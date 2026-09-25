@@ -23,6 +23,8 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(root, "THIRD_PARTY_LICENSES.md");
 const SHIPPED = ["anvil-desktop", "anvil-cli"];
+/** A third-party crate vendored under vendor/ (a path package that is not Anvil's). */
+const isVendored = (p) => !p.source && relative(join(root, "vendor"), p.manifest_path).split(/[\\/]/)[0] !== "..";
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const jsonAt = args.indexOf("--json");
@@ -114,7 +116,10 @@ function crates() {
   }
   return [...seen]
     .map((id) => byId.get(id))
-    .filter((p) => p.source) // workspace members are Anvil's own code
+    // Workspace members are Anvil's own code. Vendored third-party crates
+    // (vendor/, patched in via [patch.crates-io]) have no registry source but
+    // are still third-party and keep their upstream license.
+    .filter((p) => p.source || isVendored(p))
     .map((p) => {
       const dir = dirname(p.manifest_path);
       const notices = existsSync(dir)
@@ -128,7 +133,9 @@ function crates() {
         name: p.name,
         version: p.version,
         license: p.license ?? (p.license_file ? `SEE FILE ${p.license_file}` : null),
-        source: p.repository ?? `https://crates.io/crates/${p.name}/${p.version}`,
+        source: isVendored(p)
+          ? `${p.repository ?? `https://crates.io/crates/${p.name}/${p.version}`} (vendored with a patch: ${relative(root, dirname(p.manifest_path))})`
+          : (p.repository ?? `https://crates.io/crates/${p.name}/${p.version}`),
         notices,
       };
     })
