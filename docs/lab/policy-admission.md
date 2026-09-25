@@ -155,7 +155,7 @@ These results confirm or correct `docs/audit/gateway-lab-config.md` items that w
 ## 4. Diagnostics fixes made from these runs
 
 All fixes are in `crates/anvil-diagnostics/src/rules/ferrum_rules.rs`, with wording in
-`catalog/diagnostics/findings.en.json` (version `2026.09.25-3`). Each has a unit test in the same file.
+`catalog/diagnostics/findings.en.json` (introduced in catalog version `2026.09.25-3`). Each has a unit test in the same file.
 
 1. **Known token on a non-5xx HTTP response gives `ferrum.marker.inconsistent`.** Confidence is
    conflicting evidence and scope is unknown. There is no token finding and no catalog match.

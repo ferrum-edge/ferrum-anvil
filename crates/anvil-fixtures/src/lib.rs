@@ -6,11 +6,14 @@
 
 pub mod dns;
 pub mod dtls;
+pub mod gateway_idp;
+pub mod gateway_pki;
 pub mod goaway;
 pub mod grpc;
 pub mod h3server;
 pub mod http;
 pub mod idp;
+pub mod ldap;
 pub mod log;
 pub mod pki;
 pub mod policy;

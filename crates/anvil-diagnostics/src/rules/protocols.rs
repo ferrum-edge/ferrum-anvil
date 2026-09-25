@@ -1,7 +1,7 @@
 use super::Ctx;
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
-use anvil_domain::execution::FailureKind;
+use anvil_domain::execution::{Direction, FailureKind};
 use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, OutcomeWarning, ProtocolStatus, WarningCode};
 
 pub fn grpc_name(code: i32) -> &'static str {
@@ -117,7 +117,32 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             }
         }
         ProtocolStatus::Udp { datagrams_sent, datagrams_received, window_ms } => {
-            if *datagrams_received == 0 && *datagrams_sent > 0 {
+            // A DTLS peer that completed the handshake and then sent
+            // close_notify without answering did answer: it closed the
+            // session. "Nothing is listening" is then contradicted, so the
+            // generic silent-UDP finding would mislead.
+            let peer_closed = ctx
+                .input
+                .stream
+                .map(|s| s.messages.iter().any(|m| m.direction == Direction::Received && m.kind == "close_notify"))
+                .unwrap_or(false);
+            if *datagrams_received == 0 && *datagrams_sent > 0 && peer_closed {
+                out.push(
+                    Draft::new(
+                        "dtls.closed_without_response",
+                        "protocol.streams",
+                        Confidence::Confirmed,
+                        SourceScope::ClientToPeer,
+                        Owner::Unknown,
+                        Severity::Error,
+                    )
+                    .ev(E::NativeTransport, "dtls.close_notify", "received")
+                    .ev(E::NativeTransport, "udp.sent", datagrams_sent.to_string())
+                    .ev(E::NativeTransport, "udp.received", "0")
+                    .var("sent", datagrams_sent.to_string())
+                    .var("host", ctx.target_host()),
+                );
+            } else if *datagrams_received == 0 && *datagrams_sent > 0 {
                 out.push(
                     Draft::new("udp.no_response", "protocol.streams", Confidence::Confirmed, SourceScope::Unknown, Owner::Unknown, Severity::Warning)
                         .ev(E::NativeTransport, "udp.sent", datagrams_sent.to_string())

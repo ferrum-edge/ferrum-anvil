@@ -123,6 +123,23 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         K::TlsProtocolMismatch => Some(base("client.tls.not_tls", "tls.handshake", Confidence::Likely, Owner::Caller)),
         K::TlsAlpnMismatch => Some(base("client.tls.alpn_mismatch", "tls.handshake", Confidence::Confirmed, Owner::Unknown)),
         K::TlsOther => Some(base("client.tls.other", "tls.handshake", Confidence::Unknown, Owner::Unknown)),
+        // TLS 1.3 refusal whose alert was lost: the peer asked for a client
+        // certificate, the client finished its side of the handshake, and the
+        // fresh connection then closed before any response without a
+        // readable alert (the peer's reset can discard the alert).
+        K::ClosedBeforeResponse | K::ResetBeforeResponse | K::RequestWriteFailed
+            if f.tls_alert.is_none()
+                && requested == Some(true)
+                && tls.and_then(|t| t.version.as_deref()) == Some("TLSv1_3")
+                && a.connection.as_ref().map(|c| !c.reused && c.prior_requests == 0).unwrap_or(false) =>
+        {
+            let presented_subject = tls.and_then(|t| t.client_certificate_presented.as_ref()).map(|c| c.subject.clone());
+            let (conf, cert) = match presented_subject {
+                Some(s) => (Confidence::Unknown, s),
+                None => (Confidence::Likely, "no client certificate".to_string()),
+            };
+            Some(base("client.tls.closed_after_certificate_request", "tls.handshake", conf, Owner::Caller).var("client_cert", cert))
+        }
         _ => None,
     };
     if let Some(d) = d {

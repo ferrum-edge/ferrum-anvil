@@ -76,7 +76,7 @@ pub const RULES: &[RuleMeta] = &[
         id: "tls.handshake",
         version: 1,
         summary: "TLS handshake rejections, alerts, stalls and protocol mismatches",
-        fixtures: &["TLS-005", "TLS-006", "TLS-009", "TLS-010", "TLS-011", "TLS-012"],
+        fixtures: &["TLS-005", "TLS-006", "TLS-009", "TLS-010", "TLS-011", "TLS-012", "TLS-014"],
     },
     RuleMeta { id: "tls.bypass", version: 1, summary: "Scoped verification bypass warning", fixtures: &["TLS-015", "TLS-016"] },
     RuleMeta {
@@ -128,7 +128,10 @@ pub const RULES: &[RuleMeta] = &[
         id: "ferrum.catalog",
         version: 1,
         summary: "Signature matching against the source-audited Ferrum outcome inventory",
-        fixtures: &["UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010", "GW-012", "GW-013", "GW-014"],
+        fixtures: &[
+            "UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010", "GW-011", "GW-012", "GW-013",
+            "GW-014", "AUTH-001",
+        ],
     },
     RuleMeta {
         id: "app.body",
@@ -152,7 +155,7 @@ pub const RULES: &[RuleMeta] = &[
         id: "protocol.streams",
         version: 1,
         summary: "SSE / TCP / UDP session semantics",
-        fixtures: &["PROTO-018", "PROTO-019", "PROTO-020", "PROTO-021"],
+        fixtures: &["PROTO-018", "PROTO-019", "PROTO-020", "PROTO-021", "PROTO-022"],
     },
     RuleMeta {
         id: "protocol.http3",

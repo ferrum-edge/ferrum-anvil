@@ -9,15 +9,19 @@
 //! Results: `results/lab/<timestamp>-<profile>/{summary.json, <ID>.json}`.
 
 mod admission;
+mod auth;
 mod core;
 mod drain;
 mod fixtures;
+mod fixtures_auth;
 mod fixtures_policy;
+mod fixtures_tls;
 mod gateway;
 mod harness;
 mod policy;
 mod profiles;
 mod scenario;
+mod tls;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

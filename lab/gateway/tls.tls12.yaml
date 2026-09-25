@@ -1,0 +1,27 @@
+# Ferrum Anvil failure lab - profile "tls", TLS-1.2-only instance (ferrum-edge v0.9.5, file mode)
+#
+# Scenarios: TLS-005.tls12, TLS-006.tls12, TLS-008.tls12, TLS-X01 (HTTPS 127.0.0.1:18344).
+# Settings:  tls.tls12.conf. Backend: the tls profile's echo fixture 127.0.0.1:19309.
+version: "1"
+
+resource_counts:
+  proxies: 1
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  - id: tls12-frontend-echo
+    listen_path: /tls/echo
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19309
+    strip_listen_path: true
+    pool_enable_http2: false
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}

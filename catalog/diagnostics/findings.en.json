@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-3",
+  "version": "2026.09.25-5",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -700,6 +700,28 @@
       ],
       "confirm_with": [
         "The peer's TLS logs."
+      ]
+    },
+    "client.tls.closed_after_certificate_request": {
+      "title": "The connection closed right after a client certificate was requested",
+      "explanation": "{host} asked for a client certificate during a TLS 1.3 handshake and Anvil presented {client_cert}. The new connection then closed before any response, without a TLS alert Anvil could read. In TLS 1.3 the peer checks the client certificate only after the client has finished its side of the handshake, and its refusal alert can be lost when the peer resets the connection, so this is consistent with the peer refusing the client certificate. No HTTP response was received.",
+      "alternatives": [
+        "The peer closed the connection for an unrelated reason (overload, restart or connection policy).",
+        "Something between Anvil and the peer reset the connection."
+      ],
+      "does_not_prove": [
+        "That the client certificate was the reason.",
+        "That an HTTP 401 was received.",
+        "That a gateway's certificate for its backend is wrong."
+      ],
+      "remediation": [
+        {
+          "text": "Check that the intended client certificate is selected for this host and issued by a CA the peer accepts.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The peer's TLS logs for this connection."
       ]
     },
     "client.tls.version_mismatch": {
@@ -1789,6 +1811,27 @@
       ],
       "confirm_with": []
     },
+    "ferrum.relayed_backend_response": {
+      "title": "The gateway relayed this response from behind it",
+      "explanation": "The body matches a gateway rejection ({outcome}), but the {status} response carries the gateway's own Via hop ({via}). Ferrum Edge 0.9.5 adds that hop only to responses built on its backend path; its authentication and authorization rejections never carry it. This response most likely came from the service behind the gateway, not from the gateway's own checks.",
+      "alternatives": [
+        "Another gateway or proxy behind this one produced the rejection.",
+        "The application reuses the gateway's error wording."
+      ],
+      "does_not_prove": [
+        "Which component behind the gateway produced it.",
+        "That the gateway authored the body, even though the text matches."
+      ],
+      "remediation": [
+        {
+          "text": "Check the application's (or the next hop's) authentication and authorization logs for this request.",
+          "owner": "api_owner"
+        }
+      ],
+      "confirm_with": [
+        "The gateway's transaction log for this request, which shows whether the backend was called."
+      ]
+    },
     "app.soap_fault": {
       "title": "The SOAP service returned a fault",
       "explanation": "The transport succeeded (status {status}), but the SOAP body is a Fault: {fault_code} — {fault_reason}.",
@@ -1963,6 +2006,33 @@
         }
       ],
       "confirm_with": []
+    },
+    "dtls.closed_without_response": {
+      "title": "The DTLS peer closed the session without answering",
+      "explanation": "The DTLS handshake with {host} completed from Anvil's side, {sent} datagram(s) were sent, and the peer then closed the session (close_notify) without sending any data back.",
+      "alternatives": [
+        "The peer did not accept the client certificate. With DTLS 1.3 the peer checks it only after the client's final handshake flight, so the client sees the handshake finish before the refusal.",
+        "A gateway in front of the service could not set up its own connection to the backend and closed the session.",
+        "The peer's policy ended the session."
+      ],
+      "does_not_prove": [
+        "Which of these reasons applies.",
+        "That the datagrams reached an application.",
+        "That nothing is listening on the port: a DTLS peer answered the handshake."
+      ],
+      "remediation": [
+        {
+          "text": "Check the client identity selected in the DTLS profile against the peer's accepted CA.",
+          "owner": "caller"
+        },
+        {
+          "text": "Check the peer's (or gateway's) logs for this session's close reason.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The peer's or gateway's logs for this session."
+      ]
     },
     "udp.no_response": {
       "title": "No UDP response was observed",
