@@ -248,3 +248,58 @@ pub fn operator_field(c: &mut Checks, lines: &[String], pointer: &str, allowed: 
 pub fn operator_lines(gw: &Gateway, from: usize, needle: &str) -> Vec<String> {
     gw.log_lines().into_iter().skip(from).filter(|l| l.contains(needle)).take(3).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::gateway::repo_root;
+
+    /// Port plan (docs/audit/gateway-lab-config.md §3): each profile keeps its
+    /// gateway listeners in 18N00–18N99 and every fixture it points the gateway
+    /// at in 19N00–19N99, all on loopback, so profiles can run side by side.
+    #[test]
+    fn profiles_stay_inside_their_port_blocks() {
+        for (name, target, n) in
+            [("policy", crate::policy::TARGET, 2u16), ("admission", crate::admission::TARGET, 5), ("drain", crate::drain::TARGET, 6)]
+        {
+            let (gw_lo, fx_lo) = (18000 + n * 100, 19000 + n * 100);
+            assert!((gw_lo..gw_lo + 100).contains(&target.port), "{name} listener {}", target.port);
+            assert_eq!(target.base, format!("http://127.0.0.1:{}", target.port));
+            let conf = std::fs::read_to_string(repo_root().join(format!("lab/gateway/{name}.conf"))).unwrap();
+            for line in conf.lines().filter(|l| l.contains("_PORT =")) {
+                let port: u16 = line.rsplit('=').next().unwrap().trim().parse().unwrap();
+                assert!(port == 0 || (gw_lo..gw_lo + 100).contains(&port), "{name}.conf: {line}");
+            }
+            for line in conf.lines().filter(|l| l.contains("BIND_ADDRESS")) {
+                assert!(line.trim_end().ends_with("127.0.0.1"), "{name}.conf binds beyond loopback: {line}");
+            }
+            let yaml = std::fs::read_to_string(repo_root().join(format!("lab/gateway/{name}.yaml"))).unwrap();
+            for line in yaml.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
+                let port = if let Some(p) = line.strip_prefix("backend_port:") {
+                    p.trim().parse::<u16>().ok()
+                } else if let Some(h) = line.strip_prefix("opa_host:") {
+                    h.trim().trim_matches('"').rsplit(':').next().and_then(|p| p.parse::<u16>().ok())
+                } else {
+                    None
+                };
+                if let Some(p) = port {
+                    assert!((fx_lo..fx_lo + 100).contains(&p), "{name}.yaml points outside its fixture block: {line}");
+                }
+                if line.starts_with("backend_host:") {
+                    assert_eq!(line, "backend_host: 127.0.0.1", "{name}.yaml");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn profile_registry_names_are_unique() {
+        let names: Vec<&str> = crate::profiles::all().iter().map(|p| p.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "{names:?}");
+        for n in ["policy", "admission", "drain"] {
+            assert!(names.contains(&n), "{n} is registered");
+        }
+    }
+}
