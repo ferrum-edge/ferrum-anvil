@@ -126,7 +126,7 @@ pub const RULES: &[RuleMeta] = &[
         id: "ferrum.catalog",
         version: 1,
         summary: "Signature matching against the source-audited Ferrum outcome inventory",
-        fixtures: &["UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010"],
+        fixtures: &["UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010", "GW-011", "AUTH-001"],
     },
     RuleMeta {
         id: "app.body",

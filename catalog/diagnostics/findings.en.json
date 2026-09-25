@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-2",
+  "version": "2026.09.25-3",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1739,6 +1739,27 @@
         }
       ],
       "confirm_with": []
+    },
+    "ferrum.relayed_backend_response": {
+      "title": "The gateway relayed this response from behind it",
+      "explanation": "The body matches a gateway rejection ({outcome}), but the {status} response carries the gateway's own Via hop ({via}). Ferrum Edge 0.9.5 adds that hop only to responses built on its backend path; its authentication and authorization rejections never carry it. This response most likely came from the service behind the gateway, not from the gateway's own checks.",
+      "alternatives": [
+        "Another gateway or proxy behind this one produced the rejection.",
+        "The application reuses the gateway's error wording."
+      ],
+      "does_not_prove": [
+        "Which component behind the gateway produced it.",
+        "That the gateway authored the body, even though the text matches."
+      ],
+      "remediation": [
+        {
+          "text": "Check the application's (or the next hop's) authentication and authorization logs for this request.",
+          "owner": "api_owner"
+        }
+      ],
+      "confirm_with": [
+        "The gateway's transaction log for this request, which shows whether the backend was called."
+      ]
     },
     "app.soap_fault": {
       "title": "The SOAP service returned a fault",

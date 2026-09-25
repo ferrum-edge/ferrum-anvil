@@ -196,6 +196,40 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
 
     // Body text is weak evidence: a backend can return identical bytes.
     let body_ceiling = Confidence::Likely.min(ceiling);
+
+    // The gateway's own Via hop is written only by its backend-response
+    // builder; 0.9.5 never adds it to pre-dispatch authentication or
+    // authorization rejections (lab-verified). A body that matches such a
+    // rejection but arrived with that hop was relayed from behind the
+    // gateway, so the gateway-rejection candidates are contradicted.
+    let exact = match gateway_via_hop(r) {
+        Some(via) => {
+            let (contradicted, rest): (Vec<_>, Vec<_>) = exact.into_iter().partition(|o| pre_dispatch_reject(o));
+            if !contradicted.is_empty() && rest.is_empty() {
+                let ids: Vec<String> = contradicted.iter().map(|o| o.id.clone()).collect();
+                out.push(
+                    Draft::new(
+                        "ferrum.relayed_backend_response",
+                        "ferrum.catalog",
+                        body_ceiling,
+                        SourceScope::UpstreamApplication,
+                        Owner::ApiOwner,
+                        Severity::Error,
+                    )
+                    .ev_at(E::HttpHeader, "header.via", via.clone(), idx)
+                    .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
+                    .ev_at(E::BodyContent, "body.signature", body_text.chars().take(160).collect::<String>(), idx)
+                    .ev(E::Configuration, "catalog.contradicted", ids.join(", "))
+                    .var("status", r.status.to_string())
+                    .var("via", via)
+                    .var("outcome", ids.join(", ")),
+                );
+                return;
+            }
+            rest
+        }
+        None => exact,
+    };
     if exact.len() == 1 && exact[0].shared_signal_with.is_empty() {
         let o = exact[0];
         let mut d = Draft::new(
@@ -265,6 +299,25 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         }
         out.push(d);
     }
+}
+
+/// The Via hop Ferrum Edge adds on its backend-response path (default
+/// pseudonym `ferrum-edge`), if present. A renamed or disabled pseudonym
+/// yields `None`, which keeps the ordinary catalog matching.
+fn gateway_via_hop(r: &anvil_domain::execution::ResponseRecord) -> Option<String> {
+    r.header_values("via")
+        .into_iter()
+        .flat_map(|v| v.split(','))
+        .map(|hop| hop.trim())
+        .find(|hop| hop.split_whitespace().nth(1).map(|name| name.eq_ignore_ascii_case("ferrum-edge")).unwrap_or(false))
+        .map(|hop| hop.to_string())
+}
+
+/// Outcomes rendered by the gateway's pre-dispatch reject builder (no Via):
+/// authentication / authorization rejections. Credential-lifetime expiry is
+/// excluded because it can replace a response after dispatch.
+fn pre_dispatch_reject(o: &ferrum::Outcome) -> bool {
+    matches!(o.family.as_str(), "auth" | "authorization") && !o.id.contains("lifetime") && !o.id.starts_with("protocol.")
 }
 
 fn catalog_title(id: &str) -> String {
