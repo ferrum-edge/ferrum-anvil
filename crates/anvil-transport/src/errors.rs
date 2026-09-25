@@ -185,11 +185,16 @@ pub fn classify_hyper(e: &hyper::Error, stage: HyperStage) -> TransportFailure {
     if let Some(h2e) = find::<h2::Error>(dynerr) {
         if let Some(reason) = h2e.reason() {
             f.h2_error_code = Some(u32::from(reason));
-            f.kind = if reason == h2::Reason::REFUSED_STREAM {
+            // Only a GOAWAY / RST_STREAM the *peer* sent is a peer signal. When
+            // Anvil's own h2 library detects invalid bytes (e.g. a TLS alert
+            // or HTTP/1 answer read as a frame) it raises a local GOAWAY:
+            // that is a protocol mismatch, not the server closing.
+            let remote = h2e.is_remote();
+            f.kind = if remote && reason == h2::Reason::REFUSED_STREAM {
                 FailureKind::H2RefusedStream
-            } else if h2e.is_go_away() {
+            } else if remote && h2e.is_go_away() {
                 FailureKind::H2GoAway
-            } else if h2e.is_reset() {
+            } else if remote && h2e.is_reset() {
                 FailureKind::H2StreamReset
             } else {
                 FailureKind::HttpProtocolError

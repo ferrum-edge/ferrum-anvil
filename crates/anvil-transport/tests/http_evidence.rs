@@ -446,14 +446,33 @@ async fn proto_005_h2c_against_http1_only_peer_fails_cleanly() {
     let a = run(&HttpTransport::new(), &p).await;
     let f = failure(&a);
     assert!(a.observation.connection.as_ref().unwrap().tls.is_none(), "no TLS handshake occurred for h2c");
+    // The HTTP/1 answer is not HTTP/2: Anvil's own h2 library rejects it. That
+    // local detection must not be reported as the peer sending GOAWAY.
     assert!(
-        matches!(
-            f.kind,
-            FailureKind::HttpProtocolError | FailureKind::ClosedBeforeResponse | FailureKind::H2GoAway | FailureKind::ResetBeforeResponse
-        ),
+        matches!(f.kind, FailureKind::HttpProtocolError | FailureKind::ClosedBeforeResponse | FailureKind::ResetBeforeResponse),
         "{:?}",
         f
     );
+}
+
+#[tokio::test]
+async fn proto_005_h2c_against_a_tls_listener_is_a_protocol_mismatch_not_a_peer_goaway() {
+    init();
+    // A TLS listener answers the cleartext HTTP/2 preface with a TLS alert record.
+    let fx = fxhttp::serve("127.0.0.1:0", Some(TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone())))
+        .await
+        .unwrap();
+    let mut p = plan(&format!("http://127.0.0.1:{}/", fx.addr.port()), None);
+    p.version = HttpVersionPolicy::H2c;
+    let a = run(&HttpTransport::new(), &p).await;
+    let f = failure(&a);
+    assert!(a.observation.connection.as_ref().unwrap().tls.is_none(), "no TLS handshake occurred for h2c");
+    assert_ne!(f.kind, FailureKind::H2GoAway, "a locally detected bad frame is not the peer's GOAWAY: {f:?}");
+    assert!(
+        matches!(f.kind, FailureKind::HttpProtocolError | FailureKind::ClosedBeforeResponse | FailureKind::ResetBeforeResponse),
+        "{f:?}"
+    );
+    assert_eq!(fx.log.count_requests(), 0);
 }
 
 #[tokio::test]
