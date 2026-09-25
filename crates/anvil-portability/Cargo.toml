@@ -1,5 +1,6 @@
 [package]
 name = "anvil-portability"
+description = "Portable workspace/backup bundles: share-safely, encrypted transfer and full backup; safe, validated, previewed import"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,3 +8,22 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+anvil-domain.workspace = true
+anvil-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+chrono.workspace = true
+regex.workspace = true
+zeroize.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+sha2.workspace = true
+hex.workspace = true

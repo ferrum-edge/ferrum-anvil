@@ -1,5 +1,6 @@
 [package]
 name = "anvil-storage"
+description = "Encrypted local persistence: per-profile data key, passphrase/recovery/OS-keychain unlock, backend-enforced lock, durable migrations, history retention"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,3 +8,28 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+anvil-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+chacha20poly1305.workspace = true
+argon2.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+hex.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+keyring = { workspace = true, optional = true }
+
+[features]
+default = ["os-keychain"]
+os-keychain = ["dep:keyring"]
+
+[dev-dependencies]
+tempfile.workspace = true
+rusqlite.workspace = true

@@ -13,6 +13,7 @@ members = [
     "crates/anvil-cli",
     "crates/anvil-lab",
     "crates/anvil-fixtures",
+    "crates/anvil-app",
 
 ]
 
@@ -34,6 +35,7 @@ anvil-portability = { path = "crates/anvil-portability" }
 anvil-engine = { path = "crates/anvil-engine" }
 anvil-runner = { path = "crates/anvil-runner" }
 anvil-load = { path = "crates/anvil-load" }
+anvil-app = { path = "crates/anvil-app" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"
@@ -78,8 +80,8 @@ hex = "0.4.3"
 chacha20poly1305 = "0.11.0"
 argon2 = "0.6.0"
 zeroize = { version = "1.9.0", features = ["derive"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
-keyring = "4.2.0"
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+keyring = { version = "4.2.0" }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "rust_crypto"] }
 p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
