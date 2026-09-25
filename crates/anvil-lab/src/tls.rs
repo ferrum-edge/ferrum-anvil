@@ -940,7 +940,12 @@ fn upstream_setup_failure(c: &mut Checks, env: &Env, o: &ExecutionOutput, tokens
     c.status_in(o, &[502]);
     c.token_any(o, tokens, env.trusted);
     for t in tokens {
-        c.scope(o, t, SourceScope::GatewayToUpstream);
+        // `connection_failure` names the gateway-to-backend leg. 0.9.5 also
+        // stamps `backend_error` on an application's own 5xx and on some
+        // gateway refusals, so that token alone must not claim a leg even
+        // though the operator log shows this one was the upstream leg.
+        let scope = if *t == "ferrum.token.backend_error" { SourceScope::Unknown } else { SourceScope::GatewayToUpstream };
+        c.scope(o, t, scope);
         c.max_confidence(o, t, Confidence::Likely);
     }
     // The coarse token never proves TLS, and Anvil's own leg was fine.

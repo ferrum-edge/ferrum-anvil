@@ -1196,7 +1196,7 @@ pub fn all() -> Vec<Def> {
 }
 
 fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
-    let client_only = "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests, not a live-gateway scenario";
+    let client_only = "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests (tests/api_oauth.rs), not a live-gateway scenario";
     vec![
         ("AUTH-011", "OAuth PKCE round trip", client_only),
         ("AUTH-012", "OAuth state mismatch", client_only),
