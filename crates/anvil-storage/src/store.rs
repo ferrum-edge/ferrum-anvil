@@ -61,6 +61,8 @@ pub mod kind {
     pub const APP_SETTINGS: &str = "app_settings";
     pub const USER_PROFILE: &str = "user_profile";
     pub const IMPORT_SOURCE: &str = "import_source";
+    /// Provenance of spec/collection imports (OpenAPI, WSDL, Postman, …).
+    pub const SPEC_SOURCE: &str = "spec_source";
     pub const ALL: &[&str] = &[
         WORKSPACE,
         FOLDER,
@@ -76,6 +78,7 @@ pub mod kind {
         APP_SETTINGS,
         USER_PROFILE,
         IMPORT_SOURCE,
+        SPEC_SOURCE,
     ];
 }
 
@@ -522,6 +525,11 @@ impl Store {
             out.push(serde_json::from_slice(&pt)?);
         }
         Ok(out)
+    }
+
+    pub fn delete_load_report(&self, id: &Id) -> Result<bool> {
+        let _ = self.key()?;
+        Ok(self.conn.lock().execute("DELETE FROM load_reports WHERE id=?1", params![id.to_string()])? > 0)
     }
 
     // ------------------------------------------------------------ atomicity

@@ -786,6 +786,62 @@ pub struct LoadRun {
     slots: usize,
 }
 
+/// Workload, warmup and abort-rule checks (returns the slot count). Public
+/// so callers can reject a plan when it is saved, not only when it runs.
+fn validate_workload(plan: &LoadPlan) -> Result<usize, LoadError> {
+    let slots = match &plan.workload {
+        Workload::ClosedVirtualUsers { stages, think_time_ms } => {
+            validate_stages(stages, MAX_VUS, "virtual users")?;
+            if *think_time_ms > 3_600_000 {
+                return Err(LoadError::Invalid("think time exceeds one hour".into()));
+            }
+            stages.iter().map(|s| s.target).max().unwrap_or(0)
+        }
+        Workload::OpenArrivalRate { stages, max_in_flight } => {
+            validate_stages(stages, MAX_RATE_PER_SEC, "arrivals/s")?;
+            if *max_in_flight == 0 || *max_in_flight > MAX_IN_FLIGHT {
+                return Err(LoadError::Invalid(format!("max_in_flight must be 1..={MAX_IN_FLIGHT}")));
+            }
+            *max_in_flight
+        }
+        Workload::Iterations { iterations, concurrency } => {
+            if *iterations == 0 || *iterations > MAX_ITERATIONS {
+                return Err(LoadError::Invalid(format!("iterations must be 1..={MAX_ITERATIONS}")));
+            }
+            if *concurrency == 0 || *concurrency > MAX_CONCURRENCY {
+                return Err(LoadError::Invalid(format!("concurrency must be 1..={MAX_CONCURRENCY}")));
+            }
+            (*concurrency).min(*iterations)
+        }
+    } as usize;
+    match &plan.workload {
+        Workload::ClosedVirtualUsers { stages, .. } | Workload::OpenArrivalRate { stages, .. }
+            if plan.warmup_secs >= schedule::total_secs(stages) =>
+        {
+            return Err(LoadError::Invalid("the warmup covers the whole schedule; nothing would be measured".into()));
+        }
+        _ => {}
+    }
+    if let Some(a) = &plan.abort
+        && (a.max_failure_permille > 1000 || a.window_secs == 0 || a.window_secs > 3600)
+    {
+        return Err(LoadError::Invalid("abort rule needs max_failure_permille ≤ 1000 and a 1–3600 s window".into()));
+    }
+    Ok(slots)
+}
+
+/// Validate a plan's shape without resolving its requests: a chain or mix is
+/// present and the workload, warmup and abort rule are within limits.
+pub fn validate_plan(plan: &LoadPlan) -> Result<(), LoadError> {
+    if plan.chain.is_empty() && plan.mix.is_empty() {
+        return Err(LoadError::Invalid("the plan has neither a request chain nor a weighted mix".into()));
+    }
+    if !plan.mix.is_empty() && plan.mix.iter().all(|m| m.weight == 0) {
+        return Err(LoadError::Invalid("every weighted-mix weight is zero".into()));
+    }
+    validate_workload(plan).map(|_| ())
+}
+
 fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<(), LoadError> {
     if stages.is_empty() {
         return Err(LoadError::Invalid("the workload has no stages".into()));
@@ -836,44 +892,7 @@ impl LoadRun {
         if plan.mix.is_empty() && ids.len() > MAX_CHAIN_STEPS {
             return Err(LoadError::Invalid(format!("the chain has {} steps; the limit is {MAX_CHAIN_STEPS}", ids.len())));
         }
-        let slots = match &plan.workload {
-            Workload::ClosedVirtualUsers { stages, think_time_ms } => {
-                validate_stages(stages, MAX_VUS, "virtual users")?;
-                if *think_time_ms > 3_600_000 {
-                    return Err(LoadError::Invalid("think time exceeds one hour".into()));
-                }
-                stages.iter().map(|s| s.target).max().unwrap_or(0)
-            }
-            Workload::OpenArrivalRate { stages, max_in_flight } => {
-                validate_stages(stages, MAX_RATE_PER_SEC, "arrivals/s")?;
-                if *max_in_flight == 0 || *max_in_flight > MAX_IN_FLIGHT {
-                    return Err(LoadError::Invalid(format!("max_in_flight must be 1..={MAX_IN_FLIGHT}")));
-                }
-                *max_in_flight
-            }
-            Workload::Iterations { iterations, concurrency } => {
-                if *iterations == 0 || *iterations > MAX_ITERATIONS {
-                    return Err(LoadError::Invalid(format!("iterations must be 1..={MAX_ITERATIONS}")));
-                }
-                if *concurrency == 0 || *concurrency > MAX_CONCURRENCY {
-                    return Err(LoadError::Invalid(format!("concurrency must be 1..={MAX_CONCURRENCY}")));
-                }
-                (*concurrency).min(*iterations)
-            }
-        } as usize;
-        match &plan.workload {
-            Workload::ClosedVirtualUsers { stages, .. } | Workload::OpenArrivalRate { stages, .. }
-                if plan.warmup_secs >= schedule::total_secs(stages) =>
-            {
-                return Err(LoadError::Invalid("the warmup covers the whole schedule; nothing would be measured".into()));
-            }
-            _ => {}
-        }
-        if let Some(a) = &plan.abort
-            && (a.max_failure_permille > 1000 || a.window_secs == 0 || a.window_secs > 3600)
-        {
-            return Err(LoadError::Invalid("abort rule needs max_failure_permille ≤ 1000 and a 1–3600 s window".into()));
-        }
+        let slots = validate_workload(&plan)?;
         if plan.dataset_id.is_some() && job.dataset.is_none() {
             return Err(LoadError::Invalid("the plan references a dataset but none was provided".into()));
         }

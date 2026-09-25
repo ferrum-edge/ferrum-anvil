@@ -40,7 +40,19 @@ impl LoadController {
     /// command line carries no arguments, so nothing secret is visible in
     /// the process table.
     pub async fn spawn(worker: &Path, job: &WorkerJob) -> Result<LoadController, LoadError> {
-        let mut child = tokio::process::Command::new(worker)
+        Self::spawn_mode(worker, None, job).await
+    }
+
+    /// Like [`LoadController::spawn`], for an executable that serves several
+    /// roles (the desktop app or CLI re-launching itself as the worker).
+    /// `mode_flag` is a fixed, non-secret argument such as
+    /// `--anvil-load-worker`; the job still travels only over stdin.
+    pub async fn spawn_mode(worker: &Path, mode_flag: Option<&str>, job: &WorkerJob) -> Result<LoadController, LoadError> {
+        let mut cmd = tokio::process::Command::new(worker);
+        if let Some(flag) = mode_flag {
+            cmd.arg(flag);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

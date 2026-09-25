@@ -35,7 +35,7 @@ pub mod worker;
 pub use compare::{Comparison, compare};
 pub use controller::LoadController;
 pub use dataset::{Dataset, DatasetFormat};
-pub use executor::{LoadJob, LoadRun, Progress, ProgressSink, RunOptions};
+pub use executor::{LoadJob, LoadRun, Progress, ProgressSink, RunOptions, validate_plan};
 pub use job::WorkerJob;
 
 /// Engine identifier recorded in every report.

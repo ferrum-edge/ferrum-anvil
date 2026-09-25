@@ -204,6 +204,8 @@ dependencies = [
  "anvil-domain",
  "anvil-engine",
  "anvil-fixtures",
+ "anvil-import",
+ "anvil-load",
  "anvil-portability",
  "anvil-storage",
  "anvil-transport",
@@ -218,6 +220,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "url",
  "uuid",
  "zeroize",
 ]
