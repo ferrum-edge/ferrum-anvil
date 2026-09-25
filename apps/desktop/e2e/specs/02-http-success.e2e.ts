@@ -38,7 +38,10 @@ describe("HTTP request — success", () => {
     if (fixture) {
       expect(parsed).toEqual({ fixture: "anvil-e2e", ok: true, method: "GET", path: "/items/42?from=anvil-e2e" });
     } else {
-      expect(typeof parsed).toBe("object");
+      // Lab echo fixture behind the gateway (listen path /ok stripped).
+      expect(parsed.method).toBe("GET");
+      expect(parsed.target).toBe("/echo?from=anvil-e2e");
+      expect(parsed.headers).toContainEqual(["via", "1.1 ferrum-edge"]);
     }
     await expect($(".resp .pane")).toHaveText(expect.stringContaining("application/json"));
     await screenshot("02-http-success-body");
