@@ -118,7 +118,8 @@ PLUGIN_KEYS = {
                     group_attribute starttls connect_timeout_seconds request_timeout_seconds
                     max_concurrent_requests cache_ttl_seconds max_cache_entries consumer_mapping
                     hide_credentials allow_plaintext],                                # ldap_auth.rs:250-490 (keys read)
-  'mtls_auth' => %w[cert_field allowed_issuers allowed_ca_fingerprints_sha256]          # mtls_auth.rs:995-1045 (keys read)
+  'mtls_auth' => %w[cert_field allowed_issuers allowed_ca_fingerprints_sha256],         # mtls_auth.rs:995-1045 (keys read)
+  'oidc_relying_party' => %w[providers session behavior]                                # oidc_relying_party.rs:89 (CONFIG_FIELDS)
 }.freeze
 NESTED = {
   %w[response_transformer rules] => %w[operation target key value new_key],           # response_transformer.rs:156
@@ -137,6 +138,12 @@ NESTED = {
                                            token_hint_param required_scopes required_roles scope_claim role_claim
                                            consumer_identity_claim consumer_header_claim claim_headers], # oauth2_introspection.rs:282-305
   %w[mtls_auth allowed_issuers] => %w[cn o ou ca_certificate_pem],                    # mtls_auth.rs:217-223
+  %w[oidc_relying_party providers] => %w[issuer discovery_url authorization_endpoint token_endpoint
+                                        userinfo_endpoint jwks_uri end_session_endpoint client_id client_auth
+                                        redirect_uri callback_path logout_path post_logout_redirect_uri scopes
+                                        audiences required_scopes required_roles scope_claim role_claim
+                                        consumer_identity_claim consumer_header_claim claim_headers
+                                        id_token_clock_skew_secs],                    # oidc_relying_party.rs:90 (PROVIDER_FIELDS)
   %w[openapi_validator operations] => %w[method path_template path_regex operation_label request_required
                                          request_body responses]                      # openapi_validator.rs:159-167
 }.freeze
