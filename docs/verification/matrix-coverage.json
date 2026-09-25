@@ -2,12 +2,13 @@
  "source": "docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json",
  "total": 182,
  "totals": {
-  "verified_test": 73,
+  "verified_test": 74,
   "verified_live": 90,
-  "not_covered": 5,
+  "not_covered": 3,
   "skipped_live": 4,
   "blocked": 6,
   "not_applicable": 2,
+  "verified_check": 1,
   "partial": 2
  },
  "cases": [
@@ -6975,11 +6976,11 @@
    "id": "REL-002",
    "category": "Installer, updater and website release",
    "title": "Production driver absence",
-   "status": "not_covered",
+   "status": "verified_check",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "2026-09-25, macOS arm64, commit cf3a61c: `npx tauri build --ci --bundles app,dmg` and `cargo build --release --locked -p anvil-cli`, then `scripts/release-check.sh --runtime-probe --probe-seconds 15` over the .app, the .dmg, the raw anvil-desktop binary and the anvil CLI \u2192 pass (graph: no tauri-plugin-wdio-webdriver / e2e feature; 0 of 11 hook strings; runtime probe: no WebDriver listener on TAURI_WEBDRIVER_PORT, no env-driven profile unlock). Negative control: the e2e debug build fails with all 11 strings. The release workflow runs the same check on every installer and archive."
   },
   {
    "id": "REL-003",
@@ -7013,9 +7014,27 @@
    "id": "REL-005",
    "category": "Installer, updater and website release",
    "title": "Offline no-account smoke",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "native_e2e"
+   ],
+   "references": [
+    {
+     "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
+     "line": 1,
+     "kind": "native_e2e"
+    },
+    {
+     "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
+     "line": 89,
+     "kind": "native_e2e"
+    },
+    {
+     "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
+     "line": 197,
+     "kind": "native_e2e"
+    }
+   ],
    "lab": null,
    "note": null
   },

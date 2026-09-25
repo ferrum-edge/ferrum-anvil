@@ -6,12 +6,13 @@ A skip or block is never counted as a pass.
 | Status | Cases |
 |---|---|
 | ✅ live (real gateway) | 90 |
-| ✅ automated test | 73 |
+| ✅ automated test | 74 |
+| ✅ executed check script | 1 |
 | ⏭ skipped (live) — see reason | 4 |
 | ⛔ blocked — see reason | 6 |
 | ➖ not applicable — see reason | 2 |
 | ◐ partial — see reason | 2 |
-| ⚠ not covered | 5 |
+| ⚠ not covered | 3 |
 | **Total** | **182** |
 
 ## Client preparation and local failures
@@ -238,10 +239,10 @@ A skip or block is never counted as a pass.
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
 | REL-001 | Clean native installs | ⛔ blocked — see reason — Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. | — |
-| REL-002 | Production driver absence | ⚠ not covered | — |
+| REL-002 | Production driver absence | ✅ executed check script — 2026-09-25, macOS arm64, commit cf3a61c: `npx tauri build --ci --bundles app,dmg` and `cargo build --release --locked -p anvil-cli`, then `scripts/release-check.sh --runtime-probe --probe-seconds 15` over the .app, the .dmg, the raw anvil-desktop binary and the anvil CLI → pass (graph: no tauri-plugin-wdio-webdriver / e2e feature; 0 of 11 hook strings; runtime probe: no WebDriver listener on TAURI_WEBDRIVER_PORT, no env-driven profile unlock). Negative control: the e2e debug build fails with all 11 strings. The release workflow runs the same check on every installer and archive. | — |
 | REL-003 | Signed update integrity | ⛔ blocked — see reason — No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build. | — |
 | REL-004 | Update/migration rollback | ✅ automated test | `crates/anvil-storage/tests/store_security.rs` |
-| REL-005 | Offline no-account smoke | ⚠ not covered | — |
+| REL-005 | Offline no-account smoke | ✅ automated test | `apps/desktop/e2e/specs/09-offline-no-account.e2e.ts` |
 | REL-006 | Download manifest match | ⛔ blocked — see reason — No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. | — |
 | REL-007 | Website navigation | ◐ partial — see reason — Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release. | — |
 | REL-008 | Website feature truth | ◐ partial — see reason — Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence. | — |

@@ -164,6 +164,7 @@ def classify(case, refs, lab, overrides):
 LABELS = {
     "verified_live": "✅ live (real gateway)",
     "verified_test": "✅ automated test",
+    "verified_check": "✅ executed check script",
     "failing_live": "❌ failing (live)",
     "skipped_live": "⏭ skipped (live) — see reason",
     "blocked": "⛔ blocked — see reason",

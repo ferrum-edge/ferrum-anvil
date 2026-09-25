@@ -1,47 +1,51 @@
 {
-  "_comment": "Reasoned statuses for failure-matrix cases that cannot be executed as live or automated tests yet. Used by scripts/matrix-coverage.py only when no test/lab evidence exists. Never counted as passed.",
-  "TRUST-009": {
-    "status": "blocked",
-    "reason": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
-  },
-  "TRUST-010": {
-    "status": "blocked",
-    "reason": "Depends on G01 detail retention; not available in any gateway release."
-  },
-  "TRUST-011": {
-    "status": "blocked",
-    "reason": "Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass)."
-  },
-  "TRUST-012": {
-    "status": "not_applicable",
-    "reason": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."
-  },
-  "LOAD-012": {
-    "status": "not_applicable",
-    "reason": "The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md."
-  },
-  "PROTO-004": {
-    "status": "partial",
-    "reason": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet."
-  },
-  "REL-001": {
-    "status": "blocked",
-    "reason": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only."
-  },
-  "REL-003": {
-    "status": "blocked",
-    "reason": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build."
-  },
-  "REL-006": {
-    "status": "blocked",
-    "reason": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist."
-  },
-  "REL-007": {
-    "status": "partial",
-    "reason": "Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release."
-  },
-  "REL-008": {
-    "status": "partial",
-    "reason": "Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence."
-  }
+ "_comment": "Reasoned statuses for failure-matrix cases that cannot be executed as live or automated tests yet. Used by scripts/matrix-coverage.py only when no test/lab evidence exists. 'blocked', 'partial' and 'not_applicable' are never counted as passed; 'verified_check' records an executed check script (exact command, artifacts and result) that CI re-runs on every release artifact.",
+ "TRUST-009": {
+  "status": "blocked",
+  "reason": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
+ },
+ "TRUST-010": {
+  "status": "blocked",
+  "reason": "Depends on G01 detail retention; not available in any gateway release."
+ },
+ "TRUST-011": {
+  "status": "blocked",
+  "reason": "Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass)."
+ },
+ "TRUST-012": {
+  "status": "not_applicable",
+  "reason": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."
+ },
+ "LOAD-012": {
+  "status": "not_applicable",
+  "reason": "The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md."
+ },
+ "PROTO-004": {
+  "status": "partial",
+  "reason": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet."
+ },
+ "REL-001": {
+  "status": "blocked",
+  "reason": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only."
+ },
+ "REL-003": {
+  "status": "blocked",
+  "reason": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build."
+ },
+ "REL-006": {
+  "status": "blocked",
+  "reason": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist."
+ },
+ "REL-007": {
+  "status": "partial",
+  "reason": "Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release."
+ },
+ "REL-008": {
+  "status": "partial",
+  "reason": "Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence."
+ },
+ "REL-002": {
+  "status": "verified_check",
+  "reason": "2026-09-25, macOS arm64, commit cf3a61c: `npx tauri build --ci --bundles app,dmg` and `cargo build --release --locked -p anvil-cli`, then `scripts/release-check.sh --runtime-probe --probe-seconds 15` over the .app, the .dmg, the raw anvil-desktop binary and the anvil CLI → pass (graph: no tauri-plugin-wdio-webdriver / e2e feature; 0 of 11 hook strings; runtime probe: no WebDriver listener on TAURI_WEBDRIVER_PORT, no env-driven profile unlock). Negative control: the e2e debug build fails with all 11 strings. The release workflow runs the same check on every installer and archive."
+ }
 }

@@ -79,7 +79,9 @@ MARKERS=("com.ferrumedge.anvil" "ANVIL_DATA_DIR" "anvil-domain" "anvil_domain")
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/anvil-release-check.XXXXXX")"
 cleanup() {
-  for m in ${mounts[@]+"${mounts[@]}"}; do hdiutil detach -quiet "$m" >/dev/null 2>&1 || true; done
+  for m in ${mounts[@]+"${mounts[@]}"}; do
+    hdiutil detach -quiet "$m" >/dev/null 2>&1 || { sleep 2; hdiutil detach -quiet -force "$m" >/dev/null 2>&1; } || true
+  done
   rm -rf "$work"
 }
 mounts=()
@@ -136,8 +138,12 @@ unpack() {
       command -v hdiutil >/dev/null || { echo "hdiutil (macOS) required for $a" >&2; return 1; }
       local mp="$work/mnt.$RANDOM"
       mkdir -p "$mp"
-      hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mp" "$a" || return 1
+      # Our DMGs carry the Anvil license as a software license agreement
+      # (bundle.licenseFile); hdiutil cancels a non-interactive attach unless
+      # the prompt is answered. Only Anvil's own artifacts are attached here.
+      # `yes` ends with SIGPIPE; only hdiutil's status matters (pipefail).
       mounts+=("$mp")
+      { yes 2>/dev/null || true; } | hdiutil attach -nobrowse -readonly -mountpoint "$mp" "$a" >/dev/null || return 1
       cp -R "$mp"/. "$out/" 2>/dev/null || true ;;
     *.deb)
       if command -v dpkg-deb >/dev/null; then dpkg-deb -x "$a" "$out"
