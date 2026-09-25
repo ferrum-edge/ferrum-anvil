@@ -27,7 +27,7 @@ pass.
   - Effective-request preview.
   - Live lint.
   - Timing and sizes.
-  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1 and HTTP/2); gRPC in four modes; SSE; TCP/TLS; UDP; DTLS.
+  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3); gRPC in four modes; SSE; TCP/TLS; UDP; DTLS.
   - Interactive sessions for the session protocols.
   - See `docs/protocols.md`.
 - **Auth and TLS.**
@@ -74,10 +74,10 @@ Exact commands are in `docs/release.md` → "Local verification record".
 | Check | Result |
 |---|---|
 | `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` | clean |
-| `cargo test --workspace --exclude anvil-desktop` | 66 test binaries, 429 passed, 0 failed, 0 ignored |
+| `cargo test --workspace --exclude anvil-desktop` | 66 test binaries, 433 passed, 0 failed, 0 ignored |
 | Renderer (`tsc`, `vitest`) | clean; 24 passed |
 | Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway) | 9 spec files, 18 tests passed, on both the debug and release-profile e2e builds |
-| `anvil-lab run all --untrusted-pass` | 304 passed, 0 failed, 16 skipped with stated reasons |
+| `anvil-lab run all --untrusted-pass` | 308 passed, 0 failed, 15 skipped with stated reasons |
 | Release check on the production `.app`, `.dmg`, raw binary and CLI, with runtime probe | pass. The e2e build fails as required. |
 | Plaintext-at-rest audit (profile files, WAL/SHM side files, temp files) | no leak |
 | `cargo deny`, license inventory, `gitleaks` over the branch | clean |
@@ -89,8 +89,8 @@ Exact commands are in `docs/release.md` → "Local verification record".
 results and reasoned statuses.
 
 - **172 cases have executed evidence:**
-  - 95 live against the real gateway;
-  - 76 automated tests;
+  - 96 live against the real gateway;
+  - 75 automated tests;
   - 1 executed release check.
 - **6 are blocked:**
   - TRUST-009/010/011 need the G01 gateway detail API, which no gateway release has.
@@ -119,7 +119,7 @@ results and reasoned statuses.
 - **G01 is not implemented** in the gateway, so gateway attribution never exceeds "likely".
 - **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md`.
 - **Protocol and load gaps:**
-  - WebSocket over HTTP/3 is refused (a client library limit).
+  - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).
   - Load testing is HTTP-family only, one worker on one machine.
   - HTTP/3 has not been exercised under load.
   - No gRPC-Web, and no gRPC over HTTP/3.

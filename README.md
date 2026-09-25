@@ -15,8 +15,8 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
 
 - **Build and send**: workspaces with nested folders, saved requests with
   immutable revisions, environments and variables, history. Requests can
-  use HTTP/1.1, HTTP/2 (TLS or h2c) and HTTP/3; WebSocket (HTTP/1.1 Upgrade
-  or HTTP/2 extended CONNECT); gRPC in all four modes; SSE; TCP/TLS;
+  use HTTP/1.1, HTTP/2 (TLS or h2c) and HTTP/3; WebSocket (HTTP/1.1 Upgrade,
+  or HTTP/2 or HTTP/3 extended CONNECT); gRPC in all four modes; SSE; TCP/TLS;
   UDP/DTLS. Interactive sessions let you send and receive messages live.
 - **Auth and TLS**:
   - Auth types: API key, Basic, Bearer, JWT signing, OAuth 2.0, Ferrum HMAC

@@ -268,12 +268,12 @@ ferrum-edge/ferrum-anvil#1), after the last functional merge.
 | Check | Command | Result |
 | --- | --- | --- |
 | Format and lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings` | clean |
-| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 66 test binaries: 429 passed, 0 failed, 0 ignored |
+| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 66 test binaries: 433 passed, 0 failed, 0 ignored |
 | Contract drift | `cargo run -p anvil-cli -- schema --out contracts/schemas` + `npm run contracts` | no drift |
 | Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 24 passed (3 files) |
 | Native E2E through the gateway | `npm run e2e:build`, `anvil-lab up core`, `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` | 9 spec files, 18 tests passed (boot, success, refusal diagnosis, effective request, gateway diagnosis, untrusted TLS, load report, offline/no-account, lock) |
 | Native E2E, release-profile build | `npx tauri build --no-bundle --features e2e` (release profile), same suite | 9 spec files passed; app peak RSS 236 MiB, load worker 21 MiB (see `docs/performance.md`) |
-| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.5 release binary) | 304 passed, 0 failed, 16 skipped with stated reasons: core 36/0/0, policy 46/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 76/0/5, streams 58/0/1, cpdp 10/0/0 |
+| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.5 release binary) | 308 passed, 0 failed, 15 skipped with stated reasons: core 36/0/0, policy 46/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 76/0/5, streams 62/0/0, cpdp 10/0/0 |
 | Lab profile lint | `ruby lab/gateway/lint-profiles.rb` | 8 profiles OK; a mistyped nested plugin key is caught |
 | Release check, production artifacts | `npx tauri build --ci --bundles app,dmg`; `cargo build --release --locked -p anvil-cli`; `scripts/release-check.sh --runtime-probe` over the `.app`, `.dmg`, raw `anvil-desktop` and `anvil` | **pass**: graph without the WebDriver plugin or `e2e`, 0 of 11 hook strings in each, no WebDriver listener and no env-driven unlock at runtime |
 | Release check, negative control | `scripts/release-check.sh --no-graph target/debug/anvil-desktop` (e2e build) | **fail (exit 1)** as required: all 11 strings found |
@@ -281,7 +281,7 @@ ferrum-edge/ferrum-anvil#1), after the last functional merge.
 | License inventory | `node scripts/licenses.mjs --check` | up to date: 782 crates, 5 npm packages |
 | Secret scan | `gitleaks git --log-opts origin/main..HEAD` with `.gitleaks.toml`; `gitleaks dir .` | no leaks in the branch history; the directory scan's findings are all in git-ignored lab output, build output and throwaway lab keys (`results/`, `target/`, `lab/.run/`), none in tracked files |
 | Plaintext at rest | `cargo test -p anvil-app --test at_rest` | no planted marker in profile files, WAL/SHM side files or new temp files |
-| Failure matrix | `python3 scripts/matrix-coverage.py` | 172 of 182 with executed evidence (95 live, 76 automated, 1 release check); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
+| Failure matrix | `python3 scripts/matrix-coverage.py` | 172 of 182 with executed evidence (96 live, 75 automated, 1 release check); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
 
 Earlier on this branch (still valid; the scripts and workflows they exercise are unchanged in substance):
 

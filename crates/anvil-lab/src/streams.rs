@@ -14,7 +14,7 @@ use crate::fixtures_streams::StreamsFixtures;
 use crate::gateway::Gateway;
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
 use crate::profiles::{BoxFut, Profile, RunArgs};
-use crate::scenario::{CheckKind, Checks, ScenarioResult, summarize};
+use crate::scenario::{CheckKind, Checks, ScenarioResult};
 use anvil_domain::Id;
 use anvil_domain::diagnostics::Confidence;
 use anvil_domain::execution::{
@@ -844,37 +844,95 @@ fn proto012(env: &Env) -> Fut<'_> {
     })
 }
 
-/// PROTO-013 cannot pass: Anvil's h3 0.0.8 cannot send `:protocol = websocket`.
-/// The typed refusal is recorded as evidence on a *skipped* result.
-async fn proto013_skip(ctx: &RunCtx, env: &mut Env) -> ScenarioResult {
-    let from = op_from(env);
-    let o = send(env, &ws_ctx(env, &format!("wss://{HTTPS}/ws?close_after=1"), WsBootstrap::Http3ExtendedConnect, &["never sent"], 3_000))
-        .await;
-    let mut c = Checks::new();
-    let f = last(&o).and_then(|a| a.failure.clone());
-    c.add(
-        CheckKind::Diagnosis,
-        "Anvil refuses WebSocket over HTTP/3 as a typed unsupported combination before any traffic",
-        f.as_ref().map(|f| f.kind == FailureKind::UnsupportedCombination && f.phase == Phase::Prepare).unwrap_or(false)
-            && o.record.outcome.dispatch == DispatchState::NotDispatched,
-        outcome_line(&o),
-    );
-    c.has(&o, "local.unsupported_combination");
-    c.add(
-        CheckKind::GroundTruth,
-        "the gateway logged no WebSocket session for this attempt",
-        op_log(env, from, "proto012-ws-echo").is_empty(),
-        "",
-    );
-    let reason = format!(
-        "Anvil cannot originate RFC 9220 WebSocket over HTTP/3: the workspace h3 0.0.8 client cannot send :protocol=websocket (docs/protocols.md §3.1). \
-         Ferrum Edge 0.9.5 advertises the feature (FERRUM_HTTP3_WEBSOCKET_ENABLED=true in streams.conf), but it was not exercised. Typed refusal observed: {}",
-        f.map(|f| f.message).unwrap_or_default()
-    );
-    let mut r = ctx.skipped("PROTO-013", "WebSocket over HTTP/3 extended CONNECT (RFC 9220)", &reason);
-    r.observed = Some(summarize(&o));
-    r.checks = c.items;
-    r
+/// PROTO-013: WebSocket over HTTP/3 (RFC 9220) to the gateway's QUIC
+/// listener. Anvil waits for the gateway's SETTINGS_ENABLE_CONNECT_PROTOCOL
+/// before sending `:protocol = websocket`; the gateway bridges the session to
+/// the backend as an HTTP/1.1 Upgrade.
+fn proto013(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let before = env.fx.ws.log.requests().len();
+        let o = send(env, &ws_ctx(env, &format!("wss://{HTTPS}/ws?close_after=1"), WsBootstrap::Http3ExtendedConnect, &["over-h3"], 3_000))
+            .await;
+        quic_phases_ok(&mut c, &o);
+        let a = last(&o);
+        let (hs, code, by) = ws_status(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "extended CONNECT over h3, 200 bootstrap, normal close relayed from the backend",
+            a.map(|a| a.method == "CONNECT").unwrap_or(false) && hs == Some(200) && code == Some(1000) && by == Some(ClosedBy::Peer),
+            format!("{:?} {hs:?} {code:?} {by:?}", a.map(|a| &a.method)),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "the gateway's SETTINGS enabled extended CONNECT before anything was sent (RFC 9220 §3)",
+            a.map(|a| a.phases.iter().any(|p| p.detail.as_deref().map(|d| d.contains("RFC 9220")).unwrap_or(false))).unwrap_or(false),
+            "",
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "echo received",
+            previews(&o, Direction::Received, "text") == vec!["over-h3"],
+            format!("{:?}", previews(&o, Direction::Received, "text")),
+        );
+        c.add(CheckKind::Diagnosis, "complete success", is_success(&o), outcome_line(&o));
+        c.absent_prefix(&o, "ferrum.token");
+        let reqs: Vec<(String, String)> = env.fx.ws.log.requests().into_iter().skip(before).collect();
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway re-originated the session to the backend as an HTTP/1.1 Upgrade (GET /ws)",
+            reqs.iter().filter(|(m, p)| m == "GET" && p.starts_with("/ws")).count() == 1 && !reqs.iter().any(|(m, _)| m == "CONNECT"),
+            format!("{reqs:?}"),
+        );
+        let ops = op_log(env, from, "proto012-ws-echo");
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway's operator log records an RFC 9220 (HTTP/3) WebSocket upgrade",
+            ops.iter().any(|l| l.contains("H3 WebSocket (RFC 9220)")),
+            format!("{} lines", ops.len()),
+        );
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: ops }
+    })
+}
+
+/// PROTO-013 lookalike: the same session to a path that carries TCP but not
+/// UDP. It must fail at the QUIC handshake and never fall back to another
+/// bootstrap over TCP.
+fn proto013_blocked(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let relay_before = env.fx.udp_blocked_path.connections();
+        let backend_before = env.fx.ws.log.requests().len();
+        let mut x =
+            ws_ctx(env, &format!("wss://{UDP_BLOCKED}/ws?close_after=1"), WsBootstrap::Http3ExtendedConnect, &["never sent"], 3_000);
+        let mut t = fast();
+        t.tls_handshake_ms = Some(Some(800));
+        x.settings_layers.push(("scenario".into(), SettingsOverrides { timeouts: Some(t), ..Default::default() }));
+        let o = send(env, &x).await;
+        c.add(
+            CheckKind::Diagnosis,
+            "fails as a QUIC handshake timeout in a single attempt, nothing dispatched",
+            failure_kind(&o) == Some(FailureKind::QuicHandshakeTimeout)
+                && o.record.attempts.len() == 1
+                && o.record.outcome.dispatch == DispatchState::NotDispatched,
+            outcome_line(&o),
+        );
+        c.has(&o, "client.quic.handshake_timeout");
+        c.add(CheckKind::Diagnosis, "no session or response is claimed", o.record.stream.is_none() && o.record.response.is_none(), "");
+        c.absent_prefix(&o, "ferrum.");
+        c.add(
+            CheckKind::GroundTruth,
+            "no fallback: the TCP path saw no connection and the backend no session",
+            env.fx.udp_blocked_path.connections() == relay_before && env.fx.ws.log.requests().len() == backend_before,
+            format!("relay {} → {}", relay_before, env.fx.udp_blocked_path.connections()),
+        );
+        let r = send(env, &ws_ctx(env, &format!("wss://{HTTPS}/ws?close_after=1"), WsBootstrap::Http3ExtendedConnect, &["over-h3"], 3_000))
+            .await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
 }
 
 // ------------------------------------------------------------------ gRPC ---
@@ -1527,6 +1585,8 @@ pub fn all() -> Vec<Def> {
         Def { id: "PROTO-018", title: "SSE events then explicit cancel", run: proto018 },
         Def { id: "PROTO-018-idle", title: "SSE idle stream (no events within the idle limit)", run: proto018_idle },
         Def { id: "TRUST-007-sse", title: "SSE aborted mid-stream after HTTP 200", run: trust007_sse },
+        Def { id: "PROTO-013", title: "WebSocket over HTTP/3 extended CONNECT (RFC 9220)", run: proto013 },
+        Def { id: "PROTO-013-blocked", title: "WebSocket over HTTP/3 on a UDP-blocked path: no fallback", run: proto013_blocked },
         Def { id: "PROTO-019", title: "TCP half-close through the stream proxy", run: proto019 },
         Def { id: "PROTO-019-echo", title: "TCP newline-framed echo through the stream proxy", run: proto019_echo },
         Def { id: "PROTO-019-tls", title: "TCP+TLS terminated at the gateway, tcps to the backend", run: proto019_tls },
@@ -1543,11 +1603,7 @@ pub fn profile() -> Profile {
     Profile {
         name: "streams",
         about: "Protocols through the gateway: H1/H2/h2c/H3, WebSocket, gRPC, SSE, TCP/TLS, UDP/DTLS (HTTP 18480, HTTPS+QUIC 18443)",
-        scenarios: || {
-            let mut v: Vec<(&'static str, &'static str)> = all().into_iter().map(|d| (d.id, d.title)).collect();
-            v.push(("PROTO-013", "WebSocket over HTTP/3 extended CONNECT (RFC 9220) — skipped: client library limit"));
-            v
-        },
+        scenarios: || all().into_iter().map(|d| (d.id, d.title)).collect(),
         run: |args| Box::pin(run(args)) as BoxFut<_>,
         up: || Box::pin(up()) as BoxFut<_>,
     }
@@ -1567,14 +1623,7 @@ async fn start() -> anyhow::Result<Env> {
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let ctx = RunCtx::new("streams")?;
     let mut env = start().await?;
-    let mut results = harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await;
-    if let Ok(results) = &mut results
-        && (args.only.is_empty() || args.only.iter().any(|s| s.eq_ignore_ascii_case("PROTO-013")))
-    {
-        let r = proto013_skip(&ctx, &mut env).await;
-        eprintln!("{:22} {:7} {}", r.id, r.status, r.title);
-        results.push(r);
-    }
+    let results = harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await;
     let finished = match &results {
         Ok(r) => harness::finish(&ctx, &env, r).map(|_| ()),
         Err(_) => Ok(()),

@@ -15,7 +15,7 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 |---|---|---|---|---|
 | WebSocket, HTTP/1.1 Upgrade (`ws://`, `wss://`) | **Yes.** Send text, binary (hex) and ping. Close with a code and reason. Cancel. The transcript streams live. | **Yes.** Scripted messages, then a stop on `expect_messages`, idle close, peer close or the total deadline. | **Refused.** `anvil-load` runs HTTP-family requests only; plan validation refuses session protocols with `Unsupported` (LOAD-013). The adapter opens one connection per run and has no session or message metrics for load. | Phases DNS, connect, proxy, TLS, handshake, session. 101 validation (`Upgrade`, `Connection`, `Sec-WebSocket-Accept`). Subprotocol negotiation. Close code, reason and `closed_by`. 1006 is reported as abnormal. 1009 is split into local limit vs peer limit. |
 | WebSocket over HTTP/2 extended CONNECT (RFC 8441) | **Yes**, same commands | **Yes** | Not built | A separate bootstrap. The client waits for the peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL`. A 200 is success. Works over TLS (ALPN `h2`) and h2c. |
-| WebSocket over HTTP/3 extended CONNECT (RFC 9220) | **No.** Returns a typed `unsupported_combination`. | **No.** Returns a typed `unsupported_combination` before any traffic. | No | See §3.1. The failure is local and names the exact library limit. |
+| WebSocket over HTTP/3 extended CONNECT (RFC 9220) | **Yes**, same commands | **Yes** | Not built | A separate bootstrap on a fresh QUIC connection. The client waits for the server's `SETTINGS_ENABLE_CONNECT_PROTOCOL` before sending `:protocol = websocket`. A 200 is success. Needs `wss://` and no proxy. QUIC phases as for HTTP/3 (no TCP phase). See §3.1. |
 | gRPC unary / server streaming (`grpc://`, `grpcs://`, `http(s)://`) | No, by design. Use `execute`. `open_session` returns `unsupported_combination`. | **Yes** | Not built (one connection per call, no channel reuse) | HTTP status and gRPC status reported separately. Trailers vs trailers-only vs missing. `grpc-message` is percent-decoded. `grpc-status-details-bin` is decoded. Message boundaries are kept, each shown as JSON. |
 | gRPC client streaming / bidirectional | **Yes.** `SendText` sends a JSON message, `SendBinaryHex` sends pre-encoded protobuf. `HalfClose` or `Close` ends the client stream. | **Yes.** Scripted messages, then a half-close. | Not built | As above. The half-close is recorded in the transcript. |
 | SSE (`http(s)://`) | **Receive-only.** Close or cancel. Other commands are rejected. | **Yes.** Stops on `max_events`, idle, the deadline, cancel or the peer's end. Optional reconnect. | Not built | Every event is recorded with its id, type and data. `closed_by` is Client, Timeout, Peer or Abnormal. The raw stream is kept up to the capture limit. |
@@ -35,7 +35,7 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
   - any auth profile on raw TCP/UDP, because payloads are sent verbatim. Client certificates come from the TLS profile instead.
 - **Combinations refused before traffic** (`unsupported_combination`, `phase = prepare`, `dispatch = not_dispatched`):
   - a proxy with UDP/DTLS (HTTP CONNECT and SOCKS5 CONNECT carry only TCP);
-  - WebSocket over HTTP/3;
+  - WebSocket over HTTP/3 with `ws://` (QUIC is always encrypted) or through a proxy;
   - gRPC with the HTTP/1.1-only or HTTP/3 policies, or `plaintext` with a TLS URL;
   - SSE over HTTP/3;
   - a gRPC call mode that does not match the method descriptor. Unary alone never proves streaming.
@@ -64,16 +64,19 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 
 ### 3.1 WebSocket
 
-- **Libraries.** hyper 1.x does the bootstrap for both HTTP/1.1 and HTTP/2. `hyper::upgrade::on` hands over the stream, and tokio-tungstenite 0.30 runs the frames.
+- **Libraries.** hyper 1.x does the bootstrap for HTTP/1.1 and HTTP/2, and `hyper::upgrade::on` hands over the stream. For HTTP/3, quinn + `h3` carry the extended CONNECT, and the request stream's DATA frames are bridged to a byte stream. tokio-tungstenite 0.30 runs the frames in all three cases, with the same session code.
 - **Bootstrap request.** For HTTP/1.1, Anvil generates `Sec-WebSocket-Key` and verifies the accept key. Over TLS, HTTP/1.1 offers ALPN `http/1.1` only. User headers win over the handshake defaults, which allows deliberately malformed handshake tests.
 - **Subprotocols.** They are offered in order. If the server selects one that was not offered, that is a `ws_protocol_error`. If the server selects none, that is recorded as a note.
 - **Message limit.** `max_message_bytes` is a local inbound ceiling on both messages and frames. Outbound size is not limited. When an inbound message goes over the limit, Anvil closes with **1009**, sets `closed_by = client` and records a `ws_message_too_large` failure. When the peer's limit triggers the 1009, it is recorded with `closed_by = peer` and no transport failure. `ws.closed_too_big` keeps both explanations as alternatives.
 - **Abnormal ends.** A connection that ends without a Close frame is reported as `close_code = 1006` with `closed_by = abnormal` and a `body_incomplete`/`body_reset` failure. 1006 is a local designation, not a code the peer sent (RFC 6455 §7.1.5).
 - **Teardown after Close.** Once the peer's Close frame has arrived, the way TCP/TLS is torn down does not change the outcome. That covers an RST, or a missing TLS `close_notify`.
 - **Rejected handshakes.** A non-101 answer (non-200 for HTTP/2) keeps the HTTP response as evidence (status, headers, bounded body) with a `ws_handshake_rejected` failure. The HTTP status findings still apply.
-- **RFC 9220 (WebSocket over HTTP/3) is not implemented, and this is a library limit.** `h3` 0.0.8, the version in the workspace, models `:protocol` as a closed type, `h3::ext::Protocol`. Its inner enum is private and holds only `webtransport` and `connect-udp`. Its `FromStr` rejects every other value, and its header decoder rejects unknown `:protocol` values as a malformed field. A client built on it cannot send `:protocol = websocket`.
-  - Anvil therefore returns `unsupported_combination` in the `prepare` phase and sends nothing. It never falls back to HTTP/1.1 or HTTP/2.
-  - Ferrum Edge v0.9.5 does support RFC 9220, according to `docs/audit/gateway-lab-config.md` (PROTO-013). It uses its own patched `h3`. So PROTO-013 cannot be tested live until Anvil either ships an `h3` that accepts `:protocol = websocket` (a small patch: one more `Protocol` variant plus its parse) or implements HTTP/3 extended CONNECT itself.
+- **RFC 9220 (WebSocket over HTTP/3).**
+  - **Library.** `h3` 0.0.8 models `:protocol` as a closed type that cannot express `websocket`. Upstream fixed this in hyperium/h3#236 (`Protocol::WEBSOCKET`), which no release contains yet. The workspace vendors `h3` 0.0.8 with exactly that commit applied (`vendor/README.md`), the same approach Ferrum Edge 0.9.5 uses.
+  - **Settings first.** RFC 9220 §3 forbids sending `:protocol` until the server's SETTINGS enable extended CONNECT. Anvil waits for the SETTINGS frame (up to the response-header timeout, at most 5 s). If they do not enable it, or none arrive, it fails with `ws_handshake_rejected` in the `protocol_handshake` phase and sends nothing.
+  - **Refused before traffic.** `ws://` (QUIC is always encrypted) and any proxy give `unsupported_combination`. There is never a fallback to HTTP/1.1 or HTTP/2: a UDP-blocked path is a `quic_handshake_timeout`.
+  - **Evidence.** The connection record is the HTTP/3 one: DNS, QUIC handshake (TLS 1.3 inside) and HTTP/3 setup, with connect `not_applicable`. The session's byte counters are the WebSocket bytes carried in the stream's DATA frames, not QUIC packet bytes. A stream error that ends the session is appended to the failure message.
+  - **Live.** PROTO-013 passes against Ferrum Edge 0.9.5 (`docs/lab/streams-cpdp.md`), which bridges the session to the backend as an HTTP/1.1 Upgrade.
 - **Not implemented.** permessage-deflate and other extensions (none are offered), fragmented-send controls, and automatic reconnect.
 
 ### 3.2 gRPC
@@ -164,7 +167,7 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 | PROTO-010 | `…::proto_010_ws_abnormal_close_is_reported_as_local_1006` |
 | PROTO-011 | `…::proto_011_ws_oversize_local_limit_and_peer_limit` |
 | PROTO-012 | `…::proto_012_ws_over_h2_extended_connect_is_its_own_bootstrap` (TLS and h2c) |
-| PROTO-013 | `…::proto_013_ws_over_h3_is_a_typed_unsupported_combination` (the typed refusal only; see §3.1) |
+| PROTO-013 | `…::proto_013_ws_over_h3_extended_connect_echoes_over_quic`, `…::ws_over_h3_without_extended_connect_sends_nothing`, `…::ws_over_h3_needs_wss_and_sends_nothing_for_ws`, `…::ws_over_h3_rejected_connect_keeps_http_evidence`, `…::ws_over_h3_abnormal_end_is_reported_as_local_1006`; live in the streams lab |
 | PROTO-014 | `…::proto_014_grpc_http_200_with_error_status_is_an_rpc_failure` |
 | PROTO-015 | `…::proto_015_grpc_missing_terminal_status_is_incomplete_not_success` |
 | PROTO-016 | `…::proto_016_grpc_four_modes_with_message_boundaries`, `…_deadline_is_sent_and_enforced_without_fabricating_a_status`, `…_cancellation_and_mode_mismatch`, `…_interactive_bidi_session`; `anvil-transport/tests/sessions_streams.rs::proto_016_grpc_adapter_with_a_compiled_proto_and_trailers` |
@@ -187,7 +190,7 @@ The HTTP fixture's WebSocket route now flushes its Close reply, so a client-init
 
 ## 5. Honest limitations summary
 
-1. **WebSocket over HTTP/3 (RFC 9220).** Blocked by `h3` 0.0.8's closed `:protocol` type. Anvil returns a typed refusal, and PROTO-013 is not testable live against Ferrum until the library is patched or upgraded.
+1. **WebSocket over HTTP/3 (RFC 9220)** depends on a vendored `h3` 0.0.8 carrying one upstream commit until an `h3` release includes it. Each session opens its own QUIC connection; there is no pooling across sessions.
 2. **Load generation.** `anvil-load` drives HTTP-family requests only (see `docs/load.md`). Plan validation refuses every session protocol in this document, and HTTP/3 has not been exercised under load.
 3. **DTLS.** dimpl validates only the leaf and sends only the leaf. It is ECDSA-only, and it presents an ephemeral certificate when an identity is requested but none is configured. It does not expose the cipher suite. CertificateRequest cannot be observed for DTLS 1.3.
 4. **gRPC.** No gRPC-Web, no HTTP/3, no outbound compression, and no retry or service-config semantics. Proto imports resolve by attachment file name only.

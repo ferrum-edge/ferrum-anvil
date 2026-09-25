@@ -63,7 +63,7 @@ cargo run -p anvil-lab -- up cpdp
 ## 2. `streams` scenarios
 
 "Trusted" is the default pass. Every row also runs untrusted, and must then make no gateway
-attribution. Every row passed in every run of the final stability batch (§5), except PROTO-013, which is skipped.
+attribution. Every row passed in every run of the final stability batch (§5).
 
 | Scenario | Matrix | What it proves |
 |---|---|---|
@@ -78,7 +78,8 @@ attribution. Every row passed in every run of the final stability batch (§5), e
 | PROTO-009-client-close | PROTO-009 | The backend never closes, so Anvil ends the session (1000, `closed_by` client). The finding must **not** say the peer closed it (fix 2 in §4). |
 | PROTO-010 | PROTO-010 | The backend drops TCP without a Close frame. **Observed:** the gateway sends its own Close **1002 "protocol error"**, which answers the audit's open question. Anvil reports a peer close that is not normal and not a success. It keeps the message sent before the drop, and does not pin the close on the application (fix 3 in §4). Recovery: a normal session. |
 | PROTO-012 | PROTO-012 | RFC 8441 extended CONNECT over h2 (TLS, 18443) and h2c (18480): method CONNECT, protocol h2, a 200 bootstrap, echo, and Close 1000. Ground truth: the gateway re-originated both sessions to the backend as HTTP/1.1 Upgrade (`GET /ws`), never CONNECT. |
-| PROTO-013 | PROTO-013 | **Skipped.** See §6. The typed refusal is still recorded on the skipped result: `unsupported_combination` in `prepare`, `not_dispatched`, and no gateway session logged. |
+| PROTO-013 | PROTO-013 | WebSocket over HTTP/3 (RFC 9220) to the gateway's QUIC listener. Anvil waits for the gateway's `SETTINGS_ENABLE_CONNECT_PROTOCOL`, sends `CONNECT` with `:protocol = websocket`, gets 200, and the echo and the backend's Close 1000 come back over QUIC (ALPN `h3`, no TCP phase). Ground truth: the gateway's operator log records "H3 WebSocket (RFC 9220) upgrade request received", and it re-originates the session to the backend as an HTTP/1.1 Upgrade (`GET /ws`). |
+| PROTO-013-blocked | PROTO-013 | The same session to the TCP-only relay (no UDP): a `quic_handshake_timeout` in one attempt, nothing dispatched, and no fallback: the relay sees no TCP connection and the backend no session. Recovery over the real QUIC listener succeeds. |
 | PROTO-014 | PROTO-014 | Application error status: HTTP 200 with `grpc-status 5` in trailers. The transport completed, but the RPC failed (`app.grpc_status`), with no gateway token. Ground truth: the backend returned it. |
 | PROTO-014-down | PROTO-014 (UP-002 on gRPC) | The gRPC backend is down (19409 unbound). **HTTP 200 trailers-only** `grpc-status 14`, `grpc-message: Backend unavailable`, and **no `X-Gateway-Error`**. That is an RPC failure. Anvil does not claim which component authored a trailers-only status, and makes no client-leg connect claim. Operator `error_class` is `connection_refused`. |
 | PROTO-015 | PROTO-015 | The backend replies once, then resets before any status. The gateway resets the client stream: the status is `missing`, the transport `incomplete`, the application never a success, and `app.grpc_status_missing` is emitted. The message before the reset is kept. |
@@ -175,6 +176,9 @@ Consecutive runs with `--untrusted-pass` on 2026-09-25 (macOS arm64, Ferrum Edge
 sha256 `6a531f2c…`). The counts are harness totals: the trusted pass, the untrusted pass,
 and PROTO-013 skipped once. A streams run takes about 24 s and a cpdp run about 47 s.
 
+After RFC 9220 support was added, three more consecutive streams runs gave 62 passed,
+0 failed, 0 skipped each (31 scenarios × 2 passes).
+
 | Run | streams (29 × 2 + 1 skip) | cpdp (5 × 2) |
 |---|---|---|
 | 1 | 58 passed, 0 failed, 1 skipped | 10 passed, 0 failed |
@@ -199,10 +203,9 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
 
 ## 6. Skips and limitations
 
-- **PROTO-013 (WebSocket over HTTP/3, RFC 9220) is skipped.** It is recorded as `skipped`,
-  never as a pass. Anvil's `h3` 0.0.8 cannot send `:protocol = websocket`
-  (`docs/protocols.md` §3.1), so Anvil refuses before any traffic. The gateway side
-  (`FERRUM_HTTP3_WEBSOCKET_ENABLED=true`) is therefore not exercised.
+- **PROTO-013 runs on a vendored `h3`.** `h3` 0.0.8 cannot send `:protocol = websocket`;
+  the workspace carries the upstream fix (hyperium/h3#236) until a release includes it
+  (`vendor/README.md`). Until that change, PROTO-013 was recorded as skipped.
 - **Plain-HTTP/2 trailers through Ferrum.** 0.9.5 was observed not to relay them
   (PROTO-002). So the lab verifies Anvil's trailer preservation against the backend
   directly, and verifies through the gateway only that Anvil invents nothing. A cleartext

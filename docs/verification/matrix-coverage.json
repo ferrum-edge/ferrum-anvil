@@ -2,8 +2,8 @@
  "source": "docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json",
  "total": 182,
  "totals": {
-  "verified_test": 76,
-  "verified_live": 95,
+  "verified_test": 75,
+  "verified_live": 96,
   "blocked": 6,
   "not_applicable": 2,
   "verified_check": 1,
@@ -260,7 +260,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-001": {
@@ -309,7 +309,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-002": {
@@ -347,7 +347,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-003": {
@@ -381,7 +381,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-004": {
@@ -456,7 +456,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-005.tcp": {
@@ -563,7 +563,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-006.lookalike": {
@@ -640,7 +640,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-007": {
@@ -709,7 +709,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-008.tcp": {
@@ -786,7 +786,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-009": {
@@ -824,7 +824,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-010": {
@@ -858,7 +858,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-011": {
@@ -892,7 +892,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-012": {
@@ -937,7 +937,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-013": {
@@ -991,7 +991,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-014": {
@@ -1040,7 +1040,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-015": {
@@ -1089,7 +1089,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-016": {
@@ -1127,7 +1127,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-017": {
@@ -1161,7 +1161,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:TLS-018": {
@@ -1200,7 +1200,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-001": {
@@ -1242,19 +1242,19 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1324,
+     "line": 1382,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1533,
+     "line": 1593,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core",
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220728Z-core",
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "core:UP-002": {
@@ -1311,7 +1311,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-003": {
@@ -1343,12 +1343,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1352,
+     "line": 1410,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1534,
+     "line": 1594,
      "kind": "lab"
     },
     {
@@ -1374,8 +1374,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams",
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220940Z-streams",
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "streams:UP-004-tcps": {
@@ -1446,7 +1446,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:UP-005": {
@@ -1499,7 +1499,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:UP-006": {
@@ -1556,7 +1556,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:UP-007": {
@@ -1609,7 +1609,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:UP-008.http-to-tls": {
@@ -1666,7 +1666,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-009": {
@@ -1708,19 +1708,19 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1097,
+     "line": 1155,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1526,
+     "line": 1584,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core",
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220728Z-core",
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "core:UP-010": {
@@ -1783,7 +1783,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-011": {
@@ -1832,7 +1832,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-012": {
@@ -1881,7 +1881,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-013": {
@@ -1924,7 +1924,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-014": {
@@ -1967,7 +1967,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160150Z-admission"
+     "results/lab/20260925T220822Z-admission"
     ],
     "variants": {
      "admission:UP-015": {
@@ -2010,7 +2010,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:UP-016": {
@@ -2122,7 +2122,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160150Z-admission"
+     "results/lab/20260925T220822Z-admission"
     ],
     "variants": {
      "admission:UP-018": {
@@ -2203,7 +2203,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:UP-020": {
@@ -2256,8 +2256,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core",
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220728Z-core",
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "core:GW-001": {
@@ -2314,7 +2314,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160150Z-admission"
+     "results/lab/20260925T220822Z-admission"
     ],
     "variants": {
      "admission:GW-002": {
@@ -2357,7 +2357,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160205Z-drain"
+     "results/lab/20260925T220837Z-drain"
     ],
     "variants": {
      "drain:GW-003": {
@@ -2400,7 +2400,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-004": {
@@ -2453,8 +2453,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160150Z-admission",
-     "results/lab/20260925T160332Z-cpdp"
+     "results/lab/20260925T220822Z-admission",
+     "results/lab/20260925T221004Z-cpdp"
     ],
     "variants": {
      "admission:GW-005": {
@@ -2549,7 +2549,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:GW-006": {
@@ -2592,7 +2592,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:GW-007": {
@@ -2635,7 +2635,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:GW-008": {
@@ -2678,7 +2678,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-009": {
@@ -2741,7 +2741,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-010": {
@@ -2812,7 +2812,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:GW-011": {
@@ -2855,7 +2855,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-012": {
@@ -2918,7 +2918,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-013-REFUSED": {
@@ -2989,7 +2989,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-014-GEO": {
@@ -3042,7 +3042,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-015": {
@@ -3091,7 +3091,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:GW-016": {
@@ -3134,7 +3134,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:GW-017": {
@@ -3183,7 +3183,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160056Z-core"
+     "results/lab/20260925T220728Z-core"
     ],
     "variants": {
      "core:GW-018": {
@@ -3266,7 +3266,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-019-REJECT-UNKNOWN": {
@@ -3395,7 +3395,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160110Z-policy"
+     "results/lab/20260925T220743Z-policy"
     ],
     "variants": {
      "policy:GW-020-GUARD": {
@@ -3486,7 +3486,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-001": {
@@ -3541,7 +3541,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-002": {
@@ -3584,7 +3584,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-003": {
@@ -3627,7 +3627,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-004": {
@@ -3670,7 +3670,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-005": {
@@ -3713,7 +3713,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-006": {
@@ -3756,7 +3756,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-007": {
@@ -3799,7 +3799,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-008": {
@@ -3842,7 +3842,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-009": {
@@ -3885,7 +3885,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-010": {
@@ -3923,7 +3923,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-011": {
@@ -3963,7 +3963,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-012": {
@@ -3997,7 +3997,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-013": {
@@ -4037,7 +4037,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-014": {
@@ -4088,7 +4088,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-015": {
@@ -4131,7 +4131,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-016": {
@@ -4210,7 +4210,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-017": {
@@ -4283,7 +4283,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-018": {
@@ -4346,7 +4346,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-019": {
@@ -4395,7 +4395,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-020": {
@@ -4438,7 +4438,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-021": {
@@ -4481,7 +4481,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-022": {
@@ -4524,7 +4524,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-023": {
@@ -4567,7 +4567,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-024": {
@@ -4610,7 +4610,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-025.nonce": {
@@ -4663,7 +4663,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "tls:AUTH-026": {
@@ -4706,7 +4706,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-027": {
@@ -4749,7 +4749,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-028": {
@@ -4823,7 +4823,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-029.text": {
@@ -4894,7 +4894,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-030": {
@@ -4937,7 +4937,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-031": {
@@ -4980,7 +4980,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160248Z-auth"
+     "results/lab/20260925T220920Z-auth"
     ],
     "variants": {
      "auth:AUTH-032": {
@@ -5018,7 +5018,7 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1511,
+     "line": 1569,
      "kind": "lab"
     },
     {
@@ -5029,7 +5029,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-001": {
@@ -5067,7 +5067,7 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1512,
+     "line": 1570,
      "kind": "lab"
     },
     {
@@ -5078,7 +5078,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-002": {
@@ -5157,7 +5157,7 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1513,
+     "line": 1571,
      "kind": "lab"
     },
     {
@@ -5173,7 +5173,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-005": {
@@ -5221,13 +5221,13 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1514,
+     "line": 1572,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-006": {
@@ -5270,13 +5270,13 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1515,
+     "line": 1573,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-007": {
@@ -5319,13 +5319,13 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1516,
+     "line": 1574,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-008": {
@@ -5373,18 +5373,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1517,
+     "line": 1575,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1518,
+     "line": 1576,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-009-client-close": {
@@ -5441,13 +5441,13 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1519,
+     "line": 1577,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-010": {
@@ -5508,13 +5508,13 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1520,
+     "line": 1578,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-012": {
@@ -5539,7 +5539,7 @@
    "id": "PROTO-013",
    "category": "Protocol completion and semantics",
    "title": "WS H3 extended CONNECT",
-   "status": "verified_test",
+   "status": "verified_live",
    "evidence_kinds": [
     "integration_test",
     "lab"
@@ -5547,32 +5547,60 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 382,
+     "line": 392,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 849,
+     "line": 851,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 874,
+     "line": 902,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1588,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1589,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
+     "streams:PROTO-013-blocked": {
+      "profile": "streams",
+      "scenario": "PROTO-013-blocked",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
      "streams:PROTO-013": {
       "profile": "streams",
       "scenario": "PROTO-013",
       "passes": {
        "trusted": {
-        "status": "skipped",
-        "skip_reason": "Anvil cannot originate RFC 9220 WebSocket over HTTP/3: the workspace h3 0.0.8 client cannot send :protocol=websocket (docs/protocols.md \u00a73.1). Ferrum Edge 0.9.5 advertises the feature (FERRUM_HTTP3_WEBSOCKET_ENABLED=true in streams.conf), but it was not exercised. Typed refusal observed: WebSocket over HTTP/3 (RFC 9220 extended CONNECT) is not supported: the h3 0.0.8 library cannot send the ':protocol = websocket' pseudo-header (it only models 'webtransport' and 'connect-udp'). Nothing was sent; choose the HTTP/1.1 Upgrade or HTTP/2 extended CONNECT bootstrap."
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
        }
       }
      }
@@ -5592,33 +5620,33 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 525,
+     "line": 617,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 882,
+     "line": 940,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 915,
+     "line": 973,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1521,
+     "line": 1579,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1522,
+     "line": 1580,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-014": {
@@ -5665,23 +5693,23 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 546,
+     "line": 638,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 955,
+     "line": 1013,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1523,
+     "line": 1581,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-015": {
@@ -5714,42 +5742,42 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 562,
-     "kind": "integration_test"
-    },
-    {
-     "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 610,
-     "kind": "integration_test"
-    },
-    {
-     "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 630,
-     "kind": "integration_test"
-    },
-    {
-     "path": "crates/anvil-engine/tests/sessions.rs",
      "line": 654,
      "kind": "integration_test"
     },
     {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 702,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 722,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 746,
+     "kind": "integration_test"
+    },
+    {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 987,
+     "line": 1045,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1036,
+     "line": 1094,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1524,
+     "line": 1582,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1525,
+     "line": 1583,
      "kind": "lab"
     },
     {
@@ -5760,7 +5788,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-016-deadline": {
@@ -5806,7 +5834,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 676,
+     "line": 768,
      "kind": "integration_test"
     }
    ],
@@ -5825,27 +5853,27 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 708,
+     "line": 800,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1145,
+     "line": 1203,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1184,
+     "line": 1242,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1527,
+     "line": 1585,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1528,
+     "line": 1586,
      "kind": "lab"
     },
     {
@@ -5856,7 +5884,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-018-idle": {
@@ -5903,43 +5931,43 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 765,
+     "line": 857,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1250,
+     "line": 1308,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1282,
+     "line": 1340,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1300,
+     "line": 1358,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1530,
+     "line": 1590,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1531,
+     "line": 1591,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1532,
+     "line": 1592,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-019-tls": {
@@ -6000,17 +6028,17 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 889,
+     "line": 981,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1389,
+     "line": 1447,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1535,
+     "line": 1595,
      "kind": "lab"
     },
     {
@@ -6021,7 +6049,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-020": {
@@ -6054,23 +6082,23 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 909,
+     "line": 1001,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1423,
+     "line": 1481,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1536,
+     "line": 1596,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:PROTO-021": {
@@ -6123,27 +6151,22 @@
     },
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 995,
+     "line": 1087,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1016,
+     "line": 1108,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1041,
+     "line": 1133,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1450,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1479,
+     "line": 1508,
      "kind": "lab"
     },
     {
@@ -6153,7 +6176,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1538,
+     "line": 1597,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1598,
      "kind": "lab"
     },
     {
@@ -6164,8 +6192,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams",
-     "results/lab/20260925T160227Z-tls"
+     "results/lab/20260925T220940Z-streams",
+     "results/lab/20260925T220859Z-tls"
     ],
     "variants": {
      "streams:PROTO-022": {
@@ -6435,18 +6463,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1204,
+     "line": 1262,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1529,
+     "line": 1587,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T160308Z-streams"
+     "results/lab/20260925T220940Z-streams"
     ],
     "variants": {
      "streams:TRUST-007-sse": {
@@ -7189,7 +7217,7 @@
    "references": [
     {
      "path": "crates/anvil-load/src/html.rs",
-     "line": 572,
+     "line": 575,
      "kind": "unit_test"
     },
     {
@@ -7321,12 +7349,12 @@
     },
     {
      "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
-     "line": 91,
+     "line": 93,
      "kind": "native_e2e"
     },
     {
      "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
-     "line": 199,
+     "line": 201,
      "kind": "native_e2e"
     }
    ],
