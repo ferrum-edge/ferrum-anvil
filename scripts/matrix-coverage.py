@@ -84,8 +84,13 @@ def scan(cases):
     return refs
 
 
+BASE_ID = re.compile(r"^([A-Z]+-\d+)(?:$|[.\-])")
+
+
 def latest_lab_results():
-    """id -> {status, trusted, run, skip_reason} from the newest run per profile."""
+    """base id -> {runs, variants: {scenario id: {profile, passes}}} from the
+    newest run per profile. Scenario variants (`UP-004.expired`,
+    `GW-013-TIMEOUT`, `UP-002-tcp`) count toward their base case."""
     out = {}
     runs = sorted(glob.glob(os.path.join(ROOT, "results/lab/*")))
     newest = {}
@@ -95,7 +100,7 @@ def latest_lab_results():
             continue
         profile = name.split("-", 1)[1]
         newest[profile] = r  # sorted by timestamp prefix
-    for profile, r in newest.items():
+    for profile, r in sorted(newest.items()):
         for f in glob.glob(os.path.join(r, "*.json")):
             base = os.path.basename(f)
             if base == "summary.json" or base.endswith(".record.json"):
@@ -105,9 +110,17 @@ def latest_lab_results():
             except (OSError, ValueError):
                 continue
             rid = d.get("id", "")
-            key = rid[: -len("-untrusted")] if rid.endswith("-untrusted") else rid
-            entry = out.setdefault(key, {"profile": profile, "run": os.path.relpath(r, ROOT), "passes": {}})
-            entry["passes"]["untrusted" if rid.endswith("-untrusted") else "trusted"] = {
+            untrusted = rid.endswith("-untrusted")
+            sid = rid[: -len("-untrusted")] if untrusted else rid
+            m = BASE_ID.match(sid)
+            if not m:
+                continue
+            entry = out.setdefault(m.group(1), {"runs": [], "variants": {}})
+            run = os.path.relpath(r, ROOT)
+            if run not in entry["runs"]:
+                entry["runs"].append(run)
+            var = entry["variants"].setdefault(f"{profile}:{sid}", {"profile": profile, "scenario": sid, "passes": {}})
+            var["passes"]["untrusted" if untrusted else "trusted"] = {
                 "status": d.get("status"),
                 "skip_reason": d.get("skip_reason"),
             }
@@ -119,12 +132,14 @@ def classify(case, refs, lab, overrides):
     ov = overrides.get(cid)
     kinds = sorted({r["kind"] for r in refs})
     labres = lab.get(cid)
-    lab_statuses = {k: v["status"] for k, v in (labres or {}).get("passes", {}).items()}
-    if labres and lab_statuses and all(s == "passed" for s in lab_statuses.values()):
-        status = "verified_live"
-    elif labres and any(s == "failed" for s in lab_statuses.values()):
+    lab_statuses = [p["status"] for v in (labres or {}).get("variants", {}).values() for p in v["passes"].values()]
+    if any(s == "failed" for s in lab_statuses):
         status = "failing_live"
-    elif labres and any(s == "skipped" for s in lab_statuses.values()) and not any(k != "lab" for k in kinds):
+    elif any(s == "passed" for s in lab_statuses):
+        # Skipped variants (a documented infeasible half) are listed in the
+        # lab block; they never turn into passes.
+        status = "verified_live"
+    elif lab_statuses and not any(k != "lab" for k in kinds):
         status = "skipped_live"
     elif any(k in ("integration_test", "unit_test", "native_e2e", "renderer_test") for k in kinds):
         status = "verified_test"
@@ -189,7 +204,15 @@ def main():
             md += ["", f"## {cat}", "", "| ID | Scenario | Status | Evidence |", "|---|---|---|---|"]
         ev = ", ".join(sorted({f"`{x['path']}`" for x in r["references"]})[:3]) or "—"
         if r["lab"]:
-            ev = f"lab `{r['lab']['run']}`; " + ev
+            variants = r["lab"]["variants"].values()
+            passed = sorted({v["scenario"] for v in variants if any(p["status"] == "passed" for p in v["passes"].values())})
+            skipped = sorted({v["scenario"] for v in variants if any(p["status"] == "skipped" for p in v["passes"].values())})
+            lab_ev = "lab " + ", ".join(f"`{x}`" for x in r["lab"]["runs"])
+            if passed:
+                lab_ev += f" — passed {', '.join(passed)}"
+            if skipped:
+                lab_ev += f" — skipped {', '.join(skipped)}"
+            ev = lab_ev if ev == "—" else f"{lab_ev}; {ev}"
         note = f" — {r['note']}" if r["note"] else ""
         md.append(f"| {r['id']} | {r['title']} | {LABELS.get(r['status'], r['status'])}{note} | {ev} |")
     open(os.path.join(OUT_DIR, "matrix-coverage.md"), "w").write("\n".join(md) + "\n")
