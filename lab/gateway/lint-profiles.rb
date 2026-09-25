@@ -110,7 +110,15 @@ PLUGIN_KEYS = {
   'rate_limiting' => %w[limit_by expose_headers limits redis_failure_policy] + REDIS,
   'ai_response_guard' => %w[action pii_patterns custom_pii_patterns blocked_phrases blocked_patterns
                             scan_fields redaction_placeholder max_scan_bytes require_json
-                            required_fields max_completion_length grpc]
+                            required_fields max_completion_length grpc],
+  'oauth2_introspection' => %w[providers scope_claim role_claim consumer_identity_claim
+                               consumer_header_claim allow_provider_fanout],          # oauth2_introspection.rs:231-241 (reject_unknown_keys)
+  'ldap_auth' => %w[ldap_url bind_dn_template search_base_dn search_filter canonical_identity_attribute
+                    service_account_dn service_account_password group_base_dn group_filter required_groups
+                    group_attribute starttls connect_timeout_seconds request_timeout_seconds
+                    max_concurrent_requests cache_ttl_seconds max_cache_entries consumer_mapping
+                    hide_credentials allow_plaintext],                                # ldap_auth.rs:250-490 (keys read)
+  'mtls_auth' => %w[cert_field allowed_issuers allowed_ca_fingerprints_sha256]          # mtls_auth.rs:995-1045 (keys read)
 }.freeze
 NESTED = {
   %w[response_transformer rules] => %w[operation target key value new_key],           # response_transformer.rs:156
@@ -122,6 +130,13 @@ NESTED = {
                                 consumer_header_claim claim_headers claim_headers_separator
                                 output_claim_headers require_mtls_binding require_dpop dpop_clock_skew_secs
                                 dpop_replay_scope dpop_replay_max_entries jwks_max_stale_seconds], # jwks_auth.rs:282-308
+  %w[oauth2_introspection providers] => %w[introspection_endpoint discovery_url issuer audiences client_auth
+                                           from_headers from_params forward_original_token
+                                           positive_cache_ttl_secs negative_cache_ttl_secs request_timeout_ms
+                                           max_cache_entries max_cache_entry_bytes max_cache_total_bytes
+                                           token_hint_param required_scopes required_roles scope_claim role_claim
+                                           consumer_identity_claim consumer_header_claim claim_headers], # oauth2_introspection.rs:282-305
+  %w[mtls_auth allowed_issuers] => %w[cn o ou ca_certificate_pem],                    # mtls_auth.rs:217-223
   %w[openapi_validator operations] => %w[method path_template path_regex operation_label request_required
                                          request_body responses]                      # openapi_validator.rs:159-167
 }.freeze
