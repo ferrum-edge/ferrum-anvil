@@ -268,7 +268,7 @@ ferrum-edge/ferrum-anvil#1), after the last functional merge.
 | Check | Command | Result |
 | --- | --- | --- |
 | Format and lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings` | clean |
-| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 65 test binaries: 427 passed, 0 failed, 0 ignored |
+| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 66 test binaries: 429 passed, 0 failed, 0 ignored |
 | Contract drift | `cargo run -p anvil-cli -- schema --out contracts/schemas` + `npm run contracts` | no drift |
 | Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 24 passed (3 files) |
 | Native E2E through the gateway | `npm run e2e:build`, `anvil-lab up core`, `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` | 9 spec files, 18 tests passed (boot, success, refusal diagnosis, effective request, gateway diagnosis, untrusted TLS, load report, offline/no-account, lock) |

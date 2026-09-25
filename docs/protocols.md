@@ -188,7 +188,7 @@ The HTTP fixture's WebSocket route now flushes its Close reply, so a client-init
 ## 5. Honest limitations summary
 
 1. **WebSocket over HTTP/3 (RFC 9220).** Blocked by `h3` 0.0.8's closed `:protocol` type. Anvil returns a typed refusal, and PROTO-013 is not testable live against Ferrum until the library is patched or upgraded.
-2. **Load generation.** No protocol in this document has a load driver. `anvil-load` is a placeholder.
+2. **Load generation.** `anvil-load` drives HTTP-family requests only (see `docs/load.md`). Plan validation refuses every session protocol in this document, and HTTP/3 has not been exercised under load.
 3. **DTLS.** dimpl validates only the leaf and sends only the leaf. It is ECDSA-only, and it presents an ephemeral certificate when an identity is requested but none is configured. It does not expose the cipher suite. CertificateRequest cannot be observed for DTLS 1.3.
 4. **gRPC.** No gRPC-Web, no HTTP/3, no outbound compression, and no retry or service-config semantics. Proto imports resolve by attachment file name only.
 5. **SSE.** No reconnect after a clean end of stream, which differs from browser behavior. Compressed streams are not supported.

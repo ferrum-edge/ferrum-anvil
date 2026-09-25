@@ -101,6 +101,7 @@ cargo run -p anvil-lab -- up core         # keep the core lab up for manual test
 | Measured resource budgets | `docs/performance.md` |
 | Failure-matrix coverage | `docs/verification/matrix-coverage.md` |
 | Sample workspace and saved reports | `samples/` |
+| Completion report (what is built, verified and still open) | `docs/completion-report.md` |
 
 ## License
 
