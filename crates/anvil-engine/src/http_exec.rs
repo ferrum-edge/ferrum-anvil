@@ -100,16 +100,8 @@ pub(crate) fn resolve_auth(
             }
         }
         AuthConfig::OAuth2 { config } => {
-            let resolved = anvil_auth::oauth::OAuthResolved {
-                token_url: r.resolve(&config.token_url, "auth.token_url")?,
-                client_id: r.resolve(&config.client_id, "auth.client_id")?,
-                client_secret: sens(&config.client_secret, "auth.client_secret")?,
-                scope: r.resolve(&config.scope, "auth.scope")?,
-                audience: r.resolve(&config.audience, "auth.audience")?,
-                basic_client_auth: config.client_auth == anvil_domain::auth::OAuthClientAuth::BasicHeader,
-                refresh_skew_secs: config.refresh_skew_secs as i64,
-            };
-            let key = format!("{}|{}|{}|{}", ctx.isolation, resolved.token_url, resolved.client_id, resolved.scope);
+            let resolved = crate::oauth_http::resolve_oauth(config, ctx, r)?;
+            let key = crate::oauth_http::cache_key(ctx, &resolved);
             let cached = engine.tokens.get(&key);
             *oauth_key = Some((key, resolved));
             match cached {
@@ -334,6 +326,8 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     let mut extra_findings: Vec<anvil_diagnostics::Draft> = Vec::new();
 
     // OAuth: acquire/refresh through the same transport before sending.
+    // Interactive grants without a usable token fail here, typed, before the
+    // API request exists on the wire.
     if let Some((key, cfg)) = &prep.oauth_key {
         let http = crate::oauth_http::EngineTokenHttp { engine, ctx, settings: &prep.settings };
         match engine.tokens.get_or_acquire(key, cfg, &http, Utc::now()).await {
@@ -341,12 +335,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                 replace_oauth(&mut prep.auth, &t);
             }
             Err(e) => {
-                let f = TransportFailure::new(
-                    Phase::Prepare,
-                    FailureKind::AuthPreparationFailed,
-                    format!("OAuth token acquisition from {} failed: {e}. The API request was not sent.", cfg.token_url),
-                )
-                .with_field("auth");
+                let f = crate::oauth_http::acquisition_failure(cfg, e, "The API request was not sent.");
                 return record::local_failure(ctx, &resolver, started_at, f);
             }
         }

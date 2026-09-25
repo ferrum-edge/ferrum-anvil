@@ -422,6 +422,11 @@
           ]
         },
         {
+          "description": "The auth profile needs an interactive sign-in (OAuth authorization\ncode + PKCE) before a token exists; the request was not sent.",
+          "type": "string",
+          "const": "oauth_interaction_required"
+        },
+        {
           "description": "Peer sent a fatal alert after the client finished its handshake\n(TLS 1.3 client-certificate rejection surfaces here).",
           "type": "string",
           "const": "tls_alert_after_handshake"

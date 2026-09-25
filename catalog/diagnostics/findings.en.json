@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-2",
+  "version": "2026.09.25-3",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -170,6 +170,28 @@
       ],
       "confirm_with": [
         "The execution log shows which credential step failed."
+      ]
+    },
+    "local.oauth_interaction_required": {
+      "title": "Sign in before sending with this OAuth profile",
+      "explanation": "{message}",
+      "alternatives": [],
+      "does_not_prove": [
+        "That the destination API or a gateway rejected the request — it was never sent.",
+        "That the authorization server is unavailable — Anvil did not request a token with any other grant."
+      ],
+      "remediation": [
+        {
+          "text": "Use Sign in on the OAuth auth profile to authorize in your system browser, then send again.",
+          "owner": "caller"
+        },
+        {
+          "text": "If this API is meant for a non-interactive client, change the profile to the client-credentials grant deliberately.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The auth profile shows whether a token is cached for this workspace."
       ]
     },
     "local.vault_locked": {

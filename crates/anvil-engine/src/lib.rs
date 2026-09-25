@@ -13,7 +13,7 @@ mod h3_exec;
 pub mod http_exec;
 pub mod lint;
 mod local_checks;
-mod oauth_http;
+pub mod oauth_http;
 mod pkcs12;
 pub mod prepare;
 pub mod preview;

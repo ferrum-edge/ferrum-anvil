@@ -22,6 +22,7 @@ pub fn local(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
         K::LintBlocked => "local.lint_blocked",
         K::UnsupportedCombination => "local.unsupported_combination",
         K::AuthPreparationFailed => "local.auth_preparation_failed",
+        K::OAuthInteractionRequired => "local.oauth_interaction_required",
         K::VaultLocked => "local.vault_locked",
         K::RequestTooLargeLocal => "local.request_too_large",
         _ => "local.validation_failed",
