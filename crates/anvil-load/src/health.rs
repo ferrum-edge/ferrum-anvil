@@ -128,4 +128,14 @@ mod tests {
         assert!(h.peak_rss_bytes.unwrap() > 1024 * 1024);
         assert!(h.peak_open_fds.unwrap() >= 3);
     }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn other_platforms_report_unavailable_not_zero() {
+        let mut h = HealthSampler::new();
+        assert!(!h.available());
+        h.sample();
+        assert_eq!((h.peak_cpu_percent, h.peak_rss_bytes, h.peak_open_fds), (None, None, None));
+        assert!(sample().is_none() && open_fds().is_none());
+    }
 }

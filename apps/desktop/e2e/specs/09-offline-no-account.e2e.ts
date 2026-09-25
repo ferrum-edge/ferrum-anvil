@@ -8,7 +8,7 @@
 // embedded WebDriver port it listens on). The webview cannot reach the network
 // either way: its CSP only allows IPC (see security.test.tsx).
 import { $, browser, expect } from "@wdio/globals";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { type Fixture, cls, dimension, invoke, newRequest, screenshot, send, setUrl, startJsonFixture, waitForWorkbench } from "../helpers";
 
 interface Socket {
@@ -30,19 +30,21 @@ function appPid(): string {
 
 function sockets(pid: string): Socket[] {
   if (process.platform === "win32") {
-    const out = execFileSync(
+    // Both cmdlets report "no objects found" as an error when the process
+    // has no socket of that kind (the expected case for UDP), and PowerShell
+    // then exits non-zero; read stdout and end with an explicit success.
+    const r = spawnSync(
       "powershell",
       [
         "-NoProfile",
         "-Command",
-        // Both cmdlets report "no objects found" as an error when the process
-        // has no socket of that kind, which is the expected case for UDP.
         `Get-NetTCPConnection -OwningProcess ${pid} -ErrorAction SilentlyContinue | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) $($_.RemoteAddress):$($_.RemotePort) $($_.State)" }; ` +
-          `Get-NetUDPEndpoint -OwningProcess ${pid} -ErrorAction SilentlyContinue | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) - UDP" }`,
+          `Get-NetUDPEndpoint -OwningProcess ${pid} -ErrorAction SilentlyContinue | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) - UDP" }; exit 0`,
       ],
       { encoding: "utf8" },
     );
-    return out
+    if (r.status !== 0) throw new Error(`socket query failed (${r.status}): ${r.stderr}`);
+    return r.stdout
       .split(/\r?\n/)
       .filter(Boolean)
       .map((line) => {
