@@ -149,6 +149,9 @@ pub(crate) fn resolve_auth(
     })
 }
 
+/// Prepared TLS material, the selected profile's name and its host bindings.
+pub(crate) type TlsChoice = (Arc<PreparedTls>, Option<String>, Vec<anvil_domain::tls::HostBinding>);
+
 /// Build the TLS settings for a target (profile scoping + host binding).
 pub(crate) fn tls_for(
     engine: &Engine,
@@ -156,7 +159,7 @@ pub(crate) fn tls_for(
     settings: &EffectiveSettings,
     target: &Target,
     inferred: &mut Vec<String>,
-) -> Result<(Arc<PreparedTls>, Option<String>, Vec<anvil_domain::tls::HostBinding>), TransportFailure> {
+) -> Result<TlsChoice, TransportFailure> {
     let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
     let Some(p) = profile else {
         if settings.tls_profile_id.is_some() {
@@ -318,6 +321,7 @@ struct AttemptTarget {
     tls: Option<Arc<PreparedTls>>,
 }
 
+#[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
     let started_at = Utc::now();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
@@ -619,6 +623,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     for s in &used_secrets {
         redactor.add_secret(s);
     }
+    // An automatic HTTP/3 → TCP fallback is reported, never hidden.
+    let fallback_from = attempts.iter().find_map(|a| match &a.reason {
+        AttemptReason::ProtocolFallback { from } => Some(from.clone()),
+        _ => None,
+    });
     let assembly = Assembly {
         ctx,
         started_at,
@@ -639,7 +648,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         last,
         trust,
         credentials_stripped,
-        protocol_fallback_from: None,
+        protocol_fallback_from: fallback_from,
         redactor: &redactor,
         extra_findings,
         stream: None,
