@@ -42,11 +42,13 @@ impl TlsServerOptions {
 }
 
 pub fn certs(pem: &str) -> Vec<CertificateDer<'static>> {
-    rustls_pemfile::certs(&mut pem.as_bytes()).filter_map(Result::ok).collect()
+    use rustls_pki_types::pem::PemObject;
+    CertificateDer::pem_slice_iter(pem.as_bytes()).filter_map(Result::ok).collect()
 }
 
 pub fn key(pem: &str) -> PrivateKeyDer<'static> {
-    rustls_pemfile::private_key(&mut pem.as_bytes()).ok().flatten().expect("fixture private key")
+    use rustls_pki_types::pem::PemObject;
+    PrivateKeyDer::from_pem_slice(pem.as_bytes()).expect("fixture private key")
 }
 
 pub fn provider() -> Arc<rustls::crypto::CryptoProvider> {

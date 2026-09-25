@@ -22,7 +22,6 @@ url.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pki-types.workspace = true
-rustls-pemfile.workspace = true
 rustls-native-certs.workspace = true
 x509-parser.workspace = true
 quinn.workspace = true

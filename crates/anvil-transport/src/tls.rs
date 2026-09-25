@@ -101,8 +101,8 @@ fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFai
 }
 
 fn parse_certs(pem: &str, field: &str) -> Result<Vec<CertificateDer<'static>>, TransportFailure> {
-    let mut rd = std::io::BufReader::new(pem.as_bytes());
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut rd).collect();
+    use rustls_pki_types::pem::PemObject;
+    let certs: Result<Vec<_>, _> = CertificateDer::pem_slice_iter(pem.as_bytes()).collect();
     let certs = certs.map_err(|e| local(FailureKind::TlsProfileInvalid, format!("certificate PEM could not be parsed: {e}"), field))?;
     if certs.is_empty() {
         return Err(local(FailureKind::TlsProfileInvalid, "no CERTIFICATE blocks found in PEM", field));
@@ -111,10 +111,10 @@ fn parse_certs(pem: &str, field: &str) -> Result<Vec<CertificateDer<'static>>, T
 }
 
 fn parse_key(pem: &str) -> Result<PrivateKeyDer<'static>, TransportFailure> {
-    let mut rd = std::io::BufReader::new(pem.as_bytes());
-    match rustls_pemfile::private_key(&mut rd) {
-        Ok(Some(k)) => Ok(k),
-        Ok(None) => Err(local(
+    use rustls_pki_types::pem::{self, PemObject};
+    match PrivateKeyDer::from_pem_slice(pem.as_bytes()) {
+        Ok(k) => Ok(k),
+        Err(pem::Error::NoItemsFound) => Err(local(
             FailureKind::ClientIdentityInvalid,
             "no private key found (expected PKCS#8, PKCS#1 or SEC1 PEM; encrypted keys must be decrypted on import)",
             "tls.client_identity.private_key",

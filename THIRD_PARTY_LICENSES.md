@@ -16,7 +16,7 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-783 Rust crates, 5 npm packages.
+782 Rust crates, 5 npm packages.
 
 | License expression | Components |
 | --- | --- |
@@ -34,7 +34,7 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | Apache-2.0/MIT | 4 |
 | ISC | 4 |
 | Unlicense/MIT | 4 |
-| Apache-2.0 OR ISC OR MIT | 3 |
+| Apache-2.0 OR ISC OR MIT | 2 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 2 |
 | BSD-3-Clause AND MIT | 2 |
 | BSD-3-Clause OR MIT OR Apache-2.0 | 2 |
@@ -69,7 +69,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (783)
+## Rust crates (782)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -576,7 +576,6 @@ the modified file under MPL-2.0.
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
 | rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
 | rustls-native-certs | 0.8.4 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls-native-certs |
-| rustls-pemfile | 2.2.0 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/pemfile |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | rustls-webpki | 0.103.15 | ISC | https://github.com/rustls/webpki |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |

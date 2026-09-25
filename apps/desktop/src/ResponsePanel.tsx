@@ -1,6 +1,6 @@
 // Response and diagnosis view. Remote content is rendered as inert text only
 // (no HTML rendering, no links, no scripts).
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ExecutionView } from "./api";
 import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation } from "./generated/contracts";
 import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
@@ -25,6 +25,10 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
   const findings = view?.record.findings ?? [];
   const hasProblems = findings.some((f) => f.severity !== "info");
   const [tab, setTab] = useState<Tab>("diagnosis");
+  // Each new result opens on its diagnosis (or body/messages when quiet),
+  // never on a tab left over from a previous request.
+  const recordId = view?.record.id;
+  useEffect(() => setTab("diagnosis"), [recordId]);
   const isStream = !!view?.record.stream;
   const quiet = !hasProblems && findings.length === 0 && !!view;
   const effectiveTab: Tab = tab === "diagnosis" && quiet ? (isStream ? "messages" : "body") : tab === "body" && isStream && !view?.record.response ? "messages" : tab;
@@ -444,7 +448,8 @@ function TestsView({ view }: { view: ExecutionView }) {
   );
 }
 
-function ProtocolBadge({ p }: { p: ProtocolStatus }) {
+function ProtocolBadge({ p }: { p?: ProtocolStatus | null }) {
+  if (!p) return null;
   switch (p.protocol) {
     case "grpc":
       return (

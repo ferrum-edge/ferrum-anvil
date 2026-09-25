@@ -68,17 +68,18 @@ fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFai
 /// Convert a PEM client identity for DTLS. Only ECDSA P-256/P-384 keys are
 /// usable with dimpl's RustCrypto provider; anything else fails locally.
 pub fn identity_from_pem(cert_chain_pem: &str, key_pem: &str) -> Result<DtlsIdentity, TransportFailure> {
+    use rustls_pki_types::pem::PemObject;
     let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_chain_pem.as_bytes()).collect::<Result<_, _>>().map_err(|e| {
+        CertificateDer::pem_slice_iter(cert_chain_pem.as_bytes()).collect::<Result<_, _>>().map_err(|e| {
             local(FailureKind::ClientIdentityInvalid, format!("certificate PEM could not be parsed: {e}"), "tls.client_identity")
         })?;
     let Some(leaf) = certs.first() else {
         return Err(local(FailureKind::ClientIdentityInvalid, "no CERTIFICATE blocks found in PEM", "tls.client_identity"));
     };
-    let key = match rustls_pemfile::private_key(&mut key_pem.as_bytes()) {
-        Ok(Some(PrivateKeyDer::Pkcs8(k))) => k.secret_pkcs8_der().to_vec(),
-        Ok(Some(PrivateKeyDer::Sec1(k))) => k.secret_sec1_der().to_vec(),
-        Ok(Some(_)) => {
+    let key = match PrivateKeyDer::from_pem_slice(key_pem.as_bytes()) {
+        Ok(PrivateKeyDer::Pkcs8(k)) => k.secret_pkcs8_der().to_vec(),
+        Ok(PrivateKeyDer::Sec1(k)) => k.secret_sec1_der().to_vec(),
+        Ok(_) => {
             return Err(local(
                 FailureKind::ClientIdentityInvalid,
                 "RSA client keys cannot be used for DTLS: the DTLS implementation (dimpl) supports ECDSA P-256/P-384 keys only",

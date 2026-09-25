@@ -258,10 +258,22 @@ pub fn summary_line(
         ProtocolStatus::Udp { datagrams_sent, datagrams_received, .. } => format!("UDP {datagrams_received}/{datagrams_sent} responses"),
         ProtocolStatus::None => "no response".into(),
     };
+    let transport = match t {
+        TransportState::Completed => "completed",
+        TransportState::Failed => "failed",
+        TransportState::Incomplete => "incomplete",
+        TransportState::Canceled => "canceled",
+        TransportState::Unknown => "unknown",
+    };
+    let application = match app {
+        ApplicationState::Success => "success",
+        ApplicationState::Failure => "failure",
+        ApplicationState::NotEvaluated => "not evaluated",
+    };
     let top = findings.iter().find(|f| f.severity >= anvil_domain::diagnostics::Severity::Warning).map(|f| f.title.clone());
     match top {
-        Some(t0) => format!("{status} — transport {t:?}, application {app:?}: {t0}"),
-        None => format!("{status} — transport {t:?}, application {app:?}"),
+        Some(t0) => format!("{status} — transport {transport}, application {application}: {t0}"),
+        None => format!("{status} — transport {transport}, application {application}"),
     }
 }
 

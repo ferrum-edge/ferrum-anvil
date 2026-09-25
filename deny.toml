@@ -39,7 +39,6 @@ unsound = "all"
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side channel, via jsonwebtoken's rust_crypto backend (anvil-auth RS256 signing). Anvil only signs caller-built JWTs locally; it performs no RSA decryption and exposes no network-observable private-key oracle. No patched rsa release exists. Exit: RustCrypto/RSA#626 fixed, or jsonwebtoken switched to a constant-time backend." },
     { id = "RUSTSEC-2024-0429", reason = "glib 0.18 VariantStrIter unsoundness, via Tauri's Linux GTK stack (gtk-rs 0.18 is pinned by tauri/wry/tao/muda/webkit2gtk 2.0). Neither Anvil nor those crates (nor rfd) call VariantStrIter. Exit: Tauri moves to gtk-rs >= 0.20." },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is archived (unmaintained; no vulnerability) and is a thin wrapper over rustls-pki-types' PEM parser. Used directly by anvil-transport and anvil-fixtures. Exit: migrate to rustls_pki_types::pem::PemObject." },
 ]
 
 [licenses]
