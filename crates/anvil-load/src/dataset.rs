@@ -31,6 +31,9 @@ pub struct Dataset {
     /// (the variable is then not defined by the dataset for that row).
     pub rows: Vec<Vec<Option<String>>>,
     pub sha256: String,
+    /// Columns whose values are secrets: marked secret in each row's
+    /// variable layer, so the engine redacts their exact values everywhere.
+    pub sensitive_columns: Vec<String>,
     raw: Arc<[u8]>,
 }
 
@@ -48,7 +51,17 @@ impl Dataset {
             return Err(LoadError::Invalid("dataset has no rows".into()));
         }
         let sha256 = hex::encode(Sha256::digest(&raw));
-        Ok(Dataset { format, columns, rows, sha256, raw })
+        Ok(Dataset { format, columns, rows, sha256, sensitive_columns: vec![], raw })
+    }
+
+    /// Mark columns as sensitive. Unknown names are rejected so a typo never
+    /// silently leaves a secret column unredacted.
+    pub fn with_sensitive_columns(mut self, cols: Vec<String>) -> Result<Dataset, LoadError> {
+        if let Some(c) = cols.iter().find(|c| !self.columns.contains(c)) {
+            return Err(LoadError::Invalid(format!("dataset has no column named '{c}' (listed as sensitive)")));
+        }
+        self.sensitive_columns = cols;
+        Ok(self)
     }
 
     pub fn raw(&self) -> &[u8] {
@@ -66,7 +79,9 @@ impl Dataset {
             .columns
             .iter()
             .zip(&self.rows[i])
-            .filter_map(|(c, v)| v.as_ref().map(|v| VarEntry { name: c.clone(), value: v.clone(), secret: false }))
+            .filter_map(|(c, v)| {
+                v.as_ref().map(|v| VarEntry { name: c.clone(), value: v.clone(), secret: self.sensitive_columns.contains(c) })
+            })
             .collect();
         VarLayer { label: format!("dataset row {}", i + 1), vars }
     }
@@ -177,5 +192,18 @@ mod tests {
         assert!(Dataset::parse(DatasetFormat::Csv, b"a,b\n1\n".to_vec()).is_err());
         assert!(Dataset::parse(DatasetFormat::Json, br#"{"a":1}"#.to_vec()).is_err());
         assert!(Dataset::parse(DatasetFormat::Json, br#"[1,2]"#.to_vec()).is_err());
+    }
+
+    #[test]
+    fn sensitive_columns_are_secret_in_row_layers() {
+        let d = Dataset::parse(DatasetFormat::Csv, b"user,token\nann,t-111\nbob,t-222\n".to_vec())
+            .unwrap()
+            .with_sensitive_columns(vec!["token".into()])
+            .unwrap();
+        let l = d.row_layer(1);
+        assert!(l.vars.iter().any(|v| v.name == "token" && v.secret && v.value == "t-222"));
+        assert!(l.vars.iter().any(|v| v.name == "user" && !v.secret));
+        let bad = Dataset::parse(DatasetFormat::Csv, b"user\nann\n".to_vec()).unwrap().with_sensitive_columns(vec!["tokn".into()]);
+        assert!(bad.is_err(), "a misspelled sensitive column is refused");
     }
 }

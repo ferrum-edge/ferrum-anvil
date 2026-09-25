@@ -127,6 +127,8 @@ pub struct WireAttachment {
 pub struct WireDataset {
     pub format: DatasetFormat,
     pub data_b64: String,
+    #[serde(default)]
+    pub sensitive_columns: Vec<String>,
 }
 
 /// Complete, bounded description of one load run for the worker.
@@ -307,10 +309,11 @@ impl WorkerJob {
                 redaction_names: ctx.redaction_names.clone(),
             });
         }
-        let dataset = job
-            .dataset
-            .as_ref()
-            .map(|d| WireDataset { format: d.format, data_b64: base64::engine::general_purpose::STANDARD.encode(d.raw()) });
+        let dataset = job.dataset.as_ref().map(|d| WireDataset {
+            format: d.format,
+            data_b64: base64::engine::general_purpose::STANDARD.encode(d.raw()),
+            sensitive_columns: d.sensitive_columns.clone(),
+        });
         Ok(WorkerJob { protocol_version: WORKER_PROTOCOL_VERSION, plan: plan.clone(), options, requests, secrets, attachments, dataset })
     }
 
@@ -372,7 +375,7 @@ impl WorkerJob {
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(&d.data_b64)
                     .map_err(|e| LoadError::Invalid(format!("dataset: {e}")))?;
-                Some(Dataset::parse(d.format, bytes)?)
+                Some(Dataset::parse(d.format, bytes)?.with_sensitive_columns(d.sensitive_columns)?)
             }
             None => None,
         };

@@ -103,7 +103,9 @@ impl App {
             DomainDatasetFormat::Csv => DatasetFormat::Csv,
             DomainDatasetFormat::Json => DatasetFormat::Json,
         };
-        Dataset::parse(fmt, bytes).map_err(|e| AppError::Invalid(e.to_string()))
+        Dataset::parse(fmt, bytes)
+            .and_then(|ds| ds.with_sensitive_columns(d.sensitive_columns.clone()))
+            .map_err(|e| AppError::Invalid(e.to_string()))
     }
 
     pub fn load_preflight(&self, p: &LoadPlan) -> Result<LoadPreflight> {
