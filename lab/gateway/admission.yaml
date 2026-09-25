@@ -2,10 +2,11 @@
 #
 # Scenarios: UP-015 (gateway retained-buffer capacity), GW-002 (overload refusal).
 # Settings:  admission.conf (proxy HTTP 127.0.0.1:18580, admin 127.0.0.1:18590).
-# Fixtures:  127.0.0.1:19500-19599.
-#   19501  HTTP/1.1 sized responder: /big -> 262144-byte body, /small -> 32768-byte body
-#          (both with Content-Length, application/octet-stream)
-#   19502  HTTP/1.1 staller: reads the request, answers 200 after a configurable hold (default 5 s)
+# Fixtures:  127.0.0.1:19500-19599 (crates/anvil-lab/src/fixtures_policy.rs).
+#   19501  HTTP/1.1 sized responder: /bytes/{n} -> n-byte body with Content-Length
+#          (262144 = over budget, 32768 = fits), /status/{code}?body=... for lookalikes
+#   19502  HTTP/1.1 staller: /delay-headers/{ms} holds the response, then answers 200
+# Driven by: crates/anvil-lab/src/admission.rs (`cargo run -p anvil-lab -- run admission`).
 # Run UP-015 and GW-002 sequentially: with FERRUM_MAX_REQUESTS=1 any second concurrent
 # request is refused as overload.
 version: "1"
@@ -17,8 +18,8 @@ resource_counts:
   upstreams: 0
 
 proxies:
-  # UP-015: buffered response. /up/buffer-capacity/big -> 503 gateway_buffer_capacity;
-  # /up/buffer-capacity/small -> 200 (control).
+  # UP-015: buffered response. /up/buffer-capacity/bytes/262144 -> 503 gateway_buffer_capacity;
+  # /up/buffer-capacity/bytes/32768 -> 200 (recovery/control).
   - id: up015-buffer-capacity
     listen_path: /up/buffer-capacity
     backend_scheme: http
@@ -39,8 +40,9 @@ proxies:
     backend_read_timeout_ms: 20000
 
   # GW-002 probe: sent >= 300 ms after the occupant started; answered by the overload fence
-  # before routing (503 overload). Recovery request: /gw/probe/small once the occupant has
-  # finished (a lone 32 KiB eager-buffered response fits the 64 KiB budget).
+  # before routing (503 overload). Recovery request: /gw/probe/bytes/32768 once the occupant
+  # has finished. Lookalike: /gw/probe/status/503 with a byte-identical "Service overloaded"
+  # body authored by the backend.
   - id: gw002-probe
     listen_path: /gw/probe
     backend_scheme: http

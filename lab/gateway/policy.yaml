@@ -1,9 +1,12 @@
 # Ferrum Anvil failure lab - profile "policy" (ferrum-edge v0.9.5, file mode)
 #
-# Scenarios: GW-004 (adaptive_concurrency), GW-009 (response_transformer output ceiling),
-#            GW-010 (waf), GW-012/GW-013 (opa), GW-014 (ip_restriction), GW-015
-#            (openapi_validator), GW-019 (header mutation / forged metadata), GW-020 (AI policy +
-#            provider errors).
+# Scenarios: GW-001 half-open recovery (circuit_breaker), GW-004 (adaptive_concurrency),
+#            GW-009 (response_transformer output ceiling + response_size_limiting lookalike),
+#            GW-010 (waf + bot_detection), GW-012/GW-013 (opa), GW-014 (ip_restriction), GW-015
+#            (openapi_validator), GW-019 (header mutation / forged metadata / reject-path
+#            decoration), GW-020 (AI policy, budget, content guard + provider errors), and the
+#            plan §15.4 rate-limit extension (rate_limiting).
+# Driven by: crates/anvil-lab/src/policy.rs (`cargo run -p anvil-lab -- run policy`).
 # Settings:  policy.conf (proxy HTTP 127.0.0.1:18280, admin 127.0.0.1:18290).
 # Fixtures:  127.0.0.1:19200-19299 (see docs/audit/gateway-lab-config.md).
 # All plugins below reject unknown config keys (reject_unknown_keys / *_CONFIG_KEYS consts);
@@ -11,12 +14,40 @@
 version: "1"
 
 resource_counts:
-  proxies: 16
+  proxies: 24
   consumers: 0
-  plugin_configs: 17
+  plugin_configs: 25
   upstreams: 0
 
 proxies:
+  # Positive control and backend-lookalike route: plain pass-through to the echo fixture
+  # (the fixture's /status/{code}?body=... produces application-authored lookalike responses).
+  - id: ok
+    listen_path: /ok
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # GW-001 (half-open recovery, beyond core's open-state check): fixture 19210 answers
+  # /status/{code}; two consecutive 500s open the breaker for 2 s, then one half-open probe
+  # decides (success_threshold 1).
+  - id: gw001-breaker-halfopen
+    listen_path: /gw/breaker
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19210
+    strip_listen_path: true
+    pool_enable_http2: false
+    circuit_breaker:
+      failure_threshold: 2
+      success_threshold: 1
+      timeout_seconds: 2
+      failure_status_codes: [500, 502, 503, 504]
+      half_open_max_requests: 1
+      trip_on_connection_errors: true
+
   # GW-004: at most ONE in-flight request to the slow fixture (holds each response ~3 s).
   # Second concurrent request -> 503 {"error":"Upstream concurrency limit reached"},
   # X-Gateway-Error: concurrency_limit (src/plugins/adaptive_concurrency.rs:24-29,107-134).
@@ -57,6 +88,18 @@ proxies:
       - plugin_config_id: gw009b-limit
       - plugin_config_id: gw009b-transform
 
+  # GW-009 lookalike: the plain response_size_limiting ceiling produces the same body shape
+  # {"error":"Response body too large","limit":128} but X-Gateway-Error: backend_error.
+  - id: gw009-response-size
+    listen_path: /gw/response-size
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw009c-limit
+
   # GW-010: WAF with only lab test rules (header name x-lab-waf-test, body marker).
   - id: gw010-waf
     listen_path: /gw/waf
@@ -67,6 +110,29 @@ proxies:
     pool_enable_http2: false
     plugins:
       - plugin_config_id: gw010-waf
+
+  # GW-010 (bot detection): only the lab User-Agent marker is blocked. The default 403 body
+  # {"error":"Forbidden"} is byte-identical to the WAF reject.
+  - id: gw010-bot
+    listen_path: /gw/bot
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw010-bot
+
+  # Plan §15.4 rate-limit extension: 2 requests per 2 s per client IP, headers exposed.
+  - id: rl-rate-limit
+    listen_path: /gw/rate-limit
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: rl-rate-limit
 
   # GW-012: OPA mock answers {"result": true} for anvil/lab/allow ...
   - id: gw012-opa-allow
@@ -126,12 +192,14 @@ proxies:
       - plugin_config_id: gw014-ip
 
   # GW-015: POST /gw/openapi/items must carry {"name": string, "qty": integer >= 1}.
-  # strip_listen_path is false so the validator's path_regex sees the client path.
+  # strip_listen_path is false so the validator's path_regex sees the client path;
+  # backend_path /echo makes the echo fixture answer valid requests (recovery = 200).
   - id: gw015-openapi
     listen_path: /gw/openapi
     backend_scheme: http
     backend_host: 127.0.0.1
     backend_port: 19201
+    backend_path: /echo
     strip_listen_path: false
     pool_enable_http2: false
     plugins:
@@ -170,6 +238,34 @@ proxies:
     strip_listen_path: true
     pool_enable_http2: false
 
+  # GW-019d: a gateway REJECTION (ip_restriction deny) decorated by a response hook with an
+  # X-Gateway-Error value outside the 7-token vocabulary (reject header maps are not
+  # restored authoritatively on 0.9.5 - catalog headers[X-Gateway-Error].spoofing_notes).
+  - id: gw019-reject-decorated
+    listen_path: /gw/reject-decorated
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw019-reject-ip
+      - plugin_config_id: gw019-reject-decorate
+
+  # GW-019e: the same decorated rejection, but the hook writes a KNOWN token (`overload`)
+  # onto a 403. Ferrum's core never writes a token on a 4xx; Anvil must not report it as a
+  # gateway overload.
+  - id: gw019-reject-known-token
+    listen_path: /gw/reject-known-token
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw019-reject-known-ip
+      - plugin_config_id: gw019-reject-known-decorate
+
   # GW-020a: model/max_tokens policy -> 400 "... not in the allowed models list"
   # (tests/functional/functional_ai_plugins_test.rs:1232-1318).
   - id: gw020-ai-guard
@@ -202,6 +298,17 @@ proxies:
     backend_port: 19204
     strip_listen_path: true
     pool_enable_http2: false
+
+  # GW-020d: AI response content guard rejects a completion containing the lab phrase.
+  - id: gw020-ai-content
+    listen_path: /gw/ai/content
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19204
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw020-ai-content
 
 plugin_configs:
   - id: lab-access-log
@@ -260,6 +367,37 @@ plugin_configs:
           target: body
           key: padding
           value: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+  - id: gw009c-limit
+    plugin_name: response_size_limiting
+    scope: proxy
+    proxy_id: gw009-response-size
+    enabled: true
+    config:
+      max_bytes: 128
+
+  - id: gw010-bot
+    plugin_name: bot_detection
+    scope: proxy
+    proxy_id: gw010-bot
+    enabled: true
+    config:
+      blocked_patterns:
+        - anvil-lab-bot
+      allow_missing_user_agent: true
+
+  - id: rl-rate-limit
+    plugin_name: rate_limiting
+    scope: proxy
+    proxy_id: rl-rate-limit
+    enabled: true
+    config:
+      limit_by: ip
+      expose_headers: true
+      limits:
+        - scope: default
+          window_seconds: 2
+          max_requests: 2
 
   - id: gw010-waf
     plugin_name: waf
@@ -412,8 +550,62 @@ plugin_configs:
     enabled: true
     config:
       token_limit: 50
-      window_seconds: 60
+      window_seconds: 3
       limit_by: ip
       provider: openai
       count_mode: total_tokens
       expose_headers: true
+
+  - id: gw019-reject-ip
+    plugin_name: ip_restriction
+    scope: proxy
+    proxy_id: gw019-reject-decorated
+    enabled: true
+    config:
+      mode: allow_first
+      deny:
+        - 127.0.0.1
+
+  - id: gw019-reject-decorate
+    plugin_name: response_transformer
+    scope: proxy
+    proxy_id: gw019-reject-decorated
+    enabled: true
+    config:
+      rules:
+        - operation: add
+          target: header
+          key: X-Gateway-Error
+          value: lab-future-token
+
+  - id: gw020-ai-content
+    plugin_name: ai_response_guard
+    scope: proxy
+    proxy_id: gw020-ai-content
+    enabled: true
+    config:
+      action: reject
+      blocked_phrases:
+        - ANVIL-LAB-FORBIDDEN-PHRASE
+
+  - id: gw019-reject-known-ip
+    plugin_name: ip_restriction
+    scope: proxy
+    proxy_id: gw019-reject-known-token
+    enabled: true
+    config:
+      mode: allow_first
+      deny:
+        - 127.0.0.1
+
+  - id: gw019-reject-known-decorate
+    plugin_name: response_transformer
+    scope: proxy
+    proxy_id: gw019-reject-known-token
+    enabled: true
+    config:
+      rules:
+        - operation: add
+          target: header
+          key: X-Gateway-Error
+          value: overload

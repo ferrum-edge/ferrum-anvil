@@ -8,10 +8,14 @@
 //! ```
 //! Results: `results/lab/<timestamp>-<profile>/{summary.json, <ID>.json}`.
 
+mod admission;
 mod core;
+mod drain;
 mod fixtures;
+mod fixtures_policy;
 mod gateway;
 mod harness;
+mod policy;
 mod profiles;
 mod scenario;
 

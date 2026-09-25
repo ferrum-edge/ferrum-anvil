@@ -104,7 +104,13 @@ PLUGIN_KEYS = {
                            block_system_prompts system_prompt_aliases required_metadata_fields
                            fail_on_uninspectable_body],                               # ai_request_guard.rs:94-110 (prefix)
   'ai_rate_limiter' => %w[token_limit window_seconds count_mode limit_by expose_headers provider
-                          on_unmetered_response redis_failure_policy] + REDIS          # ai_rate_limiter.rs:351-370
+                          on_unmetered_response redis_failure_policy] + REDIS,         # ai_rate_limiter.rs:351-370
+  # Added for the policy profile; accepted by `ferrum-edge validate` v0.9.5 (live-checked).
+  'bot_detection' => %w[blocked_patterns allow_list allow_missing_user_agent custom_response_code],
+  'rate_limiting' => %w[limit_by expose_headers limits redis_failure_policy] + REDIS,
+  'ai_response_guard' => %w[action pii_patterns custom_pii_patterns blocked_phrases blocked_patterns
+                            scan_fields redaction_placeholder max_scan_bytes require_json
+                            required_fields max_completion_length grpc]
 }.freeze
 NESTED = {
   %w[response_transformer rules] => %w[operation target key value new_key],           # response_transformer.rs:156

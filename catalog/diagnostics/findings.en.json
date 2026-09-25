@@ -1517,7 +1517,7 @@
       "alternatives": [],
       "does_not_prove": [
         "That this request failed.",
-        "That the gateway (not a backend) set the header — backends can pass this header through on Ferrum Edge 0.9.5."
+        "That the gateway (not a backend or a response-header plugin) set the header — both can add it to responses on Ferrum Edge 0.9.5."
       ],
       "remediation": [
         {
@@ -1561,6 +1561,27 @@
         }
       ],
       "confirm_with": []
+    },
+    "ferrum.marker.inconsistent": {
+      "title": "Gateway diagnostic value contradicts the response status",
+      "explanation": "The response carries X-Gateway-Error: {token} on HTTP {status}. Ferrum Edge ({compat}) writes its diagnostic values only on 5xx responses (and gRPC trailers), so this value did not come from the gateway's error classification. Anvil does not use it to explain this response.",
+      "alternatives": [
+        "A response-header plugin on this route added the value to a rejection.",
+        "An intermediary or the backend added the header."
+      ],
+      "does_not_prove": [
+        "That the gateway applied the '{token}' outcome to this request.",
+        "Which component produced the {status} response."
+      ],
+      "remediation": [
+        {
+          "text": "Check the route's response-header transformation rules; X-Gateway-Error should only be written by the gateway itself.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "Gateway logs for this request."
+      ]
     },
     "ferrum.token.connection_failure": {
       "title": "Gateway could not prepare a connection to the backend",
@@ -1610,15 +1631,17 @@
     },
     "ferrum.token.backend_error": {
       "title": "Gateway classified this as a backend error",
-      "explanation": "Ferrum Edge marked this response with {token} (status {status}). On 0.9.5 this value is attached to 5xx responses the backend returned itself, to failures the gateway observed talking to the backend, and to some gateway-only refusals (response-buffer capacity, HTTP/1.1 in-flight limits, egress-policy denials).",
+      "explanation": "Ferrum Edge marked this response with {token} (status {status}). On 0.9.5 this value is attached to 5xx responses the backend returned itself, to failures the gateway observed talking to the backend, and to some gateway-only refusals (response-buffer capacity, HTTP/1.1 in-flight limits, egress-policy denials, response-phase policy rejections). It does not say which of these happened.",
       "alternatives": [
         "The application returned this 5xx itself.",
         "The backend reset or closed the connection.",
         "A gateway-local limit was reached (retained-buffer capacity or in-flight request limit).",
+        "A gateway response policy (for example an AI response guard or a response validator) rejected a response the backend had delivered.",
         "Gateway egress policy refused the backend address."
       ],
       "does_not_prove": [
         "That the application itself produced this error.",
+        "That the gateway's connection to the backend failed.",
         "That the backend is unhealthy."
       ],
       "remediation": [
@@ -1703,6 +1726,7 @@
       "title": "No gateway diagnostic marker on this error",
       "explanation": "This {status} came through the trusted gateway profile without an X-Gateway-Error value. The absence of a marker does not identify where the error originated.",
       "alternatives": [
+        "A gateway plugin rejected the request (for example an authorization dependency failing closed); on Ferrum Edge 0.9.5 plugin rejections carry no X-Gateway-Error value.",
         "The application returned the error and the gateway did not classify it.",
         "An intermediary removed the header.",
         "The error came from a component outside the gateway."
@@ -1731,11 +1755,14 @@
       ]
     },
     "ferrum.outcome_ambiguous": {
-      "title": "Several gateway causes produce this exact response",
+      "title": "Several known causes produce this exact response",
       "explanation": "This response matches {count} different Ferrum Edge outcomes that look identical from the client. The common, safe conclusion: {common}",
-      "alternatives": [],
+      "alternatives": [
+        "A backend returned a response with identical status and body."
+      ],
       "does_not_prove": [
-        "Which of the listed causes applied."
+        "Which of the listed causes applied.",
+        "That the gateway (rather than a backend returning identical bytes) authored this response."
       ],
       "remediation": [
         {
