@@ -540,6 +540,12 @@ impl HttpTransport {
                 apply_tls_tap(&mut f, &conn.stats);
                 if !write_done {
                     f.phase = Phase::RequestWrite;
+                } else if f.kind == FailureKind::RequestWriteFailed {
+                    // The request was fully written: a broken pipe now means
+                    // the peer closed the connection before responding (e.g.
+                    // an HTTP/2 GOAWAY covering this stream, then close).
+                    f.kind = FailureKind::ClosedBeforeResponse;
+                    f.message = format!("{} (after the request was fully written)", f.message);
                 }
                 let dispatch = if unsent || f.kind == FailureKind::H2RefusedStream {
                     DispatchState::NotDispatched

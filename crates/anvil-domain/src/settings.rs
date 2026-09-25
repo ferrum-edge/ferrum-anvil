@@ -83,7 +83,9 @@ impl Default for RedirectPolicy {
 pub struct RetryPolicy {
     pub max_retries: u8,
     pub backoff_ms: u64,
-    /// Retry only failures proven `not_dispatched`, or idempotent methods.
+    /// Retained for compatibility. Retries are always limited to failures
+    /// proven `not_dispatched` or idempotent methods; a possibly processed
+    /// non-idempotent request is never replayed, whatever this says.
     pub only_safe: bool,
 }
 

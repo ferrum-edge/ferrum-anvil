@@ -566,14 +566,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             && f.kind != FailureKind::Canceled
             && !f.kind.is_local_preparation()
         {
+            // Never replay a possibly processed non-idempotent request:
+            // retry only when the request provably never left, or when the
+            // method is idempotent (repeating it is safe by definition).
             let idempotent = anvil_diagnostics::facts::is_idempotent(&current.method);
-            let safe = match out.observation.dispatch {
-                DispatchState::NotDispatched => true,
-                _ => {
-                    idempotent && !prep.settings.retries.only_safe
-                        || (idempotent && out.observation.dispatch != DispatchState::MayHaveBeenSent)
-                }
-            };
+            let safe = out.observation.dispatch == DispatchState::NotDispatched || idempotent;
             if safe {
                 retries += 1;
                 let backoff = prep.settings.retries.backoff_ms.saturating_mul(1u64 << (retries - 1).min(6));

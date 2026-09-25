@@ -8,6 +8,7 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+h2 = "0.4"
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true

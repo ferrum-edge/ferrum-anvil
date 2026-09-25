@@ -359,7 +359,7 @@
           "minimum": 0
         },
         "only_safe": {
-          "description": "Retry only failures proven `not_dispatched`, or idempotent methods.",
+          "description": "Retained for compatibility. Retries are always limited to failures\nproven `not_dispatched` or idempotent methods; a possibly processed\nnon-idempotent request is never replayed, whatever this says.",
           "type": "boolean"
         }
       },

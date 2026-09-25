@@ -6,6 +6,7 @@
 
 pub mod dns;
 pub mod dtls;
+pub mod goaway;
 pub mod grpc;
 pub mod h3server;
 pub mod http;

@@ -1273,7 +1273,9 @@ export interface RetryPolicy {
   max_retries: number;
   backoff_ms: number;
   /**
-   * Retry only failures proven `not_dispatched`, or idempotent methods.
+   * Retained for compatibility. Retries are always limited to failures
+   * proven `not_dispatched` or idempotent methods; a possibly processed
+   * non-idempotent request is never replayed, whatever this says.
    */
   only_safe: boolean;
 }

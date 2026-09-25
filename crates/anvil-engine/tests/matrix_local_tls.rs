@@ -311,3 +311,37 @@ async fn trust_008_whole_request_stays_uncertain_when_an_earlier_attempt_may_hav
     assert!(has(&o, "request.earlier_attempt_may_have_processed"), "{:?}", codes(&o));
     assert_ne!(o.record.outcome.dispatch, DispatchState::NotDispatched, "final not-dispatched does not prove no side effects");
 }
+
+/// PROTO-004: a server GOAWAY while a stream is in flight. The POST is not
+/// replayed (its processing stays uncertain); an idempotent GET with retries
+/// enabled is retried on a new connection; nothing is blamed on TLS.
+#[tokio::test]
+async fn proto_004_goaway_keeps_per_stream_retry_ambiguity() {
+    init();
+    use anvil_domain::settings::{HttpVersionPolicy, RetryPolicy};
+    let retries = SettingsOverrides {
+        http_version: Some(HttpVersionPolicy::H2c),
+        retries: Some(RetryPolicy { max_retries: 1, backoff_ms: 10, only_safe: true }),
+        ..Default::default()
+    };
+
+    let f = anvil_fixtures::goaway::serve("127.0.0.1:0").await.unwrap();
+    let mut spec = RequestSpec::http("POST", &f.url("/orders"));
+    spec.body = Body::Json { text: r#"{"qty": 1}"#.into() };
+    let post = run(&with_settings(ctx(spec), retries.clone())).await;
+    assert_eq!(post.record.attempts.len(), 1, "a possibly processed POST is never replayed automatically");
+    // A GOAWAY whose last-stream-id covers this stream lets it finish; the
+    // server then closing surfaces as "closed before response".
+    assert!(matches!(last_failure(&post), FailureKind::H2GoAway | FailureKind::ClosedBeforeResponse), "{:?}", codes(&post));
+    assert_ne!(post.record.outcome.dispatch, DispatchState::NotDispatched);
+    assert!(has(&post, "exchange.h2_goaway") || has(&post, "exchange.closed_before_response"), "{:?}", codes(&post));
+    assert!(has(&post, "request.processing_uncertain"), "processing stays uncertain: {:?}", codes(&post));
+    assert!(!codes(&post).iter().any(|c| c.starts_with("client.tls.")), "GOAWAY is not a TLS failure");
+    assert_eq!(f.streams_seen.load(std::sync::atomic::Ordering::SeqCst), 1, "the server saw the POST exactly once");
+
+    let g = anvil_fixtures::goaway::serve("127.0.0.1:0").await.unwrap();
+    let get = run(&with_settings(ctx(RequestSpec::http("GET", &g.url("/status"))), retries)).await;
+    assert_eq!(get.record.attempts.len(), 2, "idempotent GET retried on a new connection");
+    assert_eq!(get.record.response.as_ref().map(|r| r.status), Some(200));
+    assert_eq!(get.record.outcome.transport, TransportState::Completed);
+}
