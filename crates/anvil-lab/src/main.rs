@@ -10,10 +10,12 @@
 
 mod core;
 mod fixtures;
+mod fixtures_tls;
 mod gateway;
 mod harness;
 mod profiles;
 mod scenario;
+mod tls;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
