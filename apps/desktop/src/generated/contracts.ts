@@ -326,6 +326,7 @@ export type FailureKind =
       | "canceled"
       | "internal"
     )
+  | "oauth_interaction_required"
   | "tls_alert_after_handshake";
 /**
  * Wire protocol family of a saved request. SOAP and GraphQL are HTTP body
@@ -837,6 +838,121 @@ export type WsMessage =
       kind: "close";
     };
 /**
+ * Bounded, throttled live events of a collection run. The final
+ * [`RunReport`] is authoritative; events may be coalesced under load
+ * (failure events are preferred, `run_started` / `run_finished` are never
+ * dropped).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunEvent".
+ */
+export type RunEvent =
+  | {
+      run_id: Id;
+      name: string;
+      iterations: number;
+      steps: number;
+      event: "run_started";
+    }
+  | {
+      run_id: Id;
+      iteration: number;
+      dataset_row?: number | null;
+      event: "iteration_started";
+    }
+  | {
+      run_id: Id;
+      iteration: number;
+      step: number;
+      request_id: Id;
+      name: string;
+      event: "step_started";
+    }
+  | {
+      run_id: Id;
+      iteration: number;
+      step: number;
+      status: RunStepStatus;
+      execution_id?: Id | null;
+      http_status?: number | null;
+      duration_ms?: number | null;
+      progress: RunProgress;
+      event: "step_finished";
+    }
+  | {
+      run_id: Id;
+      iteration: number;
+      status: RunIterationStatus;
+      progress: RunProgress;
+      event: "iteration_finished";
+    }
+  | {
+      run_id: Id;
+      completion: RunnerCompletion;
+      progress: RunProgress;
+      /**
+       * Events dropped by throttling.
+       */
+      dropped_events: number;
+      event: "run_finished";
+    };
+/**
+ * Status of one step in one iteration.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunStepStatus".
+ */
+export type RunStepStatus = "passed" | "failed" | "error" | "skipped" | "canceled";
+/**
+ * Status of one iteration.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunIterationStatus".
+ */
+export type RunIterationStatus = "passed" | "failed" | "incomplete";
+/**
+ * How the run ended.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunnerCompletion".
+ */
+export type RunnerCompletion = "completed" | "canceled" | "aborted";
+/**
+ * What was run.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunSource".
+ */
+export type RunSource =
+  | {
+      scenario_id: Id;
+      name: string;
+      /**
+       * The scenario was not trusted (e.g. imported) and ran only because
+       * the user explicitly allowed it for this run.
+       */
+      untrusted_override?: boolean;
+      kind: "scenario";
+    }
+  | {
+      /**
+       * `None` = the workspace root.
+       */
+      folder_id?: Id | null;
+      /**
+       * Display path (`Orders/Refunds`, or `/` for the root).
+       */
+      path: string;
+      kind: "folder";
+    };
+/**
+ * One of the three independent outcome dimensions of a step.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "OutcomeDimension".
+ */
+export type OutcomeDimension = "transport" | "application" | "assertions";
+/**
  * Commands for an interactive session (WebSocket / TCP / UDP / bidi gRPC).
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1065,6 +1181,8 @@ export interface AnvilContracts {
   RequestDefinition?: RequestDefinition;
   RequestRevision?: RequestRevision;
   RequestSpec?: RequestSpec;
+  RunEvent?: RunEvent;
+  RunReport?: RunReport;
   Scenario?: Scenario;
   SessionCommand?: SessionCommand;
   TlsProfile?: TlsProfile;
@@ -2881,6 +2999,297 @@ export interface RequestRevision {
    */
   spec_sha256: string;
   spec: RequestSpec;
+}
+/**
+ * Live progress snapshot carried by run events.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunProgress".
+ */
+export interface RunProgress {
+  /**
+   * Steps finished so far (executed, errored, skipped or canceled).
+   */
+  steps_done: number;
+  /**
+   * Planned steps (iterations × steps).
+   */
+  steps_total: number;
+  steps_failed: number;
+  iterations_done: number;
+  iterations_total: number;
+}
+/**
+ * Saved, self-describing collection-run report. Viewable offline; exported
+ * as JSON, JUnit XML and a standalone HTML summary.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunReport".
+ */
+export interface RunReport {
+  run_id: Id;
+  /**
+   * [`RUN_REPORT_VERSION`].
+   */
+  report_version: number;
+  /**
+   * Persisted object schema version ([`crate::SCHEMA_VERSION`]).
+   */
+  schema_version: number;
+  /**
+   * Runner build identity (runner crate version + transport adapter version).
+   */
+  runner_version: string;
+  workspace_id: Id;
+  /**
+   * Display name of the run (scenario name or folder path).
+   */
+  name: string;
+  source: RunSource;
+  environment_id?: Id | null;
+  environment_name?: string | null;
+  dataset?: RunDatasetSummary | null;
+  fail_on: FailOn;
+  stop_on_failure: boolean;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  completion: RunnerCompletion;
+  /**
+   * True unless every planned iteration ran (cancel / abort).
+   */
+  partial: boolean;
+  /**
+   * Redacted reason when the run was aborted.
+   */
+  abort_reason?: string | null;
+  totals: RunTotals;
+  iterations: RunIteration[];
+  /**
+   * Redacted notes (bounds applied, history recording problems, possibly
+   * processed canceled requests, dataset remarks, ...).
+   */
+  notes?: string[];
+}
+/**
+ * Dataset identity recorded with the run (never its values).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunDatasetSummary".
+ */
+export interface RunDatasetSummary {
+  name: string;
+  format: DatasetFormat;
+  /**
+   * SHA-256 of the exact dataset bytes.
+   */
+  sha256: string;
+  rows: number;
+  columns: string[];
+  /**
+   * Columns whose values were treated as secrets.
+   */
+  sensitive_columns: string[];
+}
+/**
+ * Which outcome dimensions make a step count as *failed* (for the step
+ * status, `stop_on_failure`, totals and exit codes).
+ *
+ * The default counts all three: a step fails when its transport did not
+ * complete, its application status is a failure (HTTP 4xx/5xx, gRPC
+ * non-OK, SOAP fault, GraphQL errors) or any enabled assertion failed. A
+ * step the runner could not even prepare (`error`) always counts as failed.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "FailOn".
+ */
+export interface FailOn {
+  transport?: boolean;
+  application?: boolean;
+  assertions?: boolean;
+}
+/**
+ * Counts over the whole run. The step ledger balances:
+ * * `steps_executed = steps_passed + steps_failed + steps_canceled_in_flight`;
+ * * every planned step of a started iteration is exactly one of executed,
+ *   `steps_errored`, `steps_skipped` or `steps_canceled` (not started).
+ *
+ * The per-dimension counters (`transport_failures`, `application_failures`,
+ * `assertion_failures`) count executed steps whose dimension failed,
+ * regardless of [`FailOn`]; they are independent and may overlap.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunTotals".
+ */
+export interface RunTotals {
+  iterations_planned: number;
+  iterations_started: number;
+  iterations_passed: number;
+  iterations_failed: number;
+  iterations_incomplete: number;
+  /**
+   * Engine executions (one `ExecutionRecord` each).
+   */
+  steps_executed: number;
+  steps_passed: number;
+  steps_failed: number;
+  steps_errored: number;
+  steps_skipped: number;
+  /**
+   * Steps not started because the run was canceled or aborted.
+   */
+  steps_canceled: number;
+  /**
+   * Executed steps that were canceled mid-flight.
+   */
+  steps_canceled_in_flight: number;
+  /**
+   * Executed steps whose transport did not complete.
+   */
+  transport_failures: number;
+  /**
+   * Executed steps whose application status was a failure.
+   */
+  application_failures: number;
+  /**
+   * Executed steps with at least one failed assertion.
+   */
+  assertion_failures: number;
+  /**
+   * Individual assertion results.
+   */
+  assertions_passed: number;
+  assertions_failed: number;
+  /**
+   * Sum of step wall-clock durations.
+   */
+  step_time_ms: number;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunIteration".
+ */
+export interface RunIteration {
+  /**
+   * 0-based iteration number (the `anvil.iteration` variable).
+   */
+  index: number;
+  /**
+   * 1-based dataset row used by this iteration.
+   */
+  dataset_row?: number | null;
+  started_at: string;
+  duration_ms: number;
+  status: RunIterationStatus;
+  /**
+   * Set when `stop_on_failure` ended the iteration early: the index of the
+   * step that failed.
+   */
+  stopped_at_step?: number | null;
+  steps: RunStep[];
+  /**
+   * Passing/skipped step summaries dropped by the report-size bound (the
+   * totals still count them; failed steps are kept preferentially).
+   */
+  steps_omitted?: number;
+}
+/**
+ * Bounded summary of one step execution. Never contains a response body.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunStep".
+ */
+export interface RunStep {
+  /**
+   * Position in the scenario / folder order (0-based).
+   */
+  index: number;
+  request_id: Id;
+  /**
+   * Exact request revision executed (when the request has been saved).
+   */
+  revision_id?: Id | null;
+  name: string;
+  protocol?: Protocol | null;
+  method?: string;
+  /**
+   * Redacted URL as prepared (or the template when the step never ran).
+   */
+  url?: string;
+  status: RunStepStatus;
+  /**
+   * Dimensions that failed, whether or not [`FailOn`] counts them.
+   */
+  failed_dimensions?: OutcomeDimension[];
+  /**
+   * Id of the step's `ExecutionRecord` (history), when it was executed.
+   */
+  execution_id?: Id | null;
+  transport?: TransportState | null;
+  application?: ApplicationState | null;
+  assertions?: AssertionState | null;
+  /**
+   * Whether the request may have been processed by the peer.
+   */
+  dispatch?: DispatchState | null;
+  /**
+   * HTTP status (or handshake status) when a response head arrived.
+   */
+  http_status?: number | null;
+  /**
+   * gRPC terminal status when applicable.
+   */
+  grpc_status?: number | null;
+  /**
+   * Redacted one-line summary.
+   */
+  summary?: string;
+  /**
+   * Redacted reason for `error` / `skipped` / `canceled`, or the typed
+   * transport failure message.
+   */
+  message?: string | null;
+  /**
+   * Wall-clock time of the step (preparation, auth, exchange, diagnosis).
+   */
+  duration_ms?: number | null;
+  /**
+   * Sum of the network attempt durations (what latency assertions see is
+   * the final attempt only).
+   */
+  exchange_ms?: number | null;
+  /**
+   * Think time waited before the step.
+   */
+  delay_ms?: number;
+  /**
+   * Assertion results (redacted, bounded).
+   */
+  assertion_results?: AssertionResult[];
+  /**
+   * Assertion results dropped by the per-step bound.
+   */
+  assertion_results_omitted?: number;
+  /**
+   * Highest-severity findings first (bounded).
+   */
+  findings?: RunFindingSummary[];
+  /**
+   * Names of variables this step extracted (values are never reported).
+   */
+  extracted?: string[];
+}
+/**
+ * A diagnostic finding reduced to what a run report needs.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RunFindingSummary".
+ */
+export interface RunFindingSummary {
+  code: string;
+  title: string;
+  confidence: Confidence;
+  severity: Severity;
 }
 /**
  * Ordered chain of saved requests executed by the collection runner.
