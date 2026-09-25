@@ -2,7 +2,7 @@
 // app settings. All persistence happens in Rust.
 import { useEffect, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { api, type ExportPreview, type ImportReport, type SpecImported, type SystemInfo } from "./api";
+import { api, type ExportPreview, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
 import type { AppSettings, ClientIdentity, Environment, IntegrationProfile, ProxyProfile, TlsProfile, Variable, Workspace } from "./generated/contracts";
 import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
@@ -829,6 +829,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
         <input className="field mono" value={s.redaction_names.join(", ")} onChange={(e) => setS({ ...s, redaction_names: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
       </label>
       <ChangePassphrase />
+      <Providers />
       <button
         className="btn danger small"
         style={{ alignSelf: "start" }}
@@ -892,5 +893,42 @@ function ChangePassphrase() {
       </div>
       {msg && <div className="hint">{msg}</div>}
     </fieldset>
+  );
+}
+
+function Providers() {
+  const [list, setList] = useState<ProviderInfo[] | null>(null);
+  useEffect(() => {
+    api.loginProviders().then(setList).catch(() => setList([]));
+  }, []);
+  if (!list) return null;
+  return (
+    <details>
+      <summary className="muted">Sign-in providers (optional, identity only)</summary>
+      <p className="hint">
+        A linked provider identity can be required before unlocking, but it never encrypts or unlocks your data by itself — the passphrase, recovery key or OS keychain does.
+      </p>
+      <table className="grid">
+        <tbody>
+          {list.map((p) => (
+            <tr key={p.id}>
+              <td>{p.display_name}</td>
+              <td>
+                {p.availability.status === "available" ? (
+                  <span className="badge ok">available{p.test_only ? " (test build)" : ""}</span>
+                ) : (
+                  <span className="badge warn" title={p.availability.reason}>
+                    unavailable
+                  </span>
+                )}
+              </td>
+              <td className="faint" style={{ fontSize: 11 }}>
+                {p.availability.status === "unavailable" ? p.owner_actions.join("; ") : p.native_flow}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
   );
 }

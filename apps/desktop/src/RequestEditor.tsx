@@ -135,7 +135,14 @@ export function RequestEditor(props: {
         )}
         {activeSub === "body" && <BodyEditor spec={spec} set={set} />}
         {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} />}
-        {activeSub === "auth" && <AuthEditor value={(spec.auth as AuthConfig) ?? { type: "inherit" }} onChange={(auth) => set({ auth })} workspaceId={props.workspaceId} />}
+        {activeSub === "auth" && (
+          <AuthEditor
+            value={(spec.auth as AuthConfig) ?? { type: "inherit" }}
+            onChange={(auth) => set({ auth })}
+            workspaceId={props.workspaceId}
+            signInInput={{ workspace_id: props.workspaceId, request_id: req.id, spec, environment_id: props.environmentId, send_anyway: false }}
+          />
+        )}
         {activeSub === "tests" && <TestsEditor spec={spec} set={set} />}
         {activeSub === "settings" && <SettingsEditor spec={spec} set={set} profiles={props.profiles} />}
         {activeSub === "effective" && <EffectivePanel req={req} workspaceId={props.workspaceId} environmentId={props.environmentId} />}

@@ -1,7 +1,7 @@
 // API auth editor (identity presented to the API — not the app login).
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, type JwtInspection } from "./api";
+import { api, onOAuthFlow, type FlowEvent, type JwtInspection, type SendInput, type TokenSummary } from "./api";
 import type { AuthConfig, DpopConfig, HmacConfig, JwtAlgorithm, OAuth2Config, SensitiveValue, WsseConfig } from "./generated/contracts";
 import { Modal, SecretField } from "./ui";
 
@@ -47,7 +47,15 @@ function defaults(t: AuthConfig["type"]): AuthConfig {
   }
 }
 
-export function AuthEditor(props: { value: AuthConfig; onChange: (a: AuthConfig) => void; workspaceId: string | null; allowInherit?: boolean; nested?: boolean }) {
+export function AuthEditor(props: {
+  value: AuthConfig;
+  onChange: (a: AuthConfig) => void;
+  workspaceId: string | null;
+  allowInherit?: boolean;
+  nested?: boolean;
+  /** The request this auth belongs to (enables interactive OAuth sign-in). */
+  signInInput?: SendInput | null;
+}) {
   const a = props.value;
   const types = TYPES.filter((t) => (props.allowInherit === false ? t.id !== "inherit" : true) && (!props.nested || (t.id !== "multi" && t.id !== "inherit")));
   return (
@@ -67,7 +75,17 @@ export function AuthEditor(props: { value: AuthConfig; onChange: (a: AuthConfig)
   );
 }
 
-function Fields({ value: a, onChange, workspaceId }: { value: AuthConfig; onChange: (a: AuthConfig) => void; workspaceId: string | null }) {
+function Fields({
+  value: a,
+  onChange,
+  workspaceId,
+  signInInput,
+}: {
+  value: AuthConfig;
+  onChange: (a: AuthConfig) => void;
+  workspaceId: string | null;
+  signInInput?: SendInput | null;
+}) {
   switch (a.type) {
     case "inherit":
       return <p className="hint">Uses the nearest folder's auth, then the workspace's. The Effective tab shows which one applies.</p>;
@@ -118,7 +136,12 @@ function Fields({ value: a, onChange, workspaceId }: { value: AuthConfig; onChan
     case "jwt":
       return <JwtFields a={a} onChange={onChange} workspaceId={workspaceId} />;
     case "oauth2":
-      return <OAuthFields c={a.config} onChange={(config) => onChange({ ...a, config })} workspaceId={workspaceId} />;
+      return (
+        <>
+          <OAuthFields c={a.config} onChange={(config) => onChange({ ...a, config })} workspaceId={workspaceId} />
+          {a.config.grant !== "client_credentials" && <OAuthSignIn input={signInInput ?? null} />}
+        </>
+      );
     case "hmac":
       return <HmacFields c={a.config} onChange={(config) => onChange({ ...a, config })} workspaceId={workspaceId} />;
     case "dpop":
@@ -132,7 +155,13 @@ function Fields({ value: a, onChange, workspaceId }: { value: AuthConfig; onChan
           {a.profiles.map((p, i) => (
             <fieldset key={i} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
               <legend className="faint">Profile {i + 1}</legend>
-              <AuthEditor value={p} nested workspaceId={workspaceId} onChange={(np) => onChange({ ...a, profiles: a.profiles.map((x, j) => (j === i ? np : x)) })} />
+              <AuthEditor
+                value={p}
+                nested
+                workspaceId={workspaceId}
+                signInInput={signInInput}
+                onChange={(np) => onChange({ ...a, profiles: a.profiles.map((x, j) => (j === i ? np : x)) })}
+              />
               <button className="btn small danger" style={{ marginTop: 8 }} onClick={() => onChange({ ...a, profiles: a.profiles.filter((_, j) => j !== i) })}>
                 Remove
               </button>
@@ -225,6 +254,112 @@ function OAuthFields({ c, onChange, workspaceId }: { c: OAuth2Config; onChange: 
       </p>
     </>
   );
+}
+
+/** Interactive sign-in for authorization-code (PKCE) profiles: system
+ * browser + loopback redirect. The token never reaches the webview. */
+function OAuthSignIn({ input }: { input: SendInput | null }) {
+  const [status, setStatus] = useState<TokenSummary | null>(null);
+  const [events, setEvents] = useState<FlowEvent[]>([]);
+  const [attempt, setAttempt] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const refresh = () => {
+    if (input) void api.oauthTokenStatus(input).then(setStatus).catch(() => setStatus(null));
+  };
+  useEffect(refresh, [JSON.stringify(input)]);
+  useEffect(() => {
+    const un = onOAuthFlow((e) => {
+      if (e.attempt === attempt) setEvents((x) => [...x, e.event]);
+    });
+    return () => void un.then((f) => f());
+  }, [attempt]);
+  if (!input) return <p className="hint">Save the request to sign in from here.</p>;
+  const last = events[events.length - 1];
+  const manual = events.find((e) => e.type === "browser_open_failed") as Extract<FlowEvent, { type: "browser_open_failed" }> | undefined;
+  return (
+    <fieldset className="box">
+      <legend>Sign-in</legend>
+      <div className="row">
+        {status ? (
+          <span className="badge ok">
+            signed in · {status.token_type}
+            {status.expires_at ? ` · expires ${new Date(status.expires_at).toLocaleTimeString()}` : ""}
+            {status.refresh_token_available ? " · refreshable" : ""}
+          </span>
+        ) : (
+          <span className="badge">not signed in</span>
+        )}
+        <span className="spacer" />
+        {attempt ? (
+          <button className="btn small" onClick={() => void api.oauthCancel(attempt)}>
+            Cancel sign-in
+          </button>
+        ) : (
+          <button
+            className="btn small primary"
+            onClick={async () => {
+              const id = crypto.randomUUID();
+              setErr(null);
+              setEvents([]);
+              setAttempt(id);
+              try {
+                await api.oauthSignIn(input, id);
+                refresh();
+              } catch (e) {
+                setErr(String((e as Error).message));
+              } finally {
+                setAttempt(null);
+              }
+            }}
+          >
+            Sign in with browser…
+          </button>
+        )}
+        {status && !attempt && (
+          <button
+            className="btn small"
+            onClick={async () => {
+              await api.oauthSignOut(input);
+              refresh();
+            }}
+          >
+            Sign out
+          </button>
+        )}
+      </div>
+      {attempt && last && <div className="hint">{describeFlow(last)}</div>}
+      {manual && (
+        <div className="warn-box">
+          The browser could not be opened automatically. Open this URL yourself: <span className="mono">{manual.authorization_url}</span>
+        </div>
+      )}
+      {err && <div className="bad-box">{err}</div>}
+      <p className="hint">Tokens stay in memory in the backend and are cleared on lock; sending uses the cached token and its refresh token.</p>
+    </fieldset>
+  );
+}
+
+function describeFlow(e: FlowEvent): string {
+  switch (e.type) {
+    case "listener_ready":
+      return "Waiting for the browser…";
+    case "browser_opened":
+      return "Complete the sign-in in your browser.";
+    case "callback_ignored":
+      return `Ignored an unrelated callback (${e.reason}).`;
+    case "callback_accepted":
+      return "Callback received.";
+    case "exchanging_code":
+      return "Exchanging the authorization code…";
+    case "verifying_identity":
+      return "Verifying…";
+    case "completed":
+      return "Signed in.";
+    case "failed":
+      return `Sign-in failed: ${e.message}`;
+    default:
+      return "";
+  }
 }
 
 function HmacFields({ c, onChange, workspaceId }: { c: HmacConfig; onChange: (c: HmacConfig) => void; workspaceId: string | null }) {

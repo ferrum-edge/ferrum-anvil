@@ -11,6 +11,9 @@ import type {
   LoadPlan,
   LoadReport,
   RunCompletion,
+  RunEvent,
+  RunReport,
+  Scenario,
   SessionCommand,
   StreamMessage,
   TimeBucket,
@@ -33,6 +36,9 @@ import type {
 } from "./generated/contracts";
 
 export type {
+  RunEvent,
+  RunReport,
+  Scenario,
   SessionCommand,
   StreamMessage,
   AppSettings,
@@ -301,6 +307,48 @@ export interface SpecImported {
 }
 export type SpecTarget = { kind: "new_workspace" } | { kind: "workspace"; workspace_id: string };
 
+// ------------------------------------------------------------- runner/oauth
+export type RunTarget = { kind: "scenario"; scenario_id: string } | { kind: "folder"; workspace_id: string; folder_id: string | null };
+export interface RunInput {
+  environment_id?: string | null;
+  iterations?: number | null;
+  stop_on_failure?: boolean | null;
+  allow_untrusted?: boolean;
+}
+export interface TokenSummary {
+  token_type: string;
+  expires_at?: string | null;
+  refresh_token_available: boolean;
+}
+export interface ApiAuthorization {
+  profile_scope: string;
+  grant: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  client_id: string;
+  scope: string;
+  token: TokenSummary;
+}
+export type FlowEvent =
+  | { type: "listener_ready"; redirect_uri: string }
+  | { type: "browser_opened"; authorization_url: string }
+  | { type: "browser_open_failed"; authorization_url: string; error: string }
+  | { type: "callback_ignored"; reason: string }
+  | { type: "callback_accepted" }
+  | { type: "exchanging_code" }
+  | { type: "verifying_identity" }
+  | { type: "completed" }
+  | { type: "failed"; kind: string; message: string };
+export interface ProviderInfo {
+  id: string;
+  display_name: string;
+  availability: { status: "available" } | { status: "unavailable"; reason: string };
+  native_flow: string;
+  owner_actions: string[];
+  needs_broker: boolean;
+  test_only: boolean;
+}
+
 export const api = {
   status: () => call<Status>("app_status"),
   systemInfo: () => call<SystemInfo>("system_info"),
@@ -379,6 +427,24 @@ export const api = {
   addDataset: (workspaceId: string, path: string, name: string, sensitiveColumns: string[]) =>
     call<Dataset>("dataset_add", { workspaceId, path, name, sensitiveColumns }),
 
+  scenarios: (workspaceId: string) => call<Scenario[]>("scenarios_list", { workspaceId }),
+  createScenario: (workspaceId: string, name: string, requestIds: string[]) => call<Scenario>("scenario_create", { workspaceId, name, requestIds }),
+  saveScenario: (scenario: Scenario) => call<Scenario>("scenario_save", { scenario }),
+  trustScenario: (scenarioId: string) => call<Scenario>("scenario_trust", { scenarioId }),
+  deleteScenario: (scenarioId: string) => call<void>("scenario_delete", { scenarioId }),
+  runStart: (target: RunTarget, input: RunInput) => call<string>("run_start", { target, input }),
+  runCancel: (runId: string) => call<boolean>("run_cancel", { runId }),
+  runReports: (workspaceId: string) => call<RunReport[]>("run_reports", { workspaceId }),
+  runReport: (runId: string) => call<RunReport>("run_report", { runId }),
+  deleteRunReport: (runId: string) => call<void>("run_report_delete", { runId }),
+  exportRunReport: (runId: string, format: "json" | "junit" | "html", path: string) => call<number>("run_report_export", { runId, format, path }),
+
+  oauthSignIn: (input: SendInput, attempt: string) => call<ApiAuthorization>("oauth_sign_in", { input, attempt }),
+  oauthCancel: (attempt: string) => call<boolean>("oauth_cancel", { attempt }),
+  oauthTokenStatus: (input: SendInput) => call<TokenSummary | null>("oauth_token_status", { input }),
+  oauthSignOut: (input: SendInput) => call<boolean>("oauth_sign_out", { input }),
+  loginProviders: () => call<ProviderInfo[]>("login_providers"),
+
   sessionOpen: (input: SendInput, executionId: string) => call<string>("session_open", { input, executionId }),
   sessionSend: (executionId: string, command: SessionCommand) => call<void>("session_send", { executionId, command }),
   sessionCancel: (executionId: string) => call<void>("session_cancel", { executionId }),
@@ -403,6 +469,18 @@ export function onLoadFinished(cb: (e: { run_key: string; run_id?: string | null
 
 export function onSessionEnded(cb: (e: { execution_id: string; view?: ExecutionView | null; error?: string | null }) => void): Promise<UnlistenFn> {
   return listen<{ execution_id: string; view?: ExecutionView | null; error?: string | null }>("session-ended", (ev) => cb(ev.payload));
+}
+
+export function onRunEvent(cb: (e: RunEvent) => void): Promise<UnlistenFn> {
+  return listen<RunEvent>("run-event", (ev) => cb(ev.payload));
+}
+
+export function onRunFinished(cb: (e: { run_id: string; error?: string | null }) => void): Promise<UnlistenFn> {
+  return listen<{ run_id: string; error?: string | null }>("run-finished", (ev) => cb(ev.payload));
+}
+
+export function onOAuthFlow(cb: (e: { attempt: string; event: FlowEvent }) => void): Promise<UnlistenFn> {
+  return listen<{ attempt: string; event: FlowEvent }>("oauth-flow", (ev) => cb(ev.payload));
 }
 
 export function onLocked(cb: (reason: string) => void): Promise<UnlistenFn> {

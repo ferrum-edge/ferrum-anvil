@@ -1,6 +1,8 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_identity;
 mod cmd_load;
+mod cmd_runner;
 mod cmd_sessions;
 mod cmd_specs;
 mod commands;
@@ -144,6 +146,22 @@ pub fn run() {
             cmd_load::load_compare,
             cmd_load::datasets_list,
             cmd_load::dataset_add,
+            cmd_runner::scenarios_list,
+            cmd_runner::scenario_create,
+            cmd_runner::scenario_save,
+            cmd_runner::scenario_trust,
+            cmd_runner::scenario_delete,
+            cmd_runner::run_start,
+            cmd_runner::run_cancel,
+            cmd_runner::run_reports,
+            cmd_runner::run_report,
+            cmd_runner::run_report_delete,
+            cmd_runner::run_report_export,
+            cmd_identity::oauth_sign_in,
+            cmd_identity::oauth_cancel,
+            cmd_identity::oauth_token_status,
+            cmd_identity::oauth_sign_out,
+            cmd_identity::login_providers,
             cmd_sessions::session_open,
             cmd_sessions::session_send,
             cmd_sessions::session_cancel,

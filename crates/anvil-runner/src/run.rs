@@ -468,8 +468,9 @@ impl Run {
                 message: clip(&sec.text(&a.message), MAX_TEXT),
             })
             .collect();
-        let mut findings: Vec<&anvil_domain::diagnostics::DiagnosticFinding> = rec.findings.iter().collect();
-        findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.confidence.cmp(&a.confidence)));
+        // Keep the diagnostics engine's order (severity, then hop-specific
+        // before generic status explanations) so every surface agrees.
+        let findings: Vec<&anvil_domain::diagnostics::DiagnosticFinding> = rec.findings.iter().collect();
         let message = rec.attempts.last().and_then(|a| a.failure.as_ref()).map(|f| clip(&sec.text(&f.message), MAX_TEXT)).or_else(|| {
             // Extraction misses are warnings on an otherwise complete step;
             // surface them because the next step will depend on them.

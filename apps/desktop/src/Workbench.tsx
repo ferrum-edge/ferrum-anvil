@@ -9,6 +9,7 @@ import { EnvironmentsDialog, ExportDialog, ImportDialog, ProfilesDialog, Setting
 import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
 import { ResponsePanel } from "./ResponsePanel";
 import { LoadView } from "./LoadView";
+import { RunnerView } from "./RunnerView";
 import { Modal, Toast, uid } from "./ui";
 
 interface OpenTab {
@@ -34,7 +35,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [side, setSide] = useState<"tree" | "history">("tree");
-  const [view, setView] = useState<"requests" | "load">("requests");
+  const [view, setView] = useState<"requests" | "runner" | "load">("requests");
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [profiles, setProfiles] = useState<Profiles>({ tls: [], proxy: [], integrations: [] });
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -320,6 +321,15 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             Requests
           </button>
           <button
+            aria-pressed={view === "runner"}
+            onClick={() => {
+              setView("runner");
+              void loadTree();
+            }}
+          >
+            Runner
+          </button>
+          <button
             aria-pressed={view === "load"}
             onClick={() => {
               setView("load");
@@ -348,6 +358,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       </header>
 
       {view === "load" && ws && <LoadView workspaceId={ws.id} tree={tree} environments={envs} notify={notify} />}
+      {view === "runner" && ws && (
+        <RunnerView workspaceId={ws.id} tree={tree} environments={envs} activeEnvironment={ws.active_environment_id ?? null} notify={notify} />
+      )}
       <div className="main" style={{ ["--sidebar-w" as string]: `${sideW}px`, display: view === "requests" ? undefined : "none" }}>
         <aside className="sidebar" aria-label="Collections and history">
           <div className="side-tabs" role="tablist">
