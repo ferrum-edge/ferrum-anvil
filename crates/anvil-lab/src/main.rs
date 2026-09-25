@@ -16,6 +16,7 @@ mod drain;
 mod fixtures;
 mod fixtures_admission_mesh;
 mod fixtures_auth;
+mod fixtures_auth_soap;
 mod fixtures_cpdp;
 mod fixtures_policy;
 mod fixtures_streams;

@@ -126,7 +126,13 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     }
     let body_complete =
         response.as_ref().map(|r| matches!(r.body.completeness, BodyCompleteness::Complete | BodyCompleteness::NoBody)).unwrap_or(false);
-    let application = anvil_diagnostics::assess_application(ctx.spec.protocol, &protocol_status, &diagnosis.body, body_complete);
+    // A redirect into an interactive login (AUTH-017) never evaluated the API,
+    // even when the login page itself answered 200.
+    let application = if diagnosis.stopped_at_login {
+        ApplicationState::NotEvaluated
+    } else {
+        anvil_diagnostics::assess_application(ctx.spec.protocol, &protocol_status, &diagnosis.body, body_complete)
+    };
     let mut warnings = diagnosis.warnings.clone();
     if let Some(l) = &a.lint_bypassed {
         warnings.push(OutcomeWarning { code: WarningCode::LintBypassed, message: format!("Sent despite a lint error: {l}") });

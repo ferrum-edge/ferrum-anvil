@@ -12,7 +12,17 @@
 //! * `POST /introspect` — `token=<t>` form; known tokens answer their stored
 //!   claims (with `active: true`), unknown tokens `{"active": false}`
 //! * `POST /oauth/token` — `grant_type=client_credentials` (Basic or form
-//!   client authentication); issues an opaque token that `/introspect` knows
+//!   client authentication); issues an opaque token that `/introspect` knows.
+//!   Also `grant_type=authorization_code` (PKCE S256, single-use code bound
+//!   to client, redirect URI and nonce) returning an ID token minted by the
+//!   lab-supplied [`IdTokenMinter`]
+//! * `GET /.well-known/openid-configuration` — OIDC discovery for a relying
+//!   party (authorization, token and JWKS endpoints on this listener)
+//! * `GET /authorize` — the provider's login page (HTML, 200); it never
+//!   issues a code by itself
+//! * `POST /authorize/login` — the user submitting that page: the lab user's
+//!   credentials plus the original authorization parameters; on success a
+//!   302 back to `redirect_uri` with `code` and `state`
 
 use crate::log::{GroundTruth, GroundTruthLog};
 use base64::Engine;
@@ -43,6 +53,19 @@ pub enum IdpMode {
     Stall,
 }
 
+/// Signs an ID token over the given claims (the lab owns the issuer key).
+pub type IdTokenMinter = Arc<dyn Fn(serde_json::Value) -> String + Send + Sync>;
+
+/// A pending authorization code (single use).
+#[derive(Clone, Debug)]
+pub struct OidcCode {
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub nonce: String,
+    pub code_challenge: String,
+    pub sub: String,
+}
+
 pub struct IdpState {
     pub jwks: Mutex<serde_json::Value>,
     /// token → introspection claims (without `active`).
@@ -55,6 +78,19 @@ pub struct IdpState {
     pub jwks_fetches: AtomicU64,
     pub introspections: AtomicU64,
     pub token_requests: AtomicU64,
+    /// `iss` of minted ID tokens.
+    pub oidc_issuer: Mutex<String>,
+    /// Lab users of the login page: username → password.
+    pub oidc_users: Mutex<HashMap<String, String>>,
+    pub oidc_codes: Mutex<HashMap<String, OidcCode>>,
+    pub id_token_minter: Mutex<Option<IdTokenMinter>>,
+    pub discovery_fetches: AtomicU64,
+    /// Login pages served (`GET /authorize`).
+    pub login_pages: AtomicU64,
+    /// Login form submissions (`POST /authorize/login`), successful or not.
+    pub login_submissions: AtomicU64,
+    /// Authorization-code exchanges answered with tokens.
+    pub code_exchanges: AtomicU64,
 }
 
 pub struct IdpFixture {
@@ -95,6 +131,30 @@ impl IdpFixture {
     pub fn token_requests(&self) -> u64 {
         self.state.token_requests.load(Ordering::SeqCst)
     }
+
+    /// Enable the OIDC provider role: ID tokens carry `issuer` and are signed
+    /// by `minter`; `users` may log in on the login page.
+    pub fn enable_oidc(&self, issuer: &str, users: &[(&str, &str)], minter: IdTokenMinter) {
+        *self.state.oidc_issuer.lock() = issuer.to_string();
+        *self.state.oidc_users.lock() = users.iter().map(|(u, p)| (u.to_string(), p.to_string())).collect();
+        *self.state.id_token_minter.lock() = Some(minter);
+    }
+
+    pub fn login_pages(&self) -> u64 {
+        self.state.login_pages.load(Ordering::SeqCst)
+    }
+
+    pub fn login_submissions(&self) -> u64 {
+        self.state.login_submissions.load(Ordering::SeqCst)
+    }
+
+    pub fn code_exchanges(&self) -> u64 {
+        self.state.code_exchanges.load(Ordering::SeqCst)
+    }
+
+    pub fn discovery_fetches(&self) -> u64 {
+        self.state.discovery_fetches.load(Ordering::SeqCst)
+    }
 }
 
 type Body = http_body_util::combinators::BoxBody<Bytes, Infallible>;
@@ -124,6 +184,14 @@ pub async fn serve(bind: &str, jwks: serde_json::Value, client_id: &str, client_
         jwks_fetches: AtomicU64::new(0),
         introspections: AtomicU64::new(0),
         token_requests: AtomicU64::new(0),
+        oidc_issuer: Mutex::new(String::new()),
+        oidc_users: Mutex::new(HashMap::new()),
+        oidc_codes: Mutex::new(HashMap::new()),
+        id_token_minter: Mutex::new(None),
+        discovery_fetches: AtomicU64::new(0),
+        login_pages: AtomicU64::new(0),
+        login_submissions: AtomicU64::new(0),
+        code_exchanges: AtomicU64::new(0),
     });
     let cancel = CancellationToken::new();
     let (l2, s2, c2) = (log.clone(), state.clone(), cancel.clone());
@@ -138,7 +206,7 @@ pub async fn serve(bind: &str, jwks: serde_json::Value, client_id: &str, client_
             tokio::spawn(async move {
                 let svc = service_fn(move |req| {
                     let (log, state) = (log.clone(), state.clone());
-                    async move { Ok::<_, Infallible>(route(req, log, state).await) }
+                    async move { Ok::<_, Infallible>(route(req, log, state, addr).await) }
                 });
                 let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
                 let conn = builder.serve_connection(TokioIo::new(stream), svc);
@@ -152,9 +220,11 @@ pub async fn serve(bind: &str, jwks: serde_json::Value, client_id: &str, client_
     Ok(IdpFixture { addr, log, state, cancel })
 }
 
-async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<IdpState>) -> Response<Body> {
+async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<IdpState>, addr: SocketAddr) -> Response<Body> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    let query: HashMap<String, String> =
+        req.uri().query().map(|q| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect()).unwrap_or_default();
     // Header names only: authorization values are credentials.
     let headers: Vec<(String, String)> = req
         .headers()
@@ -182,6 +252,9 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<IdpState>
         "/.well-known/jwks.json" => Some(&state.jwks_fetches),
         "/introspect" => Some(&state.introspections),
         "/oauth/token" => Some(&state.token_requests),
+        "/.well-known/openid-configuration" => Some(&state.discovery_fetches),
+        "/authorize" => Some(&state.login_pages),
+        "/authorize/login" => Some(&state.login_submissions),
         _ => None,
     };
     if let Some(c) = counter {
@@ -215,6 +288,91 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<IdpState>
                 None => json(200, serde_json::json!({"active": false})),
             }
         }
+        (Method::GET, "/.well-known/openid-configuration") => {
+            let base = format!("http://{addr}");
+            json(
+                200,
+                serde_json::json!({
+                    "issuer": state.oidc_issuer.lock().clone(),
+                    "authorization_endpoint": format!("{base}/authorize"),
+                    "token_endpoint": format!("{base}/oauth/token"),
+                    "jwks_uri": format!("{base}/.well-known/jwks.json"),
+                    "response_types_supported": ["code"],
+                    "subject_types_supported": ["public"],
+                    "id_token_signing_alg_values_supported": ["ES256"],
+                    "code_challenge_methods_supported": ["S256"],
+                }),
+            )
+        }
+        (Method::GET, "/authorize") => login_page(&query, None),
+        (Method::POST, "/authorize/login") => {
+            let user = form.get("username").cloned().unwrap_or_default();
+            let ok = !user.is_empty() && state.oidc_users.lock().get(&user).map(|p| Some(p) == form.get("password")).unwrap_or(false);
+            let (Some(redirect_uri), Some(st), Some(challenge)) = (form.get("redirect_uri"), form.get("state"), form.get("code_challenge"))
+            else {
+                return json(400, serde_json::json!({"error": "invalid_request"}));
+            };
+            if !ok {
+                login_page(&form, Some("The user name or password is incorrect."))
+            } else {
+                let mut b = [0u8; 16];
+                rand_fill(&mut b);
+                let code = format!("idp-code-{}", hex_lower(&b));
+                state.oidc_codes.lock().insert(
+                    code.clone(),
+                    OidcCode {
+                        client_id: form.get("client_id").cloned().unwrap_or_default(),
+                        redirect_uri: redirect_uri.clone(),
+                        nonce: form.get("nonce").cloned().unwrap_or_default(),
+                        code_challenge: challenge.clone(),
+                        sub: user,
+                    },
+                );
+                let sep = if redirect_uri.contains('?') { '&' } else { '?' };
+                let st: String = url::form_urlencoded::byte_serialize(st.as_bytes()).collect();
+                Response::builder()
+                    .status(302)
+                    .header("location", format!("{redirect_uri}{sep}code={code}&state={st}"))
+                    .header("cache-control", "no-store")
+                    .body(Full::new(Bytes::new()).boxed())
+                    .expect("response")
+            }
+        }
+        (Method::POST, "/oauth/token") if form.get("grant_type").map(String::as_str) == Some("authorization_code") => {
+            let code = form.get("code").cloned().unwrap_or_default();
+            let Some(pending) = state.oidc_codes.lock().remove(&code) else {
+                return json(400, serde_json::json!({"error": "invalid_grant"}));
+            };
+            let verifier = form.get("code_verifier").cloned().unwrap_or_default();
+            let challenge = {
+                use sha2::Digest;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()))
+            };
+            if challenge != pending.code_challenge
+                || form.get("redirect_uri") != Some(&pending.redirect_uri)
+                || form.get("client_id") != Some(&pending.client_id)
+            {
+                return json(400, serde_json::json!({"error": "invalid_grant"}));
+            }
+            let Some(mint) = state.id_token_minter.lock().clone() else {
+                return json(500, serde_json::json!({"error": "server_error", "error_description": "no ID token signer configured"}));
+            };
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let id_token = mint(serde_json::json!({
+                "iss": state.oidc_issuer.lock().clone(),
+                "sub": pending.sub,
+                "aud": pending.client_id,
+                "nonce": pending.nonce,
+                "exp": now + 300,
+            }));
+            let mut b = [0u8; 16];
+            rand_fill(&mut b);
+            state.code_exchanges.fetch_add(1, Ordering::SeqCst);
+            json(
+                200,
+                serde_json::json!({"access_token": format!("idp-oidc-at-{}", hex_lower(&b)), "id_token": id_token, "token_type": "Bearer", "expires_in": 300}),
+            )
+        }
         (Method::POST, "/oauth/token") => {
             let (cid, csec) = match basic.as_deref().and_then(|s| s.split_once(':')) {
                 Some((a, b)) => (a.to_string(), b.to_string()),
@@ -243,6 +401,29 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<IdpState>
     };
     log.push(GroundTruth::ResponseStarted { status: resp.status().as_u16() });
     resp
+}
+
+/// The provider's login page. The authorization parameters travel as hidden
+/// fields; values are HTML-escaped. Nothing here issues a code: only the
+/// user submitting the form with valid credentials does.
+fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Response<Body> {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let mut hidden = String::new();
+    for k in ["response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "code_challenge", "code_challenge_method"] {
+        if let Some(v) = params.get(k) {
+            hidden.push_str(&format!(r#"<input type="hidden" name="{k}" value="{}">"#, esc(v)));
+        }
+    }
+    let msg = error.map(|e| format!("<p class=error>{}</p>", esc(e))).unwrap_or_default();
+    let html = format!(
+        r#"<!doctype html><html><head><title>Anvil lab identity provider - sign in</title></head><body><h1>Sign in</h1>{msg}<form method="post" action="/authorize/login">{hidden}<label>User <input name="username"></label><label>Password <input name="password" type="password"></label><button>Sign in</button></form></body></html>"#
+    );
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(Full::new(Bytes::from(html)).boxed())
+        .expect("response")
 }
 
 fn rand_fill(b: &mut [u8]) {

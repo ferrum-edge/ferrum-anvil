@@ -105,6 +105,10 @@ pub struct Diagnosis {
     pub findings: Vec<DiagnosticFinding>,
     pub warnings: Vec<OutcomeWarning>,
     pub body: BodyFacts,
+    /// The exchange ended at an interactive login step (a redirect to an
+    /// OAuth 2.0 / OIDC authorization endpoint), not at the requested API:
+    /// whatever the final status, the application was not evaluated.
+    pub stopped_at_login: bool,
 }
 
 /// Run every rule over the input and render findings.
@@ -114,12 +118,13 @@ pub fn diagnose(input: &DiagnosticInput<'_>) -> Diagnosis {
     let mut warnings: Vec<OutcomeWarning> = Vec::new();
     let ctx = rules::Ctx { input, body: &body };
     rules::run_all(&ctx, &mut drafts, &mut warnings);
+    let stopped_at_login = rules::stopped_at_login(&ctx);
     // Cap confidence when the only provenance is an unauthenticated channel.
     let findings = drafts.into_iter().map(render::render).collect::<Vec<_>>();
     let mut findings = dedupe(findings);
     findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(specificity(b).cmp(&specificity(a))).then(b.confidence.cmp(&a.confidence)));
     warnings.dedup_by(|a, b| a.code == b.code);
-    Diagnosis { findings, warnings, body }
+    Diagnosis { findings, warnings, body, stopped_at_login }
 }
 
 /// Presentation order only (each finding keeps its own confidence): evidence

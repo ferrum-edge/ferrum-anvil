@@ -8,6 +8,7 @@
 //! never mints issuer tokens — scenarios hand them to it as bearer/DPoP
 //! access tokens, exactly as a user would paste one.
 
+use crate::fixtures_auth_soap::SoapSigning;
 use anvil_auth::dpop;
 use anvil_domain::auth::{JwtAlgorithm, JwtClaims};
 use anvil_fixtures::gateway_idp::{self as idp, IdpFixture};
@@ -41,6 +42,12 @@ pub struct LabSecrets {
     /// `FERRUM_BASIC_AUTH_HMAC_SECRET` for the gateway process.
     pub basic_hmac_secret: String,
     pub oauth_client_secret: String,
+    /// WS-Security UsernameToken password (inline in the soap_ws_security config).
+    pub soap_alice_password: String,
+    /// oidc_relying_party session sealing secret.
+    pub oidc_session_secret: String,
+    /// alice's password on the lab IdP's login page (the "browser" user).
+    pub oidc_alice_password: String,
 }
 
 impl LabSecrets {
@@ -54,6 +61,9 @@ impl LabSecrets {
             alice_ldap_password: format!("ldap-{}", random_hex(8)),
             basic_hmac_secret: random_hex(32),
             oauth_client_secret: random_hex(16),
+            soap_alice_password: format!("soap-{}", random_hex(8)),
+            oidc_session_secret: random_hex(32),
+            oidc_alice_password: format!("idp-{}", random_hex(8)),
         }
     }
 
@@ -72,6 +82,8 @@ impl LabSecrets {
             ("ALICE_JWT_SECRET", self.alice_jwt_secret.clone()),
             ("ALICE_HMAC_SECRET", self.alice_hmac_secret.clone()),
             ("BASIC_AUTH_ALICE_HASH", self.alice_basic_hash()),
+            ("SOAP_ALICE_PASSWORD", self.soap_alice_password.clone()),
+            ("OIDC_SESSION_SECRET", self.oidc_session_secret.clone()),
         ]
     }
 }
@@ -95,11 +107,17 @@ pub struct AuthFixtures {
     /// Anvil's DPoP proof key, and a second, unrelated one.
     pub dpop_key: String,
     pub other_dpop_key: String,
+    /// Directory of the per-run SOAP signer / SAML IdP certificates
+    /// (`{{LAB_SOAP}}`).
+    pub soap_dir: std::path::PathBuf,
+    /// The lab's XML signer and SAML identity provider.
+    pub soap: SoapSigning,
 }
 
 impl AuthFixtures {
-    pub async fn start() -> Result<Self> {
+    pub async fn start(soap_dir: std::path::PathBuf) -> Result<Self> {
         let secrets = LabSecrets::generate();
+        let soap = SoapSigning::setup(&soap_dir).map_err(|e| anyhow::anyhow!("SOAP lab signer setup: {e}"))?;
         let issuer_key = dpop::generate_key_pem()?;
         let rotated_key = dpop::generate_key_pem()?;
         let (x, y) = dpop::public_jwk(&issuer_key)?;
@@ -110,6 +128,24 @@ impl AuthFixtures {
         // Tokens issued to the client-credentials client introspect as alice.
         *idp.state.issued_claims.lock() = serde_json::json!({"username": "alice", "sub": "alice", "iss": ISSUER, "aud": AUDIENCE});
         let ldap = ldap::serve("127.0.0.1:19106", &[("alice", &secrets.alice_ldap_password)]).await?;
+        // OIDC provider role for the oidc_relying_party route (AUTH-017): the
+        // lab signs ID tokens with the published issuer key.
+        let minter_key = issuer_key.clone();
+        idp.enable_oidc(
+            ISSUER,
+            &[("alice", &secrets.oidc_alice_password)],
+            std::sync::Arc::new(move |claims: serde_json::Value| {
+                anvil_auth::jwt::sign(
+                    JwtAlgorithm::ES256,
+                    &minter_key,
+                    &JwtClaims::default(),
+                    &claims,
+                    Some(ISSUER_KID),
+                    chrono::Utc::now(),
+                )
+                .unwrap_or_default()
+            }),
+        );
         Ok(AuthFixtures {
             echo: http::serve("127.0.0.1:19101", None).await?,
             idp,
@@ -120,6 +156,8 @@ impl AuthFixtures {
             dpop_key: dpop::generate_key_pem()?,
             other_dpop_key: dpop::generate_key_pem()?,
             secrets,
+            soap_dir,
+            soap,
         })
     }
 
