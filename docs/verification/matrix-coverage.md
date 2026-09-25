@@ -5,14 +5,13 @@ A skip or block is never counted as a pass.
 
 | Status | Cases |
 |---|---|
-| ✅ live (real gateway) | 90 |
-| ✅ automated test | 74 |
+| ✅ live (real gateway) | 91 |
+| ✅ automated test | 76 |
 | ✅ executed check script | 1 |
 | ⏭ skipped (live) — see reason | 4 |
 | ⛔ blocked — see reason | 6 |
 | ➖ not applicable — see reason | 2 |
 | ◐ partial — see reason | 2 |
-| ⚠ not covered | 3 |
 | **Total** | **182** |
 
 ## Client preparation and local failures
@@ -73,11 +72,11 @@ A skip or block is never counted as a pass.
 | UP-012 | Backend mid-body reset | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-012; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
 | UP-013 | Backend short Content-Length body | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-013; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
 | UP-014 | Backend oversized response | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-014; `crates/anvil-lab/src/core.rs` |
-| UP-015 | Gateway retained-buffer exhaustion | ✅ live (real gateway) | lab `results/lab/20260925T112315Z-admission` — passed UP-015; `crates/anvil-lab/src/admission.rs` |
+| UP-015 | Gateway retained-buffer exhaustion | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission` — passed UP-015; `crates/anvil-lab/src/admission.rs` |
 | UP-016 | Backend pool cancellation | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed UP-016; `crates/anvil-lab/src/tls.rs` |
-| UP-017 | Backend ephemeral-port exhaustion | ⚠ not covered | — |
-| UP-018 | Backend connection ceiling | ⚠ not covered | — |
-| UP-019 | Trust withdrawn | ⚠ not covered | — |
+| UP-017 | Backend ephemeral-port exhaustion | ✅ automated test — Live reproduction blocked: Ferrum Edge 0.9.5 assigns port_exhaustion only to EADDRNOTAVAIL at connect (src/retry.rs) and the release binary has no lab dial-admission hook, while draining the lab host's real ephemeral ports would be unsafe. Covered instead by the public-signal contract test up_017_port_exhaustion_signal_is_coarse_and_hook_free (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the catalog's shared 502 connection_failure 'Backend unavailable' signal keeps the connection-failure family ambiguous, names port exhaustion only as an unknown-confidence candidate, never states port exhaustion or host resources at likely or above, and makes no TLS/DNS claim. It is neither a live nor a hook-based test. | `crates/anvil-diagnostics/tests/upstream_setup_contract.rs` |
+| UP-018 | Backend connection ceiling | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission` — passed UP-018 — skipped UP-018-H2; `crates/anvil-diagnostics/tests/upstream_setup_contract.rs`, `crates/anvil-lab/src/admission.rs` |
+| UP-019 | Trust withdrawn | ✅ automated test — Live reproduction blocked: upstream.trust_withdrawn is mesh-only in 0.9.5 (an accepted gateway trust publication withdraws an authority while an HBONE / sidecar-mTLS transport is established or reused); no mesh/HBONE trust-publication lab is built (the admission profile's mesh instance is an egress gateway to a plaintext external destination and never uses those transports). Covered instead by the public-signal contract test up_019_trust_withdrawn_signal_makes_no_certificate_claim (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the shared 502 connection_failure signal stays ambiguous, lists trust withdrawal only as an unknown-confidence candidate, and yields no confirmed or likely certificate/TLS claim and no blame on the caller's certificate. | `crates/anvil-diagnostics/tests/upstream_setup_contract.rs` |
 | UP-020 | Generic post-dispatch failure | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-020; `crates/anvil-lab/src/core.rs` |
 
 ## Gateway admission, policy and response ownership
@@ -85,10 +84,10 @@ A skip or block is never counted as a pass.
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
 | GW-001 | Open circuit breaker | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core`, `results/lab/20260925T112236Z-policy` — passed GW-001, GW-001-HALFOPEN; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/policy.rs` |
-| GW-002 | Overload refusal | ✅ live (real gateway) | lab `results/lab/20260925T112315Z-admission` — passed GW-002; `crates/anvil-lab/src/admission.rs` |
+| GW-002 | Overload refusal | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission` — passed GW-002; `crates/anvil-lab/src/admission.rs` |
 | GW-003 | Drain refusal | ✅ live (real gateway) | lab `results/lab/20260925T112324Z-drain` — passed GW-003; `crates/anvil-lab/src/drain.rs` |
 | GW-004 | Adaptive concurrency limit | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-004; `crates/anvil-lab/src/policy.rs` |
-| GW-005 | Stale DP fence | ✅ live (real gateway) | lab `results/lab/20260925T112315Z-admission`, `results/lab/20260925T112442Z-cpdp` — passed GW-005, GW-005-lookalike, GW-005-orphan, GW-005-partition — skipped GW-005; `crates/anvil-lab/src/cpdp.rs` |
+| GW-005 | Stale DP fence | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission`, `results/lab/20260925T112442Z-cpdp` — passed GW-005, GW-005-lookalike, GW-005-orphan, GW-005-partition — skipped GW-005; `crates/anvil-lab/src/cpdp.rs` |
 | GW-006 | No matched route | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-006; `crates/anvil-lab/src/core.rs` |
 | GW-007 | Method not allowed | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-007; `crates/anvil-lab/src/core.rs` |
 | GW-008 | Request size ceiling | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-008; `crates/anvil-lab/src/core.rs` |

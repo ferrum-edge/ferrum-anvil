@@ -2,9 +2,8 @@
  "source": "docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json",
  "total": 182,
  "totals": {
-  "verified_test": 74,
-  "verified_live": 90,
-  "not_covered": 3,
+  "verified_test": 76,
+  "verified_live": 91,
   "skipped_live": 4,
   "blocked": 6,
   "not_applicable": 2,
@@ -1958,18 +1957,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 120,
+     "line": 128,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 290,
+     "line": 419,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112315Z-admission"
+     "results/lab/20260925T115414Z-admission"
     ],
     "variants": {
      "admission:UP-015": {
@@ -2037,31 +2036,151 @@
    "id": "UP-017",
    "category": "Gateway-to-upstream failures",
    "title": "Backend ephemeral-port exhaustion",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 4,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 130,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 138,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 170,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 173,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
-   "note": null
+   "note": "Live reproduction blocked: Ferrum Edge 0.9.5 assigns port_exhaustion only to EADDRNOTAVAIL at connect (src/retry.rs) and the release binary has no lab dial-admission hook, while draining the lab host's real ephemeral ports would be unsafe. Covered instead by the public-signal contract test up_017_port_exhaustion_signal_is_coarse_and_hook_free (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the catalog's shared 502 connection_failure 'Backend unavailable' signal keeps the connection-failure family ambiguous, names port exhaustion only as an unknown-confidence candidate, never states port exhaustion or host resources at likely or above, and makes no TLS/DNS claim. It is neither a live nor a hook-based test."
   },
   {
    "id": "UP-018",
    "category": "Gateway-to-upstream failures",
    "title": "Backend connection ceiling",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
-   "lab": null,
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 10,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 12,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 206,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 212,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 221,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 227,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 326,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 421,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260925T115414Z-admission"
+    ],
+    "variants": {
+     "admission:UP-018": {
+      "profile": "admission",
+      "scenario": "UP-018",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "admission:UP-018-H2": {
+      "profile": "admission",
+      "scenario": "UP-018-H2",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "Not reachable with a single-destination lab on 0.9.5: the direct-H2 pool multiplexes, so a maxConnections=1 ceiling is never re-dialled - with SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s behind the first on the one connection (200, one backend connection), and a backend that GOAWAYs each connection made the pool reuse the draining connection (502 connection_failure, operator error_class connection_pool_error = pool cancellation, not the ceiling). The pooled-lane public signal (502 connection_failure \"Backend unavailable\") is covered by the contract test up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family (crates/anvil-diagnostics/tests/upstream_setup_contract.rs)."
+       }
+      }
+     }
+    }
+   },
    "note": null
   },
   {
    "id": "UP-019",
    "category": "Gateway-to-upstream failures",
    "title": "Trust withdrawn",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 7,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 180,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 187,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
-   "note": null
+   "note": "Live reproduction blocked: upstream.trust_withdrawn is mesh-only in 0.9.5 (an accepted gateway trust publication withdraws an authority while an HBONE / sidecar-mTLS transport is established or reused); no mesh/HBONE trust-publication lab is built (the admission profile's mesh instance is an egress gateway to a plaintext external destination and never uses those transports). Covered instead by the public-signal contract test up_019_trust_withdrawn_signal_makes_no_certificate_claim (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the shared 502 connection_failure signal stays ambiguous, lists trust withdrawal only as an unknown-confidence candidate, and yields no confirmed or likely certificate/TLS claim and no blame on the caller's certificate."
   },
   {
    "id": "UP-020",
@@ -2185,18 +2304,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 194,
+     "line": 202,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 291,
+     "line": 420,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112315Z-admission"
+     "results/lab/20260925T115414Z-admission"
     ],
     "variants": {
      "admission:GW-002": {
@@ -2335,7 +2454,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112315Z-admission",
+     "results/lab/20260925T115414Z-admission",
      "results/lab/20260925T112442Z-cpdp"
     ],
     "variants": {
