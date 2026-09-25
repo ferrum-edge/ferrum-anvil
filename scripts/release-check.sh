@@ -128,7 +128,8 @@ is_exe() { # ELF, Mach-O (thin/fat, both endians), PE
 
 # Unpack an artifact into $2 (a directory); print nothing on success.
 unpack() {
-  local a="$1" out="$2"
+  local a out="$2"
+  a="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" # absolute: some branches cd
   mkdir -p "$out"
   case "$a" in
     *.dmg)
@@ -145,9 +146,8 @@ unpack() {
       command -v rpm2cpio >/dev/null || { echo "rpm2cpio required for $a" >&2; return 1; }
       (cd "$out" && rpm2cpio "$a" | cpio -idm --quiet) ;;
     *.AppImage)
-      local abs; abs="$(cd "$(dirname "$a")" && pwd)/$(basename "$a")"
-      chmod +x "$abs"
-      (cd "$out" && "$abs" --appimage-extract >/dev/null) ;;
+      chmod +x "$a"
+      (cd "$out" && "$a" --appimage-extract >/dev/null) ;;
     *.msi)
       command -v powershell >/dev/null || command -v pwsh >/dev/null || { echo "Windows msiexec required for $a" >&2; return 1; }
       local ps; ps="$(command -v pwsh || command -v powershell)"
@@ -265,11 +265,14 @@ for a in ${artifacts[@]+"${artifacts[@]}"}; do
 
   probe_status="skipped"
   if [ "$probe" = 1 ]; then
-    # Probe the desktop app: the executable carrying the Tauri identifier.
+    # Probe the desktop app: the executable carrying both the app identifier
+    # and the Tauri runtime (the CLI also contains the identifier).
     target=""
     for f in "${files[@]}"; do
       case "$f" in *.dll|*.so|*.so.*|*.dylib) continue ;; esac
-      if LC_ALL=C grep -a -q -F "com.ferrumedge.anvil" "$f"; then target="$f"; break; fi
+      if LC_ALL=C grep -a -q -F "com.ferrumedge.anvil" "$f" && LC_ALL=C grep -a -q -F "__TAURI_INTERNALS__" "$f"; then
+        target="$f"; break
+      fi
     done
     if [ -z "$target" ]; then
       say "      probe: no desktop executable in this artifact (skipped)"
