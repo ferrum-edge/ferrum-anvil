@@ -100,6 +100,7 @@ cargo run -p anvil-lab -- up core         # keep the core lab up for manual test
 | CI and releases | `docs/ci.md`, `docs/release.md` |
 | Measured resource budgets | `docs/performance.md` |
 | Failure-matrix coverage | `docs/verification/matrix-coverage.md` |
+| Sample workspace and saved reports | `samples/` |
 
 ## License
 

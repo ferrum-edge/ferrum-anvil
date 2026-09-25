@@ -1,0 +1,160 @@
+{
+  "run_id": "01a0d958-e869-7231-8a5c-13b15b6bdb34",
+  "schema_version": 1,
+  "engine": "anvil-native",
+  "engine_version": "anvil-load/0.1.0+anvil-transport/0.1.0",
+  "plan": {
+    "id": "01a0d958-e812-7356-864f-792faf058bcd",
+    "workspace_id": "01a0d958-e566-76c3-8980-25571fda3089",
+    "name": "OK smoke",
+    "workload": {
+      "model": "iterations",
+      "iterations": 200,
+      "concurrency": 4
+    },
+    "chain": [
+      "01a0d958-e5b9-7418-8a92-a6b4550e41f2"
+    ],
+    "mix": [],
+    "connection_mode": "persistent",
+    "warmup_secs": 0,
+    "seed": 1,
+    "trusted": true,
+    "created_at": "2026-09-25T16:14:37.586034Z",
+    "updated_at": "2026-09-25T16:14:37.586045Z"
+  },
+  "request_revisions": [
+    "01a0d958-e5b9-7418-8a92-a6b513a25948"
+  ],
+  "started_at": "2026-09-25T16:14:37.674036Z",
+  "finished_at": "2026-09-25T16:14:37.694781Z",
+  "completion": "completed",
+  "partial": false,
+  "warmup_included_in_metrics": false,
+  "destination_summary": [
+    "http://127.0.0.1:18080"
+  ],
+  "counts": {
+    "scheduled": 200,
+    "started": 200,
+    "dropped": 0,
+    "completed": 200,
+    "transport_failures": 0,
+    "application_failures": 0,
+    "assertion_failures": 0,
+    "timeouts": 0,
+    "canceled": 0,
+    "in_flight_at_end": 0
+  },
+  "achieved_rate_per_sec": 10189.568256274977,
+  "latency_success": {
+    "count": 200,
+    "min_us": 107,
+    "max_us": 708,
+    "mean_us": 178,
+    "p50_us": 155,
+    "p90_us": 226,
+    "p95_us": 255,
+    "p99_us": 708
+  },
+  "latency_failure": {
+    "count": 0,
+    "min_us": 0,
+    "max_us": 0,
+    "mean_us": 0,
+    "p50_us": 0,
+    "p90_us": 0,
+    "p95_us": 0,
+    "p99_us": 0
+  },
+  "histogram_success_b64": "HISTFAAAAHZ4nC2KuxHCUBAD5T1x854TfgGB6YXmaIBxRE5LUAd0wJxtBaeTtNf7fJb00KrYfKjzmV+6fdfiPSA6xoHSxo48qLVspzHHzIR0Wm6MLNFKCwwEKhO2EMtbhO2oVLDD1UTtCyTkYAdc6HQmngMTe37mmH9ogAmv",
+  "status_distribution": [
+    [
+      200,
+      200
+    ]
+  ],
+  "failure_categories": [],
+  "timeline": [
+    {
+      "second": 0,
+      "started": 200,
+      "completed": 200,
+      "failures": 0,
+      "dropped": 0,
+      "p50_us": 155,
+      "p99_us": 711,
+      "in_flight": 4,
+      "warmup": false,
+      "p99_schedule_lag_us": 0
+    }
+  ],
+  "bytes_sent": 26600,
+  "bytes_received": 94000,
+  "generator": {
+    "peak_cpu_percent": null,
+    "peak_rss_bytes": 31047680,
+    "peak_open_fds": 13,
+    "max_schedule_lag_us": 0,
+    "p99_schedule_lag_us": 0,
+    "target_not_achieved": false,
+    "notes": [
+      "Generator CPU is process user+system time over wall time (100 % = one core) and RSS is the peak resident set, both from getrusage(RUSAGE_SELF); descriptors are counted from the process fd table. They describe the whole process that ran the load engine.",
+      "Mean generator CPU over the run: 136 % of one core.",
+      "Iteration workload: no target rate exists; schedule lag is not measured."
+    ]
+  },
+  "notes": [
+    "Fixed iterations with bounded concurrency (closed): slowing responses lengthen the run rather than dropping work; no target rate.",
+    "Connection mode persistent: each virtual user / slot keeps its own pooled connections (keep-alive forced on for this run).",
+    "Latency is the sum of attempt durations (connect … last body byte) measured by the shared engine; local preparation and token acquisition are reported separately as setup time. Bytes are logical request/response header+body sizes (HTTP/2 header sizes are estimates), not wire bytes."
+  ],
+  "requests": {
+    "started": 200,
+    "completed": 200,
+    "transport_failures": 0,
+    "timeouts": 0,
+    "canceled": 0,
+    "in_flight_at_end": 0,
+    "application_failures": 0,
+    "assertion_failures": 0,
+    "connections_opened": 4,
+    "connections_reused": 196
+  },
+  "workload_label": "Fixed iterations with bounded concurrency (closed): slowing responses lengthen the run rather than dropping work; no target rate.",
+  "measured_duration_secs": 0.019627917,
+  "timeouts_censored": {
+    "count": 0,
+    "elapsed_at_timeout": {
+      "count": 0,
+      "min_us": 0,
+      "max_us": 0,
+      "mean_us": 0,
+      "p50_us": 0,
+      "p90_us": 0,
+      "p95_us": 0,
+      "p99_us": 0
+    },
+    "label": "Censored at the deadline: each value is the time at which the send was abandoned, a lower bound on the latency the target would have produced. Excluded from the success and failure latency distributions."
+  },
+  "latency_setup": {
+    "count": 200,
+    "min_us": 41,
+    "max_us": 7411,
+    "mean_us": 198,
+    "p50_us": 51,
+    "p90_us": 59,
+    "p95_us": 64,
+    "p99_us": 7411
+  },
+  "histogram_failure_b64": "HISTFAAAAB94nJNpmSzMwMDAyAABzFAazL82eQmD/QeoCABVgwSI",
+  "protocols": [
+    [
+      "http/1.1",
+      200
+    ]
+  ],
+  "warmup_iterations_excluded": 0,
+  "warmup_sends_excluded": 0,
+  "integrity_sha256": "cc25e18e2e7e4339756f98f7637eb7eee74acddbcae26f27a17f005d835d99b6"
+}
