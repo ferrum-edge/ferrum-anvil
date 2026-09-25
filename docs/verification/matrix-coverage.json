@@ -3,8 +3,7 @@
  "total": 182,
  "totals": {
   "verified_test": 76,
-  "verified_live": 91,
-  "skipped_live": 4,
+  "verified_live": 95,
   "blocked": 6,
   "not_applicable": 2,
   "verified_check": 1,
@@ -261,7 +260,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-001": {
@@ -310,7 +309,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-002": {
@@ -348,7 +347,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-003": {
@@ -382,7 +381,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-004": {
@@ -457,7 +456,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-005.tcp": {
@@ -564,7 +563,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-006.lookalike": {
@@ -641,7 +640,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-007": {
@@ -710,7 +709,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-008.tcp": {
@@ -787,7 +786,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-009": {
@@ -825,7 +824,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-010": {
@@ -859,7 +858,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-011": {
@@ -893,7 +892,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-012": {
@@ -938,7 +937,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-013": {
@@ -992,7 +991,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-014": {
@@ -1041,7 +1040,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-015": {
@@ -1090,7 +1089,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-016": {
@@ -1128,7 +1127,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-017": {
@@ -1162,7 +1161,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:TLS-018": {
@@ -1201,7 +1200,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-001": {
@@ -1254,8 +1253,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core",
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160056Z-core",
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "core:UP-002": {
@@ -1312,7 +1311,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-003": {
@@ -1375,8 +1374,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams",
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160308Z-streams",
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "streams:UP-004-tcps": {
@@ -1447,7 +1446,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:UP-005": {
@@ -1500,7 +1499,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:UP-006": {
@@ -1557,7 +1556,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:UP-007": {
@@ -1610,7 +1609,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:UP-008.http-to-tls": {
@@ -1667,7 +1666,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-009": {
@@ -1720,8 +1719,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core",
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160056Z-core",
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "core:UP-010": {
@@ -1784,7 +1783,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-011": {
@@ -1833,7 +1832,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-012": {
@@ -1882,7 +1881,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-013": {
@@ -1925,7 +1924,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-014": {
@@ -1968,7 +1967,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T115414Z-admission"
+     "results/lab/20260925T160150Z-admission"
     ],
     "variants": {
      "admission:UP-015": {
@@ -2011,7 +2010,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:UP-016": {
@@ -2123,7 +2122,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T115414Z-admission"
+     "results/lab/20260925T160150Z-admission"
     ],
     "variants": {
      "admission:UP-018": {
@@ -2204,7 +2203,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:UP-020": {
@@ -2257,8 +2256,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core",
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160056Z-core",
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "core:GW-001": {
@@ -2315,7 +2314,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T115414Z-admission"
+     "results/lab/20260925T160150Z-admission"
     ],
     "variants": {
      "admission:GW-002": {
@@ -2358,7 +2357,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112324Z-drain"
+     "results/lab/20260925T160205Z-drain"
     ],
     "variants": {
      "drain:GW-003": {
@@ -2401,7 +2400,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-004": {
@@ -2454,8 +2453,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T115414Z-admission",
-     "results/lab/20260925T112442Z-cpdp"
+     "results/lab/20260925T160150Z-admission",
+     "results/lab/20260925T160332Z-cpdp"
     ],
     "variants": {
      "admission:GW-005": {
@@ -2550,7 +2549,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:GW-006": {
@@ -2593,7 +2592,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:GW-007": {
@@ -2636,7 +2635,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:GW-008": {
@@ -2679,7 +2678,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-009": {
@@ -2742,7 +2741,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-010": {
@@ -2802,18 +2801,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1071,
+     "line": 1075,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1192,
+     "line": 1661,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:GW-011": {
@@ -2856,7 +2855,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-012": {
@@ -2919,7 +2918,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-013-REFUSED": {
@@ -2990,7 +2989,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-014-GEO": {
@@ -3043,7 +3042,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-015": {
@@ -3092,7 +3091,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:GW-016": {
@@ -3135,7 +3134,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:GW-017": {
@@ -3184,7 +3183,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112221Z-core"
+     "results/lab/20260925T160056Z-core"
     ],
     "variants": {
      "core:GW-018": {
@@ -3267,7 +3266,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-019-REJECT-UNKNOWN": {
@@ -3396,7 +3395,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112236Z-policy"
+     "results/lab/20260925T160110Z-policy"
     ],
     "variants": {
      "policy:GW-020-GUARD": {
@@ -3476,18 +3475,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 315,
+     "line": 319,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1165,
+     "line": 1634,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-001": {
@@ -3531,18 +3530,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 346,
+     "line": 350,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1166,
+     "line": 1635,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-002": {
@@ -3574,18 +3573,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 376,
+     "line": 380,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1167,
+     "line": 1636,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-003": {
@@ -3617,18 +3616,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 403,
+     "line": 407,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1168,
+     "line": 1637,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-004": {
@@ -3660,18 +3659,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 428,
+     "line": 432,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1169,
+     "line": 1638,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-005": {
@@ -3703,18 +3702,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 446,
+     "line": 450,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1170,
+     "line": 1639,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-006": {
@@ -3746,18 +3745,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 462,
+     "line": 466,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1171,
+     "line": 1640,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-007": {
@@ -3789,18 +3788,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 478,
+     "line": 482,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1172,
+     "line": 1641,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-008": {
@@ -3832,18 +3831,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 496,
+     "line": 500,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1173,
+     "line": 1642,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-009": {
@@ -3875,18 +3874,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 530,
+     "line": 534,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1174,
+     "line": 1643,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-010": {
@@ -3924,7 +3923,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-011": {
@@ -3964,7 +3963,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-012": {
@@ -3998,7 +3997,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-013": {
@@ -4038,7 +4037,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-014": {
@@ -4078,18 +4077,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 641,
+     "line": 645,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1176,
+     "line": 1645,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-015": {
@@ -4121,18 +4120,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 661,
+     "line": 665,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1177,
+     "line": 1646,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-016": {
@@ -4157,21 +4156,88 @@
    "id": "AUTH-017",
    "category": "Authentication generation, binding and identity dependencies",
    "title": "OIDC browser session",
-   "status": "skipped_live",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 86,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 113,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 123,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 139,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1544,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1613,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1669,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1671,
+     "kind": "lab"
+    }
+   ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-017": {
       "profile": "auth",
       "scenario": "AUTH-017",
       "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
        "trusted": {
-        "status": "skipped",
-        "skip_reason": "needs an interactive system-browser session with the oidc_relying_party plugin; the lab has no browser driver, and Anvil never imports browser cookies automatically"
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "auth:AUTH-017.lookalike": {
+      "profile": "auth",
+      "scenario": "AUTH-017.lookalike",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
        }
       }
      }
@@ -4196,28 +4262,28 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 746,
+     "line": 750,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 764,
+     "line": 768,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1180,
+     "line": 1649,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1181,
+     "line": 1650,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-018": {
@@ -4269,18 +4335,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 778,
+     "line": 782,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1182,
+     "line": 1651,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-019": {
@@ -4318,18 +4384,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 796,
+     "line": 800,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1183,
+     "line": 1652,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-020": {
@@ -4361,18 +4427,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 825,
+     "line": 829,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1184,
+     "line": 1653,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-021": {
@@ -4404,18 +4470,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 843,
+     "line": 847,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1185,
+     "line": 1654,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-022": {
@@ -4447,18 +4513,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 874,
+     "line": 878,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1186,
+     "line": 1655,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-023": {
@@ -4490,18 +4556,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 904,
+     "line": 908,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1187,
+     "line": 1656,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-024": {
@@ -4533,18 +4599,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 951,
+     "line": 955,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1188,
+     "line": 1657,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-025.nonce": {
@@ -4597,7 +4663,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "tls:AUTH-026": {
@@ -4629,18 +4695,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 989,
+     "line": 993,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1189,
+     "line": 1658,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-027": {
@@ -4672,18 +4738,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1012,
+     "line": 1016,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1190,
+     "line": 1659,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-028": {
@@ -4708,21 +4774,97 @@
    "id": "AUTH-029",
    "category": "Authentication generation, binding and identity dependencies",
    "title": "SOAP UsernameToken",
-   "status": "skipped_live",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1229,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1292,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1319,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1664,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1665,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1666,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_wsse.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_wsse.rs",
+     "line": 87,
+     "kind": "integration_test"
+    }
+   ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
+     "auth:AUTH-029.text": {
+      "profile": "auth",
+      "scenario": "AUTH-029.text",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "auth:AUTH-029.expired": {
+      "profile": "auth",
+      "scenario": "AUTH-029.expired",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
      "auth:AUTH-029": {
       "profile": "auth",
       "scenario": "AUTH-029",
       "passes": {
        "trusted": {
-        "status": "skipped",
-        "skip_reason": "soap_ws_security exists in 0.9.5 but this lab pass has no signed-SOAP/UsernameToken fixture set; not covered yet"
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
        }
       }
      }
@@ -4734,12 +4876,25 @@
    "id": "AUTH-030",
    "category": "Authentication generation, binding and identity dependencies",
    "title": "SOAP XML signature",
-   "status": "skipped_live",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1348,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1667,
+     "kind": "lab"
+    }
+   ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-030": {
@@ -4747,8 +4902,12 @@
       "scenario": "AUTH-030",
       "passes": {
        "trusted": {
-        "status": "skipped",
-        "skip_reason": "soap_ws_security exists in 0.9.5 but this lab pass has no audited XML-signature fixture; not covered yet"
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
        }
       }
      }
@@ -4760,12 +4919,25 @@
    "id": "AUTH-031",
    "category": "Authentication generation, binding and identity dependencies",
    "title": "SOAP SAML assertion",
-   "status": "skipped_live",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1412,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1668,
+     "kind": "lab"
+    }
+   ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-031": {
@@ -4773,8 +4945,12 @@
       "scenario": "AUTH-031",
       "passes": {
        "trusted": {
-        "status": "skipped",
-        "skip_reason": "needs a trusted SAML issuer fixture; Anvil never mints assertions; not covered yet"
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
        }
       }
      }
@@ -4793,18 +4969,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1034,
+     "line": 1038,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1191,
+     "line": 1660,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112407Z-auth"
+     "results/lab/20260925T160248Z-auth"
     ],
     "variants": {
      "auth:AUTH-032": {
@@ -4853,7 +5029,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-001": {
@@ -4902,7 +5078,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-002": {
@@ -4997,7 +5173,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-005": {
@@ -5051,7 +5227,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-006": {
@@ -5100,7 +5276,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-007": {
@@ -5149,7 +5325,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-008": {
@@ -5208,7 +5384,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-009-client-close": {
@@ -5271,7 +5447,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-010": {
@@ -5338,7 +5514,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-012": {
@@ -5387,7 +5563,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-013": {
@@ -5442,7 +5618,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-014": {
@@ -5505,7 +5681,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-015": {
@@ -5584,7 +5760,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-016-deadline": {
@@ -5680,7 +5856,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-018-idle": {
@@ -5763,7 +5939,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-019-tls": {
@@ -5845,7 +6021,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-020": {
@@ -5894,7 +6070,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:PROTO-021": {
@@ -5988,8 +6164,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams",
-     "results/lab/20260925T112346Z-tls"
+     "results/lab/20260925T160308Z-streams",
+     "results/lab/20260925T160227Z-tls"
     ],
     "variants": {
      "streams:PROTO-022": {
@@ -6270,7 +6446,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T112418Z-streams"
+     "results/lab/20260925T160308Z-streams"
     ],
     "variants": {
      "streams:TRUST-007-sse": {
@@ -6703,7 +6879,7 @@
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 680,
+     "line": 679,
      "kind": "integration_test"
     }
    ],
@@ -7145,12 +7321,12 @@
     },
     {
      "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
-     "line": 89,
+     "line": 91,
      "kind": "native_e2e"
     },
     {
      "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
-     "line": 197,
+     "line": 199,
      "kind": "native_e2e"
     }
    ],

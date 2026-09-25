@@ -5,10 +5,9 @@ A skip or block is never counted as a pass.
 
 | Status | Cases |
 |---|---|
-| ✅ live (real gateway) | 91 |
+| ✅ live (real gateway) | 95 |
 | ✅ automated test | 76 |
 | ✅ executed check script | 1 |
-| ⏭ skipped (live) — see reason | 4 |
 | ⛔ blocked — see reason | 6 |
 | ➖ not applicable — see reason | 2 |
 | ◐ partial — see reason | 2 |
@@ -35,138 +34,138 @@ A skip or block is never counted as a pass.
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
-| TLS-001 | Unknown root | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-001; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-002 | Hostname mismatch | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-002; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-003 | Expired peer certificate | ✅ automated test | lab `results/lab/20260925T112346Z-tls` — skipped TLS-003; `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-004 | Not-yet-valid certificate | ✅ automated test | lab `results/lab/20260925T112346Z-tls` — skipped TLS-004; `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-005 | Missing client certificate | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-005, TLS-005.tcp, TLS-005.tls12; `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`, `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-006 | Rejected client certificate | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-006, TLS-006.lookalike, TLS-006.tls12; `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`, `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-007 | Client certificate key mismatch | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-007; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-008 | Valid frontend mTLS | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-008, TLS-008.tcp, TLS-008.tls12; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-009 | TLS versus plaintext port | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-009; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-010 | TLS handshake stall | ✅ automated test | lab `results/lab/20260925T112346Z-tls` — skipped TLS-010; `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-011 | Unadorned handshake reset | ✅ automated test | lab `results/lab/20260925T112346Z-tls` — skipped TLS-011; `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-012 | ALPN mismatch | ✅ automated test | lab `results/lab/20260925T112346Z-tls` — skipped TLS-012; `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-013 | Custom CA isolation | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-013; `crates/anvil-engine/tests/matrix_local_tls.rs`, `crates/anvil-lab/src/tls.rs` |
-| TLS-014 | mTLS pool isolation | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-014; `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`, `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-015 | Verification-bypass scope | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-015; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-016 | TLS off versus verification off | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed TLS-016; `crates/anvil-engine/tests/matrix_local_tls.rs`, `crates/anvil-lab/src/tls.rs` |
-| TLS-017 | TLS through forward proxy | ✅ automated test | lab `results/lab/20260925T112346Z-tls` — skipped TLS-017; `crates/anvil-engine/tests/matrix_local_tls.rs` |
-| TLS-018 | Redirect certificate boundary | ✅ automated test | lab `results/lab/20260925T112346Z-tls` — skipped TLS-018; `crates/anvil-engine/tests/engine_scenarios.rs` |
+| TLS-001 | Unknown root | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-001; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-002 | Hostname mismatch | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-002; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-003 | Expired peer certificate | ✅ automated test | lab `results/lab/20260925T160227Z-tls` — skipped TLS-003; `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-004 | Not-yet-valid certificate | ✅ automated test | lab `results/lab/20260925T160227Z-tls` — skipped TLS-004; `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-005 | Missing client certificate | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-005, TLS-005.tcp, TLS-005.tls12; `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`, `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-006 | Rejected client certificate | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-006, TLS-006.lookalike, TLS-006.tls12; `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`, `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-007 | Client certificate key mismatch | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-007; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-008 | Valid frontend mTLS | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-008, TLS-008.tcp, TLS-008.tls12; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-009 | TLS versus plaintext port | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-009; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-010 | TLS handshake stall | ✅ automated test | lab `results/lab/20260925T160227Z-tls` — skipped TLS-010; `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-011 | Unadorned handshake reset | ✅ automated test | lab `results/lab/20260925T160227Z-tls` — skipped TLS-011; `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-012 | ALPN mismatch | ✅ automated test | lab `results/lab/20260925T160227Z-tls` — skipped TLS-012; `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-013 | Custom CA isolation | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-013; `crates/anvil-engine/tests/matrix_local_tls.rs`, `crates/anvil-lab/src/tls.rs` |
+| TLS-014 | mTLS pool isolation | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-014; `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`, `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-015 | Verification-bypass scope | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-015; `crates/anvil-lab/src/tls.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-016 | TLS off versus verification off | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed TLS-016; `crates/anvil-engine/tests/matrix_local_tls.rs`, `crates/anvil-lab/src/tls.rs` |
+| TLS-017 | TLS through forward proxy | ✅ automated test | lab `results/lab/20260925T160227Z-tls` — skipped TLS-017; `crates/anvil-engine/tests/matrix_local_tls.rs` |
+| TLS-018 | Redirect certificate boundary | ✅ automated test | lab `results/lab/20260925T160227Z-tls` — skipped TLS-018; `crates/anvil-engine/tests/engine_scenarios.rs` |
 
 ## Gateway-to-upstream failures
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
-| UP-001 | Backend DNS failure | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-001; `crates/anvil-lab/src/core.rs` |
-| UP-002 | Backend connect refused | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core`, `results/lab/20260925T112418Z-streams` — passed UP-002, UP-002-tcp; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
-| UP-003 | Backend connect deadline | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-003; `crates/anvil-lab/src/core.rs` |
-| UP-004 | Backend untrusted certificate | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams`, `results/lab/20260925T112346Z-tls` — passed UP-004, UP-004-tcps, UP-004.expired; `crates/anvil-lab/src/streams.rs`, `crates/anvil-lab/src/tls.rs` |
-| UP-005 | Backend certificate name mismatch | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed UP-005; `crates/anvil-lab/src/tls.rs` |
-| UP-006 | Backend mTLS missing identity | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed UP-006, UP-006.tls12; `crates/anvil-lab/src/tls.rs` |
-| UP-007 | Backend TLS stall | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed UP-007; `crates/anvil-lab/src/tls.rs` |
-| UP-008 | Backend HTTP to HTTPS mismatch | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed UP-008, UP-008.http-to-tls; `crates/anvil-lab/src/tls.rs` |
-| UP-009 | Backend upload stall | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-009; `crates/anvil-lab/src/core.rs` |
-| UP-010 | Backend first-header stall | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core`, `results/lab/20260925T112418Z-streams` — passed UP-010, UP-010-grpc; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
-| UP-011 | Backend body idle stall | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-011; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| UP-012 | Backend mid-body reset | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-012; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| UP-013 | Backend short Content-Length body | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-013; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| UP-014 | Backend oversized response | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-014; `crates/anvil-lab/src/core.rs` |
-| UP-015 | Gateway retained-buffer exhaustion | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission` — passed UP-015; `crates/anvil-lab/src/admission.rs` |
-| UP-016 | Backend pool cancellation | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed UP-016; `crates/anvil-lab/src/tls.rs` |
+| UP-001 | Backend DNS failure | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-001; `crates/anvil-lab/src/core.rs` |
+| UP-002 | Backend connect refused | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core`, `results/lab/20260925T160308Z-streams` — passed UP-002, UP-002-tcp; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
+| UP-003 | Backend connect deadline | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-003; `crates/anvil-lab/src/core.rs` |
+| UP-004 | Backend untrusted certificate | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams`, `results/lab/20260925T160227Z-tls` — passed UP-004, UP-004-tcps, UP-004.expired; `crates/anvil-lab/src/streams.rs`, `crates/anvil-lab/src/tls.rs` |
+| UP-005 | Backend certificate name mismatch | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed UP-005; `crates/anvil-lab/src/tls.rs` |
+| UP-006 | Backend mTLS missing identity | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed UP-006, UP-006.tls12; `crates/anvil-lab/src/tls.rs` |
+| UP-007 | Backend TLS stall | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed UP-007; `crates/anvil-lab/src/tls.rs` |
+| UP-008 | Backend HTTP to HTTPS mismatch | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed UP-008, UP-008.http-to-tls; `crates/anvil-lab/src/tls.rs` |
+| UP-009 | Backend upload stall | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-009; `crates/anvil-lab/src/core.rs` |
+| UP-010 | Backend first-header stall | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core`, `results/lab/20260925T160308Z-streams` — passed UP-010, UP-010-grpc; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
+| UP-011 | Backend body idle stall | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-011; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| UP-012 | Backend mid-body reset | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-012; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| UP-013 | Backend short Content-Length body | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-013; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| UP-014 | Backend oversized response | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-014; `crates/anvil-lab/src/core.rs` |
+| UP-015 | Gateway retained-buffer exhaustion | ✅ live (real gateway) | lab `results/lab/20260925T160150Z-admission` — passed UP-015; `crates/anvil-lab/src/admission.rs` |
+| UP-016 | Backend pool cancellation | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed UP-016; `crates/anvil-lab/src/tls.rs` |
 | UP-017 | Backend ephemeral-port exhaustion | ✅ automated test — Live reproduction blocked: Ferrum Edge 0.9.5 assigns port_exhaustion only to EADDRNOTAVAIL at connect (src/retry.rs) and the release binary has no lab dial-admission hook, while draining the lab host's real ephemeral ports would be unsafe. Covered instead by the public-signal contract test up_017_port_exhaustion_signal_is_coarse_and_hook_free (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the catalog's shared 502 connection_failure 'Backend unavailable' signal keeps the connection-failure family ambiguous, names port exhaustion only as an unknown-confidence candidate, never states port exhaustion or host resources at likely or above, and makes no TLS/DNS claim. It is neither a live nor a hook-based test. | `crates/anvil-diagnostics/tests/upstream_setup_contract.rs` |
-| UP-018 | Backend connection ceiling | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission` — passed UP-018 — skipped UP-018-H2; `crates/anvil-diagnostics/tests/upstream_setup_contract.rs`, `crates/anvil-lab/src/admission.rs` |
+| UP-018 | Backend connection ceiling | ✅ live (real gateway) | lab `results/lab/20260925T160150Z-admission` — passed UP-018 — skipped UP-018-H2; `crates/anvil-diagnostics/tests/upstream_setup_contract.rs`, `crates/anvil-lab/src/admission.rs` |
 | UP-019 | Trust withdrawn | ✅ automated test — Live reproduction blocked: upstream.trust_withdrawn is mesh-only in 0.9.5 (an accepted gateway trust publication withdraws an authority while an HBONE / sidecar-mTLS transport is established or reused); no mesh/HBONE trust-publication lab is built (the admission profile's mesh instance is an egress gateway to a plaintext external destination and never uses those transports). Covered instead by the public-signal contract test up_019_trust_withdrawn_signal_makes_no_certificate_claim (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the shared 502 connection_failure signal stays ambiguous, lists trust withdrawal only as an unknown-confidence candidate, and yields no confirmed or likely certificate/TLS claim and no blame on the caller's certificate. | `crates/anvil-diagnostics/tests/upstream_setup_contract.rs` |
-| UP-020 | Generic post-dispatch failure | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed UP-020; `crates/anvil-lab/src/core.rs` |
+| UP-020 | Generic post-dispatch failure | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed UP-020; `crates/anvil-lab/src/core.rs` |
 
 ## Gateway admission, policy and response ownership
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
-| GW-001 | Open circuit breaker | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core`, `results/lab/20260925T112236Z-policy` — passed GW-001, GW-001-HALFOPEN; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/policy.rs` |
-| GW-002 | Overload refusal | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission` — passed GW-002; `crates/anvil-lab/src/admission.rs` |
-| GW-003 | Drain refusal | ✅ live (real gateway) | lab `results/lab/20260925T112324Z-drain` — passed GW-003; `crates/anvil-lab/src/drain.rs` |
-| GW-004 | Adaptive concurrency limit | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-004; `crates/anvil-lab/src/policy.rs` |
-| GW-005 | Stale DP fence | ✅ live (real gateway) | lab `results/lab/20260925T115414Z-admission`, `results/lab/20260925T112442Z-cpdp` — passed GW-005, GW-005-lookalike, GW-005-orphan, GW-005-partition — skipped GW-005; `crates/anvil-lab/src/cpdp.rs` |
-| GW-006 | No matched route | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-006; `crates/anvil-lab/src/core.rs` |
-| GW-007 | Method not allowed | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-007; `crates/anvil-lab/src/core.rs` |
-| GW-008 | Request size ceiling | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-008; `crates/anvil-lab/src/core.rs` |
-| GW-009 | Response transformer ceiling | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-009; `crates/anvil-lab/src/policy.rs` |
-| GW-010 | WAF block | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-010, GW-010-BODY, GW-010-BOT; `crates/anvil-lab/src/policy.rs` |
-| GW-011 | ACL denial | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed GW-011; `crates/anvil-lab/src/auth.rs` |
-| GW-012 | OPA explicit denial | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-012; `crates/anvil-lab/src/policy.rs` |
-| GW-013 | OPA unavailable | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-013-ERROR, GW-013-REFUSED, GW-013-TIMEOUT; `crates/anvil-lab/src/policy.rs` |
-| GW-014 | IP or geo restriction | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-014 — skipped GW-014-GEO; `crates/anvil-lab/src/policy.rs` |
-| GW-015 | OpenAPI validation rejection | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-015; `crates/anvil-lab/src/policy.rs` |
-| GW-016 | Application 403 lookalike | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-016; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/core.rs` |
-| GW-017 | Application 5xx | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-017; `crates/anvil-lab/src/core.rs` |
-| GW-018 | Degraded but successful routing | ✅ live (real gateway) | lab `results/lab/20260925T112221Z-core` — passed GW-018; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/core.rs` |
-| GW-019 | Header mutation after error | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-019-ERROR, GW-019-FORGED, GW-019-OK, GW-019-REJECT-KNOWN, GW-019-REJECT-UNKNOWN; `crates/anvil-lab/src/policy.rs` |
-| GW-020 | AI policy or provider failure | ✅ live (real gateway) | lab `results/lab/20260925T112236Z-policy` — passed GW-020-BUDGET, GW-020-CONTENT, GW-020-GUARD, GW-020-PROVIDER; `crates/anvil-lab/src/policy.rs` |
+| GW-001 | Open circuit breaker | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core`, `results/lab/20260925T160110Z-policy` — passed GW-001, GW-001-HALFOPEN; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/policy.rs` |
+| GW-002 | Overload refusal | ✅ live (real gateway) | lab `results/lab/20260925T160150Z-admission` — passed GW-002; `crates/anvil-lab/src/admission.rs` |
+| GW-003 | Drain refusal | ✅ live (real gateway) | lab `results/lab/20260925T160205Z-drain` — passed GW-003; `crates/anvil-lab/src/drain.rs` |
+| GW-004 | Adaptive concurrency limit | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-004; `crates/anvil-lab/src/policy.rs` |
+| GW-005 | Stale DP fence | ✅ live (real gateway) | lab `results/lab/20260925T160150Z-admission`, `results/lab/20260925T160332Z-cpdp` — passed GW-005, GW-005-lookalike, GW-005-orphan, GW-005-partition — skipped GW-005; `crates/anvil-lab/src/cpdp.rs` |
+| GW-006 | No matched route | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed GW-006; `crates/anvil-lab/src/core.rs` |
+| GW-007 | Method not allowed | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed GW-007; `crates/anvil-lab/src/core.rs` |
+| GW-008 | Request size ceiling | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed GW-008; `crates/anvil-lab/src/core.rs` |
+| GW-009 | Response transformer ceiling | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-009; `crates/anvil-lab/src/policy.rs` |
+| GW-010 | WAF block | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-010, GW-010-BODY, GW-010-BOT; `crates/anvil-lab/src/policy.rs` |
+| GW-011 | ACL denial | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed GW-011; `crates/anvil-lab/src/auth.rs` |
+| GW-012 | OPA explicit denial | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-012; `crates/anvil-lab/src/policy.rs` |
+| GW-013 | OPA unavailable | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-013-ERROR, GW-013-REFUSED, GW-013-TIMEOUT; `crates/anvil-lab/src/policy.rs` |
+| GW-014 | IP or geo restriction | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-014 — skipped GW-014-GEO; `crates/anvil-lab/src/policy.rs` |
+| GW-015 | OpenAPI validation rejection | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-015; `crates/anvil-lab/src/policy.rs` |
+| GW-016 | Application 403 lookalike | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed GW-016; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/core.rs` |
+| GW-017 | Application 5xx | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed GW-017; `crates/anvil-lab/src/core.rs` |
+| GW-018 | Degraded but successful routing | ✅ live (real gateway) | lab `results/lab/20260925T160056Z-core` — passed GW-018; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/core.rs` |
+| GW-019 | Header mutation after error | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-019-ERROR, GW-019-FORGED, GW-019-OK, GW-019-REJECT-KNOWN, GW-019-REJECT-UNKNOWN; `crates/anvil-lab/src/policy.rs` |
+| GW-020 | AI policy or provider failure | ✅ live (real gateway) | lab `results/lab/20260925T160110Z-policy` — passed GW-020-BUDGET, GW-020-CONTENT, GW-020-GUARD, GW-020-PROVIDER; `crates/anvil-lab/src/policy.rs` |
 
 ## Authentication generation, binding and identity dependencies
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
-| AUTH-001 | API key header name | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-001; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/auth.rs` |
-| AUTH-002 | API key query redaction | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-002; `crates/anvil-engine/src/redact.rs`, `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/auth.rs` |
-| AUTH-003 | Basic invalid credentials | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-003; `crates/anvil-lab/src/auth.rs` |
-| AUTH-004 | JWT expired | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-004; `crates/anvil-lab/src/auth.rs` |
-| AUTH-005 | JWT future nbf | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-005; `crates/anvil-lab/src/auth.rs` |
-| AUTH-006 | JWT wrong signature | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-006; `crates/anvil-lab/src/auth.rs` |
-| AUTH-007 | JWT wrong consumer claim | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-007; `crates/anvil-lab/src/auth.rs` |
-| AUTH-008 | JWKS unknown key | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-008; `crates/anvil-lab/src/auth.rs` |
-| AUTH-009 | JWKS issuer or audience mismatch | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-009; `crates/anvil-lab/src/auth.rs` |
-| AUTH-010 | JWT algorithm confusion | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-010; `crates/anvil-lab/src/auth.rs` |
-| AUTH-011 | OAuth PKCE round trip | ✅ automated test | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-011; `crates/anvil-identity/tests/api_oauth.rs` |
-| AUTH-012 | OAuth state mismatch | ✅ automated test | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-012; `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs` |
-| AUTH-013 | OAuth redirect spoof | ✅ automated test | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-013; `crates/anvil-identity/tests/api_oauth.rs` |
-| AUTH-014 | OAuth refresh race | ✅ automated test | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-014; `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs` |
-| AUTH-015 | OAuth issuer outage | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-015; `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs`, `crates/anvil-lab/src/auth.rs` |
-| AUTH-016 | OAuth client credentials | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-016; `crates/anvil-lab/src/auth.rs` |
-| AUTH-017 | OIDC browser session | ⏭ skipped (live) — see reason | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-017 |
-| AUTH-018 | HMAC v2 happy path | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-018, AUTH-018.skew; `crates/anvil-auth/tests/hmac_vectors.rs`, `crates/anvil-lab/src/auth.rs` |
-| AUTH-019 | HMAC body mutation | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-019; `crates/anvil-auth/tests/hmac_vectors.rs`, `crates/anvil-lab/src/auth.rs` |
-| AUTH-020 | HMAC replay | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-020; `crates/anvil-auth/tests/hmac_vectors.rs`, `crates/anvil-lab/src/auth.rs` |
-| AUTH-021 | HMAC raw path/query | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-021; `crates/anvil-lab/src/auth.rs` |
-| AUTH-022 | HMAC duplicate digest fields | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-022; `crates/anvil-lab/src/auth.rs` |
-| AUTH-023 | HMAC legacy profile | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-023; `crates/anvil-lab/src/auth.rs` |
-| AUTH-024 | DPoP binding | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-024; `crates/anvil-lab/src/auth.rs` |
-| AUTH-025 | DPoP replay or nonce | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-025 — skipped AUTH-025.nonce; `crates/anvil-lab/src/auth.rs` |
-| AUTH-026 | Certificate-bound token | ✅ live (real gateway) | lab `results/lab/20260925T112346Z-tls` — passed AUTH-026; `crates/anvil-lab/src/tls.rs` |
-| AUTH-027 | LDAP wrong credentials | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-027; `crates/anvil-lab/src/auth.rs` |
-| AUTH-028 | LDAP unavailable | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-028; `crates/anvil-lab/src/auth.rs` |
-| AUTH-029 | SOAP UsernameToken | ⏭ skipped (live) — see reason | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-029 |
-| AUTH-030 | SOAP XML signature | ⏭ skipped (live) — see reason | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-030 |
-| AUTH-031 | SOAP SAML assertion | ⏭ skipped (live) — see reason | lab `results/lab/20260925T112407Z-auth` — skipped AUTH-031 |
-| AUTH-032 | Multi-auth identity selection | ✅ live (real gateway) | lab `results/lab/20260925T112407Z-auth` — passed AUTH-032; `crates/anvil-lab/src/auth.rs` |
+| AUTH-001 | API key header name | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-001; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/auth.rs` |
+| AUTH-002 | API key query redaction | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-002; `crates/anvil-engine/src/redact.rs`, `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/auth.rs` |
+| AUTH-003 | Basic invalid credentials | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-003; `crates/anvil-lab/src/auth.rs` |
+| AUTH-004 | JWT expired | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-004; `crates/anvil-lab/src/auth.rs` |
+| AUTH-005 | JWT future nbf | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-005; `crates/anvil-lab/src/auth.rs` |
+| AUTH-006 | JWT wrong signature | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-006; `crates/anvil-lab/src/auth.rs` |
+| AUTH-007 | JWT wrong consumer claim | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-007; `crates/anvil-lab/src/auth.rs` |
+| AUTH-008 | JWKS unknown key | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-008; `crates/anvil-lab/src/auth.rs` |
+| AUTH-009 | JWKS issuer or audience mismatch | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-009; `crates/anvil-lab/src/auth.rs` |
+| AUTH-010 | JWT algorithm confusion | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-010; `crates/anvil-lab/src/auth.rs` |
+| AUTH-011 | OAuth PKCE round trip | ✅ automated test | lab `results/lab/20260925T160248Z-auth` — skipped AUTH-011; `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-012 | OAuth state mismatch | ✅ automated test | lab `results/lab/20260925T160248Z-auth` — skipped AUTH-012; `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-013 | OAuth redirect spoof | ✅ automated test | lab `results/lab/20260925T160248Z-auth` — skipped AUTH-013; `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-014 | OAuth refresh race | ✅ automated test | lab `results/lab/20260925T160248Z-auth` — skipped AUTH-014; `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-015 | OAuth issuer outage | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-015; `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs`, `crates/anvil-lab/src/auth.rs` |
+| AUTH-016 | OAuth client credentials | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-016; `crates/anvil-lab/src/auth.rs` |
+| AUTH-017 | OIDC browser session | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-017, AUTH-017.lookalike; `crates/anvil-diagnostics/tests/lab_browser_session.rs`, `crates/anvil-lab/src/auth.rs` |
+| AUTH-018 | HMAC v2 happy path | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-018, AUTH-018.skew; `crates/anvil-auth/tests/hmac_vectors.rs`, `crates/anvil-lab/src/auth.rs` |
+| AUTH-019 | HMAC body mutation | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-019; `crates/anvil-auth/tests/hmac_vectors.rs`, `crates/anvil-lab/src/auth.rs` |
+| AUTH-020 | HMAC replay | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-020; `crates/anvil-auth/tests/hmac_vectors.rs`, `crates/anvil-lab/src/auth.rs` |
+| AUTH-021 | HMAC raw path/query | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-021; `crates/anvil-lab/src/auth.rs` |
+| AUTH-022 | HMAC duplicate digest fields | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-022; `crates/anvil-lab/src/auth.rs` |
+| AUTH-023 | HMAC legacy profile | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-023; `crates/anvil-lab/src/auth.rs` |
+| AUTH-024 | DPoP binding | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-024; `crates/anvil-lab/src/auth.rs` |
+| AUTH-025 | DPoP replay or nonce | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-025 — skipped AUTH-025.nonce; `crates/anvil-lab/src/auth.rs` |
+| AUTH-026 | Certificate-bound token | ✅ live (real gateway) | lab `results/lab/20260925T160227Z-tls` — passed AUTH-026; `crates/anvil-lab/src/tls.rs` |
+| AUTH-027 | LDAP wrong credentials | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-027; `crates/anvil-lab/src/auth.rs` |
+| AUTH-028 | LDAP unavailable | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-028; `crates/anvil-lab/src/auth.rs` |
+| AUTH-029 | SOAP UsernameToken | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-029, AUTH-029.expired, AUTH-029.text; `crates/anvil-lab/src/auth.rs`, `crates/anvil-load/tests/load_wsse.rs` |
+| AUTH-030 | SOAP XML signature | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-030; `crates/anvil-lab/src/auth.rs` |
+| AUTH-031 | SOAP SAML assertion | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-031; `crates/anvil-lab/src/auth.rs` |
+| AUTH-032 | Multi-auth identity selection | ✅ live (real gateway) | lab `results/lab/20260925T160248Z-auth` — passed AUTH-032; `crates/anvil-lab/src/auth.rs` |
 
 ## Protocol completion and semantics
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
-| PROTO-001 | HTTP1 keepalive reuse | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-001; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| PROTO-002 | HTTP2 trailers | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-002; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| PROTO-001 | HTTP1 keepalive reuse | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-001; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| PROTO-002 | HTTP2 trailers | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-002; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-003 | HTTP2 stream reset | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-004 | HTTP2 GOAWAY | ✅ automated test — HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet. | `crates/anvil-engine/tests/matrix_local_tls.rs` |
-| PROTO-005 | h2c mismatch | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-005; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| PROTO-006 | H3 forced success | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-006; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-007 | H3 UDP unavailable | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-007; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-008 | H3 automatic fallback | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-008; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-009 | WS normal close | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-009, PROTO-009-client-close; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-010 | WS abnormal close | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-010; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-005 | h2c mismatch | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-005; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| PROTO-006 | H3 forced success | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-006; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-007 | H3 UDP unavailable | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-007; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-008 | H3 automatic fallback | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-008; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-009 | WS normal close | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-009, PROTO-009-client-close; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-010 | WS abnormal close | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-010; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
 | PROTO-011 | WS oversized message | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |
-| PROTO-012 | WS H2 extended CONNECT | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-012; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-013 | WS H3 extended CONNECT | ✅ automated test | lab `results/lab/20260925T112418Z-streams` — skipped PROTO-013; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-014 | gRPC HTTP200 error | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-014, PROTO-014-down; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-015 | gRPC missing terminal status | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-015; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-016 | gRPC four modes | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-016, PROTO-016-deadline; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
+| PROTO-012 | WS H2 extended CONNECT | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-012; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-013 | WS H3 extended CONNECT | ✅ automated test | lab `results/lab/20260925T160308Z-streams` — skipped PROTO-013; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-014 | gRPC HTTP200 error | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-014, PROTO-014-down; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-015 | gRPC missing terminal status | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-015; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-016 | gRPC four modes | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-016, PROTO-016-deadline; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
 | PROTO-017 | gRPC reflection denied | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |
-| PROTO-018 | SSE cancellation | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-018, PROTO-018-idle; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
-| PROTO-019 | TCP half-close | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-019, PROTO-019-echo, PROTO-019-tls; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-020 | UDP silent peer | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-020; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
-| PROTO-021 | UDP loss/reorder | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed PROTO-021; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-022 | DTLS handshake/mTLS | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams`, `results/lab/20260925T112346Z-tls` — passed PROTO-022, PROTO-022-wrong-root, PROTO-022.nocert, PROTO-022.rogue, PROTO-022.root; `crates/anvil-diagnostics/tests/lab_dtls_close.rs`, `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-018 | SSE cancellation | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-018, PROTO-018-idle; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
+| PROTO-019 | TCP half-close | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-019, PROTO-019-echo, PROTO-019-tls; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-020 | UDP silent peer | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-020; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
+| PROTO-021 | UDP loss/reorder | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed PROTO-021; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-022 | DTLS handshake/mTLS | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams`, `results/lab/20260925T160227Z-tls` — passed PROTO-022, PROTO-022-wrong-root, PROTO-022.nocert, PROTO-022.rogue, PROTO-022.root; `crates/anvil-diagnostics/tests/lab_dtls_close.rs`, `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
 | PROTO-023 | SOAP fault HTTP200 | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | PROTO-024 | GraphQL errors HTTP200 | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | PROTO-025 | Compressed/binary body | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
@@ -181,7 +180,7 @@ A skip or block is never counted as a pass.
 | TRUST-004 | Conflicting duplicate headers | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-005 | Coarse-equivalent causes | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-006 | 403 indistinguishable origins | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
-| TRUST-007 | Post-header failure | ✅ live (real gateway) | lab `results/lab/20260925T112418Z-streams` — passed TRUST-007-sse; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/streams.rs` |
+| TRUST-007 | Post-header failure | ✅ live (real gateway) | lab `results/lab/20260925T160308Z-streams` — passed TRUST-007-sse; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-lab/src/streams.rs` |
 | TRUST-008 | Multi-attempt provenance | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | TRUST-009 | Cross-tenant lookup | ⛔ blocked — see reason — Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable. | — |
 | TRUST-010 | Diagnostic retention expired | ⛔ blocked — see reason — Depends on G01 detail retention; not available in any gateway release. | — |
