@@ -43,5 +43,13 @@
   "REL-008": {
     "status": "partial",
     "reason": "Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence."
+  },
+  "UP-017": {
+    "status": "blocked",
+    "reason": "Live reproduction blocked: Ferrum Edge 0.9.5 assigns port_exhaustion only to EADDRNOTAVAIL at connect (src/retry.rs) and the release binary has no lab dial-admission hook, while draining the lab host's real ephemeral ports would be unsafe. Covered instead by the public-signal contract test up_017_port_exhaustion_signal_is_coarse_and_hook_free (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the catalog's shared 502 connection_failure 'Backend unavailable' signal keeps the connection-failure family ambiguous, names port exhaustion only as an unknown-confidence candidate, never states port exhaustion or host resources at likely or above, and makes no TLS/DNS claim. It is neither a live nor a hook-based test."
+  },
+  "UP-019": {
+    "status": "blocked",
+    "reason": "Live reproduction blocked: upstream.trust_withdrawn is mesh-only in 0.9.5 (an accepted gateway trust publication withdraws an authority while an HBONE / sidecar-mTLS transport is established or reused); no mesh/HBONE trust-publication lab is built (the admission profile's mesh instance is an egress gateway to a plaintext external destination and never uses those transports). Covered instead by the public-signal contract test up_019_trust_withdrawn_signal_makes_no_certificate_claim (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the shared 502 connection_failure signal stays ambiguous, lists trust withdrawal only as an unknown-confidence candidate, and yields no confirmed or likely certificate/TLS claim and no blame on the caller's certificate."
   }
 }
