@@ -9,7 +9,9 @@
 //! Results: `results/lab/<timestamp>-<profile>/{summary.json, <ID>.json}`.
 
 mod core;
+mod cpdp;
 mod fixtures;
+mod fixtures_cpdp;
 mod fixtures_streams;
 mod gateway;
 mod harness;

@@ -1,0 +1,7 @@
+{
+  "id": "lab-access-log",
+  "plugin_name": "stdout_logging",
+  "scope": "global",
+  "enabled": true,
+  "config": {}
+}
