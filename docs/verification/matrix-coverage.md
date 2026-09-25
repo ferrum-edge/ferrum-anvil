@@ -243,5 +243,5 @@ A skip or block is never counted as a pass.
 | REL-004 | Update/migration rollback | ✅ automated test | `crates/anvil-storage/tests/store_security.rs` |
 | REL-005 | Offline no-account smoke | ✅ automated test | `apps/desktop/e2e/specs/09-offline-no-account.e2e.ts` |
 | REL-006 | Download manifest match | ⛔ blocked — see reason — No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. | — |
-| REL-007 | Website navigation | ◐ partial — see reason — Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release. | — |
-| REL-008 | Website feature truth | ◐ partial — see reason — Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence. | — |
+| REL-007 | Website navigation | ◐ partial — see reason — Staged in draft PR ferrum-edge/ferrumedge#54: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests pass; link checker OK incl. external). Partial because it must not be published before an Anvil release. | — |
+| REL-008 | Website feature truth | ◐ partial — see reason — Staged in draft PR ferrum-edge/ferrumedge#54: copy limited to built and tested capabilities with limitations, real E2E screenshots, and a test that fails on 'available now', Anvil release/asset links or a missing pre-release notice. Publication is gated on release evidence (signed artifacts). | — |

@@ -38,11 +38,11 @@
  },
  "REL-007": {
   "status": "partial",
-  "reason": "Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release."
+  "reason": "Staged in draft PR ferrum-edge/ferrumedge#54: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests pass; link checker OK incl. external). Partial because it must not be published before an Anvil release."
  },
  "REL-008": {
   "status": "partial",
-  "reason": "Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence."
+  "reason": "Staged in draft PR ferrum-edge/ferrumedge#54: copy limited to built and tested capabilities with limitations, real E2E screenshots, and a test that fails on 'available now', Anvil release/asset links or a missing pre-release notice. Publication is gated on release evidence (signed artifacts)."
  },
  "REL-002": {
   "status": "verified_check",
