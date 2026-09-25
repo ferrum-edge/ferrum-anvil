@@ -5,7 +5,9 @@
 //! not depend on it (verified by the release artifact check).
 
 pub mod dns;
+pub mod dtls;
 pub mod grpc;
+pub mod h3server;
 pub mod http;
 pub mod log;
 pub mod pki;

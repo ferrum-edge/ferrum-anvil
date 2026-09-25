@@ -81,15 +81,25 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
 
     let protocol_status = a.protocol_status_override.clone().unwrap_or_else(|| protocol_status_http(response.as_ref()));
     let final_attempt = attempts.last();
-    let transport = match (&response, final_attempt.and_then(|x| x.failure.as_ref())) {
-        (None, Some(f)) if f.kind == FailureKind::Canceled => TransportState::Canceled,
-        (None, _) if a.stream.is_some() => TransportState::Completed,
-        (None, _) => TransportState::Failed,
-        (Some(r), _) => match r.body.completeness {
-            BodyCompleteness::Complete | BodyCompleteness::NoBody => TransportState::Completed,
-            BodyCompleteness::Canceled => TransportState::Canceled,
-            BodyCompleteness::Incomplete | BodyCompleteness::StoppedAtLocalLimit => TransportState::Incomplete,
-        },
+    let transport = if a.stream.is_some() {
+        // An opened session (WebSocket, gRPC stream, SSE, TCP, UDP) ends on its
+        // own terms — close handshake, stop condition, peer end — so its
+        // completion comes from the session outcome, not HTTP body framing.
+        match final_attempt.and_then(|x| x.failure.as_ref()) {
+            None => TransportState::Completed,
+            Some(f) if f.kind == FailureKind::Canceled => TransportState::Canceled,
+            Some(_) => TransportState::Incomplete,
+        }
+    } else {
+        match (&response, final_attempt.and_then(|x| x.failure.as_ref())) {
+            (None, Some(f)) if f.kind == FailureKind::Canceled => TransportState::Canceled,
+            (None, _) => TransportState::Failed,
+            (Some(r), _) => match r.body.completeness {
+                BodyCompleteness::Complete | BodyCompleteness::NoBody => TransportState::Completed,
+                BodyCompleteness::Canceled => TransportState::Canceled,
+                BodyCompleteness::Incomplete | BodyCompleteness::StoppedAtLocalLimit => TransportState::Incomplete,
+            },
+        }
     };
     let transport = match (&protocol_status, transport) {
         (ProtocolStatus::Grpc { source: GrpcStatusSource::Missing, .. }, TransportState::Completed) => TransportState::Incomplete,

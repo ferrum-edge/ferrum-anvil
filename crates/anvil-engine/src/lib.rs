@@ -4,6 +4,9 @@
 //! CLI, the collection runner and load workers, so "manual Send succeeds but
 //! load sends different bytes" cannot happen by construction.
 
+// Typed `TransportFailure` evidence is returned by value by design (see
+// anvil-transport); boxing it would only obscure the evidence flow.
+
 pub mod assertions;
 pub mod context;
 mod h3_exec;
@@ -16,6 +19,7 @@ pub mod prepare;
 pub mod preview;
 pub mod record;
 pub mod redact;
+pub mod sessions;
 pub mod settings;
 pub mod vars;
 
@@ -31,6 +35,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub use context::ExecutionContext;
+pub use sessions::{SessionError, SessionHandle};
 
 /// Result of one execution.
 #[derive(Debug, Clone)]
@@ -74,14 +79,8 @@ impl Engine {
     pub async fn execute(&self, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
         match ctx.spec.protocol {
             Protocol::Http => http_exec::execute(self, ctx, events, cancel).await,
-            _ => {
-                let resolver = vars::Resolver::new(ctx.var_layers.clone(), ctx.seed);
-                let f = TransportFailure::new(
-                    anvil_domain::execution::Phase::Prepare,
-                    anvil_domain::execution::FailureKind::UnsupportedCombination,
-                    format!("{:?} execution is handled by its session adapter", ctx.spec.protocol),
-                );
-                record::local_failure(ctx, &resolver, chrono::Utc::now(), f)
+            Protocol::WebSocket | Protocol::Grpc | Protocol::Sse | Protocol::Tcp | Protocol::Udp => {
+                sessions::execute(self, ctx, events, cancel).await
             }
         }
     }

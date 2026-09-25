@@ -149,8 +149,8 @@ pub(crate) fn resolve_auth(
     })
 }
 
-/// Prepared TLS config, the profile name used, and its client-identity bindings.
-type TlsSelection = (Arc<PreparedTls>, Option<String>, Vec<anvil_domain::tls::HostBinding>);
+/// Prepared TLS material, the selected profile's name and its host bindings.
+pub(crate) type TlsChoice = (Arc<PreparedTls>, Option<String>, Vec<anvil_domain::tls::HostBinding>);
 
 /// Build the TLS settings for a target (profile scoping + host binding).
 pub(crate) fn tls_for(
@@ -159,7 +159,7 @@ pub(crate) fn tls_for(
     settings: &EffectiveSettings,
     target: &Target,
     inferred: &mut Vec<String>,
-) -> Result<TlsSelection, TransportFailure> {
+) -> Result<TlsChoice, TransportFailure> {
     let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
     let Some(p) = profile else {
         if settings.tls_profile_id.is_some() {
@@ -275,7 +275,7 @@ pub(crate) fn trust_for(ctx: &ExecutionContext, target: &Target) -> (FerrumTrust
     (FerrumTrust::NotConfigured, false)
 }
 
-pub fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, allowed: &[&str]) -> Result<Prepared, TransportFailure> {
+pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, allowed: &[&str]) -> Result<Prepared, TransportFailure> {
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let http = prepare::prepare_http(&ctx.spec, r, ctx.attachments.as_ref(), &settings, ctx.send_anyway, allowed)?;
     let mut inferred = http.inferred.clone();
@@ -321,6 +321,7 @@ struct AttemptTarget {
     tls: Option<Arc<PreparedTls>>,
 }
 
+#[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
     let started_at = Utc::now();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
@@ -488,66 +489,67 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         if let Some(resp) = &out.response
             && is_redirect(resp.status)
             && prep.settings.redirects.follow
-            && let Some(loc) = resp.header_values("location").first().map(|s| s.to_string())
         {
-            if redirects >= prep.settings.redirects.max {
-                last = Some(out);
-                break;
-            }
-            let base = url::Url::parse(&current.target.url()).ok();
-            let next = base.and_then(|b| b.join(&loc).ok()).map(|u| u.to_string()).unwrap_or(loc.clone());
-            let mut inf = vec![];
-            match prepare::parse_target(&next, &["https", "http"], &mut inf) {
-                Ok(t) => {
-                    redirects += 1;
-                    let status = resp.status;
-                    let (method, body) = match status {
-                        303 if current.method != "HEAD" => ("GET".to_string(), Bytes::new()),
-                        301 | 302 if current.method == "POST" => ("GET".to_string(), Bytes::new()),
-                        _ => (current.method.clone(), current.body.clone()),
-                    };
-                    let cross_origin = t.origin() != original_origin;
-                    let mut headers = current.headers.clone();
-                    headers.retain(|(n, _)| !n.eq_ignore_ascii_case("host"));
-                    if body.is_empty() {
-                        headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("content-length"));
-                    }
-                    let mut with_credentials = current.with_credentials;
-                    let tls;
-                    if cross_origin && !prep.settings.redirects.forward_credentials_cross_origin {
-                        headers.retain(|(n, _)| {
-                            !matches!(n.to_ascii_lowercase().as_str(), "authorization" | "cookie" | "proxy-authorization")
-                        });
-                        with_credentials = false;
-                        credentials_stripped = true;
-                    }
-                    if t.scheme == "https" {
-                        let mut inf2 = vec![];
-                        // The redirect target gets its own TLS policy; the
-                        // client identity is presented only where bound.
-                        let cross_bound = binding_matches(&prep.tls_profile_bindings, &t) && !prep.tls_profile_bindings.is_empty();
-                        if cross_origin && !cross_bound {
-                            let mut strict_ctx = ctx.clone();
-                            strict_ctx.tls_profiles.iter_mut().for_each(|p| {
-                                if !binding_matches(&p.bindings, &t) || p.bindings.is_empty() {
-                                    p.client_identity = None;
-                                }
-                            });
-                            tls = tls_for(engine, &strict_ctx, &prep.settings, &t, &mut inf2).ok().map(|x| x.0);
-                        } else {
-                            tls = tls_for(engine, ctx, &prep.settings, &t, &mut inf2).ok().map(|x| x.0);
-                        }
-                    } else {
-                        tls = None;
-                    }
-                    current = AttemptTarget { method, target: t, headers, body, with_credentials, tls };
-                    reason = AttemptReason::Redirect { status };
-                    last = Some(out);
-                    continue;
-                }
-                Err(_) => {
+            if let Some(loc) = resp.header_values("location").first().map(|s| s.to_string()) {
+                if redirects >= prep.settings.redirects.max {
                     last = Some(out);
                     break;
+                }
+                let base = url::Url::parse(&current.target.url()).ok();
+                let next = base.and_then(|b| b.join(&loc).ok()).map(|u| u.to_string()).unwrap_or(loc.clone());
+                let mut inf = vec![];
+                match prepare::parse_target(&next, &["https", "http"], &mut inf) {
+                    Ok(t) => {
+                        redirects += 1;
+                        let status = resp.status;
+                        let (method, body) = match status {
+                            303 if current.method != "HEAD" => ("GET".to_string(), Bytes::new()),
+                            301 | 302 if current.method == "POST" => ("GET".to_string(), Bytes::new()),
+                            _ => (current.method.clone(), current.body.clone()),
+                        };
+                        let cross_origin = t.origin() != original_origin;
+                        let mut headers = current.headers.clone();
+                        headers.retain(|(n, _)| !n.eq_ignore_ascii_case("host"));
+                        if body.is_empty() {
+                            headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("content-length"));
+                        }
+                        let mut with_credentials = current.with_credentials;
+                        let tls;
+                        if cross_origin && !prep.settings.redirects.forward_credentials_cross_origin {
+                            headers.retain(|(n, _)| {
+                                !matches!(n.to_ascii_lowercase().as_str(), "authorization" | "cookie" | "proxy-authorization")
+                            });
+                            with_credentials = false;
+                            credentials_stripped = true;
+                        }
+                        if t.scheme == "https" {
+                            let mut inf2 = vec![];
+                            // The redirect target gets its own TLS policy; the
+                            // client identity is presented only where bound.
+                            let cross_bound = binding_matches(&prep.tls_profile_bindings, &t) && !prep.tls_profile_bindings.is_empty();
+                            if cross_origin && !cross_bound {
+                                let mut strict_ctx = ctx.clone();
+                                strict_ctx.tls_profiles.iter_mut().for_each(|p| {
+                                    if !binding_matches(&p.bindings, &t) || p.bindings.is_empty() {
+                                        p.client_identity = None;
+                                    }
+                                });
+                                tls = tls_for(engine, &strict_ctx, &prep.settings, &t, &mut inf2).ok().map(|x| x.0);
+                            } else {
+                                tls = tls_for(engine, ctx, &prep.settings, &t, &mut inf2).ok().map(|x| x.0);
+                            }
+                        } else {
+                            tls = None;
+                        }
+                        current = AttemptTarget { method, target: t, headers, body, with_credentials, tls };
+                        reason = AttemptReason::Redirect { status };
+                        last = Some(out);
+                        continue;
+                    }
+                    Err(_) => {
+                        last = Some(out);
+                        break;
+                    }
                 }
             }
         }
@@ -621,6 +623,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     for s in &used_secrets {
         redactor.add_secret(s);
     }
+    // An automatic HTTP/3 → TCP fallback is reported, never hidden.
+    let fallback_from = attempts.iter().find_map(|a| match &a.reason {
+        AttemptReason::ProtocolFallback { from } => Some(from.clone()),
+        _ => None,
+    });
     let assembly = Assembly {
         ctx,
         started_at,
@@ -641,7 +648,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         last,
         trust,
         credentials_stripped,
-        protocol_fallback_from: None,
+        protocol_fallback_from: fallback_from,
         redactor: &redactor,
         extra_findings,
         stream: None,

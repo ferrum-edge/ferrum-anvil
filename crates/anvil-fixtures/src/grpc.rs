@@ -14,6 +14,10 @@ use std::sync::OnceLock;
 
 pub const ECHO_PROTO: &str = include_str!("../../../lab/proto/echo.proto");
 
+/// Fixture-only `fail_with` sentinel for `Unary`: reply once, then reset the
+/// stream before any terminal status (PROTO-015 ground truth). Not a gRPC code.
+pub const ABORT_WITHOUT_STATUS: i32 = -1;
+
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct EchoRequest {
     #[prost(string, tag = "1")]
@@ -178,6 +182,14 @@ async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruth
             };
             log.push(GroundTruth::MessageReceived { bytes: m.len() as u64 });
             let req = EchoRequest::decode(m).unwrap_or_default();
+            if req.fail_with == ABORT_WITHOUT_STATUS {
+                // Lab-only fault: reply, then reset the stream before any terminal status.
+                log.push(GroundTruth::FaultApplied { fault: "grpc_abort_before_status".into() });
+                let _ = tx.send(send(frame(&EchoReply { message: req.message, index: 0 }))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let _ = tx.send(Err(std::io::Error::other("fixture abort before grpc-status"))).await;
+                return;
+            }
             if req.fail_with != 0 {
                 let _ = tx.send(Ok(Frame::trailers(trailers(req.fail_with, "fixture requested failure")))).await;
                 return;

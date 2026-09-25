@@ -262,7 +262,7 @@ impl HttpTransport {
         let mut outputs = Vec::new();
         let mut attempt_reason = reason;
         let mut allow_pool = plan.keepalive;
-        for attempt_index in index..index + 2 {
+        for attempt_index in (index..).take(2) {
             let (out, redispatch) = self.execute_once(plan, &key, attempt_index, attempt_reason.clone(), allow_pool, events, cancel).await;
             outputs.push(out);
             if !redispatch {

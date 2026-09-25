@@ -46,10 +46,13 @@ dimpl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+protox.workspace = true
+rcgen.workspace = true
 
 [dev-dependencies]
 anvil-fixtures = { path = "../anvil-fixtures" }
-rcgen.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
