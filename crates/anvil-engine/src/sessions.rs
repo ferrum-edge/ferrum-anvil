@@ -130,13 +130,7 @@ async fn apply_auth(
         let http = crate::oauth_http::EngineTokenHttp { engine, ctx, settings: &prep.settings };
         match engine.tokens.get_or_acquire(key, cfg, &http, Utc::now()).await {
             Ok(t) => replace_oauth(&mut prep.auth, &t),
-            Err(e) => {
-                return Err(local(
-                    FailureKind::AuthPreparationFailed,
-                    format!("OAuth token acquisition from {} failed: {e}. Nothing was sent.", cfg.token_url),
-                    "auth",
-                ));
-            }
+            Err(e) => return Err(crate::oauth_http::acquisition_failure(cfg, e, "Nothing was sent.")),
         }
     }
     if matches!(prep.auth, ResolvedAuth::None) {

@@ -131,6 +131,10 @@ pub enum FailureKind {
     LintBlocked,
     RequestTooLargeLocal,
     AuthPreparationFailed,
+    /// The auth profile needs an interactive sign-in (OAuth authorization
+    /// code + PKCE) before a token exists; the request was not sent.
+    #[serde(rename = "oauth_interaction_required")]
+    OAuthInteractionRequired,
     UnsupportedCombination,
     VaultLocked,
     // ---- name resolution (client leg) ----
@@ -225,6 +229,7 @@ impl FailureKind {
                 | LintBlocked
                 | RequestTooLargeLocal
                 | AuthPreparationFailed
+                | OAuthInteractionRequired
                 | UnsupportedCombination
                 | VaultLocked
         )

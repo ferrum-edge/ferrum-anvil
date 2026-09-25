@@ -61,7 +61,7 @@ pub const RULES: &[RuleMeta] = &[
         id: "local.preparation",
         version: 1,
         summary: "Local validation/preparation failures before any network activity",
-        fixtures: &["LOCAL-001", "LOCAL-002", "LOCAL-003", "LOCAL-004", "LOCAL-005", "LOCAL-006", "TLS-007"],
+        fixtures: &["LOCAL-001", "LOCAL-002", "LOCAL-003", "LOCAL-004", "LOCAL-005", "LOCAL-006", "TLS-007", "AUTH-011", "AUTH-015"],
     },
     RuleMeta { id: "network.dns", version: 1, summary: "Client-leg name resolution outcomes", fixtures: &["LOCAL-007", "LOCAL-008"] },
     RuleMeta { id: "network.connect", version: 1, summary: "Client-leg TCP connect outcomes", fixtures: &["LOCAL-009", "LOCAL-010"] },

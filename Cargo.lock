@@ -204,6 +204,7 @@ dependencies = [
  "anvil-domain",
  "anvil-engine",
  "anvil-fixtures",
+ "anvil-identity",
  "anvil-import",
  "anvil-load",
  "anvil-portability",
@@ -402,6 +403,30 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "url",
+]
+
+[[package]]
+name = "anvil-identity"
+version = "0.1.0"
+dependencies = [
+ "anvil-auth",
+ "anvil-domain",
+ "anvil-engine",
+ "anvil-fixtures",
+ "anvil-transport",
+ "bytes",
+ "chrono",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

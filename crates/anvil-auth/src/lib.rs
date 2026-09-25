@@ -27,6 +27,11 @@ pub enum AuthError {
     Acquisition(String),
     #[error("{0}")]
     Unsupported(String),
+    /// No usable token exists and the configured grant needs the user to
+    /// sign in interactively (authorization code + PKCE). Never answered by
+    /// silently switching to another grant.
+    #[error("{0}")]
+    InteractionRequired(String),
 }
 
 /// The request exactly as it will be written (after serialization).
