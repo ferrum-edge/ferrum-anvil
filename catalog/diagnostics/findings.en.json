@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-2",
+  "version": "2026.09.25-3",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1821,7 +1821,7 @@
     },
     "ws.closed_normally": {
       "title": "The WebSocket session ended normally",
-      "explanation": "The peer closed the session with code {code} {reason}. This is a normal end, not a network error.",
+      "explanation": "{closer} closed the session with code {code} {reason}. This is a normal end, not a network error.",
       "alternatives": [],
       "does_not_prove": [],
       "remediation": [],
@@ -1847,7 +1847,7 @@
     },
     "ws.closed_policy": {
       "title": "The WebSocket was closed for policy reasons (1008)",
-      "explanation": "The peer closed the session with 1008 {reason}.",
+      "explanation": "{closer} closed the session with 1008 {reason}.",
       "alternatives": [
         "A gateway security policy (e.g. WAF message inspection).",
         "The application's own policy."
@@ -1884,10 +1884,22 @@
     "ws.closed_other": {
       "title": "The WebSocket was closed by the peer ({code})",
       "explanation": "The peer closed the session with code {code} {reason}.",
-      "alternatives": [],
-      "does_not_prove": [],
-      "remediation": [],
-      "confirm_with": []
+      "alternatives": [
+        "The application closed the session with this code.",
+        "A gateway or proxy on the path closed the session itself, for example because its own upstream connection ended without a Close frame."
+      ],
+      "does_not_prove": [
+        "Which hop authored the Close frame: the peer Anvil is connected to may be a proxy speaking for its upstream."
+      ],
+      "remediation": [
+        {
+          "text": "Check the application's and any gateway's logs for this session.",
+          "owner": "unknown"
+        }
+      ],
+      "confirm_with": [
+        "Gateway or proxy logs for this WebSocket session."
+      ]
     },
     "sse.canceled": {
       "title": "The event stream was stopped",
@@ -1958,13 +1970,50 @@
       "remediation": [],
       "confirm_with": []
     },
+    "tcp.closed_without_data": {
+      "title": "The connection closed without any data",
+      "explanation": "The TCP connection to {host} was established and {sent} byte(s) were sent, but the peer {how} before sending anything back. A layer-4 proxy (such as a gateway stream listener) has no way to say why it closed; the cause is recorded only on the peer or proxy.",
+      "alternatives": [
+        "A proxy or gateway on the path could not reach, or was refused by, its own upstream.",
+        "The peer's TLS, policy or rate-limit checks rejected the connection after accepting it.",
+        "The service accepts connections but closes them for this input."
+      ],
+      "does_not_prove": [
+        "That the connection from Anvil failed: its TCP (and any TLS) setup completed.",
+        "That the destination service is down.",
+        "Whether the bytes that were sent were processed."
+      ],
+      "remediation": [
+        {
+          "text": "Check the peer's or the proxy/gateway operator's logs for this connection; a layer-4 proxy records the cause only there.",
+          "owner": "unknown"
+        }
+      ],
+      "confirm_with": [
+        "Operator logs for the stream listener at this time (for example the gateway's error class and disconnect cause)."
+      ]
+    },
     "tcp.closed_abnormally": {
       "title": "The TCP session ended abnormally",
-      "explanation": "The connection was reset or ended with an error.",
-      "alternatives": [],
-      "does_not_prove": [],
-      "remediation": [],
-      "confirm_with": []
+      "explanation": "The connection to {host} was reset or ended with an error after {bytes} byte(s) had been received.",
+      "alternatives": [
+        "The peer aborted the connection.",
+        "A proxy or gateway on the path tore the relay down (for example because its own upstream failed or an idle limit expired).",
+        "A network interruption."
+      ],
+      "does_not_prove": [
+        "Which hop ended the connection.",
+        "That the destination service is down."
+      ],
+      "remediation": [
+        {
+          "text": "Check the peer's (or the proxy/gateway operator's) logs for this connection.",
+          "owner": "unknown"
+        }
+      ],
+      "confirm_with": [
+        "Operator logs of the peer or the stream proxy at this time."
+      ]
     },
     "auth.token_expired_locally": {
       "title": "The token appears to be expired",

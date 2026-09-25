@@ -80,6 +80,14 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             _ => {}
         },
         ProtocolStatus::WebSocket { handshake_status, close_code, close_reason, closed_by } => {
+            // Who started the closing handshake, stated from the evidence: a
+            // 1000 that Anvil sent (user close, idle close) is not the peer's choice.
+            let closer = match closed_by {
+                ClosedBy::Peer => "The peer",
+                ClosedBy::Client => "Anvil",
+                ClosedBy::Timeout => "Anvil (a time limit elapsed)",
+                ClosedBy::Abnormal | ClosedBy::NotClosed => "The session",
+            };
             let base = |code: &str, conf: Confidence, owner: Owner, sev: Severity| {
                 Draft::new(code, "protocol.websocket", conf, SourceScope::Unknown, owner, sev)
                     .ev_at(E::WebSocketClose, "close.code", close_code.map(|c| c.to_string()).unwrap_or_else(|| "none".into()), idx)
@@ -87,6 +95,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                     .ev_at(E::WebSocketClose, "closed_by", format!("{closed_by:?}"), idx)
                     .var("code", close_code.map(|c| c.to_string()).unwrap_or_else(|| "none".into()))
                     .var("reason", close_reason.clone())
+                    .var("closer", closer.to_string())
             };
             match (handshake_status, close_code, closed_by) {
                 (Some(s), _, _) if *s != 101 && *s != 200 => out.push(
@@ -134,17 +143,132 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 );
             }
         }
-        ProtocolStatus::Tcp { bytes_received, half_closed, closed_by, .. } => {
+        ProtocolStatus::Tcp { bytes_sent, bytes_received, half_closed, closed_by } => {
             if *half_closed && *bytes_received > 0 {
                 out.push(
                     Draft::new("tcp.reply_after_half_close", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Info)
                         .var("bytes", bytes_received.to_string()),
                 );
             }
-            if *closed_by == ClosedBy::Abnormal {
-                out.push(Draft::new("tcp.closed_abnormally", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Error));
+            let ended_by_peer = matches!(closed_by, ClosedBy::Peer | ClosedBy::Abnormal);
+            if ended_by_peer && *bytes_received == 0 {
+                // The connection itself was established; the peer (or a layer-4
+                // proxy such as a gateway stream listener) ended it before any
+                // data came back. L4 carries no in-band reason.
+                let how = if *closed_by == ClosedBy::Abnormal {
+                    "reset the connection (or it ended with an error)"
+                } else {
+                    "closed the connection (FIN)"
+                };
+                out.push(
+                    Draft::new("tcp.closed_without_data", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Warning)
+                        .ev_at(E::NativeTransport, "tcp.bytes_sent", bytes_sent.to_string(), idx)
+                        .ev_at(E::NativeTransport, "tcp.bytes_received", "0", idx)
+                        .ev_at(E::NativeTransport, "closed_by", format!("{closed_by:?}"), idx)
+                        .var("host", ctx.target_host())
+                        .var("sent", bytes_sent.to_string())
+                        .var("how", how.to_string()),
+                );
+            } else if *closed_by == ClosedBy::Abnormal {
+                out.push(
+                    Draft::new("tcp.closed_abnormally", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Error)
+                        .ev_at(E::NativeTransport, "tcp.bytes_received", bytes_received.to_string(), idx)
+                        .var("host", ctx.target_host())
+                        .var("bytes", bytes_received.to_string()),
+                );
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::facts::{DiagnosticInput, FerrumTrust};
+    use anvil_domain::diagnostics::DiagnosticFinding;
+    use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
+    use anvil_domain::request::Protocol;
+
+    fn diagnose(protocol: Protocol, status: ProtocolStatus) -> Vec<DiagnosticFinding> {
+        let trust = FerrumTrust::NotConfigured;
+        let input = DiagnosticInput {
+            protocol,
+            method: "GET",
+            preparation_failure: None,
+            attempts: &[],
+            response: None,
+            body: &[],
+            stream: None,
+            protocol_status: &status,
+            trust: &trust,
+            tls_verification_enabled: true,
+            credentials_stripped_on_redirect: false,
+            protocol_fallback_from: None,
+        };
+        crate::diagnose(&input).findings
+    }
+
+    fn ws(code: u16, by: ClosedBy) -> ProtocolStatus {
+        ProtocolStatus::WebSocket { handshake_status: Some(101), close_code: Some(code), close_reason: String::new(), closed_by: by }
+    }
+
+    fn find<'a>(f: &'a [DiagnosticFinding], code: &str) -> &'a DiagnosticFinding {
+        f.iter().find(|x| x.code == code).unwrap_or_else(|| panic!("missing {code}: {:?}", f.iter().map(|x| &x.code).collect::<Vec<_>>()))
+    }
+
+    #[test]
+    fn a_normal_close_names_who_closed() {
+        let peer = diagnose(Protocol::WebSocket, ws(1000, ClosedBy::Peer));
+        let e = &find(&peer, "ws.closed_normally").explanation;
+        assert!(e.starts_with("The peer closed"), "{e}");
+        // Anvil's own close (user close or automation idle close) is not the peer's choice.
+        let client = diagnose(Protocol::WebSocket, ws(1000, ClosedBy::Client));
+        let e = &find(&client, "ws.closed_normally").explanation;
+        assert!(e.starts_with("Anvil closed"), "{e}");
+        assert!(!e.to_lowercase().contains("peer"), "{e}");
+    }
+
+    #[test]
+    fn a_peer_close_leaves_open_which_hop_authored_it() {
+        // Ferrum 0.9.5 answers a backend's silent TCP drop with its own Close 1002.
+        let f = diagnose(Protocol::WebSocket, ws(1002, ClosedBy::Peer));
+        let d = find(&f, "ws.closed_other");
+        assert!(d.does_not_prove.iter().any(|x| x.contains("Which hop")), "{:?}", d.does_not_prove);
+        assert!(d.alternatives.iter().any(|x| x.contains("gateway or proxy")), "{:?}", d.alternatives);
+    }
+
+    #[test]
+    fn a_scripted_policy_close_is_not_attributed_to_the_peer() {
+        let f = diagnose(Protocol::WebSocket, ws(1008, ClosedBy::Client));
+        assert!(!find(&f, "ws.closed_policy").explanation.to_lowercase().contains("the peer"));
+    }
+
+    fn tcp(sent: u64, received: u64, by: ClosedBy) -> ProtocolStatus {
+        ProtocolStatus::Tcp { bytes_sent: sent, bytes_received: received, half_closed: false, closed_by: by }
+    }
+
+    #[test]
+    fn a_tcp_close_without_any_data_is_explained_without_blaming_the_client_leg() {
+        for by in [ClosedBy::Peer, ClosedBy::Abnormal] {
+            let f = diagnose(Protocol::Tcp, tcp(6, 0, by));
+            let d = find(&f, "tcp.closed_without_data");
+            assert!(d.does_not_prove.iter().any(|x| x.contains("setup completed")), "{:?}", d.does_not_prove);
+            assert!(d.alternatives.iter().any(|x| x.contains("its own upstream")), "{:?}", d.alternatives);
+            assert!(!f.iter().any(|x| x.code.starts_with("client.")), "no client-leg failure is claimed");
+            assert!(!f.iter().any(|x| x.code == "tcp.closed_abnormally"), "one finding per session end");
+        }
+    }
+
+    #[test]
+    fn a_reset_after_data_stays_an_abnormal_end_and_ordinary_ends_are_silent() {
+        let f = diagnose(Protocol::Tcp, tcp(6, 12, ClosedBy::Abnormal));
+        assert!(find(&f, "tcp.closed_abnormally").explanation.contains("12"));
+        assert!(!f.iter().any(|x| x.code == "tcp.closed_without_data"));
+        // Anvil stopping by itself (expected frames, idle limit) is not a peer close.
+        for by in [ClosedBy::Client, ClosedBy::Timeout] {
+            assert!(diagnose(Protocol::Tcp, tcp(6, 0, by)).iter().all(|x| !x.code.starts_with("tcp.closed")));
+        }
+        // A peer that answered and then closed is an ordinary end.
+        assert!(diagnose(Protocol::Tcp, tcp(6, 6, ClosedBy::Peer)).iter().all(|x| !x.code.starts_with("tcp.closed")));
     }
 }
