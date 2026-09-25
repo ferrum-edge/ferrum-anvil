@@ -1,7 +1,25 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_load;
+mod cmd_specs;
 mod commands;
 mod state;
+
+pub use cmd_load::LOAD_WORKER_FLAG;
+
+/// Entry point when the executable is re-launched as a load worker: read
+/// one job from stdin, stream progress and the report to stdout, exit.
+pub fn run_load_worker() -> i32 {
+    anvil_transport::init();
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("load worker: {err}");
+            return 70;
+        }
+    };
+    rt.block_on(anvil_load::worker::run_stdio())
+}
 
 use state::DesktopState;
 use std::time::{Duration, Instant, SystemTime};
@@ -108,6 +126,24 @@ pub fn run() {
             commands::import_apply,
             commands::attachment_add,
             commands::read_text_file,
+            cmd_load::load_plans,
+            cmd_load::load_plan_save,
+            cmd_load::load_plan_delete,
+            cmd_load::load_preflight,
+            cmd_load::load_run_start,
+            cmd_load::load_run_cancel,
+            cmd_load::load_reports,
+            cmd_load::load_report,
+            cmd_load::load_report_delete,
+            cmd_load::load_report_export,
+            cmd_load::load_compare,
+            cmd_load::datasets_list,
+            cmd_load::dataset_add,
+            cmd_specs::spec_preview,
+            cmd_specs::spec_import,
+            cmd_specs::spec_sources,
+            cmd_specs::spec_reimport_plan,
+            cmd_specs::spec_reimport_apply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ferrum Anvil");

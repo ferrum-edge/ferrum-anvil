@@ -15,6 +15,8 @@ pub struct DesktopState {
     pub app: RwLock<Option<Arc<App>>>,
     /// Running executions (for cancel and lock-time stop).
     pub running: Mutex<HashMap<Id, CancellationToken>>,
+    /// Load runs in worker processes, by run key (cancel and lock-time stop).
+    pub load_runs: Mutex<HashMap<String, CancellationToken>>,
     pub last_activity: Mutex<Instant>,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
@@ -26,6 +28,7 @@ impl DesktopState {
             profiles: ProfileManager::new(root),
             app: RwLock::new(None),
             running: Mutex::new(HashMap::new()),
+            load_runs: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(Instant::now()),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
         }
@@ -52,6 +55,11 @@ impl DesktopState {
     /// cached credentials/connections.
     pub fn lock(&self) {
         for (_, t) in self.running.lock().drain() {
+            t.cancel();
+        }
+        // Load workers are asked to stop and finalize a partial report
+        // (completion `stopped_by_lock` is recorded by the run policy).
+        for t in self.load_runs.lock().values() {
             t.cancel();
         }
         if let Some(a) = self.app.read().as_ref() {

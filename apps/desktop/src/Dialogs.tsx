@@ -2,9 +2,10 @@
 // app settings. All persistence happens in Rust.
 import { useEffect, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { api, type ExportPreview, type ImportReport, type SystemInfo } from "./api";
+import { api, type ExportPreview, type ImportReport, type SpecImported, type SystemInfo } from "./api";
 import type { AppSettings, ClientIdentity, Environment, IntegrationProfile, ProxyProfile, TlsProfile, Variable, Workspace } from "./generated/contracts";
 import { PemFromFile } from "./AuthEditor";
+import { SpecImport } from "./SpecImport";
 import { Modal, SecretField, Tabs, humanize } from "./ui";
 
 const now = () => new Date().toISOString();
@@ -624,7 +625,14 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
   );
 }
 
-export function ImportDialog(props: { onClose: () => void; onImported: (workspaces: string[]) => void }) {
+export function ImportDialog(props: {
+  onClose: () => void;
+  onImported: (workspaces: string[]) => void;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  onSpecImported: (r: SpecImported) => void;
+}) {
+  const [tab, setTab] = useState<"spec" | "bundle">("spec");
   const [path, setPath] = useState<string | null>(null);
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
@@ -667,19 +675,37 @@ export function ImportDialog(props: { onClose: () => void; onImported: (workspac
   };
   return (
     <Modal
-      title="Import Anvil bundle"
+      title="Import"
+      wide
       onClose={props.onClose}
       footer={
-        <>
-          <button className="btn" disabled={!path || busy} onClick={doPreview}>
-            Preview
-          </button>
-          <button className="btn primary" disabled={!preview || busy} onClick={apply}>
-            Import
-          </button>
-        </>
+        tab === "bundle" ? (
+          <>
+            <button className="btn" disabled={!path || busy} onClick={doPreview}>
+              Preview
+            </button>
+            <button className="btn primary" disabled={!preview || busy} onClick={apply}>
+              Import
+            </button>
+          </>
+        ) : undefined
       }
     >
+      <Tabs
+        tabs={[
+          { id: "spec" as const, label: "API spec or collection" },
+          { id: "bundle" as const, label: "Anvil bundle / backup" },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
+      {tab === "spec" && <SpecImport workspaceId={props.workspaceId} workspaceName={props.workspaceName} onImported={props.onSpecImported} />}
+      {tab === "bundle" && bundleBody()}
+    </Modal>
+  );
+  function bundleBody() {
+    return (
+      <>
       <div className="row">
         <button className="btn" data-autofocus onClick={choose}>
           Choose bundle…
@@ -720,8 +746,9 @@ export function ImportDialog(props: { onClose: () => void; onImported: (workspac
         </div>
       )}
       {err && <div className="bad-box">{err}</div>}
-    </Modal>
-  );
+      </>
+    );
+  }
 }
 
 // ---------------------------------------------------------------- settings

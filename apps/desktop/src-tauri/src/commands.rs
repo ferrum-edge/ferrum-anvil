@@ -24,16 +24,16 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
-type R<T> = Result<T, String>;
+pub(crate) type R<T> = Result<T, String>;
 
-fn e(err: AppError) -> String {
+pub(crate) fn e(err: AppError) -> String {
     match err {
         AppError::Locked => "LOCKED".into(),
         other => other.to_string(),
     }
 }
 
-fn id(s: &str) -> R<Id> {
+pub(crate) fn id(s: &str) -> R<Id> {
     s.parse().map_err(|_| format!("invalid id '{s}'"))
 }
 

@@ -2,10 +2,10 @@
 // (no HTML rendering, no links, no scripts).
 import { useMemo, useState } from "react";
 import type { ExecutionView } from "./api";
-import type { AttemptObservation, DiagnosticFinding, PhaseTiming, SourceScope, TlsObservation } from "./generated/contracts";
+import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation } from "./generated/contracts";
 import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
 
-type Tab = "diagnosis" | "body" | "headers" | "timing" | "connection" | "attempts" | "tests";
+type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
 
 const SCOPE_LABEL: Record<SourceScope, string> = {
   local_client: "This app (nothing sent)",
@@ -57,8 +57,10 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
   const resp = r.response;
   const status = resp?.status;
   const last = r.attempts[r.attempts.length - 1];
+  const stream = r.stream;
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "diagnosis", label: "Diagnosis", count: findings.length },
+    ...(stream ? [{ id: "messages" as Tab, label: "Messages", count: stream.messages.length }] : []),
     { id: "body", label: "Body" },
     { id: "headers", label: "Headers", count: (resp?.headers.length ?? 0) + (resp?.trailers.length ?? 0) },
     { id: "timing", label: "Timing" },
@@ -69,8 +71,9 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
   return (
     <div className="resp">
       <div className="resp-head">
-        {status != null ? <span className={`status-code s${String(status)[0]}`}>{status}</span> : <span className="status-code s5">No response</span>}
+        {status != null ? <span className={`status-code s${String(status)[0]}`}>{status}</span> : !stream && <span className="status-code s5">No response</span>}
         {resp?.reason && <span className="muted">{resp.reason}</span>}
+        <ProtocolBadge p={r.outcome.protocol_status} />
         <Dim label="Transport" value={r.outcome.transport} good={r.outcome.transport === "completed"} />
         <Dim label="Application" value={r.outcome.application} good={r.outcome.application === "success"} />
         <Dim label="Tests" value={r.outcome.assertions} good={r.outcome.assertions !== "fail"} />
@@ -88,6 +91,7 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
       <Tabs tabs={tabs} value={effectiveTab} onChange={setTab} />
       <div className="pane">
         {effectiveTab === "diagnosis" && <Findings view={view} />}
+        {effectiveTab === "messages" && stream && <Messages t={stream} />}
         {effectiveTab === "body" && <Body view={view} />}
         {effectiveTab === "headers" && <Headers view={view} />}
         {effectiveTab === "timing" && <Timing attempt={last} />}
@@ -435,5 +439,83 @@ function TestsView({ view }: { view: ExecutionView }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+function ProtocolBadge({ p }: { p: ProtocolStatus }) {
+  switch (p.protocol) {
+    case "grpc":
+      return (
+        <span className={`badge ${p.grpc_status === 0 ? "ok" : "bad"}`} title={`status from ${humanize(p.source)}`}>
+          gRPC {p.grpc_status ?? "no status"}
+          {p.grpc_message ? ` · ${p.grpc_message}` : ""}
+        </span>
+      );
+    case "websocket":
+      return (
+        <span className="badge">
+          WebSocket{p.close_code != null ? ` closed ${p.close_code}${p.close_reason ? ` (${p.close_reason})` : ""} by ${humanize(p.closed_by)}` : ` · ${humanize(p.closed_by)}`}
+        </span>
+      );
+    case "sse":
+      return <span className="badge">SSE · {p.events} events · {humanize(p.closed_by)}</span>;
+    case "tcp":
+      return (
+        <span className="badge">
+          TCP · sent {fmtBytes(p.bytes_sent)} · received {fmtBytes(p.bytes_received)}
+          {p.half_closed ? " · half-closed" : ""} · {humanize(p.closed_by)}
+        </span>
+      );
+    case "udp":
+      return (
+        <span className="badge">
+          UDP · {p.datagrams_sent} sent · {p.datagrams_received} received in {p.window_ms} ms
+        </span>
+      );
+    default:
+      return null;
+  }
+}
+
+function Messages({ t }: { t: StreamTranscript }) {
+  return (
+    <div className="col">
+      <div className="faint">
+        {t.sent_count} sent ({fmtBytes(t.sent_bytes)}) · {t.received_count} received ({fmtBytes(t.received_bytes)})
+        {t.dropped_messages > 0 ? ` · ${t.dropped_messages} older messages not retained` : ""}
+      </div>
+      <table className="grid">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th></th>
+            <th>Kind</th>
+            <th>Size</th>
+            <th>Content</th>
+          </tr>
+        </thead>
+        <tbody>
+          {t.messages.map((m, i) => (
+            <tr key={i}>
+              <td className="k">{fmtUs(m.offset_us)}</td>
+              <td className="k" style={{ color: m.direction === "sent" ? "var(--info)" : "var(--ok)" }}>
+                {m.direction === "sent" ? "→" : "←"}
+              </td>
+              <td className="k">
+                {m.kind}
+                {m.event_type ? ` · ${m.event_type}` : ""}
+                {m.event_id ? ` #${m.event_id}` : ""}
+              </td>
+              <td className="k">{fmtBytes(m.size)}</td>
+              <td className="v">
+                {m.preview}
+                {m.preview_truncated ? " …" : ""}
+                {m.preview_is_hex ? <span className="faint"> (hex)</span> : null}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

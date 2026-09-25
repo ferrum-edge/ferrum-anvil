@@ -2200,6 +2200,9 @@ export interface LoadReport {
   warmup_included_in_metrics: boolean;
   destination_summary: string[];
   counts: LoadCounts;
+  /**
+   * Iterations started per second over the measured window.
+   */
   achieved_rate_per_sec: number;
   latency_success: LatencySummary;
   latency_failure: LatencySummary1;
@@ -2214,10 +2217,51 @@ export interface LoadReport {
   bytes_received: number;
   generator: GeneratorHealth;
   notes: string[];
+  requests?: RequestCounts;
+  /**
+   * Human label of the workload semantics (closed/open/iterations).
+   */
+  workload_label?: string;
+  /**
+   * Scheduled arrivals per second over the measured window (open workloads only).
+   */
+  offered_rate_per_sec?: number | null;
+  /**
+   * Length of the measured window (after warmup, until scheduling stopped).
+   */
+  measured_duration_secs?: number;
+  timeouts_censored?: CensoredTimeouts;
+  latency_setup?: LatencySummary3;
+  /**
+   * Mergeable serialized HDR histogram (V2 + DEFLATE, base64) of failure latency.
+   */
+  histogram_failure_b64?: string;
+  /**
+   * Negotiated application protocols observed (e.g. `http/1.1`, `h2`) → sends.
+   */
+  protocols?: [unknown, unknown][];
+  warmup_iterations_excluded?: number;
+  warmup_sends_excluded?: number;
+  /**
+   * SHA-256 of the canonical JSON of this report with this field unset;
+   * verified when a saved report is reopened.
+   */
+  integrity_sha256?: string | null;
 }
 /**
- * Counts that must balance: scheduled = started + dropped (open workloads);
- * started = completed + failed + canceled + in-flight-at-end.
+ * Iteration ledger of the measured window. One *iteration* is one arrival
+ * (open workload) or one pass of a virtual user / concurrency lane: a single
+ * request for a weighted mix, or the whole sequential chain.
+ *
+ * The counts always balance:
+ * * `scheduled = started + dropped` (only open workloads drop; closed and
+ *   iteration workloads schedule exactly what they start);
+ * * `started = completed + transport_failures + timeouts + canceled + in_flight_at_end`
+ *   — the five terminal classes are disjoint.
+ *
+ * `application_failures` and `assertion_failures` are *subsets* of
+ * `completed` (a complete response that failed at the application level or
+ * an assertion) and may overlap each other.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "LoadCounts".
@@ -2225,26 +2269,43 @@ export interface LoadReport {
 export interface LoadCounts {
   scheduled: number;
   started: number;
+  /**
+   * Open-workload arrivals not started because `max_in_flight` was reached.
+   */
   dropped: number;
+  /**
+   * Every step of the iteration received a complete response (any status).
+   */
   completed: number;
   /**
-   * Transport failures (no complete response).
+   * Ended by a transport failure other than a deadline (no complete response).
    */
   transport_failures: number;
   /**
-   * Complete responses with application failure (4xx/5xx, gRPC non-OK).
+   * Completed iterations with at least one application failure (4xx/5xx, gRPC non-OK).
    */
   application_failures: number;
+  /**
+   * Completed iterations with at least one failed assertion.
+   */
   assertion_failures: number;
   /**
-   * Requests that hit a deadline (censored latency).
+   * Ended by a deadline (censored latency; see [`CensoredTimeouts`]).
    */
   timeouts: number;
+  /**
+   * Ended by run cancellation (user cancel, abort rule, graceful-stop limit).
+   */
   canceled: number;
+  /**
+   * Started but with no known outcome when the report was produced (worker
+   * crash, or a send that ignored cancellation past the drain limit).
+   */
   in_flight_at_end: number;
 }
 /**
- * Latency of complete successful responses.
+ * Network-exchange latency (sum of attempt durations) of successful sends:
+ * complete response, application success, assertions passed or not run.
  */
 export interface LatencySummary {
   count: number;
@@ -2257,7 +2318,9 @@ export interface LatencySummary {
   p99_us: number;
 }
 /**
- * Latency of failed attempts (to failure time).
+ * Latency of failed sends to their failure point: transport failures,
+ * application failures and assertion failures. Timeouts (censored) and
+ * cancellations are excluded.
  */
 export interface LatencySummary1 {
   count: number;
@@ -2282,26 +2345,63 @@ export interface FailureSample {
   examples: string[];
 }
 /**
+ * One timeline bucket (send level, except `dropped`, which counts arrivals).
+ * Includes warmup seconds, flagged, which are excluded from summary metrics.
+ *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "TimeBucket".
  */
 export interface TimeBucket {
+  /**
+   * Bucket start, seconds from run start.
+   */
   second: number;
+  /**
+   * Sends started in the bucket.
+   */
   started: number;
+  /**
+   * Sends that received a complete response in the bucket (any status).
+   */
   completed: number;
+  /**
+   * Sends that failed in the bucket (transport, timeout, application or assertion).
+   */
   failures: number;
+  /**
+   * Arrivals dropped in the bucket (open workloads).
+   */
   dropped: number;
+  /**
+   * Successful-send latency percentiles of sends completing in the bucket.
+   */
   p50_us: number;
   p99_us: number;
+  /**
+   * Peak sends in flight during the bucket.
+   */
   in_flight: number;
+  warmup?: boolean;
+  /**
+   * p99 start lag (scheduled arrival → actual start) of arrivals in the bucket.
+   */
+  p99_schedule_lag_us?: number;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "GeneratorHealth".
  */
 export interface GeneratorHealth {
+  /**
+   * Peak process CPU (user + system time over wall time; 100 = one core).
+   * `None` when the platform measurement is unavailable.
+   */
   peak_cpu_percent?: number | null;
   peak_rss_bytes?: number | null;
+  /**
+   * Peak open file descriptors (sockets included), when measurable.
+   */
+  peak_open_fds?: number | null;
   /**
    * Maximum observed lag between a scheduled arrival and its start.
    */
@@ -2312,6 +2412,75 @@ export interface GeneratorHealth {
    */
   target_not_achieved: boolean;
   notes: string[];
+}
+/**
+ * Send ledger (see [`RequestCounts`]); equals `counts` for single-request iterations.
+ */
+export interface RequestCounts {
+  started: number;
+  completed: number;
+  transport_failures: number;
+  timeouts: number;
+  canceled: number;
+  in_flight_at_end: number;
+  /**
+   * Subset of `completed`.
+   */
+  application_failures: number;
+  /**
+   * Subset of `completed`.
+   */
+  assertion_failures: number;
+  /**
+   * Attempts that opened a new connection (engine evidence).
+   */
+  connections_opened: number;
+  /**
+   * Attempts served on a reused pooled connection.
+   */
+  connections_reused: number;
+}
+/**
+ * Sends abandoned at a deadline. Their elapsed time is a *lower bound* on the
+ * latency the target would have produced, so they are excluded from both
+ * latency distributions and summarised separately.
+ */
+export interface CensoredTimeouts {
+  count: number;
+  /**
+   * Smallest / largest configured deadline that elapsed, when recorded.
+   */
+  deadline_ms_min?: number | null;
+  deadline_ms_max?: number | null;
+  elapsed_at_timeout: LatencySummary2;
+  label: string;
+}
+/**
+ * Elapsed time when each send was abandoned (censored values, not latencies).
+ */
+export interface LatencySummary2 {
+  count: number;
+  min_us: number;
+  max_us: number;
+  mean_us: number;
+  p50_us: number;
+  p90_us: number;
+  p95_us: number;
+  p99_us: number;
+}
+/**
+ * Local time around the network exchange: preparation, token
+ * acquisition/refresh, retry backoff and record assembly.
+ */
+export interface LatencySummary3 {
+  count: number;
+  min_us: number;
+  max_us: number;
+  mean_us: number;
+  p50_us: number;
+  p90_us: number;
+  p95_us: number;
+  p99_us: number;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -2948,7 +3117,7 @@ export interface SettingsOverrides3 {
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "LatencySummary".
  */
-export interface LatencySummary2 {
+export interface LatencySummary4 {
   count: number;
   min_us: number;
   max_us: number;
@@ -2957,4 +3126,59 @@ export interface LatencySummary2 {
   p90_us: number;
   p95_us: number;
   p99_us: number;
+}
+/**
+ * Send ledger of the measured window: one entry per `Engine::execute` call.
+ * Balances like [`LoadCounts`]:
+ * `started = completed + transport_failures + timeouts + canceled + in_flight_at_end`.
+ *
+ * `completed` means a complete response was received for a request/response
+ * protocol. Datagram and stream denominators (UDP datagrams sent/received,
+ * WebSocket messages, gRPC stream messages) are not modelled here: the load
+ * engine refuses non-HTTP requests rather than implying delivery (LOAD-013).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "RequestCounts".
+ */
+export interface RequestCounts1 {
+  started: number;
+  completed: number;
+  transport_failures: number;
+  timeouts: number;
+  canceled: number;
+  in_flight_at_end: number;
+  /**
+   * Subset of `completed`.
+   */
+  application_failures: number;
+  /**
+   * Subset of `completed`.
+   */
+  assertion_failures: number;
+  /**
+   * Attempts that opened a new connection (engine evidence).
+   */
+  connections_opened: number;
+  /**
+   * Attempts served on a reused pooled connection.
+   */
+  connections_reused: number;
+}
+/**
+ * Sends abandoned at a deadline. Their elapsed time is a *lower bound* on the
+ * latency the target would have produced, so they are excluded from both
+ * latency distributions and summarised separately.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "CensoredTimeouts".
+ */
+export interface CensoredTimeouts1 {
+  count: number;
+  /**
+   * Smallest / largest configured deadline that elapsed, when recorded.
+   */
+  deadline_ms_min?: number | null;
+  deadline_ms_max?: number | null;
+  elapsed_at_timeout: LatencySummary2;
+  label: string;
 }

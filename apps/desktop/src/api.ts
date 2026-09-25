@@ -5,6 +5,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
   AttachmentRef,
+  Dataset,
+  LoadCounts,
+  LatencySummary,
+  LoadPlan,
+  LoadReport,
+  RunCompletion,
+  TimeBucket,
   DiagnosticFinding,
   Environment,
   ExecutionEvent,
@@ -26,6 +33,9 @@ import type {
 export type {
   AppSettings,
   AttachmentRef,
+  Dataset,
+  LoadPlan,
+  LoadReport,
   DiagnosticFinding,
   Environment,
   ExecutionEvent,
@@ -176,6 +186,117 @@ export interface SendInput {
   run_override?: SettingsOverrides | null;
 }
 
+// ------------------------------------------------------------------ load
+export interface LoadPreflight {
+  destinations: string[];
+  workload: string;
+  max_duration_secs: number;
+  peak_target: number;
+  dataset_rows?: number | null;
+  trusted: boolean;
+  warnings: string[];
+}
+export interface LoadReportSummary {
+  run_id: string;
+  plan_id: string;
+  plan_name: string;
+  started_at: string;
+  completion: RunCompletion;
+  partial: boolean;
+  achieved_rate_per_sec: number;
+  started: number;
+  failures: number;
+  p95_us: number;
+}
+export interface LoadProgress {
+  run_id: string;
+  elapsed_secs: number;
+  phase: "warmup" | "measuring" | "draining";
+  in_flight: number;
+  snapshot: {
+    counts: LoadCounts;
+    achieved_rate_per_sec: number;
+    offered_rate_per_sec?: number | null;
+    latency_success: LatencySummary;
+    latency_failure: LatencySummary;
+    status_distribution: [number, number][];
+    failure_categories: { category: string; count: number; examples: string[] }[];
+    measured_duration_secs: number;
+  };
+  timeline_from: number;
+  timeline_delta: TimeBucket[];
+}
+export interface LoadComparison {
+  run_a: string;
+  run_b: string;
+  compatible: boolean;
+  differences: { aspect: string; a: string; b: string; impact: string; explanation: string }[];
+  summary: string;
+}
+
+// ----------------------------------------------------------- spec import
+export type SpecInput = { kind: "path"; path: string } | { kind: "text"; text: string; name: string };
+export interface ImportOptions {
+  mode: "blank" | "sample";
+  seed: number;
+  group_by: "tags" | "paths";
+  include_optional: boolean;
+  server_index: number;
+  include_credentials: boolean;
+  max_operations: number;
+  max_bytes: number;
+  max_ref_depth: number;
+  max_nodes: number;
+  max_ref_expansions: number;
+  max_sample_nodes: number;
+}
+export const DEFAULT_IMPORT_OPTIONS: ImportOptions = {
+  mode: "sample",
+  seed: 0,
+  group_by: "tags",
+  include_optional: false,
+  server_index: 0,
+  include_credentials: false,
+  max_operations: 5000,
+  max_bytes: 32 * 1024 * 1024,
+  max_ref_depth: 32,
+  max_nodes: 2_000_000,
+  max_ref_expansions: 250_000,
+  max_sample_nodes: 20_000,
+};
+export interface SpecFinding {
+  code: string;
+  pointer: string;
+  message: string;
+}
+export interface SpecImportReport {
+  warnings: SpecFinding[];
+  unsupported: SpecFinding[];
+  external_refs: { reference: string; kind: string; pointers: string[]; requires_approval: boolean }[];
+  scripts: { pointer: string; owner: string; event: string; language: string }[];
+  inactive_settings: { pointer: string; setting: string; value: string; reason: string }[];
+  redactions: { pointer: string; field: string; placeholder: string }[];
+  required_variables: { name: string; secret: boolean; reason: string; pointers: string[] }[];
+  counts: { operations_found: number; requests: number; folders: number; environments: number; skipped_operations: number; warnings: number };
+}
+export interface SpecPreview {
+  detected: { kind: string; dialect: string; syntax: string; declared_version?: string | null; note?: string | null };
+  title?: string | null;
+  report: SpecImportReport;
+  folders: number;
+  requests: number;
+  environments: number;
+  sample: string[];
+}
+export interface SpecImported {
+  workspace_id: string;
+  root_folder_id?: string | null;
+  import_id: string;
+  requests: number;
+  report: SpecImportReport;
+}
+export type SpecTarget = { kind: "new_workspace" } | { kind: "workspace"; workspace_id: string };
+
 export const api = {
   status: () => call<Status>("app_status"),
   systemInfo: () => call<SystemInfo>("system_info"),
@@ -237,12 +358,38 @@ export const api = {
   importPreview: (path: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { path, passphrase, conflictPolicy }),
   importApply: (path: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_apply", { path, passphrase, conflictPolicy }),
   attachmentAdd: (path: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { path, mediaType }),
+
+  loadPlans: (workspaceId: string) => call<LoadPlan[]>("load_plans", { workspaceId }),
+  saveLoadPlan: (plan: LoadPlan) => call<LoadPlan>("load_plan_save", { plan }),
+  deleteLoadPlan: (planId: string) => call<void>("load_plan_delete", { planId }),
+  loadPreflight: (planId: string) => call<LoadPreflight>("load_preflight", { planId }),
+  loadRunStart: (planId: string, acknowledged: boolean) => call<string>("load_run_start", { planId, acknowledged }),
+  loadRunCancel: (runKey: string) => call<boolean>("load_run_cancel", { runKey }),
+  loadReports: (workspaceId: string) => call<LoadReportSummary[]>("load_reports", { workspaceId }),
+  loadReport: (runId: string) => call<LoadReport>("load_report", { runId }),
+  deleteLoadReport: (runId: string) => call<void>("load_report_delete", { runId }),
+  exportLoadReport: (runId: string, format: "json" | "csv" | "timeline_csv" | "html", path: string) => call<number>("load_report_export", { runId, format, path }),
+  compareLoadReports: (a: string, b: string) => call<LoadComparison>("load_compare", { a, b }),
+  datasets: (workspaceId: string) => call<Dataset[]>("datasets_list", { workspaceId }),
+  addDataset: (workspaceId: string, path: string, name: string, sensitiveColumns: string[]) =>
+    call<Dataset>("dataset_add", { workspaceId, path, name, sensitiveColumns }),
+
+  specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
+  specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
   readTextFile: (path: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
     call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { path, workspaceId, storeAsSecret, base64 }),
 };
 
 export function onExecutionEvent(cb: (e: ExecutionEvent) => void): Promise<UnlistenFn> {
   return listen<ExecutionEvent>("execution-event", (ev) => cb(ev.payload));
+}
+
+export function onLoadProgress(cb: (e: { run_key: string; progress: LoadProgress }) => void): Promise<UnlistenFn> {
+  return listen<{ run_key: string; progress: LoadProgress }>("load-progress", (ev) => cb(ev.payload));
+}
+
+export function onLoadFinished(cb: (e: { run_key: string; run_id?: string | null; error?: string | null }) => void): Promise<UnlistenFn> {
+  return listen<{ run_key: string; run_id?: string | null; error?: string | null }>("load-finished", (ev) => cb(ev.payload));
 }
 
 export function onLocked(cb: (reason: string) => void): Promise<UnlistenFn> {

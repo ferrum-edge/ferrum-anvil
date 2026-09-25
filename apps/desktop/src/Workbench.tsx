@@ -7,6 +7,7 @@ import type { Environment, RequestDefinition, Workspace } from "./generated/cont
 import { EnvironmentsDialog, ExportDialog, ImportDialog, ProfilesDialog, SettingsDialog } from "./Dialogs";
 import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
 import { ResponsePanel } from "./ResponsePanel";
+import { LoadView } from "./LoadView";
 import { Modal, Toast, uid } from "./ui";
 
 interface OpenTab {
@@ -31,6 +32,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [side, setSide] = useState<"tree" | "history">("tree");
+  const [view, setView] = useState<"requests" | "load">("requests");
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [profiles, setProfiles] = useState<Profiles>({ tls: [], proxy: [], integrations: [] });
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -283,6 +285,20 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           ))}
           <option value="__manage">Manage environments…</option>
         </select>
+        <div className="viewswitch" role="group" aria-label="View">
+          <button aria-pressed={view === "requests"} onClick={() => setView("requests")}>
+            Requests
+          </button>
+          <button
+            aria-pressed={view === "load"}
+            onClick={() => {
+              setView("load");
+              void loadTree();
+            }}
+          >
+            Load tests
+          </button>
+        </div>
         <span className="spacer" />
         <button className="btn ghost" onClick={() => setDialog("profiles")}>
           Profiles
@@ -301,7 +317,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         </button>
       </header>
 
-      <div className="main" style={{ ["--sidebar-w" as string]: `${sideW}px` }}>
+      {view === "load" && ws && <LoadView workspaceId={ws.id} tree={tree} environments={envs} notify={notify} />}
+      <div className="main" style={{ ["--sidebar-w" as string]: `${sideW}px`, display: view === "requests" ? undefined : "none" }}>
         <aside className="sidebar" aria-label="Collections and history">
           <div className="side-tabs" role="tablist">
             <button className="side-tab" role="tab" aria-selected={side === "tree"} onClick={() => setSide("tree")}>
@@ -461,6 +478,15 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       {dialog === "export" && <ExportDialog workspace={ws} onClose={() => setDialog(null)} notify={notify} />}
       {dialog === "import" && (
         <ImportDialog
+          workspaceId={ws?.id ?? null}
+          workspaceName={ws?.name ?? null}
+          onSpecImported={async (r) => {
+            setDialog(null);
+            const missing = r.report.required_variables.length;
+            notify(`Imported ${r.requests} request(s). Nothing was sent.${missing ? ` Fill in ${missing} variable(s) before sending.` : ""}`);
+            await loadWorkspaces(r.workspace_id);
+            await loadTree();
+          }}
           onClose={() => setDialog(null)}
           onImported={async (ids) => {
             notify(`Imported ${ids.length} workspace(s). Nothing was run.`);

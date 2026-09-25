@@ -219,3 +219,15 @@ details.evidence summary { cursor: pointer; color: var(--text-2); font-size: 12p
 .progress { height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); background-size: 200% 100%; animation: slide 1.1s linear infinite; }
 @keyframes slide { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .progress { animation: none; background: var(--accent); } }
+
+/* ---------- load view ---------- */
+fieldset.box { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 8px; margin: 0; }
+fieldset.box legend { color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 0 4px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.card { background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+.card-label { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px; }
+.card-value { font-size: 20px; font-weight: 700; font-family: var(--mono); }
+.hist-row.selected { background: var(--bg-active); }
+.viewswitch { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.viewswitch button { border: none; background: transparent; padding: 5px 12px; cursor: pointer; color: var(--text-2); }
+.viewswitch button[aria-pressed="true"] { background: var(--bg-active); color: var(--text); }

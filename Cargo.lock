@@ -282,6 +282,8 @@ dependencies = [
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
+ "anvil-import",
+ "anvil-load",
  "anvil-portability",
  "anvil-storage",
  "anvil-transport",
