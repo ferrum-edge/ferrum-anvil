@@ -19,6 +19,7 @@ use crate::gateway::{self, Gateway};
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
 use crate::profiles::{BoxFut, Profile, RunArgs};
 use crate::scenario::{CheckKind, Checks, ScenarioResult};
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::diagnostics::{Confidence, Owner, SourceScope};
 use anvil_domain::execution::{FailureKind, Phase, TlsObservation, TlsVerification};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
@@ -731,6 +732,77 @@ fn tls016(env: &Env) -> Fut<'_> {
     })
 }
 
+/// AUTH-026: a certificate-bound token (cnf.x5t#S256) presented over a
+/// connection authenticated with a different — but valid — client
+/// certificate. The TLS layer accepts both identities; only the token
+/// binding differs, so the refusal is an HTTP 401, never a TLS failure.
+fn auth026(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let url = format!("{HTTPS}/tls/bound-token/echo");
+        let token = env.fx.bound_token(&env.fx.pki.client_good.cert);
+        let with = |cl: &Client<'_>| {
+            let mut x = https(env, &url, cl);
+            let auth = AuthConfig::Bearer { token: SensitiveValue::template(&token), prefix: "Bearer".into() };
+            x.spec.auth = auth.clone();
+            x.auth_layers = vec![("request".into(), auth)];
+            x
+        };
+        let bound = go(env, &with(&Client::lab(env, Some(&env.fx.pki.client_good)))).await;
+        c.success(CheckKind::Diagnosis, &bound);
+        let (before, from) = (env.fx.echo.log.count_requests(), env.gw.log_lines().len());
+        let o = go(env, &with(&Client::lab(env, Some(&env.fx.pki.client_unmapped)))).await;
+        c.status_in(&o, &[401]);
+        let body = o.decoded_body.as_ref().unwrap_or(&o.body);
+        let err =
+            serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
+        c.add(
+            CheckKind::GroundTruth,
+            "gateway body error is \"mTLS binding mismatch\"",
+            err.as_deref() == Some("mTLS binding mismatch"),
+            format!("{err:?}"),
+        );
+        c.has(&o, "http.unauthorized");
+        c.absent_prefix(&o, "client.tls.");
+        if env.trusted {
+            c.has(&o, "ferrum.outcome");
+            c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
+        }
+        let prefix_advice: Vec<String> = o
+            .record
+            .findings
+            .iter()
+            .flat_map(|f| f.remediation.iter())
+            .map(|r| r.text.to_lowercase())
+            .filter(|t| t.contains("prefix") || t.contains("bearer spelling"))
+            .collect();
+        c.add(
+            CheckKind::Diagnosis,
+            "no advice to change the bearer prefix/spelling",
+            prefix_advice.is_empty(),
+            format!("{prefix_advice:?}"),
+        );
+        record_excludes(&mut c, &o, &token, "the bound access token");
+        c.add(CheckKind::GroundTruth, "the backend was not reached", echo_since(env, before) == 0, "");
+        let lines = op_lines(&env.gw, from, "tls-bound-token");
+        c.add(
+            CheckKind::GroundTruth,
+            "gateway logged a 401 for the bound-token route",
+            lines.iter().any(|l| l.contains("401")),
+            format!("{lines:?}"),
+        );
+        // Recovery: a token bound to the certificate actually presented.
+        let rebound = env.fx.bound_token(&env.fx.pki.client_unmapped.cert);
+        let mut r = https(env, &url, &Client::lab(env, Some(&env.fx.pki.client_unmapped)));
+        let auth = AuthConfig::Bearer { token: SensitiveValue::template(&rebound), prefix: "Bearer".into() };
+        r.spec.auth = auth.clone();
+        r.auth_layers = vec![("request".into(), auth)];
+        let r = go(env, &r).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
+    })
+}
+
 // ---------------------------------------------------- TCP+TLS and DTLS
 
 fn tls008_tcp(env: &Env) -> Fut<'_> {
@@ -1116,6 +1188,7 @@ pub fn all() -> Vec<Def> {
         Def { id: "TLS-014", title: "mTLS connection not reused across security contexts", run: tls014 },
         Def { id: "TLS-015", title: "Verification bypass is scoped and warned", run: tls015 },
         Def { id: "TLS-016", title: "TLS off versus verification off", run: tls016 },
+        Def { id: "AUTH-026", title: "Certificate-bound token presented with another valid client certificate", run: auth026 },
         Def { id: "TLS-008.tcp", title: "Valid mTLS on the TCP+TLS stream listener", run: tls008_tcp },
         Def { id: "TLS-005.tcp", title: "No client certificate on the TCP+TLS stream listener", run: tls005_tcp },
         Def { id: "PROTO-022", title: "DTLS listener with valid client identity", run: proto022 },

@@ -1213,11 +1213,6 @@ fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
             "infeasible on Ferrum Edge 0.9.5: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4); AUTH-025 covers the replay half live",
         ),
         (
-            "AUTH-026",
-            "Certificate-bound token",
-            "needs an mTLS frontend plus jwks_auth require_mtls_binding; the auth profile is plaintext and the tls profile does not carry a JWKS issuer yet — not covered in this lab pass",
-        ),
-        (
             "AUTH-029",
             "SOAP UsernameToken",
             "soap_ws_security exists in 0.9.5 but this lab pass has no signed-SOAP/UsernameToken fixture set; not covered yet",

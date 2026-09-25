@@ -1,6 +1,6 @@
 # Ferrum Anvil failure lab - profile "tls" (ferrum-edge v0.9.5, file mode)
 #
-# Scenarios: TLS-001/002/005/006/008/009/013..016 (frontend mTLS on HTTPS 127.0.0.1:18343),
+# Scenarios: TLS-001/002/005/006/008/009/013..016 and AUTH-026 (frontend mTLS on HTTPS 127.0.0.1:18343),
 #            UP-004..UP-008 and UP-016 (backend TLS, via plaintext listener 127.0.0.1:18380),
 #            PROTO-022 (DTLS mTLS on UDP 127.0.0.1:18301), TCP+TLS mTLS on 127.0.0.1:18302.
 # Settings:  tls.conf. Fixtures: 127.0.0.1:19300-19399.
@@ -18,9 +18,9 @@
 version: "1"
 
 resource_counts:
-  proxies: 14
+  proxies: 15
   consumers: 1
-  plugin_configs: 2
+  plugin_configs: 3
   upstreams: 0
 
 proxies:
@@ -46,6 +46,19 @@ proxies:
     pool_enable_http2: false
     plugins:
       - plugin_config_id: tls-mtls-auth
+
+  # AUTH-026: certificate-bound access token (RFC 8705 cnf.x5t#S256) checked by jwks_auth
+  # against the client certificate of this very connection. JWKS from the lab issuer on
+  # 19313 (must be up before the gateway starts).
+  - id: tls-bound-token
+    listen_path: /tls/bound-token
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19309
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: tls-bound-token
 
   # ---- backend TLS (requests over http://127.0.0.1:18380) -------------------
   # Positive control: fixture presents backend-good.pem (SAN localhost,127.0.0.1).
@@ -205,6 +218,18 @@ plugin_configs:
     scope: global
     enabled: true
     config: {}
+
+  - id: tls-bound-token
+    plugin_name: jwks_auth
+    scope: proxy
+    proxy_id: tls-bound-token
+    enabled: true
+    config:
+      providers:
+        - jwks_uri: "http://127.0.0.1:19313/.well-known/jwks.json"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+          require_mtls_binding: true
 
   - id: tls-mtls-auth
     plugin_name: mtls_auth
