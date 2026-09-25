@@ -15,6 +15,7 @@
 //! same user; use only in isolated CI). Keychain profiles unlock automatically.
 
 mod collection;
+mod specs_load;
 
 use anvil_app::App;
 use anvil_app::exec::SendOptions;
@@ -69,6 +70,13 @@ enum Cmd {
     Send(SendArgs),
     /// Run a scenario or every request of a folder (collection runner).
     Run(RunArgs),
+    /// Import an API spec or collection (OpenAPI, WSDL, Postman, Insomnia, cURL, HAR).
+    ImportSpec(specs_load::ImportSpecArgs),
+    /// Load plans, runs (in a worker process) and reports.
+    Load {
+        #[command(subcommand)]
+        cmd: specs_load::LoadCmd,
+    },
     /// Manage collection-runner scenarios.
     Scenario {
         #[command(subcommand)]
@@ -381,8 +389,21 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // `anvil` re-launches itself as the load worker (job on stdin). Exit
+    // directly: dropping the runtime would wait on the blocking stdin reader.
+    if std::env::args_os().nth(1).is_some_and(|a| a == specs_load::LOAD_WORKER_FLAG) {
+        anvil_transport::init();
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+        let code = rt.block_on(anvil_load::worker::run_stdio());
+        std::process::exit(code);
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+    let code = rt.block_on(cli_main());
+    std::process::exit(code);
+}
+
+async fn cli_main() -> i32 {
     anvil_transport::init();
     let cli = match Cli::try_parse() {
         Ok(c) => c,
@@ -391,17 +412,16 @@ async fn main() {
             // are local errors (3), not assertion failures (clap's default 2).
             let code = if e.use_stderr() { 3 } else { 0 };
             let _ = e.print();
-            std::process::exit(code);
+            return code;
         }
     };
-    let code = match run(cli).await {
+    match run(cli).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e:#}");
             3
         }
-    };
-    std::process::exit(code);
+    }
 }
 
 async fn run(cli: Cli) -> Result<i32> {
@@ -608,6 +628,8 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             })
         }
         Cmd::Run(a) => collection::run_collection(&app, a).await,
+        Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),
+        Cmd::Load { cmd } => specs_load::load_cmd(&app, cmd).await,
         Cmd::Scenario { cmd } => collection::scenario_cmd(&app, cmd),
         Cmd::History { workspace, limit } => {
             let ws = match workspace {

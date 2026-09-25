@@ -264,6 +264,8 @@ dependencies = [
  "anvil-domain",
  "anvil-engine",
  "anvil-fixtures",
+ "anvil-import",
+ "anvil-load",
  "anvil-portability",
  "anvil-runner",
  "anvil-storage",
