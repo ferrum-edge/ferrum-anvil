@@ -57,7 +57,7 @@ gateway processes; afterwards `pgrep -fl ferrum-edge` shows none from the run.
 | Profile | Gateway listeners | Fixtures |
 |---|---|---|
 | `tls` | instance A (`tls.conf`/`tls.yaml`): HTTP 18380, HTTPS 18343 (client certificate **mandatory**, TLS 1.2–1.3), admin 18390, DTLS 18301/udp (client certificate mandatory), TCP+TLS 18302 (same). Instance B (`tls.tls12.conf`/`tls.tls12.yaml`): HTTPS 18344 (mTLS, **TLS 1.2 only**), admin 18391 | 19301 TLS backend (trusted), 19302 self-signed, 19303 wrong name, 19304 TLS 1.3 requiring a client certificate, 19305 the same on TLS 1.2, 19306 accepts TCP and never answers the ClientHello, 19307 plaintext HTTP, 19308 TLS (for the plaintext-to-TLS case), 19309 echo, 19310 UDP echo, 19311 TCP echo, 19312 expired backend certificate, 19313 JWKS of the lab issuer (AUTH-026). All backend TLS fixtures offer only `http/1.1` so the gateway's startup capability probe keeps every route on the audited reqwest HTTP/1 path. |
-| `auth` | HTTP 18180, admin 18190 | 19101 echo, 19102 identity provider (JWKS, RFC 7662 introspection, client-credentials token endpoint), 19103 second JWKS host (switched off mid-run), 19106 LDAP directory; 19104 and 19107 deliberately unbound |
+| `auth` | HTTP 18180, admin 18190 | 19101 echo, 19102 identity provider (JWKS, RFC 7662 introspection, client-credentials and authorization-code token endpoint, OIDC discovery, login page), 19103 second JWKS host (switched off mid-run), 19106 LDAP directory; 19104 and 19107 deliberately unbound |
 
 The second tls instance exists because `FERRUM_TLS_MAX_VERSION` is
 process-wide: the TLS-1.2 refusal shape and the version-mismatch scenario
@@ -70,6 +70,24 @@ would. Anvil never mints issuer tokens; scenarios hand them to it as a
 bearer/DPoP access token, as a user would. The LDAP fixture implements the
 simple-bind + base-search flow `ldap_auth` uses (bounded BER, no password
 logging); it verifies adapter behaviour, not any real directory.
+
+**Signed SOAP fixtures (AUTH-030/031).** Anvil does not sign XML: X.509
+XML signing is unavailable in Anvil (the WS-Security auth profile offers
+UsernameToken and embeds a *user-supplied* SAML assertion verbatim; a
+pre-signed envelope is sent as the request body, byte for byte). For these
+scenarios the lab plays the external signer and the SAML identity provider,
+with audited tools already on the host and never a hand-written
+canonicalizer: libxml2's Exclusive XML Canonicalization (`xmllint
+--exc-c14n`, the implementation xmlsec1 also uses) and OpenSSL RSA-SHA256.
+Throwaway RSA-2048 keys and self-signed certificates are generated per run
+under `lab/.run/auth/soap/` and trusted only by the lab gateway's routes. Each
+signed element is canonicalized in a standalone form declaring exactly the
+namespaces it visibly uses, so it equals the in-context exclusive canonical
+form; the gateway's own, independent canonicalizer accepting the result is
+the cross-check. `xmlsec1` is not installed on this host and was not
+downloaded. Without `xmllint`, AUTH-030/031 are reported as skipped with that
+reason; `openssl` is required to start the auth profile at all (the gateway
+config references the certificates).
 
 ## `tls` scenarios
 
@@ -158,6 +176,13 @@ records redact `WWW-Authenticate`.
 | GW-011 | GW-011 | alice's key on an ACL route → 403 `Consumer is not allowed` | Authorization category, never "invalid password", never WAF |
 | AUTH-X04 | — | Valid gateway key; the **backend** answers 401 `{"error":"Invalid API key"}` (byte-identical to key_auth) | Not attributed to the gateway: `ferrum.relayed_backend_response` (likely, upstream application), no `ferrum.outcome*` |
 | AUTH-X05 | — | No auth plugin; the backend answers 401 `Authentication required` + `WWW-Authenticate: ferrum-edge` | Same: the gateway's own fallback challenge, copied by a backend, is not a gateway rejection |
+| AUTH-029 | AUTH-029 | `soap_ws_security` PasswordDigest (in-process nonce store, 2 s clock skew): Anvil's WS-Security auth → 200; wrong password → 401 `WS-Security: invalid credentials`; an envelope Anvil's own signer produced, captured and sent twice as raw bytes → 200, then 401 `WS-Security: nonce replay detected` | Anvil sent the captured bytes verbatim (body hash); the replay rejection is a generic 401 plus a gateway-outcome claim ≤ likely; no confirmed claim about the password, signature, expiry or replay; the password never on the wire and never in the record; three fresh Anvil envelopes in a row accepted (fresh nonce and `Created` per send — the load path is covered by `crates/anvil-load/tests/load_wsse.rs`) |
+| AUTH-029.text | AUTH-029 | PasswordText with `remove_credential` → 200; the right password sent as PasswordText to the PasswordDigest route → 401 `WS-Security: Password Type does not match the configured password_type` | The backend received the envelope without the password; the profile mismatch is not reported as a wrong password; password not recorded |
+| AUTH-029.expired | AUTH-029 | An envelope Anvil generated with a 1 s Timestamp lifetime, sent raw 4 s later → 401 `WS-Security: Timestamp has expired` | Generic 401, no confirmed expiry/clock claim (0.9.5 renders all WS-Security structural rejections as one `{"error":"<message>"}` family, so no gateway outcome is claimed); backend untouched; a fresh envelope recovers |
+| AUTH-030 | AUTH-030 | `x509_signature` (RSA-SHA256, exclusive C14N, Body and Timestamp signed): lab-signed envelope → 200; the signed Body altered after signing → 401 `WS-Security: Reference digest mismatch`; a valid signature by an untrusted key → 401 `WS-Security: signing certificate is not trusted` | Anvil sent the signed envelope byte for byte (body hash; the backend received exactly those bytes); a certificate problem inside XML is never reported as a TLS failure (`client.tls.*` absent); no confirmed signature/certificate claim; backend untouched on rejection; a freshly signed envelope recovers |
+| AUTH-031 | AUTH-031 | `saml` (+ PasswordDigest UsernameToken): Anvil embeds a lab-issued signed SAML 2.0 bearer assertion verbatim → 200; the same assertion again → 401 `WS-Security: SAML assertion has already been used`; wrong audience, expired, untrusted issuer and untrusted signing certificate → their 401s | The backend received the assertion byte for byte; the assertion's signature never appears in the record; replay gets a gateway outcome ≤ likely, the other rejections a generic 401 with no confirmed SAML claim; a new assertion recovers (a SAML bearer assertion is single-use by design) |
+| AUTH-017 | AUTH-017 | `oidc_relying_party` (discovery at the lab IdP). Ground truth first: the lab's raw-HTTP "system browser" completes the real login (gateway 302 → IdP login page → credentials → callback → session cookie → 200). Then Anvil, without that cookie: API request → 401 `Authentication required` + `Bearer realm="oidc"`; browser-shaped request (`Accept: text/html`) → 302, followed to the IdP login page (200 HTML) | `auth.browser_session_required` (likely) says the request stopped at a login step, that a browser session stays in the browser and Anvil never imports browser cookies, and names the supported paths (an API credential or an explicitly configured, authorized session cookie); the followed login page is recorded as application **not evaluated**, never success; Anvil sent no Cookie, never submitted IdP credentials and carried no Authorization/Cookie to the IdP. Recovery: the session cookie configured explicitly as a secret → 200, and its value never appears in the record |
+| AUTH-017.lookalike | AUTH-017 | An ordinary backend redirect (even one whose target mentions `client_id`) and a backend 401 with a plain `Bearer` challenge | No `auth.browser_session_required`; the redirect stays a successful exchange |
 
 ## Skipped scenarios (never counted as passes)
 
@@ -168,9 +193,8 @@ records redact `WWW-Authenticate`.
 | TLS-012 | Infeasible: every 0.9.5 TLS listener (HTTPS and TCP+TLS share one rustls config) offers `h2`, `http/1.1`, `acme-tls/1`; every Anvil HTTP policy offers one of the first two. |
 | TLS-017, TLS-018 | Out of this profile (forward-proxy leg; Anvil's own redirect policy). |
 | AUTH-011..014 | Client-side OAuth flows with no gateway leg; covered by anvil-auth unit tests. |
-| AUTH-017 | Needs an interactive system-browser session with `oidc_relying_party`. |
 | AUTH-025.nonce | Infeasible: 0.9.5 has no DPoP-Nonce / `use_dpop_nonce` challenge. |
-| AUTH-029..031 | `soap_ws_security` exists in 0.9.5, but this pass has no signed-SOAP/SAML fixture set; not covered yet. |
+| AUTH-030, AUTH-031 (conditional) | Only on hosts without `xmllint`: the lab cannot produce signed fixtures without an audited canonicalizer, and Anvil itself never signs XML. Present on this host, so both ran live. |
 
 ## Diagnostics fixes found by these profiles
 
@@ -199,6 +223,20 @@ records redact `WWW-Authenticate`.
    replaces the gateway attribution. Genuine gateway rejections, foreign `Via`
    hops, untrusted destinations and gateway-built upstream failures are
    unchanged. Tests: `crates/anvil-diagnostics/tests/lab_via_relay.rs`.
+4. **A login page reported as a successful API exchange** (AUTH-017). A
+   browser-shaped request to the OIDC route was redirected to the identity
+   provider; Anvil followed it and reported the provider's 200 login page as
+   a complete success, with nothing explaining that a browser session is not
+   shared. New rule `auth.session` emits `auth.browser_session_required`
+   (likely) from typed evidence only — a followed redirect or a 3xx
+   `Location` carrying the RFC 6749 authorization-request parameters
+   (`response_type` and `client_id`), or a 401 challenge naming the `oidc`
+   realm — and `Diagnosis.stopped_at_login` makes the engine record such an
+   exchange as application *not evaluated* (one line in
+   `crates/anvil-engine/src/record.rs`). Ordinary redirects, plain bearer
+   challenges and requests sent directly to an authorization endpoint are
+   unchanged. Tests: `crates/anvil-diagnostics/tests/lab_browser_session.rs`.
+   Catalog version `2026.09.25-7`.
 
 ## Gateway behaviour observed live (0.9.5, macOS arm64)
 
@@ -224,6 +262,17 @@ records redact `WWW-Authenticate`.
 - `oauth2_introspection` / `ldap_auth` dependency outages are distinguishable
   (503 / 500, no challenge) from credential rejections (401 + challenge).
 - Plugin rejections carry no `Via`; relayed backend responses do.
+- `soap_ws_security`: one identity-establishing instance per proxy and no
+  other auth plugin beside it; credentials are inline plaintext in the plugin
+  (PasswordDigest needs the plaintext); the nonce replay store keys on the
+  nonce alone; a SAML assertion id is single-use; X.509 trust is an exact
+  certificate (SHA-256 fingerprint), RSA only. The gateway's in-house
+  exclusive canonicalizer agreed with libxml2's on every signed fixture.
+- `oidc_relying_party`: browser vs API is decided by `Accept: text/html`
+  (GET/HEAD); the API branch answers 401 with `Bearer realm="oidc",
+  error="invalid_token"`; the browser branch 302s with a sealed correlation
+  cookie; discovery is fetched in the background after startup (browser
+  requests get 503 `OIDC discovery unavailable` until then).
 
 ## Known limitations
 
@@ -242,6 +291,18 @@ records redact `WWW-Authenticate`.
   disabled pseudonym falls back to the previous (body-based, likely) behaviour.
 - Both profiles need a free port block (18180/18190, 19100–19199; 18380,
   18343, 18344, 18390, 18391, 18301, 18302, 19300–19399).
+- WS-Security rejections other than `invalid credentials`, `nonce replay
+  detected` and `SAML assertion has already been used` are recorded in the
+  0.9.5 outcome catalog as one `{"error":"{message}"}` family, so Anvil gives
+  them only the generic 401 meaning (no gateway attribution, no specific
+  cause). Honest, but less specific than the body text.
+- AUTH-030/031 depend on `xmllint` and `openssl` on the host (signed fixtures
+  are generated per run; nothing signed is committed). Anvil has no XML
+  signer; a user must bring a pre-signed envelope or a signed assertion.
+- AUTH-017 drives the browser side with a raw HTTP client, not a real
+  browser; the IdP login page is a fixture. The recovery path shown is an
+  explicitly configured session cookie (the lab route carries only the OIDC
+  plugin, so the API-token path is not exercised here).
 
 ## Stability
 
@@ -253,7 +314,8 @@ as passes.
 
 | Batch | tls (per run) | auth (per run) |
 |---|---|---|
-| Final code (HEAD), 3 consecutive runs | 66 passed, 0 failed, 7 skipped ×3 | 62 passed, 0 failed, 9 skipped ×3 |
+| With AUTH-017/029/030/031 live (current), 4 consecutive auth runs + 1 tls run | 66 passed, 0 failed, 7 skipped ×1 | 76 passed, 0 failed, 5 skipped ×4 |
+| Before AUTH-017/029/030/031, 3 consecutive runs | 66 passed, 0 failed, 7 skipped ×3 | 62 passed, 0 failed, 9 skipped ×3 |
 | Before AUTH-026 moved into tls, 5 consecutive runs | 64 passed, 0 failed, 7 skipped ×5 | 62 passed, 0 failed, 10 skipped ×5 |
 | With AUTH-026 in tls, 5 consecutive runs | 66 passed, 0 failed, 7 skipped ×5 | 62 passed, 0 failed, 9 skipped ×5 |
 
@@ -268,7 +330,14 @@ lab.
 
 The `core` profile (`run core --untrusted-pass`, 36 scenarios) could not be
 re-run from this worktree while this work was done: another session held the
-core port block with `anvil-lab up core`. None of the three diagnostics
-changes can fire on core's evidence (no UDP/DTLS, no TLS client leg, no
-authentication or authorization catalog candidates), and the engine and
+core port block with `anvil-lab up core`. None of the diagnostics changes
+can fire on core's evidence (no UDP/DTLS, no TLS client leg, no
+authentication or authorization catalog candidates, no redirect into an
+authorization endpoint and no `oidc`-realm challenge), and the engine and
 diagnostics test suites pass.
+
+`python3 scripts/matrix-coverage.py` (with the newest auth/tls runs above and
+the other profiles' baseline runs) moves AUTH-017, AUTH-029, AUTH-030 and
+AUTH-031 from *skipped (live)* to *verified live*: 94 verified live,
+74 automated test, 1 executed check, 6 blocked, 2 partial, 2 not applicable,
+3 not covered (UP-017/018/019, owned by the admission profile).
