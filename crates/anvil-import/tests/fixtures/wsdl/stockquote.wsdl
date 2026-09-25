@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wsdl:definitions name="StockQuote"
+    targetNamespace="urn:example:stockquote"
+    xmlns:tns="urn:example:stockquote"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/"
+    xmlns:http="http://schemas.xmlsoap.org/wsdl/http/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <wsdl:documentation>Stock quotes over SOAP 1.1 and 1.2.</wsdl:documentation>
+  <wsdl:types>
+    <xsd:schema targetNamespace="urn:example:stockquote" elementFormDefault="qualified">
+      <xsd:import namespace="urn:example:common" schemaLocation="https://schemas.example.com/common.xsd"/>
+      <xsd:simpleType name="Side">
+        <xsd:restriction base="xsd:string">
+          <xsd:enumeration value="BUY"/>
+          <xsd:enumeration value="SELL"/>
+        </xsd:restriction>
+      </xsd:simpleType>
+      <xsd:simpleType name="Quantity">
+        <xsd:restriction base="xsd:int">
+          <xsd:minInclusive value="1"/>
+          <xsd:maxInclusive value="500"/>
+        </xsd:restriction>
+      </xsd:simpleType>
+      <xsd:complexType name="Instrument">
+        <xsd:sequence>
+          <xsd:element name="symbol" type="xsd:string"/>
+          <xsd:element name="exchange" type="xsd:string" minOccurs="0"/>
+        </xsd:sequence>
+        <xsd:attribute name="currency" type="xsd:string" use="required" fixed="USD"/>
+      </xsd:complexType>
+      <xsd:complexType name="Option">
+        <xsd:complexContent>
+          <xsd:extension base="tns:Instrument">
+            <xsd:sequence>
+              <xsd:element name="strike" type="xsd:decimal"/>
+              <xsd:element name="expiry" type="xsd:date"/>
+            </xsd:sequence>
+          </xsd:extension>
+        </xsd:complexContent>
+      </xsd:complexType>
+      <xsd:complexType name="Basket">
+        <xsd:sequence>
+          <xsd:element name="name" type="xsd:string"/>
+          <xsd:element name="child" type="tns:Basket" minOccurs="0"/>
+          <xsd:element name="leg" type="tns:Basket"/>
+        </xsd:sequence>
+      </xsd:complexType>
+      <xsd:element name="GetQuote">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="symbol" type="xsd:string"/>
+            <xsd:element name="asOf" type="xsd:dateTime" minOccurs="0"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="GetQuoteResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="price" type="xsd:decimal"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="AuthHeader">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="username" type="xsd:string"/>
+            <xsd:element name="password" type="xsd:string"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="PlaceOrder">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="side" type="tns:Side"/>
+            <xsd:element name="quantity" type="tns:Quantity"/>
+            <xsd:choice>
+              <xsd:element name="stock" type="tns:Instrument"/>
+              <xsd:element name="option" type="tns:Option"/>
+            </xsd:choice>
+            <xsd:element name="note" type="xsd:string" minOccurs="0" maxOccurs="unbounded"/>
+            <xsd:element name="basket" type="tns:Basket" minOccurs="0"/>
+            <xsd:any namespace="##other" minOccurs="0"/>
+          </xsd:sequence>
+          <xsd:attribute name="clientRef" type="xsd:string"/>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="PlaceOrderResponse" type="xsd:string"/>
+    </xsd:schema>
+  </wsdl:types>
+  <wsdl:message name="GetQuoteIn"><wsdl:part name="parameters" element="tns:GetQuote"/></wsdl:message>
+  <wsdl:message name="GetQuoteOut"><wsdl:part name="parameters" element="tns:GetQuoteResponse"/></wsdl:message>
+  <wsdl:message name="Auth"><wsdl:part name="auth" element="tns:AuthHeader"/></wsdl:message>
+  <wsdl:message name="PlaceOrderIn"><wsdl:part name="parameters" element="tns:PlaceOrder"/></wsdl:message>
+  <wsdl:message name="PlaceOrderOut"><wsdl:part name="parameters" element="tns:PlaceOrderResponse"/></wsdl:message>
+  <wsdl:message name="GetPriceIn">
+    <wsdl:part name="symbol" type="xsd:string"/>
+    <wsdl:part name="instrument" type="tns:Instrument"/>
+  </wsdl:message>
+  <wsdl:message name="GetPriceOut"><wsdl:part name="price" type="xsd:decimal"/></wsdl:message>
+  <wsdl:portType name="StockQuotePortType">
+    <wsdl:operation name="GetQuote">
+      <wsdl:documentation>Latest quote for a symbol.</wsdl:documentation>
+      <wsdl:input message="tns:GetQuoteIn"/>
+      <wsdl:output message="tns:GetQuoteOut"/>
+    </wsdl:operation>
+    <wsdl:operation name="PlaceOrder">
+      <wsdl:input message="tns:PlaceOrderIn"/>
+      <wsdl:output message="tns:PlaceOrderOut"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:portType name="LegacyPortType">
+    <wsdl:operation name="GetPrice">
+      <wsdl:input message="tns:GetPriceIn"/>
+      <wsdl:output message="tns:GetPriceOut"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="StockQuoteSoap" type="tns:StockQuotePortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="GetQuote">
+      <soap:operation soapAction="urn:example:stockquote/GetQuote"/>
+      <wsdl:input>
+        <soap:body use="literal"/>
+        <soap:header message="tns:Auth" part="auth" use="literal"/>
+      </wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="PlaceOrder">
+      <soap:operation soapAction="urn:example:stockquote/PlaceOrder"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:binding name="StockQuoteSoap12" type="tns:StockQuotePortType">
+    <soap12:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="GetQuote">
+      <soap12:operation soapAction="urn:example:stockquote/GetQuote"/>
+      <wsdl:input><soap12:body use="literal"/></wsdl:input>
+      <wsdl:output><soap12:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="PlaceOrder">
+      <soap12:operation soapAction=""/>
+      <wsdl:input><soap12:body use="literal"/></wsdl:input>
+      <wsdl:output><soap12:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:binding name="LegacyRpc" type="tns:LegacyPortType">
+    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="GetPrice">
+      <soap:operation soapAction="GetPrice"/>
+      <wsdl:input><soap:body use="literal" namespace="urn:example:legacy"/></wsdl:input>
+      <wsdl:output><soap:body use="literal" namespace="urn:example:legacy"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:binding name="StockQuoteHttp" type="tns:StockQuotePortType">
+    <http:binding verb="GET"/>
+    <wsdl:operation name="GetQuote">
+      <http:operation location="/quote"/>
+      <wsdl:input><http:urlEncoded/></wsdl:input>
+      <wsdl:output/>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="StockQuoteService">
+    <wsdl:port name="StockQuoteSoap" binding="tns:StockQuoteSoap">
+      <soap:address location="https://quotes.example.com/soap"/>
+    </wsdl:port>
+    <wsdl:port name="StockQuoteSoap12" binding="tns:StockQuoteSoap12">
+      <soap12:address location="https://quotes.example.com/soap12"/>
+    </wsdl:port>
+    <wsdl:port name="StockQuoteHttp" binding="tns:StockQuoteHttp">
+      <http:address location="https://quotes.example.com/http"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>

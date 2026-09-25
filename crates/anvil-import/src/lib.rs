@@ -36,6 +36,7 @@ mod reimport;
 mod report;
 mod structured;
 mod util;
+mod wsdl;
 
 pub use builder::ANVIL_IMPORT_NAMESPACE;
 pub use detect::{Detected, Dialect, SourceKind, Syntax, detect};
@@ -221,6 +222,7 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
         (Parsed::Structured(v), Dialect::Swagger20 | Dialect::OpenApi30 | Dialect::OpenApi31 | Dialect::OpenApi32) => {
             openapi::import(v, detected.dialect, &mut b)?
         }
+        (Parsed::Xml(text), Dialect::Wsdl11) => wsdl::import(text, &mut b)?,
         _ => {
             return Err(ImportError::Unrecognized { message: format!("{} input could not be dispatched", detected.dialect) });
         }
