@@ -1,0 +1,82 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Files", "version": "1.0" },
+  "host": "files.example.com",
+  "basePath": "/v2/",
+  "schemes": ["https", "http"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "securityDefinitions": {
+    "basic": { "type": "basic" },
+    "key": { "type": "apiKey", "name": "api_key", "in": "query" },
+    "oauth": {
+      "type": "oauth2",
+      "flow": "accessCode",
+      "authorizationUrl": "https://auth.files.example.com/authorize",
+      "tokenUrl": "https://auth.files.example.com/token",
+      "scopes": { "files:write": "write" }
+    }
+  },
+  "security": [{ "basic": [] }],
+  "parameters": {
+    "Folder": { "name": "folder", "in": "path", "required": true, "type": "string", "x-example": "reports" }
+  },
+  "paths": {
+    "/folders/{folder}/files": {
+      "parameters": [{ "$ref": "#/parameters/Folder" }],
+      "post": {
+        "operationId": "uploadFile",
+        "consumes": ["multipart/form-data"],
+        "security": [{ "oauth": ["files:write"] }],
+        "parameters": [
+          { "name": "file", "in": "formData", "type": "file", "required": true },
+          { "name": "note", "in": "formData", "type": "string", "required": true, "maxLength": 10 },
+          { "name": "labels", "in": "formData", "type": "array", "items": { "type": "string" }, "collectionFormat": "multi", "required": true }
+        ],
+        "responses": { "201": { "description": "created" } }
+      },
+      "get": {
+        "operationId": "listFiles",
+        "parameters": [
+          { "name": "sizes", "in": "query", "type": "array", "items": { "type": "integer", "minimum": 1, "maximum": 9 }, "minItems": 2, "collectionFormat": "pipes", "required": true },
+          { "name": "kinds", "in": "query", "type": "array", "items": { "type": "string", "enum": ["pdf", "csv"] }, "collectionFormat": "csv", "required": true },
+          { "name": "X-Trace", "in": "header", "type": "string" }
+        ],
+        "security": [{ "key": [] }],
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/metadata": {
+      "put": {
+        "operationId": "putMetadata",
+        "parameters": [
+          { "name": "body", "in": "body", "required": true, "schema": { "$ref": "#/definitions/Metadata" } }
+        ],
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/login": {
+      "post": {
+        "operationId": "login",
+        "consumes": ["application/x-www-form-urlencoded"],
+        "security": [],
+        "parameters": [
+          { "name": "username", "in": "formData", "type": "string", "required": true },
+          { "name": "password", "in": "formData", "type": "string", "format": "password", "required": true }
+        ],
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  },
+  "definitions": {
+    "Metadata": {
+      "type": "object",
+      "required": ["title", "size"],
+      "properties": {
+        "title": { "type": "string", "example": "Q3 report" },
+        "size": { "type": "integer", "minimum": 1 },
+        "owner": { "type": "string", "x-nullable": true }
+      }
+    }
+  }
+}

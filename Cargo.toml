@@ -13,6 +13,7 @@ members = [
     "crates/anvil-cli",
     "crates/anvil-lab",
     "crates/anvil-fixtures",
+    "crates/anvil-import",
 
 ]
 
@@ -34,6 +35,7 @@ anvil-portability = { path = "crates/anvil-portability" }
 anvil-engine = { path = "crates/anvil-engine" }
 anvil-runner = { path = "crates/anvil-runner" }
 anvil-load = { path = "crates/anvil-load" }
+anvil-import = { path = "crates/anvil-import" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"
