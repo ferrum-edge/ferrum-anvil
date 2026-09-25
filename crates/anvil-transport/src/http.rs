@@ -260,16 +260,14 @@ impl HttpTransport {
     ) -> Vec<AttemptOutput> {
         let key = pool_key(plan);
         let mut outputs = Vec::new();
-        let mut attempt_index = index;
         let mut attempt_reason = reason;
         let mut allow_pool = plan.keepalive;
-        for _ in 0..2 {
+        for attempt_index in (index..).take(2) {
             let (out, redispatch) = self.execute_once(plan, &key, attempt_index, attempt_reason.clone(), allow_pool, events, cancel).await;
             outputs.push(out);
             if !redispatch {
                 break;
             }
-            attempt_index += 1;
             attempt_reason = AttemptReason::Retry { after: FailureKind::ClosedBeforeResponse };
             allow_pool = false;
         }
@@ -309,19 +307,13 @@ impl HttpTransport {
         let fail = |mut rec: Recorder, mut obs: AttemptObservation, f: TransportFailure, dispatch: DispatchState| -> AttemptOutput {
             let st = match f.kind {
                 FailureKind::Canceled => PhaseStatus::Canceled,
-                k if matches!(
-                    k,
-                    FailureKind::TotalTimeout
-                        | FailureKind::ResponseHeadersTimeout
-                        | FailureKind::RequestWriteTimeout
-                        | FailureKind::BodyIdleTimeout
-                        | FailureKind::ConnectTimeout
-                        | FailureKind::TlsHandshakeTimeout
-                        | FailureKind::DnsTimeout
-                ) =>
-                {
-                    PhaseStatus::TimedOut
-                }
+                FailureKind::TotalTimeout
+                | FailureKind::ResponseHeadersTimeout
+                | FailureKind::RequestWriteTimeout
+                | FailureKind::BodyIdleTimeout
+                | FailureKind::ConnectTimeout
+                | FailureKind::TlsHandshakeTimeout
+                | FailureKind::DnsTimeout => PhaseStatus::TimedOut,
                 _ => PhaseStatus::Failed,
             };
             rec.close_open(st);

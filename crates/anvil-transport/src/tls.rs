@@ -87,7 +87,7 @@ pub struct PreparedTls {
     /// Stable fingerprint of everything that affects the TLS session
     /// (part of the connection-pool isolation key).
     pub fingerprint: String,
-    verifier: Option<Arc<WebPkiServerVerifier>>,
+    pub(crate) verifier: Option<Arc<WebPkiServerVerifier>>,
     client_key: Option<Arc<CertifiedKey>>,
     pub client_summary: Option<CertificateSummary>,
     pub verify: bool,
