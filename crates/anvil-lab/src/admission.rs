@@ -3,7 +3,13 @@
 //! `FERRUM_MAX_REQUESTS=1` (overload refusal before routing) and a 64 KiB
 //! retained-response budget (gateway buffer capacity stamped `backend_error`).
 //! Config: `lab/gateway/admission.{conf,yaml}`.
+//!
+//! A second instance runs the same binary in **mesh mode** (egress-gateway
+//! topology, `lab/gateway/admission-mesh.{conf,json}`) for UP-018: in 0.9.5 a
+//! per-destination physical-connection ceiling (DestinationRule
+//! `maxConnections`) exists only on the mesh slice-apply path.
 
+use crate::fixtures_admission_mesh::{self as mesh, H1_LANE, H1_PROXY_ID, MeshInstance};
 use crate::fixtures_policy::{
     AdmissionFixtures, Target, body_text, catalog_ids, catalog_outcome, caveat, codes, enc, header, no_claim, no_scope, op_log, request,
     send, skips,
@@ -31,6 +37,8 @@ pub struct Env {
     /// Operator credential for the authenticated admin `/overload` snapshot
     /// (operator ground truth only; never given to the engine).
     pub metrics_token: String,
+    /// Mesh-mode egress gateway with DestinationRule connection ceilings (UP-018).
+    pub mesh: MeshInstance,
 }
 
 impl LabEnv for Env {
@@ -38,7 +46,7 @@ impl LabEnv for Env {
         self.trusted = trusted;
     }
     fn operator_logs(&self) -> Vec<std::path::PathBuf> {
-        vec![self.gateway.log_path.clone()]
+        vec![self.gateway.log_path.clone(), self.mesh.gateway.log_path.clone()]
     }
 }
 
@@ -284,26 +292,160 @@ fn gw002(env: &Env) -> Fut<'_> {
     })
 }
 
+/// Backend requests since `before` whose target matches `path`.
+fn backend_saw(log: &anvil_fixtures::GroundTruthLog, before: usize, path: &str) -> usize {
+    log.requests().iter().skip(before).filter(|(_, p)| p == path).count()
+}
+
+/// Hold the destination's only permitted connection with a slow request on
+/// `lane`, then probe the same destination 500 ms later. Returns
+/// (occupant, probe, backend requests seen during the hold, operator lines).
+async fn hold_and_probe(
+    env: &Env,
+    lane: &Target,
+    log: &anvil_fixtures::GroundTruthLog,
+    proxy_id: &str,
+    probe_path: &str,
+) -> (ExecutionOutput, ExecutionOutput, Vec<(String, String)>, Vec<String>) {
+    let m = &env.mesh;
+    let from = m.gateway.log_lines().len();
+    let before = log.count_requests();
+    let occupant = mesh::request(m, lane, env.trusted, "/delay-headers/3000");
+    let probe = mesh::request(m, lane, env.trusted, probe_path);
+    let (first, o) = tokio::join!(send(&env.engine, &occupant), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        send(&env.engine, &probe).await
+    });
+    let seen = log.requests().into_iter().skip(before).collect();
+    (first, o, seen, op_log(&m.gateway, from, proxy_id))
+}
+
+/// UP-018 (reqwest HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a
+/// mesh_external destination; the only connection is held by a slow
+/// request, so the next request needs a second socket and is refused.
+fn up018(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let m = &env.mesh;
+        let log = &m.backend.log;
+        let probe_path = "/delay-headers/11";
+        let (first, o, seen, ops) = hold_and_probe(env, &H1_LANE, log, H1_PROXY_ID, probe_path).await;
+        // Ground truth: the cap was reached and the probe never left the gateway.
+        c.success(CheckKind::GroundTruth, &first);
+        c.add(
+            CheckKind::GroundTruth,
+            "backend served the occupant and never saw the probe",
+            seen.iter().any(|(_, p)| p == "/delay-headers/3000") && !seen.iter().any(|(_, p)| p == probe_path),
+            format!("{seen:?}"),
+        );
+        c.operator_class(&ops, H1_PROXY_ID, &["dispatch_policy_rejected", "backend_connection_limit"]);
+        // Public evidence.
+        c.status_in(&o, &[503]);
+        c.add(
+            CheckKind::GroundTruth,
+            "gateway-authored connection-limit body",
+            body_text(&o).contains("Backend connection limit exceeded"),
+            body_text(&o),
+        );
+        c.not_success(&o);
+        c.token(&o, "ferrum.token.backend_error", env.trusted);
+        c.max_confidence(&o, "ferrum.token.backend_error", Confidence::Likely);
+        c.absent_prefix(&o, "ferrum.backend_passthrough");
+        no_scope(&mut c, &o, SourceScope::UpstreamApplication, Confidence::Likely);
+        no_scope(&mut c, &o, SourceScope::ClientToPeer, Confidence::Likely);
+        for term in ["crash", "unhealthy", "backend is down", "overload"] {
+            no_claim(&mut c, &o, term, Confidence::Unknown);
+        }
+        if env.trusted {
+            c.scope(&o, "ferrum.token.backend_error", SourceScope::Unknown);
+            let got = catalog_outcome(&o);
+            c.add(
+                CheckKind::Diagnosis,
+                "catalog outcome upstream.connection_limit.reqwest",
+                got.as_deref() == Some("upstream.connection_limit.reqwest"),
+                format!("{got:?}; {:?}", codes(&o)),
+            );
+            c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
+            c.scope(&o, "ferrum.outcome", SourceScope::GatewayAdmission);
+            caveat(&mut c, &o, "ferrum.outcome", "identical");
+        }
+        // Recovery: the slot is free again once the occupant finished.
+        let before = log.count_requests();
+        let r = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, "/delay-headers/10")).await;
+        c.success(CheckKind::Recovery, &r);
+        c.add(CheckKind::Recovery, "recovery request reached the backend", backend_saw(log, before, "/delay-headers/10") == 1, "");
+        // Lookalike A: the application's own 503 through the same capped route.
+        let look = send(
+            &env.engine,
+            &mesh::request(
+                m,
+                &H1_LANE,
+                env.trusted,
+                &format!("/status/503?body={}", enc(r#"{"error":"service unavailable","source":"application"}"#)),
+            ),
+        )
+        .await;
+        c.status_in(&look, &[503]);
+        c.token(&look, "ferrum.token.backend_error", env.trusted);
+        c.add(
+            CheckKind::Diagnosis,
+            "application 503 is not called a connection ceiling",
+            !catalog_ids(&look).iter().any(|i| i.starts_with("upstream.connection_limit")),
+            format!("{:?}", codes(&look)),
+        );
+        // Lookalike B: byte-identical application body — the honest best is
+        // "likely" with the identical-bytes caveat, never more.
+        let same = send(
+            &env.engine,
+            &mesh::request(
+                m,
+                &H1_LANE,
+                env.trusted,
+                &format!("/status/503?body={}", enc(r#"{"error":"Backend connection limit exceeded"}"#)),
+            ),
+        )
+        .await;
+        c.max_confidence(&same, "ferrum.outcome", Confidence::Likely);
+        if env.trusted {
+            caveat(&mut c, &same, "ferrum.outcome", "identical");
+        }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
 pub fn all() -> Vec<Def> {
     vec![
         Def { id: "CTRL-ADM-001", title: "Positive control through the admission gateway", run: ctrl },
         Def { id: "UP-015", title: "Gateway retained-buffer exhaustion stamped backend_error", run: up015 },
         Def { id: "GW-002", title: "Overload refusal before routing (+ application 503 lookalike)", run: gw002 },
+        Def { id: "UP-018", title: "Backend connection ceiling, HTTP/1.1 lane (mesh DestinationRule maxConnections)", run: up018 },
     ]
 }
 
 /// Family members this profile cannot drive live (reported as skips, never passes).
-const SKIPPED: &[(&str, &str, &str)] = &[(
-    "GW-005",
-    "Stale DP fence (config_stale)",
-    "Needs a real CP + DP pair (a file-mode gateway never installs the DP freshness fence, src/modes/data_plane.rs:44); \
-     it is owned by the cpdp profile (ports 187xx/197xx), not this file-mode admission instance.",
-)];
+const SKIPPED: &[(&str, &str, &str)] = &[
+    (
+        "GW-005",
+        "Stale DP fence (config_stale)",
+        "Needs a real CP + DP pair (a file-mode gateway never installs the DP freshness fence, src/modes/data_plane.rs:44); \
+         it is owned by the cpdp profile (ports 187xx/197xx), not this file-mode admission instance.",
+    ),
+    (
+        "UP-018-H2",
+        "Backend connection ceiling, pooled lanes (direct H2 / gRPC / H3)",
+        "Not reachable with a single-destination lab on 0.9.5: the direct-H2 pool multiplexes, so a maxConnections=1 ceiling is \
+         never re-dialled - with SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s behind the first on the one \
+         connection (200, one backend connection), and a backend that GOAWAYs each connection made the pool reuse the draining \
+         connection (502 connection_failure, operator error_class connection_pool_error = pool cancellation, not the ceiling). \
+         The pooled-lane public signal (502 connection_failure \"Backend unavailable\") is covered by the contract test \
+         up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family (crates/anvil-diagnostics/tests/upstream_setup_contract.rs).",
+    ),
+];
 
 pub fn profile() -> Profile {
     Profile {
         name: "admission",
-        about: "Process-wide admission: overload refusal, retained-buffer capacity (HTTP 18580)",
+        about: "Process-wide admission: overload, retained-buffer capacity, connection ceiling (HTTP 18580; mesh egress 18589)",
         scenarios: || all().into_iter().map(|d| (d.id, d.title)).collect(),
         run: |args| Box::pin(run(args)) as BoxFut<_>,
         up: || Box::pin(up()) as BoxFut<_>,
@@ -324,8 +466,20 @@ async fn start() -> anyhow::Result<Env> {
         &[("FERRUM_METRICS_BEARER_TOKEN", metrics_token.clone())],
     )
     .await?;
+    let mesh = match mesh::start().await {
+        Ok(m) => m,
+        Err(e) => {
+            gateway.stop().await;
+            return Err(e);
+        }
+    };
     tokio::time::sleep(Duration::from_secs(2)).await;
-    Ok(Env { engine: Engine::new(), fixtures, gateway, trusted: true, metrics_token })
+    Ok(Env { engine: Engine::new(), fixtures, gateway, trusted: true, metrics_token, mesh })
+}
+
+async fn stop(env: Env) {
+    env.gateway.stop().await;
+    env.mesh.gateway.stop().await;
 }
 
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
@@ -334,13 +488,14 @@ async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let mut results = match harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await {
         Ok(r) => r,
         Err(e) => {
-            env.gateway.stop().await;
+            stop(env).await;
             return Err(e);
         }
     };
     results.extend(skips(&ctx, &args.only, SKIPPED));
-    harness::finish(&ctx, &env, &results)?;
-    env.gateway.stop().await;
+    let finished = harness::finish(&ctx, &env, &results);
+    stop(env).await;
+    finished?;
     Ok(results)
 }
 
@@ -348,7 +503,13 @@ async fn up() -> anyhow::Result<()> {
     let env = start().await?;
     println!("admission lab running: gateway {} (admin {ADMIN}); operator log {}", TARGET.base, env.gateway.log_path.display());
     println!("routes: /up/buffer-capacity/bytes/{{n}} /gw/occupant/delay-headers/{{ms}} /gw/probe/bytes/{{n}}");
+    println!(
+        "mesh egress (UP-018): {} with the client SVID in {}/lab/.run/admission-mesh/pki (admin 127.0.0.1:{})",
+        H1_LANE.base,
+        crate::gateway::repo_root().display(),
+        mesh::MESH_ADMIN_PORT
+    );
     harness::wait_for_shutdown().await?;
-    env.gateway.stop().await;
+    stop(env).await;
     Ok(())
 }
