@@ -90,6 +90,35 @@ pub fn render(text: &str, vars: &[(&str, String)]) -> String {
     out
 }
 
+/// When a started instance counts as up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    /// Admin `/health` reports `ready:true` (file mode, CP, a DP that has a snapshot).
+    Ready,
+    /// Admin `/live` answers: the process serves traffic but may never become
+    /// ready (a data plane whose control plane is unreachable).
+    Live,
+}
+
+/// One gateway process. `Gateway::start` is the file-mode shorthand; CP/DP
+/// profiles run several instances with their own run directories.
+pub struct Instance<'a> {
+    /// Run directory name under `lab/.run/`.
+    pub name: &'a str,
+    /// `file`, `cp` or `dp`.
+    pub mode: &'a str,
+    pub conf: &'a str,
+    /// Resource file (`-c`); file mode only.
+    pub yaml: Option<&'a str>,
+    pub vars: &'a [(&'a str, String)],
+    pub admin_port: u16,
+    /// Extra environment; a key here replaces the generated default.
+    pub env: &'a [(&'a str, String)],
+    pub readiness: Readiness,
+    /// Append to an existing operator log (a restarted instance) instead of truncating it.
+    pub append_log: bool,
+}
+
 impl Gateway {
     pub async fn start(
         profile: &str,
@@ -99,40 +128,69 @@ impl Gateway {
         admin_port: u16,
         extra_env: &[(&str, String)],
     ) -> Result<Gateway> {
+        Self::launch(Instance {
+            name: profile,
+            mode: "file",
+            conf: conf_name,
+            yaml: Some(yaml_name),
+            vars,
+            admin_port,
+            env: extra_env,
+            readiness: Readiness::Ready,
+            append_log: false,
+        })
+        .await
+    }
+
+    pub async fn launch(i: Instance<'_>) -> Result<Gateway> {
         let (bin, _lock) = binary()?;
         let root = repo_root();
+        let profile = i.name;
         let run_dir = root.join("lab/.run").join(profile);
         std::fs::create_dir_all(&run_dir)?;
-        let conf = render(
-            &std::fs::read_to_string(root.join("lab/gateway").join(conf_name)).with_context(|| format!("reading {conf_name}"))?,
-            vars,
-        );
-        let yaml = render(
-            &std::fs::read_to_string(root.join("lab/gateway").join(yaml_name)).with_context(|| format!("reading {yaml_name}"))?,
-            vars,
-        );
-        if conf.contains("{{") || yaml.contains("{{") {
+        let conf =
+            render(&std::fs::read_to_string(root.join("lab/gateway").join(i.conf)).with_context(|| format!("reading {}", i.conf))?, i.vars);
+        let yaml = match i.yaml {
+            Some(y) => {
+                Some(render(&std::fs::read_to_string(root.join("lab/gateway").join(y)).with_context(|| format!("reading {y}"))?, i.vars))
+            }
+            None => None,
+        };
+        if conf.contains("{{") || yaml.as_deref().is_some_and(|y| y.contains("{{")) {
             bail!("unrendered template tokens remain in profile {profile}");
         }
-        let conf_path = run_dir.join(conf_name);
-        let yaml_path = run_dir.join(yaml_name);
+        let conf_path = run_dir.join(i.conf);
         std::fs::write(&conf_path, conf)?;
-        std::fs::write(&yaml_path, yaml)?;
-        let mut env: Vec<(String, String)> = vec![
-            ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
-            ("HOME".into(), run_dir.display().to_string()),
-            ("FERRUM_ADMIN_JWT_SECRET".into(), random_secret()),
-            ("FERRUM_METRICS_BEARER_TOKEN".into(), random_secret()),
+        let yaml_path = match (i.yaml, yaml) {
+            (Some(name), Some(text)) => {
+                let p = run_dir.join(name);
+                std::fs::write(&p, text)?;
+                Some(p)
+            }
+            _ => None,
+        };
+        let defaults = [
+            ("PATH", std::env::var("PATH").unwrap_or_default()),
+            ("HOME", run_dir.display().to_string()),
+            ("FERRUM_ADMIN_JWT_SECRET", random_secret()),
+            ("FERRUM_METRICS_BEARER_TOKEN", random_secret()),
         ];
-        for (k, v) in extra_env {
+        let mut env: Vec<(String, String)> =
+            defaults.into_iter().filter(|(k, _)| !i.env.iter().any(|(e, _)| e == k)).map(|(k, v)| (k.to_string(), v)).collect();
+        for (k, v) in i.env {
             env.push((k.to_string(), v.clone()));
         }
+        let args = |verb: &str| {
+            let mut a: Vec<std::ffi::OsString> = vec![verb.into(), "-m".into(), i.mode.into(), "-s".into(), conf_path.clone().into()];
+            if let Some(y) = &yaml_path {
+                a.push("-c".into());
+                a.push(y.clone().into());
+            }
+            a
+        };
         // Validate first (fails fast on schema drift).
         let out = Command::new(&bin)
-            .args(["validate", "-m", "file", "-s"])
-            .arg(&conf_path)
-            .arg("-c")
-            .arg(&yaml_path)
+            .args(args("validate"))
             .env_clear()
             .envs(env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
             .current_dir(&run_dir)
@@ -146,12 +204,13 @@ impl Gateway {
             );
         }
         let log_path = run_dir.join("gateway.log");
-        let log = std::fs::File::create(&log_path)?;
+        let log = if i.append_log {
+            std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?
+        } else {
+            std::fs::File::create(&log_path)?
+        };
         let child = Command::new(&bin)
-            .args(["run", "-m", "file", "-s"])
-            .arg(&conf_path)
-            .arg("-c")
-            .arg(&yaml_path)
+            .args(args("run"))
             .env_clear()
             .envs(env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
             .current_dir(&run_dir)
@@ -160,16 +219,20 @@ impl Gateway {
             .kill_on_drop(true)
             .spawn()
             .context("starting ferrum-edge")?;
-        let gw = Gateway { child, profile: profile.into(), admin: format!("127.0.0.1:{admin_port}"), log_path, run_dir };
-        gw.wait_ready(Duration::from_secs(30)).await?;
+        let gw = Gateway { child, profile: profile.into(), admin: format!("127.0.0.1:{}", i.admin_port), log_path, run_dir };
+        let probe = match i.readiness {
+            Readiness::Ready => ("/health", "\"ready\":true"),
+            Readiness::Live => ("/live", "\"status\":\"ok\""),
+        };
+        gw.wait_ready(Duration::from_secs(30), probe).await?;
         Ok(gw)
     }
 
-    async fn wait_ready(&self, max: Duration) -> Result<()> {
+    async fn wait_ready(&self, max: Duration, (path, needle): (&str, &str)) -> Result<()> {
         let start = Instant::now();
         loop {
-            if let Ok(body) = http_get(&self.admin, "/health").await
-                && body.contains("\"ready\":true")
+            if let Ok(body) = http_get(&self.admin, path).await
+                && body.contains(needle)
             {
                 return Ok(());
             }
@@ -185,6 +248,12 @@ impl Gateway {
     /// Operator-side ground truth: gateway stdout transaction lines.
     pub fn log_lines(&self) -> Vec<String> {
         std::fs::read_to_string(&self.log_path).unwrap_or_default().lines().map(|s| s.to_string()).collect()
+    }
+
+    /// Hard stop (SIGKILL): the process disappears without a graceful drain,
+    /// like a crash.
+    pub async fn kill(mut self) {
+        let _ = self.child.kill().await;
     }
 
     pub async fn stop(mut self) {
@@ -203,7 +272,7 @@ fn unsafe_kill(pid: u32) {
     let _ = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
 }
 
-fn random_secret() -> String {
+pub fn random_secret() -> String {
     let mut b = [0u8; 32];
     rand::fill(&mut b);
     hex::encode(b)
