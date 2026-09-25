@@ -6,10 +6,10 @@ A skip or block is never counted as a pass.
 | Status | Cases |
 |---|---|
 | ✅ live (real gateway) | 17 |
-| ✅ automated test | 107 |
+| ✅ automated test | 108 |
 | ⛔ blocked — see reason | 6 |
 | ➖ not applicable — see reason | 2 |
-| ◐ partial — see reason | 3 |
+| ◐ partial — see reason | 2 |
 | ⚠ not covered | 47 |
 | **Total** | **182** |
 
@@ -147,7 +147,7 @@ A skip or block is never counted as a pass.
 | PROTO-001 | HTTP1 keepalive reuse | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-002 | HTTP2 trailers | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-003 | HTTP2 stream reset | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
-| PROTO-004 | HTTP2 GOAWAY | ◐ partial — see reason — HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet. | — |
+| PROTO-004 | HTTP2 GOAWAY | ✅ automated test — HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet. | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | PROTO-005 | h2c mismatch | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-006 | H3 forced success | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |
 | PROTO-007 | H3 UDP unavailable | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |

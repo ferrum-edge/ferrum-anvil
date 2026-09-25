@@ -2,12 +2,12 @@
  "source": "docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json",
  "total": 182,
  "totals": {
-  "verified_test": 107,
+  "verified_test": 108,
   "verified_live": 17,
   "not_covered": 47,
-  "partial": 3,
   "blocked": 6,
-  "not_applicable": 2
+  "not_applicable": 2,
+  "partial": 2
  },
  "cases": [
   {
@@ -1910,9 +1910,22 @@
    "id": "PROTO-004",
    "category": "Protocol completion and semantics",
    "title": "HTTP2 GOAWAY",
-   "status": "partial",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 315,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 319,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet."
   },
@@ -2831,12 +2844,12 @@
     },
     {
      "path": "apps/desktop/src/security.test.tsx",
-     "line": 67,
+     "line": 66,
      "kind": "renderer_test"
     },
     {
      "path": "apps/desktop/src/security.test.tsx",
-     "line": 79,
+     "line": 78,
      "kind": "renderer_test"
     }
    ],

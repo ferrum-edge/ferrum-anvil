@@ -16,14 +16,14 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-773 Rust crates, 5 npm packages.
+783 Rust crates, 5 npm packages.
 
 | License expression | Components |
 | --- | --- |
-| MIT OR Apache-2.0 | 362 |
-| MIT | 154 |
-| Apache-2.0 OR MIT | 112 |
-| MIT/Apache-2.0 | 35 |
+| MIT OR Apache-2.0 | 363 |
+| MIT | 158 |
+| Apache-2.0 OR MIT | 113 |
+| MIT/Apache-2.0 | 36 |
 | Unicode-3.0 | 18 |
 | Zlib OR Apache-2.0 OR MIT | 17 |
 | BSD-3-Clause | 12 |
@@ -33,6 +33,7 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | MPL-2.0 | 5 |
 | Apache-2.0/MIT | 4 |
 | ISC | 4 |
+| Unlicense/MIT | 4 |
 | Apache-2.0 OR ISC OR MIT | 3 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 2 |
 | BSD-3-Clause AND MIT | 2 |
@@ -41,7 +42,6 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | 2 |
 | MIT OR Apache-2.0 OR Zlib | 2 |
 | MIT OR Zlib OR Apache-2.0 | 2 |
-| Unlicense/MIT | 2 |
 | Zlib | 2 |
 | (MIT OR Apache-2.0) AND Apache-2.0 | 1 |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 1 |
@@ -49,6 +49,7 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | Apache-2.0 / MIT | 1 |
 | Apache-2.0 AND ISC | 1 |
 | Apache-2.0 AND MIT | 1 |
+| Apache-2.0 OR BSL-1.0 | 1 |
 | Apache-2.0 WITH LLVM-exception | 1 |
 | CC0-1.0 OR MIT-0 OR Apache-2.0 | 1 |
 | MIT OR Apache-2.0 OR BSD-1-Clause | 1 |
@@ -68,7 +69,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (773)
+## Rust crates (783)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -195,6 +196,8 @@ the modified file under MPL-2.0.
 | crypto-common | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | cssparser | 0.36.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
 | cssparser-macros | 0.6.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
+| csv | 1.4.0 | Unlicense/MIT | https://github.com/BurntSushi/rust-csv |
+| csv-core | 0.1.13 | Unlicense/MIT | https://github.com/BurntSushi/rust-csv |
 | ctor | 0.8.0 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | ctor-proc-macro | 0.0.7 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | ctr | 0.9.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-modes |
@@ -318,6 +321,7 @@ the modified file under MPL-2.0.
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashlink | 0.12.2 | MIT OR Apache-2.0 | https://github.com/djc/hashlink |
+| hdrhistogram | 7.6.0 | MIT/Apache-2.0 | https://github.com/HdrHistogram/HdrHistogram_rust.git |
 | heck | 0.4.1 | MIT OR Apache-2.0 | https://github.com/withoutboats/heck |
 | heck | 0.5.0 | MIT OR Apache-2.0 | https://github.com/withoutboats/heck |
 | hermit-abi | 0.5.3 | MIT OR Apache-2.0 | https://github.com/hermit-os/hermit-rs |
@@ -360,6 +364,8 @@ the modified file under MPL-2.0.
 | ipconfig | 0.3.4 | MIT/Apache-2.0 | https://github.com/liranringel/ipconfig |
 | ipnet | 2.12.2 | MIT OR Apache-2.0 | https://github.com/krisprice/ipnet |
 | is_terminal_polyfill | 1.70.2 | MIT OR Apache-2.0 | https://github.com/polyfill-rs/is_terminal_polyfill |
+| is-docker | 0.2.0 | MIT | https://github.com/TheLarkInn/is-docker |
+| is-wsl | 0.4.0 | MIT | https://github.com/TheLarkInn/is-wsl |
 | itertools | 0.14.0 | MIT OR Apache-2.0 | https://github.com/rust-itertools/itertools |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa |
 | javascriptcore-rs | 1.1.2 | MIT | https://github.com/tauri-apps/javascriptcore-rs |
@@ -459,6 +465,7 @@ the modified file under MPL-2.0.
 | once_cell | 1.21.4 | MIT OR Apache-2.0 | https://github.com/matklad/once_cell |
 | once_cell_polyfill | 1.70.2 | MIT OR Apache-2.0 | https://github.com/polyfill-rs/once_cell_polyfill |
 | opaque-debug | 0.3.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
+| open | 5.4.4 | MIT | https://github.com/Byron/open-rs |
 | openssl-probe | 0.2.1 | MIT OR Apache-2.0 | https://github.com/rustls/openssl-probe |
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | ordered-float | 2.10.1 | MIT | https://github.com/reem/rust-ordered-float |
@@ -573,6 +580,7 @@ the modified file under MPL-2.0.
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | rustls-webpki | 0.103.15 | ISC | https://github.com/rustls/webpki |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
+| ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | https://github.com/dtolnay/ryu |
 | salsa20 | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/stream-ciphers |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
 | schannel | 0.1.29 | MIT | https://github.com/steffengy/schannel-rs |
@@ -600,6 +608,7 @@ the modified file under MPL-2.0.
 | serde_json_path_core | 0.2.2 | MIT | https://github.com/hiltontj/serde_json_path |
 | serde_json_path_macros | 0.1.6 | MIT | https://github.com/hiltontj/serde_json_path |
 | serde_json_path_macros_internal | 0.1.2 | MIT | https://github.com/hiltontj/serde_json_path |
+| serde_norway | 0.9.42 | MIT OR Apache-2.0 | https://github.com/cafkafk/serde-yaml |
 | serde_repr | 0.1.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/serde-repr |
 | serde_spanned | 0.6.9 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | serde_spanned | 1.1.1 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
@@ -662,6 +671,7 @@ the modified file under MPL-2.0.
 | tauri-plugin | 2.6.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-plugin-dialog | 2.7.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-fs | 2.5.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
+| tauri-plugin-opener | 2.5.5 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-runtime | 2.11.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-runtime-wry | 2.11.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-utils | 2.9.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
@@ -718,6 +728,7 @@ the modified file under MPL-2.0.
 | unicode-width | 0.1.14 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
 | universal-hash | 0.5.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | universal-hash | 0.6.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| unsafe-libyaml-norway | 0.2.15 | MIT | https://github.com/cafkafk/unsafe-libyaml-norway |
 | untrusted | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
 | url | 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | urlpattern | 0.3.0 | MIT | https://github.com/denoland/rust-urlpattern |
