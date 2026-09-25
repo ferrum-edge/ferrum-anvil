@@ -1,0 +1,165 @@
+# Fast PR/push lane: formatting, lints, unit/contract/integration tests on
+# Linux/macOS/Windows, renderer tests and build, contract and diagnostic
+# catalog drift, supply-chain policy and secret scanning.
+# Reproduce locally: see docs/ci.md.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust:
+    name: Rust · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: rust
+      # anvil-desktop embeds apps/desktop/dist at compile time
+      # (tauri::generate_context!), so the frontend must be built first.
+      - name: Build frontend (for anvil-desktop compilation)
+        working-directory: apps/desktop
+        run: npm run build
+      - name: cargo fmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: cargo clippy (workspace, all targets)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: cargo check anvil-desktop (release feature set)
+        run: cargo check --locked -p anvil-desktop
+      - name: cargo check anvil-desktop --features e2e (test-only WebDriver build)
+        run: cargo check --locked -p anvil-desktop --features e2e
+      - name: cargo test (workspace except the desktop shell)
+        shell: bash
+        run: |
+          ulimit -n 4096 2>/dev/null || true
+          cargo test --locked --workspace --exclude anvil-desktop
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Typecheck (app)
+        run: npm run typecheck
+      - name: Typecheck (native E2E suite)
+        run: npm run e2e:typecheck
+      - name: Renderer unit tests (vitest)
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: npm audit (shipped dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+  contracts:
+    name: Contract & catalog drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          cache-key: contracts
+      - name: Regenerate JSON Schemas (anvil schema)
+        run: cargo run --locked -p anvil-cli -- schema --out contracts/schemas
+      - name: Regenerate TypeScript bindings
+        working-directory: apps/desktop
+        run: npm run contracts
+      - name: Fail on drift
+        run: |
+          git add -N contracts apps/desktop/src/generated
+          if ! git diff --exit-code --stat -- contracts apps/desktop/src/generated; then
+            echo "::error::Generated contracts are stale. Run 'cargo run -p anvil-cli -- schema --out contracts/schemas' and 'npm run contracts' (apps/desktop), then commit."
+            git diff -- contracts apps/desktop/src/generated | head -200
+            exit 1
+          fi
+      - name: Diagnostic catalog drift (finding codes ⇄ catalog wording)
+        run: cargo test --locked -p anvil-diagnostics --test catalog_drift
+
+  supply-chain:
+    name: Supply chain & licensing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          node: "false"
+          cache-key: supply-chain
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo deny (advisories, bans, licenses, sources)
+        run: cargo deny --locked check
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+      - name: THIRD_PARTY_LICENSES.md is current and every license is allowed
+        run: node scripts/licenses.mjs --check
+      - name: Release dependency graph has no WebDriver plugin / e2e feature
+        run: scripts/release-check.sh
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          rm gitleaks.tar.gz
+      - name: gitleaks (full history)
+        run: '"$RUNNER_TEMP/gitleaks" git --config .gitleaks.toml --redact --no-banner --verbose .'
+      - name: gitleaks (working tree, including untracked generated files)
+        run: '"$RUNNER_TEMP/gitleaks" dir --config .gitleaks.toml --redact --no-banner --verbose .'

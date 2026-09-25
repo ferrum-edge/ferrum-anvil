@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "types": ["node", "mocha", "@wdio/globals/types", "@wdio/mocha-framework", "@wdio/tauri-service"]
+  },
+  "include": ["./**/*.ts", "../wdio.conf.ts"]
+}

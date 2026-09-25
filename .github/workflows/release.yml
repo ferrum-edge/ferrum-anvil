@@ -1,0 +1,360 @@
+# Release lane: build installers and CLI binaries per OS/arch from a tag,
+# prove they contain no test hooks, generate checksums, SBOMs, a license
+# report and release evidence, and create a DRAFT GitHub release.
+#
+#   push tag anvil-vX.Y.Z  -> full build + draft release
+#   manual, tag input      -> same for an existing tag
+#   manual, no tag         -> dry run: artifacts + evidence uploaded to the run only
+#
+# Code signing/notarization runs only when the owner's credentials exist as
+# repository secrets and is recorded as signed only after the signature is
+# verified on the runner. Otherwise every target is recorded as
+# "unsigned — owner credentials not configured". See docs/release.md.
+name: Release
+
+on:
+  push:
+    tags: ["anvil-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (anvil-vX.Y.Z). Leave empty for a dry run of the selected ref (nothing is published)."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      ref: ${{ steps.version.outputs.ref }}
+      commit: ${{ steps.version.outputs.commit }}
+      epoch: ${{ steps.version.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
+      - name: Resolve version, tag and commit
+        id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          app="$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')"
+          ui="$(node -p 'require("./apps/desktop/package.json").version')"
+          [ "$version" = "$app" ] && [ "$version" = "$ui" ] || { echo "::error::version mismatch: Cargo $version, tauri.conf $app, package.json $ui"; exit 1; }
+          tag=""
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          if [ -n "$INPUT_TAG" ]; then tag="$INPUT_TAG"; fi
+          if [ -n "$tag" ] && [ "$tag" != "anvil-v$version" ]; then
+            echo "::error::tag $tag does not match workspace version $version (expected anvil-v$version)"; exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "ref=${tag:-$GITHUB_SHA}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "epoch=$(git log -1 --format=%ct)"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $version, tag '${tag:-<dry run>}', commit $(git rev-parse HEAD)"
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          node: "false"
+          cache-key: release-preflight
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo deny
+        run: cargo deny --locked check
+      - name: License inventory current and allowed
+        run: node scripts/licenses.mjs --check
+      - name: Release graph has no WebDriver plugin / e2e feature
+        run: scripts/release-check.sh
+      - name: Diagnostic catalog drift
+        run: cargo test --locked -p anvil-diagnostics --test catalog_drift
+
+  build:
+    name: Build · ${{ matrix.target }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+            bundles: app,dmg
+            probe: true
+          - target: x86_64-apple-darwin
+            os: macos-15
+            bundles: app,dmg
+            probe: false # cross-built on arm64; not launched
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04 # older glibc baseline for the .deb/.rpm/AppImage
+            bundles: deb,rpm,appimage
+            probe: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            bundles: msi,nsis
+            probe: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ matrix.target }}
+          xvfb: "true"
+          cache-key: release-${{ matrix.target }}
+      - name: Bundling and inspection tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libfuse2 rpm2cpio cpio
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      - name: Import Windows signing certificate (only with owner credentials)
+        id: wincert
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            "config=" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            Write-Host "Windows signing credentials not configured; building unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "anvil-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item $pfx
+          $cfg = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Compress -Depth 5
+          "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: Build desktop bundles (release profile, default features — no e2e)
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config }}
+          BUNDLES: ${{ matrix.bundles }}
+        run: |
+          # Unset empty credentials so Tauri never attempts a half-configured signing.
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
+          args=(build --ci --target "$TARGET" --bundles "$BUNDLES")
+          if [ -n "${WIN_SIGN_CONFIG:-}" ]; then args+=(--config "$WIN_SIGN_CONFIG"); fi
+          npx tauri "${args[@]}"
+
+      - name: Build CLI
+        shell: bash
+        run: cargo build --locked --release -p anvil-cli --target "$TARGET"
+
+      - name: Collect artifacts
+        id: collect
+        shell: bash
+        run: |
+          out="dist/$TARGET"
+          mkdir -p "$out"
+          b="target/$TARGET/release/bundle"
+          shopt -s nullglob
+          for f in "$b"/dmg/*.dmg "$b"/deb/*.deb "$b"/rpm/*.rpm "$b"/appimage/*.AppImage "$b"/msi/*.msi "$b"/nsis/*-setup.exe; do
+            name="$(basename "$f" | tr ' ' '-')"
+            cp "$f" "$out/$name"
+          done
+          stage="$RUNNER_TEMP/anvil-cli-$VERSION-$TARGET"
+          mkdir -p "$stage"
+          cp LICENSE LICENSE-COMMERCIAL.md THIRD_PARTY_LICENSES.md "$stage/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "target/$TARGET/release/anvil.exe" "$stage/"
+            (cd "$RUNNER_TEMP" && 7z a -tzip -bso0 "anvil-cli-$VERSION-$TARGET.zip" "anvil-cli-$VERSION-$TARGET")
+            mv "$RUNNER_TEMP/anvil-cli-$VERSION-$TARGET.zip" "$out/"
+            echo "app=target/$TARGET/release/anvil-desktop.exe" >> "$GITHUB_OUTPUT"
+          else
+            cp "target/$TARGET/release/anvil" "$stage/"
+            tar -C "$RUNNER_TEMP" -czf "$out/anvil-cli-$VERSION-$TARGET.tar.gz" "anvil-cli-$VERSION-$TARGET"
+            echo "app=target/$TARGET/release/anvil-desktop" >> "$GITHUB_OUTPUT"
+          fi
+          ls -la "$out"
+
+      - name: Release check (no WebDriver server, no test hooks)
+        shell: bash
+        env:
+          APP: ${{ steps.collect.outputs.app }}
+          PROBE: ${{ matrix.probe }}
+        run: |
+          out="dist/$TARGET"
+          args=(--report "$out/release-check-$VERSION-$TARGET.json")
+          [ "$PROBE" = "true" ] && args+=(--runtime-probe)
+          shopt -s nullglob
+          files=("$out"/*.dmg "$out"/*.deb "$out"/*.rpm "$out"/*.AppImage "$out"/*.msi "$out"/*-setup.exe "$out"/anvil-cli-* "$APP")
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a scripts/release-check.sh "${args[@]}" "${files[@]}"
+          else
+            scripts/release-check.sh "${args[@]}" "${files[@]}"
+          fi
+
+      - name: Verify signatures (records signed only if verified)
+        id: signing
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: |
+          out="dist/$TARGET"
+          signed=false; method="none"; detail="unsigned — owner credentials not configured"
+          case "$RUNNER_OS" in
+            macOS)
+              app="$(find "target/$TARGET/release/bundle/macos" -maxdepth 1 -name "*.app" | head -1)"
+              info="$(codesign -dv --verbose=2 "$app" 2>&1 || true)"
+              if codesign --verify --deep --strict "$app" 2>/dev/null && ! grep -q "Signature=adhoc" <<<"$info" && grep -q "^TeamIdentifier=[A-Z0-9]" <<<"$info"; then
+                signed=true; method="Developer ID codesign"
+                detail="$(grep -E '^(Authority|TeamIdentifier)=' <<<"$info" | head -2 | tr '\n' ' ')"
+                dmg="$(find "$out" -maxdepth 1 -name "*.dmg" | head -1)"
+                if xcrun stapler validate "$dmg" >/dev/null 2>&1 || spctl -a -t exec -vv "$app" 2>&1 | grep -q "Notarized Developer ID"; then
+                  method="$method + notarized"
+                else
+                  method="$method (not notarized)"
+                fi
+              elif grep -q "Signature=adhoc" <<<"$info"; then
+                detail="unsigned — owner credentials not configured (ad-hoc signature only, not a Developer ID)"
+              fi ;;
+            Windows)
+              status="$(pwsh -NoProfile -Command "\$s = Get-ChildItem '$out' -Include *.msi,*-setup.exe -Recurse | ForEach-Object { (Get-AuthenticodeSignature \$_.FullName).Status }; if (\$s -and -not (\$s | Where-Object { \$_ -ne 'Valid' })) { 'Valid' } else { (\$s -join ',') }")"
+              if [ "$status" = "Valid" ]; then signed=true; method="Authenticode"; detail="all installers: Valid"; fi ;;
+            Linux)
+              detail="unsigned — owner credentials not configured (no platform code signing for .deb/.rpm/.AppImage; verify with SHA256SUMS)" ;;
+          esac
+          echo "signed=$signed method=$method detail=$detail"
+          # shellcheck disable=SC2016 # JavaScript source, not shell
+          node -e '
+            const [target, os, arch, runner, signed, method, detail] = process.argv.slice(1);
+            const { execSync } = require("node:child_process");
+            const v = (c) => { try { return execSync(c, { encoding: "utf8" }).trim(); } catch { return null; } };
+            const info = {
+              target, os, arch, runner,
+              toolchain: { rustc: v("rustc -V"), cargo: v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
+              signing: { signed: signed === "true", method, detail },
+            };
+            require("node:fs").writeFileSync(`dist/${target}/build-info.json`, JSON.stringify(info, null, 2) + "\n");
+          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail"
+
+      - name: CycloneDX SBOMs (Rust, per target)
+        shell: bash
+        run: |
+          cargo cyclonedx -f json --spec-version 1.5 --target "$TARGET" -q
+          cp apps/desktop/src-tauri/anvil-desktop.cdx.json "dist/$TARGET/anvil-desktop-$VERSION-$TARGET.cdx.json"
+          cp crates/anvil-cli/anvil-cli.cdx.json "dist/$TARGET/anvil-cli-$VERSION-$TARGET.cdx.json"
+          if grep -q "tauri-plugin-wdio-webdriver" "dist/$TARGET/anvil-desktop-$VERSION-$TARGET.cdx.json"; then
+            echo "::error::desktop SBOM lists the test-only WebDriver plugin"; exit 1
+          fi
+
+      - name: Upload build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Evidence & draft release
+    needs: [preflight, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the draft release
+      actions: read # list the CI/E2E/lab runs for this commit
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          cache-key: release-publish
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+      - name: npm SBOM (UI production dependencies)
+        working-directory: apps/desktop
+        run: npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --omit dev --output-format JSON --spec-version 1.5 --output-reproducible --output-file "../../dist/anvil-desktop-ui-npm-$VERSION.cdx.json"
+      - name: License report
+        run: node scripts/licenses.mjs --check --json dist/license-report.json
+      - name: Test runs for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$RELEASE_COMMIT&per_page=100" \
+            --jq '[.workflow_runs[] | {workflow: .name, run_id: .id, event: .event, status: .status, conclusion: .conclusion, url: .html_url}]' > "$RUNNER_TEMP/runs.json"
+          cat "$RUNNER_TEMP/runs.json"
+      - name: Checksums and release evidence
+        run: |
+          args=(--dist dist --test-runs "$RUNNER_TEMP/runs.json")
+          [ -n "$TAG" ] && args+=(--tag "$TAG")
+          node scripts/release-evidence.mjs "${args[@]}"
+      - name: Flatten release assets
+        run: |
+          mkdir -p upload
+          find dist -type f ! -name build-info.json -exec cp {} upload/ \;
+          ls -la upload
+          (cd upload && sha256sum -c SHA256SUMS)
+      - name: Upload evidence bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-evidence-${{ needs.preflight.outputs.version }}
+          path: upload/
+          retention-days: 90
+      - name: Create draft release
+        if: needs.preflight.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          signing="$(node -p 'require("./upload/release-evidence.json").signing')"
+          {
+            echo "Draft release of Ferrum Anvil $VERSION built from \`$RELEASE_COMMIT\` by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            echo
+            echo "**Signing:** $signing."
+            echo
+            echo "Verify downloads with \`SHA256SUMS\`. \`release-evidence.json\` ties every artifact to its hash, platform, release check, SBOM, license report, compatibility catalog and test runs."
+            echo
+            echo "This draft is not published. Review the evidence (docs/release.md) before publishing."
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" upload/* --draft --verify-tag --repo "$GITHUB_REPOSITORY" \
+            --title "Ferrum Anvil $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

@@ -1,0 +1,79 @@
+# Real-gateway failure lab: the pinned Ferrum Edge release binary (verified
+# against lab/gateway/RELEASE.lock) plus controllable fixtures, running the
+# failure-matrix scenarios through Anvil's engine with and without the
+# destination declared as a trusted Ferrum profile.
+#   PR (engine/diagnostics/lab changes): core profile
+#   nightly + manual:                    all profiles
+name: Lab
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "lab/**"
+      - "catalog/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/lab.yml"
+      - ".github/actions/setup/**"
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Lab profile to run (core, all, ...)
+        default: all
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lab-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  lab:
+    name: Lab · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          node: "false"
+          cache-key: lab
+      - name: Fetch and verify the pinned Ferrum Edge gateway
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: lab/scripts/fetch-gateway.sh
+      - name: Verify gateway identity
+        run: cargo run --locked -p anvil-lab -- verify
+      - name: Run lab
+        env:
+          PROFILE: ${{ github.event_name == 'pull_request' && 'core' || inputs.profile || 'all' }}
+        run: |
+          ulimit -n 4096 2>/dev/null || true
+          echo "profile: $PROFILE"
+          cargo run --locked -p anvil-lab -- run "$PROFILE" --untrusted-pass
+      - name: Upload lab results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lab-results-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            results/lab/**
+            lab/.run/**/*.log
+          if-no-files-found: warn
+          retention-days: 30
