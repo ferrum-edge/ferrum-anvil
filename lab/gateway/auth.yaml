@@ -1,6 +1,6 @@
 # Ferrum Anvil failure lab - profile "auth" (ferrum-edge v0.9.5, file mode)
 #
-# Scenarios: AUTH-001..010, 015, 016, 018..025, 027, 028, 032, GW-011 and lab extensions
+# Scenarios: AUTH-001..010, 015..025, 027..032, GW-011 and lab extensions
 #            AUTH-X01..X05 (see docs/lab/auth-tls.md).
 # Settings:  auth.conf (proxy HTTP 127.0.0.1:18180, admin 127.0.0.1:18190).
 # Fixtures:  echo 127.0.0.1:19101; identity provider 127.0.0.1:19102 (JWKS, RFC 7662
@@ -13,14 +13,18 @@
 #            {{BASIC_AUTH_ALICE_HASH}} = "hmac_sha256:" + hex(HMAC-SHA256(key=FERRUM_BASIC_AUTH_HMAC_SECRET,
 #            msg=<alice password>)) (types.rs:9009-9031). File mode rejects plaintext `password`
 #            (src/config/file_loader.rs:288-306).
+#            {{SOAP_ALICE_PASSWORD}} (soap_ws_security keeps credentials inline; PasswordDigest
+#            needs the plaintext), {{OIDC_SESSION_SECRET}} (>= 32 chars), and {{LAB_SOAP}}: the
+#            directory holding the per-run SOAP signer and SAML IdP certificates (throwaway
+#            RSA keys generated with openssl at lab start; never trusted outside the lab).
 # Credential values must be ARRAYS of objects (types.rs:8563-8596); jwt / hmac_auth secrets
 # need >= 32 characters (types.rs:8617-8664).
 version: "1"
 
 resource_counts:
-  proxies: 16
+  proxies: 21
   consumers: 2
-  plugin_configs: 18
+  plugin_configs: 23
   upstreams: 0
 
 proxies:
@@ -201,6 +205,67 @@ proxies:
     backend_port: 19101
     strip_listen_path: true
     pool_enable_http2: false
+
+  # ---- SOAP WS-Security (soap_ws_security) --------------------------------
+  # One identity-establishing soap_ws_security instance per proxy and no other
+  # auth plugin on it (0.9.5 composition rule). Credentials are inline in the
+  # plugin (no consumer credential type); the password is generated per run.
+  # AUTH-029: UsernameToken PasswordText; the credential is removed before the
+  # backend (remove_credential needs PasswordText and allow_mtom: false).
+  - id: auth029-soap-text
+    listen_path: /soap/text
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth029-soap-text
+
+  # AUTH-029: UsernameToken PasswordDigest with in-process nonce replay protection.
+  - id: auth029-soap-digest
+    listen_path: /soap/digest
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth029-soap-digest
+
+  # AUTH-030: X.509 XML signature over Body and Timestamp; trusts only the lab signer.
+  - id: auth030-soap-x509
+    listen_path: /soap/x509
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth030-soap-x509
+
+  # AUTH-031: signed SAML 2.0 bearer assertion from the lab IdP, alongside a
+  # PasswordDigest UsernameToken (Anvil's WS-Security header always carries one).
+  - id: auth031-soap-saml
+    listen_path: /soap/saml
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth031-soap-saml
+
+  # AUTH-017: OIDC relying party (browser session) against the lab IdP on 19102.
+  - id: auth017-oidc
+    listen_path: /auth/oidc
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth017-oidc
 
   # Positive control for the backend path without credentials.
   - id: auth-ctrl-open
@@ -428,3 +493,108 @@ plugin_configs:
     config:
       allowed_groups:
         - lab-admins
+
+  - id: auth029-soap-text
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth029-soap-text
+    enabled: true
+    config:
+      content_type:
+        allow_mtom: false
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      username_token:
+        enabled: true
+        password_type: PasswordText
+        remove_credential: true
+        credentials:
+          - username: alice
+            password: "{{SOAP_ALICE_PASSWORD}}"
+
+  - id: auth029-soap-digest
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth029-soap-digest
+    enabled: true
+    config:
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      username_token:
+        enabled: true
+        password_type: PasswordDigest
+        credentials:
+          - username: alice
+            password: "{{SOAP_ALICE_PASSWORD}}"
+      nonce:
+        replay_scope: process
+
+  - id: auth030-soap-x509
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth030-soap-x509
+    enabled: true
+    config:
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      x509_signature:
+        enabled: true
+        trusted_certs:
+          - "{{LAB_SOAP}}/soap-signer.pem"
+
+  - id: auth031-soap-saml
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth031-soap-saml
+    enabled: true
+    config:
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      username_token:
+        enabled: true
+        password_type: PasswordDigest
+        credentials:
+          - username: alice
+            password: "{{SOAP_ALICE_PASSWORD}}"
+      nonce:
+        replay_scope: process
+      saml:
+        enabled: true
+        trusted_issuers:
+          - "https://saml-idp.anvil-lab.invalid"
+        trusted_signing_certs:
+          - "{{LAB_SOAP}}/saml-idp.pem"
+        audience: "urn:anvil:lab:soap-service"
+        recipient: "http://127.0.0.1:18180/soap/saml"
+        clock_skew_seconds: 5
+
+  # Keyless client (loopback token endpoint). Discovery is fetched in the
+  # background after startup; the session secret is generated per run.
+  - id: auth017-oidc
+    plugin_name: oidc_relying_party
+    scope: proxy
+    proxy_id: auth017-oidc
+    enabled: true
+    config:
+      providers:
+        - issuer: "https://idp.anvil-lab.invalid"
+          discovery_url: "http://127.0.0.1:19102/.well-known/openid-configuration"
+          client_id: anvil-lab-oidc-rp
+          client_auth:
+            method: none
+          scopes: [openid]
+          redirect_uri: "http://127.0.0.1:18180/auth/oidc/callback"
+          callback_path: /auth/oidc/callback
+          logout_path: /auth/oidc/logout
+      session:
+        store: cookie
+        encryption_secret: "{{OIDC_SESSION_SECRET}}"
+        secure: false

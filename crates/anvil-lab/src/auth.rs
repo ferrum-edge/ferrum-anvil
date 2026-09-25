@@ -1,7 +1,9 @@
 //! Scenarios for the `auth` gateway profile: every authentication family
 //! Ferrum Edge 0.9.5 offers that a loopback lab can drive for real
 //! (key_auth, basic_auth, jwt_auth, jwks_auth, DPoP, hmac_auth v2,
-//! oauth2_introspection, ldap_auth, multi-auth, access_control), through
+//! oauth2_introspection, ldap_auth, multi-auth, access_control,
+//! soap_ws_security UsernameToken / X.509 signature / SAML, and the
+//! oidc_relying_party browser session), through
 //! HTTP 18180, with a local identity provider and LDAP directory.
 //!
 //! Public-evidence mode: the destination is a trusted Ferrum profile over
@@ -17,6 +19,7 @@
 //! `.<variant>`; `X` ids (e.g. `AUTH-X01`) are lab extensions with no seed.
 
 use crate::fixtures_auth::{self, AUDIENCE, AuthFixtures, ISSUER, ISSUER_KID, OAUTH_CLIENT_ID, ROTATED_KID};
+use crate::fixtures_auth_soap::{SamlSpec, Signer};
 use crate::gateway::Gateway;
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
 use crate::profiles::{BoxFut, Profile, RunArgs};
@@ -25,14 +28,15 @@ use crate::tls::{absent_scope, integration, op_lines, record_excludes, send};
 use anvil_auth::{HmacParams, SignableRequest};
 use anvil_domain::auth::{
     AuthConfig, BodyDigestHeader, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile, JwtAlgorithm, JwtClaims, KeyLocation, OAuth2Config,
-    OAuthClientAuth, OAuthGrant,
+    OAuthClientAuth, OAuthGrant, WsseConfig, WssePasswordType,
 };
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::Phase;
-use anvil_domain::request::{Body, KeyValue, RequestSpec};
+use anvil_domain::request::{Body, KeyValue, RequestSpec, SoapVersion};
 use anvil_domain::secret::SensitiveValue;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::gateway_idp::IdpMode;
+use sha2::Digest as _;
 use std::future::Future;
 use std::pin::Pin;
 use zeroize::Zeroizing;
@@ -1157,6 +1161,471 @@ fn authx05(env: &Env) -> Fut<'_> {
     })
 }
 
+// ------------------------------------------------- SOAP WS-Security (0.9.5)
+
+const SOAP_ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><m:Ping xmlns:m="urn:anvil:lab:soap">anvil-lab-ping</m:Ping></soap:Body></soap:Envelope>"#;
+
+fn soap_ctx(env: &Env, path: &str, auth: AuthConfig, envelope: &str) -> ExecutionContext {
+    let mut c = ctx(env, "POST", path, auth);
+    c.spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: envelope.into(), action: Some("urn:anvil:lab:soap#Ping".into()) };
+    c
+}
+
+fn wsse(_env: &Env, password: &str, ptype: WssePasswordType, ttl: Option<u32>, saml: Option<&str>) -> AuthConfig {
+    AuthConfig::Wsse {
+        config: WsseConfig {
+            username: "alice".into(),
+            password: tv(password),
+            password_type: ptype,
+            timestamp_ttl_secs: ttl,
+            saml_assertion: saml.map(tv),
+        },
+    }
+}
+
+/// A WS-Security envelope as Anvil's own signer produced it for one send
+/// (the captured request for replay / expiry stimuli, sent back raw).
+fn captured_wsse(env: &Env, ptype: WssePasswordType, ttl: u32) -> String {
+    let bytes = anvil_auth::wsse::insert_security(
+        SOAP_ENVELOPE.as_bytes(),
+        "alice",
+        &env.fx.secrets.soap_alice_password,
+        ptype,
+        Some(ttl),
+        None,
+        chrono::Utc::now(),
+    )
+    .expect("lab wsse capture");
+    String::from_utf8(bytes).expect("utf-8 envelope")
+}
+
+/// The request body the echo backend received (it reflects it in `body`).
+fn echoed_body(o: &ExecutionOutput) -> String {
+    let b = o.decoded_body.as_ref().unwrap_or(&o.body);
+    serde_json::from_slice::<serde_json::Value>(b)
+        .ok()
+        .and_then(|v| v.get("body").and_then(|x| x.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
+/// Shared checks for a gateway WS-Security rejection: a generic 401, no
+/// confirmed claim about the credential, never a TLS finding, gateway
+/// attribution capped at likely, no secret in the record.
+fn soap_rejection(c: &mut Checks, env: &Env, o: &ExecutionOutput, error: &str) {
+    signal(c, o, 401, error);
+    c.has(o, "http.unauthorized");
+    c.absent_prefix(o, "client.tls.");
+    c.absent_prefix(o, "auth.browser_session_required");
+    for term in ["password", "signature", "certificate", "expired", "saml", "replay"] {
+        no_confirmed_text(c, o, term);
+    }
+    c.max_confidence(o, "ferrum.outcome", Confidence::Likely);
+    if !env.trusted {
+        c.absent_prefix(o, "ferrum.");
+    }
+    record_excludes(c, o, &env.fx.secrets.soap_alice_password, "the WS-Security password");
+}
+
+fn auth029(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let pw = env.fx.secrets.soap_alice_password.clone();
+        let (before, from) = (env.fx.echo.log.count_requests(), env.gw.log_lines().len());
+        // Accepted control: PasswordDigest built by Anvil at send time.
+        let ok =
+            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE))
+                .await;
+        c.success(CheckKind::Diagnosis, &ok);
+        c.add(CheckKind::Diagnosis, "PasswordDigest never puts the password on the wire", !echoed_body(&ok).contains(&pw), "");
+        record_excludes(&mut c, &ok, &pw, "the WS-Security password");
+        // Wrong password.
+        let wrong = go(
+            env,
+            &soap_ctx(
+                env,
+                "/soap/digest/echo",
+                wsse(env, "not-the-password", WssePasswordType::PasswordDigest, Some(60), None),
+                SOAP_ENVELOPE,
+            ),
+        )
+        .await;
+        soap_rejection(&mut c, env, &wrong, "WS-Security: invalid credentials");
+        record_excludes(&mut c, &wrong, "not-the-password", "the wrong password");
+        // Replay: the identical captured envelope, twice (raw bytes; Anvil's
+        // own signer would never reuse a nonce).
+        let captured = captured_wsse(env, WssePasswordType::PasswordDigest, 60);
+        let first = go(env, &soap_ctx(env, "/soap/digest/echo", AuthConfig::None, &captured)).await;
+        c.add(
+            CheckKind::GroundTruth,
+            "the captured envelope is accepted once",
+            first.record.response.as_ref().map(|r| r.status) == Some(200),
+            "",
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "Anvil sent the captured bytes verbatim",
+            first.record.prepared.body_sha256.as_deref() == Some(&hex::encode(sha2::Sha256::digest(captured.as_bytes()))),
+            "",
+        );
+        let before_replay = env.fx.echo.log.count_requests();
+        let o = go(env, &soap_ctx(env, "/soap/digest/echo", AuthConfig::None, &captured)).await;
+        soap_rejection(&mut c, env, &o, "WS-Security: nonce replay detected");
+        gateway_outcome(&mut c, env, &o);
+        backend_untouched(&mut c, env, before_replay);
+        // Recovery: Anvil generates a fresh nonce and Created per send.
+        let mut all_ok = true;
+        for _ in 0..3 {
+            let r = go(
+                env,
+                &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE),
+            )
+            .await;
+            all_ok &= r.record.response.as_ref().map(|x| x.status) == Some(200);
+        }
+        c.add(CheckKind::Recovery, "three fresh Anvil envelopes in a row are all accepted", all_ok, "");
+        c.add(CheckKind::GroundTruth, "the backend received the accepted requests", env.fx.echo.log.count_requests() >= before + 5, "");
+        let log = logged(&mut c, env, from, "auth029-soap-digest", 401);
+        Outcome { main: Some(o), recovery: Some(ok), checks: c, operator_log: log }
+    })
+}
+
+fn auth029_text(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let pw = env.fx.secrets.soap_alice_password.clone();
+        let o =
+            go(env, &soap_ctx(env, "/soap/text/echo", wsse(env, &pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE)).await;
+        c.success(CheckKind::Diagnosis, &o);
+        record_excludes(&mut c, &o, &pw, "the PasswordText password");
+        let got = echoed_body(&o);
+        c.add(
+            CheckKind::GroundTruth,
+            "remove_credential: the backend received the envelope without the password",
+            !got.is_empty() && !got.contains(&pw) && got.contains("anvil-lab-ping"),
+            "",
+        );
+        // Lookalike: the right password presented as PasswordText to the
+        // PasswordDigest route is a profile mismatch, not a wrong password.
+        let m = go(env, &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE))
+            .await;
+        soap_rejection(&mut c, env, &m, "WS-Security: Password Type does not match the configured password_type");
+        let r =
+            go(env, &soap_ctx(env, "/soap/text/echo", wsse(env, &pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE)).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
+fn auth029_expired(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let pw = env.fx.secrets.soap_alice_password.clone();
+        // An envelope Anvil generated with a 1 s Timestamp lifetime, sent
+        // after it lapsed (the route allows 2 s of clock skew).
+        let captured = captured_wsse(env, WssePasswordType::PasswordDigest, 1);
+        tokio::time::sleep(std::time::Duration::from_millis(4_200)).await;
+        let before = env.fx.echo.log.count_requests();
+        let o = go(env, &soap_ctx(env, "/soap/digest/echo", AuthConfig::None, &captured)).await;
+        soap_rejection(&mut c, env, &o, "WS-Security: Timestamp has expired");
+        backend_untouched(&mut c, env, before);
+        let r =
+            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE))
+                .await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
+/// Whether the host can produce the signed-XML fixtures (reason otherwise).
+fn soap_signing_unavailable(env: &Env) -> Option<String> {
+    env.fx.soap.tools.signing_unavailable()
+}
+
+fn signed(env: &Env, signer: &Signer, payload: &str) -> String {
+    env.fx.soap.signed_envelope(signer, payload, chrono::Utc::now(), 60).expect("lab signed envelope")
+}
+
+fn auth030(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let soap = &env.fx.soap;
+        let envelope = signed(env, &soap.soap_signer, "order-42");
+        let before = env.fx.echo.log.count_requests();
+        let ok = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &envelope)).await;
+        c.success(CheckKind::Diagnosis, &ok);
+        c.add(
+            CheckKind::Diagnosis,
+            "Anvil sent the signed envelope byte for byte (no re-serialization)",
+            ok.record.prepared.body_sha256.as_deref() == Some(&hex::encode(sha2::Sha256::digest(envelope.as_bytes()))),
+            "",
+        );
+        c.add(CheckKind::GroundTruth, "the backend received exactly the signed bytes", echoed_body(&ok) == envelope, "");
+        backend_reached(&mut c, env, before);
+        // Tampered signed element: the Body changes after signing.
+        let tampered = signed(env, &soap.soap_signer, "order-42").replace("order-42", "order-99");
+        let before = env.fx.echo.log.count_requests();
+        let o = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &tampered)).await;
+        soap_rejection(&mut c, env, &o, "WS-Security: Reference digest mismatch");
+        backend_untouched(&mut c, env, before);
+        // Untrusted key: a valid signature by a certificate the route does not trust.
+        let rogue = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &signed(env, &soap.rogue, "order-42"))).await;
+        soap_rejection(&mut c, env, &rogue, "WS-Security: signing certificate is not trusted");
+        // Recovery: a freshly signed, untouched envelope.
+        let r = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &signed(env, &soap.soap_signer, "order-43"))).await;
+        c.success(CheckKind::Recovery, &r);
+        let log = vec![format!(
+            "lab signer: {}; route trusts {} (per-run throwaway RSA-2048)",
+            soap.tools.versions,
+            soap.soap_signer.cert_path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+        )];
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: log }
+    })
+}
+
+fn saml_spec(issuer: &str, audience: &str, not_before_offset: i64, lifetime: i64) -> SamlSpec {
+    let now = chrono::Utc::now();
+    SamlSpec {
+        issuer: issuer.into(),
+        name_id: "alice".into(),
+        audience: audience.into(),
+        recipient: SAML_RECIPIENT.into(),
+        not_before: now + chrono::Duration::seconds(not_before_offset),
+        not_on_or_after: now + chrono::Duration::seconds(not_before_offset + lifetime),
+    }
+}
+
+const SAML_ISSUER: &str = "https://saml-idp.anvil-lab.invalid";
+const SAML_AUDIENCE: &str = "urn:anvil:lab:soap-service";
+const SAML_RECIPIENT: &str = "http://127.0.0.1:18180/soap/saml";
+
+fn assertion(env: &Env, signer: &Signer, spec: &SamlSpec) -> String {
+    env.fx.soap.saml_assertion(signer, spec).expect("lab SAML assertion")
+}
+
+/// Anvil's WS-Security auth: a fresh PasswordDigest UsernameToken plus the
+/// user-supplied assertion embedded verbatim.
+fn saml_send(env: &Env, a: &str) -> ExecutionContext {
+    let pw = env.fx.secrets.soap_alice_password.clone();
+    soap_ctx(env, "/soap/saml/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), Some(a)), SOAP_ENVELOPE)
+}
+
+fn auth031(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let idp = &env.fx.soap.saml_idp;
+        let good = assertion(env, idp, &saml_spec(SAML_ISSUER, SAML_AUDIENCE, -5, 120));
+        let ok = go(env, &saml_send(env, &good)).await;
+        c.success(CheckKind::Diagnosis, &ok);
+        c.add(CheckKind::GroundTruth, "the backend received the assertion byte for byte", echoed_body(&ok).contains(&good), "");
+        let sig_value = good.split("<ds:SignatureValue>").nth(1).and_then(|x| x.split('<').next()).unwrap_or("").to_string();
+        record_excludes(&mut c, &ok, &sig_value, "the assertion signature (bearer credential)");
+        // Replay: the same assertion again, with a fresh UsernameToken.
+        let o = go(env, &saml_send(env, &good)).await;
+        soap_rejection(&mut c, env, &o, "WS-Security: SAML assertion has already been used");
+        gateway_outcome(&mut c, env, &o);
+        let wrong_aud =
+            go(env, &saml_send(env, &assertion(env, idp, &saml_spec(SAML_ISSUER, "urn:anvil:lab:another-service", -5, 120)))).await;
+        soap_rejection(&mut c, env, &wrong_aud, "WS-Security: SAML AudienceRestriction does not admit this service");
+        let expired = go(env, &saml_send(env, &assertion(env, idp, &saml_spec(SAML_ISSUER, SAML_AUDIENCE, -600, 200)))).await;
+        soap_rejection(&mut c, env, &expired, "WS-Security: SAML Assertion has expired");
+        let issuer =
+            go(env, &saml_send(env, &assertion(env, idp, &saml_spec("https://rogue-idp.anvil-lab.invalid", SAML_AUDIENCE, -5, 120)))).await;
+        soap_rejection(&mut c, env, &issuer, "WS-Security: SAML Issuer is not trusted");
+        let key = go(env, &saml_send(env, &assertion(env, &env.fx.soap.rogue, &saml_spec(SAML_ISSUER, SAML_AUDIENCE, -5, 120)))).await;
+        soap_rejection(&mut c, env, &key, "WS-Security: SAML signing certificate is not trusted");
+        let r = go(env, &saml_send(env, &assertion(env, idp, &saml_spec(SAML_ISSUER, SAML_AUDIENCE, -5, 120)))).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![format!("lab signer: {}", env.fx.soap.tools.versions)] }
+    })
+}
+
+// ------------------------------------------------- OIDC browser session
+
+/// A minimal raw HTTP/1.1 exchange (the lab's "system browser" and ground
+/// truth probe; never given to the engine). Returns status, headers, body.
+async fn raw_http(
+    addr: &str,
+    method: &str,
+    target: &str,
+    headers: &[(&str, String)],
+    body: &str,
+) -> Option<(u16, Vec<(String, String)>, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(addr)).await.ok()?.ok()?;
+    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+    for (n, v) in headers {
+        req.push_str(&format!("{n}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    s.write_all(req.as_bytes()).await.ok()?;
+    let mut buf = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), s.read_to_end(&mut buf)).await.ok()?.ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let (head, rest) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let mut lines = head.lines();
+    let status = lines.next()?.split_whitespace().nth(1)?.parse().ok()?;
+    let hs = lines.filter_map(|l| l.split_once(':').map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string()))).collect();
+    Some((status, hs, rest.to_string()))
+}
+
+fn hdr<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    h.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+}
+
+/// `name=value` pairs of every Set-Cookie.
+fn set_cookies(h: &[(String, String)]) -> Vec<String> {
+    h.iter().filter(|(n, _)| n == "set-cookie").filter_map(|(_, v)| v.split(';').next().map(|x| x.trim().to_string())).collect()
+}
+
+/// The system browser logging in: gateway → IdP login page → credentials →
+/// callback → session cookie. Returns (session cookie, trace) or an error.
+async fn browser_login(env: &Env) -> Result<(String, Vec<String>), String> {
+    let mut trace = Vec::new();
+    let html = [("Accept", "text/html".to_string())];
+    // Discovery is fetched in the background after the gateway starts.
+    let mut first = None;
+    for _ in 0..40 {
+        let r = raw_http(AUTHORITY, "GET", "/auth/oidc/echo", &html, "").await.ok_or("gateway unreachable")?;
+        if r.0 != 503 {
+            first = Some(r);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let (st, h, _) = first.ok_or("OIDC discovery never became available")?;
+    trace.push(format!("browser GET /auth/oidc/echo -> {st}"));
+    let location = hdr(&h, "location").ok_or(format!("no redirect ({st})"))?.to_string();
+    let correlation = set_cookies(&h);
+    let authz = url::Url::parse(&location).map_err(|e| e.to_string())?;
+    let idp_addr = format!("{}:{}", authz.host_str().unwrap_or(""), authz.port().unwrap_or(80));
+    let target = format!("{}?{}", authz.path(), authz.query().unwrap_or(""));
+    let (st, _, page) = raw_http(&idp_addr, "GET", &target, &html, "").await.ok_or("IdP unreachable")?;
+    trace.push(format!("browser GET IdP {} -> {st} ({} bytes of login page)", authz.path(), page.len()));
+    let mut form: Vec<(String, String)> = authz.query_pairs().into_owned().collect();
+    form.push(("username".into(), "alice".into()));
+    form.push(("password".into(), env.fx.secrets.oidc_alice_password.clone()));
+    let body: String = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(form).finish();
+    let (st, h, _) =
+        raw_http(&idp_addr, "POST", "/authorize/login", &[("Content-Type", "application/x-www-form-urlencoded".into())], &body)
+            .await
+            .ok_or("IdP login unreachable")?;
+    trace.push(format!("browser POST IdP /authorize/login -> {st}"));
+    let callback = url::Url::parse(hdr(&h, "location").ok_or(format!("login did not redirect ({st})"))?).map_err(|e| e.to_string())?;
+    let target = format!("{}?{}", callback.path(), callback.query().unwrap_or(""));
+    let (st, h, b) = raw_http(AUTHORITY, "GET", &target, &[("Cookie", correlation.join("; "))], "").await.ok_or("callback unreachable")?;
+    trace.push(format!("browser GET {} -> {st}", callback.path()));
+    let session =
+        set_cookies(&h).into_iter().find(|c| c.contains("session") && !c.ends_with('=')).ok_or(format!("no session cookie ({st}: {b})"))?;
+    let (st, _, _) =
+        raw_http(AUTHORITY, "GET", "/auth/oidc/echo", &[("Cookie", session.clone())], "").await.ok_or("gateway unreachable")?;
+    trace.push(format!("browser GET /auth/oidc/echo with its session -> {st}"));
+    if st != 200 {
+        return Err(format!("the browser session was not accepted ({st})"));
+    }
+    Ok((session, trace))
+}
+
+fn login_finding(c: &mut Checks, o: &ExecutionOutput) {
+    c.has(o, "auth.browser_session_required");
+    c.max_confidence(o, "auth.browser_session_required", Confidence::Likely);
+    let f = o.record.findings.iter().find(|f| f.code == "auth.browser_session_required");
+    let explains = f.map(|f| f.explanation.contains("does not read or import browser cookies")).unwrap_or(false);
+    c.add(CheckKind::Diagnosis, "explains that the browser's session is not available to Anvil", explains, "");
+    c.add(
+        CheckKind::Diagnosis,
+        "not reported as a successful API exchange",
+        o.record.outcome.application != anvil_domain::outcome::ApplicationState::Success,
+        format!("{:?}", o.record.outcome.application),
+    );
+    c.absent_prefix(o, "client.tls.");
+}
+
+fn auth017(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = env.gw.log_lines().len();
+        // Ground truth first: a real browser-style login succeeds.
+        let (session, trace) = match browser_login(env).await {
+            Ok(x) => x,
+            Err(e) => {
+                c.add(CheckKind::GroundTruth, "the lab browser completed the OIDC login", false, e);
+                return Outcome { main: None, recovery: None, checks: c, operator_log: vec![] };
+            }
+        };
+        c.add(CheckKind::GroundTruth, "the lab browser completed the OIDC login and holds a session", true, trace.join("; "));
+        let before = env.fx.echo.log.count_requests();
+        // (a) An API-style request from Anvil: the browser's session is not shared.
+        let o = go(env, &ctx(env, "GET", "/auth/oidc/echo", AuthConfig::None)).await;
+        c.status_in(&o, &[401]);
+        login_finding(&mut c, &o);
+        c.has(&o, "http.unauthorized");
+        c.add(
+            CheckKind::Diagnosis,
+            "Anvil sent no Cookie (browser cookies are never imported)",
+            !o.record.prepared.headers.iter().any(|h| h.name.eq_ignore_ascii_case("cookie")),
+            "",
+        );
+        // (b) A browser-shaped request: Anvil follows the redirect to the
+        // login page without credentials and never submits it.
+        let (pages, submissions) = (env.fx.idp.login_pages(), env.fx.idp.login_submissions());
+        let mut html = ctx(env, "GET", "/auth/oidc/echo", AuthConfig::None);
+        html.spec.headers.push(KeyValue::new("Accept", "text/html"));
+        let b = go(env, &html).await;
+        login_finding(&mut c, &b);
+        c.add(
+            CheckKind::Diagnosis,
+            "the followed login page is recorded as not evaluated, not success",
+            b.record.outcome.application == anvil_domain::outcome::ApplicationState::NotEvaluated,
+            format!("{:?}", b.record.outcome.application),
+        );
+        c.add(CheckKind::GroundTruth, "Anvil reached the IdP login page", env.fx.idp.login_pages() > pages, "");
+        c.add(CheckKind::GroundTruth, "Anvil never submitted IdP credentials", env.fx.idp.login_submissions() == submissions, "");
+        let idp_auth = env.fx.idp.log.entries().into_iter().rev().find_map(|e| match e.event {
+            anvil_fixtures::GroundTruth::RequestReceived { path, headers, .. } if path == "/authorize" => Some(headers),
+            _ => None,
+        });
+        c.add(
+            CheckKind::GroundTruth,
+            "the redirect to the IdP carried no Authorization or Cookie header",
+            idp_auth
+                .map(|h| !h.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization") || n.eq_ignore_ascii_case("cookie")))
+                .unwrap_or(false),
+            "",
+        );
+        backend_untouched(&mut c, env, before);
+        let log = op_lines(&env.gw, from, "auth017-oidc");
+        // Recovery (supported path): the user explicitly configures the
+        // authorized session cookie as a secret on the request.
+        let mut explicit = ctx(env, "GET", "/auth/oidc/echo", AuthConfig::None);
+        secret_header(&mut explicit, "Cookie", &session);
+        let r = go(env, &explicit).await;
+        c.success(CheckKind::Recovery, &r);
+        c.absent_prefix(&r, "auth.browser_session_required");
+        let value = session.split_once('=').map(|(_, v)| v.to_string()).unwrap_or_default();
+        record_excludes(&mut c, &r, &value, "the session cookie value");
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: log }
+    })
+}
+
+/// Lookalikes: an ordinary backend redirect and a plain bearer challenge are
+/// not browser-login challenges.
+fn auth017_lookalike(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let o = go(env, &ctx(env, "GET", "/auth/open/redirect?to=/ok/echo%3Fclient_id%3Dabc", AuthConfig::None)).await;
+        c.success(CheckKind::Diagnosis, &o);
+        c.absent_prefix(&o, "auth.browser_session_required");
+        let body: String = url::form_urlencoded::byte_serialize(br#"{"error":"invalid token"}"#).collect();
+        let b =
+            go(env, &ctx(env, "GET", &format!("/auth/open/status/401?body={body}&header=WWW-Authenticate:Bearer"), AuthConfig::None)).await;
+        c.status_in(&b, &[401]);
+        c.has(&b, "http.unauthorized");
+        c.absent_prefix(&b, "auth.browser_session_required");
+        Outcome { main: Some(o), recovery: Some(b), checks: c, operator_log: vec![] }
+    })
+}
+
 // -------------------------------------------------------------- registry
 
 pub fn all() -> Vec<Def> {
@@ -1192,8 +1661,22 @@ pub fn all() -> Vec<Def> {
         Def { id: "GW-011", title: "ACL denial for an authenticated consumer", run: gw011 },
         Def { id: "AUTH-X04", title: "Backend 401 byte-identical to key_auth's rejection", run: authx04 },
         Def { id: "AUTH-X05", title: "Backend 401 with the gateway's fallback challenge", run: authx05 },
+        Def { id: "AUTH-029", title: "SOAP UsernameToken digest: accepted, wrong password, replayed nonce", run: auth029 },
+        Def { id: "AUTH-029.text", title: "SOAP UsernameToken PasswordText; profile-mismatch lookalike", run: auth029_text },
+        Def { id: "AUTH-029.expired", title: "SOAP Timestamp expired before it reached the gateway", run: auth029_expired },
+        Def { id: "AUTH-030", title: "SOAP X.509 signature: verbatim signed envelope, tampered body, untrusted key", run: auth030 },
+        Def { id: "AUTH-031", title: "SOAP SAML assertion: replay, audience, expiry, issuer and key trust", run: auth031 },
+        Def { id: "AUTH-017", title: "OIDC browser session is not Anvil's session", run: auth017 },
+        Def {
+            id: "AUTH-017.lookalike",
+            title: "Ordinary redirect and plain bearer challenge are not browser logins",
+            run: auth017_lookalike,
+        },
     ]
 }
+
+/// Scenarios that need the lab's XML signer (xmllint + openssl).
+const SIGNED_XML: &[&str] = &["AUTH-030", "AUTH-031"];
 
 fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
     let client_only = "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests (tests/api_oauth.rs), not a live-gateway scenario";
@@ -1203,26 +1686,10 @@ fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
         ("AUTH-013", "OAuth redirect spoof", client_only),
         ("AUTH-014", "OAuth refresh race", client_only),
         (
-            "AUTH-017",
-            "OIDC browser session",
-            "needs an interactive system-browser session with the oidc_relying_party plugin; the lab has no browser driver, and Anvil never imports browser cookies automatically",
-        ),
-        (
             "AUTH-025.nonce",
             "DPoP server-nonce challenge",
             "infeasible on Ferrum Edge 0.9.5: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4); AUTH-025 covers the replay half live",
         ),
-        (
-            "AUTH-029",
-            "SOAP UsernameToken",
-            "soap_ws_security exists in 0.9.5 but this lab pass has no signed-SOAP/UsernameToken fixture set; not covered yet",
-        ),
-        (
-            "AUTH-030",
-            "SOAP XML signature",
-            "soap_ws_security exists in 0.9.5 but this lab pass has no audited XML-signature fixture; not covered yet",
-        ),
-        ("AUTH-031", "SOAP SAML assertion", "needs a trusted SAML issuer fixture; Anvil never mints assertions; not covered yet"),
     ]
 }
 
@@ -1241,9 +1708,11 @@ pub fn profile() -> Profile {
 }
 
 async fn start() -> anyhow::Result<Env> {
-    let fx = AuthFixtures::start().await?;
+    let soap_dir = crate::gateway::repo_root().join("lab/.run/auth/soap");
+    let fx = AuthFixtures::start(soap_dir.clone()).await?;
     let vars = fx.secrets.template_vars();
-    let vars: Vec<(&str, String)> = vars.iter().map(|(k, v)| (*k, v.clone())).collect();
+    let mut vars: Vec<(&str, String)> = vars.iter().map(|(k, v)| (*k, v.clone())).collect();
+    vars.push(("LAB_SOAP", soap_dir.display().to_string()));
     let gw = Gateway::start(
         "auth",
         "auth.conf",
@@ -1261,13 +1730,24 @@ async fn start() -> anyhow::Result<Env> {
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let ctx = RunCtx::new("auth")?;
     let mut env = start().await?;
-    let mut results = match harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await {
+    // Signed-XML fixtures need an audited canonicalizer on the host.
+    let unsigned = soap_signing_unavailable(&env);
+    let defs: Vec<Def> = all().into_iter().filter(|d| unsigned.is_none() || !SIGNED_XML.contains(&d.id)).collect();
+    let mut results = match harness::run_defs(&ctx, &mut env, defs, &args.only, args.untrusted_pass).await {
         Ok(r) => r,
         Err(e) => {
             env.gw.stop().await;
             return Err(e);
         }
     };
+    if let Some(reason) = &unsigned {
+        for d in all().into_iter().filter(|d| SIGNED_XML.contains(&d.id)) {
+            if args.only.is_empty() || args.only.iter().any(|s| s.eq_ignore_ascii_case(d.id)) {
+                eprintln!("{:22} skipped {}\n    — {reason}", d.id, d.title);
+                results.push(ctx.skipped(d.id, d.title, reason));
+            }
+        }
+    }
     for (id, title, reason) in skips() {
         if args.only.is_empty() || args.only.iter().any(|s| s.eq_ignore_ascii_case(id)) {
             eprintln!("{id:22} skipped {title}\n    — {reason}");
