@@ -11,10 +11,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 fn fingerprint(der: &[u8]) -> String {
     let h = Sha256::digest(der);
-    h.iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(":")
+    h.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }
 
 pub fn summarize(der: &CertificateDer<'_>) -> CertificateSummary {
@@ -27,9 +24,7 @@ pub fn summarize(der: &CertificateDer<'_>) -> CertificateSummary {
                         GeneralName::DNSName(d) => sans.push(format!("DNS:{d}")),
                         GeneralName::IPAddress(ip) => {
                             let s = match ip.len() {
-                                4 => {
-                                    std::net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]).to_string()
-                                }
+                                4 => std::net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]).to_string(),
                                 16 => {
                                     let mut a = [0u8; 16];
                                     a.copy_from_slice(ip);
@@ -45,12 +40,7 @@ pub fn summarize(der: &CertificateDer<'_>) -> CertificateSummary {
                     }
                 }
             }
-            let is_ca = cert
-                .basic_constraints()
-                .ok()
-                .flatten()
-                .map(|bc| bc.value.ca)
-                .unwrap_or(false);
+            let is_ca = cert.basic_constraints().ok().flatten().map(|bc| bc.value.ca).unwrap_or(false);
             let key_algorithm = match cert.public_key().parsed() {
                 Ok(x509_parser::public_key::PublicKey::RSA(r)) => format!("RSA-{}", r.key_size()),
                 Ok(x509_parser::public_key::PublicKey::EC(ec)) => format!("EC-{}", ec.key_size()),

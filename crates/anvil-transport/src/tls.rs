@@ -12,9 +12,7 @@
 
 use crate::certs::summarize;
 use crate::errors::classify_rustls;
-use anvil_domain::execution::{
-    CertificateSummary, FailureKind, Phase, TlsObservation, TlsVerification, TransportFailure,
-};
+use anvil_domain::execution::{CertificateSummary, FailureKind, Phase, TlsObservation, TlsVerification, TransportFailure};
 use anvil_domain::tls::TlsMinVersion;
 use parking_lot::Mutex;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -40,9 +38,7 @@ pub struct ClientIdentityMaterial {
 
 impl std::fmt::Debug for ClientIdentityMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientIdentityMaterial")
-            .field("private_key_pem", &"‹redacted›")
-            .finish()
+        f.debug_struct("ClientIdentityMaterial").field("private_key_pem", &"‹redacted›").finish()
     }
 }
 
@@ -58,18 +54,13 @@ pub struct TlsSettings {
 
 impl TlsSettings {
     pub fn strict_system() -> Self {
-        TlsSettings {
-            verify: true,
-            use_system_roots: true,
-            ..Default::default()
-        }
+        TlsSettings { verify: true, use_system_roots: true, ..Default::default() }
     }
 }
 
 pub fn provider() -> Arc<CryptoProvider> {
     static P: OnceLock<Arc<CryptoProvider>> = OnceLock::new();
-    P.get_or_init(|| Arc::new(rustls::crypto::ring::default_provider()))
-        .clone()
+    P.get_or_init(|| Arc::new(rustls::crypto::ring::default_provider())).clone()
 }
 
 struct SystemRoots {
@@ -81,10 +72,7 @@ fn system_roots() -> &'static SystemRoots {
     static R: OnceLock<SystemRoots> = OnceLock::new();
     R.get_or_init(|| {
         let res = rustls_native_certs::load_native_certs();
-        SystemRoots {
-            certs: res.certs,
-            load_errors: res.errors.iter().map(|e| e.to_string()).collect(),
-        }
+        SystemRoots { certs: res.certs, load_errors: res.errors.iter().map(|e| e.to_string()).collect() }
     })
 }
 
@@ -115,19 +103,9 @@ fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFai
 fn parse_certs(pem: &str, field: &str) -> Result<Vec<CertificateDer<'static>>, TransportFailure> {
     let mut rd = std::io::BufReader::new(pem.as_bytes());
     let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut rd).collect();
-    let certs = certs.map_err(|e| {
-        local(
-            FailureKind::TlsProfileInvalid,
-            format!("certificate PEM could not be parsed: {e}"),
-            field,
-        )
-    })?;
+    let certs = certs.map_err(|e| local(FailureKind::TlsProfileInvalid, format!("certificate PEM could not be parsed: {e}"), field))?;
     if certs.is_empty() {
-        return Err(local(
-            FailureKind::TlsProfileInvalid,
-            "no CERTIFICATE blocks found in PEM",
-            field,
-        ));
+        return Err(local(FailureKind::TlsProfileInvalid, "no CERTIFICATE blocks found in PEM", field));
     }
     Ok(certs)
 }
@@ -153,23 +131,12 @@ fn parse_key(pem: &str) -> Result<PrivateKeyDer<'static>, TransportFailure> {
 /// All failures are local (no network activity happened).
 pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> {
     let mut hasher = Sha256::new();
-    hasher.update([
-        settings.verify as u8,
-        settings.use_system_roots as u8,
-        settings.min_version as u8,
-    ]);
-    hasher.update(
-        settings
-            .server_name_override
-            .as_deref()
-            .unwrap_or("")
-            .as_bytes(),
-    );
+    hasher.update([settings.verify as u8, settings.use_system_roots as u8, settings.min_version as u8]);
+    hasher.update(settings.server_name_override.as_deref().unwrap_or("").as_bytes());
 
     let mut roots = RootCertStore::empty();
     if settings.use_system_roots {
-        let (added, _ignored) =
-            roots.add_parsable_certificates(system_roots().certs.iter().cloned());
+        let (added, _ignored) = roots.add_parsable_certificates(system_roots().certs.iter().cloned());
         hasher.update(b"system");
         let _ = added;
     }
@@ -178,11 +145,7 @@ pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> 
         for c in certs {
             hasher.update(c.as_ref());
             roots.add(c).map_err(|e| {
-                local(
-                    FailureKind::TlsProfileInvalid,
-                    format!("CA certificate rejected: {e}"),
-                    &format!("tls.extra_roots[{i}]"),
-                )
+                local(FailureKind::TlsProfileInvalid, format!("CA certificate rejected: {e}"), &format!("tls.extra_roots[{i}]"))
             })?;
         }
     }
@@ -199,13 +162,7 @@ pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> 
         Some(
             WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider())
                 .build()
-                .map_err(|e| {
-                    local(
-                        FailureKind::TlsProfileInvalid,
-                        format!("trust store could not be built: {e}"),
-                        "tls.extra_roots",
-                    )
-                })?,
+                .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("trust store could not be built: {e}"), "tls.extra_roots"))?,
         )
     };
 
@@ -291,9 +248,7 @@ impl ServerCertVerifier for ObservingVerifier {
         let mut chain = vec![summarize(end_entity)];
         chain.extend(intermediates.iter().map(summarize));
         let result = match &self.inner {
-            Some(v) => {
-                v.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
-            }
+            Some(v) => v.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now),
             None => Err(rustls::Error::General("no trust anchors".into())),
         };
         let mut slot = self.slot.lock();
@@ -303,10 +258,7 @@ impl ServerCertVerifier for ObservingVerifier {
                 Ok(_) => slot.0.verification = Some(TlsVerification::Verified),
                 Err(e) => {
                     let (kind, _) = classify_rustls(e, false);
-                    slot.0.verification = Some(TlsVerification::Failed {
-                        problem: kind,
-                        detail: e.to_string(),
-                    });
+                    slot.0.verification = Some(TlsVerification::Failed { problem: kind, detail: e.to_string() });
                 }
             }
             result
@@ -315,9 +267,7 @@ impl ServerCertVerifier for ObservingVerifier {
                 (Some(_), Err(e)) => Some(classify_rustls(e, false).0),
                 _ => None,
             };
-            slot.0.verification = Some(TlsVerification::Bypassed {
-                would_have_failed: would,
-            });
+            slot.0.verification = Some(TlsVerification::Bypassed { would_have_failed: would });
             Ok(ServerCertVerified::assertion())
         }
     }
@@ -328,12 +278,7 @@ impl ServerCertVerifier for ObservingVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &provider().signature_verification_algorithms,
-        )
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &provider().signature_verification_algorithms)
     }
 
     fn verify_tls13_signature(
@@ -342,18 +287,11 @@ impl ServerCertVerifier for ObservingVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &provider().signature_verification_algorithms,
-        )
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &provider().signature_verification_algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        provider().signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -364,11 +302,7 @@ struct ObservingClientCert {
 }
 
 impl rustls::client::ResolvesClientCert for ObservingClientCert {
-    fn resolve(
-        &self,
-        _root_hint_subjects: &[&[u8]],
-        _sigschemes: &[SignatureScheme],
-    ) -> Option<Arc<CertifiedKey>> {
+    fn resolve(&self, _root_hint_subjects: &[&[u8]], _sigschemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
         let mut slot = self.slot.lock();
         slot.0.client_cert_requested = true;
         slot.0.client_cert_presented = self.key.is_some();
@@ -380,22 +314,10 @@ impl rustls::client::ResolvesClientCert for ObservingClientCert {
     }
 }
 
-pub fn server_name_for(
-    host: &str,
-    prepared: &PreparedTls,
-) -> Result<ServerName<'static>, TransportFailure> {
-    let name = prepared.server_name_override.clone().unwrap_or_else(|| {
-        host.trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_string()
-    });
-    ServerName::try_from(name.clone()).map_err(|_| {
-        local(
-            FailureKind::InvalidUrl,
-            format!("'{name}' is not a valid TLS server name"),
-            "url",
-        )
-    })
+pub fn server_name_for(host: &str, prepared: &PreparedTls) -> Result<ServerName<'static>, TransportFailure> {
+    let name = prepared.server_name_override.clone().unwrap_or_else(|| host.trim_start_matches('[').trim_end_matches(']').to_string());
+    ServerName::try_from(name.clone())
+        .map_err(|_| local(FailureKind::InvalidUrl, format!("'{name}' is not a valid TLS server name"), "url"))
 }
 
 /// Perform a TLS handshake over `io`, returning the stream and evidence. On
@@ -443,25 +365,16 @@ where
             let mut obs = observation_from_slot(&slot, &sni, alpn, prepared, true);
             let (_, conn) = stream.get_ref();
             obs.version = conn.protocol_version().map(|v| format!("{v:?}"));
-            obs.cipher_suite = conn
-                .negotiated_cipher_suite()
-                .map(|c| format!("{:?}", c.suite()));
-            obs.alpn_negotiated = conn
-                .alpn_protocol()
-                .map(|p| String::from_utf8_lossy(p).into_owned());
+            obs.cipher_suite = conn.negotiated_cipher_suite().map(|c| format!("{:?}", c.suite()));
+            obs.alpn_negotiated = conn.alpn_protocol().map(|p| String::from_utf8_lossy(p).into_owned());
             let resumed = matches!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
             obs.resumed = Some(resumed);
             if resumed {
                 // No certificate exchange happens on resumption.
                 obs.client_certificate_requested = None;
                 if obs.verification == TlsVerification::NotReached {
-                    obs.verification = if prepared.verify {
-                        TlsVerification::Verified
-                    } else {
-                        TlsVerification::Bypassed {
-                            would_have_failed: None,
-                        }
-                    };
+                    obs.verification =
+                        if prepared.verify { TlsVerification::Verified } else { TlsVerification::Bypassed { would_have_failed: None } };
                 }
             }
             Ok((stream, obs))
@@ -486,35 +399,18 @@ fn server_name_string(n: &ServerName<'_>) -> String {
     }
 }
 
-fn client_config(
-    prepared: &PreparedTls,
-    alpn: &[&str],
-    slot: Arc<Mutex<SlotHandle>>,
-) -> Result<ClientConfig, TransportFailure> {
+fn client_config(prepared: &PreparedTls, alpn: &[&str], slot: Arc<Mutex<SlotHandle>>) -> Result<ClientConfig, TransportFailure> {
     let versions: &[&'static rustls::SupportedProtocolVersion] = match prepared.min_version {
         TlsMinVersion::Tls12 => &[&rustls::version::TLS13, &rustls::version::TLS12],
         TlsMinVersion::Tls13 => &[&rustls::version::TLS13],
     };
-    let verifier = Arc::new(ObservingVerifier {
-        inner: prepared.verifier.clone(),
-        verify: prepared.verify,
-        slot: slot.clone(),
-    });
+    let verifier = Arc::new(ObservingVerifier { inner: prepared.verifier.clone(), verify: prepared.verify, slot: slot.clone() });
     let mut cfg = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(versions)
-        .map_err(|e| {
-            local(
-                FailureKind::TlsProfileInvalid,
-                format!("TLS versions unsupported: {e}"),
-                "tls.min_version",
-            )
-        })?
+        .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("TLS versions unsupported: {e}"), "tls.min_version"))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_client_cert_resolver(Arc::new(ObservingClientCert {
-            key: prepared.client_key.clone(),
-            slot,
-        }));
+        .with_client_cert_resolver(Arc::new(ObservingClientCert { key: prepared.client_key.clone(), slot }));
     cfg.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
     cfg.resumption = Resumption::store(prepared.sessions.clone());
     Ok(cfg)
@@ -546,10 +442,7 @@ fn observation_from_slot(
     let s = slot.lock();
     let mut obs = empty_observation(sni, alpn);
     obs.peer_certificates = s.0.peer_chain.clone();
-    obs.verification =
-        s.0.verification
-            .clone()
-            .unwrap_or(TlsVerification::NotReached);
+    obs.verification = s.0.verification.clone().unwrap_or(TlsVerification::NotReached);
     // "Not requested" is only asserted for a completed full handshake; a
     // failed handshake may have stopped before the resolver was consulted.
     obs.client_certificate_requested = if s.0.client_cert_requested {
@@ -559,10 +452,6 @@ fn observation_from_slot(
     } else {
         None
     };
-    obs.client_certificate_presented = if s.0.client_cert_presented {
-        prepared.client_summary.clone()
-    } else {
-        None
-    };
+    obs.client_certificate_presented = if s.0.client_cert_presented { prepared.client_summary.clone() } else { None };
     obs
 }

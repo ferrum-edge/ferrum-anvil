@@ -53,11 +53,7 @@ pub fn display_chain(err: &(dyn StdError + 'static)) -> String {
         }
     }
     let joined = parts.join(": ");
-    if joined.len() > 600 {
-        format!("{}…", &joined[..600])
-    } else {
-        joined
-    }
+    if joined.len() > 600 { format!("{}…", &joined[..600]) } else { joined }
 }
 
 pub fn io_kind_name(k: io::ErrorKind) -> String {
@@ -106,9 +102,7 @@ pub fn classify_rustls(e: &rustls::Error, after_handshake: bool) -> (FailureKind
                 C::Expired | C::ExpiredContext { .. } => FailureKind::TlsExpired,
                 C::NotValidYet | C::NotValidYetContext { .. } => FailureKind::TlsNotYetValid,
                 C::UnknownIssuer => FailureKind::TlsUntrustedIssuer,
-                C::NotValidForName | C::NotValidForNameContext { .. } => {
-                    FailureKind::TlsNameMismatch
-                }
+                C::NotValidForName | C::NotValidForNameContext { .. } => FailureKind::TlsNameMismatch,
                 C::Revoked => FailureKind::TlsRevoked,
                 _ => FailureKind::TlsBadCertificate,
             };
@@ -131,9 +125,7 @@ pub fn classify_rustls(e: &rustls::Error, after_handshake: bool) -> (FailureKind
             match m {
                 // The first bytes were not a TLS record: the peer is very likely
                 // not speaking TLS on this port (e.g. plaintext HTTP).
-                M::InvalidContentType | M::UnknownProtocolVersion | M::MessageTooLarge => {
-                    (FailureKind::TlsProtocolMismatch, None)
-                }
+                M::InvalidContentType | M::UnknownProtocolVersion | M::MessageTooLarge => (FailureKind::TlsProtocolMismatch, None),
                 _ => (FailureKind::TlsOther, None),
             }
         }
@@ -154,9 +146,7 @@ pub fn classify_tls_handshake(e: &io::Error) -> TransportFailure {
     }
     f.kind = match e.kind() {
         io::ErrorKind::UnexpectedEof => FailureKind::TlsPeerClosed,
-        io::ErrorKind::ConnectionReset
-        | io::ErrorKind::ConnectionAborted
-        | io::ErrorKind::BrokenPipe => FailureKind::TlsReset,
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe => FailureKind::TlsReset,
         io::ErrorKind::TimedOut => FailureKind::TlsHandshakeTimeout,
         _ => FailureKind::TlsOther,
     };

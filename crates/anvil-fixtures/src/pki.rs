@@ -2,8 +2,8 @@
 //! installed into an OS trust store.
 
 use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, SanType,
 };
 use std::path::Path;
 use time::{Duration, OffsetDateTime};
@@ -56,11 +56,7 @@ fn ca_params(cn: &str) -> CertificateParams {
     let mut p = CertificateParams::new(Vec::<String>::new()).expect("params");
     p.distinguished_name = dn(cn);
     p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    p.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-        KeyUsagePurpose::DigitalSignature,
-    ];
+    p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
     p.not_before = OffsetDateTime::now_utc() - Duration::days(1);
     p.not_after = OffsetDateTime::now_utc() + Duration::days(365);
     p
@@ -75,21 +71,11 @@ fn make_ca(cn: &str) -> Ca {
     let key = KeyPair::generate().expect("key");
     let key_pem = key.serialize_pem();
     let issuer = CertifiedIssuer::self_signed(ca_params(cn), key).expect("ca");
-    let pem = Pem {
-        cert: issuer.pem(),
-        key: key_pem,
-    };
+    let pem = Pem { cert: issuer.pem(), key: key_pem };
     Ca { issuer, pem }
 }
 
-fn leaf(
-    cn: &str,
-    sans: &[&str],
-    issuer: &Issuer<'_, KeyPair>,
-    not_before: OffsetDateTime,
-    not_after: OffsetDateTime,
-    client: bool,
-) -> Pem {
+fn leaf(cn: &str, sans: &[&str], issuer: &Issuer<'_, KeyPair>, not_before: OffsetDateTime, not_after: OffsetDateTime, client: bool) -> Pem {
     let mut p = CertificateParams::new(Vec::<String>::new()).expect("params");
     p.distinguished_name = dn(cn);
     p.subject_alt_names = sans
@@ -100,33 +86,16 @@ fn leaf(
         })
         .collect();
     p.is_ca = IsCa::ExplicitNoCa;
-    p.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyEncipherment,
-    ];
-    p.extended_key_usages = if client {
-        vec![ExtendedKeyUsagePurpose::ClientAuth]
-    } else {
-        vec![ExtendedKeyUsagePurpose::ServerAuth]
-    };
+    p.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+    p.extended_key_usages = if client { vec![ExtendedKeyUsagePurpose::ClientAuth] } else { vec![ExtendedKeyUsagePurpose::ServerAuth] };
     p.not_before = not_before;
     p.not_after = not_after;
     let key = KeyPair::generate().expect("key");
     let cert = p.signed_by(&key, issuer).expect("sign");
-    Pem {
-        cert: cert.pem(),
-        key: key.serialize_pem(),
-    }
+    Pem { cert: cert.pem(), key: key.serialize_pem() }
 }
 
-pub const SERVER_NAMES: &[&str] = &[
-    "localhost",
-    "127.0.0.1",
-    "::1",
-    "*.anvil.test",
-    "gateway.anvil.test",
-    "backend.anvil.test",
-];
+pub const SERVER_NAMES: &[&str] = &["localhost", "127.0.0.1", "::1", "*.anvil.test", "gateway.anvil.test", "backend.anvil.test"];
 
 impl LabPki {
     pub fn generate() -> Self {
@@ -137,22 +106,8 @@ impl LabPki {
         let valid_from = now - Duration::days(1);
         let valid_to = now + Duration::days(90);
         LabPki {
-            server: leaf(
-                "anvil-lab-server",
-                SERVER_NAMES,
-                &ca.issuer,
-                valid_from,
-                valid_to,
-                false,
-            ),
-            server_expired: leaf(
-                "anvil-lab-expired",
-                SERVER_NAMES,
-                &ca.issuer,
-                now - Duration::days(30),
-                now - Duration::days(1),
-                false,
-            ),
+            server: leaf("anvil-lab-server", SERVER_NAMES, &ca.issuer, valid_from, valid_to, false),
+            server_expired: leaf("anvil-lab-expired", SERVER_NAMES, &ca.issuer, now - Duration::days(30), now - Duration::days(1), false),
             server_not_yet_valid: leaf(
                 "anvil-lab-future",
                 SERVER_NAMES,
@@ -161,46 +116,11 @@ impl LabPki {
                 now + Duration::days(60),
                 false,
             ),
-            server_wrong_name: leaf(
-                "wrong.anvil.invalid",
-                &["wrong.anvil.invalid"],
-                &ca.issuer,
-                valid_from,
-                valid_to,
-                false,
-            ),
-            server_untrusted: leaf(
-                "anvil-lab-untrusted",
-                SERVER_NAMES,
-                &rogue.issuer,
-                valid_from,
-                valid_to,
-                false,
-            ),
-            client_a: leaf(
-                "anvil-client-a",
-                &["anvil-client-a"],
-                &client_ca.issuer,
-                valid_from,
-                valid_to,
-                true,
-            ),
-            client_b: leaf(
-                "anvil-client-b",
-                &["anvil-client-b"],
-                &client_ca.issuer,
-                valid_from,
-                valid_to,
-                true,
-            ),
-            client_rogue: leaf(
-                "anvil-client-rogue",
-                &["anvil-client-rogue"],
-                &rogue.issuer,
-                valid_from,
-                valid_to,
-                true,
-            ),
+            server_wrong_name: leaf("wrong.anvil.invalid", &["wrong.anvil.invalid"], &ca.issuer, valid_from, valid_to, false),
+            server_untrusted: leaf("anvil-lab-untrusted", SERVER_NAMES, &rogue.issuer, valid_from, valid_to, false),
+            client_a: leaf("anvil-client-a", &["anvil-client-a"], &client_ca.issuer, valid_from, valid_to, true),
+            client_b: leaf("anvil-client-b", &["anvil-client-b"], &client_ca.issuer, valid_from, valid_to, true),
+            client_rogue: leaf("anvil-client-rogue", &["anvil-client-rogue"], &rogue.issuer, valid_from, valid_to, true),
             ca: ca.pem,
             rogue_ca: rogue.pem,
             client_ca: client_ca.pem,
@@ -233,10 +153,7 @@ impl LabPki {
                 std::fs::set_permissions(&kp, std::fs::Permissions::from_mode(0o600))?;
             }
         }
-        std::fs::write(
-            dir.join("server-chain.crt"),
-            self.server.chain_with(&self.ca),
-        )?;
+        std::fs::write(dir.join("server-chain.crt"), self.server.chain_with(&self.ca))?;
         Ok(())
     }
 }

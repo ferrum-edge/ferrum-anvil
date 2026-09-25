@@ -43,29 +43,13 @@ pub async fn connect_tcp(
         match res {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
-                attempts.push(ConnectAttempt {
-                    address: addr.to_string(),
-                    failure: None,
-                    duration_us: Some(dur),
-                });
-                return Ok(ConnectResult {
-                    stream,
-                    attempts,
-                    remote: *addr,
-                });
+                attempts.push(ConnectAttempt { address: addr.to_string(), failure: None, duration_us: Some(dur) });
+                return Ok(ConnectResult { stream, attempts, remote: *addr });
             }
             Err(Some(e)) => {
                 let kind = classify_connect_io(&e);
-                attempts.push(ConnectAttempt {
-                    address: addr.to_string(),
-                    failure: Some(kind),
-                    duration_us: Some(dur),
-                });
-                let mut f = TransportFailure::new(
-                    Phase::Connect,
-                    kind,
-                    format!("connect to {addr} failed: {}", display_chain(&e)),
-                );
+                attempts.push(ConnectAttempt { address: addr.to_string(), failure: Some(kind), duration_us: Some(dur) });
+                let mut f = TransportFailure::new(Phase::Connect, kind, format!("connect to {addr} failed: {}", display_chain(&e)));
                 f.io_error_kind = Some(io_kind_name(e.kind()));
                 f.os_error_code = e.raw_os_error();
                 last = Some(f);
@@ -80,9 +64,7 @@ pub async fn connect_tcp(
                     TransportFailure::new(
                         Phase::Connect,
                         FailureKind::ConnectTimeout,
-                        format!(
-                            "TCP connect to {addr} did not complete before the connect deadline"
-                        ),
+                        format!("TCP connect to {addr} did not complete before the connect deadline"),
                     )
                     .with_deadline(deadline.map(|d| d.as_millis() as u64)),
                 );
@@ -90,12 +72,8 @@ pub async fn connect_tcp(
         }
     }
     let f = last.unwrap_or_else(|| {
-        TransportFailure::new(
-            Phase::Connect,
-            FailureKind::ConnectTimeout,
-            "connect deadline elapsed before any address was tried",
-        )
-        .with_deadline(deadline.map(|d| d.as_millis() as u64))
+        TransportFailure::new(Phase::Connect, FailureKind::ConnectTimeout, "connect deadline elapsed before any address was tried")
+            .with_deadline(deadline.map(|d| d.as_millis() as u64))
     });
     Err((f, attempts))
 }
@@ -108,30 +86,21 @@ pub async fn http_connect_tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     deadline: Option<Duration>,
 ) -> Result<(), TransportFailure> {
     let fut = async {
-        let mut req =
-            format!("CONNECT {target_authority} HTTP/1.1\r\nHost: {target_authority}\r\n");
+        let mut req = format!("CONNECT {target_authority} HTTP/1.1\r\nHost: {target_authority}\r\n");
         if let Some((u, p)) = credentials {
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
             req.push_str(&format!("Proxy-Authorization: Basic {token}\r\n"));
         }
         req.push_str("\r\n");
         stream.write_all(req.as_bytes()).await.map_err(|e| {
-            TransportFailure::new(
-                Phase::ProxyTunnel,
-                FailureKind::ProxyProtocolError,
-                format!("writing CONNECT to proxy failed: {e}"),
-            )
+            TransportFailure::new(Phase::ProxyTunnel, FailureKind::ProxyProtocolError, format!("writing CONNECT to proxy failed: {e}"))
         })?;
         // Read the proxy's response head, bounded to 16 KiB.
         let mut buf = Vec::with_capacity(512);
         let mut byte = [0u8; 1];
         loop {
             let n = stream.read(&mut byte).await.map_err(|e| {
-                TransportFailure::new(
-                    Phase::ProxyTunnel,
-                    FailureKind::ProxyProtocolError,
-                    format!("reading CONNECT response failed: {e}"),
-                )
+                TransportFailure::new(Phase::ProxyTunnel, FailureKind::ProxyProtocolError, format!("reading CONNECT response failed: {e}"))
             })?;
             if n == 0 {
                 return Err(TransportFailure::new(
@@ -153,31 +122,15 @@ pub async fn http_connect_tunnel<S: AsyncRead + AsyncWrite + Unpin>(
             }
         }
         let head = String::from_utf8_lossy(&buf);
-        let status: u16 = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| {
-                TransportFailure::new(
-                    Phase::ProxyTunnel,
-                    FailureKind::ProxyProtocolError,
-                    "proxy sent an unparseable CONNECT response",
-                )
-            })?;
+        let status: u16 = head.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).ok_or_else(|| {
+            TransportFailure::new(Phase::ProxyTunnel, FailureKind::ProxyProtocolError, "proxy sent an unparseable CONNECT response")
+        })?;
         if (200..300).contains(&status) {
             Ok(())
         } else {
-            let kind = if status == 407 {
-                FailureKind::ProxyAuthRequired
-            } else {
-                FailureKind::ProxyTunnelRejected
-            };
-            let mut f = TransportFailure::new(
-                Phase::ProxyTunnel,
-                kind,
-                format!("proxy refused CONNECT to {target_authority} with HTTP {status}"),
-            );
+            let kind = if status == 407 { FailureKind::ProxyAuthRequired } else { FailureKind::ProxyTunnelRejected };
+            let mut f =
+                TransportFailure::new(Phase::ProxyTunnel, kind, format!("proxy refused CONNECT to {target_authority} with HTTP {status}"));
             f.status = Some(status);
             Err(f)
         }
@@ -203,31 +156,19 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
     credentials: Option<(&str, &str)>,
     deadline: Option<Duration>,
 ) -> Result<(), TransportFailure> {
-    let perr =
-        |m: String| TransportFailure::new(Phase::ProxyTunnel, FailureKind::ProxyProtocolError, m);
+    let perr = |m: String| TransportFailure::new(Phase::ProxyTunnel, FailureKind::ProxyProtocolError, m);
     let fut = async {
-        let methods: &[u8] = if credentials.is_some() {
-            &[0x05, 0x02, 0x00, 0x02]
-        } else {
-            &[0x05, 0x01, 0x00]
-        };
-        stream
-            .write_all(methods)
-            .await
-            .map_err(|e| perr(format!("SOCKS5 greeting failed: {e}")))?;
+        let methods: &[u8] = if credentials.is_some() { &[0x05, 0x02, 0x00, 0x02] } else { &[0x05, 0x01, 0x00] };
+        stream.write_all(methods).await.map_err(|e| perr(format!("SOCKS5 greeting failed: {e}")))?;
         let mut sel = [0u8; 2];
-        stream
-            .read_exact(&mut sel)
-            .await
-            .map_err(|e| perr(format!("SOCKS5 method selection failed: {e}")))?;
+        stream.read_exact(&mut sel).await.map_err(|e| perr(format!("SOCKS5 method selection failed: {e}")))?;
         if sel[0] != 0x05 {
             return Err(perr("peer is not a SOCKS5 proxy".into()));
         }
         match sel[1] {
             0x00 => {}
             0x02 => {
-                let (u, p) =
-                    credentials.ok_or_else(|| perr("SOCKS5 proxy requested credentials".into()))?;
+                let (u, p) = credentials.ok_or_else(|| perr("SOCKS5 proxy requested credentials".into()))?;
                 if u.len() > 255 || p.len() > 255 {
                     return Err(TransportFailure::new(
                         Phase::Prepare,
@@ -239,15 +180,9 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
                 m.extend_from_slice(u.as_bytes());
                 m.push(p.len() as u8);
                 m.extend_from_slice(p.as_bytes());
-                stream
-                    .write_all(&m)
-                    .await
-                    .map_err(|e| perr(format!("SOCKS5 auth write failed: {e}")))?;
+                stream.write_all(&m).await.map_err(|e| perr(format!("SOCKS5 auth write failed: {e}")))?;
                 let mut r = [0u8; 2];
-                stream
-                    .read_exact(&mut r)
-                    .await
-                    .map_err(|e| perr(format!("SOCKS5 auth read failed: {e}")))?;
+                stream.read_exact(&mut r).await.map_err(|e| perr(format!("SOCKS5 auth read failed: {e}")))?;
                 if r[1] != 0 {
                     return Err(TransportFailure::new(
                         Phase::ProxyTunnel,
@@ -264,17 +199,11 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
                 ));
             }
             m => {
-                return Err(perr(format!(
-                    "SOCKS5 proxy selected unsupported method {m}"
-                )));
+                return Err(perr(format!("SOCKS5 proxy selected unsupported method {m}")));
             }
         }
         let mut req = vec![0x05, 0x01, 0x00];
-        match host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-        {
+        match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
             Ok(std::net::IpAddr::V4(v4)) => {
                 req.push(0x01);
                 req.extend_from_slice(&v4.octets());
@@ -285,11 +214,7 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
             }
             Err(_) => {
                 if host.len() > 255 {
-                    return Err(TransportFailure::new(
-                        Phase::Prepare,
-                        FailureKind::InvalidUrl,
-                        "host name too long for SOCKS5",
-                    ));
+                    return Err(TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, "host name too long for SOCKS5"));
                 }
                 req.push(0x03);
                 req.push(host.len() as u8);
@@ -297,23 +222,14 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
             }
         }
         req.extend_from_slice(&port.to_be_bytes());
-        stream
-            .write_all(&req)
-            .await
-            .map_err(|e| perr(format!("SOCKS5 connect write failed: {e}")))?;
+        stream.write_all(&req).await.map_err(|e| perr(format!("SOCKS5 connect write failed: {e}")))?;
         let mut head = [0u8; 4];
-        stream
-            .read_exact(&mut head)
-            .await
-            .map_err(|e| perr(format!("SOCKS5 connect reply failed: {e}")))?;
+        stream.read_exact(&mut head).await.map_err(|e| perr(format!("SOCKS5 connect reply failed: {e}")))?;
         if head[1] != 0x00 {
             let mut f = TransportFailure::new(
                 Phase::ProxyTunnel,
                 FailureKind::ProxyTunnelRejected,
-                format!(
-                    "SOCKS5 proxy could not connect to {host}:{port} (reply code {})",
-                    head[1]
-                ),
+                format!("SOCKS5 proxy could not connect to {host}:{port} (reply code {})", head[1]),
             );
             f.status = Some(head[1] as u16);
             return Err(f);
@@ -323,27 +239,19 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
             0x04 => 16 + 2,
             0x03 => {
                 let mut l = [0u8; 1];
-                stream
-                    .read_exact(&mut l)
-                    .await
-                    .map_err(|e| perr(format!("SOCKS5 reply read failed: {e}")))?;
+                stream.read_exact(&mut l).await.map_err(|e| perr(format!("SOCKS5 reply read failed: {e}")))?;
                 l[0] as usize + 2
             }
             _ => return Err(perr("SOCKS5 reply has unknown address type".into())),
         };
         let mut rest = vec![0u8; skip];
-        stream
-            .read_exact(&mut rest)
-            .await
-            .map_err(|e| perr(format!("SOCKS5 reply read failed: {e}")))?;
+        stream.read_exact(&mut rest).await.map_err(|e| perr(format!("SOCKS5 reply read failed: {e}")))?;
         Ok(())
     };
     match deadline {
         Some(d) => tokio::time::timeout(d, fut).await.unwrap_or_else(|_| {
-            Err(
-                perr("SOCKS5 proxy did not complete the tunnel before the connect deadline".into())
-                    .with_deadline(Some(d.as_millis() as u64)),
-            )
+            Err(perr("SOCKS5 proxy did not complete the tunnel before the connect deadline".into())
+                .with_deadline(Some(d.as_millis() as u64)))
         }),
         None => fut.await,
     }
@@ -352,10 +260,7 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
 /// `NO_PROXY` matching: `*`, exact hosts, `.suffix` / `suffix` domain matches,
 /// IP literals and CIDR blocks. Ports in entries (`host:port`) must match.
 pub fn no_proxy_matches(no_proxy: &str, host: &str, port: u16) -> bool {
-    let host = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
     for raw in no_proxy.split(',') {
         let entry = raw.trim().to_ascii_lowercase();
         if entry.is_empty() {
@@ -366,19 +271,10 @@ pub fn no_proxy_matches(no_proxy: &str, host: &str, port: u16) -> bool {
         }
         let (name, eport) = match entry.rsplit_once(':') {
             Some((n, p)) if !n.contains(':') || n.ends_with(']') => match p.parse::<u16>() {
-                Ok(pp) => (
-                    n.trim_start_matches('[').trim_end_matches(']').to_string(),
-                    Some(pp),
-                ),
+                Ok(pp) => (n.trim_start_matches('[').trim_end_matches(']').to_string(), Some(pp)),
                 Err(_) => (entry.clone(), None),
             },
-            _ => (
-                entry
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string(),
-                None,
-            ),
+            _ => (entry.trim_start_matches('[').trim_end_matches(']').to_string(), None),
         };
         if let Some(p) = eport
             && p != port
@@ -409,22 +305,14 @@ fn cidr_contains(net: std::net::IpAddr, bits: u8, ip: std::net::IpAddr) -> bool 
             if bits > 32 {
                 return false;
             }
-            let mask = if bits == 0 {
-                0
-            } else {
-                u32::MAX << (32 - bits)
-            };
+            let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
             (u32::from(n) & mask) == (u32::from(i) & mask)
         }
         (V6(n), V6(i)) => {
             if bits > 128 {
                 return false;
             }
-            let mask = if bits == 0 {
-                0
-            } else {
-                u128::MAX << (128 - bits)
-            };
+            let mask = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
             (u128::from(n) & mask) == (u128::from(i) & mask)
         }
         _ => false,

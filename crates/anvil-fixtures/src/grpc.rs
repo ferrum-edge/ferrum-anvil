@@ -88,11 +88,7 @@ pub fn echo_file_descriptor() -> &'static Vec<u8> {
     static FD: OnceLock<Vec<u8>> = OnceLock::new();
     FD.get_or_init(|| {
         let set = echo_descriptor_set();
-        set.file
-            .into_iter()
-            .find(|f| f.name() == "echo.proto")
-            .map(|f| f.encode_to_vec())
-            .unwrap_or_default()
+        set.file.into_iter().find(|f| f.name() == "echo.proto").map(|f| f.encode_to_vec()).unwrap_or_default()
     })
 }
 
@@ -119,15 +115,9 @@ fn frame(msg: &impl Message) -> Bytes {
 
 fn trailers(status: i32, message: &str) -> HeaderMap {
     let mut t = HeaderMap::new();
-    t.insert(
-        "grpc-status",
-        HeaderValue::from_str(&status.to_string()).unwrap(),
-    );
+    t.insert("grpc-status", HeaderValue::from_str(&status.to_string()).unwrap());
     if !message.is_empty() {
-        t.insert(
-            "grpc-message",
-            HeaderValue::from_str(message).unwrap_or(HeaderValue::from_static("error")),
-        );
+        t.insert("grpc-message", HeaderValue::from_str(message).unwrap_or(HeaderValue::from_static("error")));
     }
     t
 }
@@ -144,8 +134,7 @@ impl FrameReader {
     async fn next(&mut self) -> Option<Result<Bytes, String>> {
         loop {
             if self.buf.len() >= 5 {
-                let len = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]])
-                    as usize;
+                let len = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
                 if len > 4 * 1024 * 1024 {
                     return Some(Err("message too large".into()));
                 }
@@ -162,11 +151,7 @@ impl FrameReader {
                 }
                 Some(Err(e)) => return Some(Err(e.to_string())),
                 None => {
-                    return if self.buf.is_empty() {
-                        None
-                    } else {
-                        Some(Err("truncated gRPC frame".into()))
-                    };
+                    return if self.buf.is_empty() { None } else { Some(Err("truncated gRPC frame".into())) };
                 }
             }
         }
@@ -178,53 +163,26 @@ pub async fn handle(req: Request<Incoming>, log: GroundTruthLog) -> Response<FxB
     let deny_reflection = req.headers().contains_key("x-fixture-deny-reflection");
     let (tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
     let body: FxBody = StreamBody::new(rx).boxed();
-    let reader = FrameReader {
-        body: req.into_body(),
-        buf: BytesMut::new(),
-    };
+    let reader = FrameReader { body: req.into_body(), buf: BytesMut::new() };
     tokio::spawn(run(path, reader, tx, log, deny_reflection));
-    Response::builder()
-        .status(200)
-        .header("content-type", "application/grpc")
-        .body(body)
-        .unwrap()
+    Response::builder().status(200).header("content-type", "application/grpc").body(body).unwrap()
 }
 
-async fn run(
-    path: String,
-    mut reader: FrameReader,
-    mut tx: Tx,
-    log: GroundTruthLog,
-    deny_reflection: bool,
-) {
+async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruthLog, deny_reflection: bool) {
     let send = |m: Bytes| Ok(Frame::data(m));
     match path.as_str() {
         "/anvil.lab.v1.Echo/Unary" => {
             let Some(Ok(m)) = reader.next().await else {
-                let _ = tx
-                    .send(Ok(Frame::trailers(trailers(3, "missing request message"))))
-                    .await;
+                let _ = tx.send(Ok(Frame::trailers(trailers(3, "missing request message")))).await;
                 return;
             };
-            log.push(GroundTruth::MessageReceived {
-                bytes: m.len() as u64,
-            });
+            log.push(GroundTruth::MessageReceived { bytes: m.len() as u64 });
             let req = EchoRequest::decode(m).unwrap_or_default();
             if req.fail_with != 0 {
-                let _ = tx
-                    .send(Ok(Frame::trailers(trailers(
-                        req.fail_with,
-                        "fixture requested failure",
-                    ))))
-                    .await;
+                let _ = tx.send(Ok(Frame::trailers(trailers(req.fail_with, "fixture requested failure")))).await;
                 return;
             }
-            let _ = tx
-                .send(send(frame(&EchoReply {
-                    message: req.message,
-                    index: 0,
-                })))
-                .await;
+            let _ = tx.send(send(frame(&EchoReply { message: req.message, index: 0 }))).await;
             let _ = tx.send(Ok(Frame::trailers(trailers(0, "")))).await;
         }
         "/anvil.lab.v1.Echo/ServerStream" => {
@@ -233,27 +191,13 @@ async fn run(
             };
             let req = EchoRequest::decode(m).unwrap_or_default();
             for i in 0..req.count.clamp(0, 10_000) {
-                if tx
-                    .send(send(frame(&EchoReply {
-                        message: req.message.clone(),
-                        index: i,
-                    })))
-                    .await
-                    .is_err()
-                {
+                if tx.send(send(frame(&EchoReply { message: req.message.clone(), index: i }))).await.is_err() {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
             let _ = tx
-                .send(Ok(Frame::trailers(trailers(
-                    req.fail_with,
-                    if req.fail_with != 0 {
-                        "fixture requested failure"
-                    } else {
-                        ""
-                    },
-                ))))
+                .send(Ok(Frame::trailers(trailers(req.fail_with, if req.fail_with != 0 { "fixture requested failure" } else { "" }))))
                 .await;
         }
         "/anvil.lab.v1.Echo/ClientStream" => {
@@ -267,83 +211,45 @@ async fn run(
                 n += 1;
             }
             if fail != 0 {
-                let _ = tx
-                    .send(Ok(Frame::trailers(trailers(
-                        fail,
-                        "fixture requested failure",
-                    ))))
-                    .await;
+                let _ = tx.send(Ok(Frame::trailers(trailers(fail, "fixture requested failure")))).await;
                 return;
             }
-            let _ = tx
-                .send(send(frame(&EchoReply {
-                    message: format!("{n} messages; last={last}"),
-                    index: n,
-                })))
-                .await;
+            let _ = tx.send(send(frame(&EchoReply { message: format!("{n} messages; last={last}"), index: n }))).await;
             let _ = tx.send(Ok(Frame::trailers(trailers(0, "")))).await;
         }
         "/anvil.lab.v1.Echo/Bidi" => {
             let mut i = 0;
             while let Some(Ok(m)) = reader.next().await {
                 let r = EchoRequest::decode(m).unwrap_or_default();
-                if tx
-                    .send(send(frame(&EchoReply {
-                        message: r.message,
-                        index: i,
-                    })))
-                    .await
-                    .is_err()
-                {
+                if tx.send(send(frame(&EchoReply { message: r.message, index: i }))).await.is_err() {
                     return;
                 }
                 i += 1;
             }
             let _ = tx.send(Ok(Frame::trailers(trailers(0, "")))).await;
         }
-        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
-        | "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo" => {
+        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" | "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo" => {
             if deny_reflection {
-                let _ = tx
-                    .send(Ok(Frame::trailers(trailers(
-                        7,
-                        "reflection is disabled for this caller",
-                    ))))
-                    .await;
+                let _ = tx.send(Ok(Frame::trailers(trailers(7, "reflection is disabled for this caller")))).await;
                 return;
             }
             while let Some(Ok(m)) = reader.next().await {
                 let r = ReflRequest::decode(m).unwrap_or_default();
-                let mut resp = ReflResponse {
-                    valid_host: r.host.clone(),
-                    ..Default::default()
-                };
+                let mut resp = ReflResponse { valid_host: r.host.clone(), ..Default::default() };
                 if r.list_services.is_some() {
                     resp.list_services_response = Some(ListServiceResponse {
                         service: vec![
-                            ServiceResponse {
-                                name: "anvil.lab.v1.Echo".into(),
-                            },
-                            ServiceResponse {
-                                name: "grpc.reflection.v1.ServerReflection".into(),
-                            },
+                            ServiceResponse { name: "anvil.lab.v1.Echo".into() },
+                            ServiceResponse { name: "grpc.reflection.v1.ServerReflection".into() },
                         ],
                     });
-                } else if r
-                    .file_containing_symbol
-                    .as_deref()
-                    .map(|s| s.starts_with("anvil.lab.v1"))
-                    .unwrap_or(false)
+                } else if r.file_containing_symbol.as_deref().map(|s| s.starts_with("anvil.lab.v1")).unwrap_or(false)
                     || r.file_by_filename.as_deref() == Some("echo.proto")
                 {
-                    resp.file_descriptor_response = Some(FileDescriptorResponse {
-                        file_descriptor_proto: vec![echo_file_descriptor().clone()],
-                    });
+                    resp.file_descriptor_response =
+                        Some(FileDescriptorResponse { file_descriptor_proto: vec![echo_file_descriptor().clone()] });
                 } else {
-                    resp.error_response = Some(ErrorResponse {
-                        error_code: 5,
-                        error_message: "not found".into(),
-                    });
+                    resp.error_response = Some(ErrorResponse { error_code: 5, error_message: "not found".into() });
                 }
                 if tx.send(send(frame(&resp))).await.is_err() {
                     return;
@@ -352,9 +258,7 @@ async fn run(
             let _ = tx.send(Ok(Frame::trailers(trailers(0, "")))).await;
         }
         _ => {
-            let _ = tx
-                .send(Ok(Frame::trailers(trailers(12, "unknown method"))))
-                .await;
+            let _ = tx.send(Ok(Frame::trailers(trailers(12, "unknown method")))).await;
         }
     }
 }

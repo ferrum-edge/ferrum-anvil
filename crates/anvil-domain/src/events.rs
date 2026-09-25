@@ -9,43 +9,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ExecutionEvent {
-    Started {
-        execution_id: Id,
-        method: String,
-        url: String,
-    },
-    AttemptStarted {
-        execution_id: Id,
-        attempt: u32,
-    },
-    Phase {
-        execution_id: Id,
-        attempt: u32,
-        phase: Phase,
-        status: PhaseStatus,
-        offset_us: u64,
-    },
-    ResponseHead {
-        execution_id: Id,
-        attempt: u32,
-        status: u16,
-    },
-    BodyProgress {
-        execution_id: Id,
-        bytes: u64,
-    },
-    Message {
-        execution_id: Id,
-        message: StreamMessage,
-    },
-    AttemptFailed {
-        execution_id: Id,
-        attempt: u32,
-        kind: FailureKind,
-    },
-    Finished {
-        execution_id: Id,
-    },
+    Started { execution_id: Id, method: String, url: String },
+    AttemptStarted { execution_id: Id, attempt: u32 },
+    Phase { execution_id: Id, attempt: u32, phase: Phase, status: PhaseStatus, offset_us: u64 },
+    ResponseHead { execution_id: Id, attempt: u32, status: u16 },
+    BodyProgress { execution_id: Id, bytes: u64 },
+    Message { execution_id: Id, message: StreamMessage },
+    AttemptFailed { execution_id: Id, attempt: u32, kind: FailureKind },
+    Finished { execution_id: Id },
 }
 
 /// Commands for an interactive session (WebSocket / TCP / UDP / bidi gRPC).

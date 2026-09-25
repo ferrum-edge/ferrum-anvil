@@ -36,13 +36,7 @@ pub struct KeyValue {
 
 impl KeyValue {
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
-        KeyValue {
-            name: name.into(),
-            value: value.into(),
-            enabled: true,
-            description: String::new(),
-            sensitive: false,
-        }
+        KeyValue { name: name.into(), value: value.into(), enabled: true, description: String::new(), sensitive: false }
     }
 }
 

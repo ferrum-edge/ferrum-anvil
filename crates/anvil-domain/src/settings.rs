@@ -73,11 +73,7 @@ pub struct RedirectPolicy {
 
 impl Default for RedirectPolicy {
     fn default() -> Self {
-        RedirectPolicy {
-            follow: true,
-            max: 10,
-            forward_credentials_cross_origin: false,
-        }
+        RedirectPolicy { follow: true, max: 10, forward_credentials_cross_origin: false }
     }
 }
 
@@ -279,12 +275,7 @@ pub struct HistoryPolicy {
 
 impl Default for HistoryPolicy {
     fn default() -> Self {
-        HistoryPolicy {
-            enabled: true,
-            keep_response_bodies: true,
-            max_age_days: 30,
-            max_total_bytes: 512 * 1024 * 1024,
-        }
+        HistoryPolicy { enabled: true, keep_response_bodies: true, max_age_days: 30, max_total_bytes: 512 * 1024 * 1024 }
     }
 }
 
@@ -299,12 +290,7 @@ pub struct LockPolicy {
 
 impl Default for LockPolicy {
     fn default() -> Self {
-        LockPolicy {
-            idle_minutes: 15,
-            lock_on_os_lock: true,
-            run_policy: LockRunPolicy::StopRuns,
-            clear_clipboard_on_lock: true,
-        }
+        LockPolicy { idle_minutes: 15, lock_on_os_lock: true, run_policy: LockRunPolicy::StopRuns, clear_clipboard_on_lock: true }
     }
 }
 

@@ -48,23 +48,11 @@ pub fn apply_preference(mut addrs: Vec<SocketAddr>, pref: IpPreference) -> Vec<S
     }
 }
 
-pub async fn resolve(
-    host: &str,
-    port: u16,
-    cfg: &DnsConfig,
-    timeout: Option<Duration>,
-) -> Result<Resolution, TransportFailure> {
+pub async fn resolve(host: &str, port: u16, cfg: &DnsConfig, timeout: Option<Duration>) -> Result<Resolution, TransportFailure> {
     if let Some(ip) = parse_literal(host) {
-        return Ok(Resolution {
-            addrs: vec![SocketAddr::new(ip, port)],
-            source: "literal",
-        });
+        return Ok(Resolution { addrs: vec![SocketAddr::new(ip, port)], source: "literal" });
     }
-    if let Some(ov) = cfg
-        .overrides
-        .iter()
-        .find(|o| o.host.eq_ignore_ascii_case(host))
-    {
+    if let Some(ov) = cfg.overrides.iter().find(|o| o.host.eq_ignore_ascii_case(host)) {
         let mut addrs = Vec::new();
         for a in &ov.addresses {
             match parse_literal(a) {
@@ -80,18 +68,13 @@ pub async fn resolve(
             }
         }
         let addrs = apply_preference(addrs, cfg.ip_preference);
-        return Ok(Resolution {
-            addrs,
-            source: "override",
-        });
+        return Ok(Resolution { addrs, source: "override" });
     }
 
     let fut = async {
         match &cfg.resolver {
             ResolverMode::System => resolve_system(host, port).await,
-            ResolverMode::Custom { nameservers } => {
-                resolve_custom(host, port, nameservers, timeout).await
-            }
+            ResolverMode::Custom { nameservers } => resolve_custom(host, port, nameservers, timeout).await,
         }
     };
     let res = match timeout {
@@ -100,10 +83,7 @@ pub async fn resolve(
             Err(_) => Err(TransportFailure::new(
                 Phase::Dns,
                 FailureKind::DnsTimeout,
-                format!(
-                    "name resolution for {host} did not complete within {} ms",
-                    t.as_millis()
-                ),
+                format!("name resolution for {host} did not complete within {} ms", t.as_millis()),
             )
             .with_deadline(Some(t.as_millis() as u64))),
         },
@@ -114,25 +94,16 @@ pub async fn resolve(
         return Err(TransportFailure::new(
             Phase::Dns,
             FailureKind::DnsNoRecords,
-            format!(
-                "{host} resolved, but no addresses match the IP preference {:?}",
-                cfg.ip_preference
-            ),
+            format!("{host} resolved, but no addresses match the IP preference {:?}", cfg.ip_preference),
         ));
     }
-    Ok(Resolution {
-        addrs,
-        source: res.source,
-    })
+    Ok(Resolution { addrs, source: res.source })
 }
 
 async fn resolve_system(host: &str, port: u16) -> Result<Resolution, TransportFailure> {
     let h = host.to_string();
     let joined = tokio::task::spawn_blocking(move || {
-        let hints = dns_lookup::AddrInfoHints {
-            socktype: dns_lookup::SockType::Stream.into(),
-            ..Default::default()
-        };
+        let hints = dns_lookup::AddrInfoHints { socktype: dns_lookup::SockType::Stream.into(), ..Default::default() };
         dns_lookup::getaddrinfo(Some(&h), None, Some(hints)).map(|it| {
             let mut v: Vec<IpAddr> = Vec::new();
             for ai in it.flatten() {
@@ -148,19 +119,9 @@ async fn resolve_system(host: &str, port: u16) -> Result<Resolution, TransportFa
     match joined {
         Ok(Ok(ips)) => {
             if ips.is_empty() {
-                Err(TransportFailure::new(
-                    Phase::Dns,
-                    FailureKind::DnsNoRecords,
-                    format!("{host} has no address records"),
-                ))
+                Err(TransportFailure::new(Phase::Dns, FailureKind::DnsNoRecords, format!("{host} has no address records")))
             } else {
-                Ok(Resolution {
-                    addrs: ips
-                        .into_iter()
-                        .map(|ip| SocketAddr::new(ip, port))
-                        .collect(),
-                    source: "system",
-                })
+                Ok(Resolution { addrs: ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect(), source: "system" })
             }
         }
         Ok(Err(e)) => {
@@ -175,31 +136,16 @@ async fn resolve_system(host: &str, port: u16) -> Result<Resolution, TransportFa
                 _ => FailureKind::DnsOther,
             };
             let io: std::io::Error = e.into();
-            let mut f = TransportFailure::new(
-                Phase::Dns,
-                kind,
-                format!("system resolver could not resolve {host}: {io}"),
-            );
+            let mut f = TransportFailure::new(Phase::Dns, kind, format!("system resolver could not resolve {host}: {io}"));
             f.io_error_kind = Some(format!("{:?}", io.kind()));
             Err(f)
         }
-        Err(join) => Err(TransportFailure::new(
-            Phase::Dns,
-            FailureKind::Internal,
-            format!("resolver task failed: {join}"),
-        )),
+        Err(join) => Err(TransportFailure::new(Phase::Dns, FailureKind::Internal, format!("resolver task failed: {join}"))),
     }
 }
 
-async fn resolve_custom(
-    host: &str,
-    port: u16,
-    nameservers: &[String],
-    timeout: Option<Duration>,
-) -> Result<Resolution, TransportFailure> {
-    use hickory_resolver::config::{
-        ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts,
-    };
+async fn resolve_custom(host: &str, port: u16, nameservers: &[String], timeout: Option<Duration>) -> Result<Resolution, TransportFailure> {
+    use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
     use hickory_resolver::net::runtime::TokioRuntimeProvider;
     let mut config = ResolverConfig::default();
     for ns in nameservers {
@@ -229,37 +175,18 @@ async fn resolve_custom(
     }
     opts.attempts = 1;
     opts.cache_size = 0;
-    let resolver =
-        hickory_resolver::Resolver::builder_with_config(config, TokioRuntimeProvider::default())
-            .with_options(opts)
-            .build()
-            .map_err(|e| {
-                TransportFailure::new(
-                    Phase::Dns,
-                    FailureKind::DnsOther,
-                    format!("resolver setup failed: {e}"),
-                )
-            })?;
-    let fqdn = if host.ends_with('.') {
-        host.to_string()
-    } else {
-        format!("{host}.")
-    };
+    let resolver = hickory_resolver::Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .map_err(|e| TransportFailure::new(Phase::Dns, FailureKind::DnsOther, format!("resolver setup failed: {e}")))?;
+    let fqdn = if host.ends_with('.') { host.to_string() } else { format!("{host}.") };
     match resolver.lookup_ip(fqdn.as_str()).await {
         Ok(lookup) => {
-            let addrs: Vec<SocketAddr> =
-                lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
+            let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
             if addrs.is_empty() {
-                Err(TransportFailure::new(
-                    Phase::Dns,
-                    FailureKind::DnsNoRecords,
-                    format!("{host} has no A/AAAA records"),
-                ))
+                Err(TransportFailure::new(Phase::Dns, FailureKind::DnsNoRecords, format!("{host} has no A/AAAA records")))
             } else {
-                Ok(Resolution {
-                    addrs,
-                    source: "custom_resolver",
-                })
+                Ok(Resolution { addrs, source: "custom_resolver" })
             }
         }
         Err(e) => {
@@ -275,11 +202,7 @@ async fn resolve_custom(
                     _ => FailureKind::DnsOther,
                 }
             };
-            Err(TransportFailure::new(
-                Phase::Dns,
-                kind,
-                format!("DNS query for {host} failed: {e}"),
-            ))
+            Err(TransportFailure::new(Phase::Dns, kind, format!("DNS query for {host} failed: {e}")))
         }
     }
 }

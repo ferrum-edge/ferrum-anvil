@@ -63,22 +63,11 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn url(&self, path: &str) -> String {
-        format!(
-            "{}://{}{}",
-            if self.tls { "https" } else { "http" },
-            self.addr,
-            path
-        )
+        format!("{}://{}{}", if self.tls { "https" } else { "http" }, self.addr, path)
     }
 
     pub fn url_host(&self, host: &str, path: &str) -> String {
-        format!(
-            "{}://{}:{}{}",
-            if self.tls { "https" } else { "http" },
-            host,
-            self.addr.port(),
-            path
-        )
+        format!("{}://{}:{}{}", if self.tls { "https" } else { "http" }, host, self.addr.port(), path)
     }
 
     pub fn shutdown(&self) {
@@ -93,9 +82,7 @@ impl Drop for Fixture {
 }
 
 fn full(b: impl Into<Bytes>) -> FxBody {
-    Full::new(b.into())
-        .map_err(|e: Infallible| match e {})
-        .boxed()
+    Full::new(b.into()).map_err(|e: Infallible| match e {}).boxed()
 }
 
 fn json(status: u16, v: serde_json::Value) -> Response<FxBody> {
@@ -107,21 +94,13 @@ fn json(status: u16, v: serde_json::Value) -> Response<FxBody> {
 }
 
 fn text(status: u16, ct: &str, body: impl Into<Bytes>) -> Response<FxBody> {
-    Response::builder()
-        .status(status)
-        .header("content-type", ct)
-        .body(full(body))
-        .unwrap()
+    Response::builder().status(status).header("content-type", ct).body(full(body)).unwrap()
 }
 
 fn query(req: &Request<Incoming>) -> Vec<(String, String)> {
     req.uri()
         .query()
-        .map(|q| {
-            url::form_urlencoded::parse(q.as_bytes())
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect()
-        })
+        .map(|q| url::form_urlencoded::parse(q.as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect())
         .unwrap_or_default()
 }
 
@@ -141,10 +120,7 @@ pub async fn serve(bind: &str, tls: Option<TlsServerOptions>) -> anyhow::Result<
     let listener = TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
     let log = GroundTruthLog::default();
-    let state = Arc::new(State {
-        oauth_expires_in: Mutex::new(3600),
-        ..Default::default()
-    });
+    let state = Arc::new(State { oauth_expires_in: Mutex::new(3600), ..Default::default() });
     let cancel = CancellationToken::new();
     let acceptor = match &tls {
         Some(o) => Some(tokio_rustls::TlsAcceptor::from(server_config(o)?)),
@@ -158,41 +134,25 @@ pub async fn serve(bind: &str, tls: Option<TlsServerOptions>) -> anyhow::Result<
                 _ = c2.cancelled() => break,
             };
             let _ = stream.set_nodelay(true);
-            l2.push(GroundTruth::ConnectionAccepted {
-                peer: peer.to_string(),
-            });
-            let (log, state, acceptor, cancel) =
-                (l2.clone(), s2.clone(), acceptor.clone(), c2.clone());
+            l2.push(GroundTruth::ConnectionAccepted { peer: peer.to_string() });
+            let (log, state, acceptor, cancel) = (l2.clone(), s2.clone(), acceptor.clone(), c2.clone());
             tokio::spawn(async move {
                 match acceptor {
                     Some(acc) => match acc.accept(stream).await {
                         Ok(tls) => {
                             let (_, conn) = tls.get_ref();
-                            let alpn = conn
-                                .alpn_protocol()
-                                .map(|p| String::from_utf8_lossy(p).into_owned());
-                            log.push(GroundTruth::TlsHandshakeCompleted {
-                                alpn,
-                                client_cert_cn: client_cn(conn),
-                            });
+                            let alpn = conn.alpn_protocol().map(|p| String::from_utf8_lossy(p).into_owned());
+                            log.push(GroundTruth::TlsHandshakeCompleted { alpn, client_cert_cn: client_cn(conn) });
                             serve_conn(TokioIo::new(tls), log, state, cancel).await;
                         }
-                        Err(e) => log.push(GroundTruth::TlsHandshakeFailed {
-                            error: e.to_string(),
-                        }),
+                        Err(e) => log.push(GroundTruth::TlsHandshakeFailed { error: e.to_string() }),
                     },
                     None => serve_conn(TokioIo::new(stream), log, state, cancel).await,
                 }
             });
         }
     });
-    Ok(Fixture {
-        addr,
-        tls: tls.is_some(),
-        log,
-        state,
-        cancel,
-    })
+    Ok(Fixture { addr, tls: tls.is_some(), log, state, cancel })
 }
 
 async fn serve_conn<I>(io: I, log: GroundTruthLog, state: Arc<State>, cancel: CancellationToken)
@@ -215,54 +175,26 @@ where
 async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -> Response<FxBody> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
-    let raw_target = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| path.clone());
+    let raw_target = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| path.clone());
     let qs = query(&req);
-    let headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .map(|(n, v)| {
-            (
-                n.as_str().to_string(),
-                String::from_utf8_lossy(v.as_bytes()).into_owned(),
-            )
-        })
-        .collect();
+    let headers: Vec<(String, String)> =
+        req.headers().iter().map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
 
     // WebSocket upgrades must not consume the body.
     if path == "/ws" {
-        log.push(GroundTruth::RequestReceived {
-            method: method.to_string(),
-            path: raw_target,
-            body_bytes: 0,
-            headers,
-        });
+        log.push(GroundTruth::RequestReceived { method: method.to_string(), path: raw_target, body_bytes: 0, headers });
         return websocket(req, qs, log).await;
     }
     if path.starts_with("/anvil.lab.v1.") || path.starts_with("/grpc.reflection.") {
-        log.push(GroundTruth::RequestReceived {
-            method: method.to_string(),
-            path: raw_target,
-            body_bytes: 0,
-            headers,
-        });
+        log.push(GroundTruth::RequestReceived { method: method.to_string(), path: raw_target, body_bytes: 0, headers });
         return crate::grpc::handle(req, log).await;
     }
 
     let version = format!("{:?}", req.version());
-    let body = match Limited::new(req.into_body(), 64 * 1024 * 1024)
-        .collect()
-        .await
-    {
+    let body = match Limited::new(req.into_body(), 64 * 1024 * 1024).collect().await {
         Ok(b) => b.to_bytes(),
         Err(_) => {
-            return json(
-                413,
-                serde_json::json!({"error": "fixture request body limit"}),
-            );
+            return json(413, serde_json::json!({"error": "fixture request body limit"}));
         }
     };
     log.push(GroundTruth::RequestReceived {
@@ -276,24 +208,19 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
         (_, [""]) => text(200, "text/plain", "anvil fixture ok\n"),
         (_, ["status", code]) => {
             let code: u16 = code.parse().unwrap_or(500);
-            let mut b = Response::builder()
-                .status(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+            let mut b = Response::builder().status(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
             let ct = q(&qs, "ct").unwrap_or("application/json");
             b = b.header("content-type", ct);
             for (k, v) in &qs {
                 if k == "header"
                     && let Some((n, val)) = v.split_once(':')
-                    && let (Ok(n), Ok(val)) = (
-                        HeaderName::from_bytes(n.trim().as_bytes()),
-                        HeaderValue::from_str(val.trim()),
-                    )
+                    && let (Ok(n), Ok(val)) = (HeaderName::from_bytes(n.trim().as_bytes()), HeaderValue::from_str(val.trim()))
                 {
                     b = b.header(n, val);
                 }
             }
-            let body = q(&qs, "body")
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("{{\"status\":{code},\"source\":\"fixture-backend\"}}"));
+            let body =
+                q(&qs, "body").map(|s| s.to_string()).unwrap_or_else(|| format!("{{\"status\":{code},\"source\":\"fixture-backend\"}}"));
             b.body(full(body)).unwrap()
         }
         (_, ["echo"]) | (_, ["echo", ..]) => {
@@ -335,121 +262,67 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
         }
         (_, ["delay-headers", ms]) => {
             let ms: u64 = ms.parse::<u64>().unwrap_or(0).min(600_000);
-            log.push(GroundTruth::FaultApplied {
-                fault: format!("delay_headers_{ms}ms"),
-            });
+            log.push(GroundTruth::FaultApplied { fault: format!("delay_headers_{ms}ms") });
             tokio::time::sleep(Duration::from_millis(ms)).await;
             text(200, "text/plain", "delayed\n")
         }
         (_, ["stall-body", ms]) => {
             let ms: u64 = ms.parse::<u64>().unwrap_or(0).min(600_000);
-            log.push(GroundTruth::FaultApplied {
-                fault: format!("stall_body_{ms}ms"),
-            });
+            log.push(GroundTruth::FaultApplied { fault: format!("stall_body_{ms}ms") });
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
-                let _ = tx
-                    .send(Ok(Frame::data(Bytes::from_static(b"partial-"))))
-                    .await;
+                let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"partial-")))).await;
                 tokio::time::sleep(Duration::from_millis(ms)).await;
-                let _ = tx
-                    .send(Ok(Frame::data(Bytes::from_static(b"rest\n"))))
-                    .await;
+                let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"rest\n")))).await;
             });
-            Response::builder()
-                .status(200)
-                .header("content-type", "text/plain")
-                .body(b)
-                .unwrap()
+            Response::builder().status(200).header("content-type", "text/plain").body(b).unwrap()
         }
         (_, ["body-error"]) => {
-            log.push(GroundTruth::FaultApplied {
-                fault: "abort_mid_body".into(),
-            });
+            log.push(GroundTruth::FaultApplied { fault: "abort_mid_body".into() });
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
-                let _ = tx
-                    .send(Ok(Frame::data(Bytes::from_static(b"{\"partial\":"))))
-                    .await;
+                let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"{\"partial\":")))).await;
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let _ = tx.send(Err(std::io::Error::other("fixture abort"))).await;
             });
-            Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(b)
-                .unwrap()
+            Response::builder().status(200).header("content-type", "application/json").body(b).unwrap()
         }
         (_, ["trailers"]) => {
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
-                let _ = tx
-                    .send(Ok(Frame::data(Bytes::from_static(
-                        b"payload-with-trailers\n",
-                    ))))
-                    .await;
+                let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"payload-with-trailers\n")))).await;
                 let mut t = HeaderMap::new();
                 t.insert("x-checksum", HeaderValue::from_static("abc123"));
                 t.insert("x-fixture-complete", HeaderValue::from_static("true"));
                 let _ = tx.send(Ok(Frame::trailers(t))).await;
             });
-            Response::builder()
-                .status(200)
-                .header("content-type", "text/plain")
-                .body(b)
-                .unwrap()
+            Response::builder().status(200).header("content-type", "text/plain").body(b).unwrap()
         }
         (_, ["grpc-status", code]) => {
             let code: i32 = code.parse().unwrap_or(2);
             let msg = q(&qs, "message").unwrap_or("fixture status").to_string();
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
-                let _ = tx
-                    .send(Ok(Frame::data(Bytes::from_static(&[0, 0, 0, 0, 0]))))
-                    .await;
+                let _ = tx.send(Ok(Frame::data(Bytes::from_static(&[0, 0, 0, 0, 0])))).await;
                 let mut t = HeaderMap::new();
-                t.insert(
-                    "grpc-status",
-                    HeaderValue::from_str(&code.to_string()).unwrap(),
-                );
-                t.insert(
-                    "grpc-message",
-                    HeaderValue::from_str(&msg).unwrap_or(HeaderValue::from_static("x")),
-                );
+                t.insert("grpc-status", HeaderValue::from_str(&code.to_string()).unwrap());
+                t.insert("grpc-message", HeaderValue::from_str(&msg).unwrap_or(HeaderValue::from_static("x")));
                 let _ = tx.send(Ok(Frame::trailers(t))).await;
             });
-            Response::builder()
-                .status(200)
-                .header("content-type", "application/grpc")
-                .body(b)
-                .unwrap()
+            Response::builder().status(200).header("content-type", "application/grpc").body(b).unwrap()
         }
         (_, ["grpc-missing-status"]) => {
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
-                let _ = tx
-                    .send(Ok(Frame::data(Bytes::from_static(&[0, 0, 0, 0, 0]))))
-                    .await;
+                let _ = tx.send(Ok(Frame::data(Bytes::from_static(&[0, 0, 0, 0, 0])))).await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
-                let _ = tx
-                    .send(Err(std::io::Error::other("fixture drop before trailers")))
-                    .await;
+                let _ = tx.send(Err(std::io::Error::other("fixture drop before trailers"))).await;
             });
-            Response::builder()
-                .status(200)
-                .header("content-type", "application/grpc")
-                .body(b)
-                .unwrap()
+            Response::builder().status(200).header("content-type", "application/grpc").body(b).unwrap()
         }
         (_, ["sse"]) => {
-            let count: u32 = q(&qs, "count")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3)
-                .min(10_000);
-            let interval: u64 = q(&qs, "interval")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(50)
-                .min(60_000);
+            let count: u32 = q(&qs, "count").and_then(|s| s.parse().ok()).unwrap_or(3).min(10_000);
+            let interval: u64 = q(&qs, "interval").and_then(|s| s.parse().ok()).unwrap_or(50).min(60_000);
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
                 for i in 0..count {
@@ -460,12 +333,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
                     tokio::time::sleep(Duration::from_millis(interval)).await;
                 }
             });
-            Response::builder()
-                .status(200)
-                .header("content-type", "text/event-stream")
-                .header("cache-control", "no-cache")
-                .body(b)
-                .unwrap()
+            Response::builder().status(200).header("content-type", "text/event-stream").header("cache-control", "no-cache").body(b).unwrap()
         }
         (_, ["gzip"]) => {
             use std::io::Write;
@@ -479,11 +347,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
                 .body(full(gz))
                 .unwrap()
         }
-        (_, ["binary"]) => text(
-            200,
-            "application/octet-stream",
-            Bytes::from_static(&[0xff, 0xfe, 0x00, 0x01, 0x80, 0x81, 0xc3, 0x28]),
-        ),
+        (_, ["binary"]) => text(200, "application/octet-stream", Bytes::from_static(&[0xff, 0xfe, 0x00, 0x01, 0x80, 0x81, 0xc3, 0x28])),
         (_, ["html"]) => text(
             200,
             "text/html",
@@ -506,11 +370,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
         (_, ["redirect"]) => {
             let to = q(&qs, "to").unwrap_or("/").to_string();
             let status: u16 = q(&qs, "status").and_then(|s| s.parse().ok()).unwrap_or(302);
-            Response::builder()
-                .status(status)
-                .header("location", to)
-                .body(full(""))
-                .unwrap()
+            Response::builder().status(status).header("location", to).body(full("")).unwrap()
         }
         (_, ["set-cookie"]) => {
             let name = q(&qs, "name").unwrap_or("session");
@@ -530,10 +390,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
                     q(&qs, "pass").unwrap_or("pass")
                 ))
             );
-            if headers
-                .iter()
-                .any(|(n, v)| n == "authorization" && *v == expected)
-            {
+            if headers.iter().any(|(n, v)| n == "authorization" && *v == expected) {
                 json(200, serde_json::json!({"authenticated": true}))
             } else {
                 Response::builder()
@@ -546,10 +403,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
         }
         (_, ["auth", "bearer"]) => {
             let expected = format!("Bearer {}", q(&qs, "token").unwrap_or("token"));
-            if headers
-                .iter()
-                .any(|(n, v)| n == "authorization" && *v == expected)
-            {
+            if headers.iter().any(|(n, v)| n == "authorization" && *v == expected) {
                 json(200, serde_json::json!({"authenticated": true}))
             } else {
                 json(401, serde_json::json!({"error": "invalid token"}))
@@ -562,10 +416,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
             if ok {
                 json(200, serde_json::json!({"authenticated": true}))
             } else {
-                json(
-                    401,
-                    serde_json::json!({"error": "missing or invalid api key"}),
-                )
+                json(401, serde_json::json!({"error": "missing or invalid api key"}))
             }
         }
         (_, ["count", key]) => {
@@ -576,14 +427,9 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
         }
         (Method::POST, ["oauth", "token"]) => oauth_token(&state, &headers, &body),
         (Method::GET, ["oauth", "authorize"]) => oauth_authorize(&state, &qs),
-        _ => json(
-            404,
-            serde_json::json!({"error": "no fixture route", "path": path}),
-        ),
+        _ => json(404, serde_json::json!({"error": "no fixture route", "path": path})),
     };
-    log.push(GroundTruth::ResponseStarted {
-        status: resp.status().as_u16(),
-    });
+    log.push(GroundTruth::ResponseStarted { status: resp.status().as_u16() });
     resp
 }
 
@@ -597,28 +443,17 @@ fn oauth_token(state: &State, headers: &[(String, String)], body: &[u8]) -> Resp
         .iter()
         .find(|(n, _)| n == "authorization")
         .and_then(|(_, v)| v.strip_prefix("Basic "))
-        .and_then(|b| {
-            base64::engine::general_purpose::STANDARD
-                .decode(b)
-                .ok()
-                .and_then(|d| String::from_utf8(d).ok())
-        });
+        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok().and_then(|d| String::from_utf8(d).ok()));
     let (cid, csec) = match basic.as_deref().and_then(|s| s.split_once(':')) {
         Some((a, b)) => (a.to_string(), b.to_string()),
-        None => (
-            form.get("client_id").cloned().unwrap_or_default(),
-            form.get("client_secret").cloned().unwrap_or_default(),
-        ),
+        None => (form.get("client_id").cloned().unwrap_or_default(), form.get("client_secret").cloned().unwrap_or_default()),
     };
     let expires = *state.oauth_expires_in.lock();
     let n = *state.oauth_token_requests.lock();
     match form.get("grant_type").map(String::as_str) {
         Some("client_credentials") => {
             if cid == "anvil-client" && csec == "anvil-secret" {
-                json(
-                    200,
-                    serde_json::json!({"access_token": format!("fx-token-{n}"), "token_type": "Bearer", "expires_in": expires}),
-                )
+                json(200, serde_json::json!({"access_token": format!("fx-token-{n}"), "token_type": "Bearer", "expires_in": expires}))
             } else {
                 json(401, serde_json::json!({"error": "invalid_client"}))
             }
@@ -630,13 +465,8 @@ fn oauth_token(state: &State, headers: &[(String, String)], body: &[u8]) -> Resp
                 return json(400, serde_json::json!({"error": "invalid_grant"}));
             };
             use sha2_fixture::sha256_b64url;
-            if sha256_b64url(verifier.as_bytes()) != challenge
-                || form.get("redirect_uri") != Some(&redirect)
-            {
-                return json(
-                    400,
-                    serde_json::json!({"error": "invalid_grant", "error_description": "PKCE or redirect mismatch"}),
-                );
+            if sha256_b64url(verifier.as_bytes()) != challenge || form.get("redirect_uri") != Some(&redirect) {
+                return json(400, serde_json::json!({"error": "invalid_grant", "error_description": "PKCE or redirect mismatch"}));
             }
             json(
                 200,
@@ -644,15 +474,8 @@ fn oauth_token(state: &State, headers: &[(String, String)], body: &[u8]) -> Resp
             )
         }
         Some("refresh_token") => {
-            if form
-                .get("refresh_token")
-                .map(|r| r.starts_with("fx-refresh-"))
-                .unwrap_or(false)
-            {
-                json(
-                    200,
-                    serde_json::json!({"access_token": format!("fx-refreshed-{n}"), "token_type": "Bearer", "expires_in": expires}),
-                )
+            if form.get("refresh_token").map(|r| r.starts_with("fx-refresh-")).unwrap_or(false) {
+                json(200, serde_json::json!({"access_token": format!("fx-refreshed-{n}"), "token_type": "Bearer", "expires_in": expires}))
             } else {
                 json(400, serde_json::json!({"error": "invalid_grant"}))
             }
@@ -662,33 +485,20 @@ fn oauth_token(state: &State, headers: &[(String, String)], body: &[u8]) -> Resp
 }
 
 fn oauth_authorize(state: &State, qs: &[(String, String)]) -> Response<FxBody> {
-    let (Some(redirect), Some(st), Some(ch)) = (
-        q(qs, "redirect_uri"),
-        q(qs, "state"),
-        q(qs, "code_challenge"),
-    ) else {
+    let (Some(redirect), Some(st), Some(ch)) = (q(qs, "redirect_uri"), q(qs, "state"), q(qs, "code_challenge")) else {
         return json(400, serde_json::json!({"error": "invalid_request"}));
     };
     if q(qs, "code_challenge_method") != Some("S256") {
-        return json(
-            400,
-            serde_json::json!({"error": "invalid_request", "error_description": "S256 required"}),
-        );
+        return json(400, serde_json::json!({"error": "invalid_request", "error_description": "S256 required"}));
     }
     let code = format!("fx-code-{}", rand_hex());
-    state
-        .oauth_codes
-        .lock()
-        .insert(code.clone(), (ch.to_string(), redirect.to_string()));
+    state.oauth_codes.lock().insert(code.clone(), (ch.to_string(), redirect.to_string()));
     let sep = if redirect.contains('?') { '&' } else { '?' };
     Response::builder()
         .status(302)
         .header(
             "location",
-            format!(
-                "{redirect}{sep}code={code}&state={}",
-                url::form_urlencoded::byte_serialize(st.as_bytes()).collect::<String>()
-            ),
+            format!("{redirect}{sep}code={code}&state={}", url::form_urlencoded::byte_serialize(st.as_bytes()).collect::<String>()),
         )
         .body(full(""))
         .unwrap()
@@ -697,10 +507,7 @@ fn oauth_authorize(state: &State, qs: &[(String, String)]) -> Response<FxBody> {
 fn rand_hex() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static C: AtomicU64 = AtomicU64::new(1);
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{:x}{:x}", t, C.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -713,40 +520,21 @@ mod sha2_fixture {
     }
 }
 
-async fn websocket(
-    req: Request<Incoming>,
-    qs: Vec<(String, String)>,
-    log: GroundTruthLog,
-) -> Response<FxBody> {
+async fn websocket(req: Request<Incoming>, qs: Vec<(String, String)>, log: GroundTruthLog) -> Response<FxBody> {
     let close_after: Option<u32> = q(&qs, "close_after").and_then(|s| s.parse().ok());
     let abnormal_after: Option<u32> = q(&qs, "abnormal_after").and_then(|s| s.parse().ok());
-    let max: usize = q(&qs, "max")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1 << 20);
+    let max: usize = q(&qs, "max").and_then(|s| s.parse().ok()).unwrap_or(1 << 20);
     let is_h2_connect = req.method() == Method::CONNECT;
     if is_h2_connect {
-        let proto = req
-            .extensions()
-            .get::<hyper::ext::Protocol>()
-            .map(|p| p.as_str().to_string());
+        let proto = req.extensions().get::<hyper::ext::Protocol>().map(|p| p.as_str().to_string());
         if proto.as_deref() != Some("websocket") {
-            return json(
-                400,
-                serde_json::json!({"error": "extended CONNECT requires :protocol websocket"}),
-            );
+            return json(400, serde_json::json!({"error": "extended CONNECT requires :protocol websocket"}));
         }
     } else {
-        let upgrade = req
-            .headers()
-            .get("upgrade")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.eq_ignore_ascii_case("websocket"))
-            .unwrap_or(false);
+        let upgrade =
+            req.headers().get("upgrade").and_then(|v| v.to_str().ok()).map(|s| s.eq_ignore_ascii_case("websocket")).unwrap_or(false);
         if !upgrade {
-            return json(
-                426,
-                serde_json::json!({"error": "websocket upgrade required"}),
-            );
+            return json(426, serde_json::json!({"error": "websocket upgrade required"}));
         }
     }
     let key = req.headers().get("sec-websocket-key").cloned();
@@ -759,9 +547,7 @@ async fn websocket(
     let mut resp = if is_h2_connect {
         Response::builder().status(200)
     } else {
-        let accept = tungstenite::handshake::derive_accept_key(
-            key.as_ref().map(|k| k.as_bytes()).unwrap_or(b""),
-        );
+        let accept = tungstenite::handshake::derive_accept_key(key.as_ref().map(|k| k.as_bytes()).unwrap_or(b""));
         Response::builder()
             .status(101)
             .header("upgrade", "websocket")
@@ -778,49 +564,30 @@ async fn websocket(
         let mut cfg = tungstenite::protocol::WebSocketConfig::default();
         cfg.max_message_size = Some(max);
         cfg.max_frame_size = Some(max);
-        let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
-            TokioIo::new(upgraded),
-            Role::Server,
-            Some(cfg),
-        )
-        .await;
+        let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(cfg)).await;
         let mut n = 0u32;
         while let Some(msg) = ws.next().await {
             let msg = match msg {
                 Ok(m) => m,
                 Err(tungstenite::Error::Capacity(_)) => {
-                    let _ = ws
-                        .send(Message::Close(Some(CloseFrame {
-                            code: CloseCode::Size,
-                            reason: "message too big".into(),
-                        })))
-                        .await;
+                    let _ = ws.send(Message::Close(Some(CloseFrame { code: CloseCode::Size, reason: "message too big".into() }))).await;
                     return;
                 }
                 Err(_) => return,
             };
             match msg {
                 Message::Text(_) | Message::Binary(_) => {
-                    log.push(GroundTruth::MessageReceived {
-                        bytes: msg.len() as u64,
-                    });
+                    log.push(GroundTruth::MessageReceived { bytes: msg.len() as u64 });
                     n += 1;
                     if ws.send(msg).await.is_err() {
                         return;
                     }
                     if abnormal_after == Some(n) {
-                        log.push(GroundTruth::FaultApplied {
-                            fault: "ws_abnormal_drop".into(),
-                        });
+                        log.push(GroundTruth::FaultApplied { fault: "ws_abnormal_drop".into() });
                         return; // drop without a Close frame
                     }
                     if close_after == Some(n) {
-                        let _ = ws
-                            .send(Message::Close(Some(CloseFrame {
-                                code: CloseCode::Normal,
-                                reason: "fixture done".into(),
-                            })))
-                            .await;
+                        let _ = ws.send(Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "fixture done".into() }))).await;
                     }
                 }
                 Message::Close(_) => {

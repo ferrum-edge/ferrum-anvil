@@ -29,11 +29,7 @@ impl Drop for StreamFixture {
     }
 }
 
-pub async fn tcp(
-    bind: &str,
-    mode: TcpMode,
-    tls: Option<TlsServerOptions>,
-) -> anyhow::Result<StreamFixture> {
+pub async fn tcp(bind: &str, mode: TcpMode, tls: Option<TlsServerOptions>) -> anyhow::Result<StreamFixture> {
     let listener = TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
     let log = GroundTruthLog::default();
@@ -49,9 +45,7 @@ pub async fn tcp(
                 r = listener.accept() => match r { Ok(x) => x, Err(_) => continue },
                 _ = c2.cancelled() => break,
             };
-            l2.push(GroundTruth::ConnectionAccepted {
-                peer: peer.to_string(),
-            });
+            l2.push(GroundTruth::ConnectionAccepted { peer: peer.to_string() });
             let (log, acceptor) = (l2.clone(), acceptor.clone());
             tokio::spawn(async move {
                 match acceptor {
@@ -68,11 +62,7 @@ pub async fn tcp(
     Ok(StreamFixture { addr, log, cancel })
 }
 
-async fn tcp_session<S: AsyncRead + AsyncWrite + Unpin>(
-    mut s: S,
-    mode: TcpMode,
-    log: GroundTruthLog,
-) {
+async fn tcp_session<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, mode: TcpMode, log: GroundTruthLog) {
     let mut buf = vec![0u8; 16 * 1024];
     let mut total = 0u64;
     loop {
@@ -92,9 +82,7 @@ async fn tcp_session<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
     if let TcpMode::ReplyAfterHalfClose = mode {
-        let _ = s
-            .write_all(format!("received {total} bytes after half-close\n").as_bytes())
-            .await;
+        let _ = s.write_all(format!("received {total} bytes after half-close\n").as_bytes()).await;
     }
     let _ = s.shutdown().await;
 }

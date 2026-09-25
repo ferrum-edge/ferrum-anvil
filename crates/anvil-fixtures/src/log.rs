@@ -10,34 +10,14 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GroundTruth {
-    ConnectionAccepted {
-        peer: String,
-    },
-    TlsHandshakeCompleted {
-        alpn: Option<String>,
-        client_cert_cn: Option<String>,
-    },
-    TlsHandshakeFailed {
-        error: String,
-    },
-    RequestReceived {
-        method: String,
-        path: String,
-        body_bytes: u64,
-        headers: Vec<(String, String)>,
-    },
-    ResponseStarted {
-        status: u16,
-    },
-    FaultApplied {
-        fault: String,
-    },
-    DatagramReceived {
-        bytes: u64,
-    },
-    MessageReceived {
-        bytes: u64,
-    },
+    ConnectionAccepted { peer: String },
+    TlsHandshakeCompleted { alpn: Option<String>, client_cert_cn: Option<String> },
+    TlsHandshakeFailed { error: String },
+    RequestReceived { method: String, path: String, body_bytes: u64, headers: Vec<(String, String)> },
+    ResponseStarted { status: u16 },
+    FaultApplied { fault: String },
+    DatagramReceived { bytes: u64 },
+    MessageReceived { bytes: u64 },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,10 +36,7 @@ const MAX_ENTRIES: usize = 10_000;
 
 impl GroundTruthLog {
     pub fn push(&self, event: GroundTruth) {
-        let at_ms = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
+        let at_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         let mut g = self.inner.lock();
         if g.len() < MAX_ENTRIES {
             g.push(Entry { at_ms, event });
@@ -79,9 +56,7 @@ impl GroundTruthLog {
             .lock()
             .iter()
             .filter_map(|e| match &e.event {
-                GroundTruth::RequestReceived { method, path, .. } => {
-                    Some((method.clone(), path.clone()))
-                }
+                GroundTruth::RequestReceived { method, path, .. } => Some((method.clone(), path.clone())),
                 _ => None,
             })
             .collect()
@@ -92,10 +67,7 @@ impl GroundTruthLog {
     }
 
     pub fn saw_connection(&self) -> bool {
-        self.inner
-            .lock()
-            .iter()
-            .any(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. }))
+        self.inner.lock().iter().any(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. }))
     }
 
     pub fn last_request_headers(&self) -> Option<Vec<(String, String)>> {

@@ -56,11 +56,7 @@ impl ConnStats {
     /// Instant of the first read observed after the last mark, if any.
     pub fn first_read_after_mark(&self) -> Option<Instant> {
         let ns = self.first_read_after_mark_ns.load(Ordering::Relaxed);
-        if ns == 0 {
-            None
-        } else {
-            Some(self.epoch + std::time::Duration::from_nanos(ns))
-        }
+        if ns == 0 { None } else { Some(self.epoch + std::time::Duration::from_nanos(ns)) }
     }
 
     /// Typed TLS failure seen on this connection after the handshake, if any.
@@ -84,11 +80,7 @@ impl ConnStats {
         self.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
         if self.mark_armed.load(Ordering::Relaxed) == 1 {
             let ns = self.epoch.elapsed().as_nanos().max(1) as u64;
-            if self
-                .first_read_after_mark_ns
-                .compare_exchange(0, ns, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
+            if self.first_read_after_mark_ns.compare_exchange(0, ns, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
                 self.mark_armed.store(0, Ordering::Relaxed);
             }
         }
@@ -124,11 +116,7 @@ impl<T> CountingIo<T> {
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for CountingIo<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
         let r = Pin::new(&mut self.inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(())) = &r {
@@ -140,11 +128,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for CountingIo<T> {
 }
 
 impl<T: AsyncWrite + Unpin> AsyncWrite for CountingIo<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write(cx, data);
         if let Poll::Ready(Ok(n)) = &r {
             self.stats.record_write(*n);
@@ -152,11 +136,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for CountingIo<T> {
         r
     }
 
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
         if let Poll::Ready(Ok(n)) = &r {
             self.stats.record_write(*n);
@@ -192,11 +172,7 @@ impl<T> TlsErrorTap<T> {
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for TlsErrorTap<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let r = Pin::new(&mut self.inner).poll_read(cx, buf);
         if let Poll::Ready(Err(e)) = &r {
             self.stats.record_io_error(e);
@@ -206,11 +182,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for TlsErrorTap<T> {
 }
 
 impl<T: AsyncWrite + Unpin> AsyncWrite for TlsErrorTap<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write(cx, data);
         if let Poll::Ready(Err(e)) = &r {
             self.stats.record_io_error(e);
@@ -218,11 +190,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for TlsErrorTap<T> {
         r
     }
 
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
         if let Poll::Ready(Err(e)) = &r {
             self.stats.record_io_error(e);

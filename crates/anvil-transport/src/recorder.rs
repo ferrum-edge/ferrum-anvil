@@ -18,10 +18,7 @@ pub struct EventCtx {
 
 impl EventCtx {
     pub fn none() -> Self {
-        EventCtx {
-            execution_id: Id::nil(),
-            sink: None,
-        }
+        EventCtx { execution_id: Id::nil(), sink: None }
     }
 
     pub fn emit(&self, ev: ExecutionEvent) {
@@ -40,12 +37,7 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn new(attempt: u32, events: EventCtx) -> Self {
-        Recorder {
-            t0: Instant::now(),
-            phases: Vec::new(),
-            attempt,
-            events,
-        }
+        Recorder { t0: Instant::now(), phases: Vec::new(), attempt, events }
     }
 
     pub fn us(&self) -> u64 {
@@ -69,13 +61,7 @@ impl Recorder {
     /// Begin a measured phase; returns its index.
     pub fn start(&mut self, phase: Phase) -> usize {
         let now = self.us();
-        self.phases.push(PhaseTiming {
-            phase,
-            status: PhaseStatus::Unknown,
-            start_us: Some(now),
-            end_us: None,
-            detail: None,
-        });
+        self.phases.push(PhaseTiming { phase, status: PhaseStatus::Unknown, start_us: Some(now), end_us: None, detail: None });
         self.emit(phase, PhaseStatus::Unknown, now);
         self.phases.len() - 1
     }
@@ -99,13 +85,7 @@ impl Recorder {
 
     /// Record a phase that has no measurement on this attempt.
     pub fn mark(&mut self, phase: Phase, status: PhaseStatus, detail: Option<&str>) {
-        self.phases.push(PhaseTiming {
-            phase,
-            status,
-            start_us: None,
-            end_us: None,
-            detail: detail.map(|s| s.to_string()),
-        });
+        self.phases.push(PhaseTiming { phase, status, start_us: None, end_us: None, detail: detail.map(|s| s.to_string()) });
     }
 
     /// Close any still-open phase with the given status (on failure/cancel).
@@ -120,10 +100,6 @@ impl Recorder {
     }
 
     pub fn open_phase(&self) -> Option<Phase> {
-        self.phases
-            .iter()
-            .rev()
-            .find(|p| p.end_us.is_none() && p.start_us.is_some())
-            .map(|p| p.phase)
+        self.phases.iter().rev().find(|p| p.end_us.is_none() && p.start_us.is_some()).map(|p| p.phase)
     }
 }

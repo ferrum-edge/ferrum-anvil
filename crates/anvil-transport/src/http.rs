@@ -84,20 +84,11 @@ struct InstrumentedBody {
 
 impl InstrumentedBody {
     fn new(data: Bytes) -> (Self, Arc<WriteSignal>) {
-        let signal = Arc::new(WriteSignal {
-            done: AtomicBool::new(false),
-            notify: Notify::new(),
-        });
+        let signal = Arc::new(WriteSignal { done: AtomicBool::new(false), notify: Notify::new() });
         if data.is_empty() {
             signal.done.store(true, Ordering::SeqCst);
         }
-        (
-            InstrumentedBody {
-                data,
-                signal: signal.clone(),
-            },
-            signal,
-        )
+        (InstrumentedBody { data, signal: signal.clone() }, signal)
     }
 }
 
@@ -105,10 +96,7 @@ impl Body for InstrumentedBody {
     type Data = Bytes;
     type Error = Infallible;
 
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+    fn poll_frame(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
         if self.data.is_empty() {
             if !self.signal.done.swap(true, Ordering::SeqCst) {
                 self.signal.notify.notify_waiters();
@@ -156,10 +144,7 @@ impl Pooled {
             return false;
         }
         match &self.sender {
-            Sender::H1(s) => s
-                .try_lock()
-                .map(|s| !s.is_closed() && s.is_ready())
-                .unwrap_or(false),
+            Sender::H1(s) => s.try_lock().map(|s| !s.is_closed() && s.is_ready()).unwrap_or(false),
             Sender::H2(s) => !s.is_closed(),
         }
     }
@@ -217,27 +202,14 @@ impl Pool {
 
     /// Drop pooled connections whose key starts with an isolation prefix.
     pub fn clear_isolation(&self, isolation: &str) {
-        self.idle
-            .lock()
-            .retain(|k, _| !k.starts_with(&format!("{isolation}|")));
+        self.idle.lock().retain(|k, _| !k.starts_with(&format!("{isolation}|")));
     }
 }
 
 fn pool_key(plan: &HttpPlan) -> String {
-    let proxy = plan
-        .proxy
-        .as_ref()
-        .map(|p| format!("{:?}:{}:{}", p.kind, p.host, p.port))
-        .unwrap_or_default();
-    let tls = plan
-        .tls
-        .as_ref()
-        .map(|t| t.fingerprint.clone())
-        .unwrap_or_default();
-    let dns = format!(
-        "{:?}{:?}{:?}",
-        plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference
-    );
+    let proxy = plan.proxy.as_ref().map(|p| format!("{:?}:{}:{}", p.kind, p.host, p.port)).unwrap_or_default();
+    let tls = plan.tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default();
+    let dns = format!("{:?}{:?}{:?}", plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference);
     format!(
         "{}|{}://{}:{}|{}|{}|{:?}|{}",
         plan.isolation,
@@ -267,10 +239,7 @@ fn alpn_for(policy: HttpVersionPolicy) -> &'static [&'static str] {
 }
 
 fn is_idempotent(m: &Method) -> bool {
-    matches!(
-        *m,
-        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE | Method::PUT | Method::DELETE
-    )
+    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE | Method::PUT | Method::DELETE)
 }
 
 impl HttpTransport {
@@ -295,25 +264,13 @@ impl HttpTransport {
         let mut attempt_reason = reason;
         let mut allow_pool = plan.keepalive;
         for _ in 0..2 {
-            let (out, redispatch) = self
-                .execute_once(
-                    plan,
-                    &key,
-                    attempt_index,
-                    attempt_reason.clone(),
-                    allow_pool,
-                    events,
-                    cancel,
-                )
-                .await;
+            let (out, redispatch) = self.execute_once(plan, &key, attempt_index, attempt_reason.clone(), allow_pool, events, cancel).await;
             outputs.push(out);
             if !redispatch {
                 break;
             }
             attempt_index += 1;
-            attempt_reason = AttemptReason::Retry {
-                after: FailureKind::ClosedBeforeResponse,
-            };
+            attempt_reason = AttemptReason::Retry { after: FailureKind::ClosedBeforeResponse };
             allow_pool = false;
         }
         outputs
@@ -332,14 +289,8 @@ impl HttpTransport {
     ) -> (AttemptOutput, bool) {
         let started_at = Utc::now();
         let mut rec = Recorder::new(index, events.clone());
-        events.emit(ExecutionEvent::AttemptStarted {
-            execution_id: events.execution_id,
-            attempt: index,
-        });
-        let total_deadline = plan
-            .timeouts
-            .total_ms
-            .map(|ms| Instant::now() + Duration::from_millis(ms));
+        events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: index });
+        let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let mut obs = AttemptObservation {
             index,
             reason,
@@ -349,20 +300,13 @@ impl HttpTransport {
             connection: None,
             phases: vec![],
             dispatch: DispatchState::NotDispatched,
-            bytes: ByteCounts {
-                request_body: plan.body.len() as u64,
-                ..Default::default()
-            },
+            bytes: ByteCounts { request_body: plan.body.len() as u64, ..Default::default() },
             response_status: None,
             failure: None,
             duration_us: 0,
         };
 
-        let fail = |mut rec: Recorder,
-                    mut obs: AttemptObservation,
-                    f: TransportFailure,
-                    dispatch: DispatchState|
-         -> AttemptOutput {
+        let fail = |mut rec: Recorder, mut obs: AttemptObservation, f: TransportFailure, dispatch: DispatchState| -> AttemptOutput {
             let st = match f.kind {
                 FailureKind::Canceled => PhaseStatus::Canceled,
                 k if matches!(
@@ -381,20 +325,12 @@ impl HttpTransport {
                 _ => PhaseStatus::Failed,
             };
             rec.close_open(st);
-            events.emit(ExecutionEvent::AttemptFailed {
-                execution_id: events.execution_id,
-                attempt: obs.index,
-                kind: f.kind,
-            });
+            events.emit(ExecutionEvent::AttemptFailed { execution_id: events.execution_id, attempt: obs.index, kind: f.kind });
             obs.duration_us = rec.us();
             obs.phases = std::mem::take(&mut rec.phases);
             obs.dispatch = dispatch;
             obs.failure = Some(f);
-            AttemptOutput {
-                observation: obs,
-                response: None,
-                body: Bytes::new(),
-            }
+            AttemptOutput { observation: obs, response: None, body: Bytes::new() }
         };
 
         // Unsupported combinations fail before any traffic.
@@ -417,58 +353,28 @@ impl HttpTransport {
             return (fail(rec, obs, f, DispatchState::NotDispatched), false);
         }
         if plan.https && plan.tls.is_none() {
-            let f = TransportFailure::new(
-                Phase::Prepare,
-                FailureKind::TlsProfileInvalid,
-                "no TLS configuration for https request",
-            );
+            let f = TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "no TLS configuration for https request");
             return (fail(rec, obs, f, DispatchState::NotDispatched), false);
         }
 
         // ---- acquire a connection ----
         let q = rec.start(Phase::Queue);
-        let pooled = if allow_pool {
-            self.pool.checkout(key)
-        } else {
-            None
-        };
+        let pooled = if allow_pool { self.pool.checkout(key) } else { None };
         let (conn, reused) = match pooled {
             Some(p) => {
                 rec.finish(q, PhaseStatus::Completed);
                 rec.mark(Phase::Dns, PhaseStatus::Reused, Some("pooled connection"));
-                rec.mark(
-                    Phase::Connect,
-                    PhaseStatus::Reused,
-                    Some("pooled connection"),
-                );
+                rec.mark(Phase::Connect, PhaseStatus::Reused, Some("pooled connection"));
                 if plan.https {
-                    rec.mark(
-                        Phase::TlsHandshake,
-                        PhaseStatus::Reused,
-                        Some("pooled connection"),
-                    );
+                    rec.mark(Phase::TlsHandshake, PhaseStatus::Reused, Some("pooled connection"));
                 }
                 (p, true)
             }
             None => {
                 rec.finish(q, PhaseStatus::Completed);
-                let forward = plan
-                    .proxy
-                    .as_ref()
-                    .map(|p| p.kind == ProxyKind::Http && !plan.https)
-                    .unwrap_or(false);
-                let alpn: &[&str] = if plan.https {
-                    alpn_for(plan.version)
-                } else {
-                    &[]
-                };
-                let target = Target {
-                    host: &plan.host,
-                    port: plan.port,
-                    tls: plan.tls.as_deref(),
-                    alpn,
-                    http_forward_via_proxy: forward,
-                };
+                let forward = plan.proxy.as_ref().map(|p| p.kind == ProxyKind::Http && !plan.https).unwrap_or(false);
+                let alpn: &[&str] = if plan.https { alpn_for(plan.version) } else { &[] };
+                let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: forward };
                 let est = tokio::select! {
                     r = connector::establish(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref()) => r,
                     _ = cancel.cancelled() => {
@@ -504,39 +410,19 @@ impl HttpTransport {
 
         // ---- build the request ----
         let is_h2 = matches!(conn.sender, Sender::H2(_));
-        let absolute_form = !is_h2
-            && plan
-                .proxy
-                .as_ref()
-                .map(|p| p.kind == ProxyKind::Http && !plan.https)
-                .unwrap_or(false);
-        let explicit_host = plan
-            .headers
-            .iter()
-            .find(|(n, _)| n == http::header::HOST)
-            .map(|(_, v)| v.to_str().unwrap_or("").to_string());
-        let authority = explicit_host
-            .clone()
-            .unwrap_or_else(|| plan.authority.clone());
+        let absolute_form = !is_h2 && plan.proxy.as_ref().map(|p| p.kind == ProxyKind::Http && !plan.https).unwrap_or(false);
+        let explicit_host = plan.headers.iter().find(|(n, _)| n == http::header::HOST).map(|(_, v)| v.to_str().unwrap_or("").to_string());
+        let authority = explicit_host.clone().unwrap_or_else(|| plan.authority.clone());
         let uri_str = if is_h2 || absolute_form {
-            format!(
-                "{}://{}{}",
-                if plan.https { "https" } else { "http" },
-                authority,
-                plan.request_target
-            )
+            format!("{}://{}{}", if plan.https { "https" } else { "http" }, authority, plan.request_target)
         } else {
             plan.request_target.clone()
         };
         let uri: Uri = match uri_str.parse() {
             Ok(u) => u,
             Err(e) => {
-                let f = TransportFailure::new(
-                    Phase::Prepare,
-                    FailureKind::InvalidUrl,
-                    format!("request target is not a valid URI: {e}"),
-                )
-                .with_field("url");
+                let f = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("request target is not a valid URI: {e}"))
+                    .with_field("url");
                 if !reused || matches!(conn.sender, Sender::H1(_)) {
                     self.pool.checkin(key, conn);
                 }
@@ -569,12 +455,8 @@ impl HttpTransport {
         let req = match req.body(body) {
             Ok(r) => r,
             Err(e) => {
-                let f = TransportFailure::new(
-                    Phase::Prepare,
-                    FailureKind::InvalidHeader,
-                    format!("request could not be built: {e}"),
-                )
-                .with_field("headers");
+                let f = TransportFailure::new(Phase::Prepare, FailureKind::InvalidHeader, format!("request could not be built: {e}"))
+                    .with_field("headers");
                 return (fail(rec, obs, f, DispatchState::NotDispatched), false);
             }
         };
@@ -584,10 +466,7 @@ impl HttpTransport {
         let read_before = conn.stats.bytes_read();
         conn.stats.mark_awaiting_read();
         let w_idx = rec.start(Phase::RequestWrite);
-        let write_deadline = plan
-            .timeouts
-            .request_write_ms
-            .map(|ms| Instant::now() + Duration::from_millis(ms));
+        let write_deadline = plan.timeouts.request_write_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let mut headers_deadline: Option<Instant> = None;
         let mut h_idx: Option<usize> = None;
         let signal_wait = signal.clone();
@@ -595,10 +474,7 @@ impl HttpTransport {
         if write_done {
             rec.finish(w_idx, PhaseStatus::Completed);
             h_idx = Some(rec.start(Phase::AwaitResponseHeaders));
-            headers_deadline = plan
-                .timeouts
-                .response_headers_ms
-                .map(|ms| Instant::now() + Duration::from_millis(ms));
+            headers_deadline = plan.timeouts.response_headers_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         }
 
         let send_result: Result<hyper::Response<Incoming>, (hyper::Error, bool)> = {
@@ -682,30 +558,15 @@ impl HttpTransport {
                 // is re-dispatched once on a fresh connection.
                 let redispatch = unsent && reused;
                 if unsent {
-                    f.message = format!(
-                        "{} (the request was not written to the connection)",
-                        f.message
-                    );
+                    f.message = format!("{} (the request was not written to the connection)", f.message);
                 }
-                return (
-                    finalize_fail(
-                        fail(rec, obs, f, dispatch),
-                        &conn.stats,
-                        written_before,
-                        read_before,
-                    ),
-                    redispatch,
-                );
+                return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), redispatch);
             }
         };
 
         // ---- response head ----
         if !write_done {
-            rec.finish_with(
-                w_idx,
-                PhaseStatus::Unknown,
-                "response arrived before the request body was fully sent",
-            );
+            rec.finish_with(w_idx, PhaseStatus::Unknown, "response arrived before the request body was fully sent");
         }
         let head_at = Instant::now();
         let first_byte = conn.stats.first_read_after_mark();
@@ -713,21 +574,14 @@ impl HttpTransport {
             rec.finish(i, PhaseStatus::Completed);
             if let Some(fb) = first_byte {
                 let off = rec.us_at(fb);
-                rec.phases[i].detail = Some(format!(
-                    "first response byte at +{} µs (connection-level)",
-                    off
-                ));
+                rec.phases[i].detail = Some(format!("first response byte at +{} µs (connection-level)", off));
             }
         }
         let _ = head_at;
         obs.dispatch = DispatchState::Sent;
         let status = resp.status().as_u16();
         obs.response_status = Some(status);
-        events.emit(ExecutionEvent::ResponseHead {
-            execution_id: events.execution_id,
-            attempt: index,
-            status,
-        });
+        events.emit(ExecutionEvent::ResponseHead { execution_id: events.execution_id, attempt: index, status });
         let version = match resp.version() {
             http::Version::HTTP_10 => "HTTP/1.0",
             http::Version::HTTP_11 => "HTTP/1.1",
@@ -739,45 +593,20 @@ impl HttpTransport {
         let headers: Vec<HeaderEntry> = resp
             .headers()
             .iter()
-            .map(|(n, v)| HeaderEntry {
-                name: n.as_str().to_string(),
-                value: String::from_utf8_lossy(v.as_bytes()).into_owned(),
-            })
+            .map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() })
             .collect();
-        let resp_header_bytes: u64 = headers
-            .iter()
-            .map(|h| (h.name.len() + h.value.len() + 4) as u64)
-            .sum::<u64>()
-            + 17;
+        let resp_header_bytes: u64 = headers.iter().map(|h| (h.name.len() + h.value.len() + 4) as u64).sum::<u64>() + 17;
         obs.bytes.response_headers_logical = Some(resp_header_bytes);
-        let content_type = resp
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let content_encoding = resp
-            .headers()
-            .get(http::header::CONTENT_ENCODING)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let declared_length = resp
-            .headers()
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok());
+        let content_type = resp.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let content_encoding = resp.headers().get(http::header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let declared_length =
+            resp.headers().get(http::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<u64>().ok());
         let conn_close = resp
             .headers()
             .get_all(http::header::CONNECTION)
             .iter()
-            .any(|v| {
-                v.to_str()
-                    .map(|s| s.to_ascii_lowercase().contains("close"))
-                    .unwrap_or(false)
-            });
-        let no_body = plan.method == Method::HEAD
-            || status == 204
-            || status == 304
-            || (100..200).contains(&status);
+            .any(|v| v.to_str().map(|s| s.to_ascii_lowercase().contains("close")).unwrap_or(false));
+        let no_body = plan.method == Method::HEAD || status == 204 || status == 304 || (100..200).contains(&status);
 
         // ---- body ----
         let b_idx = rec.start(Phase::ResponseBody);
@@ -851,21 +680,13 @@ impl HttpTransport {
         let body_status = match (&failure, completeness) {
             (None, _) => PhaseStatus::Completed,
             (Some(f), _) if f.kind == FailureKind::Canceled => PhaseStatus::Canceled,
-            (Some(f), _)
-                if matches!(
-                    f.kind,
-                    FailureKind::BodyIdleTimeout | FailureKind::TotalTimeout
-                ) =>
-            {
-                PhaseStatus::TimedOut
-            }
+            (Some(f), _) if matches!(f.kind, FailureKind::BodyIdleTimeout | FailureKind::TotalTimeout) => PhaseStatus::TimedOut,
             _ => PhaseStatus::Failed,
         };
         rec.finish(b_idx, body_status);
 
         obs.bytes.response_body_wire = Some(wire);
-        obs.bytes.connection_bytes_written =
-            Some(conn.stats.bytes_written().saturating_sub(written_before));
+        obs.bytes.connection_bytes_written = Some(conn.stats.bytes_written().saturating_sub(written_before));
         obs.bytes.connection_bytes_read = Some(conn.stats.bytes_read().saturating_sub(read_before));
         conn.served.fetch_add(1, Ordering::SeqCst);
 
@@ -890,16 +711,10 @@ impl HttpTransport {
         }
 
         let captured = captured.freeze();
-        let blob = if captured.is_empty() {
-            None
-        } else {
-            Some(crate::certs::sha256_hex(&captured))
-        };
+        let blob = if captured.is_empty() { None } else { Some(crate::certs::sha256_hex(&captured)) };
         let response = ResponseRecord {
             status,
-            reason: http::StatusCode::from_u16(status)
-                .ok()
-                .and_then(|s| s.canonical_reason().map(|r| r.to_string())),
+            reason: http::StatusCode::from_u16(status).ok().and_then(|s| s.canonical_reason().map(|r| r.to_string())),
             http_version: version,
             headers,
             trailers,
@@ -917,24 +732,13 @@ impl HttpTransport {
             },
         };
         if let Some(f) = &failure {
-            events.emit(ExecutionEvent::AttemptFailed {
-                execution_id: events.execution_id,
-                attempt: index,
-                kind: f.kind,
-            });
+            events.emit(ExecutionEvent::AttemptFailed { execution_id: events.execution_id, attempt: index, kind: f.kind });
         }
         obs.failure = failure;
         obs.duration_us = rec.us();
         obs.phases = std::mem::take(&mut rec.phases);
         let _ = is_idempotent;
-        (
-            AttemptOutput {
-                observation: obs,
-                response: Some(response),
-                body: captured,
-            },
-            false,
-        )
+        (AttemptOutput { observation: obs, response: Some(response), body: captured }, false)
     }
 
     async fn handshake(
@@ -943,15 +747,8 @@ impl HttpTransport {
         plan: &HttpPlan,
         est: Established,
     ) -> Result<Pooled, (TransportFailure, ConnectionObservation)> {
-        let Established {
-            io,
-            stats,
-            mut observation,
-        } = est;
-        let negotiated = observation
-            .tls
-            .as_ref()
-            .and_then(|t| t.alpn_negotiated.clone());
+        let Established { io, stats, mut observation } = est;
+        let negotiated = observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone());
         let use_h2 = match plan.version {
             HttpVersionPolicy::H2c => true,
             HttpVersionPolicy::Http2Only => {
@@ -961,10 +758,7 @@ impl HttpTransport {
                         FailureKind::TlsAlpnMismatch,
                         format!(
                             "HTTP/2 was required but the peer negotiated {}",
-                            negotiated
-                                .as_deref()
-                                .map(|s| format!("'{s}'"))
-                                .unwrap_or_else(|| "no ALPN protocol".into())
+                            negotiated.as_deref().map(|s| format!("'{s}'")).unwrap_or_else(|| "no ALPN protocol".into())
                         ),
                     );
                     return Err((f, observation));
@@ -979,9 +773,7 @@ impl HttpTransport {
         let io: TokioIo<BoxIo> = TokioIo::new(io);
         let sender = if use_h2 {
             let mut b = http2::Builder::new(TokioExecutor::new());
-            b.max_header_list_size(
-                plan.limits.max_response_header_bytes.min(u32::MAX as u64) as u32
-            );
+            b.max_header_list_size(plan.limits.max_response_header_bytes.min(u32::MAX as u64) as u32);
             match b.handshake::<_, InstrumentedBody>(io).await {
                 Ok((s, conn)) => {
                     let c = closed.clone();
@@ -1041,23 +833,12 @@ fn apply_tls_tap(f: &mut TransportFailure, stats: &ConnStats) {
 }
 
 fn dispatch_from_bytes(stats: &ConnStats, written_before: u64) -> DispatchState {
-    if stats.bytes_written() > written_before {
-        DispatchState::MayHaveBeenSent
-    } else {
-        DispatchState::NotDispatched
-    }
+    if stats.bytes_written() > written_before { DispatchState::MayHaveBeenSent } else { DispatchState::NotDispatched }
 }
 
-fn finalize_fail(
-    mut out: AttemptOutput,
-    stats: &ConnStats,
-    written_before: u64,
-    read_before: u64,
-) -> AttemptOutput {
-    out.observation.bytes.connection_bytes_written =
-        Some(stats.bytes_written().saturating_sub(written_before));
-    out.observation.bytes.connection_bytes_read =
-        Some(stats.bytes_read().saturating_sub(read_before));
+fn finalize_fail(mut out: AttemptOutput, stats: &ConnStats, written_before: u64, read_before: u64) -> AttemptOutput {
+    out.observation.bytes.connection_bytes_written = Some(stats.bytes_written().saturating_sub(written_before));
+    out.observation.bytes.connection_bytes_read = Some(stats.bytes_read().saturating_sub(read_before));
     out
 }
 

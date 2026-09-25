@@ -42,16 +42,11 @@ impl TlsServerOptions {
 }
 
 pub fn certs(pem: &str) -> Vec<CertificateDer<'static>> {
-    rustls_pemfile::certs(&mut pem.as_bytes())
-        .filter_map(Result::ok)
-        .collect()
+    rustls_pemfile::certs(&mut pem.as_bytes()).filter_map(Result::ok).collect()
 }
 
 pub fn key(pem: &str) -> PrivateKeyDer<'static> {
-    rustls_pemfile::private_key(&mut pem.as_bytes())
-        .ok()
-        .flatten()
-        .expect("fixture private key")
+    rustls_pemfile::private_key(&mut pem.as_bytes()).ok().flatten().expect("fixture private key")
 }
 
 pub fn provider() -> Arc<rustls::crypto::CryptoProvider> {
@@ -66,8 +61,7 @@ pub fn server_config(opts: &TlsServerOptions) -> anyhow::Result<Arc<ServerConfig
     } else {
         &[&rustls::version::TLS13, &rustls::version::TLS12]
     };
-    let builder =
-        ServerConfig::builder_with_provider(provider()).with_protocol_versions(versions)?;
+    let builder = ServerConfig::builder_with_provider(provider()).with_protocol_versions(versions)?;
     let builder = match &opts.client_auth {
         ClientAuth::None => builder.with_no_client_auth(),
         ClientAuth::Optional { ca_pem } | ClientAuth::Required { ca_pem } => {
@@ -76,11 +70,7 @@ pub fn server_config(opts: &TlsServerOptions) -> anyhow::Result<Arc<ServerConfig
                 roots.add(c)?;
             }
             let b = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider());
-            let v = if matches!(opts.client_auth, ClientAuth::Optional { .. }) {
-                b.allow_unauthenticated().build()?
-            } else {
-                b.build()?
-            };
+            let v = if matches!(opts.client_auth, ClientAuth::Optional { .. }) { b.allow_unauthenticated().build()? } else { b.build()? };
             builder.with_client_cert_verifier(v)
         }
     };

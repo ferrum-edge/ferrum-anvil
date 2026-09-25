@@ -103,18 +103,12 @@ impl DispatchState {
             any = true;
             result = match (result, s) {
                 (DispatchState::Sent, _) | (_, DispatchState::Sent) => DispatchState::Sent,
-                (DispatchState::MayHaveBeenSent, _) | (_, DispatchState::MayHaveBeenSent) => {
-                    DispatchState::MayHaveBeenSent
-                }
+                (DispatchState::MayHaveBeenSent, _) | (_, DispatchState::MayHaveBeenSent) => DispatchState::MayHaveBeenSent,
                 (DispatchState::Unknown, _) | (_, DispatchState::Unknown) => DispatchState::Unknown,
                 _ => DispatchState::NotDispatched,
             };
         }
-        if any {
-            result
-        } else {
-            DispatchState::NotDispatched
-        }
+        if any { result } else { DispatchState::NotDispatched }
     }
 }
 
@@ -238,15 +232,7 @@ impl FailureKind {
 
     pub fn is_tls_verification(self) -> bool {
         use FailureKind::*;
-        matches!(
-            self,
-            TlsUntrustedIssuer
-                | TlsExpired
-                | TlsNotYetValid
-                | TlsNameMismatch
-                | TlsRevoked
-                | TlsBadCertificate
-        )
+        matches!(self, TlsUntrustedIssuer | TlsExpired | TlsNotYetValid | TlsNameMismatch | TlsRevoked | TlsBadCertificate)
     }
 }
 
@@ -519,19 +505,11 @@ pub struct ResponseRecord {
 impl ResponseRecord {
     /// All values of a header (case-insensitive), in order.
     pub fn header_values<'a>(&'a self, name: &str) -> Vec<&'a str> {
-        self.headers
-            .iter()
-            .filter(|h| h.name.eq_ignore_ascii_case(name))
-            .map(|h| h.value.as_str())
-            .collect()
+        self.headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str()).collect()
     }
 
     pub fn trailer_values<'a>(&'a self, name: &str) -> Vec<&'a str> {
-        self.trailers
-            .iter()
-            .filter(|h| h.name.eq_ignore_ascii_case(name))
-            .map(|h| h.value.as_str())
-            .collect()
+        self.trailers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str()).collect()
     }
 }
 

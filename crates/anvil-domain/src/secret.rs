@@ -27,17 +27,13 @@ pub enum SensitiveValue {
 
 impl Default for SensitiveValue {
     fn default() -> Self {
-        SensitiveValue::Template {
-            value: String::new(),
-        }
+        SensitiveValue::Template { value: String::new() }
     }
 }
 
 impl SensitiveValue {
     pub fn template(value: impl Into<String>) -> Self {
-        SensitiveValue::Template {
-            value: value.into(),
-        }
+        SensitiveValue::Template { value: value.into() }
     }
 
     /// True when the value is only variable references (no literal secret
@@ -47,8 +43,7 @@ impl SensitiveValue {
             SensitiveValue::Secret { .. } => true,
             SensitiveValue::Template { value } => {
                 let t = value.trim();
-                t.is_empty()
-                    || (t.starts_with("{{") && t.ends_with("}}") && t.matches("{{").count() == 1)
+                t.is_empty() || (t.starts_with("{{") && t.ends_with("}}") && t.matches("{{").count() == 1)
             }
         }
     }

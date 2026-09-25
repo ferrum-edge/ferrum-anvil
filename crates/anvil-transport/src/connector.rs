@@ -7,9 +7,7 @@ use crate::recorder::Recorder;
 use crate::stats::{ConnStats, CountingIo};
 
 use crate::tls::{self, PreparedTls};
-use anvil_domain::execution::{
-    ConnectionObservation, FailureKind, Phase, PhaseStatus, TransportFailure,
-};
+use anvil_domain::execution::{ConnectionObservation, FailureKind, Phase, PhaseStatus, TransportFailure};
 use anvil_domain::settings::Timeouts;
 use anvil_domain::tls::ProxyKind;
 use std::sync::Arc;
@@ -43,10 +41,7 @@ pub struct ProxyPlan {
 
 impl std::fmt::Debug for ProxyPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProxyPlan")
-            .field("kind", &self.kind)
-            .field("label", &self.label)
-            .finish()
+        f.debug_struct("ProxyPlan").field("kind", &self.kind).field("label", &self.label).finish()
     }
 }
 
@@ -110,11 +105,7 @@ pub async fn establish(
     let resolution = match dns::resolve(dns_host, dns_port, dns_cfg, ms(timeouts.dns_ms)).await {
         Ok(r) => r,
         Err(mut f) => {
-            let status = if f.kind == FailureKind::DnsTimeout {
-                PhaseStatus::TimedOut
-            } else {
-                PhaseStatus::Failed
-            };
+            let status = if f.kind == FailureKind::DnsTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed };
             if f.phase == Phase::Prepare {
                 rec.finish(dns_idx, PhaseStatus::NotApplicable);
             } else {
@@ -144,14 +135,7 @@ pub async fn establish(
         Ok(c) => c,
         Err((mut f, attempts)) => {
             obs.connect_attempts = attempts;
-            rec.finish(
-                conn_idx,
-                if f.kind == FailureKind::ConnectTimeout {
-                    PhaseStatus::TimedOut
-                } else {
-                    PhaseStatus::Failed
-                },
-            );
+            rec.finish(conn_idx, if f.kind == FailureKind::ConnectTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed });
             if proxy.is_some() {
                 f.message = format!("connecting to the proxy failed: {}", f.message);
                 f.kind = FailureKind::ProxyConnectFailed;
@@ -170,15 +154,7 @@ pub async fn establish(
     if let Some(p) = proxy {
         if let (ProxyKind::Https, Some(ptls)) = (p.kind, p.tls.as_ref()) {
             let idx = rec.start(Phase::TlsHandshake);
-            match tls::connect(
-                ptls,
-                io,
-                &p.host,
-                &["http/1.1"],
-                ms(timeouts.tls_handshake_ms),
-            )
-            .await
-            {
+            match tls::connect(ptls, io, &p.host, &["http/1.1"], ms(timeouts.tls_handshake_ms)).await {
                 Ok((s, _o)) => {
                     rec.finish_with(idx, PhaseStatus::Completed, "TLS to proxy");
                     io = Box::new(s);
@@ -193,30 +169,15 @@ pub async fn establish(
         }
         if !target.http_forward_via_proxy {
             let idx = rec.start(Phase::ProxyTunnel);
-            let creds = p
-                .credentials
-                .as_ref()
-                .map(|(u, pw)| (u.as_str(), pw.as_str()));
+            let creds = p.credentials.as_ref().map(|(u, pw)| (u.as_str(), pw.as_str()));
             let authority = if target.host.contains(':') && !target.host.starts_with('[') {
                 format!("[{}]:{}", target.host, target.port)
             } else {
                 format!("{}:{}", target.host, target.port)
             };
             let r = match p.kind {
-                ProxyKind::Socks5 => {
-                    net::socks5_connect(
-                        &mut io,
-                        target.host,
-                        target.port,
-                        creds,
-                        ms(timeouts.connect_ms),
-                    )
-                    .await
-                }
-                _ => {
-                    net::http_connect_tunnel(&mut io, &authority, creds, ms(timeouts.connect_ms))
-                        .await
-                }
+                ProxyKind::Socks5 => net::socks5_connect(&mut io, target.host, target.port, creds, ms(timeouts.connect_ms)).await,
+                _ => net::http_connect_tunnel(&mut io, &authority, creds, ms(timeouts.connect_ms)).await,
             };
             if let Err(f) = r {
                 rec.finish(idx, PhaseStatus::Failed);
@@ -230,44 +191,21 @@ pub async fn establish(
     match target.tls {
         Some(prepared) => {
             let idx = rec.start(Phase::TlsHandshake);
-            match tls::connect(
-                prepared,
-                io,
-                target.host,
-                target.alpn,
-                ms(timeouts.tls_handshake_ms),
-            )
-            .await
-            {
+            match tls::connect(prepared, io, target.host, target.alpn, ms(timeouts.tls_handshake_ms)).await {
                 Ok((s, tls_obs)) => {
                     rec.finish(idx, PhaseStatus::Completed);
                     obs.tls = Some(tls_obs);
                     io = Box::new(crate::stats::TlsErrorTap::new(s, stats.clone()));
                 }
                 Err((f, tls_obs)) => {
-                    rec.finish(
-                        idx,
-                        if f.kind == FailureKind::TlsHandshakeTimeout {
-                            PhaseStatus::TimedOut
-                        } else {
-                            PhaseStatus::Failed
-                        },
-                    );
+                    rec.finish(idx, if f.kind == FailureKind::TlsHandshakeTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed });
                     obs.tls = Some(tls_obs);
                     return Err((f, obs));
                 }
             }
         }
-        None => rec.mark(
-            Phase::TlsHandshake,
-            PhaseStatus::NotApplicable,
-            Some("cleartext"),
-        ),
+        None => rec.mark(Phase::TlsHandshake, PhaseStatus::NotApplicable, Some("cleartext")),
     }
 
-    Ok(Established {
-        io,
-        stats,
-        observation: obs,
-    })
+    Ok(Established { io, stats, observation: obs })
 }

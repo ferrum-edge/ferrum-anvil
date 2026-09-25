@@ -27,10 +27,7 @@ pub enum Workload {
     /// Open workload: scheduled arrivals independent of response time. Late
     /// arrivals beyond `max_in_flight` are dropped and counted, never queued
     /// without bound.
-    OpenArrivalRate {
-        stages: Vec<Stage>,
-        max_in_flight: u64,
-    },
+    OpenArrivalRate { stages: Vec<Stage>, max_in_flight: u64 },
     /// Fixed number of iterations as fast as `concurrency` allows.
     Iterations { iterations: u64, concurrency: u64 },
 }

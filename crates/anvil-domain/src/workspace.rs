@@ -19,12 +19,7 @@ pub struct Meta {
 impl Meta {
     pub fn new() -> Self {
         let now = Utc::now();
-        Meta {
-            id: Id::new(),
-            schema_version: crate::SCHEMA_VERSION,
-            created_at: now,
-            updated_at: now,
-        }
+        Meta { id: Id::new(), schema_version: crate::SCHEMA_VERSION, created_at: now, updated_at: now }
     }
 }
 
@@ -51,13 +46,7 @@ pub struct Variable {
 
 impl Variable {
     pub fn plain(name: &str, value: &str) -> Self {
-        Variable {
-            name: name.into(),
-            value: SensitiveValue::template(value),
-            secret: false,
-            enabled: true,
-            description: String::new(),
-        }
+        Variable { name: name.into(), value: SensitiveValue::template(value), secret: false, enabled: true, description: String::new() }
     }
 }
 
