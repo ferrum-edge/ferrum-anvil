@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UserProfile",
+  "description": "Local profile (a selector, not an OS security boundary).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "protection": {
+      "$ref": "#/$defs/ProtectionMode"
+    },
+    "linked_identity": {
+      "description": "Provider identity bound to this profile (identity only — never a key).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LinkedIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "schema_version",
+    "created_at",
+    "updated_at",
+    "display_name",
+    "protection"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "ProtectionMode": {
+      "oneOf": [
+        {
+          "description": "Data encrypted with a key held by the OS credential store; no separate\nunlock beyond the OS session.",
+          "type": "string",
+          "const": "os_keychain"
+        },
+        {
+          "description": "Data encrypted with a key wrapped by a passphrase (Argon2id) and a\nrecovery key. Unlock required at start and after lock.",
+          "type": "string",
+          "const": "passphrase"
+        }
+      ]
+    },
+    "LinkedIdentity": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "`google`, `github`, `facebook`, or `mock` (CI only).",
+          "type": "string"
+        },
+        "subject": {
+          "description": "Provider subject identifier.",
+          "type": "string"
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "linked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "require_fresh_login": {
+          "description": "Require a fresh provider authentication before local unlock\n(online-only policy; offline unlock then needs the recovery path).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "provider",
+        "subject",
+        "linked_at"
+      ]
+    }
+  }
+}

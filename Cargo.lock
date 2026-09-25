@@ -237,6 +237,23 @@ dependencies = [
 [[package]]
 name = "anvil-cli"
 version = "0.1.0"
+dependencies = [
+ "anvil-app",
+ "anvil-auth",
+ "anvil-diagnostics",
+ "anvil-domain",
+ "anvil-engine",
+ "anvil-portability",
+ "anvil-storage",
+ "anvil-transport",
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "zeroize",
+]
 
 [[package]]
 name = "anvil-diagnostics"

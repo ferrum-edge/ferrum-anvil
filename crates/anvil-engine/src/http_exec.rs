@@ -272,7 +272,7 @@ pub(crate) fn trust_for(ctx: &ExecutionContext, target: &Target) -> (FerrumTrust
     (FerrumTrust::NotConfigured, false)
 }
 
-pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, allowed: &[&str]) -> Result<Prepared, TransportFailure> {
+pub fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, allowed: &[&str]) -> Result<Prepared, TransportFailure> {
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let http = prepare::prepare_http(&ctx.spec, r, ctx.attachments.as_ref(), &settings, ctx.send_anyway, allowed)?;
     let mut inferred = http.inferred.clone();

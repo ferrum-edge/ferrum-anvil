@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionEvent",
+  "description": "Structured, bounded progress events emitted while an execution runs. The\nUI and CLI render these live; the final [`crate::execution::ExecutionRecord`]\nis authoritative.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "const": "started"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id",
+        "method",
+        "url"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "event": {
+          "type": "string",
+          "const": "attempt_started"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id",
+        "attempt"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "status": {
+          "$ref": "#/$defs/PhaseStatus"
+        },
+        "offset_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "event": {
+          "type": "string",
+          "const": "phase"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id",
+        "attempt",
+        "phase",
+        "status",
+        "offset_us"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "status": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "event": {
+          "type": "string",
+          "const": "response_head"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id",
+        "attempt",
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "event": {
+          "type": "string",
+          "const": "body_progress"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id",
+        "bytes"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "message": {
+          "$ref": "#/$defs/StreamMessage"
+        },
+        "event": {
+          "type": "string",
+          "const": "message"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id",
+        "message"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/FailureKind"
+        },
+        "event": {
+          "type": "string",
+          "const": "attempt_failed"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id",
+        "attempt",
+        "kind"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "event": {
+          "type": "string",
+          "const": "finished"
+        }
+      },
+      "required": [
+        "event",
+        "execution_id"
+      ]
+    }
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "Phase": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "dns",
+            "tls_handshake",
+            "quic_handshake",
+            "dtls_handshake",
+            "request_write",
+            "await_response_headers",
+            "response_body"
+          ]
+        },
+        {
+          "description": "Local validation / preparation (variables, files, profiles, signing).",
+          "type": "string",
+          "const": "prepare"
+        },
+        {
+          "description": "Waiting for a pooled connection or a concurrency slot.",
+          "type": "string",
+          "const": "queue"
+        },
+        {
+          "description": "TCP connect (to the destination, or to the configured proxy).",
+          "type": "string",
+          "const": "connect"
+        },
+        {
+          "description": "Proxy tunnel establishment (HTTP CONNECT / SOCKS handshake).",
+          "type": "string",
+          "const": "proxy_tunnel"
+        },
+        {
+          "description": "Protocol handshake above TLS (HTTP/2 preface, WebSocket upgrade, ...).",
+          "type": "string",
+          "const": "protocol_handshake"
+        },
+        {
+          "description": "Long-lived session (WebSocket / SSE / TCP / UDP / gRPC stream).",
+          "type": "string",
+          "const": "session"
+        }
+      ]
+    },
+    "PhaseStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "completed",
+            "failed",
+            "timed_out",
+            "canceled"
+          ]
+        },
+        {
+          "description": "Satisfied by a reused connection; no new measurement exists.",
+          "type": "string",
+          "const": "reused"
+        },
+        {
+          "description": "Not part of this attempt (IP literal, cleartext, no body, ...).",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "Started but outcome unknown (e.g. the attempt was abandoned).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "StreamMessage": {
+      "description": "One message/event/datagram in a session transcript (bounded preview).",
+      "type": "object",
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/Direction"
+        },
+        "offset_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "kind": {
+          "description": "`text`, `binary`, `ping`, `pong`, `close`, `event`, `grpc_message`, `datagram`, `bytes`.",
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "preview": {
+          "description": "UTF-8 preview or hex (bounded).",
+          "type": "string"
+        },
+        "preview_is_hex": {
+          "type": "boolean"
+        },
+        "preview_truncated": {
+          "type": "boolean"
+        },
+        "event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "direction",
+        "offset_us",
+        "kind",
+        "size",
+        "preview",
+        "preview_is_hex",
+        "preview_truncated"
+      ]
+    },
+    "Direction": {
+      "type": "string",
+      "enum": [
+        "sent",
+        "received"
+      ]
+    },
+    "FailureKind": {
+      "description": "Typed failure kinds. Rules match on these, never on message text.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "invalid_url",
+            "unsupported_scheme",
+            "unresolved_variable",
+            "variable_cycle",
+            "missing_attachment",
+            "client_identity_invalid",
+            "client_identity_key_mismatch",
+            "tls_profile_invalid",
+            "proxy_config_invalid",
+            "invalid_header",
+            "body_serialization",
+            "lint_blocked",
+            "request_too_large_local",
+            "auth_preparation_failed",
+            "unsupported_combination",
+            "vault_locked",
+            "dns_no_such_host",
+            "dns_no_records",
+            "dns_timeout",
+            "dns_server_failure",
+            "dns_other",
+            "connect_refused",
+            "connect_timeout",
+            "connect_reset",
+            "network_unreachable",
+            "host_unreachable",
+            "address_unavailable",
+            "connect_other",
+            "proxy_connect_failed",
+            "proxy_tunnel_rejected",
+            "proxy_auth_required",
+            "proxy_protocol_error",
+            "tls_untrusted_issuer",
+            "tls_expired",
+            "tls_not_yet_valid",
+            "tls_name_mismatch",
+            "tls_revoked",
+            "tls_bad_certificate",
+            "tls_alert_received",
+            "tls_handshake_timeout",
+            "tls_peer_closed",
+            "tls_reset",
+            "tls_protocol_mismatch",
+            "tls_alpn_mismatch",
+            "tls_other",
+            "quic_handshake_timeout",
+            "quic_idle_timeout",
+            "quic_transport_error",
+            "quic_application_closed",
+            "quic_other",
+            "dtls_handshake_timeout",
+            "dtls_handshake_failed",
+            "request_write_timeout",
+            "request_write_failed",
+            "response_headers_timeout",
+            "closed_before_response",
+            "reset_before_response",
+            "http_protocol_error",
+            "h2_stream_reset",
+            "h2_refused_stream",
+            "h2_go_away",
+            "response_headers_too_large",
+            "body_idle_timeout",
+            "body_incomplete",
+            "body_reset",
+            "response_too_large_local",
+            "decompression_failed",
+            "ws_handshake_rejected",
+            "ws_protocol_error",
+            "ws_message_too_large",
+            "total_timeout",
+            "canceled",
+            "internal"
+          ]
+        },
+        {
+          "description": "Peer sent a fatal alert after the client finished its handshake\n(TLS 1.3 client-certificate rejection surfaces here).",
+          "type": "string",
+          "const": "tls_alert_after_handshake"
+        }
+      ]
+    }
+  }
+}

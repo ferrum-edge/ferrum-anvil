@@ -13,6 +13,7 @@ mod local_checks;
 mod oauth_http;
 mod pkcs12;
 pub mod prepare;
+pub mod preview;
 pub mod record;
 pub mod redact;
 pub mod settings;

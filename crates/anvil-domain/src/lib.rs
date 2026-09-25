@@ -25,6 +25,7 @@ pub mod integration;
 pub mod load;
 pub mod outcome;
 pub mod request;
+pub mod schema;
 pub mod secret;
 pub mod settings;
 pub mod tls;

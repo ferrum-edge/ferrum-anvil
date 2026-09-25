@@ -41,6 +41,9 @@ enum Cmd {
     },
     /// Verify the pinned gateway binary and print its identity.
     Verify,
+    /// Start fixtures + gateway for a profile and keep them running until Ctrl-C
+    /// (for manual desktop/CLI sessions and screenshots).
+    Up { profile: String },
 }
 
 #[tokio::main]
@@ -52,6 +55,19 @@ async fn main() -> Result<()> {
         Cmd::Verify => {
             let (bin, lock) = gateway::binary()?;
             println!("ferrum-edge {} ({}) at {} sha256 {}", lock.release, gateway::asset_name(), bin.display(), lock.sha256);
+        }
+        Cmd::Up { profile } => {
+            if profile != "core" {
+                anyhow::bail!("unknown profile {profile} (available: core)");
+            }
+            let _fixtures = fixtures::CoreFixtures::start().await?;
+            let gw = gateway::Gateway::start("core", "core.conf", "core.yaml", &[], 18090, &[]).await?;
+            println!("core lab running: gateway http://127.0.0.1:18080 (admin 127.0.0.1:18090); operator log {}", gw.log_path.display());
+            println!(
+                "routes: /ok/… (healthy), /up/dns /up/refused /up/connect-stall /up/header-stall /up/body-stall /up/reset /up/short-body /up/oversize… /gw/breaker /gw/methods /gw/request-size /gw/app-403 /gw/app-500 /gw/degraded"
+            );
+            tokio::signal::ctrl_c().await?;
+            gw.stop().await;
         }
         Cmd::List { profile } => {
             if profile != "core" {

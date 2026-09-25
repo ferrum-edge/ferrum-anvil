@@ -1,0 +1,681 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoadReport",
+  "description": "Saved, self-describing load report. Viewable offline.",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "engine": {
+      "type": "string"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "plan": {
+      "$ref": "#/$defs/LoadPlan"
+    },
+    "request_revisions": {
+      "description": "Revision ids of the requests executed.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "dataset_sha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completion": {
+      "$ref": "#/$defs/RunCompletion"
+    },
+    "partial": {
+      "description": "True if the report is partial (cancel, crash, abort, lock).",
+      "type": "boolean"
+    },
+    "warmup_included_in_metrics": {
+      "type": "boolean"
+    },
+    "destination_summary": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "counts": {
+      "$ref": "#/$defs/LoadCounts"
+    },
+    "achieved_rate_per_sec": {
+      "type": "number",
+      "format": "double"
+    },
+    "latency_success": {
+      "description": "Latency of complete successful responses.",
+      "$ref": "#/$defs/LatencySummary"
+    },
+    "latency_failure": {
+      "description": "Latency of failed attempts (to failure time).",
+      "$ref": "#/$defs/LatencySummary"
+    },
+    "histogram_success_b64": {
+      "description": "Mergeable serialized HDR histogram (V2 + DEFLATE, base64) of success latency.",
+      "type": "string"
+    },
+    "status_distribution": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "failure_categories": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FailureSample"
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TimeBucket"
+      }
+    },
+    "bytes_sent": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "bytes_received": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "generator": {
+      "$ref": "#/$defs/GeneratorHealth"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "run_id",
+    "schema_version",
+    "engine",
+    "engine_version",
+    "plan",
+    "request_revisions",
+    "started_at",
+    "finished_at",
+    "completion",
+    "partial",
+    "warmup_included_in_metrics",
+    "destination_summary",
+    "counts",
+    "achieved_rate_per_sec",
+    "latency_success",
+    "latency_failure",
+    "histogram_success_b64",
+    "status_distribution",
+    "failure_categories",
+    "timeline",
+    "bytes_sent",
+    "bytes_received",
+    "generator",
+    "notes"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "LoadPlan": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "workload": {
+          "$ref": "#/$defs/Workload"
+        },
+        "chain": {
+          "description": "A sequential chain executed per iteration (with extraction), or a\nweighted mix (one request per iteration) when `mix` is non-empty.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "default": []
+        },
+        "mix": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeightedStep"
+          },
+          "default": []
+        },
+        "dataset_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection_mode": {
+          "$ref": "#/$defs/ConnectionMode",
+          "default": "persistent"
+        },
+        "warmup_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "abort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbortRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "description": "Seed for weighted selection / generated data.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "trusted": {
+          "description": "Imported plans are never auto-started; the user must acknowledge the\ndestination and ownership reminder for each run.",
+          "type": "boolean",
+          "default": false
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "name",
+        "workload",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "Workload": {
+      "oneOf": [
+        {
+          "description": "Closed workload: fixed virtual users; slow responses reduce offered rate.",
+          "type": "object",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Stage"
+              }
+            },
+            "think_time_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "closed_virtual_users"
+            }
+          },
+          "required": [
+            "model",
+            "stages"
+          ]
+        },
+        {
+          "description": "Open workload: scheduled arrivals independent of response time. Late\narrivals beyond `max_in_flight` are dropped and counted, never queued\nwithout bound.",
+          "type": "object",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Stage"
+              }
+            },
+            "max_in_flight": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "open_arrival_rate"
+            }
+          },
+          "required": [
+            "model",
+            "stages",
+            "max_in_flight"
+          ]
+        },
+        {
+          "description": "Fixed number of iterations as fast as `concurrency` allows.",
+          "type": "object",
+          "properties": {
+            "iterations": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "concurrency": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "iterations"
+            }
+          },
+          "required": [
+            "model",
+            "iterations",
+            "concurrency"
+          ]
+        }
+      ]
+    },
+    "Stage": {
+      "type": "object",
+      "properties": {
+        "duration_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "target": {
+          "description": "Target at the end of the stage (arrivals/s for open workloads, VUs for\nclosed); linear ramp from the previous stage's target.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "duration_secs",
+        "target"
+      ]
+    },
+    "WeightedStep": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "weight": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1
+        }
+      },
+      "required": [
+        "request_id"
+      ]
+    },
+    "ConnectionMode": {
+      "oneOf": [
+        {
+          "description": "Reuse connections within each virtual user / slot.",
+          "type": "string",
+          "const": "persistent"
+        },
+        {
+          "description": "Force a new connection per iteration.",
+          "type": "string",
+          "const": "fresh"
+        }
+      ]
+    },
+    "AbortRule": {
+      "type": "object",
+      "properties": {
+        "max_failure_permille": {
+          "description": "Abort when the failure ratio over the last window exceeds this (0–1, as permille).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "window_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_failure_permille",
+        "window_secs"
+      ]
+    },
+    "RunCompletion": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "canceled_by_user",
+        "aborted_by_rule",
+        "worker_crashed",
+        "stopped_by_lock"
+      ]
+    },
+    "LoadCounts": {
+      "description": "Counts that must balance: scheduled = started + dropped (open workloads);\nstarted = completed + failed + canceled + in-flight-at-end.",
+      "type": "object",
+      "properties": {
+        "scheduled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "started": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "transport_failures": {
+          "description": "Transport failures (no complete response).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "application_failures": {
+          "description": "Complete responses with application failure (4xx/5xx, gRPC non-OK).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "assertion_failures": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeouts": {
+          "description": "Requests that hit a deadline (censored latency).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "canceled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "in_flight_at_end": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scheduled",
+        "started",
+        "dropped",
+        "completed",
+        "transport_failures",
+        "application_failures",
+        "assertion_failures",
+        "timeouts",
+        "canceled",
+        "in_flight_at_end"
+      ]
+    },
+    "LatencySummary": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "min_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mean_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p90_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p95_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p99_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "count",
+        "min_us",
+        "max_us",
+        "mean_us",
+        "p50_us",
+        "p90_us",
+        "p95_us",
+        "p99_us"
+      ]
+    },
+    "FailureSample": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "examples": {
+          "description": "Up to a bounded number of representative redacted examples.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "category",
+        "count",
+        "examples"
+      ]
+    },
+    "TimeBucket": {
+      "type": "object",
+      "properties": {
+        "second": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "started": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "failures": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p99_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "in_flight": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "second",
+        "started",
+        "completed",
+        "failures",
+        "dropped",
+        "p50_us",
+        "p99_us",
+        "in_flight"
+      ]
+    },
+    "GeneratorHealth": {
+      "type": "object",
+      "properties": {
+        "peak_cpu_percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "peak_rss_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_schedule_lag_us": {
+          "description": "Maximum observed lag between a scheduled arrival and its start.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p99_schedule_lag_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "target_not_achieved": {
+          "description": "True when the generator could not sustain the planned target.",
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "max_schedule_lag_us",
+        "p99_schedule_lag_us",
+        "target_not_achieved",
+        "notes"
+      ]
+    }
+  }
+}

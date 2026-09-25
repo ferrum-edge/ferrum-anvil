@@ -1,0 +1,379 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EffectiveSettings",
+  "description": "Fully-resolved settings used for one execution, with the layer each value\ncame from (for the Effective Request inspector).",
+  "type": "object",
+  "properties": {
+    "http_version": {
+      "$ref": "#/$defs/HttpVersionPolicy"
+    },
+    "timeouts": {
+      "$ref": "#/$defs/Timeouts"
+    },
+    "redirects": {
+      "$ref": "#/$defs/RedirectPolicy"
+    },
+    "retries": {
+      "$ref": "#/$defs/RetryPolicy"
+    },
+    "ip_preference": {
+      "$ref": "#/$defs/IpPreference"
+    },
+    "resolver": {
+      "$ref": "#/$defs/ResolverMode"
+    },
+    "dns_overrides": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DnsOverride"
+      }
+    },
+    "proxy_profile_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tls_profile_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits"
+    },
+    "decompress": {
+      "type": "boolean"
+    },
+    "cookies": {
+      "type": "boolean"
+    },
+    "keepalive": {
+      "type": "boolean"
+    },
+    "infer_content_type": {
+      "type": "boolean"
+    },
+    "integration_profile_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sources": {
+      "description": "Field path → layer label (\"app\", \"workspace\", \"folder:<name>\", \"request\", \"run\").",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SettingSource"
+      }
+    }
+  },
+  "required": [
+    "http_version",
+    "timeouts",
+    "redirects",
+    "retries",
+    "ip_preference",
+    "resolver",
+    "dns_overrides",
+    "limits",
+    "decompress",
+    "cookies",
+    "keepalive",
+    "infer_content_type",
+    "sources"
+  ],
+  "$defs": {
+    "HttpVersionPolicy": {
+      "description": "Protocol negotiation policy for HTTP-family requests.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "http1_only"
+          ]
+        },
+        {
+          "description": "ALPN negotiation over TLS (h2, then http/1.1); HTTP/1.1 for cleartext.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "HTTP/2 over TLS (ALPN `h2` only — fails rather than silently using HTTP/1.1).",
+          "type": "string",
+          "const": "http2_only"
+        },
+        {
+          "description": "Cleartext HTTP/2 with prior knowledge.",
+          "type": "string",
+          "const": "h2c"
+        },
+        {
+          "description": "Forced HTTP/3 over QUIC. Never silently sends over TCP.",
+          "type": "string",
+          "const": "http3_only"
+        },
+        {
+          "description": "Try HTTP/3 first, then fall back to TCP; every attempt is recorded.",
+          "type": "string",
+          "const": "http3_with_fallback"
+        }
+      ]
+    },
+    "Timeouts": {
+      "description": "Separate timeout classes. `None` means \"no deadline for this phase\" (the\ntotal deadline still applies). Values are milliseconds.",
+      "type": "object",
+      "properties": {
+        "dns_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connect_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls_handshake_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "request_write_ms": {
+          "description": "Deadline for handing the complete request (headers + body) to the connection.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "response_headers_ms": {
+          "description": "Deadline from request sent to response headers.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "body_idle_ms": {
+          "description": "Maximum idle gap between response body chunks.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total_ms": {
+          "description": "Whole-attempt deadline.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "RedirectPolicy": {
+      "type": "object",
+      "properties": {
+        "follow": {
+          "type": "boolean"
+        },
+        "max": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "forward_credentials_cross_origin": {
+          "description": "Forward `Authorization`/cookies/client identity to a different origin.\nOff by default; the target's own configuration applies otherwise.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "follow",
+        "max",
+        "forward_credentials_cross_origin"
+      ]
+    },
+    "RetryPolicy": {
+      "description": "Automatic retry policy. Off by default. Possibly-processed non-idempotent\noperations are never retried automatically regardless of this setting.",
+      "type": "object",
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "backoff_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "only_safe": {
+          "description": "Retry only failures proven `not_dispatched`, or idempotent methods.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "max_retries",
+        "backoff_ms",
+        "only_safe"
+      ]
+    },
+    "IpPreference": {
+      "type": "string",
+      "enum": [
+        "system",
+        "prefer_ipv4",
+        "prefer_ipv6",
+        "ipv4_only",
+        "ipv6_only"
+      ]
+    },
+    "ResolverMode": {
+      "oneOf": [
+        {
+          "description": "Operating-system resolver (getaddrinfo).",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "system"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "Query the given DNS servers directly (`ip:port`), bypassing the OS resolver.",
+          "type": "object",
+          "properties": {
+            "nameservers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "mode": {
+              "type": "string",
+              "const": "custom"
+            }
+          },
+          "required": [
+            "mode",
+            "nameservers"
+          ]
+        }
+      ]
+    },
+    "DnsOverride": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "Host name to override (exact, case-insensitive).",
+          "type": "string"
+        },
+        "addresses": {
+          "description": "Addresses to connect to instead of resolving.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "host",
+        "addresses"
+      ]
+    },
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "Limits": {
+      "type": "object",
+      "properties": {
+        "max_response_bytes": {
+          "description": "Hard ceiling on response body bytes read from the wire; exceeded bodies\nend with a local `response_too_large` outcome (never a peer fault).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "capture_bytes": {
+          "description": "Bytes retained for display/history; beyond this the body is still read\nand counted but marked display-truncated.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_decoded_bytes": {
+          "description": "Ceiling on decompressed size.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_response_header_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_request_body_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_response_bytes",
+        "capture_bytes",
+        "max_decoded_bytes",
+        "max_response_header_bytes",
+        "max_request_body_bytes"
+      ]
+    },
+    "SettingSource": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "layer"
+      ]
+    }
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scenario",
+  "description": "Ordered chain of saved requests executed by the collection runner.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string",
+      "default": ""
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScenarioStep"
+      }
+    },
+    "dataset_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "iterations": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "default": 0
+    },
+    "stop_on_failure": {
+      "description": "Stop the iteration at the first failed step.",
+      "type": "boolean",
+      "default": false
+    },
+    "trusted": {
+      "description": "Imported scenarios are not runnable until the user explicitly trusts them.",
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "id",
+    "schema_version",
+    "created_at",
+    "updated_at",
+    "workspace_id",
+    "name",
+    "steps"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "ScenarioStep": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "delay_ms": {
+          "description": "Delay before this step (think time).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "required": [
+        "request_id"
+      ]
+    }
+  }
+}

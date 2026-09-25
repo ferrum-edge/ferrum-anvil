@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoadPlan",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "workload": {
+      "$ref": "#/$defs/Workload"
+    },
+    "chain": {
+      "description": "A sequential chain executed per iteration (with extraction), or a\nweighted mix (one request per iteration) when `mix` is non-empty.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      },
+      "default": []
+    },
+    "mix": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WeightedStep"
+      },
+      "default": []
+    },
+    "dataset_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environment_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "connection_mode": {
+      "$ref": "#/$defs/ConnectionMode",
+      "default": "persistent"
+    },
+    "warmup_secs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "default": 0
+    },
+    "abort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AbortRule"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "seed": {
+      "description": "Seed for weighted selection / generated data.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "default": 0
+    },
+    "trusted": {
+      "description": "Imported plans are never auto-started; the user must acknowledge the\ndestination and ownership reminder for each run.",
+      "type": "boolean",
+      "default": false
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "workspace_id",
+    "name",
+    "workload",
+    "created_at",
+    "updated_at"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "Workload": {
+      "oneOf": [
+        {
+          "description": "Closed workload: fixed virtual users; slow responses reduce offered rate.",
+          "type": "object",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Stage"
+              }
+            },
+            "think_time_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "closed_virtual_users"
+            }
+          },
+          "required": [
+            "model",
+            "stages"
+          ]
+        },
+        {
+          "description": "Open workload: scheduled arrivals independent of response time. Late\narrivals beyond `max_in_flight` are dropped and counted, never queued\nwithout bound.",
+          "type": "object",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Stage"
+              }
+            },
+            "max_in_flight": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "open_arrival_rate"
+            }
+          },
+          "required": [
+            "model",
+            "stages",
+            "max_in_flight"
+          ]
+        },
+        {
+          "description": "Fixed number of iterations as fast as `concurrency` allows.",
+          "type": "object",
+          "properties": {
+            "iterations": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "concurrency": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "iterations"
+            }
+          },
+          "required": [
+            "model",
+            "iterations",
+            "concurrency"
+          ]
+        }
+      ]
+    },
+    "Stage": {
+      "type": "object",
+      "properties": {
+        "duration_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "target": {
+          "description": "Target at the end of the stage (arrivals/s for open workloads, VUs for\nclosed); linear ramp from the previous stage's target.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "duration_secs",
+        "target"
+      ]
+    },
+    "WeightedStep": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "weight": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1
+        }
+      },
+      "required": [
+        "request_id"
+      ]
+    },
+    "ConnectionMode": {
+      "oneOf": [
+        {
+          "description": "Reuse connections within each virtual user / slot.",
+          "type": "string",
+          "const": "persistent"
+        },
+        {
+          "description": "Force a new connection per iteration.",
+          "type": "string",
+          "const": "fresh"
+        }
+      ]
+    },
+    "AbortRule": {
+      "type": "object",
+      "properties": {
+        "max_failure_permille": {
+          "description": "Abort when the failure ratio over the last window exceeds this (0–1, as permille).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "window_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_failure_permille",
+        "window_secs"
+      ]
+    }
+  }
+}

@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TlsProfile",
+  "description": "Trust + identity settings for TLS/DTLS connections.\n\n`verify = false` means encryption stays on but the peer is not\nauthenticated. That is distinct from choosing plaintext (`http://`). A\nbypass is scoped to the requests that select this profile, shows a\npersistent warning, and is never activated by import.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "verify": {
+      "type": "boolean",
+      "default": true
+    },
+    "use_system_roots": {
+      "type": "boolean",
+      "default": true
+    },
+    "extra_roots_pem": {
+      "description": "Additional trusted CA certificates (PEM). Scoped to this profile only;\nnever installed into the OS store.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "client_identity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClientIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bindings": {
+      "description": "Destinations where this profile's client identity may be presented.\nEmpty = any destination that selects the profile (UI warns).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HostBinding"
+      },
+      "default": []
+    },
+    "min_version": {
+      "$ref": "#/$defs/TlsMinVersion",
+      "default": "tls12"
+    },
+    "server_name_override": {
+      "description": "Override the SNI / verification name (advanced). The HTTP authority is unchanged.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "workspace_id",
+    "name",
+    "created_at",
+    "updated_at"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "ClientIdentity": {
+      "description": "Client identity presented to a peer (identity #2 in the plan's three\nidentities). Never the gateway's own backend identity.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "cert_chain_pem": {
+              "description": "Certificate chain PEM (not secret).",
+              "type": "string"
+            },
+            "private_key_pem": {
+              "description": "Private key PEM (PKCS#8, PKCS#1 or SEC1) — sensitive.",
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "format": {
+              "type": "string",
+              "const": "pem"
+            }
+          },
+          "required": [
+            "format",
+            "cert_chain_pem",
+            "private_key_pem"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bundle_b64": {
+              "description": "Base64 PKCS#12 bundle — sensitive.",
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "password": {
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "format": {
+              "type": "string",
+              "const": "pkcs12"
+            }
+          },
+          "required": [
+            "format",
+            "bundle_b64",
+            "password"
+          ]
+        }
+      ]
+    },
+    "SensitiveValue": {
+      "description": "A field that may carry sensitive material (password, token, key).\n\n* `Template` — text that may contain `{{variable}}` references. A literal\n  (non-variable) template in a sensitive field is itself treated as\n  sensitive: it is masked in the UI, redacted in history, and replaced by a\n  placeholder in safe-share exports.\n* `Secret` — a vault reference.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "template"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "secret"
+            }
+          },
+          "required": [
+            "kind",
+            "secret"
+          ]
+        }
+      ]
+    },
+    "SecretRef": {
+      "description": "Reference to a value held in the encrypted vault. The value itself never\nappears in ordinary object graphs, logs or safe-share exports.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "description": "Human label shown in the UI and in export previews (\"prod API key\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "HostBinding": {
+      "description": "Host/port pattern a TLS profile or client identity is bound to. Wildcards\nare allowed only as a leading `*.` label and produce a UI warning.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "host"
+      ]
+    },
+    "TlsMinVersion": {
+      "type": "string",
+      "enum": [
+        "tls12",
+        "tls13"
+      ]
+    }
+  }
+}

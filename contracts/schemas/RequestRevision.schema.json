@@ -1,0 +1,2333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RequestRevision",
+  "description": "Immutable snapshot of a request spec. History and run reports reference\nrevisions, so editing a request never rewrites past outcomes.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "request_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "spec_sha256": {
+      "description": "SHA-256 of the canonical JSON of `spec`.",
+      "type": "string"
+    },
+    "spec": {
+      "$ref": "#/$defs/RequestSpec"
+    }
+  },
+  "required": [
+    "id",
+    "request_id",
+    "created_at",
+    "spec_sha256",
+    "spec"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "RequestSpec": {
+      "description": "The editable, serializable definition of a request. Execution never\nmutates it; a run snapshots it as an immutable [`crate::workspace::RequestRevision`].",
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/Protocol",
+          "default": "http"
+        },
+        "method": {
+          "description": "HTTP method (ignored for non-HTTP protocols).",
+          "type": "string",
+          "default": "GET"
+        },
+        "url": {
+          "description": "URL template (may contain `{{variables}}`). For TCP/UDP: `tcp://host:port`,\n`tls://host:port`, `udp://host:port`, `dtls://host:port`.",
+          "type": "string"
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          },
+          "default": []
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          },
+          "default": []
+        },
+        "body": {
+          "$ref": "#/$defs/Body",
+          "default": {
+            "type": "none"
+          }
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "type": "inherit"
+          }
+        },
+        "settings": {
+          "$ref": "#/$defs/SettingsOverrides",
+          "default": {}
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Assertion"
+          },
+          "default": []
+        },
+        "extractions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Extraction"
+          },
+          "default": []
+        },
+        "lint_policy": {
+          "$ref": "#/$defs/LintSendPolicy",
+          "default": "block"
+        },
+        "grpc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "websocket": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SseSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tcp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TcpSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "udp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UdpSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "description": "Reference to the imported spec operation this request came from.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "Protocol": {
+      "description": "Wire protocol family of a saved request. SOAP and GraphQL are HTTP body\nkinds, not separate transports.",
+      "type": "string",
+      "enum": [
+        "http",
+        "web_socket",
+        "grpc",
+        "sse",
+        "tcp",
+        "udp"
+      ]
+    },
+    "KeyValue": {
+      "description": "Enabled/disabled name-value entry. Repeated names are legal and preserved\nin order (headers and query parameters may repeat).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "sensitive": {
+          "description": "Marks the value as sensitive for masking/redaction/export.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "Body": {
+      "description": "Request body model. Serialization (and content-type inference) happens in\nthe engine before any body-dependent signing.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "content_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "raw"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "json"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "xml"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/KeyValue"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "form_url_encoded"
+            }
+          },
+          "required": [
+            "type",
+            "fields"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MultipartPart"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "multipart"
+            }
+          },
+          "required": [
+            "type",
+            "parts"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attachment": {
+              "$ref": "#/$defs/AttachmentRef"
+            },
+            "content_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "binary"
+            }
+          },
+          "required": [
+            "type",
+            "attachment"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "variables": {
+              "type": "string"
+            },
+            "operation_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "graphql"
+            }
+          },
+          "required": [
+            "type",
+            "query"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/SoapVersion"
+            },
+            "envelope": {
+              "type": "string"
+            },
+            "action": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "soap"
+            }
+          },
+          "required": [
+            "type",
+            "version",
+            "envelope"
+          ]
+        }
+      ]
+    },
+    "MultipartPart": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "content_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "part_kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "part_kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attachment": {
+              "$ref": "#/$defs/AttachmentRef"
+            },
+            "file_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "part_kind": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "required": [
+            "part_kind",
+            "attachment"
+          ]
+        }
+      ]
+    },
+    "AttachmentRef": {
+      "description": "Reference to a content-addressed attachment (binary body, multipart file,\nproto file, dataset). The bytes live in encrypted attachment storage or,\nfor linked files, at a path the user selected on this machine.",
+      "oneOf": [
+        {
+          "description": "Stored inside Anvil (portable; included in exports).",
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "file_name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "stored"
+            }
+          },
+          "required": [
+            "kind",
+            "sha256",
+            "size",
+            "file_name"
+          ]
+        },
+        {
+          "description": "Linked local file (device-specific; exports report it as a rebinding\nrequirement rather than copying an absolute machine path silently).",
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "linked_file"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        }
+      ]
+    },
+    "SoapVersion": {
+      "type": "string",
+      "enum": [
+        "soap11",
+        "soap12"
+      ]
+    },
+    "AuthConfig": {
+      "description": "Auth configuration. Applied after interpolation, content-type inference\nand serialization so body-dependent signatures cover the final bytes.",
+      "oneOf": [
+        {
+          "description": "Use the nearest ancestor folder/workspace auth.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "inherit"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Explicitly send no credentials (clears inherited auth).",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "location": {
+              "$ref": "#/$defs/KeyLocation",
+              "default": "header"
+            },
+            "type": {
+              "type": "string",
+              "const": "api_key"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "type": {
+              "type": "string",
+              "const": "basic"
+            }
+          },
+          "required": [
+            "type",
+            "username",
+            "password"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "prefix": {
+              "type": "string",
+              "default": "Bearer"
+            },
+            "type": {
+              "type": "string",
+              "const": "bearer"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "$ref": "#/$defs/JwtAlgorithm"
+            },
+            "signing_key": {
+              "description": "HMAC secret, or PKCS#8 PEM private key for RS/ES algorithms.",
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "claims": {
+              "$ref": "#/$defs/JwtClaims"
+            },
+            "kid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "header_name": {
+              "description": "Header carrying the token (default `Authorization: Bearer`).",
+              "type": "string",
+              "default": "Authorization"
+            },
+            "prefix": {
+              "type": "string",
+              "default": "Bearer"
+            },
+            "type": {
+              "type": "string",
+              "const": "jwt"
+            }
+          },
+          "required": [
+            "type",
+            "algorithm",
+            "signing_key",
+            "claims"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/OAuth2Config"
+            },
+            "type": {
+              "type": "string",
+              "const": "oauth2"
+            }
+          },
+          "required": [
+            "type",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/HmacConfig"
+            },
+            "type": {
+              "type": "string",
+              "const": "hmac"
+            }
+          },
+          "required": [
+            "type",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/DpopConfig"
+            },
+            "type": {
+              "type": "string",
+              "const": "dpop"
+            }
+          },
+          "required": [
+            "type",
+            "config"
+          ]
+        },
+        {
+          "description": "SOAP WS-Security header inserted into the SOAP envelope.",
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/WsseConfig"
+            },
+            "type": {
+              "type": "string",
+              "const": "wsse"
+            }
+          },
+          "required": [
+            "type",
+            "config"
+          ]
+        },
+        {
+          "description": "Several explicit presentations in one request (e.g. mTLS + API key).\nOrder is preserved; conflicting headers fail validation.",
+          "type": "object",
+          "properties": {
+            "profiles": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AuthConfig"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "multi"
+            }
+          },
+          "required": [
+            "type",
+            "profiles"
+          ]
+        }
+      ]
+    },
+    "SensitiveValue": {
+      "description": "A field that may carry sensitive material (password, token, key).\n\n* `Template` — text that may contain `{{variable}}` references. A literal\n  (non-variable) template in a sensitive field is itself treated as\n  sensitive: it is masked in the UI, redacted in history, and replaced by a\n  placeholder in safe-share exports.\n* `Secret` — a vault reference.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "template"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "secret"
+            }
+          },
+          "required": [
+            "kind",
+            "secret"
+          ]
+        }
+      ]
+    },
+    "SecretRef": {
+      "description": "Reference to a value held in the encrypted vault. The value itself never\nappears in ordinary object graphs, logs or safe-share exports.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "description": "Human label shown in the UI and in export previews (\"prod API key\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "KeyLocation": {
+      "description": "Where an API key is presented.",
+      "type": "string",
+      "enum": [
+        "header",
+        "query",
+        "cookie"
+      ]
+    },
+    "JwtAlgorithm": {
+      "type": "string",
+      "enum": [
+        "HS256",
+        "HS384",
+        "HS512",
+        "RS256",
+        "ES256"
+      ]
+    },
+    "JwtClaims": {
+      "description": "Claims editor for the JWT helper. Anvil signs only with key material the\nuser supplies; it never invents an issuer or a gateway token endpoint.",
+      "type": "object",
+      "properties": {
+        "iss": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sub": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "aud": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expires_in_secs": {
+          "description": "Lifetime in seconds from signing time; `exp` is computed per send.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "not_before_offset_secs": {
+          "description": "`nbf` offset (seconds, may be negative) relative to signing time.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "extra_json": {
+          "description": "Additional claims as a JSON object text (may contain `{{vars}}`).",
+          "type": "string"
+        }
+      }
+    },
+    "OAuth2Config": {
+      "type": "object",
+      "properties": {
+        "grant": {
+          "$ref": "#/$defs/OAuthGrant"
+        },
+        "token_url": {
+          "type": "string"
+        },
+        "authorization_url": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "client_secret": {
+          "description": "Confidential-client secret (client credentials). Public PKCE clients\nleave this empty.",
+          "$ref": "#/$defs/SensitiveValue",
+          "default": {
+            "kind": "template",
+            "value": ""
+          }
+        },
+        "scope": {
+          "type": "string"
+        },
+        "audience": {
+          "type": "string"
+        },
+        "client_auth": {
+          "description": "How client credentials are sent to the token endpoint.",
+          "$ref": "#/$defs/OAuthClientAuth",
+          "default": "basic_header"
+        },
+        "token_cache_id": {
+          "description": "Where the acquired access token is cached (vault) — id of the token\ncache entry, managed by the engine.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refresh_skew_secs": {
+          "description": "Refresh this many seconds before expiry.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 30
+        }
+      },
+      "required": [
+        "grant",
+        "token_url",
+        "client_id"
+      ]
+    },
+    "OAuthGrant": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "client_credentials",
+            "refresh_token"
+          ]
+        },
+        {
+          "description": "Authorization code with PKCE (S256) through the external system browser\nand a loopback redirect bound to one authorization attempt.",
+          "type": "string",
+          "const": "authorization_code_pkce"
+        }
+      ]
+    },
+    "OAuthClientAuth": {
+      "type": "string",
+      "enum": [
+        "basic_header",
+        "request_body"
+      ]
+    },
+    "HmacConfig": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/HmacProfile",
+          "default": "ferrum_v2"
+        },
+        "username": {
+          "type": "string"
+        },
+        "secret": {
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        "algorithm": {
+          "$ref": "#/$defs/HmacAlgorithm",
+          "default": "hmac_sha256"
+        },
+        "digest_header": {
+          "$ref": "#/$defs/BodyDigestHeader",
+          "default": "content_digest"
+        },
+        "namespace": {
+          "description": "Optional namespace bound into the signature when the gateway profile uses one.",
+          "type": "string"
+        },
+        "allow_unsafe_legacy": {
+          "description": "Explicit opt-in required to use the replayable legacy profile.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "username",
+        "secret"
+      ]
+    },
+    "HmacProfile": {
+      "description": "HMAC request signing profile. `FerrumV2` is the gateway's current\nsingle-use profile; `FerrumV1Legacy` is disabled unless the user explicitly\nenables the unsafe compatibility option.",
+      "type": "string",
+      "enum": [
+        "ferrum_v2",
+        "ferrum_v1_legacy"
+      ]
+    },
+    "HmacAlgorithm": {
+      "type": "string",
+      "enum": [
+        "hmac_sha256",
+        "hmac_sha384",
+        "hmac_sha512"
+      ]
+    },
+    "BodyDigestHeader": {
+      "oneOf": [
+        {
+          "description": "RFC 9530 `Content-Digest: sha-256=:<b64>:`.",
+          "type": "string",
+          "const": "content_digest"
+        },
+        {
+          "description": "Legacy RFC 3230 `Digest: SHA-256=<b64>`.",
+          "type": "string",
+          "const": "legacy_digest"
+        }
+      ]
+    },
+    "DpopConfig": {
+      "type": "object",
+      "properties": {
+        "access_token": {
+          "description": "The access token (bound to the proof key by the issuer).",
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        "private_key_pem": {
+          "description": "PKCS#8 PEM of the ES256 proof key (vault reference recommended).",
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        "dpop_scheme": {
+          "description": "Present the token as `DPoP <token>` (RFC 9449) or legacy `Bearer`.",
+          "type": "boolean",
+          "default": true
+        },
+        "handle_nonce_challenge": {
+          "description": "Automatically answer a single `use_dpop_nonce` challenge with a fresh proof.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "access_token",
+        "private_key_pem"
+      ]
+    },
+    "WsseConfig": {
+      "type": "object",
+      "properties": {
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        "password_type": {
+          "$ref": "#/$defs/WssePasswordType",
+          "default": "password_text"
+        },
+        "timestamp_ttl_secs": {
+          "description": "Add a `wsu:Timestamp` with this lifetime.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "saml_assertion": {
+          "description": "User-provided signed SAML assertion XML to embed verbatim (Anvil never\nmints assertions).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "username",
+        "password"
+      ]
+    },
+    "WssePasswordType": {
+      "type": "string",
+      "enum": [
+        "password_text",
+        "password_digest"
+      ]
+    },
+    "SettingsOverrides": {
+      "description": "Non-secret request settings resolved deterministically:\napp defaults → workspace → ancestor folders → request → run override.\nEvery field is optional at each layer; `None` inherits.",
+      "type": "object",
+      "properties": {
+        "http_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpVersionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeouts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeoutOverrides"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redirects": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RedirectPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retries": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ip_preference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IpPreference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolverMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dns_overrides": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DnsOverride"
+          }
+        },
+        "proxy_profile_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxySelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tls_profile_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Limits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decompress": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "cookies": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "keepalive": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "infer_content_type": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "integration_profile_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "HttpVersionPolicy": {
+      "description": "Protocol negotiation policy for HTTP-family requests.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "http1_only"
+          ]
+        },
+        {
+          "description": "ALPN negotiation over TLS (h2, then http/1.1); HTTP/1.1 for cleartext.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "HTTP/2 over TLS (ALPN `h2` only — fails rather than silently using HTTP/1.1).",
+          "type": "string",
+          "const": "http2_only"
+        },
+        {
+          "description": "Cleartext HTTP/2 with prior knowledge.",
+          "type": "string",
+          "const": "h2c"
+        },
+        {
+          "description": "Forced HTTP/3 over QUIC. Never silently sends over TCP.",
+          "type": "string",
+          "const": "http3_only"
+        },
+        {
+          "description": "Try HTTP/3 first, then fall back to TCP; every attempt is recorded.",
+          "type": "string",
+          "const": "http3_with_fallback"
+        }
+      ]
+    },
+    "TimeoutOverrides": {
+      "description": "Partial timeout overrides (each class independently inheritable).",
+      "type": "object",
+      "properties": {
+        "dns_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connect_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls_handshake_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "request_write_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "response_headers_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "body_idle_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "RedirectPolicy": {
+      "type": "object",
+      "properties": {
+        "follow": {
+          "type": "boolean"
+        },
+        "max": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "forward_credentials_cross_origin": {
+          "description": "Forward `Authorization`/cookies/client identity to a different origin.\nOff by default; the target's own configuration applies otherwise.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "follow",
+        "max",
+        "forward_credentials_cross_origin"
+      ]
+    },
+    "RetryPolicy": {
+      "description": "Automatic retry policy. Off by default. Possibly-processed non-idempotent\noperations are never retried automatically regardless of this setting.",
+      "type": "object",
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "backoff_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "only_safe": {
+          "description": "Retry only failures proven `not_dispatched`, or idempotent methods.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "max_retries",
+        "backoff_ms",
+        "only_safe"
+      ]
+    },
+    "IpPreference": {
+      "type": "string",
+      "enum": [
+        "system",
+        "prefer_ipv4",
+        "prefer_ipv6",
+        "ipv4_only",
+        "ipv6_only"
+      ]
+    },
+    "ResolverMode": {
+      "oneOf": [
+        {
+          "description": "Operating-system resolver (getaddrinfo).",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "system"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "Query the given DNS servers directly (`ip:port`), bypassing the OS resolver.",
+          "type": "object",
+          "properties": {
+            "nameservers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "mode": {
+              "type": "string",
+              "const": "custom"
+            }
+          },
+          "required": [
+            "mode",
+            "nameservers"
+          ]
+        }
+      ]
+    },
+    "DnsOverride": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "Host name to override (exact, case-insensitive).",
+          "type": "string"
+        },
+        "addresses": {
+          "description": "Addresses to connect to instead of resolving.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "host",
+        "addresses"
+      ]
+    },
+    "ProxySelection": {
+      "description": "Explicit proxy choice: a profile, or explicitly none (overrides inherited).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Id"
+            },
+            "kind": {
+              "type": "string",
+              "const": "profile"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "Limits": {
+      "type": "object",
+      "properties": {
+        "max_response_bytes": {
+          "description": "Hard ceiling on response body bytes read from the wire; exceeded bodies\nend with a local `response_too_large` outcome (never a peer fault).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "capture_bytes": {
+          "description": "Bytes retained for display/history; beyond this the body is still read\nand counted but marked display-truncated.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_decoded_bytes": {
+          "description": "Ceiling on decompressed size.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_response_header_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_request_body_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_response_bytes",
+        "capture_bytes",
+        "max_decoded_bytes",
+        "max_response_header_bytes",
+        "max_request_body_bytes"
+      ]
+    },
+    "Assertion": {
+      "description": "Declarative, no-code assertion. Assertion failures are reported separately\nfrom transport and application failures.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "status"
+            }
+          },
+          "required": [
+            "type",
+            "comparison",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint16",
+                "minimum": 0,
+                "maximum": 65535
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "status_in"
+            }
+          },
+          "required": [
+            "type",
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "string",
+              "default": ""
+            },
+            "type": {
+              "type": "string",
+              "const": "header"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "comparison"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "string",
+              "default": ""
+            },
+            "type": {
+              "type": "string",
+              "const": "trailer"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "comparison"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "string",
+              "default": ""
+            },
+            "type": {
+              "type": "string",
+              "const": "json_path"
+            }
+          },
+          "required": [
+            "type",
+            "path",
+            "comparison"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "string",
+              "default": ""
+            },
+            "type": {
+              "type": "string",
+              "const": "x_path"
+            }
+          },
+          "required": [
+            "type",
+            "path",
+            "comparison"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "json_schema"
+            }
+          },
+          "required": [
+            "type",
+            "schema"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "string",
+              "default": ""
+            },
+            "type": {
+              "type": "string",
+              "const": "body"
+            }
+          },
+          "required": [
+            "type",
+            "comparison"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "max": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "latency_ms"
+            }
+          },
+          "required": [
+            "type",
+            "max"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "grpc_status"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "message_count"
+            }
+          },
+          "required": [
+            "type",
+            "comparison",
+            "value"
+          ]
+        },
+        {
+          "description": "Assert the presence/absence of a diagnostic finding code.",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "diagnostic"
+            }
+          },
+          "required": [
+            "type",
+            "code",
+            "present"
+          ]
+        },
+        {
+          "description": "Assert transport completion state (`completed`, `failed`, ...).",
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "transport"
+            }
+          },
+          "required": [
+            "type",
+            "state"
+          ]
+        }
+      ]
+    },
+    "Comparison": {
+      "type": "string",
+      "enum": [
+        "equals",
+        "not_equals",
+        "contains",
+        "not_contains",
+        "matches",
+        "exists",
+        "not_exists",
+        "less_than",
+        "greater_than"
+      ]
+    },
+    "Extraction": {
+      "description": "Extract a response value into an iteration-local variable for chaining.",
+      "type": "object",
+      "properties": {
+        "variable": {
+          "type": "string"
+        },
+        "sensitive": {
+          "description": "Treat the extracted value as sensitive (masked, redacted from reports).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "variable"
+      ],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "from": {
+              "type": "string",
+              "const": "json_path"
+            }
+          },
+          "required": [
+            "from",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "from": {
+              "type": "string",
+              "const": "x_path"
+            }
+          },
+          "required": [
+            "from",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "from": {
+              "type": "string",
+              "const": "header"
+            }
+          },
+          "required": [
+            "from",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "group": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0,
+              "default": 0
+            },
+            "from": {
+              "type": "string",
+              "const": "regex"
+            }
+          },
+          "required": [
+            "from",
+            "pattern"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "const": "status"
+            }
+          },
+          "required": [
+            "from"
+          ]
+        }
+      ]
+    },
+    "LintSendPolicy": {
+      "description": "Policy for sending a body whose syntax lint failed. Anvil is a testing\nclient, so invalid JSON/XML is sendable by explicit choice.",
+      "oneOf": [
+        {
+          "description": "Refuse to send until the user chooses \"send anyway\" for this send.",
+          "type": "string",
+          "const": "block"
+        },
+        {
+          "description": "Warn in the outcome but send.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "Do not lint (e.g. deliberate malformed-payload tests).",
+          "type": "string",
+          "const": "off"
+        }
+      ]
+    },
+    "GrpcSpec": {
+      "type": "object",
+      "properties": {
+        "service": {
+          "description": "Fully qualified `package.Service`.",
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/GrpcMode",
+          "default": "unary"
+        },
+        "schema": {
+          "$ref": "#/$defs/GrpcSchemaSource"
+        },
+        "messages": {
+          "description": "JSON messages to send in order (one for unary / server streaming).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "metadata": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          },
+          "default": []
+        },
+        "deadline_ms": {
+          "description": "`grpc-timeout` sent to the server, if any.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "plaintext": {
+          "description": "Use h2c (cleartext prior knowledge) for `http://` targets.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "service",
+        "method",
+        "schema",
+        "messages"
+      ]
+    },
+    "GrpcMode": {
+      "type": "string",
+      "enum": [
+        "unary",
+        "client_streaming",
+        "server_streaming",
+        "bidirectional"
+      ]
+    },
+    "GrpcSchemaSource": {
+      "description": "Where gRPC message schemas come from.",
+      "oneOf": [
+        {
+          "description": "`.proto` sources (compiled in-process; imports resolved only among the\nprovided files).",
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AttachmentRef"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "proto_files"
+            }
+          },
+          "required": [
+            "kind",
+            "files"
+          ]
+        },
+        {
+          "description": "Serialized `FileDescriptorSet`.",
+          "type": "object",
+          "properties": {
+            "attachment": {
+              "$ref": "#/$defs/AttachmentRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "descriptor_set"
+            }
+          },
+          "required": [
+            "kind",
+            "attachment"
+          ]
+        },
+        {
+          "description": "Server reflection (grpc.reflection.v1, falling back to v1alpha).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "reflection"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "WsSpec": {
+      "type": "object",
+      "properties": {
+        "bootstrap": {
+          "$ref": "#/$defs/WsBootstrap",
+          "default": "http1_upgrade"
+        },
+        "subprotocols": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "messages": {
+          "description": "Messages sent after open (automation / scripted session).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WsMessage"
+          },
+          "default": []
+        },
+        "expect_messages": {
+          "description": "Automation: wait for this many inbound messages before closing.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        },
+        "max_message_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 16777216
+        },
+        "idle_close_ms": {
+          "description": "Close the session after this idle period (automation only).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 5000
+        }
+      }
+    },
+    "WsBootstrap": {
+      "oneOf": [
+        {
+          "description": "RFC 6455 HTTP/1.1 Upgrade.",
+          "type": "string",
+          "const": "http1_upgrade"
+        },
+        {
+          "description": "RFC 8441 Extended CONNECT over HTTP/2.",
+          "type": "string",
+          "const": "http2_extended_connect"
+        },
+        {
+          "description": "RFC 9220 Extended CONNECT over HTTP/3.",
+          "type": "string",
+          "const": "http3_extended_connect"
+        }
+      ]
+    },
+    "WsMessage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "description": "Hex-encoded bytes.",
+          "type": "object",
+          "properties": {
+            "hex": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "binary"
+            }
+          },
+          "required": [
+            "kind",
+            "hex"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "hex": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "ping"
+            }
+          },
+          "required": [
+            "kind",
+            "hex"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "close"
+            }
+          },
+          "required": [
+            "kind",
+            "code",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "SseSpec": {
+      "type": "object",
+      "properties": {
+        "max_events": {
+          "description": "Stop after this many events (0 = until cancel/idle/max duration).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        },
+        "idle_timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30000
+        },
+        "last_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reconnect": {
+          "description": "Automatic reconnect is off by default; reconnect only when explicitly enabled.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "TcpSpec": {
+      "type": "object",
+      "properties": {
+        "tls": {
+          "description": "Use TLS (the `tls_profile` settings apply).",
+          "type": "boolean",
+          "default": false
+        },
+        "framing": {
+          "$ref": "#/$defs/TcpFraming",
+          "default": "none"
+        },
+        "payloads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StreamPayload"
+          }
+        },
+        "half_close_after_send": {
+          "description": "Half-close (shutdown write) after sending, then keep reading.",
+          "type": "boolean",
+          "default": false
+        },
+        "read_idle_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 2000
+        },
+        "max_read_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 1048576
+        },
+        "expect_frames": {
+          "description": "Stop reading after this many frames (0 = until idle/close/max bytes).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "required": [
+        "payloads"
+      ]
+    },
+    "TcpFraming": {
+      "description": "Framing presets for raw TCP exchanges. Arbitrary bytes are never assumed to\nbe a known application protocol.",
+      "type": "string",
+      "enum": [
+        "none",
+        "newline_delimited",
+        "length_prefixed_u16",
+        "length_prefixed_u32"
+      ]
+    },
+    "StreamPayload": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "encoding": {
+          "$ref": "#/$defs/PayloadEncoding",
+          "default": "text"
+        }
+      },
+      "required": [
+        "data"
+      ]
+    },
+    "PayloadEncoding": {
+      "type": "string",
+      "enum": [
+        "text",
+        "hex",
+        "base64"
+      ]
+    },
+    "UdpSpec": {
+      "type": "object",
+      "properties": {
+        "dtls": {
+          "description": "Use DTLS (the `tls_profile` settings apply).",
+          "type": "boolean",
+          "default": false
+        },
+        "datagrams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StreamPayload"
+          }
+        },
+        "response_window_ms": {
+          "description": "How long to wait for responses after the last datagram is sent.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 1000
+        },
+        "max_datagrams": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1000
+        }
+      },
+      "required": [
+        "datagrams"
+      ]
+    },
+    "ImportSource": {
+      "description": "Link from a request to the spec/collection it was imported from, used for\nreimport diffs.",
+      "type": "object",
+      "properties": {
+        "import_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_key": {
+          "description": "Stable key: operationId when present, else `METHOD path`.",
+          "type": "string"
+        },
+        "generated_hash": {
+          "description": "Hash of the generated request spec at import time (detects user edits).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "import_id",
+        "operation_key",
+        "generated_hash"
+      ]
+    }
+  }
+}

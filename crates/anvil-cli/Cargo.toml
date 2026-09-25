@@ -1,9 +1,29 @@
 [package]
 name = "anvil-cli"
+description = "Headless Ferrum Anvil: send, run, export/import and inspect using the same engine as the desktop app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license-file.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "anvil"
+path = "src/main.rs"
+
 [dependencies]
+anvil-domain.workspace = true
+anvil-app.workspace = true
+anvil-engine.workspace = true
+anvil-storage.workspace = true
+anvil-portability.workspace = true
+anvil-transport.workspace = true
+anvil-auth.workspace = true
+anvil-diagnostics.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+zeroize.workspace = true
