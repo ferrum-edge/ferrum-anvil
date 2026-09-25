@@ -11,6 +11,7 @@ pub mod h3server;
 pub mod http;
 pub mod log;
 pub mod pki;
+pub mod policy;
 pub mod raw;
 pub mod streams;
 pub mod tlsserver;
