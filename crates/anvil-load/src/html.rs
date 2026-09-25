@@ -352,8 +352,11 @@ pub fn to_html(r: &LoadReport) -> String {
     if let Some(o) = r.offered_rate_per_sec {
         h.push_str(&tile("Offered rate", &format!("{o:.1}/s"), "arrivals scheduled per second"));
     }
-    h.push_str(&tile("p50 success", &fmt_us(r.latency_success.p50_us), "merged histogram"));
-    h.push_str(&tile("p99 success", &fmt_us(r.latency_success.p99_us), "merged histogram"));
+    // No successful send means no success latency, never "0 µs".
+    let success_us = |v: u64| if r.latency_success.count == 0 { "—".to_string() } else { fmt_us(v) };
+    let sub = if r.latency_success.count == 0 { "no successful sends" } else { "merged histogram" };
+    h.push_str(&tile("p50 success", &success_us(r.latency_success.p50_us), sub));
+    h.push_str(&tile("p99 success", &success_us(r.latency_success.p99_us), sub));
     h.push_str(&tile("Failed sends", &format!("{err_pct:.1} %"), &format!("{} of {} finished", fmt_n(failed), fmt_n(finished))));
     h.push_str(&tile("Dropped arrivals", &fmt_n(c.dropped), "never started, no latency"));
     h.push_str(&tile("Timeouts", &fmt_n(r.timeouts_censored.count), "censored, excluded from latency"));

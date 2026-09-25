@@ -129,7 +129,7 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
               </span>
               <span />
               <span className="faint" style={{ fontSize: 11 }}>
-                {new Date(r.started_at).toLocaleString()} · {r.achieved_rate_per_sec.toFixed(1)}/s · p95 {fmtUs(r.p95_us)} · {r.failures} failed
+                {new Date(r.started_at).toLocaleString()} · {r.achieved_rate_per_sec.toFixed(1)}/s · p95 {r.p95_us === null ? "— (no successes)" : fmtUs(r.p95_us)} · {r.failures} failed
               </span>
             </div>
           ))}
@@ -603,7 +603,11 @@ function LivePanel(props: { live: { runKey: string; planName: string; progress: 
             <Card label="Started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped` : undefined} />
             <Card label="Completed" value={String(c.completed)} />
             <Card label="Failures" value={String(c.transport_failures + c.timeouts + c.application_failures)} bad={c.transport_failures + c.timeouts + c.application_failures > 0} />
-            <Card label="p95 (success)" value={fmtUs(p.snapshot.latency_success.p95_us)} sub={`p99 ${fmtUs(p.snapshot.latency_success.p99_us)}`} />
+            {p.snapshot.latency_success.count === 0 ? (
+              <Card label="p95 (success)" value="—" sub="no successful sends yet" />
+            ) : (
+              <Card label="p95 (success)" value={fmtUs(p.snapshot.latency_success.p95_us)} sub={`p99 ${fmtUs(p.snapshot.latency_success.p99_us)}`} />
+            )}
           </div>
           <Timeline buckets={props.live.timeline.filter(Boolean)} />
         </>
@@ -729,11 +733,19 @@ function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify
               <tr key={name as string}>
                 <td>{name as string}</td>
                 <td className="v">{L.count}</td>
-                <td className="v">{fmtUs(L.p50_us)}</td>
-                <td className="v">{fmtUs(L.p90_us)}</td>
-                <td className="v">{fmtUs(L.p95_us)}</td>
-                <td className="v">{fmtUs(L.p99_us)}</td>
-                <td className="v">{fmtUs(L.max_us)}</td>
+                {L.count === 0 ? (
+                  <td className="v faint" colSpan={5}>
+                    no samples
+                  </td>
+                ) : (
+                  <>
+                    <td className="v">{fmtUs(L.p50_us)}</td>
+                    <td className="v">{fmtUs(L.p90_us)}</td>
+                    <td className="v">{fmtUs(L.p95_us)}</td>
+                    <td className="v">{fmtUs(L.p99_us)}</td>
+                    <td className="v">{fmtUs(L.max_us)}</td>
+                  </>
+                )}
               </tr>
             );
           })}

@@ -25,7 +25,8 @@ pub struct LoadReportSummary {
     pub achieved_rate_per_sec: f64,
     pub started: u64,
     pub failures: u64,
-    pub p95_us: u64,
+    /// p95 of successful sends; `None` when no send succeeded.
+    pub p95_us: Option<u64>,
 }
 
 /// What the user must see and acknowledge before a run starts.
@@ -171,7 +172,7 @@ impl App {
                 achieved_rate_per_sec: r.achieved_rate_per_sec,
                 started: r.counts.started,
                 failures: r.counts.transport_failures + r.counts.timeouts + r.counts.application_failures,
-                p95_us: r.latency_success.p95_us,
+                p95_us: (r.latency_success.count > 0).then_some(r.latency_success.p95_us),
             })
             .collect())
     }

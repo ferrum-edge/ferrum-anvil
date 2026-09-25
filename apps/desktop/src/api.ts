@@ -216,7 +216,8 @@ export interface LoadReportSummary {
   achieved_rate_per_sec: number;
   started: number;
   failures: number;
-  p95_us: number;
+  /** p95 of successful sends; null when none succeeded. */
+  p95_us: number | null;
 }
 export interface LoadProgress {
   run_id: string;

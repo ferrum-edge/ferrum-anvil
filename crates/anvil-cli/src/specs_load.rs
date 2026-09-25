@@ -256,13 +256,13 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                         Some(p) => {
                             let k = &p.snapshot.counts;
                             eprintln!(
-                                "{:>5.0}s {:>9} started {:>9} completed {:>6} failed {:>8.1}/s p95 {} µs",
+                                "{:>5.0}s {:>9} started {:>9} completed {:>6} failed {:>8.1}/s p95 {}",
                                 p.elapsed_secs,
                                 k.started,
                                 k.completed,
                                 k.transport_failures + k.timeouts + k.application_failures,
                                 p.snapshot.achieved_rate_per_sec,
-                                p.snapshot.latency_success.p95_us
+                                us_or_none(p.snapshot.latency_success.count, p.snapshot.latency_success.p95_us)
                             );
                         }
                         None => break,
@@ -287,7 +287,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             }
             let k = &report.counts;
             println!(
-                "{:?}{}: {} started, {} completed, {} transport failures, {} timeouts, {} application failures, {} assertion failures, {} dropped; {:.1}/s; p50 {} µs p95 {} µs p99 {} µs",
+                "{:?}{}: {} started, {} completed, {} transport failures, {} timeouts, {} application failures, {} assertion failures, {} dropped; {:.1}/s; success p50 {} p95 {} p99 {}",
                 report.completion,
                 if report.partial { " (partial)" } else { "" },
                 k.started,
@@ -298,9 +298,9 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 k.assertion_failures,
                 k.dropped,
                 report.achieved_rate_per_sec,
-                report.latency_success.p50_us,
-                report.latency_success.p95_us,
-                report.latency_success.p99_us
+                us_or_none(report.latency_success.count, report.latency_success.p50_us),
+                us_or_none(report.latency_success.count, report.latency_success.p95_us),
+                us_or_none(report.latency_success.count, report.latency_success.p99_us)
             );
             for n in &report.notes {
                 println!("  note: {n}");
@@ -318,18 +318,23 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             let ws = app.find_workspace(workspace)?.meta.id;
             for r in app.load_reports(&ws)? {
                 println!(
-                    "{}  {}  {}  {:?}{}  {:.1}/s  p95 {} µs  {} failed",
+                    "{}  {}  {}  {:?}{}  {:.1}/s  p95 {}  {} failed",
                     r.run_id,
                     r.started_at.format("%Y-%m-%d %H:%M:%S"),
                     r.plan_name,
                     r.completion,
                     if r.partial { " (partial)" } else { "" },
                     r.achieved_rate_per_sec,
-                    r.p95_us,
+                    r.p95_us.map(|v| format!("{v} µs")).unwrap_or_else(|| "— (no successful sends)".into()),
                     r.failures
                 );
             }
             Ok(0)
         }
     }
+}
+
+/// A success-latency value, or "—" when no send succeeded (never "0 µs").
+fn us_or_none(count: u64, us: u64) -> String {
+    if count == 0 { "—".into() } else { format!("{us} µs") }
 }
