@@ -421,13 +421,14 @@ fn gw015(env: &Env) -> Fut<'_> {
             "",
         );
         // Lookalike: an application-authored problem+json 400.
-        let look = env
-            .backend(
-                400,
-                r#"{"type":"about:blank","title":"Request body validation failed","status":400,"detail":"qty must be >= 1"}"#,
-                &["content-type:application/problem+json"],
-            )
-            .await;
+        let problem = r#"{"type":"about:blank","title":"Request body validation failed","status":400,"detail":"qty must be >= 1"}"#;
+        let look = env.get(&format!("/ok/status/400?ct={}&body={}", enc("application/problem+json"), enc(problem))).await;
+        c.add(
+            CheckKind::GroundTruth,
+            "application lookalike is problem+json too",
+            header(&look, "content-type") == ["application/problem+json"],
+            format!("{:?}", header(&look, "content-type")),
+        );
         indistinguishable(&mut c, &o, &look, "gateway validator 400 vs application 400");
         let r = env.post_json("/gw/openapi/items", r#"{"name":"x","qty":2}"#).await;
         c.success(CheckKind::Recovery, &r);
