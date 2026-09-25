@@ -54,5 +54,7 @@ describe("Load test — acknowledged run and saved report", () => {
     await browser.pause(300);
     expect(fixture.requests.length).toBe(300);
     await screenshot("08-load-report");
+    // Specs share one app instance: leave it in the Requests view.
+    await $('//div[@aria-label="View"]/button[normalize-space()="Requests"]').click();
   });
 });
