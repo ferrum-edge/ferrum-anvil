@@ -389,17 +389,33 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     }
 }
 
+/// Stack for the thread that drives the top-level future. Windows gives the
+/// main thread only 1 MiB (Linux and macOS: 8 MiB), less than the deepest
+/// engine and runner futures need.
+const MAIN_STACK: usize = 16 << 20;
+/// Stack for runtime worker threads (Tokio's default is 2 MiB).
+const WORKER_STACK: usize = 8 << 20;
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread().thread_stack_size(WORKER_STACK).enable_all().build().expect("tokio runtime")
+}
+
 fn main() {
+    let main = std::thread::Builder::new().name("anvil".into()).stack_size(MAIN_STACK).spawn(real_main).expect("start the main thread");
+    // `real_main` always exits the process; getting here means it panicked.
+    let _ = main.join();
+    std::process::exit(101);
+}
+
+fn real_main() {
     // `anvil` re-launches itself as the load worker (job on stdin). Exit
     // directly: dropping the runtime would wait on the blocking stdin reader.
     if std::env::args_os().nth(1).is_some_and(|a| a == specs_load::LOAD_WORKER_FLAG) {
         anvil_transport::init();
-        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
-        let code = rt.block_on(anvil_load::worker::run_stdio());
+        let code = runtime().block_on(anvil_load::worker::run_stdio());
         std::process::exit(code);
     }
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
-    let code = rt.block_on(cli_main());
+    let code = runtime().block_on(cli_main());
     std::process::exit(code);
 }
 

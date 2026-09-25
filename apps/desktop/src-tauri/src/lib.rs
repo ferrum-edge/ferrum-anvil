@@ -16,15 +16,39 @@ pub use cmd_load::LOAD_WORKER_FLAG;
 /// blocking stdin reader thread and the worker would never terminate.
 pub fn run_load_worker() -> ! {
     anvil_transport::init();
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(rt) => rt,
+    // Windows gives the main thread only 1 MiB of stack (Linux/macOS: 8 MiB);
+    // drive the worker from a thread with more.
+    let main = std::thread::Builder::new().name("anvil-load-worker".into()).stack_size(MAIN_STACK).spawn(|| {
+        let rt = match runtime() {
+            Ok(rt) => rt,
+            Err(err) => {
+                eprintln!("load worker: {err}");
+                std::process::exit(70);
+            }
+        };
+        let code = rt.block_on(anvil_load::worker::run_stdio());
+        std::process::exit(code)
+    });
+    match main {
+        Ok(t) => {
+            let _ = t.join();
+            std::process::exit(101)
+        }
         Err(err) => {
             eprintln!("load worker: {err}");
-            std::process::exit(70);
+            std::process::exit(70)
         }
-    };
-    let code = rt.block_on(anvil_load::worker::run_stdio());
-    std::process::exit(code)
+    }
+}
+
+/// Stack for a thread that drives a top-level future (see `run_load_worker`).
+const MAIN_STACK: usize = 16 << 20;
+/// Stack for async runtime workers (Tokio's default is 2 MiB), where commands,
+/// sessions and collection runs are polled.
+const WORKER_STACK: usize = 8 << 20;
+
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread().thread_stack_size(WORKER_STACK).enable_all().build()
 }
 
 use state::DesktopState;
@@ -33,6 +57,12 @@ use tauri::{Emitter, Manager};
 
 pub fn run() {
     anvil_transport::init();
+    // Give Tauri a runtime whose workers have larger stacks than the default.
+    // The runtime must outlive the app, so it is intentionally leaked.
+    match runtime() {
+        Ok(rt) => tauri::async_runtime::set(Box::leak(Box::new(rt)).handle().clone()),
+        Err(err) => eprintln!("could not build the async runtime, using Tauri's default: {err}"),
+    }
     let data_dir = std::env::var_os("ANVIL_DATA_DIR").map(std::path::PathBuf::from).unwrap_or_else(anvil_storage::default_data_dir);
     let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     #[cfg(feature = "e2e")]
