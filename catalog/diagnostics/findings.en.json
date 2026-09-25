@@ -1,0 +1,943 @@
+{
+  "version": "2026.09.25-1",
+  "locale": "en",
+  "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
+  "findings": {
+    "local.invalid_url": {
+      "title": "The request URL is not valid",
+      "explanation": "Anvil did not send anything: {message}",
+      "alternatives": [],
+      "does_not_prove": ["That any server or gateway returned an error — no network activity happened."],
+      "remediation": [{"text": "Correct the URL or protocol in {field}.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.unresolved_variable": {
+      "title": "A variable could not be resolved",
+      "explanation": "Anvil stopped before sending because {message} Unresolved variables are never replaced with an empty value.",
+      "alternatives": [],
+      "does_not_prove": ["That the credentials or the authorization server are at fault."],
+      "remediation": [{"text": "Define the variable in the selected environment, the workspace, the folder or the request, or fix its name.", "owner": "caller"}],
+      "confirm_with": ["Open the Effective request inspector to see which scopes were searched."]
+    },
+    "local.variable_cycle": {
+      "title": "Variables reference each other in a cycle",
+      "explanation": "Anvil stopped before sending: {message}",
+      "alternatives": [],
+      "does_not_prove": ["Anything about the destination — nothing was sent."],
+      "remediation": [{"text": "Break the cycle so every variable eventually resolves to a literal value.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.missing_attachment": {
+      "title": "A file used by the request is missing",
+      "explanation": "Anvil stopped before sending: {message}",
+      "alternatives": [],
+      "does_not_prove": ["That the destination rejected the payload — it was never sent."],
+      "remediation": [{"text": "Re-link the file or attach it to the workspace so it travels with exports.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.client_identity_invalid": {
+      "title": "The client certificate or private key could not be loaded",
+      "explanation": "Anvil could not use the selected client identity: {message}. No connection was attempted.",
+      "alternatives": [],
+      "does_not_prove": ["That the server rejected a certificate — the key was never loaded or presented."],
+      "remediation": [{"text": "Re-import the certificate and an unencrypted PKCS#8, PKCS#1 or SEC1 key (or a PKCS#12 bundle with its password).", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.client_identity_key_mismatch": {
+      "title": "The private key does not match the client certificate",
+      "explanation": "The selected private key belongs to a different public key than the certificate. Anvil refused to present this pair; nothing was sent.",
+      "alternatives": [],
+      "does_not_prove": ["That the peer rejected the request — the handshake never started."],
+      "remediation": [{"text": "Select the private key that was issued with this certificate.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.tls_profile_invalid": {
+      "title": "The TLS profile is not usable",
+      "explanation": "Anvil could not build the TLS configuration: {message}. No connection was attempted.",
+      "alternatives": [],
+      "does_not_prove": ["Anything about the destination's certificate."],
+      "remediation": [{"text": "Fix the CA bundle or trust settings in the TLS profile.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.proxy_config_invalid": {
+      "title": "The proxy configuration is invalid",
+      "explanation": "Anvil did not send the request: {message}",
+      "alternatives": [],
+      "does_not_prove": ["That the destination or a gateway backend is down."],
+      "remediation": [{"text": "Correct the proxy profile address, type or credential reference.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.lint_blocked": {
+      "title": "The body failed syntax validation",
+      "explanation": "{message} The request was not sent. Choose \"Send anyway\" to deliberately send an invalid body.",
+      "alternatives": [],
+      "does_not_prove": ["That the destination would reject the body."],
+      "remediation": [{"text": "Fix the syntax error, or send anyway for a deliberate malformed-payload test.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.unsupported_combination": {
+      "title": "These settings cannot be combined",
+      "explanation": "{message} Anvil refuses unsupported combinations before sending instead of silently changing them.",
+      "alternatives": [],
+      "does_not_prove": ["Anything about the destination."],
+      "remediation": [{"text": "Choose a supported protocol/transport combination for {field}.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.auth_preparation_failed": {
+      "title": "Credentials could not be prepared",
+      "explanation": "Anvil could not produce the configured credential before sending: {message}. The API request itself was not sent.",
+      "alternatives": [],
+      "does_not_prove": ["That the destination API rejected a request it never received."],
+      "remediation": [{"text": "Check the auth profile settings and any token endpoint it depends on.", "owner": "caller"}],
+      "confirm_with": ["The execution log shows which credential step failed."]
+    },
+    "local.vault_locked": {
+      "title": "Anvil is locked",
+      "explanation": "Secrets are unavailable while the vault is locked, so the request was not prepared or sent.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Unlock Anvil and send again.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.request_too_large": {
+      "title": "The request body exceeds the local limit",
+      "explanation": "{message}",
+      "alternatives": [],
+      "does_not_prove": ["That any server enforces the same limit."],
+      "remediation": [{"text": "Reduce the body or raise the local request-body limit in settings.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.validation_failed": {
+      "title": "The request could not be prepared",
+      "explanation": "Anvil stopped before sending: {message}",
+      "alternatives": [],
+      "does_not_prove": ["That any remote component returned an error."],
+      "remediation": [{"text": "Correct {field} and send again.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "local.response_limit_reached": {
+      "title": "Reading stopped at Anvil's response size limit",
+      "explanation": "Response headers arrived with status {status}. Anvil stopped reading after {bytes} body bytes because its local maximum response size was reached. This is a local limit, not a fault of the peer.",
+      "alternatives": [],
+      "does_not_prove": ["That the server sent a malformed or oversized response by its own rules."],
+      "remediation": [{"text": "Raise the maximum response size for this request if you need the full body.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.dns.no_such_host": {
+      "title": "The host name does not exist (client DNS)",
+      "explanation": "Anvil's resolver reported that {host} does not exist. This happened on your side of the connection, before contacting any server or gateway.",
+      "alternatives": ["The name is misspelled.", "The name exists only on a private/VPN DNS server this machine is not using.", "A DNS override or custom resolver is sending queries to the wrong server."],
+      "does_not_prove": ["That a gateway failed to resolve its backend — the gateway was never contacted."],
+      "remediation": [{"text": "Check the host name and which resolver this machine or workspace uses.", "owner": "caller"}],
+      "confirm_with": ["Resolve the same name with the same resolver from this machine."]
+    },
+    "client.dns.no_records": {
+      "title": "The host name has no usable addresses",
+      "explanation": "{host} resolved, but no address of an acceptable type was returned ({message}).",
+      "alternatives": ["The name has only IPv6 (or only IPv4) records and the IP preference excludes them."],
+      "does_not_prove": ["That the destination service is down."],
+      "remediation": [{"text": "Check the DNS records and the IP family preference.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.dns.timeout": {
+      "title": "Name resolution did not finish in time",
+      "explanation": "Resolving {host} did not complete within {deadline_ms} ms. The resolver did not answer; why is not known from this evidence.",
+      "alternatives": ["The DNS server is unreachable or overloaded.", "A VPN or network change left a stale resolver configuration.", "UDP DNS traffic is filtered."],
+      "does_not_prove": ["That the destination is down.", "That the name does not exist."],
+      "remediation": [{"text": "Check resolver reachability from this machine, or use a DNS override for testing.", "owner": "network_administrator"}],
+      "confirm_with": ["Query the same resolver directly and compare response times."]
+    },
+    "client.dns.server_failure": {
+      "title": "The DNS server could not answer",
+      "explanation": "The resolver reported a temporary or server-side failure for {host} ({message}).",
+      "alternatives": ["The authoritative server is failing (SERVFAIL).", "DNSSEC validation failed."],
+      "does_not_prove": ["That the name does not exist."],
+      "remediation": [{"text": "Retry later or check the resolver and the zone's authoritative servers.", "owner": "network_administrator"}],
+      "confirm_with": []
+    },
+    "client.dns.other": {
+      "title": "Name resolution failed",
+      "explanation": "Resolving {host} failed: {message}",
+      "alternatives": [],
+      "does_not_prove": ["Any specific DNS cause."],
+      "remediation": [{"text": "Check the host name and resolver configuration.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.connect.refused": {
+      "title": "The connection was refused",
+      "explanation": "The peer at {host} actively refused the TCP connection. Nothing was sent.",
+      "alternatives": ["Nothing is listening on that port.", "A firewall rejects (rather than drops) the connection.", "The service is restarting."],
+      "does_not_prove": ["That a process crashed.", "That a gateway's backend failed — this is the connection from Anvil itself."],
+      "remediation": [{"text": "Check the host and port, and whether the service/listener is running.", "owner": "caller"}],
+      "confirm_with": ["Check the listener on the target host (e.g. with ss/netstat)."]
+    },
+    "client.connect.timeout": {
+      "title": "The connection was not established in time",
+      "explanation": "TCP connect to {host} did not complete within {deadline_ms} ms. Nothing was sent. Why the peer did not answer is not known from this evidence.",
+      "alternatives": ["A firewall silently drops the traffic.", "The host is down or unreachable.", "Routing or VPN configuration sends traffic elsewhere."],
+      "does_not_prove": ["That a firewall rule is the cause.", "That the destination is permanently down."],
+      "remediation": [{"text": "Check network reachability to the host and port.", "owner": "network_administrator"}],
+      "confirm_with": ["Try connecting from another network or host."]
+    },
+    "client.connect.unreachable": {
+      "title": "The network or host is unreachable",
+      "explanation": "The operating system reported that {host} cannot be reached ({message}). Nothing was sent.",
+      "alternatives": ["No route to that network.", "The interface or VPN is down."],
+      "does_not_prove": ["That the service itself is down."],
+      "remediation": [{"text": "Check network connectivity and routing on this machine.", "owner": "network_administrator"}],
+      "confirm_with": []
+    },
+    "client.connect.reset": {
+      "title": "The connection was reset while connecting",
+      "explanation": "The TCP connection to {host} was reset during setup. Nothing was sent.",
+      "alternatives": ["A firewall or middlebox reset the connection.", "The listener's backlog is full."],
+      "does_not_prove": ["Any specific cause."],
+      "remediation": [{"text": "Check listener health and middleboxes on the path.", "owner": "network_administrator"}],
+      "confirm_with": []
+    },
+    "client.connect.address_unavailable": {
+      "title": "No local address or port was available",
+      "explanation": "This machine could not allocate a local address/port for the connection ({message}).",
+      "alternatives": ["Local ephemeral ports are exhausted (common during heavy load tests)."],
+      "does_not_prove": ["Anything about the destination."],
+      "remediation": [{"text": "Reduce local connection churn (enable keep-alive) or wait for TIME_WAIT sockets to drain.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.connect.other": {
+      "title": "The connection could not be established",
+      "explanation": "Connecting to {host} failed: {message}",
+      "alternatives": [],
+      "does_not_prove": ["Any specific cause."],
+      "remediation": [{"text": "Check the host, port and local network.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "proxy.connect_failed": {
+      "title": "The forward proxy could not be reached",
+      "explanation": "Anvil could not connect to {proxy}: {message}. The destination was never contacted.",
+      "alternatives": [],
+      "does_not_prove": ["That the destination API or a gateway backend is down."],
+      "remediation": [{"text": "Check the proxy address and that the proxy is running, or bypass it for this host with NO_PROXY.", "owner": "network_administrator"}],
+      "confirm_with": []
+    },
+    "proxy.auth_required": {
+      "title": "The proxy requires authentication",
+      "explanation": "{proxy} refused to open a tunnel without valid proxy credentials. The destination was never contacted.",
+      "alternatives": [],
+      "does_not_prove": ["That the destination API rejected your API credentials."],
+      "remediation": [{"text": "Set the proxy credentials in the proxy profile.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "proxy.tunnel_rejected": {
+      "title": "The proxy refused to connect to the destination",
+      "explanation": "{proxy} answered the tunnel request with {status}. Anvil never reached the destination, so no TLS handshake with it took place.",
+      "alternatives": ["The proxy's policy blocks this destination.", "The proxy could not reach the destination itself."],
+      "does_not_prove": ["That the destination rejected TLS or the request."],
+      "remediation": [{"text": "Check the proxy's allow-list and its connectivity to the destination.", "owner": "network_administrator"}],
+      "confirm_with": ["Proxy access logs for this tunnel."]
+    },
+    "proxy.protocol_error": {
+      "title": "The proxy did not complete the tunnel",
+      "explanation": "{proxy}: {message}",
+      "alternatives": [],
+      "does_not_prove": ["That the destination is at fault."],
+      "remediation": [{"text": "Confirm the proxy type (HTTP, HTTPS or SOCKS5) matches the proxy.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.verification_bypassed": {
+      "title": "Certificate verification is disabled for this request",
+      "explanation": "The connection to {host} was encrypted, but its certificate was not verified, so the peer's identity is not authenticated. Strict verification would have concluded that {would}.",
+      "alternatives": [],
+      "does_not_prove": ["That you are talking to the intended server."],
+      "remediation": [{"text": "Trust the correct private CA in this TLS profile and turn verification back on.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.untrusted_issuer": {
+      "title": "The server certificate is not trusted",
+      "explanation": "The certificate presented by {host} (issuer {issuer}) does not chain to a trusted authority in this TLS profile. This concerns the connection from Anvil to {host}, and it failed before any HTTP was exchanged.",
+      "alternatives": ["The server uses a private CA that this profile does not include.", "The server does not send its intermediate certificates.", "Something is intercepting the connection."],
+      "does_not_prove": ["That a gateway's connection to its backend failed.", "That the server is malicious."],
+      "remediation": [{"text": "After confirming the server's identity, add the correct private CA to this workspace's TLS profile (it is never installed system-wide).", "owner": "caller"}, {"text": "If a public certificate is expected, ask the server owner to serve the full chain.", "owner": "api_owner"}],
+      "confirm_with": ["Compare the presented chain's fingerprints with the expected certificate."]
+    },
+    "client.tls.expired": {
+      "title": "The server certificate has expired",
+      "explanation": "The certificate presented by {host} expired on {not_after} according to this machine's clock. The handshake stopped before any HTTP was exchanged.",
+      "alternatives": ["This machine's clock is wrong."],
+      "does_not_prove": ["That disabling verification is appropriate."],
+      "remediation": [{"text": "Renew the server certificate.", "owner": "api_owner"}, {"text": "Check this machine's date and time.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.not_yet_valid": {
+      "title": "The server certificate is not valid yet",
+      "explanation": "The certificate presented by {host} is valid only from {not_before} according to this machine's clock.",
+      "alternatives": ["This machine's clock is behind.", "The certificate was issued with a future start date."],
+      "does_not_prove": ["That the server's clock is wrong."],
+      "remediation": [{"text": "Check this machine's date and time, then the certificate's issuance.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.name_mismatch": {
+      "title": "The certificate does not match the host name",
+      "explanation": "The certificate from {host} is valid for {sans}, not for the name Anvil verified ({server_name}). This concerns the connection from Anvil to {host}.",
+      "alternatives": ["The URL uses a different name (or an IP address) than the certificate.", "SNI/host routing selected a different site's certificate."],
+      "does_not_prove": ["That your token or credentials are invalid."],
+      "remediation": [{"text": "Use the host name the certificate was issued for, or set the TLS server name in the profile.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.revoked": {
+      "title": "The server certificate is revoked",
+      "explanation": "The certificate presented by {host} is marked as revoked.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "The server owner must deploy a new certificate.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "client.tls.bad_certificate": {
+      "title": "The server certificate is not acceptable",
+      "explanation": "The certificate from {host} failed validation: {message}",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Ask the server owner to fix the certificate (encoding, key usage or signature).", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "client.tls.client_cert_required": {
+      "title": "A client certificate is required",
+      "explanation": "{host} asked for a client certificate, Anvil had none selected for this destination, and the peer ended the handshake with a certificate_required alert. No HTTP response was received.",
+      "alternatives": [],
+      "does_not_prove": ["That an HTTP 401 was received.", "That a gateway's certificate for its backend is wrong."],
+      "remediation": [{"text": "Select the intended client certificate in the TLS profile for this host.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.client_cert_rejected": {
+      "title": "The peer rejected the presented client certificate",
+      "explanation": "Anvil presented {client_subject} and {host} ended the connection with a {alert} alert. That alert is consistent with the peer not accepting this certificate.",
+      "alternatives": ["The peer does not trust the certificate's issuer.", "The certificate is expired or not yet valid on the peer's clock.", "The certificate is revoked or lacks the client-authentication usage.", "The peer's policy does not allow this identity."],
+      "does_not_prove": ["Which of these reasons applies.", "That the gateway's backend certificate is wrong."],
+      "remediation": [{"text": "Confirm with the server owner which CA and identity are accepted for this host.", "owner": "caller"}],
+      "confirm_with": ["The peer's TLS logs for this handshake."]
+    },
+    "client.tls.client_cert_probably_required": {
+      "title": "The handshake failed after a client certificate was requested",
+      "explanation": "{host} requested a client certificate, Anvil had none selected, and the peer then ended the handshake with a {alert} alert. This is consistent with a required client certificate, but the alert itself is generic.",
+      "alternatives": [],
+      "does_not_prove": ["That a missing certificate was definitely the reason."],
+      "remediation": [{"text": "Select the intended client certificate for this host and retry.", "owner": "caller"}],
+      "confirm_with": ["The peer's TLS logs."]
+    },
+    "client.tls.version_mismatch": {
+      "title": "The peer does not support the offered TLS version",
+      "explanation": "{host} ended the handshake with a protocol_version alert.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Check the minimum TLS version in the profile and the server's supported versions.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.peer_alert": {
+      "title": "The peer ended the TLS handshake",
+      "explanation": "{host} sent a {alert} alert. The alert shows the handshake was rejected but not why.",
+      "alternatives": ["Certificate policy on the server.", "Cipher suite or version incompatibility.", "SNI routing rejected the requested name."],
+      "does_not_prove": ["Any specific cause."],
+      "remediation": [{"text": "Check the server's TLS configuration and logs.", "owner": "api_owner"}],
+      "confirm_with": ["The server's TLS logs for this handshake."]
+    },
+    "client.tls.handshake_timeout": {
+      "title": "The TLS handshake did not finish in time",
+      "explanation": "TCP to {host} connected, but the TLS handshake did not complete within {deadline_ms} ms. The peer accepted the connection and then did not complete TLS.",
+      "alternatives": ["The service is overloaded.", "The port expects a different protocol and is waiting for input.", "A middlebox holds the connection."],
+      "does_not_prove": ["That a backend read timeout occurred.", "That the server's certificate is wrong."],
+      "remediation": [{"text": "Confirm the port serves TLS and check the peer's TLS setup and load.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "client.tls.connection_closed": {
+      "title": "The connection closed during the TLS handshake",
+      "explanation": "{host} closed or reset the connection during the TLS handshake without sending a TLS alert. The specific reason is unknown.",
+      "alternatives": ["The server requires a client certificate and drops connections without one.", "SNI routing does not recognize the requested name.", "The port does not speak TLS.", "A middlebox reset the connection."],
+      "does_not_prove": ["That a client certificate is missing.", "That the server certificate is invalid."],
+      "remediation": [{"text": "Check the peer's TLS logs and certificate policy.", "owner": "api_owner"}],
+      "confirm_with": ["The peer's logs for this connection."]
+    },
+    "client.tls.not_tls": {
+      "title": "The peer does not appear to speak TLS on this port",
+      "explanation": "Anvil started TLS with {host}, but the first bytes received were not a TLS record. The port is probably serving plaintext (for example plain HTTP).",
+      "alternatives": ["The URL should use http:// or a different port."],
+      "does_not_prove": ["That a certificate expired or is invalid."],
+      "remediation": [{"text": "Check the URL scheme and port.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.alpn_mismatch": {
+      "title": "The required application protocol was not negotiated",
+      "explanation": "{message}",
+      "alternatives": ["The listener does not support HTTP/2 (or the selected protocol)."],
+      "does_not_prove": ["That authentication failed."],
+      "remediation": [{"text": "Choose a protocol the listener supports, or use automatic negotiation.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.tls.other": {
+      "title": "The TLS handshake failed",
+      "explanation": "The TLS handshake with {host} failed: {message}",
+      "alternatives": [],
+      "does_not_prove": ["Any specific cause."],
+      "remediation": [{"text": "Check TLS settings on both sides.", "owner": "unknown"}],
+      "confirm_with": []
+    },
+    "client.quic.handshake_timeout": {
+      "title": "The QUIC handshake did not complete",
+      "explanation": "No QUIC handshake completed with {host} within {deadline_ms} ms. With forced HTTP/3, Anvil does not fall back to TCP.",
+      "alternatives": ["UDP is blocked on the path.", "The server does not serve HTTP/3 on this port."],
+      "does_not_prove": ["That the server is down — UDP failure is not TCP failure."],
+      "remediation": [{"text": "Check UDP reachability, or choose HTTP/3 with fallback.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "client.quic.idle_timeout": {
+      "title": "The QUIC connection went idle",
+      "explanation": "The QUIC connection to {host} timed out due to inactivity.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Check UDP path stability.", "owner": "network_administrator"}],
+      "confirm_with": []
+    },
+    "client.quic.connection_failed": {
+      "title": "The QUIC connection failed",
+      "explanation": "{message}",
+      "alternatives": [],
+      "does_not_prove": ["That the HTTP service is down."],
+      "remediation": [{"text": "Check the HTTP/3 listener and UDP path.", "owner": "unknown"}],
+      "confirm_with": []
+    },
+    "client.dtls.handshake_timeout": {
+      "title": "The DTLS handshake did not complete",
+      "explanation": "No DTLS handshake completed with {host} within {deadline_ms} ms. For UDP this does not show whether datagrams reached the peer.",
+      "alternatives": ["UDP is blocked.", "The peer does not speak DTLS on this port.", "The peer rejected the client identity silently."],
+      "does_not_prove": ["That the peer is down."],
+      "remediation": [{"text": "Check the DTLS listener, UDP reachability and the DTLS profile.", "owner": "unknown"}],
+      "confirm_with": []
+    },
+    "client.dtls.handshake_failed": {
+      "title": "The DTLS handshake failed",
+      "explanation": "{message}",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Check the DTLS certificates and trust on both sides.", "owner": "unknown"}],
+      "confirm_with": []
+    },
+    "client.h3.fallback_used": {
+      "title": "HTTP/3 was not used",
+      "explanation": "{from} was attempted first and failed; the response came over {to}. Each attempt is listed in the session inspector.",
+      "alternatives": [],
+      "does_not_prove": ["That the server lacks HTTP/3 — the UDP path may be blocked."],
+      "remediation": [{"text": "Force HTTP/3 to test it specifically.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "exchange.write_timeout": {
+      "title": "The request could not be sent in time",
+      "explanation": "Anvil could not hand the full request to {host} within {deadline_ms} ms; the peer stopped reading it.",
+      "alternatives": ["The server is overloaded.", "Flow control or a proxy is buffering the upload."],
+      "does_not_prove": ["That no part of the request reached the server."],
+      "remediation": [{"text": "Check server upload handling and limits.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "exchange.write_failed": {
+      "title": "Sending the request failed",
+      "explanation": "The connection to {host} failed while the request was being written ({message}).",
+      "alternatives": ["The peer closed early because the request exceeded a limit.", "The connection was reset by a middlebox."],
+      "does_not_prove": ["That the server did not see part of the request."],
+      "remediation": [{"text": "Check request size limits and the peer's logs.", "owner": "unknown"}],
+      "confirm_with": []
+    },
+    "exchange.headers_timeout": {
+      "title": "No response arrived in time",
+      "explanation": "The request was sent to {host}, but no response headers arrived within {deadline_ms} ms. The peer may still be working on it.",
+      "alternatives": ["The server (or something behind it) is slow.", "The server is waiting for more request data."],
+      "does_not_prove": ["That the server never received the request.", "That the request was not processed."],
+      "remediation": [{"text": "Increase the response-header deadline only if long processing is expected; otherwise investigate server latency.", "owner": "api_owner"}],
+      "confirm_with": ["Server-side logs for the request."]
+    },
+    "exchange.closed_before_response": {
+      "title": "The connection closed before a response",
+      "explanation": "{host} closed the connection after the request was sent and before sending a response. The request may or may not have been processed.",
+      "alternatives": ["The server crashed or restarted while handling the request.", "The server closes idle/keep-alive connections at the same moment.", "A middlebox dropped the connection."],
+      "does_not_prove": ["That the request was not processed."],
+      "remediation": [{"text": "Check whether the operation took effect before repeating it; check server logs.", "owner": "api_owner"}],
+      "confirm_with": ["Server logs for this request."]
+    },
+    "exchange.reset_before_response": {
+      "title": "The connection was reset before a response",
+      "explanation": "{host} reset the connection after the request was sent and before sending a response. The request may or may not have been processed.",
+      "alternatives": ["The server aborted the request.", "A middlebox reset the connection.", "The server exceeded a resource limit."],
+      "does_not_prove": ["That the request was not processed."],
+      "remediation": [{"text": "Check whether the operation took effect before repeating it; check server and proxy logs.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "exchange.protocol_error": {
+      "title": "The response could not be understood",
+      "explanation": "{host} replied with data that is not a valid response for the negotiated protocol: {message}",
+      "alternatives": ["The port serves a different protocol.", "Cleartext HTTP/2 (h2c) was forced against an HTTP/1-only server."],
+      "does_not_prove": ["That a TLS handshake occurred (for cleartext connections)."],
+      "remediation": [{"text": "Check the protocol setting and the port.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "exchange.headers_too_large": {
+      "title": "The response headers are too large",
+      "explanation": "The response headers from {host} exceeded Anvil's header limit.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Raise the response header limit if this is expected.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "exchange.h2_refused_stream": {
+      "title": "The server refused this HTTP/2 stream",
+      "explanation": "{host} refused the stream with REFUSED_STREAM. HTTP/2 guarantees that a refused stream was not processed, so repeating it is safe.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Retry; if it repeats, the server is limiting concurrent streams.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "exchange.h2_stream_reset": {
+      "title": "The HTTP/2 stream was reset",
+      "explanation": "{host} reset this stream with {h2_code} before a response. Other streams on the same connection are not necessarily affected.",
+      "alternatives": [],
+      "does_not_prove": ["That the whole connection or server failed.", "That the request was not processed."],
+      "remediation": [{"text": "Check server logs for this stream before repeating a non-idempotent request.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "exchange.h2_goaway": {
+      "title": "The server is closing the HTTP/2 connection",
+      "explanation": "{host} sent GOAWAY ({h2_code}) before this request completed.",
+      "alternatives": ["Graceful shutdown or restart.", "The server hit a connection-level limit."],
+      "does_not_prove": ["That TLS failed.", "Whether this request was processed."],
+      "remediation": [{"text": "Send new requests on a new connection; verify operation state before repeating.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "exchange.total_timeout": {
+      "title": "The request exceeded its total time limit",
+      "explanation": "The whole attempt exceeded the total deadline of {deadline_ms} ms before a response arrived.",
+      "alternatives": [],
+      "does_not_prove": ["That the server did not process the request."],
+      "remediation": [{"text": "Review the total timeout for this request.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "request.canceled": {
+      "title": "The request was canceled",
+      "explanation": "You canceled the request before a response arrived.",
+      "alternatives": [],
+      "does_not_prove": ["That the server did not receive or process the request."],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "request.canceled_during_body": {
+      "title": "Reading the response was canceled",
+      "explanation": "Response headers with status {status} had arrived; reading the body was canceled after {bytes} bytes.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "request.processing_uncertain": {
+      "title": "The request may have been processed",
+      "explanation": "Request bytes left Anvil before the failure, so the server may have acted on this {method}. {replay_advice}",
+      "alternatives": [],
+      "does_not_prove": ["That the operation succeeded.", "That the operation did not happen."],
+      "remediation": [{"text": "Verify the operation's state (for example by reading the resource) before sending again.", "owner": "caller"}],
+      "confirm_with": ["Server-side records keyed by an idempotency key or request ID."]
+    },
+    "request.earlier_attempt_may_have_processed": {
+      "title": "An earlier attempt may already have been processed",
+      "explanation": "This {method} made {attempts} attempts. The last one was rejected before being sent, but an earlier attempt may have reached the server. The request as a whole may have taken effect.",
+      "alternatives": [],
+      "does_not_prove": ["That the final rejection means nothing happened."],
+      "remediation": [{"text": "Check the operation's state before repeating it.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "response.body_incomplete": {
+      "title": "The response body did not finish",
+      "explanation": "Response headers arrived with status {status}, but the body ended after {bytes} of {declared} bytes. This is not a complete response, even if the status indicates success.",
+      "alternatives": ["The server or an intermediary aborted the response.", "The connection was interrupted."],
+      "does_not_prove": ["That the request failed on the server — it may have been processed.", "That the server sent a different status."],
+      "remediation": [{"text": "Do not treat this as a successful response; check whether the operation took effect before repeating it.", "owner": "caller"}, {"text": "Check the server's logs for aborted responses.", "owner": "api_owner"}],
+      "confirm_with": ["Server or gateway logs for this request."]
+    },
+    "response.body_idle_timeout": {
+      "title": "The response body stalled",
+      "explanation": "Response headers arrived with status {status}; after {bytes} body bytes, no more data arrived within {deadline_ms} ms.",
+      "alternatives": ["The server is slow to produce the body.", "A long-lived stream was expected (use streaming/SSE mode)."],
+      "does_not_prove": ["That the response succeeded.", "That the backend's read timeout fired."],
+      "remediation": [{"text": "Check server body production; raise the body idle deadline only if long gaps are expected.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "response.body_stream_reset": {
+      "title": "The response stream was reset",
+      "explanation": "Response headers arrived with status {status}; the HTTP/2 stream was then reset ({h2_code}) after {bytes} body bytes. The response is incomplete.",
+      "alternatives": [],
+      "does_not_prove": ["That the status reflects the final result."],
+      "remediation": [{"text": "Treat the response as failed; check server logs.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "response.body_total_timeout": {
+      "title": "The total time limit ended the response",
+      "explanation": "Response headers with status {status} arrived, but the body was still incomplete when the total deadline of {deadline_ms} ms elapsed.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Raise the total timeout for large or slow responses.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.unauthorized": {
+      "title": "Authentication was refused (401)",
+      "explanation": "The response status is 401: the request was missing credentials or they were not accepted.",
+      "alternatives": ["A gateway authentication plugin rejected the credential.", "The application rejected the credential.", "The credential is expired or for a different audience."],
+      "does_not_prove": ["Which component returned the 401.", "That a TLS problem occurred."],
+      "remediation": [{"text": "Check the credential, its location (header/query) and its expiry in the Effective request.", "owner": "caller"}],
+      "confirm_with": ["The WWW-Authenticate header and a correlated gateway diagnostic."]
+    },
+    "http.forbidden": {
+      "title": "The request was refused (403)",
+      "explanation": "The service refused this request with 403. A 403 alone does not tell whether gateway authorization, a WAF/policy block or the application refused it.",
+      "alternatives": ["Gateway access control (ACL, IP/geo restriction, OPA).", "A WAF or bot-detection policy.", "The application's own authorization."],
+      "does_not_prove": ["That a WAF blocked the request.", "That the credentials are wrong."],
+      "remediation": [{"text": "Check the credential's scope/groups and the response details.", "owner": "caller"}, {"text": "Ask the gateway operator to correlate the request with gateway logs.", "owner": "gateway_operator"}],
+      "confirm_with": ["A correlated gateway diagnostic or log entry."]
+    },
+    "http.not_found": {
+      "title": "Not found (404)",
+      "explanation": "The response status is 404.",
+      "alternatives": ["No gateway route matches this host/path.", "The application has no such resource."],
+      "does_not_prove": ["That a gateway route is missing — applications also return 404."],
+      "remediation": [{"text": "Check the host, path and any path prefix the gateway strips or adds.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.method_not_allowed": {
+      "title": "Method not allowed (405)",
+      "explanation": "The response status is 405. {allow}",
+      "alternatives": ["The gateway route restricts methods.", "The application does not implement this method."],
+      "does_not_prove": ["That authentication failed.", "Which component rejected the method."],
+      "remediation": [{"text": "Use a documented method for this endpoint.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.proxy_auth_required": {
+      "title": "Proxy authentication required (407)",
+      "explanation": "The response status is 407.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [{"text": "Configure proxy credentials.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.request_timeout": {
+      "title": "Request timeout (408)",
+      "explanation": "The response status is 408: the server gave up waiting for the complete request.",
+      "alternatives": ["The request body was sent too slowly.", "A gateway's request-body read timeout fired."],
+      "does_not_prove": [],
+      "remediation": [{"text": "Check upload speed and body size.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.payload_too_large": {
+      "title": "The request body is too large (413)",
+      "explanation": "The response status is 413: a size limit on the path refused the request body.",
+      "alternatives": ["A gateway request-size limit.", "The application's own limit."],
+      "does_not_prove": ["That the application received the full body."],
+      "remediation": [{"text": "Reduce or split the payload, or ask the owner about the intended limit.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.unsupported_media_type": {
+      "title": "Unsupported media type (415)",
+      "explanation": "The response status is 415: the Content-Type of the request is not accepted.",
+      "alternatives": ["A gateway contract validator.", "The application."],
+      "does_not_prove": [],
+      "remediation": [{"text": "Check the Content-Type header and body encoding.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.too_many_requests": {
+      "title": "Rate limited (429)",
+      "explanation": "The response status is 429: a rate or concurrency limit refused the request. {retry_after}",
+      "alternatives": ["A gateway rate-limiting plugin.", "The application's own rate limit.", "A per-IP concurrency limit."],
+      "does_not_prove": ["Which component applied the limit."],
+      "remediation": [{"text": "Slow down, honor Retry-After, or ask for a higher quota.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.client_error": {
+      "title": "Client error ({status})",
+      "explanation": "The response status is {status} {reason}: the request was not accepted as sent.",
+      "alternatives": [],
+      "does_not_prove": ["Which component returned the status."],
+      "remediation": [{"text": "Check the request against the API's documentation.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.bad_gateway": {
+      "title": "Bad gateway (502)",
+      "explanation": "The response status is 502: a proxy or gateway on the path could not get a valid response from the next hop — or an application returned 502 itself.",
+      "alternatives": ["A gateway could not connect to its backend.", "The backend closed or reset its connection.", "The application returned 502."],
+      "does_not_prove": ["Which hop failed.", "That your connection to the gateway had a problem — it completed."],
+      "remediation": [{"text": "Ask the gateway operator to check the backend's reachability for this route.", "owner": "gateway_operator"}],
+      "confirm_with": ["Gateway logs or diagnostic detail for this request."]
+    },
+    "http.service_unavailable": {
+      "title": "Service unavailable (503)",
+      "explanation": "The response status is 503: a component on the path is temporarily unable to handle the request. {retry_after}",
+      "alternatives": ["Gateway admission control (overload, circuit breaker, stale configuration, capacity limits).", "The application is overloaded or in maintenance."],
+      "does_not_prove": ["That CPU is exhausted.", "Which component refused the request."],
+      "remediation": [{"text": "Retry later with backoff; ask the operator which limit applied.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "http.gateway_timeout": {
+      "title": "Gateway timeout (504)",
+      "explanation": "The response status is 504: a proxy or gateway did not get a response from the next hop in time — or an application returned 504 itself.",
+      "alternatives": ["The backend was slow to respond.", "The backend was slow to read the upload.", "The application returned 504."],
+      "does_not_prove": ["Which stage timed out.", "That the backend never received the request."],
+      "remediation": [{"text": "Ask the operator to compare the gateway's timeouts with backend latency.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "http.server_error": {
+      "title": "Server error ({status})",
+      "explanation": "The response status is {status} {reason}.",
+      "alternatives": ["The application failed.", "A gateway or proxy generated the error."],
+      "does_not_prove": ["Which component produced the status."],
+      "remediation": [{"text": "Check the API's error details and server logs.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "ferrum.marker.unverified": {
+      "title": "Ferrum-like header from an unverified destination",
+      "explanation": "The response carries Ferrum diagnostic header values ({values}), but this destination is not configured as a trusted Ferrum gateway. Any server can send these headers, so Anvil does not use them to attribute the failure.",
+      "alternatives": [],
+      "does_not_prove": ["That the response came from Ferrum Edge."],
+      "remediation": [{"text": "If this is your Ferrum gateway, add a trusted Ferrum integration profile for this host after verifying its identity.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "ferrum.degraded_routing": {
+      "title": "Gateway used degraded upstream selection",
+      "explanation": "The request completed with status {status}, and the gateway reported degraded upstream selection (for example, a fallback target). This is a warning about routing health, not a failed request.",
+      "alternatives": [],
+      "does_not_prove": ["That this request failed.", "That the gateway (not a backend) set the header — backends can pass this header through on Ferrum Edge 0.9.5."],
+      "remediation": [{"text": "Check upstream health and target selection for this route.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.marker.conflicting": {
+      "title": "Conflicting gateway diagnostic values",
+      "explanation": "The response carries several different X-Gateway-Error values ({values}). Anvil does not pick one; the evidence conflicts.",
+      "alternatives": ["An intermediary added or duplicated the header.", "A backend returned its own copy."],
+      "does_not_prove": ["Any one of the listed causes."],
+      "remediation": [{"text": "Inspect the raw headers and the path's intermediaries.", "owner": "gateway_operator"}],
+      "confirm_with": ["Gateway logs for this request."]
+    },
+    "ferrum.marker.unknown_token": {
+      "title": "Unrecognized gateway diagnostic value",
+      "explanation": "The trusted gateway sent X-Gateway-Error: {token}, which is not in the {compat} compatibility catalog. Anvil shows it as-is without guessing what it means.",
+      "alternatives": [],
+      "does_not_prove": ["Any interpretation based on how the value is spelled."],
+      "remediation": [{"text": "Update Anvil's compatibility catalog for this gateway version.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "ferrum.token.connection_failure": {
+      "title": "Gateway could not prepare a connection to the backend",
+      "explanation": "Ferrum Edge reports ({token}, status {status}) that it could not set up a connection to the configured backend. This coarse value combines DNS, TCP connect, TLS, connection-pool and related setup failures; it does not say which step failed. Your own connection to the gateway completed.",
+      "alternatives": ["The gateway could not resolve the backend host.", "The backend refused or did not accept the connection.", "The gateway's TLS connection to the backend failed.", "A gateway connection-pool or connection-limit problem."],
+      "does_not_prove": ["That TLS failed.", "That DNS failed.", "That your client certificate is wrong — the gateway's connection to its backend uses the gateway's identity."],
+      "remediation": [{"text": "Check the backend host and port, the gateway's DNS/network access to it, and the gateway's backend TLS settings.", "owner": "gateway_operator"}],
+      "confirm_with": ["Gateway logs or authorized diagnostic detail for this request."]
+    },
+    "ferrum.token.backend_timeout": {
+      "title": "Gateway reported a backend timeout",
+      "explanation": "Ferrum Edge reports ({token}, status {status}) a timeout while exchanging with the backend. The value does not say which stage (upload, waiting for headers, body) timed out. On 0.9.5 a backend's own 504 carries the same value.",
+      "alternatives": ["The backend was slow to produce response headers.", "The backend stopped reading the upload.", "The backend's body stalled.", "The backend itself returned 504."],
+      "does_not_prove": ["Which stage timed out.", "That the backend never received the request."],
+      "remediation": [{"text": "Compare the route's timeouts with backend latency; check backend logs.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.token.backend_error": {
+      "title": "Gateway classified this as a backend error",
+      "explanation": "Ferrum Edge marked this response with {token} (status {status}). On 0.9.5 this value is attached both to failures the gateway observed talking to the backend and to 5xx responses the backend returned itself.",
+      "alternatives": ["The application returned this 5xx itself.", "The backend reset or closed the connection.", "A gateway-local limit (such as retained-buffer capacity) was reached."],
+      "does_not_prove": ["That the application itself produced this error.", "That the backend is unhealthy."],
+      "remediation": [{"text": "Check the response body and the backend's logs for this request.", "owner": "api_owner"}, {"text": "Correlate with gateway logs to separate gateway-observed failures from application responses.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.token.circuit_breaker_open": {
+      "title": "Gateway circuit breaker rejected this attempt",
+      "explanation": "Ferrum Edge rejected this attempt ({token}, status {status}) because the circuit breaker for the upstream is open after recent failures.",
+      "alternatives": [],
+      "does_not_prove": ["That no earlier attempt of this request reached a backend."],
+      "remediation": [{"text": "Check upstream health; the breaker closes after its recovery period.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.token.overload": {
+      "title": "Gateway refused the request (overload category)",
+      "explanation": "Ferrum Edge refused this request with {token} (status {status}). This value covers gateway overload and draining refusals, and also the response-transformer output size ceiling.",
+      "alternatives": ["The gateway is at its admission limit.", "The gateway is draining.", "A response transformation exceeded the output size ceiling."],
+      "does_not_prove": ["That CPU is exhausted.", "That the application is overloaded."],
+      "remediation": [{"text": "Reduce offered load or retry later; the operator can check gateway resources, drain state and transform limits.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.token.config_stale": {
+      "title": "Gateway configuration is stale",
+      "explanation": "Ferrum Edge refused this request ({token}, status {status}) because its data plane has not received fresh configuration within the allowed window.",
+      "alternatives": [],
+      "does_not_prove": ["That anything in your request is wrong — changing the payload will not help."],
+      "remediation": [{"text": "Restore control-plane connectivity or configuration freshness.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.token.concurrency_limit": {
+      "title": "Gateway adaptive concurrency limit",
+      "explanation": "Ferrum Edge refused this request ({token}, status {status}) at its adaptive concurrency admission control for the upstream.",
+      "alternatives": [],
+      "does_not_prove": ["That the backend crashed.", "That an API rate limit was hit."],
+      "remediation": [{"text": "Reduce concurrency; the operator can review latency signals and admission settings.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.marker.absent": {
+      "title": "No gateway diagnostic marker on this error",
+      "explanation": "This {status} came through the trusted gateway profile without an X-Gateway-Error value. The absence of a marker does not identify where the error originated.",
+      "alternatives": ["The application returned the error and the gateway did not classify it.", "An intermediary removed the header.", "The error came from a component outside the gateway."],
+      "does_not_prove": ["That the upstream application produced the error."],
+      "remediation": [{"text": "Correlate with gateway logs.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.outcome": {
+      "title": "Matches a known gateway outcome",
+      "explanation": "",
+      "alternatives": ["A backend returned a response with identical status and body."],
+      "does_not_prove": [],
+      "remediation": [],
+      "confirm_with": ["Gateway logs or authorized diagnostic detail for this request."]
+    },
+    "ferrum.outcome_ambiguous": {
+      "title": "Several gateway causes produce this exact response",
+      "explanation": "This response matches {count} different Ferrum Edge outcomes that look identical from the client. The common, safe conclusion: {common}",
+      "alternatives": [],
+      "does_not_prove": ["Which of the listed causes applied."],
+      "remediation": [{"text": "Ask the gateway operator for the correlated log entry or diagnostic detail to tell these apart.", "owner": "gateway_operator"}],
+      "confirm_with": []
+    },
+    "ferrum.backend_passthrough": {
+      "title": "The backend's own response passed through the gateway",
+      "explanation": "The body is not a gateway-generated error body. On Ferrum Edge 0.9.5, a backend's own {status} passes through with the gateway marker {token}. This is consistent with the application producing the status.",
+      "alternatives": ["An intermediary behind the gateway produced it."],
+      "does_not_prove": ["That the gateway produced the error."],
+      "remediation": [{"text": "Check the application's logs and the error body.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "app.soap_fault": {
+      "title": "The SOAP service returned a fault",
+      "explanation": "The transport succeeded (status {status}), but the SOAP body is a Fault: {fault_code} — {fault_reason}.",
+      "alternatives": [],
+      "does_not_prove": ["That the HTTP status indicates success at the application level."],
+      "remediation": [{"text": "Read the fault code and fix the request or ask the service owner.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "app.graphql_errors": {
+      "title": "The GraphQL response contains errors",
+      "explanation": "The transport succeeded (status {status}), but the response lists {count} GraphQL error(s), starting with: {first}. {partial}",
+      "alternatives": [],
+      "does_not_prove": ["That HTTP 200 means the operation fully succeeded."],
+      "remediation": [{"text": "Inspect each error's path; partial data may still be usable.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "app.grpc_status": {
+      "title": "The RPC failed: {name}",
+      "explanation": "The call ended with grpc-status {code} ({name}) {message}. HTTP status was {http_status}; for gRPC, HTTP 200 does not mean the RPC succeeded. {trailers_only}",
+      "alternatives": [],
+      "does_not_prove": ["Which component (gateway or service) produced the status, when it came as a trailers-only response."],
+      "remediation": [{"text": "Handle the status per the service's contract; check grpc-status-details if present.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "app.grpc_status_missing": {
+      "title": "The RPC ended without a status",
+      "explanation": "HTTP status {http_status} arrived, but the stream ended without a grpc-status. The RPC result is unknown — it is not a success.",
+      "alternatives": ["The server or an intermediary aborted the stream.", "A deadline or connection problem cut the stream."],
+      "does_not_prove": ["That the RPC succeeded or failed on the server."],
+      "remediation": [{"text": "Check server logs and stream completion before repeating non-idempotent calls.", "owner": "api_owner"}],
+      "confirm_with": []
+    },
+    "ws.handshake_rejected": {
+      "title": "The WebSocket handshake was rejected",
+      "explanation": "The server answered the upgrade with HTTP {status} instead of switching protocols.",
+      "alternatives": ["Authentication or origin policy refused the upgrade.", "The endpoint does not support WebSocket over this bootstrap."],
+      "does_not_prove": [],
+      "remediation": [{"text": "Check the response body, credentials, Origin and the selected bootstrap (HTTP/1.1 Upgrade vs extended CONNECT).", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "ws.closed_normally": {
+      "title": "The WebSocket session ended normally",
+      "explanation": "The peer closed the session with code {code} {reason}. This is a normal end, not a network error.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "ws.closed_abnormally": {
+      "title": "The WebSocket connection ended abnormally",
+      "explanation": "The connection ended without a WebSocket Close frame (reported as 1006). Code 1006 is never sent by a peer; it means the connection dropped.",
+      "alternatives": ["The server process or an intermediary dropped the connection.", "A network interruption."],
+      "does_not_prove": ["That the peer chose to close the session."],
+      "remediation": [{"text": "Check server and proxy logs around this time.", "owner": "unknown"}],
+      "confirm_with": []
+    },
+    "ws.closed_policy": {
+      "title": "The WebSocket was closed for policy reasons (1008)",
+      "explanation": "The peer closed the session with 1008 {reason}.",
+      "alternatives": ["A gateway security policy (e.g. WAF message inspection).", "The application's own policy."],
+      "does_not_prove": ["Which component applied the policy."],
+      "remediation": [{"text": "Review the message content that triggered the close.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "ws.closed_too_big": {
+      "title": "A WebSocket message was too large (1009)",
+      "explanation": "The session was closed with 1009 {reason}: a message exceeded a size limit.",
+      "alternatives": ["The peer's limit.", "Anvil's local message limit."],
+      "does_not_prove": ["That the message was corrupt."],
+      "remediation": [{"text": "Send smaller messages or adjust the limit intentionally.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "ws.closed_other": {
+      "title": "The WebSocket was closed by the peer ({code})",
+      "explanation": "The peer closed the session with code {code} {reason}.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "sse.canceled": {
+      "title": "The event stream was stopped",
+      "explanation": "The event stream was stopped after {events} events, as requested. This is an expected end, not a server timeout.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "sse.idle_timeout": {
+      "title": "The event stream went quiet",
+      "explanation": "No event arrived within the idle limit after {events} events.",
+      "alternatives": ["The server has no new events.", "The connection stalled."],
+      "does_not_prove": ["That the server failed."],
+      "remediation": [{"text": "Raise the idle limit if long gaps between events are normal.", "owner": "caller"}],
+      "confirm_with": []
+    },
+    "udp.no_response": {
+      "title": "No UDP response was observed",
+      "explanation": "{sent} datagram(s) were sent and none were received within {window_ms} ms. UDP gives no delivery confirmation: silence shows only that no response was observed.",
+      "alternatives": ["The peer received the data but does not reply.", "The datagrams were lost or filtered.", "Nothing is listening on the port."],
+      "does_not_prove": ["That the datagrams were delivered.", "That the peer or a gateway is down."],
+      "remediation": [{"text": "Check what the protocol expects, and whether UDP is allowed on the path.", "owner": "caller"}],
+      "confirm_with": ["A packet capture or the peer's logs."]
+    },
+    "udp.partial_responses": {
+      "title": "Fewer UDP responses than datagrams sent",
+      "explanation": "{sent} datagram(s) sent, {received} received within {window_ms} ms. Sent is not delivered: UDP does not acknowledge datagrams.",
+      "alternatives": ["Packet loss.", "The peer answers only some messages."],
+      "does_not_prove": ["Which datagrams were lost."],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "tcp.reply_after_half_close": {
+      "title": "The peer replied after Anvil finished sending",
+      "explanation": "Anvil half-closed its side after sending; the peer still returned {bytes} bytes. The reply was preserved.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "tcp.closed_abnormally": {
+      "title": "The TCP session ended abnormally",
+      "explanation": "The connection was reset or ended with an error.",
+      "alternatives": [],
+      "does_not_prove": [],
+      "remediation": [],
+      "confirm_with": []
+    }
+  }
+}

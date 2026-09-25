@@ -75,18 +75,18 @@ pub fn classify_connect_io(e: &io::Error) -> FailureKind {
 }
 
 fn alert_name(a: &rustls::AlertDescription) -> String {
-    // AlertDescription's Debug is the RFC name in CamelCase; convert to snake_case.
+    // RFC 8446 alert names in snake_case (Debug is CamelCase; acronyms stay together).
     let dbg = format!("{a:?}");
+    if dbg == "UnknownPSKIdentity" {
+        return "unknown_psk_identity".into();
+    }
+    let chars: Vec<char> = dbg.chars().collect();
     let mut out = String::new();
-    for (i, ch) in dbg.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i > 0 {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch);
+    for (i, ch) in chars.iter().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 && chars[i - 1].is_ascii_lowercase() {
+            out.push('_');
         }
+        out.push(ch.to_ascii_lowercase());
     }
     out
 }

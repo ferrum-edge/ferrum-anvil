@@ -82,7 +82,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 keyring = "4.2.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "rust_crypto"] }
-p256 = { version = "0.14.0", features = ["ecdsa", "jwk", "pem"] }
+p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
 serde_norway = "0.9.42"
 roxmltree = "0.21.1"
 quick-xml = "0.42.0"
