@@ -39,8 +39,23 @@ fn owner_from(s: &str) -> Owner {
 
 fn token_scope(t: &str) -> SourceScope {
     match t {
-        "connection_failure" | "backend_timeout" | "backend_error" => SourceScope::GatewayToUpstream,
+        "connection_failure" | "backend_timeout" => SourceScope::GatewayToUpstream,
+        // On 0.9.5 `backend_error` is stamped on the application's own 5xx
+        // (upstream application), on failed upstream exchanges (gateway to
+        // upstream) and on gateway-local refusals such as retained-buffer
+        // capacity or response-phase policy rejections (live: UP-015,
+        // GW-020 content guard). The token alone does not identify the leg.
+        "backend_error" => SourceScope::Unknown,
         _ => SourceScope::GatewayAdmission,
+    }
+}
+
+fn token_owner(t: &str) -> Owner {
+    match t {
+        // Application 5xx belongs to the API owner, gateway-local refusals to
+        // the operator; the token cannot tell them apart.
+        "backend_error" => Owner::Unknown,
+        _ => Owner::GatewayOperator,
     }
 }
 
@@ -152,10 +167,41 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         return;
     }
 
+    // Status/marker consistency. The gateway core writes the seven tokens only
+    // on 5xx HTTP responses (gRPC carries them on HTTP 200 trailers-only
+    // responses). A known token on a 1xx-4xx HTTP response therefore did not
+    // come from the gateway's error classification: a response-header plugin
+    // on a rejection path, or an intermediary, added it (live: GW-019
+    // reject-path decoration). Report the conflict instead of the token's
+    // meaning, and do not match catalog outcomes against it.
+    let grpc_shaped = matches!(ctx.input.protocol, anvil_domain::request::Protocol::Grpc)
+        || r.body.content_type.as_deref().is_some_and(|ct| ct.trim().to_ascii_lowercase().starts_with("application/grpc"));
+    if let Some(t) = &token
+        && r.status < 500
+        && !grpc_shaped
+    {
+        out.push(
+            Draft::new(
+                "ferrum.marker.inconsistent",
+                "ferrum.marker",
+                Confidence::ConflictingEvidence,
+                SourceScope::Unknown,
+                Owner::GatewayOperator,
+                Severity::Warning,
+            )
+            .ev_at(src, "header.x-gateway-error", t.clone(), idx)
+            .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
+            .var("token", t.clone())
+            .var("status", r.status.to_string())
+            .var("compat", cat.compatibility_id.clone()),
+        );
+        return;
+    }
+
     if let Some(t) = &token {
         let code = format!("ferrum.token.{t}");
         let conf = Confidence::Confirmed.min(ceiling);
-        let mut d = Draft::new(code, "ferrum.marker", conf, token_scope(t), Owner::GatewayOperator, Severity::Error)
+        let mut d = Draft::new(code, "ferrum.marker", conf, token_scope(t), token_owner(t), Severity::Error)
             .ev_at(src, "header.x-gateway-error", t.clone(), idx)
             .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
             .var("status", r.status.to_string())
@@ -282,4 +328,138 @@ fn catalog_title(id: &str) -> String {
         _ => "Ferrum Edge outcome",
     };
     label.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::facts::{DiagnosticInput, FerrumTrust};
+    use anvil_domain::diagnostics::{Confidence, DiagnosticFinding};
+    use anvil_domain::execution::{BodyCapture, BodyCompleteness, HeaderEntry, ResponseRecord};
+    use anvil_domain::outcome::ProtocolStatus;
+    use anvil_domain::request::Protocol;
+
+    fn response(status: u16, content_type: &str, headers: &[(&str, &str)]) -> ResponseRecord {
+        ResponseRecord {
+            status,
+            reason: None,
+            http_version: "HTTP/1.1".into(),
+            headers: headers.iter().map(|(n, v)| HeaderEntry { name: n.to_string(), value: v.to_string() }).collect(),
+            trailers: vec![],
+            trailers_received: false,
+            body: BodyCapture {
+                completeness: BodyCompleteness::Complete,
+                wire_bytes: 0,
+                declared_length: None,
+                captured_bytes: 0,
+                display_truncated: false,
+                content_type: Some(content_type.into()),
+                content_encoding: None,
+                decoded_bytes: None,
+                blob_sha256: None,
+            },
+        }
+    }
+
+    fn diagnose(protocol: Protocol, r: &ResponseRecord, body: &[u8]) -> Vec<DiagnosticFinding> {
+        let trust =
+            FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: "ferrum-edge-0.9.5".into(), channel_authenticated: false };
+        let ps = ProtocolStatus::Http { status: r.status, reason: None };
+        crate::diagnose(&DiagnosticInput {
+            protocol,
+            method: "GET",
+            preparation_failure: None,
+            attempts: &[],
+            response: Some(r),
+            body,
+            stream: None,
+            protocol_status: &ps,
+            trust: &trust,
+            tls_verification_enabled: true,
+            credentials_stripped_on_redirect: false,
+            protocol_fallback_from: None,
+        })
+        .findings
+    }
+
+    fn find<'a>(f: &'a [DiagnosticFinding], code: &str) -> Option<&'a DiagnosticFinding> {
+        f.iter().find(|x| x.code == code)
+    }
+
+    /// Live GW-019 (policy lab): a response_transformer on an ip_restriction
+    /// rejection added `X-Gateway-Error: overload` to the 403. The gateway core
+    /// never writes a token on a 4xx, so this must not become an overload claim.
+    #[test]
+    fn known_token_on_a_4xx_is_inconsistent_not_attributed() {
+        let body = br#"{"error":"IP address denied"}"#;
+        let r = response(403, "application/json", &[("x-gateway-error", "overload")]);
+        let f = diagnose(Protocol::Http, &r, body);
+        assert!(!f.iter().any(|x| x.code.starts_with("ferrum.token.")), "{:?}", f.iter().map(|x| &x.code).collect::<Vec<_>>());
+        assert!(find(&f, "ferrum.outcome").is_none(), "no catalog attribution against a conflicting marker");
+        let inc = find(&f, "ferrum.marker.inconsistent").expect("inconsistent marker finding");
+        assert_eq!(inc.confidence, Confidence::ConflictingEvidence);
+        assert!(inc.explanation.contains("overload") && inc.explanation.contains("403"), "{}", inc.explanation);
+        assert!(!inc.remediation.iter().any(|r| r.text.to_lowercase().contains("disable")), "no bypass advice");
+        assert!(find(&f, "http.forbidden").is_some(), "the generic 403 meaning is still reported");
+    }
+
+    #[test]
+    fn known_token_on_a_5xx_keeps_its_capped_meaning() {
+        let body = br#"{"error":"Service overloaded"}"#;
+        let r = response(503, "application/json", &[("x-gateway-error", "overload")]);
+        let f = diagnose(Protocol::Http, &r, body);
+        let t = find(&f, "ferrum.token.overload").expect("token finding");
+        assert_eq!(t.confidence, Confidence::Likely, "plain-HTTP trust caps at likely");
+        assert!(find(&f, "ferrum.marker.inconsistent").is_none());
+    }
+
+    #[test]
+    fn grpc_trailers_only_token_on_http_200_is_not_inconsistent() {
+        let r = response(200, "application/grpc", &[("x-gateway-error", "circuit_breaker_open"), ("grpc-status", "14")]);
+        let f = diagnose(Protocol::Http, &r, b"");
+        assert!(find(&f, "ferrum.marker.inconsistent").is_none(), "{:?}", f.iter().map(|x| &x.code).collect::<Vec<_>>());
+    }
+
+    /// Live GW-013 (policy lab): OPA fail-closed 503 carries no marker. The
+    /// "absent marker" finding must name the plugin-rejection possibility
+    /// rather than only pointing at the application.
+    #[test]
+    fn absent_marker_names_plugin_rejections() {
+        let body = br#"{"error":"authorization service unavailable"}"#;
+        let r = response(503, "application/json", &[]);
+        let f = diagnose(Protocol::Http, &r, body);
+        let a = find(&f, "ferrum.marker.absent").expect("absent marker finding");
+        assert_eq!(a.confidence, Confidence::Unknown);
+        assert!(a.alternatives.iter().any(|x| x.contains("plugin")), "{:?}", a.alternatives);
+    }
+
+    /// Live UP-015 / GW-020 (admission and policy labs): the gateway stamps
+    /// `backend_error` on its own retained-buffer refusal and on an AI
+    /// response-guard rejection of a provider 200. The token must not pin the
+    /// failure on the gateway-to-upstream leg or on one owner.
+    #[test]
+    fn backend_error_token_does_not_claim_a_leg_or_owner() {
+        let body = br#"{"error":"Response buffering capacity exceeded"}"#;
+        let r = response(503, "application/json", &[("x-gateway-error", "backend_error")]);
+        let f = diagnose(Protocol::Http, &r, body);
+        let t = find(&f, "ferrum.token.backend_error").expect("token finding");
+        assert_eq!(t.scope, anvil_domain::diagnostics::SourceScope::Unknown);
+        assert_eq!(t.owner, anvil_domain::diagnostics::Owner::Unknown);
+        assert_eq!(t.confidence, Confidence::Likely);
+        assert!(t.alternatives.iter().any(|a| a.contains("response policy")), "{:?}", t.alternatives);
+        assert!(
+            !f.iter().any(|x| x.confidence >= Confidence::Likely && x.scope == anvil_domain::diagnostics::SourceScope::UpstreamApplication)
+        );
+    }
+
+    /// Live GW-010 (policy lab): a WAF 403 and an application 403 with the
+    /// same bytes both reach the ambiguous finding; it must say so.
+    #[test]
+    fn ambiguous_outcome_names_backend_identical_bytes() {
+        let r = response(403, "application/json", &[]);
+        let f = diagnose(Protocol::Http, &r, br#"{"error":"Forbidden"}"#);
+        let a = find(&f, "ferrum.outcome_ambiguous").expect("ambiguous finding");
+        assert_eq!(a.confidence, Confidence::Unknown);
+        assert!(a.alternatives.iter().any(|x| x.contains("backend returned a response with identical")), "{:?}", a.alternatives);
+        assert!(!a.title.to_lowercase().contains("waf"));
+    }
 }

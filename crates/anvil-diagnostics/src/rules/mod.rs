@@ -106,7 +106,7 @@ pub const RULES: &[RuleMeta] = &[
     RuleMeta {
         id: "ferrum.marker",
         version: 1,
-        summary: "Ferrum public markers: trust, tokens, conflicts, unknown tokens, degraded routing",
+        summary: "Ferrum public markers: trust, tokens, conflicts, unknown tokens, status-inconsistent tokens, degraded routing",
         fixtures: &[
             "TRUST-001",
             "TRUST-002",
@@ -120,13 +120,15 @@ pub const RULES: &[RuleMeta] = &[
             "GW-002",
             "GW-004",
             "GW-005",
+            "GW-013",
+            "GW-019",
         ],
     },
     RuleMeta {
         id: "ferrum.catalog",
         version: 1,
         summary: "Signature matching against the source-audited Ferrum outcome inventory",
-        fixtures: &["UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010"],
+        fixtures: &["UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010", "GW-012", "GW-013", "GW-014"],
     },
     RuleMeta {
         id: "app.body",
