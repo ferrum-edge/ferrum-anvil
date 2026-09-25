@@ -3,6 +3,7 @@
 //! `anvil-storage`; UI layers only call these services.
 
 pub mod exec;
+pub mod identity;
 pub mod port;
 pub mod profiles;
 pub mod workspace;
@@ -31,6 +32,12 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Linked-identity unlock policy refusals (typed; never a key problem).
+    #[error("{0}")]
+    Identity(#[from] identity::IdentityPolicyError),
+    /// Interactive sign-in (browser flow) failures.
+    #[error("{0}")]
+    SignIn(#[from] anvil_identity::FlowError),
 }
 
 impl From<StoreError> for AppError {

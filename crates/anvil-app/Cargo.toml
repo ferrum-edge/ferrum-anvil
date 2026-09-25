@@ -14,6 +14,7 @@ anvil-engine.workspace = true
 anvil-transport.workspace = true
 anvil-portability.workspace = true
 anvil-diagnostics.workspace = true
+anvil-identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -30,6 +31,8 @@ uuid.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 anvil-fixtures = { path = "../anvil-fixtures" }
+# CI-only provider for the linked-identity tests (never in release builds).
+anvil-identity = { workspace = true, features = ["mock-provider"] }
 
 [lints]
 workspace = true

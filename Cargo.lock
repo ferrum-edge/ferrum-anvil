@@ -204,6 +204,7 @@ dependencies = [
  "anvil-domain",
  "anvil-engine",
  "anvil-fixtures",
+ "anvil-identity",
  "anvil-portability",
  "anvil-storage",
  "anvil-transport",
