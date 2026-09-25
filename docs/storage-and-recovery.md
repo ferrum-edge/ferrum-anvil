@@ -29,8 +29,8 @@ journal, and blobs for known secret and body values.
 | Protection | How the data key is obtained |
 |---|---|
 | Passphrase | Argon2id(passphrase, salt, parameters in the header) unwraps the data key |
-| Recovery key | A random recovery key (shown once at creation) unwraps a second copy of the data key |
-| OS keychain | The data key is stored in the platform credential store (Keychain, Credential Manager, Secret Service) |
+| Recovery key | A random recovery key (shown once at creation of a passphrase profile) unwraps a second copy of the data key |
+| OS keychain | The data key is stored in the platform credential store (Keychain, Credential Manager, Secret Service). A keychain profile has no recovery key: if the keychain item is lost, only a portable backup restores the data |
 
 A linked provider identity is **not** an unlock method; see `docs/identity.md`.
 

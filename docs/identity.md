@@ -108,9 +108,9 @@ by this flow.
 | Mode | Unlock | Offline |
 |---|---|---|
 | Local, no account | OS keychain or passphrase profile | yes |
-| Local protected | passphrase (or OS keychain); recovery key shown once | yes |
+| Local protected | passphrase, with a recovery key shown once; or the OS keychain (a keychain profile has no recovery key — the keychain item is its only wrap, so keep a portable backup) | yes |
 | Provider-linked | as above; a provider account is bound to the profile | yes (the link alone changes nothing) |
-| Provider-linked, `require_fresh_login` | passphrase/keychain **and** a provider sign-in from the last 5 minutes | only with the recovery key |
+| Provider-linked, `require_fresh_login` | passphrase/keychain **and** a provider sign-in from the last 5 minutes | only with the recovery key (passphrase profiles) |
 
 No mode implies cloud synchronization, and no mode needs a Ferrum account.
 
