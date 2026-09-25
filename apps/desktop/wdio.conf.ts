@@ -110,7 +110,13 @@ export const config: Options.Testrunner & { capabilities: WebdriverIO.Capabiliti
   },
   onComplete() {
     if (process.env.ANVIL_E2E_OWNS_DATA_DIR === "1" && process.env.ANVIL_DATA_DIR) {
-      rmSync(process.env.ANVIL_DATA_DIR, { recursive: true, force: true });
+      // On Windows the app may still hold the database open for a moment
+      // after the last session; retry, and never fail the run over cleanup.
+      try {
+        rmSync(process.env.ANVIL_DATA_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
+      } catch (e) {
+        console.warn(`could not remove the E2E data dir ${process.env.ANVIL_DATA_DIR}: ${(e as Error).message}`);
+      }
     }
   },
 };

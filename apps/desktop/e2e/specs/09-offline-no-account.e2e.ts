@@ -35,8 +35,10 @@ function sockets(pid: string): Socket[] {
       [
         "-NoProfile",
         "-Command",
-        `Get-NetTCPConnection -OwningProcess ${pid} | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) $($_.RemoteAddress):$($_.RemotePort) $($_.State)" }; ` +
-          `Get-NetUDPEndpoint -OwningProcess ${pid} | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) - UDP" }`,
+        // Both cmdlets report "no objects found" as an error when the process
+        // has no socket of that kind, which is the expected case for UDP.
+        `Get-NetTCPConnection -OwningProcess ${pid} -ErrorAction SilentlyContinue | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) $($_.RemoteAddress):$($_.RemotePort) $($_.State)" }; ` +
+          `Get-NetUDPEndpoint -OwningProcess ${pid} -ErrorAction SilentlyContinue | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) - UDP" }`,
       ],
       { encoding: "utf8" },
     );

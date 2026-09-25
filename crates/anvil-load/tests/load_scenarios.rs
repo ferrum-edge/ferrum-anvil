@@ -675,7 +675,6 @@ async fn iterations_fewer_than_concurrency_use_only_allocated_slots() {
 /// DATA-016: locking the vault during an active run stops it under the
 /// stop-runs-on-lock policy: traffic stops, the report is partial and says
 /// why, and the job's secret never appears in it.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn data_016_lock_during_load_stops_run_with_partial_report() {
     let _g = serial().await;
