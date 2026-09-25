@@ -119,7 +119,9 @@ PLUGIN_KEYS = {
                     max_concurrent_requests cache_ttl_seconds max_cache_entries consumer_mapping
                     hide_credentials allow_plaintext],                                # ldap_auth.rs:250-490 (keys read)
   'mtls_auth' => %w[cert_field allowed_issuers allowed_ca_fingerprints_sha256],         # mtls_auth.rs:995-1045 (keys read)
-  'oidc_relying_party' => %w[providers session behavior]                                # oidc_relying_party.rs:89 (CONFIG_FIELDS)
+  'oidc_relying_party' => %w[providers session behavior],                               # oidc_relying_party.rs:89 (CONFIG_FIELDS)
+  'soap_ws_security' => %w[reject_missing_security_header content_type timestamp username_token
+                           x509_signature saml nonce] + REDIS                         # soap_ws_security.rs:648-664 (ROOT_CONFIG_KEYS)
 }.freeze
 NESTED = {
   %w[response_transformer rules] => %w[operation target key value new_key],           # response_transformer.rs:156
@@ -144,6 +146,24 @@ NESTED = {
                                         audiences required_scopes required_roles scope_claim role_claim
                                         consumer_identity_claim consumer_header_claim claim_headers
                                         id_token_clock_skew_secs],                    # oidc_relying_party.rs:90 (PROVIDER_FIELDS)
+  %w[oidc_relying_party session] => %w[encryption_secret encryption_secret_previous cookie_name store ttl_secs
+                                      idle_ttl_secs max_cookie_bytes secure http_only same_site domain path
+                                      hide_session_cookie],                           # oidc_relying_party.rs:122 (SESSION_FIELDS)
+  %w[oidc_relying_party behavior] => %w[state_ttl_secs state_cache_max_entries state_cache_max_entries_per_source
+                                       post_login_redirect_param trusted_redirect_hosts refresh_skew_secs
+                                       challenge_html_status challenge_api_status html_accept_substrings
+                                       rp_initiated_logout post_login_default_path],  # oidc_relying_party.rs:137 (BEHAVIOR_FIELDS)
+  %w[soap_ws_security timestamp] => %w[require max_age_seconds require_expires clock_skew_seconds], # soap_ws_security.rs:670
+  %w[soap_ws_security username_token] => %w[enabled password_type credentials created_max_age_seconds
+                                           created_clock_skew_seconds created_max_timestamp_divergence_seconds
+                                           require_timestamp_binding remove_credential], # soap_ws_security.rs:676
+  %w[soap_ws_security content_type] => %w[mode allow_mtom],                          # soap_ws_security.rs:687
+  %w[soap_ws_security x509_signature] => %w[enabled trusted_certs allowed_algorithms allowed_digest_algorithms
+                                           require_signed_timestamp],               # soap_ws_security.rs:688
+  %w[soap_ws_security saml] => %w[enabled trusted_issuers trusted_signing_certs allowed_signature_algorithms
+                                 allowed_digest_algorithms audience recipient max_assertion_lifetime_seconds
+                                 allowed_subject_confirmation_methods clock_skew_seconds], # soap_ws_security.rs:695
+  %w[soap_ws_security nonce] => %w[replay_scope max_cache_size max_encoded_length max_total_cache_bytes], # soap_ws_security.rs:710
   %w[openapi_validator operations] => %w[method path_template path_regex operation_label request_required
                                          request_body responses]                      # openapi_validator.rs:159-167
 }.freeze
@@ -251,9 +271,14 @@ def lint(file)
     elsif pc['config'].is_a?(Hash)
       check_keys(file, "#{w}.config", pc['config'], allowed)
       NESTED.each do |(plugin, field), keys|
-        next unless plugin == pc['plugin_name'] && pc['config'][field].is_a?(Array)
+        next unless plugin == pc['plugin_name']
 
-        pc['config'][field].each_with_index { |item, i| check_keys(file, "#{w}.config.#{field}[#{i}]", item, keys) }
+        v = pc['config'][field]
+        if v.is_a?(Array)
+          v.each_with_index { |item, i| check_keys(file, "#{w}.config.#{field}[#{i}]", item, keys) }
+        elsif v.is_a?(Hash)
+          check_keys(file, "#{w}.config.#{field}", v, keys)
+        end
       end
     end
   end
