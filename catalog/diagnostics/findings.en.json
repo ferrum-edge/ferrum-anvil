@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-6",
+  "version": "2026.09.25-7",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2132,6 +2132,32 @@
       ],
       "confirm_with": [
         "Operator logs of the peer or the stream proxy at this time."
+      ]
+    },
+    "auth.browser_session_required": {
+      "title": "This destination expects an interactive browser login",
+      "explanation": "{host} {how}. The request stopped at a login step and did not reach the API. A login completed in a system browser creates a session cookie that stays in that browser: Anvil does not read or import browser cookies, so a browser that shows the page as signed in does not make Anvil's requests authenticated.",
+      "alternatives": [
+        "The route also accepts an API credential (for example a bearer token) that this request did not present.",
+        "The session cookie that was sent has expired or was not accepted."
+      ],
+      "does_not_prove": [
+        "That the credentials you use in the browser are wrong.",
+        "That Anvil's request was authenticated, even if a following page answered 200.",
+        "Which component (gateway or application) runs the login."
+      ],
+      "remediation": [
+        {
+          "text": "Use an API credential the service accepts for programmatic access (for example an access token from the identity provider).",
+          "owner": "caller"
+        },
+        {
+          "text": "If you are authorized to reuse a browser session, copy that session cookie explicitly into this request or its workspace as a secret; Anvil never takes it from the browser by itself.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The route's authentication settings (which credentials it accepts besides a browser session)."
       ]
     },
     "auth.token_expired_locally": {

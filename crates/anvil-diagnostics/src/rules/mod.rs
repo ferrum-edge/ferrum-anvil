@@ -2,6 +2,7 @@
 //! applied later from the findings catalog.
 
 mod application;
+mod auth_session;
 mod dispatch;
 mod ferrum_rules;
 mod http_status;
@@ -134,6 +135,12 @@ pub const RULES: &[RuleMeta] = &[
         ],
     },
     RuleMeta {
+        id: "auth.session",
+        version: 1,
+        summary: "Interactive browser-login (OIDC) challenges and redirects; browser sessions are not shared with Anvil",
+        fixtures: &["AUTH-017"],
+    },
+    RuleMeta {
         id: "app.body",
         version: 1,
         summary: "Application failures inside transport-successful responses (SOAP, GraphQL)",
@@ -165,6 +172,11 @@ pub const RULES: &[RuleMeta] = &[
     },
 ];
 
+/// Whether the execution stopped at an interactive login step (AUTH-017).
+pub fn stopped_at_login(ctx: &Ctx<'_>) -> bool {
+    auth_session::login_redirect(ctx).is_some()
+}
+
 pub fn run_all(ctx: &Ctx<'_>, drafts: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarning>) {
     network::local(ctx, drafts);
     network::dns_connect_proxy(ctx, drafts);
@@ -175,4 +187,5 @@ pub fn run_all(ctx: &Ctx<'_>, drafts: &mut Vec<Draft>, warnings: &mut Vec<Outcom
     ferrum_rules::rules(ctx, drafts, warnings);
     application::rules(ctx, drafts, warnings);
     protocols::rules(ctx, drafts, warnings);
+    auth_session::rules(ctx, drafts);
 }
