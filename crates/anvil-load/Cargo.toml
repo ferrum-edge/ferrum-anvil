@@ -1,9 +1,40 @@
 [package]
 name = "anvil-load"
+description = "Native load engine: open/closed/iteration scheduling over the shared execution engine, mergeable HDR metrics, worker process, offline reports and run comparison"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license-file.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "anvil-load-worker"
+path = "src/bin/anvil-load-worker.rs"
+
 [dependencies]
+anvil-domain.workspace = true
+anvil-engine.workspace = true
+anvil-transport.workspace = true
+anvil-auth.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+# Exact f64 round trips keep a reopened report's integrity hash stable.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+chrono.workspace = true
+thiserror.workspace = true
+hdrhistogram.workspace = true
+base64.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+hex.workspace = true
+csv.workspace = true
+url.workspace = true
+zeroize.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+anvil-fixtures = { path = "../anvil-fixtures" }

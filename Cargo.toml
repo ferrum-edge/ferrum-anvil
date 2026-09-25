@@ -102,6 +102,7 @@ proptest = "1.11.0"
 httpdate = "1.0.3"
 dimpl = { version = "0.6", default-features = false, features = ["rust-crypto"] }
 parking_lot = "0.12.5"
+libc = "0.2.189"
 
 [profile.release]
 lto = "thin"
