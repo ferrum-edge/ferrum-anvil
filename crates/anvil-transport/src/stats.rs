@@ -73,7 +73,7 @@ impl ConnStats {
         }
     }
 
-    fn record_read(&self, n: usize) {
+    pub(crate) fn record_read(&self, n: usize) {
         if n == 0 {
             return;
         }
@@ -86,7 +86,7 @@ impl ConnStats {
         }
     }
 
-    fn record_write(&self, n: usize) {
+    pub(crate) fn record_write(&self, n: usize) {
         self.bytes_written.fetch_add(n as u64, Ordering::Relaxed);
     }
 }

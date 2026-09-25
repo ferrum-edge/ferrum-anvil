@@ -7,12 +7,13 @@
 //! * **HTTP/2 extended CONNECT** (RFC 8441): the client waits for the peer's
 //!   `SETTINGS_ENABLE_CONNECT_PROTOCOL`, then sends `CONNECT` with
 //!   `:protocol = websocket`; a `200` opens the tunnel stream.
-//! * **HTTP/3 extended CONNECT** (RFC 9220) is **not supported**: the `h3`
-//!   0.0.8 crate models `:protocol` as a closed type (`webtransport` and
-//!   `connect-udp` only), so a client cannot send `:protocol = websocket` and
-//!   its header decoder rejects the value. Anvil returns a typed
-//!   `unsupported_combination` failure before any traffic instead of
-//!   pretending, and never silently falls back to another bootstrap.
+//! * **HTTP/3 extended CONNECT** (RFC 9220): over a fresh QUIC connection the
+//!   client waits for the server's `SETTINGS_ENABLE_CONNECT_PROTOCOL`, then
+//!   sends `CONNECT` with `:protocol = websocket`; a `200` opens the stream,
+//!   whose DATA frames carry the WebSocket bytes. `h3` 0.0.8 cannot express
+//!   `:protocol = websocket`, so the workspace patches in the upstream
+//!   `Protocol::WEBSOCKET` commit (`vendor/README.md`). HTTP/3 needs `wss://`
+//!   and no proxy; there is never a silent fallback to another bootstrap.
 //!
 //! Session evidence: every message (bounded, redacted), ping/pong, the close
 //! code/reason and who closed. A connection that ends without a Close frame
@@ -31,13 +32,14 @@ use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
 use anvil_domain::request::{WsBootstrap, WsMessage};
 use anvil_domain::settings::{Limits, Timeouts};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request};
 use http_body_util::{BodyExt, Empty};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
@@ -75,25 +77,6 @@ pub struct WsPlan {
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
 }
-
-/// Why a bootstrap cannot be used with the current crate versions, if so.
-pub fn bootstrap_unsupported(b: WsBootstrap) -> Option<TransportFailure> {
-    match b {
-        WsBootstrap::Http3ExtendedConnect => Some(
-            TransportFailure::new(
-                Phase::Prepare,
-                FailureKind::UnsupportedCombination,
-                "WebSocket over HTTP/3 (RFC 9220 extended CONNECT) is not supported: the h3 0.0.8 library cannot send the \
-                 ':protocol = websocket' pseudo-header (it only models 'webtransport' and 'connect-udp'). Nothing was sent; \
-                 choose the HTTP/1.1 Upgrade or HTTP/2 extended CONNECT bootstrap.",
-            )
-            .with_field("websocket.bootstrap"),
-        ),
-        _ => None,
-    }
-}
-
-type Ws = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
     match rx {
@@ -193,7 +176,335 @@ fn close_frame(code: u16, reason: &str) -> Message {
     Message::Close(Some(CloseFrame { code: CloseCode::from(code), reason: reason.to_string().into() }))
 }
 
-pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
+/// Check the server's `Sec-WebSocket-Protocol` choice against the offer.
+fn negotiate_subprotocol(plan: &WsPlan, headers: &HeaderMap, facts: &mut SessionFacts) -> Result<(), String> {
+    if let Some(p) = headers.get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()) {
+        if !plan.subprotocols.iter().any(|s| s.eq_ignore_ascii_case(&p)) {
+            return Err(format!("the server selected subprotocol '{p}', which was not offered"));
+        }
+        facts.notes.push(format!("subprotocol negotiated: {p}"));
+        facts.subprotocol = Some(p);
+    } else if !plan.subprotocols.is_empty() {
+        facts.notes.push(format!("subprotocols offered ({}) but the server selected none", plan.subprotocols.join(", ")));
+    }
+    Ok(())
+}
+
+/// Wait up to `ms` for the HTTP/3 peer's SETTINGS. `Ok(enabled)` says whether
+/// they enable extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 9220 §3).
+async fn await_h3_settings(send: &crate::h3::SendReq, ms: u64, cancel: &CancellationToken) -> Result<bool, &'static str> {
+    use h3::ConnectionState;
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    loop {
+        // Borrowed once the peer's SETTINGS frame has arrived; before that h3
+        // hands out RFC 9114 defaults, which say nothing about the peer.
+        if let std::borrow::Cow::Borrowed(s) = send.settings() {
+            return Ok(s.enable_extended_connect());
+        }
+        if Instant::now() >= deadline {
+            return Err("timeout");
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+            _ = cancel.cancelled() => return Err("canceled"),
+        }
+    }
+}
+
+/// Bridge an accepted RFC 9220 stream to a byte stream the WebSocket codec
+/// can drive: DATA frame payloads are the WebSocket bytes. Counts those bytes
+/// in `stats`, and keeps the h3 stream error, if the stream fails, as evidence.
+fn bridge_h3_stream<T>(
+    stream: h3::client::RequestStream<T, Bytes>,
+    stats: Arc<crate::stats::ConnStats>,
+    stream_error: Arc<parking_lot::Mutex<Option<String>>>,
+) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>)
+where
+    T: h3::quic::BidiStream<Bytes> + Send + 'static,
+    T::SendStream: Send + 'static,
+    T::RecvStream: Send + 'static,
+{
+    let (mut send, mut recv) = stream.split();
+    let (app, h3_side) = tokio::io::duplex(64 * 1024);
+    let (mut rd, mut wr) = tokio::io::split(h3_side);
+    let up_stats = stats.clone();
+    let up = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match rd.read(&mut buf).await {
+                Ok(0) | Err(_) => {
+                    let _ = send.finish().await;
+                    break;
+                }
+                Ok(n) => {
+                    if send.send_data(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
+                        break;
+                    }
+                    up_stats.record_write(n);
+                }
+            }
+        }
+    });
+    tokio::spawn(async move {
+        loop {
+            match recv.recv_data().await {
+                Ok(Some(mut chunk)) => {
+                    let n = chunk.remaining();
+                    let data = chunk.copy_to_bytes(n);
+                    stats.record_read(n);
+                    if wr.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    *stream_error.lock() = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        let _ = wr.shutdown().await;
+    });
+    (app, up)
+}
+
+/// RFC 9220: WebSocket over an HTTP/3 extended CONNECT stream on a fresh
+/// QUIC connection. The QUIC and TLS evidence is the same as for HTTP/3
+/// requests (there is no TCP phase).
+async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
+    let interactive = commands.is_some();
+    let mut rec = Recorder::new(0, events.clone());
+    events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
+    let mut obs = new_attempt(0, AttemptReason::Initial, "CONNECT", &plan.display_url);
+    let mut facts = SessionFacts::default();
+    let early = |rec: Recorder, obs: AttemptObservation, f: TransportFailure, dispatch: DispatchState, facts: SessionFacts| {
+        SessionOutput::single(fail_attempt(rec, obs, f, dispatch, events), None, ProtocolStatus::None, facts)
+    };
+    if !plan.secure {
+        let f = TransportFailure::new(
+            Phase::Prepare,
+            FailureKind::UnsupportedCombination,
+            "WebSocket over HTTP/3 needs TLS (QUIC is always encrypted): use a wss:// URL, or the HTTP/1.1 or HTTP/2 bootstrap for ws://",
+        )
+        .with_field("websocket.bootstrap");
+        return early(rec, obs, f, DispatchState::NotDispatched, facts);
+    }
+    if plan.proxy.is_some() {
+        let f = TransportFailure::new(
+            Phase::Prepare,
+            FailureKind::UnsupportedCombination,
+            "WebSocket over HTTP/3 cannot be sent through the configured HTTP/SOCKS proxy",
+        )
+        .with_field("settings.proxy");
+        return early(rec, obs, f, DispatchState::NotDispatched, facts);
+    }
+    let Some(tls) = plan.tls.clone() else {
+        let f = TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "no TLS configuration for a wss:// session");
+        return early(rec, obs, f, DispatchState::NotDispatched, facts);
+    };
+    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
+
+    // ---- QUIC + HTTP/3 connection ----
+    let connected =
+        match crate::h3::quic_connect(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel)
+            .await
+        {
+            Ok(c) => c,
+            Err((f, cobs)) => {
+                obs.connection = cobs;
+                return early(rec, obs, f, DispatchState::NotDispatched, facts);
+            }
+        };
+    let crate::h3::QuicConnected { quic, mut send, observation: cobs } = connected;
+    obs.connection = Some(cobs);
+    let close_quic = |quic: &quinn::Connection| quic.close(0x100u32.into(), b""); // H3_NO_ERROR
+    let wait_ms = plan.timeouts.response_headers_ms.unwrap_or(5_000).min(5_000);
+    match await_h3_settings(&send, wait_ms, cancel).await {
+        Ok(true) => rec.mark(Phase::ProtocolHandshake, PhaseStatus::Completed, Some("peer enabled extended CONNECT (RFC 9220)")),
+        other => {
+            let f = match other {
+                Err("canceled") => {
+                    TransportFailure::new(Phase::ProtocolHandshake, FailureKind::Canceled, "canceled while waiting for HTTP/3 settings")
+                }
+                Ok(_) => TransportFailure::new(
+                    Phase::ProtocolHandshake,
+                    FailureKind::WsHandshakeRejected,
+                    "the HTTP/3 server's SETTINGS do not enable extended CONNECT (SETTINGS_ENABLE_CONNECT_PROTOCOL), so the RFC 9220 WebSocket bootstrap is unavailable on this connection; nothing was sent",
+                ),
+                Err(_) => {
+                    let mut f = TransportFailure::new(
+                        Phase::ProtocolHandshake,
+                        FailureKind::WsHandshakeRejected,
+                        format!(
+                            "the HTTP/3 server sent no SETTINGS within {wait_ms} ms, so it is unknown whether it allows extended CONNECT (RFC 9220); nothing was sent"
+                        ),
+                    );
+                    f.deadline_ms = Some(wait_ms);
+                    f
+                }
+            };
+            close_quic(&quic);
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+    }
+
+    // ---- extended CONNECT ----
+    let req = match build_request(plan, true, "") {
+        Ok(r) => {
+            let (mut parts, _) = r.into_parts();
+            parts.extensions.remove::<hyper::ext::Protocol>();
+            parts.extensions.insert(h3::ext::Protocol::WEBSOCKET);
+            Request::from_parts(parts, ())
+        }
+        Err(e) => {
+            close_quic(&quic);
+            let f =
+                TransportFailure::new(Phase::Prepare, FailureKind::InvalidHeader, format!("the WebSocket request could not be built: {e}"));
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+    };
+    let req_headers = header_entries(req.headers());
+    obs.bytes.request_headers_logical = logical_header_bytes(&req_headers) + plan.request_target.len() as u64 + 16;
+    obs.bytes.request_headers_estimated = true;
+    let w_idx = rec.start(Phase::RequestWrite);
+    let sent = tokio::select! {
+        r = send.send_request(req) => r.map_err(|e| TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteFailed,
+            format!("sending the HTTP/3 extended CONNECT failed: {e}"))),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::TotalTimeout,
+            "total deadline elapsed while sending the extended CONNECT").with_deadline(plan.timeouts.total_ms)),
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending the extended CONNECT")),
+    };
+    let mut stream = match sent {
+        Ok(s) => s,
+        Err(f) => {
+            close_quic(&quic);
+            return early(rec, obs, f, DispatchState::MayHaveBeenSent, facts);
+        }
+    };
+    rec.finish_with(w_idx, PhaseStatus::Completed, "extended CONNECT headers sent on a new request stream (no body)");
+    let h_idx = rec.start(Phase::AwaitResponseHeaders);
+    let headers_deadline = deadline_from(plan.timeouts.response_headers_ms);
+    let resp = tokio::select! {
+        r = stream.recv_response() => r.map_err(|e| TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
+            format!("the HTTP/3 stream ended before an answer to the extended CONNECT: {e}"))),
+        _ = sleep_until_opt(headers_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
+            "no answer to the WebSocket extended CONNECT before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms)),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
+            "total deadline elapsed during the WebSocket handshake").with_deadline(plan.timeouts.total_ms)),
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during the WebSocket handshake")),
+    };
+    let resp = match resp {
+        Ok(r) => r,
+        Err(f) => {
+            close_quic(&quic);
+            return early(rec, obs, f, DispatchState::MayHaveBeenSent, facts);
+        }
+    };
+    rec.finish(h_idx, PhaseStatus::Completed);
+    let status = resp.status().as_u16();
+    obs.response_status = Some(status);
+    obs.dispatch = DispatchState::Sent;
+    events.emit(ExecutionEvent::ResponseHead { execution_id: events.execution_id, attempt: 0, status });
+    let headers = header_entries(resp.headers());
+    obs.bytes.response_headers_logical = Some(logical_header_bytes(&headers));
+    let content_type = resp.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let ws_status = |closed_by: ClosedBy| ProtocolStatus::WebSocket {
+        handshake_status: Some(status),
+        close_code: None,
+        close_reason: String::new(),
+        closed_by,
+    };
+
+    // ---- rejected handshake: keep the (bounded) response as evidence ----
+    if status != 200 {
+        let b_idx = rec.start(Phase::ResponseBody);
+        let mut captured = BytesMut::new();
+        let mut wire = 0u64;
+        let mut completeness = BodyCompleteness::Complete;
+        loop {
+            let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(5_000)));
+            let chunk = tokio::select! {
+                c = stream.recv_data() => c,
+                _ = sleep_until_opt(idle) => { completeness = BodyCompleteness::Incomplete; break; }
+                _ = cancel.cancelled() => { completeness = BodyCompleteness::Canceled; break; }
+            };
+            match chunk {
+                Ok(Some(mut c)) => {
+                    let n = c.remaining();
+                    let d = c.copy_to_bytes(n);
+                    wire += n as u64;
+                    let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
+                    captured.extend_from_slice(&d[..d.len().min(room)]);
+                    if wire > plan.limits.max_response_bytes {
+                        completeness = BodyCompleteness::StoppedAtLocalLimit;
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    completeness = BodyCompleteness::Incomplete;
+                    break;
+                }
+            }
+        }
+        rec.finish(b_idx, if completeness == BodyCompleteness::Complete { PhaseStatus::Completed } else { PhaseStatus::Failed });
+        close_quic(&quic);
+        let mut f = TransportFailure::new(
+            Phase::ProtocolHandshake,
+            FailureKind::WsHandshakeRejected,
+            format!("the server answered the WebSocket extended CONNECT over HTTP/3 with HTTP {status} instead of 200"),
+        );
+        f.status = Some(status);
+        obs.failure = Some(f);
+        obs.bytes.response_body_wire = Some(wire);
+        let obs = finish_attempt(rec, obs, events);
+        let captured = captured.freeze();
+        let response = response_record(status, http::Version::HTTP_3, headers, body_capture(completeness, wire, &captured, content_type));
+        return SessionOutput::single(
+            crate::http::AttemptOutput { observation: obs, response: Some(response), body: captured },
+            None,
+            ws_status(ClosedBy::NotClosed),
+            facts,
+        );
+    }
+
+    let response = response_record(status, http::Version::HTTP_3, headers, body_capture(BodyCompleteness::NoBody, 0, &[], content_type));
+    if let Err(e) = negotiate_subprotocol(plan, resp.headers(), &mut facts) {
+        close_quic(&quic);
+        let mut f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsProtocolError, e);
+        f.status = Some(status);
+        obs.failure = Some(f);
+        let obs = finish_attempt(rec, obs, events);
+        return SessionOutput::single(
+            crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new() },
+            None,
+            ws_status(ClosedBy::NotClosed),
+            facts,
+        );
+    }
+
+    // ---- session over the HTTP/3 stream ----
+    let stats = crate::stats::ConnStats::new();
+    let stream_error = Arc::new(parking_lot::Mutex::new(None));
+    let (io, uplink) = bridge_h3_stream(stream, stats.clone(), stream_error.clone());
+    let cx = SessionCtx { plan, events, cancel, interactive, total_deadline, stats, written_before: 0, read_before: 0, status, response };
+    let mut out = run_session(io, rec, obs, facts, commands, cx).await;
+    // Let the last frames (normally our Close) leave before the connection closes.
+    let _ = tokio::time::timeout(Duration::from_millis(500), uplink).await;
+    close_quic(&quic);
+    if let Some(e) = stream_error.lock().take()
+        && let Some(a) = out.attempts.last_mut()
+        && let Some(f) = a.observation.failure.as_mut()
+    {
+        f.message = format!("{} (HTTP/3 stream error: {e})", f.message);
+    }
+    out
+}
+
+pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
+    if plan.bootstrap == WsBootstrap::Http3ExtendedConnect {
+        return run_h3(plan, events, cancel, commands).await;
+    }
     let interactive = commands.is_some();
     let mut rec = Recorder::new(0, events.clone());
     events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
@@ -203,9 +514,6 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, m
     let early = |rec: Recorder, obs: AttemptObservation, f: TransportFailure, facts: SessionFacts| {
         SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, ProtocolStatus::None, facts)
     };
-    if let Some(f) = bootstrap_unsupported(plan.bootstrap) {
-        return early(rec, obs, f, facts);
-    }
     if plan.secure && plan.tls.is_none() {
         let f = TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "no TLS configuration for a wss:// session");
         return early(rec, obs, f, facts);
@@ -418,14 +726,8 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, m
     if !h2 && let Err(e) = validate_upgrade(resp.headers(), &key) {
         return handshake_fail(rec, obs, format!("invalid WebSocket handshake response: {e}"), facts);
     }
-    if let Some(p) = resp.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()) {
-        if !plan.subprotocols.iter().any(|s| s.eq_ignore_ascii_case(&p)) {
-            return handshake_fail(rec, obs, format!("the server selected subprotocol '{p}', which was not offered"), facts);
-        }
-        facts.notes.push(format!("subprotocol negotiated: {p}"));
-        facts.subprotocol = Some(p);
-    } else if !plan.subprotocols.is_empty() {
-        facts.notes.push(format!("subprotocols offered ({}) but the server selected none", plan.subprotocols.join(", ")));
+    if let Err(e) = negotiate_subprotocol(plan, resp.headers(), &mut facts) {
+        return handshake_fail(rec, obs, e, facts);
     }
     let upgraded = tokio::select! {
         u = hyper::upgrade::on(resp) => Some(u),
@@ -453,11 +755,45 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, m
         }
     };
 
+    let cx = SessionCtx { plan, events, cancel, interactive, total_deadline, stats, written_before, read_before, status, response };
+    run_session(TokioIo::new(upgraded), rec, obs, facts, commands, cx).await
+}
+
+/// Everything the session phase needs from the bootstrap.
+struct SessionCtx<'a> {
+    plan: &'a WsPlan,
+    events: &'a EventCtx,
+    cancel: &'a CancellationToken,
+    interactive: bool,
+    total_deadline: Option<Instant>,
+    /// Byte counters for the evidence. TCP: the whole connection. HTTP/3:
+    /// the WebSocket bytes carried in this stream's DATA frames.
+    stats: Arc<crate::stats::ConnStats>,
+    written_before: u64,
+    read_before: u64,
+    status: u16,
+    response: ResponseRecord,
+}
+
+/// The WebSocket session itself, over whichever stream the bootstrap opened
+/// (an upgraded HTTP/1.1 connection, an HTTP/2 stream or an HTTP/3 stream).
+async fn run_session<S>(
+    io: S,
+    mut rec: Recorder,
+    mut obs: AttemptObservation,
+    facts: SessionFacts,
+    mut commands: Option<CommandRx>,
+    cx: SessionCtx<'_>,
+) -> SessionOutput
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let SessionCtx { plan, events, cancel, interactive, total_deadline, stats, written_before, read_before, status, response } = cx;
     // ---- session ----
     let s_idx = rec.start(Phase::Session);
     let max = plan.max_message_bytes.clamp(16, usize::MAX as u64) as usize;
     let cfg = WebSocketConfig::default().max_message_size(Some(max)).max_frame_size(Some(max));
-    let mut ws: Ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, Some(cfg)).await;
+    let mut ws = WebSocketStream::from_raw_socket(io, Role::Client, Some(cfg)).await;
     let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
     let mut close: Option<Close> = None;
     let mut client_close_sent: Option<(u16, String)> = None;
@@ -723,11 +1059,11 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, m
 
 /// Map a WebSocket error to the close outcome and a typed failure. For
 /// local policy violations the client sends the matching Close code.
-async fn classify_ws_error(
+async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
     e: tungstenite::Error,
     close: &mut Option<Close>,
     failure: &mut Option<TransportFailure>,
-    ws: &mut Ws,
+    ws: &mut WebSocketStream<S>,
     tr: &mut Transcript,
     peer_close_seen: bool,
     stats: &crate::stats::ConnStats,
@@ -815,7 +1151,12 @@ async fn classify_ws_error(
     }
 }
 
-async fn send_close_and_drain(ws: &mut Ws, tr: &mut Transcript, code: u16, reason: &str) {
+async fn send_close_and_drain<S: AsyncRead + AsyncWrite + Unpin>(
+    ws: &mut WebSocketStream<S>,
+    tr: &mut Transcript,
+    code: u16,
+    reason: &str,
+) {
     if tokio::time::timeout(Duration::from_millis(500), ws.send(close_frame(code, reason))).await.map(|r| r.is_ok()).unwrap_or(false) {
         tr.control(Direction::Sent, "close", format!("{code} {reason}").as_bytes());
     }

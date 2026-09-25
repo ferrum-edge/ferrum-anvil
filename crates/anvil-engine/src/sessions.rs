@@ -296,9 +296,6 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
         max_message_bytes: 16 * 1024 * 1024,
         idle_close_ms: 5_000,
     });
-    if let Some(f) = ws::bootstrap_unsupported(spec.bootstrap) {
-        return Err(f);
-    }
     let mut b = base(engine, ctx, r, &["wss", "ws"])?;
     let target = b.prep.http.target.clone();
     let mut headers = b.prep.http.headers.clone();

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-type SendReq = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
+pub(crate) type SendReq = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 #[derive(Clone)]
 struct H3Conn {
@@ -84,6 +84,128 @@ fn quic_failure(e: &quinn::ConnectionError, during_handshake: bool, deadline: Op
     f
 }
 
+/// A fresh client-side QUIC endpoint (one UDP socket).
+pub(crate) fn client_endpoint(v6: bool) -> Result<quinn::Endpoint, TransportFailure> {
+    let bind: SocketAddr = if v6 { "[::]:0".parse().unwrap() } else { "0.0.0.0:0".parse().unwrap() };
+    quinn::Endpoint::client(bind).map_err(|e| {
+        TransportFailure::new(Phase::Prepare, FailureKind::AddressUnavailable, format!("could not open a UDP socket for QUIC: {e}"))
+    })
+}
+
+/// A QUIC connection with HTTP/3 set up on it (driver already running).
+pub(crate) struct QuicConnected {
+    pub quic: quinn::Connection,
+    pub send: SendReq,
+    pub observation: ConnectionObservation,
+}
+
+/// DNS, QUIC handshake (TLS 1.3 inside) and HTTP/3 connection setup, each
+/// recorded as a phase. There is no TCP phase. On failure the connection
+/// observation gathered so far (resolution, TLS evidence) is returned when
+/// there is any.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn quic_connect(
+    rec: &mut Recorder,
+    host: &str,
+    port: u16,
+    dns_cfg: &dns::DnsConfig,
+    timeouts: &anvil_domain::settings::Timeouts,
+    prepared: &Arc<tls::PreparedTls>,
+    endpoint: impl FnOnce(bool) -> Result<quinn::Endpoint, TransportFailure>,
+    cancel: &CancellationToken,
+) -> Result<QuicConnected, (TransportFailure, Option<ConnectionObservation>)> {
+    let mut cobs = crate::connector::blank_observation(crate::connector::next_connection_id());
+    rec.mark(Phase::Connect, PhaseStatus::NotApplicable, Some("QUIC has no TCP connect"));
+    let dns_idx = rec.start(Phase::Dns);
+    let res = match dns::resolve(host, port, dns_cfg, timeouts.dns_ms.map(Duration::from_millis)).await {
+        Ok(r) => r,
+        Err(f) => {
+            rec.finish(dns_idx, PhaseStatus::Failed);
+            return Err((f, Some(cobs)));
+        }
+    };
+    if res.source == "literal" || res.source == "override" {
+        rec.phases[dns_idx].status = PhaseStatus::NotApplicable;
+        rec.phases[dns_idx].start_us = None;
+    } else {
+        rec.finish(dns_idx, PhaseStatus::Completed);
+    }
+    cobs.resolved_addresses = res.addrs.iter().map(|a| a.to_string()).collect();
+    cobs.resolution_source = Some(res.source.to_string());
+    let addr = res.addrs[0];
+    cobs.remote_address = Some(addr.to_string());
+    let (cfg, sn, handle) = tls::client_config_observed(prepared, host, &["h3"], true).map_err(|f| (f, None))?;
+    let quic_cfg = quinn::crypto::rustls::QuicClientConfig::try_from(cfg).map_err(|e| {
+        (TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, format!("TLS profile cannot be used for QUIC: {e}")), None)
+    })?;
+    let mut client_cfg = quinn::ClientConfig::new(Arc::new(quic_cfg));
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(Duration::from_secs(10)));
+    if let Ok(idle) = quinn::IdleTimeout::try_from(Duration::from_secs(30)) {
+        transport.max_idle_timeout(Some(idle));
+    }
+    client_cfg.transport_config(Arc::new(transport));
+    let ep = endpoint(addr.is_ipv6()).map_err(|f| (f, None))?;
+    let sni = match &sn {
+        rustls_pki_types::ServerName::DnsName(d) => d.as_ref().to_string(),
+        _ => host.to_string(),
+    };
+    let hs_idx = rec.start(Phase::QuicHandshake);
+    let connecting = match ep.connect_with(client_cfg, addr, &sni) {
+        Ok(c) => c,
+        Err(e) => {
+            rec.finish(hs_idx, PhaseStatus::Failed);
+            let f = TransportFailure::new(Phase::QuicHandshake, FailureKind::QuicOther, format!("QUIC connect could not start: {e}"));
+            return Err((f, None));
+        }
+    };
+    let hs_deadline = timeouts.tls_handshake_ms.or(timeouts.connect_ms);
+    let result = tokio::select! {
+        r = connecting => r.map_err(|e| quic_failure(&e, true, hs_deadline)),
+        _ = sleep_until_opt(hs_deadline.map(|ms| Instant::now() + Duration::from_millis(ms))) => Err(
+            TransportFailure::new(Phase::QuicHandshake, FailureKind::QuicHandshakeTimeout,
+                format!("no QUIC handshake completed within {} ms (UDP may be blocked, or the server does not serve HTTP/3 here)", hs_deadline.unwrap_or(0)))
+            .with_deadline(hs_deadline)),
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::QuicHandshake, FailureKind::Canceled, "canceled during QUIC handshake")),
+    };
+    let quic = match result {
+        Ok(c) => c,
+        Err(mut f) => {
+            rec.finish(hs_idx, if f.kind == FailureKind::QuicHandshakeTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed });
+            let tls_obs = tls::observe(&handle, prepared, false);
+            if let TlsVerification::Failed { problem, .. } = &tls_obs.verification {
+                f.kind = *problem;
+            }
+            cobs.tls = Some(tls_obs);
+            return Err((f, Some(cobs)));
+        }
+    };
+    rec.finish(hs_idx, PhaseStatus::Completed);
+    let mut tls_obs = tls::observe(&handle, prepared, true);
+    tls_obs.version = Some("TLSv1_3".into());
+    tls_obs.alpn_negotiated = quic
+        .handshake_data()
+        .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+        .and_then(|d| d.protocol.map(|p| String::from_utf8_lossy(&p).into_owned()));
+    cobs.tls = Some(tls_obs);
+    cobs.protocol = Some("h3".into());
+    cobs.local_address = ep.local_addr().ok().map(|a| a.to_string());
+    let ph = rec.start(Phase::ProtocolHandshake);
+    let (mut driver, send) = match h3::client::new(h3_quinn::Connection::new(quic.clone())).await {
+        Ok(x) => x,
+        Err(e) => {
+            rec.finish(ph, PhaseStatus::Failed);
+            let f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::QuicOther, format!("HTTP/3 connection setup failed: {e}"));
+            return Err((f, Some(cobs)));
+        }
+    };
+    rec.finish(ph, PhaseStatus::Completed);
+    tokio::spawn(async move {
+        let _ = futures::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+    Ok(QuicConnected { quic, send, observation: cobs })
+}
+
 impl H3Transport {
     pub fn new() -> Self {
         H3Transport { endpoints: Mutex::new(HashMap::new()), pool: Mutex::new(HashMap::new()) }
@@ -98,10 +220,7 @@ impl H3Transport {
         if let Some(e) = eps.get(&v6) {
             return Ok(e.clone());
         }
-        let bind: SocketAddr = if v6 { "[::]:0".parse().unwrap() } else { "0.0.0.0:0".parse().unwrap() };
-        let ep = quinn::Endpoint::client(bind).map_err(|e| {
-            TransportFailure::new(Phase::Prepare, FailureKind::AddressUnavailable, format!("could not open a UDP socket for QUIC: {e}"))
-        })?;
+        let ep = client_endpoint(v6)?;
         eps.insert(v6, ep.clone());
         Ok(ep)
     }
@@ -182,124 +301,25 @@ impl H3Transport {
                 (c, true)
             }
             None => {
-                let mut cobs = crate::connector::blank_observation(crate::connector::next_connection_id());
-                rec.mark(Phase::Connect, PhaseStatus::NotApplicable, Some("QUIC has no TCP connect"));
-                let dns_idx = rec.start(Phase::Dns);
-                let res = dns::resolve(&plan.host, plan.port, &plan.dns, plan.timeouts.dns_ms.map(Duration::from_millis)).await;
-                let res = match res {
-                    Ok(r) => r,
-                    Err(f) => {
-                        rec.finish(dns_idx, PhaseStatus::Failed);
-                        obs.connection = Some(cobs);
-                        return fail(rec, obs, f, DispatchState::NotDispatched);
-                    }
-                };
-                if res.source == "literal" || res.source == "override" {
-                    rec.phases[dns_idx].status = PhaseStatus::NotApplicable;
-                    rec.phases[dns_idx].start_us = None;
-                } else {
-                    rec.finish(dns_idx, PhaseStatus::Completed);
-                }
-                cobs.resolved_addresses = res.addrs.iter().map(|a| a.to_string()).collect();
-                cobs.resolution_source = Some(res.source.to_string());
-                let addr = res.addrs[0];
-                cobs.remote_address = Some(addr.to_string());
-                let (cfg, sn, handle) = match tls::client_config_observed(&prepared, &plan.host, &["h3"], true) {
-                    Ok(x) => x,
-                    Err(f) => return fail(rec, obs, f, DispatchState::NotDispatched),
-                };
-                let quic_cfg = match quinn::crypto::rustls::QuicClientConfig::try_from(cfg) {
-                    Ok(q) => q,
-                    Err(e) => {
-                        let f = TransportFailure::new(
-                            Phase::Prepare,
-                            FailureKind::TlsProfileInvalid,
-                            format!("TLS profile cannot be used for QUIC: {e}"),
-                        );
-                        return fail(rec, obs, f, DispatchState::NotDispatched);
-                    }
-                };
-                let mut client_cfg = quinn::ClientConfig::new(Arc::new(quic_cfg));
-                let mut transport = quinn::TransportConfig::default();
-                transport.keep_alive_interval(Some(Duration::from_secs(10)));
-                if let Ok(idle) = quinn::IdleTimeout::try_from(Duration::from_secs(30)) {
-                    transport.max_idle_timeout(Some(idle));
-                }
-                client_cfg.transport_config(Arc::new(transport));
-                let ep = match self.endpoint(addr.is_ipv6()) {
-                    Ok(e) => e,
-                    Err(f) => return fail(rec, obs, f, DispatchState::NotDispatched),
-                };
-                let sni = match &sn {
-                    rustls_pki_types::ServerName::DnsName(d) => d.as_ref().to_string(),
-                    _ => plan.host.clone(),
-                };
-                let hs_idx = rec.start(Phase::QuicHandshake);
-                let connecting = match ep.connect_with(client_cfg, addr, &sni) {
+                let connected = match quic_connect(
+                    &mut rec,
+                    &plan.host,
+                    plan.port,
+                    &plan.dns,
+                    &plan.timeouts,
+                    &prepared,
+                    |v6| self.endpoint(v6),
+                    cancel,
+                )
+                .await
+                {
                     Ok(c) => c,
-                    Err(e) => {
-                        rec.finish(hs_idx, PhaseStatus::Failed);
-                        let f = TransportFailure::new(
-                            Phase::QuicHandshake,
-                            FailureKind::QuicOther,
-                            format!("QUIC connect could not start: {e}"),
-                        );
+                    Err((f, cobs)) => {
+                        obs.connection = cobs;
                         return fail(rec, obs, f, DispatchState::NotDispatched);
                     }
                 };
-                let hs_deadline = plan.timeouts.tls_handshake_ms.or(plan.timeouts.connect_ms);
-                let result = tokio::select! {
-                    r = connecting => r.map_err(|e| quic_failure(&e, true, hs_deadline)),
-                    _ = sleep_until_opt(hs_deadline.map(|ms| Instant::now() + Duration::from_millis(ms))) => Err(
-                        TransportFailure::new(Phase::QuicHandshake, FailureKind::QuicHandshakeTimeout,
-                            format!("no QUIC handshake completed within {} ms (UDP may be blocked, or the server does not serve HTTP/3 here)", hs_deadline.unwrap_or(0)))
-                        .with_deadline(hs_deadline)),
-                    _ = cancel.cancelled() => Err(TransportFailure::new(Phase::QuicHandshake, FailureKind::Canceled, "canceled during QUIC handshake")),
-                };
-                let quic = match result {
-                    Ok(c) => c,
-                    Err(mut f) => {
-                        rec.finish(
-                            hs_idx,
-                            if f.kind == FailureKind::QuicHandshakeTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed },
-                        );
-                        let tls_obs = tls::observe(&handle, &prepared, false);
-                        if let TlsVerification::Failed { problem, .. } = &tls_obs.verification {
-                            f.kind = *problem;
-                        }
-                        cobs.tls = Some(tls_obs);
-                        obs.connection = Some(cobs);
-                        return fail(rec, obs, f, DispatchState::NotDispatched);
-                    }
-                };
-                rec.finish(hs_idx, PhaseStatus::Completed);
-                let mut tls_obs = tls::observe(&handle, &prepared, true);
-                tls_obs.version = Some("TLSv1_3".into());
-                tls_obs.alpn_negotiated = quic
-                    .handshake_data()
-                    .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
-                    .and_then(|d| d.protocol.map(|p| String::from_utf8_lossy(&p).into_owned()));
-                cobs.tls = Some(tls_obs);
-                cobs.protocol = Some("h3".into());
-                cobs.local_address = ep.local_addr().ok().map(|a| a.to_string());
-                let ph = rec.start(Phase::ProtocolHandshake);
-                let (mut driver, send) = match h3::client::new(h3_quinn::Connection::new(quic.clone())).await {
-                    Ok(x) => x,
-                    Err(e) => {
-                        rec.finish(ph, PhaseStatus::Failed);
-                        obs.connection = Some(cobs);
-                        let f = TransportFailure::new(
-                            Phase::ProtocolHandshake,
-                            FailureKind::QuicOther,
-                            format!("HTTP/3 connection setup failed: {e}"),
-                        );
-                        return fail(rec, obs, f, DispatchState::NotDispatched);
-                    }
-                };
-                rec.finish(ph, PhaseStatus::Completed);
-                tokio::spawn(async move {
-                    let _ = futures::future::poll_fn(|cx| driver.poll_close(cx)).await;
-                });
+                let QuicConnected { quic, send, observation: cobs, .. } = connected;
                 let c = H3Conn { send, quic, template: cobs, served: Arc::new(std::sync::atomic::AtomicU32::new(0)) };
                 if plan.keepalive {
                     self.pool.lock().insert(key.clone(), c.clone());

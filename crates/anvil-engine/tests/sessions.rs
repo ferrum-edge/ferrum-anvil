@@ -378,28 +378,120 @@ async fn proto_012_ws_over_h2_extended_connect_is_its_own_bootstrap() {
     }
 }
 
-#[tokio::test]
-async fn proto_013_ws_over_h3_is_a_typed_unsupported_combination() {
-    init();
-    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
-    let e = Engine::new();
-    let mut s = spec(Protocol::WebSocket, &format!("wss://127.0.0.1:{}/ws", f.addr.port()));
-    let mut w = ws_spec(vec![text("never sent")]);
+fn ws_h3_ctx(url: &str, messages: Vec<WsMessage>) -> ExecutionContext {
+    let mut s = spec(Protocol::WebSocket, url);
+    let mut w = ws_spec(messages);
     w.bootstrap = WsBootstrap::Http3ExtendedConnect;
     s.websocket = Some(w);
     let mut c = ctx(s);
     lab_trust(&mut c);
+    c
+}
+
+#[tokio::test]
+async fn proto_013_ws_over_h3_extended_connect_echoes_over_quic() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let mut c = ws_h3_ctx(&format!("wss://127.0.0.1:{}/ws?close_after=1", f.addr.port()), vec![text("over-h3")]);
+    if let Some(w) = c.spec.websocket.as_mut() {
+        w.subprotocols = vec!["anvil.v1".into()];
+    }
     let o = run(&e, &c).await;
+    let a = last(&o);
+    assert!(a.failure.is_none(), "{:?}", a.failure);
+    assert_eq!(a.method, "CONNECT");
+    let conn = a.connection.as_ref().unwrap();
+    assert_eq!(conn.protocol.as_deref(), Some("h3"));
+    assert_eq!(conn.tls.as_ref().unwrap().alpn_negotiated.as_deref(), Some("h3"));
+    assert_eq!(phase(a, Phase::QuicHandshake).unwrap().status, PhaseStatus::Completed);
+    assert_eq!(phase(a, Phase::Connect).unwrap().status, PhaseStatus::NotApplicable, "no TCP handshake is claimed for QUIC");
+    assert!(a.phases.iter().any(|p| p.detail.as_deref().map(|d| d.contains("RFC 9220")).unwrap_or(false)), "{:?}", a.phases);
+    assert_eq!(o.record.response.as_ref().unwrap().http_version, "HTTP/3");
+    match &o.record.outcome.protocol_status {
+        ProtocolStatus::WebSocket { handshake_status, close_code, closed_by, .. } => {
+            assert_eq!(*handshake_status, Some(200), "RFC 9220 success is 200, not 101");
+            assert_eq!(*close_code, Some(1000));
+            assert_eq!(*closed_by, ClosedBy::Peer);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+    assert_eq!(previews(&o, Direction::Received, "text"), vec!["over-h3"]);
+    assert!(o.record.prepared.inferred.iter().any(|i| i.contains("subprotocol negotiated: anvil.v1")));
+    assert!(a.bytes.connection_bytes_written.unwrap_or(0) > 0 && a.bytes.connection_bytes_read.unwrap_or(0) > 0);
+    // Ground truth: one QUIC connection, and the fixture saw an extended CONNECT.
+    assert_eq!(f.connections(), 1);
+    assert!(f.log.requests().iter().any(|(m, p)| m == "CONNECT" && p.starts_with("/ws")), "{:?}", f.log.requests());
+    assert!(f.log.entries().iter().any(|e| matches!(e.event, GroundTruth::MessageReceived { .. })));
+}
+
+#[tokio::test]
+async fn ws_over_h3_without_extended_connect_sends_nothing() {
+    init();
+    let f = h3server::serve_with("127.0.0.1:0", server_tls(), h3server::H3Options { extended_connect: false }).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &ws_h3_ctx(&format!("wss://127.0.0.1:{}/ws", f.addr.port()), vec![text("never sent")])).await;
+    let fl = last(&o).failure.as_ref().unwrap();
+    assert_eq!(fl.kind, FailureKind::WsHandshakeRejected);
+    assert_eq!(fl.phase, Phase::ProtocolHandshake);
+    assert!(fl.message.contains("SETTINGS_ENABLE_CONNECT_PROTOCOL"), "{}", fl.message);
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+    assert!(o.record.stream.is_none(), "no success-shaped session");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(f.connections(), 1, "the QUIC connection was made");
+    assert!(f.log.requests().is_empty(), "but no request was sent: {:?}", f.log.requests());
+}
+
+#[tokio::test]
+async fn ws_over_h3_needs_wss_and_sends_nothing_for_ws() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &ws_h3_ctx(&format!("ws://127.0.0.1:{}/ws", f.addr.port()), vec![text("never sent")])).await;
     let fl = last(&o).failure.as_ref().unwrap();
     assert_eq!(fl.kind, FailureKind::UnsupportedCombination);
     assert_eq!(fl.phase, Phase::Prepare);
-    assert!(fl.message.contains("h3 0.0.8") && fl.message.contains(":protocol"), "{}", fl.message);
-    assert_eq!(o.record.outcome.transport, TransportState::Failed);
+    assert!(fl.message.contains("wss://"), "{}", fl.message);
     assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
     finding(&o, "local.unsupported_combination");
-    assert!(o.record.stream.is_none(), "no success-shaped session");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(f.connections(), 0, "nothing was sent");
+}
+
+#[tokio::test]
+async fn ws_over_h3_rejected_connect_keeps_http_evidence() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &ws_h3_ctx(&format!("wss://127.0.0.1:{}/nope", f.addr.port()), vec![])).await;
+    let fl = last(&o).failure.as_ref().unwrap();
+    assert_eq!(fl.kind, FailureKind::WsHandshakeRejected);
+    assert_eq!(fl.status, Some(400));
+    assert!(fl.message.contains("HTTP/3"), "{}", fl.message);
+    finding(&o, "ws.handshake_rejected");
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!((r.status, r.http_version.as_str()), (400, "HTTP/3"));
+    assert!(String::from_utf8_lossy(&o.body).contains(":protocol websocket"));
+}
+
+#[tokio::test]
+async fn ws_over_h3_abnormal_end_is_reported_as_local_1006() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &ws_h3_ctx(&format!("wss://127.0.0.1:{}/ws?abnormal_after=1", f.addr.port()), vec![text("only")])).await;
+    assert!(f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "ws_abnormal_drop".into() }));
+    match &o.record.outcome.protocol_status {
+        ProtocolStatus::WebSocket { close_code, closed_by, .. } => {
+            assert_eq!(*close_code, Some(1006));
+            assert_eq!(*closed_by, ClosedBy::Abnormal);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_ne!(o.record.outcome.application, ApplicationState::Success);
+    finding(&o, "ws.closed_abnormally");
+    assert_eq!(previews(&o, Direction::Received, "text"), vec!["only"], "messages before the drop are kept");
 }
 
 #[tokio::test]
