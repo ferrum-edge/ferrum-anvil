@@ -98,6 +98,8 @@ cargo run -p anvil-lab -- up core         # keep the core lab up for manual test
 | App identity and OAuth | `docs/identity.md` |
 | Failure lab | `docs/lab/` |
 | CI and releases | `docs/ci.md`, `docs/release.md` |
+| Measured resource budgets | `docs/performance.md` |
+| Failure-matrix coverage | `docs/verification/matrix-coverage.md` |
 
 ## License
 
