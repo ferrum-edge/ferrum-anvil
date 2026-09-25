@@ -1,0 +1,67 @@
+name: Anvil build setup
+description: >
+  Shared toolchain setup for Ferrum Anvil jobs: Tauri system libraries on Linux,
+  the Rust toolchain from rust-toolchain.toml (plus optional extra targets), a
+  Rust build cache, pinned Node.js and the desktop app's npm dependencies.
+inputs:
+  tauri-deps:
+    description: Install the Linux system libraries Tauri/WebKitGTK needs (ignored on macOS/Windows).
+    default: "true"
+  xvfb:
+    description: Also install Xvfb (Linux GUI tests without a display).
+    default: "false"
+  targets:
+    description: Extra rustup targets to add (space separated).
+    default: ""
+  cache-key:
+    description: Extra key for the Rust build cache.
+    default: ""
+  node:
+    description: Set up Node.js and run `npm ci` in apps/desktop.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Linux system libraries for Tauri (WebKitGTK 4.1, libsoup 3, appindicator)
+      if: runner.os == 'Linux' && inputs.tauri-deps == 'true'
+      shell: bash
+      env:
+        WANT_XVFB: ${{ inputs.xvfb }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential pkg-config file \
+          libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
+          libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libdbus-1-dev
+        if [ "$WANT_XVFB" = "true" ]; then sudo apt-get install -y --no-install-recommends xvfb xauth; fi
+
+    - name: Rust toolchain (from rust-toolchain.toml)
+      shell: bash
+      env:
+        EXTRA_TARGETS: ${{ inputs.targets }}
+      run: |
+        rustup --version
+        rustup toolchain install
+        # shellcheck disable=SC2086 # space-separated list
+        if [ -n "$EXTRA_TARGETS" ]; then rustup target add $EXTRA_TARGETS; fi
+        rustc -Vv
+        cargo -V
+
+    - name: Rust build cache
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        key: ${{ inputs.cache-key }}
+
+    - name: Node.js
+      if: inputs.node == 'true'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 22.23.3
+        cache: npm
+        cache-dependency-path: apps/desktop/package-lock.json
+
+    - name: npm ci (apps/desktop)
+      if: inputs.node == 'true'
+      shell: bash
+      working-directory: apps/desktop
+      run: npm ci --no-audit --no-fund
