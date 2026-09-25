@@ -169,6 +169,9 @@ fn up015(env: &Env) -> Fut<'_> {
             c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
             c.max_confidence(&o, "ferrum.outcome_ambiguous", Confidence::Unknown);
         }
+        // The refusal can briefly raise the overload monitor; let it settle so
+        // the lookalike and recovery see the route, not an admission refusal.
+        env.wait_normal(Duration::from_secs(3)).await;
         // Lookalike: the application's own 503 on the same buffered route.
         let look = env.get("/up/buffer-capacity/status/503").await;
         c.token(&look, "ferrum.token.backend_error", env.trusted);
@@ -179,6 +182,7 @@ fn up015(env: &Env) -> Fut<'_> {
             format!("{:?}", codes(&look)),
         );
         // Recovery: a 32 KiB response fits the budget.
+        env.wait_normal(Duration::from_secs(3)).await;
         let r = env.get("/up/buffer-capacity/bytes/32768").await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
