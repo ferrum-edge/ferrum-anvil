@@ -1,0 +1,77 @@
+type: collection.insomnia.rest/5.0
+name: Tasks
+meta:
+  id: wrk_tasks
+  created: 1714560000000
+  modified: 1714560000000
+  description: Insomnia v5 fixture
+collection:
+  - name: Tasks
+    meta:
+      id: fld_tasks
+      sortKey: -1
+    authentication:
+      type: basic
+      username: "{{ _.user }}"
+      password: "{{ _.password }}"
+    scripts:
+      afterResponse: "insomnia.test('ok', () => {});"
+    children:
+      - url: "{{ _.baseUrl }}/tasks"
+        name: List tasks
+        meta:
+          id: req_list
+          sortKey: -2
+          description: Lists tasks
+        method: GET
+        parameters:
+          - name: done
+            value: "false"
+        headers:
+          - name: Authorization
+            value: Bearer literal-token-value
+        settings:
+          renderRequestBody: true
+          encodeUrl: true
+          followRedirects: "on"
+          cookies:
+            send: false
+            store: true
+      - url: "{{ _.baseUrl }}/tasks"
+        name: Create task
+        meta:
+          id: req_create
+          sortKey: -1
+        method: POST
+        body:
+          mimeType: application/xml
+          text: "<task><title>Write docs</title></task>"
+        scripts:
+          preRequest: "const t = Date.now();"
+  - url: "{{ _.baseUrl }}/health"
+    name: Health
+    meta:
+      id: req_health
+      sortKey: 5
+    method: GET
+    settings:
+      encodeUrl: false
+cookieJar:
+  name: Default Jar
+  meta:
+    id: jar_tasks
+environments:
+  name: Base Environment
+  meta:
+    id: env_base
+  data:
+    baseUrl: https://tasks.example.com
+    user: tasks-bot
+    password: literal-password
+  subEnvironments:
+    - name: Local
+      meta:
+        id: env_local
+        sortKey: 1
+      data:
+        baseUrl: http://localhost:8080

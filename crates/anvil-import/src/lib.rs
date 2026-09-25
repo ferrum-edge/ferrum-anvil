@@ -30,8 +30,11 @@
 //!   [`ImportOptions::imported_at`] when set.
 
 mod builder;
+mod common;
 mod detect;
+mod insomnia;
 mod openapi;
+mod postman;
 mod reimport;
 mod report;
 mod structured;
@@ -222,6 +225,10 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
         (Parsed::Structured(v), Dialect::Swagger20 | Dialect::OpenApi30 | Dialect::OpenApi31 | Dialect::OpenApi32) => {
             openapi::import(v, detected.dialect, &mut b)?
         }
+        (Parsed::Structured(v), Dialect::PostmanV20 | Dialect::PostmanV21) => postman::import_collection(v, detected.dialect, &mut b)?,
+        (Parsed::Structured(v), Dialect::PostmanEnvironment | Dialect::PostmanGlobals) => postman::import_environment(v, &mut b)?,
+        (Parsed::Structured(v), Dialect::InsomniaV4) => insomnia::import_v4(v, &mut b)?,
+        (Parsed::Structured(v), Dialect::InsomniaV5) => insomnia::import_v5(v, &mut b)?,
         (Parsed::Xml(text), Dialect::Wsdl11) => wsdl::import(text, &mut b)?,
         _ => {
             return Err(ImportError::Unrecognized { message: format!("{} input could not be dispatched", detected.dialect) });
