@@ -31,7 +31,9 @@
 
 mod builder;
 mod common;
+mod curl;
 mod detect;
+mod har;
 mod insomnia;
 mod openapi;
 mod postman;
@@ -229,7 +231,9 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
         (Parsed::Structured(v), Dialect::PostmanEnvironment | Dialect::PostmanGlobals) => postman::import_environment(v, &mut b)?,
         (Parsed::Structured(v), Dialect::InsomniaV4) => insomnia::import_v4(v, &mut b)?,
         (Parsed::Structured(v), Dialect::InsomniaV5) => insomnia::import_v5(v, &mut b)?,
+        (Parsed::Structured(v), Dialect::Har) => har::import(v, &mut b)?,
         (Parsed::Xml(text), Dialect::Wsdl11) => wsdl::import(text, &mut b)?,
+        (Parsed::Text(text), Dialect::Curl) => curl::import(text, &mut b)?,
         _ => {
             return Err(ImportError::Unrecognized { message: format!("{} input could not be dispatched", detected.dialect) });
         }
