@@ -36,3 +36,6 @@ prost.workspace = true
 protox.workspace = true
 prost-reflect.workspace = true
 dimpl.workspace = true
+quinn.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true

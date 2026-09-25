@@ -591,7 +591,9 @@ async fn websocket(req: Request<Incoming>, qs: Vec<(String, String)>, log: Groun
                     }
                 }
                 Message::Close(_) => {
-                    let _ = ws.close(None).await;
+                    // tungstenite queued the Close reply; flush it so the
+                    // closing handshake completes before the socket drops.
+                    let _ = ws.flush().await;
                     return;
                 }
                 _ => {}
