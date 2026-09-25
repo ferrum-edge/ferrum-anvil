@@ -36,7 +36,7 @@ table{border-collapse:collapse;width:100%;margin:8px 0}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:12px}
 .st{font-weight:600;white-space:nowrap}
-.passed{color:var(--pass)}.failed,.error{color:var(--fail)}.skipped,.canceled,.incomplete{color:var(--skip)}
+.passed{color:var(--pass)}.failed,.error{color:var(--fail)}.skipped,.canceled,.aborted,.incomplete{color:var(--skip)}
 ul.plain{margin:4px 0;padding-left:18px}
 footer{color:var(--muted);font-size:12px;margin-top:32px}
 "#;
@@ -80,6 +80,12 @@ pub fn to_html(r: &RunReport) -> String {
         RunSource::Scenario { .. } => "Scenario".to_string(),
         RunSource::Folder { path, .. } => format!("Folder {path}"),
     };
+    let verdict = match r.completion {
+        _ if r.passed() => "passed",
+        RunnerCompletion::Completed => "failed",
+        RunnerCompletion::Canceled => "canceled",
+        RunnerCompletion::Aborted => "aborted",
+    };
     let _ = write!(o, "<h1>{}</h1>", esc(&r.name));
     let _ = write!(
         o,
@@ -88,8 +94,8 @@ pub fn to_html(r: &RunReport) -> String {
         esc(r.environment_name.as_deref().map(|e| format!("environment {e}")).as_deref().unwrap_or("no environment")),
         esc(&r.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
         fmt_n(r.duration_ms),
-        if r.passed() { "passed" } else { "failed" },
-        esc(&if r.passed() { "passed".to_string() } else { format!("{} · not passed", snake(&r.completion)) })
+        verdict,
+        verdict
     );
 
     if r.completion != RunnerCompletion::Completed {

@@ -13,8 +13,18 @@
 use anvil_domain::runner::*;
 use std::fmt::Write as _;
 
-/// Escape for XML text and double-quoted attribute values.
+/// Escape for double-quoted attribute values (line breaks and tabs are
+/// kept as character references so parsers do not normalize them away).
 pub fn xml_escape(s: &str) -> String {
+    escape(s, true)
+}
+
+/// Escape for element text (line breaks stay literal).
+pub fn xml_text(s: &str) -> String {
+    escape(s, false)
+}
+
+fn escape(s: &str, attr: bool) -> String {
     let mut o = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         match c {
@@ -23,9 +33,10 @@ pub fn xml_escape(s: &str) -> String {
             '>' => o.push_str("&gt;"),
             '"' => o.push_str("&quot;"),
             '\'' => o.push_str("&apos;"),
-            '\n' => o.push_str("&#10;"),
-            '\r' => o.push_str("&#13;"),
-            '\t' => o.push_str("&#9;"),
+            '\n' if attr => o.push_str("&#10;"),
+            '\r' if attr => o.push_str("&#13;"),
+            '\t' if attr => o.push_str("&#9;"),
+            '\n' | '\r' | '\t' => o.push(c),
             c if (c as u32) < 0x20 || c == '\u{FFFE}' || c == '\u{FFFF}' => o.push('\u{FFFD}'),
             c => o.push(c),
         }
@@ -142,34 +153,33 @@ pub fn to_junit(r: &RunReport) -> String {
                 xml_escape(&classname),
                 secs(s.duration_ms.unwrap_or(0))
             );
+            // Failure/error bodies carry the step detail; passing and skipped
+            // cases carry it as system-out (never both, to avoid duplication).
+            let body = xml_text(&detail(s));
             match verdict(s, &r.fail_on) {
-                Verdict::Pass => {}
+                Verdict::Pass => {
+                    let _ = write!(cases, "\n      <system-out>{body}</system-out>");
+                }
                 Verdict::Failure { kind, message } => {
                     failures += 1;
                     let _ = write!(
                         cases,
-                        "\n      <failure type=\"{}\" message=\"{}\">{}</failure>",
+                        "\n      <failure type=\"{}\" message=\"{}\">{body}</failure>",
                         xml_escape(&kind),
-                        xml_escape(&message),
-                        xml_escape(&detail(s))
+                        xml_escape(&message)
                     );
                 }
                 Verdict::Error { kind, message } => {
                     errors += 1;
-                    let _ = write!(
-                        cases,
-                        "\n      <error type=\"{}\" message=\"{}\">{}</error>",
-                        xml_escape(&kind),
-                        xml_escape(&message),
-                        xml_escape(&detail(s))
-                    );
+                    let _ =
+                        write!(cases, "\n      <error type=\"{}\" message=\"{}\">{body}</error>", xml_escape(&kind), xml_escape(&message));
                 }
                 Verdict::Skipped(m) => {
                     skipped += 1;
-                    let _ = write!(cases, "\n      <skipped message=\"{}\"/>", xml_escape(&m));
+                    let _ = write!(cases, "\n      <skipped message=\"{}\"/>\n      <system-out>{body}</system-out>", xml_escape(&m));
                 }
             }
-            let _ = write!(cases, "\n      <system-out>{}</system-out>\n    </testcase>\n", xml_escape(&detail(s)));
+            cases.push_str("\n    </testcase>\n");
         }
         let suite_name = match it.dataset_row {
             Some(row) => format!("{} · iteration {} (dataset row {row})", r.name, it.index + 1),
@@ -245,6 +255,7 @@ mod tests {
     fn escapes_markup_and_invalid_xml_chars() {
         assert_eq!(xml_escape("<a href=\"x\">&'\u{1}"), "&lt;a href=&quot;x&quot;&gt;&amp;&apos;\u{FFFD}");
         assert_eq!(xml_escape("a\nb"), "a&#10;b");
+        assert_eq!(xml_text("a\nb<\u{2}"), "a\nb&lt;\u{FFFD}");
         assert_eq!(secs(1234), "1.234");
     }
 }
