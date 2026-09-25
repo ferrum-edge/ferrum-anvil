@@ -1,0 +1,4362 @@
+{
+  "schema_version": 1,
+  "compatibility_id": "ferrum-edge-0.9.5",
+  "gateway": {
+    "release_tag": "v0.9.5",
+    "source_sha": "20e76030a05dc49c3804e969516c94ab101110b9"
+  },
+  "generated_on": "2026-09-25",
+  "method": "manual source audit + grep; not a completeness proof",
+  "public_tokens": [
+    "connection_failure",
+    "backend_timeout",
+    "backend_error",
+    "circuit_breaker_open",
+    "overload",
+    "config_stale",
+    "concurrency_limit"
+  ],
+  "error_classes": [
+    "connection_timeout",
+    "connection_refused",
+    "connection_reset",
+    "connection_closed",
+    "dns_lookup_error",
+    "tls_error",
+    "read_write_timeout",
+    "client_disconnect",
+    "protocol_error",
+    "response_body_too_large",
+    "gateway_buffer_capacity",
+    "request_body_too_large",
+    "connection_pool_error",
+    "port_exhaustion",
+    "graceful_remote_close",
+    "dispatch_policy_rejected",
+    "backend_connection_limit",
+    "trust_withdrawn",
+    "request_error"
+  ],
+  "headers": [],
+  "error_class_semantics": [],
+  "grpc_reject_status_mapping": {
+    "source": "src/proxy/grpc_proxy.rs:2225@20e7603 http_reject_status_to_grpc_status",
+    "map": {
+      "400": 3,
+      "405": 12,
+      "401": 16,
+      "403": 7,
+      "404": 12,
+      "408": 4,
+      "504": 4,
+      "409": 10,
+      "412": 9,
+      "413": 8,
+      "414": 8,
+      "429": 8,
+      "501": 12,
+      "502": 14,
+      "503": 14
+    },
+    "default": 13,
+    "note": "Gateway-generated native-gRPC rejects are HTTP 200 Trailers-Only (content-type application/grpc, grpc-status, grpc-message); grpc-message comes from the reject header, else the JSON body's grpc_message/message/error/details field (mod.rs:24941)."
+  },
+  "rejection_phases_operator_only": [],
+  "drift": [
+    {
+      "change_id": "retry_rs_unchanged",
+      "refs": "v0.9.5->8ef06f2->main",
+      "client_visible_effect": "None: src/retry.rs is byte-identical (git diff v0.9.5 8ef06f2 -- src/retry.rs is empty). ErrorClass::ALL (19), the 7 X-Gateway-Error tokens, request_reached_wire and should_retry are unchanged.",
+      "evidence": "git diff v0.9.5 8ef06f2 -- src/retry.rs (empty)",
+      "anvil_impact": "Token/class vocabulary rules can target both refs."
+    },
+    {
+      "change_id": "httproute_timeouts",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5646",
+        "#5677",
+        "#5728"
+      ],
+      "client_visible_effect": "New 504 {\"error\":\"Request timeout\"} + X-Gateway-Error: backend_timeout when a Gateway API HTTPRoute timeouts.request / mesh_route_dispatch request_timeout_ms budget expires (including BEFORE dispatch or in retry backoff, error_class dispatch_policy_rejected). timeouts.backendRequest / attempt_timeout_ms cut a streaming body (HTTP/2 reset, HTTP/1.1 close). Native HTTP/3 refuses such routes with 503 {\"error\":\"Route request timeout is not supported over HTTP/3\"} (gRPC 14) and stops advertising Alt-Svc on that port. gRPC ends with DEADLINE_EXCEEDED.",
+      "evidence": "8ef06f2:src/proxy/mod.rs:48962 ROUTE_REQUEST_TIMEOUT_BODY; 8ef06f2:src/http3/server.rs:18297",
+      "anvil_impact": "A v0.9.6+ 504 backend_timeout may never have reached a backend; body 'Request timeout' is new. Only for Gateway API / mesh_route_dispatch rules."
+    },
+    {
+      "change_id": "httproute_retry",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5695"
+      ],
+      "client_visible_effect": "Gateway API HTTPRoute rule retry: statuses retried for GET/HEAD/OPTIONS/PUT/DELETE; pre-wire failures retried for every method. Client sees only the final attempt.",
+      "evidence": "CHANGELOG 0.9.7 Added",
+      "anvil_impact": "More hidden retries behind a single response for Gateway-API-configured routes."
+    },
+    {
+      "change_id": "h1_stranded_pooled_request",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5714",
+        "#5719",
+        "#5720"
+      ],
+      "client_visible_effect": "v0.9.5: a pooled HTTP/1 backend connection that closes at enqueue time strands the request until backend_read_timeout_ms -> 504 {\"error\":\"Backend timeout\"} + backend_timeout although nothing reached the backend. v0.9.6: fails immediately; reused connection retried once, fresh connection -> 502 {\"error\":\"Backend unavailable\"} + connection_failure (connection_pool_error). Same for HBONE inner HTTP/1 and Unix-socket HTTP/1 backends.",
+      "evidence": "commit 6044b0e55 (vendored hyper-util 0.1.20)",
+      "anvil_impact": "UP-016 expectations differ by version: against v0.9.5 binaries this race looks like a 30 s backend_timeout."
+    },
+    {
+      "change_id": "rate_limiting_redis_failure_default",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5519"
+      ],
+      "client_visible_effect": "rate_limiting redis_failure_policy default changes from fail_closed (v0.9.5: src/plugins/utils/rate_limit.rs:64) to local_fallback (per-pod quota enforcement during Redis outage); request-quota Redis clients now require +time ACL, otherwise the endpoint is 'unavailable' and redis_failure_policy decides (fail_closed -> 503). Sub-bucketed trailing-window accounting changes exact 429 timing.",
+      "evidence": "CHANGELOG 0.9.7 Changed",
+      "anvil_impact": "Redis-outage fixtures behave differently between versions; 429 boundary timing tests must be version-scoped."
+    },
+    {
+      "change_id": "jwt_iss_array_rejected",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5522"
+      ],
+      "client_visible_effect": "jwt_auth: a token whose iss claim is an array (containing the configured issuer) is now 401 {\"error\":\"Invalid JWT token\"}; v0.9.5 accepted it. Also null nbf treated as absent (7241da7a4).",
+      "evidence": "8ef06f2:src/plugins/jwt_auth.rs:258-265",
+      "anvil_impact": "AUTH-009-style fixtures with array iss flip from success to 401."
+    },
+    {
+      "change_id": "introspection_nbf",
+      "refs": "v0.9.5->8ef06f2",
+      "client_visible_effect": "oauth2_introspection gains a not-yet-valid rejection with body {\"error\":\"Token is not yet valid\"} (401).",
+      "evidence": "8ef06f2:src/plugins/oauth2_introspection.rs:1210",
+      "anvil_impact": "New distinct 401 body not present in v0.9.5."
+    },
+    {
+      "change_id": "mcp_exact_endpoint",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5582"
+      ],
+      "client_visible_effect": "MCP trailing-slash alias withdrawn: /mcp/ now 404 'Unknown MCP endpoint' when endpoint.path is /mcp (v0.9.5 accepted the alias).",
+      "evidence": "CHANGELOG 0.9.7 Changed; commit 7fa105501",
+      "anvil_impact": "MCP path fixtures must use exact endpoint spelling."
+    },
+    {
+      "change_id": "hbone_peer_auth_403",
+      "refs": "v0.9.5->8ef06f2",
+      "client_visible_effect": "Mesh HBONE tunnels without an authenticated mesh peer now 403 {\"error\":\"HBONE tunnel requires an authenticated mesh peer\"} / {\"error\":\"HBONE UDP tunnel requires an authenticated mesh peer\"}.",
+      "evidence": "8ef06f2:src/proxy/hbone_proxy.rs",
+      "anvil_impact": "Mesh-only; not relevant to ordinary API clients."
+    },
+    {
+      "change_id": "spec_expose_csp",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5686"
+      ],
+      "client_visible_effect": "spec_expose responses gain Content-Security-Policy: default-src 'none'; sandbox.",
+      "evidence": "CHANGELOG 0.9.7 Fixed",
+      "anvil_impact": "Header-presence assertions on spec endpoints differ."
+    },
+    {
+      "change_id": "bot_detection_allow_list_edges",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5685"
+      ],
+      "client_visible_effect": "bot_detection allow_list entries with leading/trailing punctuation now match (fewer false 403s).",
+      "evidence": "CHANGELOG 0.9.7 Fixed",
+      "anvil_impact": "Bot-detection lookalike fixtures may flip."
+    },
+    {
+      "change_id": "graphql_grpc_router_limit_by_consumer_keys",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5692"
+      ],
+      "client_visible_effect": "graphql / grpc_method_router rate-limit keys namespaced consumer:/ip:; counters restart once after upgrade.",
+      "evidence": "CHANGELOG 0.9.7 Fixed",
+      "anvil_impact": "Quota exhaustion timing differs across upgrade."
+    },
+    {
+      "change_id": "relay_flush_write_timeout",
+      "refs": "v0.9.5->8ef06f2",
+      "commits_or_prs": [
+        "#5588",
+        "#5676"
+      ],
+      "client_visible_effect": "TCP/TLS relays, WebSocket tunnel mode and HBONE byte tunnels flush before parking; backend_write_timeout stays armed across flush/half-close so TLS backends with non-zero backend_write_timeout_ms may now see 'backend write inactivity timeout' disconnects where v0.9.5 hung.",
+      "evidence": "CHANGELOG 0.9.7 Fixed",
+      "anvil_impact": "L4/WS stall fixtures: v0.9.5 may hang where v0.9.6 closes."
+    },
+    {
+      "change_id": "main_equals_v096_src",
+      "refs": "8ef06f2->main",
+      "client_visible_effect": "None in src/: origin/main (8fed134) differs from 8ef06f2 only in CHANGELOG, Cargo version, charts and docs version pins (v0.9.7 release prep).",
+      "evidence": "git diff --stat 8ef06f2 origin/main",
+      "anvil_impact": "Treat main == v0.9.6 content (released as v0.9.7)."
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "upstream.dns.resolution_failed.reqwest_preflight",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 43055,
+          "symbol": "backend_dns_resolution_failed_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 41061,
+          "symbol": "retry dispatch DNS preflight",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 41818,
+          "symbol": "proxy_to_backend DNS preflight",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "reqwest-dispatched request (HTTP/1.1 backend, H2-via-reqwest, H3->reqwest bridge) whose preflight DnsCache resolution of the backend host fails (not an egress-policy denial).",
+      "error_class": "dns_lookup_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend DNS resolution failed\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not resolve the configured backend host name from the gateway; the request was not sent to any backend.",
+      "must_not_claim": "That the client's own DNS failed, or that this body proves which DNS server/record failed.",
+      "remediation": "Gateway operator: fix the backend hostname or gateway DNS resolver/dns_override; safe to retry after the fix.",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-001"
+      ],
+      "notes": "Distinct public body only on the reqwest path. Direct-H2/gRPC/H3 pools classify DNS failures as dns_lookup_error but render the generic 'Backend unavailable' body (see upstream.dns.resolution_failed.pooled). Body text is gateway-authored but spoofable by a backend on non-Ferrum endpoints."
+    },
+    {
+      "id": "upstream.dns.egress_policy_denied_hostname",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 43055,
+          "symbol": "backend_dns_resolution_failed_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1501,
+          "symbol": "classify_reqwest_error egress-policy check",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend hostname resolves (or rebinds) to an address blocked by FERRUM_BACKEND_ALLOW_IPS / egress CIDR policy on the reqwest preflight.",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend DNS resolution failed\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to dial the backend because gateway policy blocked its resolved address, although the body text names DNS resolution.",
+      "must_not_claim": "That DNS failed, that the backend returned an error (despite backend_error), or that the backend is unhealthy.",
+      "remediation": "Gateway operator: review backend egress allow/deny policy (FERRUM_BACKEND_ALLOW_IPS/ALLOW_CIDRS/DENY_CIDRS) for this backend.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "Same body as a real DNS failure but token differs (backend_error because connection_error=false). A rule keyed on body alone would misattribute."
+    },
+    {
+      "id": "upstream.dns.resolution_failed.pooled",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "DNS failure on a self-resolving pool (direct HTTP/2 pool, native HTTP/3 pool, WebSocket dial, HBONE/mesh) or any path without the reqwest preflight.",
+      "error_class": "dns_lookup_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-001"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response. Pooled H2 DNS: src/proxy/http2_pool.rs:1180 BackendUnavailableSource::Dns."
+    },
+    {
+      "id": "upstream.connect.refused",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "TCP connect to the backend refused (RST/ECONNREFUSED) or connect-phase reset without a TLS error.",
+      "error_class": "connection_refused",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-002"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response."
+    },
+    {
+      "id": "upstream.connect.timeout",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend TCP connect did not complete within backend_connect_timeout_ms (default 5000 ms, src/config/types.rs:5613).",
+      "error_class": "connection_timeout",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-003"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response. Whether a stalled TLS handshake surfaces as connection_timeout or tls_error depends on the dispatch path; not proven per path."
+    },
+    {
+      "id": "upstream.tls.handshake_failed_setup_phase",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Typed rustls error while the dispatcher independently knows it is still in setup (direct H2 pool, gRPC pool, native H3, WebSocket dial, HBONE/mesh, reqwest is_connect branch): untrusted cert, name mismatch, alert, missing client certificate.",
+      "error_class": "tls_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-004",
+        "UP-005",
+        "UP-006",
+        "UP-007"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response."
+    },
+    {
+      "id": "upstream.tls.https_to_plaintext",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "backend_scheme https (the HTTP-family default) but the backend speaks plaintext HTTP; handshake fails with InvalidContentType/UnknownProtocolVersion.",
+      "error_class": "tls_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-008"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response. Operator log adds error_reason=https_to_plaintext_backend (src/retry.rs:1136); client body is unchanged."
+    },
+    {
+      "id": "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "reqwest shared HTTP/1 pool: backend demands a client certificate the gateway does not present; hyper completes the connector, the connection future dies (TLS1.3 post-handshake CertificateRequired) and the queued request is canceled with no rustls in the chain (issue #4406).",
+      "error_class": "connection_pool_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-006",
+        "UP-016"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response. Typed handshake evidence is lost on this path; see retry.rs:1448-1471."
+    },
+    {
+      "id": "upstream.pool.dispatch_canceled",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "hyper is_canceled on a pooled sender (request never dispatched), gRPC DispatchCanceled/ProtocolNack, or pool acquisition/creation failure.",
+      "error_class": "connection_pool_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-016"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response."
+    },
+    {
+      "id": "upstream.port_exhaustion",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Dial failed with EADDRNOTAVAIL (errno 99/49/10049) during the connect phase.",
+      "error_class": "port_exhaustion",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.connection_limit.pooled",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-017"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response. Also increments overload port-exhaustion counter (operator-only)."
+    },
+    {
+      "id": "upstream.connection_limit.pooled",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "DestinationRule connectionPool.tcp.maxConnections ceiling reached on the direct H2 pool, native H3 pool, gRPC pool, or HBONE/mesh pool; no new socket opened.",
+      "error_class": "backend_connection_limit",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.trust_withdrawn"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-018"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response. Health-neutral. The reqwest/HTTP-1.1 and WebSocket lanes answer this condition differently (503, see upstream.connection_limit.reqwest)."
+    },
+    {
+      "id": "upstream.trust_withdrawn",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42803,
+          "symbol": "http_backend_dispatch_error_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 448,
+          "symbol": "request_reached_wire",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Mesh-only: an accepted gateway trust publication withdrew an authority while an HBONE/sidecar mTLS transport was being established or reused.",
+      "error_class": "trust_withdrawn",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "connection_failure",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.dns.resolution_failed.pooled",
+        "upstream.connect.refused",
+        "upstream.connect.timeout",
+        "upstream.tls.handshake_failed_setup_phase",
+        "upstream.tls.https_to_plaintext",
+        "upstream.tls.mtls_rejected_reqwest_pool_canceled",
+        "upstream.pool.dispatch_canceled",
+        "upstream.port_exhaustion",
+        "upstream.connection_limit.pooled"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it could not prepare or open a connection to the upstream for this attempt (DNS, TCP, TLS, connection-pool or gateway connection-policy setup); the response does not say which step failed.",
+      "must_not_claim": "A specific cause (DNS vs refused vs TLS vs pool vs port exhaustion vs connection ceiling), that the client's own TLS/certificate is wrong, or that no earlier retry attempt reached a backend.",
+      "remediation": "Gateway operator: check the configured backend host/port, gateway-side DNS and network reachability, backend TLS scheme/trust/client-certificate settings, and connection-pool limits in gateway logs (error_kind / error_class).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-019"
+      ],
+      "notes": "request_reached_wire=false: retry_on_connect_failure may have replayed this on another target before this final response. Only reachable on mesh transports (HBONE / sidecar mTLS / gRPC over them)."
+    },
+    {
+      "id": "upstream.tls.mtls_rejected_reqwest_post_connect_alert",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1492,
+          "symbol": "classify_reqwest_error",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "reqwest HTTP/1 pool: a typed rustls alert (e.g. certificate_required / handshake alert) surfaces after reqwest's TCP-only connect phase; conservatively post-wire (issue #4536 partial reversal of #4406/#4476).",
+      "error_class": "connection_reset",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.reset_before_headers",
+        "upstream.closed_before_headers",
+        "upstream.protocol_error_before_headers",
+        "upstream.h3.graceful_close_before_headers",
+        "upstream.request_error_catchall"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream exchange failed after the request may have been sent (reset, early close, protocol error, post-connect TLS alert, or an unclassified error), so the backend may or may not have processed it.",
+      "must_not_claim": "That the backend application returned this 502, that the request was definitely not processed, or that a TLS/certificate problem is certain.",
+      "remediation": "Do not auto-retry non-idempotent requests. Gateway operator/API owner: correlate gateway logs (error_class) and backend logs for resets or crashes around this time.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-006"
+      ],
+      "notes": "Post-wire (request_reached_wire=true): only status-code retries gated by retryable_methods can replay it. Same backend-mTLS misconfiguration can therefore surface publicly as connection_failure OR backend_error depending on how hyper reports it."
+    },
+    {
+      "id": "upstream.reset_before_headers",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1492,
+          "symbol": "classify_reqwest_error",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend RST (or post-connect refusal/EADDRNOTAVAIL, or gRPC BackendRequest failure) after the request may have been written, before response headers.",
+      "error_class": "connection_reset",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.tls.mtls_rejected_reqwest_post_connect_alert",
+        "upstream.closed_before_headers",
+        "upstream.protocol_error_before_headers",
+        "upstream.h3.graceful_close_before_headers",
+        "upstream.request_error_catchall"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream exchange failed after the request may have been sent (reset, early close, protocol error, post-connect TLS alert, or an unclassified error), so the backend may or may not have processed it.",
+      "must_not_claim": "That the backend application returned this 502, that the request was definitely not processed, or that a TLS/certificate problem is certain.",
+      "remediation": "Do not auto-retry non-idempotent requests. Gateway operator/API owner: correlate gateway logs (error_class) and backend logs for resets or crashes around this time.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-020"
+      ],
+      "notes": "Post-wire (request_reached_wire=true): only status-code retries gated by retryable_methods can replay it."
+    },
+    {
+      "id": "upstream.closed_before_headers",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1492,
+          "symbol": "classify_reqwest_error",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend FIN / broken pipe / hyper incomplete message before a complete response head; also missing TLS close_notify teardown.",
+      "error_class": "connection_closed",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.tls.mtls_rejected_reqwest_post_connect_alert",
+        "upstream.reset_before_headers",
+        "upstream.protocol_error_before_headers",
+        "upstream.h3.graceful_close_before_headers",
+        "upstream.request_error_catchall"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream exchange failed after the request may have been sent (reset, early close, protocol error, post-connect TLS alert, or an unclassified error), so the backend may or may not have processed it.",
+      "must_not_claim": "That the backend application returned this 502, that the request was definitely not processed, or that a TLS/certificate problem is certain.",
+      "remediation": "Do not auto-retry non-idempotent requests. Gateway operator/API owner: correlate gateway logs (error_class) and backend logs for resets or crashes around this time.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-013",
+        "UP-020"
+      ],
+      "notes": "Post-wire (request_reached_wire=true): only status-code retries gated by retryable_methods can replay it."
+    },
+    {
+      "id": "upstream.protocol_error_before_headers",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1492,
+          "symbol": "classify_reqwest_error",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "HTTP/2 or HTTP/3 stream reset / GOAWAY / h2 protocol error from the backend before response headers (other than the typed REFUSED_STREAM / GOAWAY(NO_ERROR) NACKs, which are replayed internally).",
+      "error_class": "protocol_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.tls.mtls_rejected_reqwest_post_connect_alert",
+        "upstream.reset_before_headers",
+        "upstream.closed_before_headers",
+        "upstream.h3.graceful_close_before_headers",
+        "upstream.request_error_catchall"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream exchange failed after the request may have been sent (reset, early close, protocol error, post-connect TLS alert, or an unclassified error), so the backend may or may not have processed it.",
+      "must_not_claim": "That the backend application returned this 502, that the request was definitely not processed, or that a TLS/certificate problem is certain.",
+      "remediation": "Do not auto-retry non-idempotent requests. Gateway operator/API owner: correlate gateway logs (error_class) and backend logs for resets or crashes around this time.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "PROTO-003"
+      ],
+      "notes": "Post-wire (request_reached_wire=true): only status-code retries gated by retryable_methods can replay it. RFC 9113 protocol NACKs (REFUSED_STREAM, GOAWAY NO_ERROR) are replayed by the gateway itself up to 2 times without retry config (retry.rs:1409-1430, docs/retry.md:104-108)."
+    },
+    {
+      "id": "upstream.h3.graceful_close_before_headers",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1492,
+          "symbol": "classify_reqwest_error",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "HTTP/3 backend closed with H3_NO_ERROR / GOAWAY at the response-read boundary before headers.",
+      "error_class": "graceful_remote_close",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.tls.mtls_rejected_reqwest_post_connect_alert",
+        "upstream.reset_before_headers",
+        "upstream.closed_before_headers",
+        "upstream.protocol_error_before_headers",
+        "upstream.request_error_catchall"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream exchange failed after the request may have been sent (reset, early close, protocol error, post-connect TLS alert, or an unclassified error), so the backend may or may not have processed it.",
+      "must_not_claim": "That the backend application returned this 502, that the request was definitely not processed, or that a TLS/certificate problem is certain.",
+      "remediation": "Do not auto-retry non-idempotent requests. Gateway operator/API owner: correlate gateway logs (error_class) and backend logs for resets or crashes around this time.",
+      "owner": "unknown",
+      "fixture_ids": [],
+      "notes": "Post-wire (request_reached_wire=true): only status-code retries gated by retryable_methods can replay it."
+    },
+    {
+      "id": "upstream.request_error_catchall",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1492,
+          "symbol": "classify_reqwest_error",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Unclassified backend request error (typed walk and substring fallback found nothing).",
+      "error_class": "request_error",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend unavailable\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.tls.mtls_rejected_reqwest_post_connect_alert",
+        "upstream.reset_before_headers",
+        "upstream.closed_before_headers",
+        "upstream.protocol_error_before_headers",
+        "upstream.h3.graceful_close_before_headers"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream exchange failed after the request may have been sent (reset, early close, protocol error, post-connect TLS alert, or an unclassified error), so the backend may or may not have processed it.",
+      "must_not_claim": "That the backend application returned this 502, that the request was definitely not processed, or that a TLS/certificate problem is certain.",
+      "remediation": "Do not auto-retry non-idempotent requests. Gateway operator/API owner: correlate gateway logs (error_class) and backend logs for resets or crashes around this time.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-020"
+      ],
+      "notes": "Post-wire (request_reached_wire=true): only status-code retries gated by retryable_methods can replay it."
+    },
+    {
+      "id": "upstream.timeout.response_header_wait",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45281,
+          "symbol": "reqwest per-direction watermark expiry",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 54862,
+          "symbol": "h3_read_timeout_backend_response",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "backend_read_timeout_ms (default 30000, src/config/types.rs:5617) expired waiting for response headers after the request was sent.",
+      "error_class": "read_write_timeout",
+      "public_signal": {
+        "http_status": 504,
+        "x_gateway_error": "backend_timeout",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend timeout\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.timeout.upload_write_stall",
+        "upstream.timeout.buffered_body_idle",
+        "upstream.h1_stranded_pooled_request_v095"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream did not complete its part of the exchange within the gateway's backend timeout budget; the request may have been partially or fully delivered.",
+      "must_not_claim": "Which direction stalled (upload write vs response header wait vs buffered body idle), that the backend definitely received the full request, or that raising timeouts is the fix.",
+      "remediation": "API owner: check backend latency for this operation; gateway operator: check backend_read_timeout_ms / backend_write_timeout_ms for the route. Retry only idempotent requests.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-010"
+      ],
+      "notes": "post-wire class; not replayed by retry_on_connect_failure."
+    },
+    {
+      "id": "upstream.timeout.upload_write_stall",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45278,
+          "symbol": "reqwest per-direction watermark expiry (backend_write_timeout_ms arm)",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/upload_pump.rs",
+          "line": 1,
+          "symbol": "upload pump",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "backend_write_timeout_ms (default 30000, src/config/types.rs:5621) watermark expired while the backend stopped reading the request body (upload pump), before response headers.",
+      "error_class": "read_write_timeout",
+      "public_signal": {
+        "http_status": 504,
+        "x_gateway_error": "backend_timeout",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend timeout\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.timeout.response_header_wait",
+        "upstream.timeout.buffered_body_idle",
+        "upstream.h1_stranded_pooled_request_v095"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream did not complete its part of the exchange within the gateway's backend timeout budget; the request may have been partially or fully delivered.",
+      "must_not_claim": "Which direction stalled (upload write vs response header wait vs buffered body idle), that the backend definitely received the full request, or that raising timeouts is the fix.",
+      "remediation": "API owner: check backend latency for this operation; gateway operator: check backend_read_timeout_ms / backend_write_timeout_ms for the route. Retry only idempotent requests.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-009"
+      ],
+      "notes": "post-wire class; not replayed by retry_on_connect_failure. Same public pair as header-wait; which watermark fired is logged only (watermark field)."
+    },
+    {
+      "id": "upstream.timeout.buffered_body_idle",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42839,
+          "symbol": "eager_buffer_body_read_status_and_class",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45950,
+          "symbol": "next_reqwest_chunk_idle",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Response headers arrived but the response is being buffered (plugin/buffer mode/retry) and an inter-chunk idle gap exceeded backend_read_timeout_ms.",
+      "error_class": "read_write_timeout",
+      "public_signal": {
+        "http_status": 504,
+        "x_gateway_error": "backend_timeout",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend timeout\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.timeout.response_header_wait",
+        "upstream.timeout.upload_write_stall",
+        "upstream.h1_stranded_pooled_request_v095"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream did not complete its part of the exchange within the gateway's backend timeout budget; the request may have been partially or fully delivered.",
+      "must_not_claim": "Which direction stalled (upload write vs response header wait vs buffered body idle), that the backend definitely received the full request, or that raising timeouts is the fix.",
+      "remediation": "API owner: check backend latency for this operation; gateway operator: check backend_read_timeout_ms / backend_write_timeout_ms for the route. Retry only idempotent requests.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-011"
+      ],
+      "notes": "post-wire class; not replayed by retry_on_connect_failure. Backend status/headers are discarded; client sees the gateway 504 instead of the backend status."
+    },
+    {
+      "id": "upstream.h1_stranded_pooled_request_v095",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42788,
+          "symbol": "http_backend_failure_status_and_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45281,
+          "symbol": "reqwest per-direction watermark expiry",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "v0.9.5 only: a pooled HTTP/1 backend connection closes (reset/FIN) at the instant the request is enqueued; hyper-util holds the only sender, reqwest send() hangs until backend_read_timeout_ms and returns 504 although the request never reached the backend (fixed in v0.9.6 by vendored hyper-util 0.1.20, #5714/#5719/#5720).",
+      "error_class": "read_write_timeout",
+      "public_signal": {
+        "http_status": 504,
+        "x_gateway_error": "backend_timeout",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend timeout\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "upstream.timeout.response_header_wait",
+        "upstream.timeout.upload_write_stall",
+        "upstream.timeout.buffered_body_idle"
+      ],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports the upstream did not complete its part of the exchange within the gateway's backend timeout budget; the request may have been partially or fully delivered.",
+      "must_not_claim": "Which direction stalled (upload write vs response header wait vs buffered body idle), that the backend definitely received the full request, or that raising timeouts is the fix.",
+      "remediation": "API owner: check backend latency for this operation; gateway operator: check backend_read_timeout_ms / backend_write_timeout_ms for the route. Retry only idempotent requests.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-016",
+        "UP-010"
+      ],
+      "notes": "post-wire class; not replayed by retry_on_connect_failure. Diagnostic consequence at v0.9.5: a 504 backend_timeout does not prove the backend received the request."
+    },
+    {
+      "id": "upstream.body_read_failed.eager_buffer",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42852,
+          "symbol": "eager_buffer_body_read_error_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42839,
+          "symbol": "eager_buffer_body_read_status_and_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Response headers arrived on the reqwest path but eager buffering of a small body (<= FERRUM response_buffer_cutoff) failed with a non-timeout error (reset, early close).",
+      "error_class": "connection_closed",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend response body read failed\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response replacing backend status"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge received response headers from the upstream but the response body could not be read completely; the backend may have processed the request.",
+      "must_not_claim": "That the backend returned 502, or that the request was not processed.",
+      "remediation": "API owner: check backend for crashes/resets mid-response; do not auto-retry non-idempotent requests.",
+      "owner": "api_owner",
+      "fixture_ids": [
+        "UP-012",
+        "UP-013"
+      ],
+      "notes": "error_class is whatever classify_reqwest_error returns (connection_closed / connection_reset / protocol_error / request_error); pre-wire classes are coerced to connection_reset."
+    },
+    {
+      "id": "upstream.body_read_failed.buffered_collector",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45859,
+          "symbol": "BufferedCollectFailure::read_error",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Buffered response collection (direct-H2 / generic buffered collector) hits a mid-body read failure.",
+      "error_class": "response_body_too_large",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend response read error\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response replacing backend status"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge received response headers from the upstream but failed while reading the response body; the backend may have processed the request.",
+      "must_not_claim": "That the body was too large (despite the logged class), or that the backend returned 502.",
+      "remediation": "API owner: check backend for mid-response failures.",
+      "owner": "api_owner",
+      "fixture_ids": [
+        "UP-012"
+      ],
+      "notes": "Code comment (mod.rs:45852-45856) says the class is deliberately left as ResponseBodyTooLarge; operator logs will say response_body_too_large for a read error."
+    },
+    {
+      "id": "upstream.response_too_large.declared_or_buffered",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 41537,
+          "symbol": "declared_response_length_exceeds_limit fast path",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45844,
+          "symbol": "BufferedCollectFailure::too_large",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend Content-Length exceeds the effective max response body size (FERRUM_MAX_RESPONSE_BODY_SIZE_BYTES default 10485760, or route response_size_limiting), or a buffered body grows past it.",
+      "error_class": "response_body_too_large",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend response body exceeds maximum size\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response replacing backend status"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the upstream response because it exceeds the gateway's configured response size limit.",
+      "must_not_claim": "That the backend crashed or returned 502.",
+      "remediation": "API owner: page or reduce the response; gateway operator: review the response size limit for this route.",
+      "owner": "api_owner",
+      "fixture_ids": [
+        "UP-014"
+      ],
+      "notes": "gRPC buffered path maps ResponseTooLarge through the gRPC trailers-only mapping (see protocol outcomes). Streaming without Content-Length is enforced mid-stream instead (streaming.response_size_exceeded_mid_stream)."
+    },
+    {
+      "id": "gateway.capacity.response_buffer",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/response_buffer_budget.rs",
+          "line": 469,
+          "symbol": "RESPONSE_BUFFER_OVERLOAD_STATUS",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/response_buffer_budget.rs",
+          "line": 479,
+          "symbol": "RESPONSE_BUFFER_OVERLOAD_BODY",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45882,
+          "symbol": "BufferedCollectFailure::budget_exhausted",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 26158,
+          "symbol": "replace_buffered_response_with_capacity_refusal",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Process-wide retained-response budget (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES, default 256 MiB) cannot admit a buffered response that is within every per-response ceiling.",
+      "error_class": "gateway_buffer_capacity",
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Response buffering capacity exceeded\"}",
+        "grpc_status": 8,
+        "ws_close_code": null,
+        "transport": "complete HTTP response replacing backend status; gRPC: HTTP 200 trailers-only grpc-status 8 grpc-message 'Response buffering capacity exceeded'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge temporarily lacked gateway memory budget to buffer this response; the backend answered but its response was not delivered.",
+      "must_not_claim": "That the backend is unhealthy or returned 503 (despite X-Gateway-Error: backend_error), or that retrying elsewhere helps immediately.",
+      "remediation": "Retry later; gateway operator: review FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES and why responses are buffered.",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-015"
+      ],
+      "notes": "Doc says 'Do not reuse backend_error for a response that never reached a backend' but this gateway-local refusal carries backend_error (status 503>=500, connection_error=false). Body is the only public discriminator. Not retried by the gateway."
+    },
+    {
+      "id": "gateway.capacity.request_buffer",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 47279,
+          "symbol": "build_request_buffer_capacity_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 47308,
+          "symbol": "request_buffer_capacity_backend_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/response_buffer_budget.rs",
+          "line": 452,
+          "symbol": "REQUEST_BUFFER_OVERLOAD_BODY",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Aggregate buffered-request budget (FERRUM_REQUEST_BUFFER_MAX_TOTAL_BYTES, default 256 MiB) cannot admit another buffered upload.",
+      "error_class": "gateway_buffer_capacity",
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request buffering capacity exceeded\"}",
+        "grpc_status": 8,
+        "ws_close_code": null,
+        "transport": "complete HTTP response; gRPC trailers-only grpc-status 8 'Request buffering capacity exceeded'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge temporarily lacked gateway memory budget to buffer this request body; the request was not sent upstream.",
+      "must_not_claim": "That the request body is too large or that the backend is at fault.",
+      "remediation": "Retry later; gateway operator: review request buffering budget and plugins that force buffering (WAF, validators, retries).",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "X-Gateway-Error is path-dependent: absent when built by build_request_buffer_capacity_response (pre-dispatch builder), but 'backend_error' when the same refusal returns through the backend-dispatch seam (request_buffer_capacity_backend_response)."
+    },
+    {
+      "id": "gateway.capacity.request_decode",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/response_buffer_budget.rs",
+          "line": 382,
+          "symbol": "REQUEST_DECODE_OVERLOAD_BODY",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 6057,
+          "symbol": "request decode budget refusal",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/plugins/compression.rs",
+          "line": 1372,
+          "symbol": "compression request decode refusal",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Aggregate request-decode (decompression inspection) budget cannot admit the working set for a governed request.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"}",
+        "grpc_status": 8,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge temporarily lacked capacity to inspect (decode) this request body; the request was not sent upstream.",
+      "must_not_claim": "That the request is malformed or the backend is at fault.",
+      "remediation": "Retry later; gateway operator: review request decode budget.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "Emitted as a plugin-style reject; X-Gateway-Error presence not confirmed per path."
+    },
+    {
+      "id": "upstream.connection_limit.reqwest",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45762,
+          "symbol": "proxy_to_backend maxConnections refusal",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 41687,
+          "symbol": "retry maxConnections refusal",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "reqwest (HTTP/1.1) lane: DestinationRule connectionPool.tcp.maxConnections reached for the destination; no socket opened.",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Backend connection limit exceeded\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to open another connection to this upstream because a gateway-configured connection ceiling is reached; the request was not sent.",
+      "must_not_claim": "That the backend is down or returned 503 (despite backend_error).",
+      "remediation": "Retry later; gateway operator: review maxConnections for this destination.",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "UP-018"
+      ],
+      "notes": "Same condition on direct-H2/H3/gRPC pools surfaces as 502 'Backend unavailable' + connection_failure (upstream.connection_limit.pooled). WebSocket upgrade path uses the same 503 body (mod.rs:14769)."
+    },
+    {
+      "id": "upstream.h1_pending_limit.reqwest",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 45145,
+          "symbol": "http1MaxPendingRequests shed (initial)",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 41368,
+          "symbol": "http1MaxPendingRequests shed (retry)",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "DestinationRule connectionPool.http.http1MaxPendingRequests reached for the backend (upstream overflow) on the reqwest lane.",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"HTTP/1.1 in-flight request limit reached\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge shed this request because a gateway-configured in-flight request limit for the upstream is reached; the request was not sent.",
+      "must_not_claim": "That the backend returned 503 or is unhealthy.",
+      "remediation": "Retry later with backoff; gateway operator: review http1MaxPendingRequests.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "Carries backend_error although no backend was contacted."
+    },
+    {
+      "id": "upstream.egress_denied_literal_ip",
+      "family": "policy",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 43008,
+          "symbol": "backend_egress_denied_response",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Literal-IP backend (or dns_override) blocked by the backend egress policy; no dial.",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"backend address blocked by egress policy\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to contact the configured backend address because gateway egress policy blocks it.",
+      "must_not_claim": "That the backend returned an error or is down.",
+      "remediation": "Gateway operator: fix the backend address or egress allow/deny policy.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "H3 cross-protocol bridge additionally sets gateway-error-reason: backend-egress-policy-denied (src/http3/cross_protocol.rs:1618)."
+    },
+    {
+      "id": "upstream.dns_override_literal_conflict",
+      "family": "policy",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 43024,
+          "symbol": "backend_dns_override_literal_conflict_response",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "reqwest dispatch where proxy dns_override conflicts with a literal-IP backend URL host.",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"backend DNS override cannot be applied to literal target\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to dispatch because the route's DNS override cannot be applied to the configured literal backend address (gateway configuration issue).",
+      "must_not_claim": "That the backend is at fault.",
+      "remediation": "Gateway operator: correct the route's dns_override/backend host.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": ""
+    },
+    {
+      "id": "upstream.tls_sni_requires_direct_h2",
+      "family": "policy",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 3447,
+          "symbol": "backend_tls_sni_requires_direct_h2_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 3472,
+          "symbol": "BACKEND_TLS_SNI_REQUIRES_DIRECT_H2_REASON",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend TLS SNI override that neither the direct-H2 pool nor the reqwest dial can honor.",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json",
+          "gateway-error-reason": "backend_tls_sni_requires_direct_h2"
+        },
+        "body_shape": "{\"error\":\"Bad Gateway\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to dispatch because the route's backend TLS server-name override cannot be honored on this path (gateway configuration issue).",
+      "must_not_claim": "That the backend certificate is wrong or the backend failed.",
+      "remediation": "Gateway operator: review the BackendTLSPolicy/SNI override and backend protocol.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "gateway-error-reason is an undocumented gateway-authored response header; it is NOT stripped from backend responses, so it is spoofable."
+    },
+    {
+      "id": "upstream.mesh_dispatch_unavailable",
+      "family": "policy",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 42312,
+          "symbol": "mesh transport dispatch required",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 37750,
+          "symbol": "unix socket retry dispatch unavailable",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/http3/server.rs",
+          "line": 6212,
+          "symbol": "H3 mesh dispatch required",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Mesh-only: target requires HBONE / sidecar mTLS / Unix-socket transport that is unavailable for this attempt.",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "Content-Type": "application/json",
+          "gateway-error-reason": "<fixed reason string>"
+        },
+        "body_shape": "{\"error\":\"Bad Gateway\",\"message\":\"Mesh transport dispatch required for this backend target\"} | {\"error\":\"Bad Gateway\",\"message\":\"Unix socket retry dispatch unavailable\"}",
+        "grpc_status": 14,
+        "ws_close_code": null,
+        "transport": "complete HTTP response; gRPC trailers-only UNAVAILABLE"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to dispatch because the secured mesh transport required for this backend was unavailable.",
+      "must_not_claim": "That the backend application failed.",
+      "remediation": "Gateway/mesh operator: check gateway mesh identity and transport availability.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "Mesh deployments only; included for completeness. Reason strings include 'mesh transport dispatch required for this backend target', 'Unix socket retry dispatch is unavailable', 'HBONE transport or gateway identity is unavailable for retry target'."
+    },
+    {
+      "id": "upstream.application_5xx",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 39448,
+          "symbol": "x_gateway_error_for_response at final builder",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 281,
+          "symbol": "http_observability_error_class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend returned a complete 5xx response other than 504 (connection_error=false).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": "5xx (backend's, not 504)",
+        "x_gateway_error": "backend_error",
+        "other_headers": {},
+        "body_shape": "backend's own body (any shape)",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The response was relayed by Ferrum Edge with a 5xx status that, per the gateway's coarse marker, came from or after the upstream exchange; the marker alone does not prove the backend application authored it.",
+      "must_not_claim": "That the gateway failed, or (without body/provenance evidence) that the application itself produced it: several gateway-local refusals also carry backend_error.",
+      "remediation": "API owner: inspect backend logs for this request; compare body with known gateway bodies.",
+      "owner": "api_owner",
+      "fixture_ids": [
+        "GW-017"
+      ],
+      "notes": "Backend-supplied X-Gateway-Error values are stripped and replaced on this path (mod.rs:39449)."
+    },
+    {
+      "id": "upstream.application_504",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/retry.rs",
+          "line": 284,
+          "symbol": "http_observability_error_class: status==504 -> backend_timeout",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend itself returned a complete 504 response (e.g. an upstream load balancer timeout).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 504,
+        "x_gateway_error": "backend_timeout",
+        "other_headers": {},
+        "body_shape": "backend's own body",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "A 504 was relayed through Ferrum Edge and marked backend_timeout; the marker is also applied when the backend itself answered 504, so only the body distinguishes it from the gateway's own timeout.",
+      "must_not_claim": "That the gateway timed out (unless the body is exactly {\"error\":\"Backend timeout\"} from a trusted Ferrum destination).",
+      "remediation": "API owner/infra behind the gateway: check the backend's own upstream timeouts.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "GW-017"
+      ],
+      "notes": "http_observability_error_class keys backend_timeout on status 504 alone, not on ErrorClass."
+    },
+    {
+      "id": "upstream.application_non5xx",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/retry.rs",
+          "line": 288,
+          "symbol": "http_observability_error_class returns None for <500",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 39449,
+          "symbol": "strip backend X-Gateway-Error",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend returned 1xx-4xx (including its own 401/403/404/429).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": "backend's (<500)",
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": "backend's own body",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The upstream application's response was relayed; no gateway failure marker is present.",
+      "must_not_claim": "That a 401/403/404/429 came from the gateway (gateway plugin rejections use the same statuses).",
+      "remediation": "Treat as application result unless other provenance says otherwise.",
+      "owner": "api_owner",
+      "fixture_ids": [
+        "GW-016"
+      ],
+      "notes": "Any X-Gateway-Error the backend sets is stripped on H1/H2/H3 backend-response paths."
+    },
+    {
+      "id": "upstream.degraded_routing",
+      "family": "upstream_network",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 39463,
+          "symbol": "X-Gateway-Upstream-Status builder write",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/http3/server.rs",
+          "line": 10319,
+          "symbol": "finalize_h3_response_routing_headers",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/load_balancer.rs",
+          "line": 1258,
+          "symbol": "TargetSelection.is_fallback",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "All targets in the upstream (or selected subset) were unhealthy; the load balancer used the all-unhealthy / parent-upstream fallback. Any final status.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": "any",
+        "x_gateway_error": null,
+        "other_headers": {
+          "X-Gateway-Upstream-Status": "degraded"
+        },
+        "body_shape": "unchanged",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge reports it routed this request in degraded mode because no upstream target was considered healthy; the request itself may still have succeeded.",
+      "must_not_claim": "That the request failed, or which target was used.",
+      "remediation": "Gateway operator/API owner: investigate health-check failures for the upstream.",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "GW-018"
+      ],
+      "notes": "Spoofing: on the H1/H2 builder path a backend-supplied X-Gateway-Upstream-Status is NOT stripped when the gateway did not use fallback, and when it did, the builder appends a second field line. H3 replaces it only when is_fallback. Treat as spoofable."
+    },
+    {
+      "id": "gateway.admission.config_stale",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc",
+        "ws",
+        "tcp",
+        "udp"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 29890,
+          "symbol": "stale-configuration admission fence",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/http3/server.rs",
+          "line": 2469,
+          "symbol": "H3 stale-configuration fence",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/dp_config_freshness.rs",
+          "line": 91,
+          "symbol": "new_traffic_blocked",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/tcp_proxy.rs",
+          "line": 2491,
+          "symbol": "TCP stale fence",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/udp_proxy.rs",
+          "line": 1902,
+          "symbol": "UDP stale fence",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Data-plane mode: last applied CP snapshot older than FERRUM_DP_CONFIG_MAX_STALE_SECONDS (default 3600) with CP authority lost and FERRUM_DP_CONFIG_STALE_ACTION=fail_closed (default).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": "config_stale",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Gateway configuration stale\"}",
+        "grpc_status": 14,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response. Native gRPC: HTTP 200 trailers-only grpc-status 14 grpc-message 'Gateway configuration stale' WITHOUT X-Gateway-Error. TCP/UDP listeners: accepted socket dropped / datagram session refused (no payload)."
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused new work because its data plane has not received a fresh configuration from its control plane within the allowed window; the request was not sent upstream.",
+      "must_not_claim": "That the client payload, credentials, or the backend are at fault.",
+      "remediation": "Gateway operator: restore control-plane connectivity / config sync; client can retry later (not dispatched).",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "GW-005"
+      ],
+      "notes": "Runs before routing, plugins and overload admission. Already-accepted connections drain. Readiness also degrades (/health ready:false)."
+    },
+    {
+      "id": "gateway.admission.overload_or_drain",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc",
+        "ws"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 29968,
+          "symbol": "global request admission (reject_new_requests)",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/http3/server.rs",
+          "line": 2441,
+          "symbol": "H3 overload reject",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/overload.rs",
+          "line": 1565,
+          "symbol": "begin_drain sets reject_new_requests",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Overload manager critical request pressure (FERRUM_MAX_REQUESTS with FERRUM_OVERLOAD_REQ_CRITICAL_THRESHOLD default 0.95) OR shutdown drain started (SIGTERM).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": "overload",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Service overloaded\"}",
+        "grpc_status": 14,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response. Native gRPC: HTTP 200 trailers-only grpc-status 14 'Service overloaded' without X-Gateway-Error."
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to admit this request because the gateway process is shedding load or is draining for shutdown; no upstream was contacted for this request.",
+      "must_not_claim": "That the backend is unhealthy, that it is CPU overload specifically, or which of overload vs shutdown drain applied.",
+      "remediation": "Retry later with backoff (safe: request was not dispatched); gateway operator should check overload manager pressure and deployment/shutdown activity.",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "GW-002",
+        "GW-003"
+      ],
+      "notes": "Drain and overload produce byte-identical responses; drain/pressure additionally add 'connection: close' to other responses (mod.rs:39490-39510). FERRUM_MAX_REQUESTS defaults to 0 (request-based shedding off)."
+    },
+    {
+      "id": "gateway.admission.connection_refused_at_accept",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "tcp"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 21462,
+          "symbol": "HTTP accept: reject_new_connections -> drop",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 21472,
+          "symbol": "HTTP accept: FERRUM_MAX_CONNECTIONS semaphore -> drop",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/tcp_proxy.rs",
+          "line": 2480,
+          "symbol": "TCP accept overload/stale drop",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Critical connection pressure (reject_new_connections) or the listener connection semaphore (FERRUM_MAX_CONNECTIONS, default 100000) exhausted; for TCP listeners also the stale-config fence.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "accepted TCP socket dropped immediately before TLS/HTTP (code comment says 'TCP RST'; kernel may emit FIN or RST)"
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The connection to the gateway endpoint was closed before any TLS or HTTP response; this is consistent with gateway connection admission (overload, connection limit, stale config for L4) but also with any network middlebox or a non-listening service.",
+      "must_not_claim": "That Ferrum refused it (no Ferrum marker is possible here), or any HTTP status.",
+      "remediation": "Retry with backoff; compare with a direct health check; gateway operator can check reject/connection-limit counters.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "GW-002"
+      ],
+      "notes": "No HTTP response possible. H3 equivalent: QUIC Incoming.refuse() (src/http3/server.rs:1146)."
+    },
+    {
+      "id": "gateway.admission.circuit_open",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 33107,
+          "symbol": "check_circuit_breaker reject",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 272,
+          "symbol": "CIRCUIT_BREAKER_OPEN_HEADERS",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/http3/server.rs",
+          "line": 5620,
+          "symbol": "H3 circuit breaker restore",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Circuit breaker for the proxy/target is open (or half-open probe slot taken).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": "circuit_breaker_open",
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Service temporarily unavailable (circuit breaker open)\"}",
+        "grpc_status": 14,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response. Native gRPC: normalized to trailers-only grpc-status 14 (503->UNAVAILABLE) with grpc-message 'Service temporarily unavailable (circuit breaker open)'; x-gateway-error header is restored into the reject header map so it is expected on gRPC too (not lab-verified)."
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected this attempt at its circuit breaker because recent failures to this upstream exceeded the configured threshold; this attempt was not sent upstream.",
+      "must_not_claim": "That no earlier retry attempt in the same request reached a backend, or that the backend is still failing now.",
+      "remediation": "Wait for the breaker cooldown and retry; API owner/gateway operator: investigate the upstream's recent failures.",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "GW-001"
+      ],
+      "notes": "Runs through after_proxy reject hooks (headers may be decorated) then the token is restored authoritatively. rejection_phase=circuit_breaker_open in logs."
+    },
+    {
+      "id": "gateway.admission.per_ip_concurrency",
+      "family": "rate_limit",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30516,
+          "symbol": "per-IP concurrent request limit",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "FERRUM_MAX_CONCURRENT_REQUESTS_PER_IP (default 0 = off) exceeded for the resolved client IP.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 429,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Too many concurrent requests from this IP\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge limited this request because too many requests from the same client IP were in flight at once.",
+      "must_not_claim": "That an API rate-limit quota (rate_limiting plugin) was exhausted.",
+      "remediation": "Caller: reduce concurrency from this IP; no Retry-After is provided.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "Pre-routing; no plugins run; no Retry-After / rate-limit headers; gRPC not specially mapped here (plain JSON)."
+    },
+    {
+      "id": "gateway.admission.client_trust_withdrawn",
+      "family": "frontend_tls",
+      "protocols": [
+        "http1",
+        "http2",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 29923,
+          "symbol": "frontend client-trust admission fence",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Connection authenticated with a client certificate whose trust decision was withdrawn by an accepted client-CA/CRL reload (issue #3857).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 401,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Client certificate trust withdrawn\"}",
+        "grpc_status": 16,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response; gRPC: trailers-only grpc-status 16 'Client certificate trust withdrawn'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge no longer trusts the client certificate this connection was established with; new requests on it are refused.",
+      "must_not_claim": "That the API credential/token is wrong.",
+      "remediation": "Caller: reconnect with a currently trusted client certificate; operator: check client CA/CRL changes.",
+      "owner": "caller",
+      "fixture_ids": [
+        "TLS-006"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "gateway.admission.early_data_rejected",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30409,
+          "symbol": "0-RTT early data enforcement",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Request carries Early-Data: 1 (added by a trusted CDN per RFC 8470) and its method is not in the configured early-data method list.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 425,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Method not allowed in 0-RTT early data\"}",
+        "grpc_status": 14,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response; gRPC: trailers-only grpc-status 14"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to process this request as TLS 0-RTT early data; resend it after the handshake completes.",
+      "must_not_claim": "That the method is unsupported by the API.",
+      "remediation": "Caller/CDN: retry without early data.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": ""
+    },
+    {
+      "id": "gateway.routing.no_route",
+      "family": "gateway_routing",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30967,
+          "symbol": "No route matched",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 28138,
+          "symbol": "build_pre_plugin_reject_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/grpc_proxy.rs",
+          "line": 2231,
+          "symbol": "404 -> UNIMPLEMENTED",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "No proxy route matched the request host/path.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 404,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Not Found\"}",
+        "grpc_status": 12,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response; gRPC: trailers-only grpc-status 12 grpc-message 'Not Found'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The endpoint answered 404 with Ferrum's route-miss body shape; if the destination is a trusted Ferrum gateway this means no gateway route matched this host/path.",
+      "must_not_claim": "That every 404 is a gateway route miss (backends can return the same bytes), or that the resource does not exist in the API.",
+      "remediation": "Caller: check host, path prefix and scheme against the published API; gateway operator: check route configuration.",
+      "owner": "caller",
+      "fixture_ids": [
+        "GW-006"
+      ],
+      "notes": "Pre-plugin: no auth/CORS plugins run, so a browser CORS failure may mask it. No Via header on this gateway-built response."
+    },
+    {
+      "id": "gateway.routing.method_not_allowed",
+      "family": "gateway_routing",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 31063,
+          "symbol": "per-proxy allowed_methods filter",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 24747,
+          "symbol": "restore_authoritative_allow_header",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Route matched but the method is not in the route's allowed_methods.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 405,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json",
+          "Allow": "<route allowed_methods, uppercased, ', '-joined>"
+        },
+        "body_shape": "{\"error\":\"Method Not Allowed\"}",
+        "grpc_status": 12,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response; gRPC: trailers-only grpc-status 12"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The route exists but does not accept this HTTP method; the Allow header lists the accepted methods.",
+      "must_not_claim": "That authentication failed or the resource is missing.",
+      "remediation": "Caller: use one of the methods in Allow.",
+      "owner": "caller",
+      "fixture_ids": [
+        "GW-007"
+      ],
+      "notes": "rejection_phase=allowed_methods (logs only). Allow is gateway-authoritative (policy cannot alter it)."
+    },
+    {
+      "id": "gateway.routing.trace_or_connect_blocked",
+      "family": "gateway_routing",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30373,
+          "symbol": "TRACE blocked",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30390,
+          "symbol": "non-WebSocket CONNECT blocked",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 24776,
+          "symbol": "PROTOCOL_LEVEL_405_ALLOW",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "TRACE request, or CONNECT that is not a WebSocket extended CONNECT (and not HBONE).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 405,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json",
+          "Allow": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+        },
+        "body_shape": "{\"error\":\"TRACE method is not allowed\"} | {\"error\":\"CONNECT method is not allowed\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge blocks this HTTP method at the protocol level for all routes.",
+      "must_not_claim": "That the route does not exist.",
+      "remediation": "Caller: do not use TRACE/CONNECT through the gateway.",
+      "owner": "caller",
+      "fixture_ids": [
+        "GW-007"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "gateway.routing.grpc_requires_post",
+      "family": "gateway_routing",
+      "protocols": [
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 31116,
+          "symbol": "gRPC requires POST",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Request with application/grpc content-type using a method other than POST.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 200,
+        "x_gateway_error": null,
+        "other_headers": {
+          "content-type": "application/grpc",
+          "grpc-status": "3",
+          "grpc-message": "gRPC requires POST method"
+        },
+        "body_shape": "empty (trailers-only)",
+        "grpc_status": 3,
+        "ws_close_code": null,
+        "transport": "trailers-only gRPC response (400 mapped to INVALID_ARGUMENT)"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the gRPC call because gRPC requires POST.",
+      "must_not_claim": "That the service/method does not exist.",
+      "remediation": "Caller: send gRPC calls with POST.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "Logged/metric status is 400."
+    },
+    {
+      "id": "size.request_header_single_too_large",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30165,
+          "symbol": "single header size check",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "One request header (name+value bytes) exceeds FERRUM_MAX_SINGLE_HEADER_SIZE_BYTES (default 16384).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 431,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request header '<name>' exceeds maximum size of <limit> bytes\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request because one header is larger than the gateway allows; the body names the header.",
+      "must_not_claim": "That the backend rejected it.",
+      "remediation": "Caller: shrink the named header (often cookies or tokens).",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "Header name echoed (JSON-escaped). H1 parser buffer floor is 8 KiB above which hyper itself may reject first (see frontend_parse.hyper_default_rejects)."
+    },
+    {
+      "id": "size.request_headers_total_too_large",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30185,
+          "symbol": "total header size check",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 2122,
+          "symbol": "h2_parser_max_header_list_size",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Sum of request header bytes exceeds FERRUM_MAX_HEADER_SIZE_BYTES (default 32768).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 431,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Total request headers exceed maximum size\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request because its headers are larger in total than the gateway allows.",
+      "must_not_claim": "That the backend rejected it.",
+      "remediation": "Caller: reduce header size.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "On HTTP/1 a head larger than the hyper parser buffer (max(limit, 8 KiB)) is rejected by hyper before this check with hyper's own response."
+    },
+    {
+      "id": "size.request_header_count_exceeded",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30192,
+          "symbol": "header count check",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Number of header fields exceeds FERRUM_MAX_HEADER_COUNT (default 100).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 431,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request header count (<n>) exceeds maximum of <limit>\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request because it has more header fields than the gateway allows.",
+      "must_not_claim": "That the backend rejected it.",
+      "remediation": "Caller: send fewer headers.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": ""
+    },
+    {
+      "id": "size.url_too_long",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30219,
+          "symbol": "URL length check",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "path+query length exceeds FERRUM_MAX_URL_LENGTH_BYTES (default 8192).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 414,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request URL length (<n> bytes) exceeds maximum of <limit> bytes\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request because its URL is longer than the gateway allows.",
+      "must_not_claim": "That the resource is missing.",
+      "remediation": "Caller: shorten the URL / move data into the body.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": ""
+    },
+    {
+      "id": "size.query_param_count_exceeded",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30232,
+          "symbol": "query parameter count check",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Query parameter count exceeds FERRUM_MAX_QUERY_PARAMS (default 100).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Query parameter count (<n>) exceeds maximum of <limit>\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request because it has more query parameters than the gateway allows.",
+      "must_not_claim": "That the API rejected a parameter value.",
+      "remediation": "Caller: send fewer query parameters.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": ""
+    },
+    {
+      "id": "size.request_body_too_large",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 47244,
+          "symbol": "build_request_body_too_large_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 3991,
+          "symbol": "RequestBodyBufferError::TooLarge",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 6466,
+          "symbol": "reject_result_to_backend_response 413 class",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Request body exceeds the effective limit (FERRUM_MAX_REQUEST_BODY_SIZE_BYTES default 10485760, FERRUM_MAX_GRPC_RECV_SIZE_BYTES default 4194304 for gRPC, or a lower route/request_size_limiting limit) while buffering or by Content-Length.",
+      "error_class": "request_body_too_large",
+      "public_signal": {
+        "http_status": 413,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request body exceeds maximum size\"}",
+        "grpc_status": 8,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response; gRPC: trailers-only grpc-status 8 'Request body exceeds maximum size of <limit> bytes'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request because its body exceeds the gateway's size limit.",
+      "must_not_claim": "That the backend received the full body (for streamed uploads the backend may have received a truncated prefix).",
+      "remediation": "Caller: reduce the payload or use a chunked/multipart upload API; operator may review the limit.",
+      "owner": "caller",
+      "fixture_ids": [
+        "GW-008"
+      ],
+      "notes": "The request_size_limiting plugin uses a different body shape ({\"error\":...,\"limit\":N}); see plugin outcomes. For streamed uploads exceeding the limit mid-stream the backend receives a truncated upload; client-visible shape depends on path (not fully audited)."
+    },
+    {
+      "id": "size.request_body_read_timeout",
+      "family": "size_limit",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 47217,
+          "symbol": "build_request_body_timeout_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 47326,
+          "symbol": "request_body_timeout_backend_response",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Client upload stalled beyond the request body read timeout while the gateway was buffering it.",
+      "error_class": "client_disconnect",
+      "public_signal": {
+        "http_status": 408,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request body read timed out\"}",
+        "grpc_status": 4,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response; gRPC: trailers-only grpc-status 4 'Request body read timed out'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge stopped waiting for the rest of the request body from the client; the request was not sent upstream.",
+      "must_not_claim": "That the backend timed out.",
+      "remediation": "Caller: check local upload throughput / proxy; operator: review request body timeout.",
+      "owner": "caller",
+      "fixture_ids": [
+        "LOCAL-011"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "gateway.client_disconnect_during_buffering",
+      "family": "streaming",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 4002,
+          "symbol": "RequestBodyBufferError::ClientDisconnected -> 499",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 32780,
+          "symbol": "499 Client disconnected",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Client disconnected/aborted while the gateway was buffering its request body.",
+      "error_class": "client_disconnect",
+      "public_signal": {
+        "http_status": 499,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Client disconnected\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "normally never observed by the client (it already disconnected)"
+      },
+      "evidence_visibility": "operator_logs_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The client side ended the upload before the gateway received the full request.",
+      "must_not_claim": "That the gateway or backend failed.",
+      "remediation": "Caller: check local cancellation/network.",
+      "owner": "caller",
+      "fixture_ids": [
+        "LOCAL-011"
+      ],
+      "notes": "499 is a gateway-internal status recorded in logs/metrics."
+    },
+    {
+      "id": "frontend_parse.protocol_header_violation",
+      "family": "frontend_parse",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 47008,
+          "symbol": "check_protocol_headers_with_wire_framing",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30245,
+          "symbol": "protocol header validation call",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Request smuggling / desync checks on headers: HTTP/1.0 with Transfer-Encoding, both Content-Length and Transfer-Encoding, invalid/non-numeric/overflowing/conflicting Content-Length, H2/H3 with Transfer-Encoding, invalid TE, missing/duplicate/invalid Host on HTTP/1.1.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request contains both Content-Length and Transfer-Encoding headers\"} | {\"error\":\"HTTP/1.0 does not support Transfer-Encoding\"} | {\"error\":\"Content-Length header contains invalid empty value\"} | {\"error\":\"Content-Length header contains invalid non-numeric value\"} | {\"error\":\"Content-Length header exceeds supported integer range\"} | {\"error\":\"Multiple Content-Length headers with conflicting values\"} | {\"error\":\"Request contains multiple Host headers\"} | {\"error\":\"HTTP/1.1 request is missing a Host header\"} | {\"error\":\"Host header contains invalid empty value\"} | {\"error\":\"Host header contains invalid characters\"} | {\"error\":\"HTTP/2 and HTTP/3 do not support Transfer-Encoding\"} | {\"error\":\"TE header contains invalid empty value\"} | {\"error\":\"TE header must be 'trailers' or absent\"} | {\"error\":\"TE header contains invalid characters\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request as malformed or ambiguous at the HTTP protocol layer before routing; the body names the rule.",
+      "must_not_claim": "That the API rejected the payload or that authentication failed.",
+      "remediation": "Caller: fix the request framing/Host/path encoding shown in the body (often a client or intermediate proxy bug).",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "No X-Gateway-Error on protocol 400s (issue #4543)."
+    },
+    {
+      "id": "frontend_parse.host_authority_violation",
+      "family": "frontend_parse",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 46897,
+          "symbol": "host_authority_disagreement",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 46929,
+          "symbol": "check_host_authority_consistency",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30547,
+          "symbol": "malformed Host/authority",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Host header and :authority disagree, are invalid, missing, or malformed.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Host header contains invalid authority\"} | {\"error\":\"Request authority contains invalid authority\"} | {\"error\":\"Host header and request authority disagree\"} | {\"error\":\"Request contains multiple Host headers\"} | {\"error\":\"Request is missing both :authority and Host\"} | {\"error\":\"Host header contains invalid characters\"} | {\"error\":\"Request contains malformed Host or authority\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request as malformed or ambiguous at the HTTP protocol layer before routing; the body names the rule.",
+      "must_not_claim": "That the API rejected the payload or that authentication failed.",
+      "remediation": "Caller: fix the request framing/Host/path encoding shown in the body (often a client or intermediate proxy bug).",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "No X-Gateway-Error on protocol 400s (issue #4543)."
+    },
+    {
+      "id": "frontend_parse.ambiguous_path_encoding",
+      "family": "frontend_parse",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/policy_path.rs",
+          "line": 201,
+          "symbol": "client_error_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 30328,
+          "symbol": "canonicalize_policy_path rejection",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Request path contains an ambiguous percent-encoding the canonical policy path refuses (GHSA-69xf-42xm-4w4f): incomplete/double-encoded escapes, encoded '/' or '\\\\', literal backslash, encoded control chars, (encoded) dot segments.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Request path contains an incomplete percent-escape\"} | {\"error\":\"Request path contains a double-encoded percent-escape\"} | {\"error\":\"Request path contains an encoded path separator\"} | {\"error\":\"Request path contains an encoded backslash\"} | {\"error\":\"Request path contains a backslash\"} | {\"error\":\"Request path contains an encoded control character\"} | {\"error\":\"Request path contains an unrepresentable percent-escape\"} | {\"error\":\"Request path contains an encoded dot segment\"} | {\"error\":\"Request path contains a dot segment\"}",
+        "grpc_status": 3,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request as malformed or ambiguous at the HTTP protocol layer before routing; the body names the rule.",
+      "must_not_claim": "That the API rejected the payload or that authentication failed.",
+      "remediation": "Caller: fix the request framing/Host/path encoding shown in the body (often a client or intermediate proxy bug).",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "No X-Gateway-Error on protocol 400s (issue #4543). gRPC / gRPC-Web get grpc-status 3 with messages like 'Encoded path separator in request path' (src/policy_path.rs:228)."
+    },
+    {
+      "id": "frontend_parse.h1_framing_guard_envelope",
+      "family": "frontend_parse",
+      "protocols": [
+        "http1"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/h1_framing_guard.rs",
+          "line": 59,
+          "symbol": "JSON_CONFLICTING_CONTENT_LENGTH",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/h1_framing_guard.rs",
+          "line": 63,
+          "symbol": "JSON_MALFORMED_HTTP_REQUEST",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/h1_framing_guard.rs",
+          "line": 71,
+          "symbol": "ENVELOPE_* raw responses",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "First HTTP/1 head on a connection has conflicting Content-Length values, HTTP/1.0+Transfer-Encoding, or an invalid UTF-8 request-target; written directly to the socket before hyper sees the request.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "content-type": "application/json",
+          "connection": "close"
+        },
+        "body_shape": "{\"error\":\"Multiple Content-Length headers with conflicting values\"} | {\"error\":\"HTTP/1.0 does not support Transfer-Encoding\"} | {\"error\":\"Malformed HTTP request\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "raw 'HTTP/1.1 400 Bad Request' envelope then connection close"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request as malformed HTTP/1 framing before any routing and closed the connection.",
+      "must_not_claim": "That the backend saw the request.",
+      "remediation": "Caller: fix the client's HTTP/1 framing.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "Only for the connection's first head before any response byte; later malformed heads get hyper's empty-bodied 400 (docs/error_classification.md:224-272). Before any RequestContext: no plugins/logs rows, no X-Gateway-Error."
+    },
+    {
+      "id": "frontend_parse.h1_framing_observer_failed",
+      "family": "frontend_parse",
+      "protocols": [
+        "http1"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 29856,
+          "symbol": "H1 framing observer failed",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "The inbound HTTP/1 framing observer could not verify framing (state unknown/overflowed).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json",
+          "Connection": "close"
+        },
+        "body_shape": "{\"error\":\"HTTP/1 request framing could not be verified; connection will be closed\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete response then connection close"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge could not verify this HTTP/1 connection's request framing and closed it defensively.",
+      "must_not_claim": "That the request content was invalid.",
+      "remediation": "Caller: retry on a fresh connection; report if persistent.",
+      "owner": "unknown",
+      "fixture_ids": [],
+      "notes": ""
+    },
+    {
+      "id": "frontend_parse.hyper_default_rejects",
+      "family": "frontend_parse",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 302,
+          "symbol": "http1_parser_max_buf_size (8 KiB floor)",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 13994,
+          "symbol": "hyper http1 max_buf_size",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Other malformed HTTP/1 heads hyper rejects at parse time (truncated head, non-numeric Content-Length hyper refuses, oversized head beyond the parser buffer, later heads on a pipelined connection).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": "empty body (hyper automatic response; 431 possible for an oversized head — hyper behaviour, not Ferrum code)",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "hyper-generated response then close"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The server rejected the request as unparseable HTTP before any application handling.",
+      "must_not_claim": "That Ferrum specifically generated it (no Ferrum body/header marker is present) or any gateway policy decision.",
+      "remediation": "Caller: fix the request format.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "Exact hyper status/body per failure kind is library behaviour and must be lab-verified; not Ferrum-authored."
+    },
+    {
+      "id": "frontend_parse.pre_request_timeout",
+      "family": "frontend_parse",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 14001,
+          "symbol": "http1.header_read_timeout",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 14111,
+          "symbol": "FrontendAdmission pre-request deadline",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/frontend_admission.rs",
+          "line": 50,
+          "symbol": "wait_pre_request_deadline",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "No complete request head delivered within FERRUM_HTTP_HEADER_READ_TIMEOUT_SECONDS (default 10) after accept/TLS (slowloris, idle H2 preface).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "connection closed without an HTTP response (hard close)"
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The server closed the connection before a request was accepted, consistent with a gateway header-read timeout.",
+      "must_not_claim": "Any HTTP status or backend involvement.",
+      "remediation": "Caller: send the full request head promptly; check slow proxies.",
+      "owner": "caller",
+      "fixture_ids": [
+        "TLS-010"
+      ],
+      "notes": "Idle keep-alive after the first request is not bounded by this."
+    },
+    {
+      "id": "frontend_tls.client_cert_required_missing_or_invalid",
+      "family": "frontend_tls",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "tcp"
+      ],
+      "source": [
+        {
+          "path": "src/tls/mod.rs",
+          "line": 1341,
+          "symbol": "WebPkiClientVerifier (no allow_unauthenticated)",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/tls/mod.rs",
+          "line": 1406,
+          "symbol": "with_client_cert_verifier",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "FERRUM_FRONTEND_TLS_CLIENT_CA_BUNDLE_PATH (or _SOURCE) configured on the proxy frontend: rustls WebPkiClientVerifier built WITHOUT allow_unauthenticated, so a client certificate is mandatory at the handshake and verified against the client CA bundle (+ CRLs via FERRUM_TLS_CRL_FILE_PATH).",
+      "error_class": "tls_error",
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "TLS handshake aborted with a rustls alert (typically certificate_required when none is sent under TLS 1.3; bad_certificate/unknown_ca/certificate_expired/certificate_revoked-style alerts for invalid certificates — exact alert is rustls behaviour)"
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The TLS handshake with the gateway endpoint failed; the observed alert is consistent with the server requiring or rejecting a client certificate.",
+      "must_not_claim": "That an HTTP 401/403 was received, or that the API credential is wrong.",
+      "remediation": "Caller: select a client certificate issued by the gateway's trusted client CA, with matching key and valid dates.",
+      "owner": "caller",
+      "fixture_ids": [
+        "TLS-005",
+        "TLS-006"
+      ],
+      "notes": "Frontend mTLS is all-or-nothing per listener (no optional mode on the plain proxy frontend; mesh listeners have Required/Optional/None, src/tls/mod.rs:1574). mtls_auth plugin then maps a verified cert to a consumer (HTTP 401 on no match — see plugin outcomes). FERRUM_TLS_NO_VERIFY-style no_verify disables client auth entirely (testing)."
+    },
+    {
+      "id": "frontend_tls.unknown_sni_fallback_cert",
+      "family": "frontend_tls",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "tcp"
+      ],
+      "source": [
+        {
+          "path": "src/tls/multi_cert.rs",
+          "line": 141,
+          "symbol": "SniCertResolver::resolve",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "ClientHello without SNI or with an SNI that no configured certificate claims.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "handshake completes with the fallback certificate; client-side hostname verification then fails if the name does not match"
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The gateway presented its default certificate for this host name; a name-mismatch failure is on the client-to-gateway leg.",
+      "must_not_claim": "That the backend certificate is wrong.",
+      "remediation": "Caller: use the published host name; operator: add a certificate for this name.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "TLS-002"
+      ],
+      "notes": "A name that IS claimed but has no certificate compatible with the client's signature schemes fails the handshake instead (multi_cert.rs:152-156)."
+    },
+    {
+      "id": "frontend_tls.alpn_no_overlap",
+      "family": "frontend_tls",
+      "protocols": [
+        "http1",
+        "http2"
+      ],
+      "source": [
+        {
+          "path": "src/tls/mod.rs",
+          "line": 1431,
+          "symbol": "alpn_protocols h2, http/1.1, acme-tls/1",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Client offers ALPN protocols none of which is h2 or http/1.1 (e.g. h3-only over TCP, or a custom protocol).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "rustls aborts with no_application_protocol alert (rustls default when ALPN is configured and there is no overlap)"
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The TLS handshake failed because the client and gateway share no application protocol.",
+      "must_not_claim": "Authentication failure.",
+      "remediation": "Caller: offer h2 and/or http/1.1 over TCP; use QUIC for h3.",
+      "owner": "caller",
+      "fixture_ids": [
+        "TLS-012"
+      ],
+      "notes": "rustls behaviour; lab-verify."
+    },
+    {
+      "id": "frontend_tls.handshake_timeout",
+      "family": "frontend_tls",
+      "protocols": [
+        "http1",
+        "http2",
+        "tcp"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 21705,
+          "symbol": "frontend TLS handshake timeout",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Frontend TLS handshake not completed within FERRUM_FRONTEND_TLS_HANDSHAKE_TIMEOUT_SECONDS (default 10).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "connection closed during handshake"
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The gateway endpoint closed the connection before the TLS handshake completed.",
+      "must_not_claim": "Certificate rejection (no alert evidence) or backend involvement.",
+      "remediation": "Caller: check network path and client TLS stack.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "TLS-010",
+        "TLS-011"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "gateway.response.transformer_output_ceiling",
+      "family": "transform",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 26149,
+          "symbol": "policy_refusal branch: 502 + overload",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 24790,
+          "symbol": "x_gateway_error_for_response",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/plugins/utils/size_limit.rs",
+          "line": 112,
+          "symbol": "rejection_body",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/plugins/mod.rs",
+          "line": 2112,
+          "symbol": "SizeLimitExceeded",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend response fits the effective response ceiling but response_transformer JSON body rules would produce output larger than it (issue #4784).",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "overload",
+        "other_headers": {
+          "content-type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Response body too large\",\"limit\":<retained response ceiling bytes>}",
+        "grpc_status": 8,
+        "ws_close_code": null,
+        "transport": "HTTP: complete response replacing the backend response; gRPC/gRPC-Web: HTTP 200 grpc-status 8 grpc-message 'Response body too large'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge refused to deliver this response because a gateway response transformation would exceed the gateway's response size ceiling; the backend did answer.",
+      "must_not_claim": "That the gateway is CPU/memory overloaded (despite the overload token) or that the origin body itself exceeded the ceiling.",
+      "remediation": "Gateway operator/API owner: adjust the response transformation rules or the route response ceiling.",
+      "owner": "gateway_operator",
+      "fixture_ids": [
+        "GW-009"
+      ],
+      "notes": "Only X-Gateway-Error: overload case that is not a 503; the {\"error\",\"limit\"} body shape distinguishes it from the overload 503."
+    },
+    {
+      "id": "gateway.response.representation_uninspectable",
+      "family": "transform",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 26216,
+          "symbol": "REPRESENTATION_UNINSPECTABLE_MESSAGE",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 26408,
+          "symbol": "502 representation error",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "A configured response body policy (validator, WAF, transformer, AI guard) cannot decode/inspect the backend's representation (unsupported/malformed content-encoding etc.); fail-closed.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "content-type": "application/json"
+        },
+        "body_shape": "{\"error\":\"response representation could not be inspected\"}",
+        "grpc_status": 13,
+        "ws_close_code": null,
+        "transport": "HTTP complete response; gRPC 200 trailers-only grpc-status 13 same message"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge withheld the backend response because a gateway response policy could not inspect its encoding.",
+      "must_not_claim": "That the backend returned 502.",
+      "remediation": "API owner: return an encoding the gateway supports (identity/gzip/etc.); operator: review response body policies.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "X-Gateway-Error assumed backend_error because this rewrites the status on the backend-response builder path (connection_error=false, 502); not lab-verified. Reason recorded in metadata ferrum:representation_rejected."
+    },
+    {
+      "id": "gateway.request.representation_uninspectable",
+      "family": "transform",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 6084,
+          "symbol": "request representation fail-closed 400",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/plugins/request_representation.rs",
+          "line": 231,
+          "symbol": "REQUEST_REPRESENTATION_UNINSPECTABLE_MESSAGE",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "A request body policy cannot inspect the request's Content-Encoding (malformed or unsupported coding).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "content-type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Malformed or unsupported Content-Encoding\"}",
+        "grpc_status": 3,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected the request because a gateway policy could not decode its Content-Encoding.",
+      "must_not_claim": "That the JSON/schema content is invalid.",
+      "remediation": "Caller: send an identity or supported encoding.",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": ""
+    },
+    {
+      "id": "gateway.response.redaction_failed",
+      "family": "transform",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 23982,
+          "symbol": "mandatory replay response redaction failed",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "A mandatory replay response-redaction transform failed.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 502,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "content-type": "application/json"
+        },
+        "body_shape": "{\"error\":\"response redaction failed\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge withheld the response because a required gateway redaction step failed.",
+      "must_not_claim": "That the backend failed.",
+      "remediation": "Gateway operator: check the redaction/replay plugin configuration and logs.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "X-Gateway-Error inferred (status 502 on backend-response path)."
+    },
+    {
+      "id": "gateway.response.final_policy_failure",
+      "family": "transform",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 26884,
+          "symbol": "FINAL_RESPONSE_POLICY_FAILURE_BODY",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Final client-visible response phase could not interpret a policy rejection (fail-closed).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 500,
+        "x_gateway_error": null,
+        "other_headers": {
+          "content-type": "application/json"
+        },
+        "body_shape": "{\"error\":\"response policy could not be applied\"}",
+        "grpc_status": 13,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge failed closed because a gateway response policy could not be applied.",
+      "must_not_claim": "Backend failure.",
+      "remediation": "Gateway operator: inspect gateway logs.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "X-Gateway-Error presence on this 500 depends on path; if rendered via the backend builder it would be backend_error. Unverified."
+    },
+    {
+      "id": "gateway.internal_error",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 47174,
+          "symbol": "build_response fallback",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 33029,
+          "symbol": "Internal error reject",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 25674,
+          "symbol": "normalized reject builder fallback (Internal gateway error)",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Gateway internal failure while building/converting a response or plugin result (defensive paths).",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 500,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Internal error\"} | {\"error\":\"Internal server error\"}",
+        "grpc_status": 13,
+        "ws_close_code": null,
+        "transport": "complete HTTP response; gRPC trailers-only grpc-status 13 'Internal gateway error'"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The gateway reported an internal error while handling this request.",
+      "must_not_claim": "That the backend failed (these are gateway-built responses).",
+      "remediation": "Gateway operator: inspect gateway logs; report as a defect if reproducible.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "Backends can emit the same body."
+    },
+    {
+      "id": "auth.authorization_lifetime_expired_before_commit",
+      "family": "auth",
+      "protocols": [
+        "http1",
+        "http2",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 48618,
+          "symbol": "authorization_expired_dispatch_placeholder",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 48791,
+          "symbol": "pre-commit authorization terminal",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/auth_lifetime.rs",
+          "line": 1,
+          "symbol": "auth_lifetime",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Authenticated request whose credential expiry (JWT exp, OIDC session, introspection exp, mTLS notAfter) or FERRUM_AUTHENTICATED_STREAM_MAX_LIFETIME_SECONDS (default 3600) elapsed after admission but before the response head was committed.",
+      "error_class": "client_disconnect",
+      "public_signal": {
+        "http_status": 401,
+        "x_gateway_error": null,
+        "other_headers": {
+          "content-type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Unauthorized\"}",
+        "grpc_status": 16,
+        "ws_close_code": null,
+        "transport": "HTTP: complete 401; native gRPC: HTTP 200 trailers-only grpc-status 16"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The gateway ended the request because the caller's credential (or the maximum authenticated lifetime) expired while the request was in progress.",
+      "must_not_claim": "That the credential was invalid at submission or that the backend rejected it.",
+      "remediation": "Caller: refresh the credential and retry idempotent requests.",
+      "owner": "caller",
+      "fixture_ids": [
+        "AUTH-004"
+      ],
+      "notes": "See docs/response_body_streaming.md:386-400 for after-commit behaviour (streaming.authorization_lifetime_expired_after_commit)."
+    },
+    {
+      "id": "streaming.backend_body_failure_after_headers",
+      "family": "streaming",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/retry.rs",
+          "line": 1617,
+          "symbol": "classify_body_error",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/body.rs",
+          "line": 525,
+          "symbol": "ProxyBody error propagation",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Backend body errors after the gateway committed status+headers to the client: reset, FIN before declared Content-Length, H2/H3 stream error.",
+      "error_class": "connection_closed",
+      "public_signal": {
+        "http_status": "already-sent status (often 200)",
+        "x_gateway_error": "only if status>=500 was already sent",
+        "other_headers": {},
+        "body_shape": "partial body",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "HTTP/1.1: body ends without chunked terminator / short of Content-Length, connection closed; HTTP/2: stream reset (hyper sends RST_STREAM, INTERNAL_ERROR expected — library behaviour); HTTP/3: stream reset. No trailer or marker is synthesized for plain HTTP."
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [
+        "streaming.idle_read_timeout_after_headers",
+        "streaming.response_size_exceeded_mid_stream",
+        "streaming.authorization_lifetime_expired_after_commit"
+      ],
+      "minimum_truthful_diagnosis": "Response headers arrived but the response body did not complete; the transfer was cut by the gateway or upstream after the status was sent.",
+      "must_not_claim": "That the response is complete or successful because the status was 2xx, that the gateway returned a 502, which cause (backend reset, idle timeout, size limit, credential expiry) applied, or that a non-idempotent request is safe to replay.",
+      "remediation": "Treat the result as incomplete; retry only idempotent requests; API owner/gateway operator: correlate gateway logs (body_error_class) for the cause.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-012",
+        "UP-013",
+        "TRUST-007"
+      ],
+      "notes": "Status and headers cannot be changed after commit; no X-Gateway-Error is added. error_class may be connection_closed / connection_reset / protocol_error (classify_body_error)."
+    },
+    {
+      "id": "streaming.idle_read_timeout_after_headers",
+      "family": "streaming",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/body.rs",
+          "line": 3171,
+          "symbol": "wrap_idle_read_timeout",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1667,
+          "symbol": "TimedOut -> ReadWriteTimeout",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Streaming response idle for longer than backend_read_timeout_ms between frames (wrap_idle_read_timeout).",
+      "error_class": "read_write_timeout",
+      "public_signal": {
+        "http_status": "already-sent status (often 200)",
+        "x_gateway_error": "only if status>=500 was already sent",
+        "other_headers": {},
+        "body_shape": "partial body",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "HTTP/1.1: body ends without chunked terminator / short of Content-Length, connection closed; HTTP/2: stream reset (hyper sends RST_STREAM, INTERNAL_ERROR expected — library behaviour); HTTP/3: stream reset. No trailer or marker is synthesized for plain HTTP."
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [
+        "streaming.backend_body_failure_after_headers",
+        "streaming.response_size_exceeded_mid_stream",
+        "streaming.authorization_lifetime_expired_after_commit"
+      ],
+      "minimum_truthful_diagnosis": "Response headers arrived but the response body did not complete; the transfer was cut by the gateway or upstream after the status was sent.",
+      "must_not_claim": "That the response is complete or successful because the status was 2xx, that the gateway returned a 502, which cause (backend reset, idle timeout, size limit, credential expiry) applied, or that a non-idempotent request is safe to replay.",
+      "remediation": "Treat the result as incomplete; retry only idempotent requests; API owner/gateway operator: correlate gateway logs (body_error_class) for the cause.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-011"
+      ],
+      "notes": "Status and headers cannot be changed after commit; no X-Gateway-Error is added."
+    },
+    {
+      "id": "streaming.response_size_exceeded_mid_stream",
+      "family": "streaming",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/body.rs",
+          "line": 3187,
+          "symbol": "SizeLimitedStreamingResponse",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 1699,
+          "symbol": "'response body exceeds maximum size' -> ResponseBodyTooLarge",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "No trusted Content-Length; SizeLimitedStreamingResponse counts bytes past the max response body size.",
+      "error_class": "response_body_too_large",
+      "public_signal": {
+        "http_status": "already-sent status (often 200)",
+        "x_gateway_error": "only if status>=500 was already sent",
+        "other_headers": {},
+        "body_shape": "partial body",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "HTTP/1.1: body ends without chunked terminator / short of Content-Length, connection closed; HTTP/2: stream reset (hyper sends RST_STREAM, INTERNAL_ERROR expected — library behaviour); HTTP/3: stream reset. No trailer or marker is synthesized for plain HTTP."
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [
+        "streaming.backend_body_failure_after_headers",
+        "streaming.idle_read_timeout_after_headers",
+        "streaming.authorization_lifetime_expired_after_commit"
+      ],
+      "minimum_truthful_diagnosis": "Response headers arrived but the response body did not complete; the transfer was cut by the gateway or upstream after the status was sent.",
+      "must_not_claim": "That the response is complete or successful because the status was 2xx, that the gateway returned a 502, which cause (backend reset, idle timeout, size limit, credential expiry) applied, or that a non-idempotent request is safe to replay.",
+      "remediation": "Treat the result as incomplete; retry only idempotent requests; API owner/gateway operator: correlate gateway logs (body_error_class) for the cause.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "UP-014"
+      ],
+      "notes": "Status and headers cannot be changed after commit; no X-Gateway-Error is added."
+    },
+    {
+      "id": "streaming.authorization_lifetime_expired_after_commit",
+      "family": "streaming",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3",
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/body.rs",
+          "line": 31,
+          "symbol": "AUTHORIZATION_EXPIRED_GRPC_STATUS_HEADER",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/proxy/response_watchdog.rs",
+          "line": 1,
+          "symbol": "AuthorizationTerminalOwner",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Admitted credential expiry / authenticated-stream max lifetime fires after the response head was committed.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": "already-sent status (often 200)",
+        "x_gateway_error": "only if status>=500 was already sent",
+        "other_headers": {},
+        "body_shape": "partial body",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "HTTP/1.1: body ends without chunked terminator / short of Content-Length, connection closed; HTTP/2: stream reset (hyper sends RST_STREAM, INTERNAL_ERROR expected — library behaviour); HTTP/3: stream reset. No trailer or marker is synthesized for plain HTTP."
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [
+        "streaming.backend_body_failure_after_headers",
+        "streaming.idle_read_timeout_after_headers",
+        "streaming.response_size_exceeded_mid_stream"
+      ],
+      "minimum_truthful_diagnosis": "Response headers arrived but the response body did not complete; the transfer was cut by the gateway or upstream after the status was sent.",
+      "must_not_claim": "That the response is complete or successful because the status was 2xx, that the gateway returned a 502, which cause (backend reset, idle timeout, size limit, credential expiry) applied, or that a non-idempotent request is safe to replay.",
+      "remediation": "Treat the result as incomplete; retry only idempotent requests; API owner/gateway operator: correlate gateway logs (body_error_class) for the cause.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "AUTH-004",
+        "PROTO-018"
+      ],
+      "notes": "Status and headers cannot be changed after commit; no X-Gateway-Error is added. Native gRPC before any DATA gets grpc-status 16 trailers; gRPC-Web gets a bounded trailer frame; plain HTTP/SSE never gets a synthesized status. If the client does not drain, the gateway closes the whole connection (H2 GOAWAY then close)."
+    },
+    {
+      "id": "l4.tcp.setup_failed",
+      "family": "l4",
+      "protocols": [
+        "tcp"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/stream_error.rs",
+          "line": 52,
+          "symbol": "StreamSetupKind",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 536,
+          "symbol": "classify_stream_setup_kind",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/plugins/mod.rs",
+          "line": 7605,
+          "symbol": "DisconnectCause",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "TCP (or TCP+TLS terminated) stream: backend DNS failure, connect failure, backend TLS failure, no healthy targets, circuit breaker open, backend max connections, stream plugin reject (ACL/throttle), authorization expired, client trust withdrawn, unsupported stream policy.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "client connection closed without application data (after the frontend TLS handshake when the gateway terminates TLS)"
+      },
+      "evidence_visibility": "operator_logs_only",
+      "shared_signal_with": [
+        "l4.tcp.sni_admission_refused",
+        "l4.tcp.mid_stream_disconnect"
+      ],
+      "minimum_truthful_diagnosis": "The gateway stream connection closed without delivering application data or a reason; L4 proxies cannot report the cause in-band.",
+      "must_not_claim": "A specific cause (backend down, policy reject, breaker, timeout) or that the backend received data.",
+      "remediation": "Gateway operator: check the stream transaction log (error_class, disconnect_cause, disconnect_direction) for this connection.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "PROTO-019"
+      ],
+      "notes": "Kinds are distinguishable only in StreamTransactionSummary (error_class, disconnect_cause, disconnect_direction). docs/tcp_udp_proxy.md:293: frontend TLS completes before backend connect, so a TLS client can see a successful handshake followed by close."
+    },
+    {
+      "id": "l4.tcp.sni_admission_refused",
+      "family": "l4",
+      "protocols": [
+        "tcp"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/stream_error.rs",
+          "line": 138,
+          "symbol": "SniAdmissionRefused",
+          "sha": "20e7603"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 570,
+          "symbol": "SniAdmissionRefused -> DispatchPolicyRejected",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Opaque-TLS SNI listener: not TLS, ClientHello timeout/overflow/malformed, or SNI matches no route (and no catch-all).",
+      "error_class": "dispatch_policy_rejected",
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "connection reset (docs/tcp_udp_proxy.md:268 'The client still sees RST')"
+      },
+      "evidence_visibility": "operator_logs_only",
+      "shared_signal_with": [
+        "l4.tcp.setup_failed",
+        "l4.tcp.mid_stream_disconnect"
+      ],
+      "minimum_truthful_diagnosis": "The gateway stream connection closed without delivering application data or a reason; L4 proxies cannot report the cause in-band.",
+      "must_not_claim": "A specific cause (backend down, policy reject, breaker, timeout) or that the backend received data.",
+      "remediation": "Gateway operator: check the stream transaction log (error_class, disconnect_cause, disconnect_direction) for this connection.",
+      "owner": "unknown",
+      "fixture_ids": [],
+      "notes": "FERRUM_STREAM_SNI_PLAINTEXT_FALLBACK=true routes non-TLS to the default route instead."
+    },
+    {
+      "id": "l4.tcp.mid_stream_disconnect",
+      "family": "l4",
+      "protocols": [
+        "tcp"
+      ],
+      "source": [
+        {
+          "path": "src/plugins/mod.rs",
+          "line": 7605,
+          "symbol": "DisconnectCause IdleTimeout/RecvError/BackendError/GracefulShutdown/GatewayPolicy",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Established TCP relay ends: backend reset/close, idle timeout (tcp_idle_timeout_seconds), backend write timeout, authorization lifetime expiry, drain.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "client sees FIN (half-close preserved for graceful backend FIN) or connection close/reset; no reason is transmitted"
+      },
+      "evidence_visibility": "operator_logs_only",
+      "shared_signal_with": [
+        "l4.tcp.setup_failed",
+        "l4.tcp.sni_admission_refused"
+      ],
+      "minimum_truthful_diagnosis": "The gateway stream connection closed without delivering application data or a reason; L4 proxies cannot report the cause in-band.",
+      "must_not_claim": "A specific cause (backend down, policy reject, breaker, timeout) or that the backend received data.",
+      "remediation": "Gateway operator: check the stream transaction log (error_class, disconnect_cause, disconnect_direction) for this connection.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "PROTO-019"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "l4.udp.datagram_dropped",
+      "family": "l4",
+      "protocols": [
+        "udp"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/udp_proxy.rs",
+          "line": 1901,
+          "symbol": "overload/stale session refusal",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "UDP session refused (overload, stale config, per-IP/max sessions, plugin/rate-limit drop, amplification budget exhausted, hook queue full) or backend silent.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "silence: datagrams dropped without any error signal"
+      },
+      "evidence_visibility": "operator_logs_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "No reply was observed within the wait window; UDP provides no delivery or rejection signal.",
+      "must_not_claim": "That the datagram was delivered, rejected by policy, or that the gateway is down.",
+      "remediation": "Check gateway UDP session/drop counters and backend reachability.",
+      "owner": "unknown",
+      "fixture_ids": [
+        "PROTO-020",
+        "PROTO-021"
+      ],
+      "notes": "Default udp_max_response_amplification_factor 8.0 can silently truncate reply volume."
+    },
+    {
+      "id": "l4.dtls.handshake_refused",
+      "family": "l4",
+      "protocols": [
+        "udp"
+      ],
+      "source": [
+        {
+          "path": "src/dtls/mod.rs",
+          "line": 4259,
+          "symbol": "refuse_dtls_handshake",
+          "sha": "20e7603"
+        }
+      ],
+      "condition": "Frontend DTLS client certificate invalid / refused, or backend DTLS origination failure.",
+      "error_class": "tls_error",
+      "public_signal": {
+        "http_status": null,
+        "x_gateway_error": null,
+        "other_headers": {},
+        "body_shape": null,
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "frontend DTLS client-cert refusal (FERRUM_DTLS_CLIENT_CA_CERT_PATH): server discards its queued final flight; code comment (dtls/mod.rs:4241-4252) says dimpl close() during an in-progress handshake queues no alert, so a DTLS 1.2 client sees an incomplete handshake/retransmits; DTLS 1.3 peer is torn down after the server Finished"
+      },
+      "evidence_visibility": "client_local_only",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "The DTLS handshake with the gateway was refused or did not complete.",
+      "must_not_claim": "That the backend rejected application data.",
+      "remediation": "Caller: check DTLS client certificate/trust.",
+      "owner": "caller",
+      "fixture_ids": [
+        "PROTO-022"
+      ],
+      "notes": "Code comment and docs/frontend_tls.md:270-287 disagree on whether an alert is sent under DTLS 1.2 (doc: 'emits the refusal alert'; code comment: close() queues no alert during an in-progress handshake). Lab-verify. Backend DTLS origination failures are only visible as silence (StreamSetupKind::BackendDtlsHandshake)."
+    }
+  ]
+}

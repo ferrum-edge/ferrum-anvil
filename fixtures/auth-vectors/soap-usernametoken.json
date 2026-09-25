@@ -1,0 +1,149 @@
+{
+  "source": "src/plugins/soap_ws_security.rs:2686@20e76030a05dc49c3804e969516c94ab101110b9",
+  "gateway_release": "v0.9.5",
+  "gateway_commit": "20e76030a05dc49c3804e969516c94ab101110b9",
+  "notes": [
+    "PasswordDigest = Base64(SHA-1(base64decode(Nonce) || UTF8(Created lexical) || UTF8(password))). Password comes from the soap_ws_security plugin config username_token.credentials[], NOT from Consumer credentials.",
+    "Created/Timestamp freshness is time-dependent; these vectors verify Anvil's digest math, not live acceptance. Re-generate Created and Nonce for live requests; nonces are single-use per plugin config for 93601 s."
+  ],
+  "vectors": [
+    {
+      "name": "PasswordDigest V1 test fixture nonce b\"test-nonce-12345\" (tests :1226), millisecond Created as the test helper formats it (:304-306)",
+      "inputs": {
+        "username": "alice",
+        "password": "secret123",
+        "nonce_bytes_hex": "746573742d6e6f6e63652d3132333435",
+        "nonce_base64": "dGVzdC1ub25jZS0xMjM0NQ==",
+        "created": "2026-01-01T00:00:00.000Z"
+      },
+      "expected": {
+        "password_digest_base64": "lbfI40Phe5aULmg1VUCQQo+Of+4=",
+        "digest_input_hex": "746573742d6e6f6e63652d3132333435323032362d30312d30315430303a30303a30302e3030305a736563726574313233"
+      },
+      "provenance": "auditor-computed with python3: base64.b64encode(hashlib.sha1(nonce_bytes + created.encode('utf-8') + password.encode('utf-8')).digest()). Formula copied from src/plugins/soap_ws_security.rs:2686-2699 and test helper tests/unit/plugins/soap_ws_security_tests.rs:333-361 (password_digest_security_block). Nonce bytes are the base64-DECODED wsse:Nonce (src/plugins/soap_ws_security.rs:2651-2663); created is the exact trimmed lexical wsu:Created text. Independently computed by two auditors (sub-agent and lead) with identical results. The gateway tests use Utc::now() for Created, so there is no copied expected digest."
+    },
+    {
+      "name": "PasswordDigest V2 same nonce, whole-second Created",
+      "inputs": {
+        "username": "alice",
+        "password": "secret123",
+        "nonce_bytes_hex": "746573742d6e6f6e63652d3132333435",
+        "nonce_base64": "dGVzdC1ub25jZS0xMjM0NQ==",
+        "created": "2026-01-01T00:00:00Z"
+      },
+      "expected": {
+        "password_digest_base64": "Vwk1Tx9Lm4QOBwZQ9VxrVM4/irM=",
+        "digest_input_hex": "746573742d6e6f6e63652d3132333435323032362d30312d30315430303a30303a30305a736563726574313233"
+      },
+      "provenance": "auditor-computed with python3: base64.b64encode(hashlib.sha1(nonce_bytes + created.encode('utf-8') + password.encode('utf-8')).digest()). Formula copied from src/plugins/soap_ws_security.rs:2686-2699 and test helper tests/unit/plugins/soap_ws_security_tests.rs:333-361 (password_digest_security_block). Nonce bytes are the base64-DECODED wsse:Nonce (src/plugins/soap_ws_security.rs:2651-2663); created is the exact trimmed lexical wsu:Created text. Independently computed by two auditors (sub-agent and lead) with identical results. The gateway tests use Utc::now() for Created, so there is no copied expected digest."
+    },
+    {
+      "name": "PasswordDigest V3 nonce dGVzdC1ub25jZQ== and Created 2026-01-01T00:00:00Z as they appear in structural-failure tests tests/unit/plugins/soap_ws_security_tests.rs:1366 (Created) and :1386 (Nonce)",
+      "inputs": {
+        "username": "alice",
+        "password": "secret123",
+        "nonce_bytes_hex": "746573742d6e6f6e6365",
+        "nonce_base64": "dGVzdC1ub25jZQ==",
+        "created": "2026-01-01T00:00:00Z"
+      },
+      "expected": {
+        "password_digest_base64": "NpJo90NpPsqr7sKKbiF8E7KFMDg=",
+        "digest_input_hex": "746573742d6e6f6e6365323032362d30312d30315430303a30303a30305a736563726574313233"
+      },
+      "provenance": "auditor-computed with python3: base64.b64encode(hashlib.sha1(nonce_bytes + created.encode('utf-8') + password.encode('utf-8')).digest()). Formula copied from src/plugins/soap_ws_security.rs:2686-2699 and test helper tests/unit/plugins/soap_ws_security_tests.rs:333-361 (password_digest_security_block). Nonce bytes are the base64-DECODED wsse:Nonce (src/plugins/soap_ws_security.rs:2651-2663); created is the exact trimmed lexical wsu:Created text. Independently computed by two auditors (sub-agent and lead) with identical results. The gateway tests use Utc::now() for Created, so there is no copied expected digest."
+    },
+    {
+      "name": "PasswordDigest V4 replay test nonce b\"replay-nonce-001\" (tests :1413)",
+      "inputs": {
+        "username": "alice",
+        "password": "secret123",
+        "nonce_bytes_hex": "7265706c61792d6e6f6e63652d303031",
+        "nonce_base64": "cmVwbGF5LW5vbmNlLTAwMQ==",
+        "created": "2026-01-01T00:00:00.000Z"
+      },
+      "expected": {
+        "password_digest_base64": "VYp42Iy+/bQhFQY2fatVMyxOvl0=",
+        "digest_input_hex": "7265706c61792d6e6f6e63652d303031323032362d30312d30315430303a30303a30302e3030305a736563726574313233"
+      },
+      "provenance": "auditor-computed with python3: base64.b64encode(hashlib.sha1(nonce_bytes + created.encode('utf-8') + password.encode('utf-8')).digest()). Formula copied from src/plugins/soap_ws_security.rs:2686-2699 and test helper tests/unit/plugins/soap_ws_security_tests.rs:333-361 (password_digest_security_block). Nonce bytes are the base64-DECODED wsse:Nonce (src/plugins/soap_ws_security.rs:2651-2663); created is the exact trimmed lexical wsu:Created text. Independently computed by two auditors (sub-agent and lead) with identical results. The gateway tests use Utc::now() for Created, so there is no copied expected digest."
+    },
+    {
+      "name": "PasswordDigest V5 16 zero bytes, auditor choice",
+      "inputs": {
+        "username": "alice",
+        "password": "shared-secret",
+        "nonce_bytes_hex": "00000000000000000000000000000000",
+        "nonce_base64": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "created": "2026-01-01T00:00:00Z"
+      },
+      "expected": {
+        "password_digest_base64": "XJtTmwEIPtUMTjooFZ3HoQE4dbM=",
+        "digest_input_hex": "00000000000000000000000000000000323032362d30312d30315430303a30303a30305a7368617265642d736563726574"
+      },
+      "provenance": "auditor-computed with python3: base64.b64encode(hashlib.sha1(nonce_bytes + created.encode('utf-8') + password.encode('utf-8')).digest()). Formula copied from src/plugins/soap_ws_security.rs:2686-2699 and test helper tests/unit/plugins/soap_ws_security_tests.rs:333-361 (password_digest_security_block). Nonce bytes are the base64-DECODED wsse:Nonce (src/plugins/soap_ws_security.rs:2651-2663); created is the exact trimmed lexical wsu:Created text. Independently computed by two auditors (sub-agent and lead) with identical results. The gateway tests use Utc::now() for Created, so there is no copied expected digest."
+    },
+    {
+      "name": "NEGATIVE: hashing the nonce base64 TEXT instead of decoded bytes (V1 inputs)",
+      "inputs": {
+        "nonce_base64": "dGVzdC1ub25jZS0xMjM0NQ==",
+        "created": "2026-01-01T00:00:00.000Z",
+        "password": "secret123",
+        "wrong_nonce_input": "utf8 of base64 text"
+      },
+      "expected": {
+        "password_digest_base64": "bPL/9a45uuWAjm4z6hLKf4XN5OM=",
+        "gateway_accepts": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"WS-Security: invalid credentials\"}"
+      },
+      "provenance": "auditor-computed; demonstrates a common client bug. Reject body per src/plugins/soap_ws_security.rs:1008-1010, :4773-4783."
+    },
+    {
+      "name": "exclusive c14n of element Payload with InclusiveNamespaces PrefixList=\"keep #default\"",
+      "inputs": {
+        "xml": "<outer xmlns=\"urn:default\" xmlns:p=\"urn:payload\" xmlns:keep=\"urn:inclusive\">\n        <p:Payload z=\"last\" p:qualified=\"third\" a=\"first\"><Child/><p:Empty/></p:Payload>\n    </outer>",
+        "apex_local_name": "Payload",
+        "inclusive_prefix_list": "keep #default",
+        "algorithm": "http://www.w3.org/2001/10/xml-exc-c14n#"
+      },
+      "expected": {
+        "canonical": "<p:Payload xmlns=\"urn:default\" xmlns:keep=\"urn:inclusive\" xmlns:p=\"urn:payload\" a=\"first\" z=\"last\" p:qualified=\"third\"><Child></Child><p:Empty></p:Empty></p:Payload>"
+      },
+      "provenance": "copied from gateway test tests/unit/plugins/soap_ws_security_tests.rs:815-827 (exclusive_c14n_reemits_inherited_namespaces_and_orders_attributes). Only fixed input->output vector in the SOAP test suite."
+    },
+    {
+      "name": "complete SOAP 1.1 envelope, UsernameToken PasswordDigest + bound wsu:Timestamp (V1)",
+      "inputs": {
+        "content_type": "text/xml",
+        "username": "alice",
+        "password": "secret123",
+        "nonce_base64": "dGVzdC1ub25jZS0xMjM0NQ==",
+        "created": "2026-01-01T00:00:00.000Z",
+        "plugin_config": {
+          "timestamp": {
+            "require": true,
+            "max_age_seconds": 300
+          },
+          "username_token": {
+            "enabled": true,
+            "password_type": "PasswordDigest",
+            "credentials": [
+              {
+                "username": "alice",
+                "password": "secret123"
+              }
+            ]
+          },
+          "nonce": {
+            "replay_scope": "process"
+          }
+        }
+      },
+      "expected": {
+        "envelope": "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\">\n  <soap:Header>\n    <wsse:Security xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"\n                   xmlns:wsu=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">\n      <wsu:Timestamp wsu:Id=\"TS-1\"><wsu:Created>2026-01-01T00:00:00.000Z</wsu:Created></wsu:Timestamp><wsse:UsernameToken>\n        <wsse:Username>alice</wsse:Username>\n        <wsse:Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">lbfI40Phe5aULmg1VUCQQo+Of+4=</wsse:Password>\n        <wsse:Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">dGVzdC1ub25jZS0xMjM0NQ==</wsse:Nonce>\n        <wsu:Created>2026-01-01T00:00:00.000Z</wsu:Created>\n    </wsse:UsernameToken>\n    </wsse:Security>\n  </soap:Header>\n  <soap:Body>\n    <GetPrice xmlns=\"http://example.com/prices\"><Item>Widget</Item></GetPrice>\n  </soap:Body>\n</soap:Envelope>",
+        "accepted_when": "gateway clock within [Created-300s, Created+600s] (defaults) and nonce not previously claimed on this plugin config"
+      },
+      "provenance": "assembled by auditor from gateway test helpers wrap_soap (tests/unit/plugins/soap_ws_security_tests.rs:177-192), bound_timestamp (:321-326) and password_digest_security_block (:333-361) with V1 inputs substituted for Utc::now(); digest auditor-computed. Not replayed against a live gateway."
+    }
+  ]
+}

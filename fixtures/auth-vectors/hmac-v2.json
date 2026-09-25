@@ -1,0 +1,593 @@
+{
+  "source": "src/plugins/hmac_auth.rs:1902@20e76030a05dc49c3804e969516c94ab101110b9",
+  "gateway_release": "v0.9.5",
+  "gateway_commit": "20e76030a05dc49c3804e969516c94ab101110b9",
+  "notes": [
+    "The gateway's own HMAC tests sign with Utc::now() and assert accept/reject only; they contain NO fixed expected signatures. Every signature_base64 below is auditor-computed (python3 hmac/hashlib/base64, cross-checked for the first vector with `openssl dgst -sha256 -hmac`).",
+    "Signing string = '\\n'.join([profile, namespace, username, authority, METHOD, raw_path, raw_query, Date, digest_header_value, nonce]) (src/plugins/hmac_auth.rs:1902-1943). No trailing newline.",
+    "These vectors will NOT verify against a live gateway unless the gateway clock is within clock_skew_seconds (default/max 300) of the vector Date; re-sign with a fresh Date and nonce for live tests. They are for unit-testing Anvil's canonicalization and HMAC code.",
+    "Each v2 nonce is single-use per (namespace, plugin-config id, consumer id) for 601 s (src/plugins/hmac_auth.rs:138,1215)."
+  ],
+  "vectors": [
+    {
+      "name": "v2_post_empty_body_legacy_digest",
+      "inputs": {
+        "profile": "ferrum-hmac-v2",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "api.example.com",
+        "method": "POST",
+        "raw_path": "/api/orders",
+        "raw_query": "",
+        "request_target": "/api/orders",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "",
+        "body_len": 0,
+        "digest_header_name": "Digest",
+        "digest_header_value": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+        "nonce": "00000000000000000000000000000001",
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v2\nferrum\nhmacuser\napi.example.com\nPOST\n/api/orders\n\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n00000000000000000000000000000001",
+        "signing_string_escaped": "\"ferrum-hmac-v2\\nferrum\\nhmacuser\\napi.example.com\\nPOST\\n/api/orders\\n\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\\n00000000000000000000000000000001\"",
+        "signature_base64": "vlAdWZHYHFwVVfnST/t7ko2t3O9ekn8GU8bOyLnlX9w=",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000001\", signature=\"vlAdWZHYHFwVVfnST/t7ko2t3O9ekn8GU8bOyLnlX9w=\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000001\", signature=\"vlAdWZHYHFwVVfnST/t7ko2t3O9ekn8GU8bOyLnlX9w=\"",
+          "Date": "Fri, 25 Sep 2026 12:00:00 GMT",
+          "Digest": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+          "Host": "api.example.com"
+        }
+      },
+      "provenance": "auditor-computed with python3 hmac/hashlib/base64 (script: scratchpad/vec/hmac_vectors.py, reproduced in docs/audit/gateway-auth-profiles.md). Inputs are the fixed constants of tests/unit/plugins/hmac_auth_tests.rs:25-27 (TEST_SECRET/TEST_USERNAME/TEST_AUTHORITY), DEFAULT_NAMESPACE='ferrum' (src/config/types.rs:3491), V2Request method/path (tests/unit/plugins/hmac_auth_tests.rs:1982-1985) and test_nonce(seed) (:1968); the gateway test uses Utc::now() for Date, so the Date here is a fixed auditor choice. Signing-string layout per build_signing_string (src/plugins/hmac_auth.rs:1902-1943) and test helper build_v2_signing_string (tests/unit/plugins/hmac_auth_tests.rs:1940). Signature = base64 STANDARD (padded) of HMAC(secret_utf8, signing_string_utf8)."
+    },
+    {
+      "name": "v2_post_ping_body_content_digest",
+      "inputs": {
+        "profile": "ferrum-hmac-v2",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "api.example.com",
+        "method": "POST",
+        "raw_path": "/api/orders",
+        "raw_query": "",
+        "request_target": "/api/orders",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "{\"ping\":1}",
+        "body_len": 10,
+        "digest_header_name": "Content-Digest",
+        "digest_header_value": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:",
+        "nonce": "00000000000000000000000000000f5c",
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v2\nferrum\nhmacuser\napi.example.com\nPOST\n/api/orders\n\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:\n00000000000000000000000000000f5c",
+        "signing_string_escaped": "\"ferrum-hmac-v2\\nferrum\\nhmacuser\\napi.example.com\\nPOST\\n/api/orders\\n\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:\\n00000000000000000000000000000f5c\"",
+        "signature_base64": "5LCS367Dfl/E2+3m5C91yY9sq3K+hjmIwbsH2XnQu2o=",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000f5c\", signature=\"5LCS367Dfl/E2+3m5C91yY9sq3K+hjmIwbsH2XnQu2o=\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000f5c\", signature=\"5LCS367Dfl/E2+3m5C91yY9sq3K+hjmIwbsH2XnQu2o=\"",
+          "Date": "Fri, 25 Sep 2026 12:00:00 GMT",
+          "Content-Digest": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:",
+          "Host": "api.example.com"
+        }
+      },
+      "provenance": "auditor-computed with python3 hmac/hashlib/base64 (script: scratchpad/vec/hmac_vectors.py, reproduced in docs/audit/gateway-auth-profiles.md). Inputs are the fixed constants of tests/unit/plugins/hmac_auth_tests.rs:25-27 (TEST_SECRET/TEST_USERNAME/TEST_AUTHORITY), DEFAULT_NAMESPACE='ferrum' (src/config/types.rs:3491), V2Request method/path (tests/unit/plugins/hmac_auth_tests.rs:1982-1985) and test_nonce(seed) (:1968); the gateway test uses Utc::now() for Date, so the Date here is a fixed auditor choice. Signing-string layout per build_signing_string (src/plugins/hmac_auth.rs:1902-1943) and test helper build_v2_signing_string (tests/unit/plugins/hmac_auth_tests.rs:1940). Signature = base64 STANDARD (padded) of HMAC(secret_utf8, signing_string_utf8). Body/digest mirror v2_accepts_rfc9530_content_digest_for_nonempty_body (tests/unit/plugins/hmac_auth_tests.rs:2696)."
+    },
+    {
+      "name": "v2_post_ping_body_legacy_digest",
+      "inputs": {
+        "profile": "ferrum-hmac-v2",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "api.example.com",
+        "method": "POST",
+        "raw_path": "/api/orders",
+        "raw_query": "",
+        "request_target": "/api/orders",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "{\"ping\":1}",
+        "body_len": 10,
+        "digest_header_name": "Digest",
+        "digest_header_value": "sha-256=ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=",
+        "nonce": "00000000000000000000000000000f5e",
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v2\nferrum\nhmacuser\napi.example.com\nPOST\n/api/orders\n\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=\n00000000000000000000000000000f5e",
+        "signing_string_escaped": "\"ferrum-hmac-v2\\nferrum\\nhmacuser\\napi.example.com\\nPOST\\n/api/orders\\n\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=\\n00000000000000000000000000000f5e\"",
+        "signature_base64": "q/lOMwFQLVWGW6Ux1yBh62hKC20tNnkdciV6s4X8hic=",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000f5e\", signature=\"q/lOMwFQLVWGW6Ux1yBh62hKC20tNnkdciV6s4X8hic=\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000f5e\", signature=\"q/lOMwFQLVWGW6Ux1yBh62hKC20tNnkdciV6s4X8hic=\"",
+          "Date": "Fri, 25 Sep 2026 12:00:00 GMT",
+          "Digest": "sha-256=ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=",
+          "Host": "api.example.com"
+        }
+      },
+      "provenance": "auditor-computed with python3 hmac/hashlib/base64 (script: scratchpad/vec/hmac_vectors.py, reproduced in docs/audit/gateway-auth-profiles.md). Inputs are the fixed constants of tests/unit/plugins/hmac_auth_tests.rs:25-27 (TEST_SECRET/TEST_USERNAME/TEST_AUTHORITY), DEFAULT_NAMESPACE='ferrum' (src/config/types.rs:3491), V2Request method/path (tests/unit/plugins/hmac_auth_tests.rs:1982-1985) and test_nonce(seed) (:1968); the gateway test uses Utc::now() for Date, so the Date here is a fixed auditor choice. Signing-string layout per build_signing_string (src/plugins/hmac_auth.rs:1902-1943) and test helper build_v2_signing_string (tests/unit/plugins/hmac_auth_tests.rs:1940). Signature = base64 STANDARD (padded) of HMAC(secret_utf8, signing_string_utf8). Mirrors v2_accepts_legacy_digest_for_nonempty_and_empty_bodies (:2714)."
+    },
+    {
+      "name": "v2_post_ping_body_content_digest_sha256_and_sha512",
+      "inputs": {
+        "profile": "ferrum-hmac-v2",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "api.example.com",
+        "method": "POST",
+        "raw_path": "/api/orders",
+        "raw_query": "",
+        "request_target": "/api/orders",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "{\"ping\":1}",
+        "body_len": 10,
+        "digest_header_name": "Content-Digest",
+        "digest_header_value": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:, sha-512=:/BE9DVToegd+YvBsVYNx9nATEzmKa9wf0pToVetGYxvPi+J+YmElGvN1KtiXL3yP0UvTsk/BXfgMFmcK0xNzQg==:",
+        "nonce": "00000000000000000000000000000f69",
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v2\nferrum\nhmacuser\napi.example.com\nPOST\n/api/orders\n\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:, sha-512=:/BE9DVToegd+YvBsVYNx9nATEzmKa9wf0pToVetGYxvPi+J+YmElGvN1KtiXL3yP0UvTsk/BXfgMFmcK0xNzQg==:\n00000000000000000000000000000f69",
+        "signing_string_escaped": "\"ferrum-hmac-v2\\nferrum\\nhmacuser\\napi.example.com\\nPOST\\n/api/orders\\n\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:, sha-512=:/BE9DVToegd+YvBsVYNx9nATEzmKa9wf0pToVetGYxvPi+J+YmElGvN1KtiXL3yP0UvTsk/BXfgMFmcK0xNzQg==:\\n00000000000000000000000000000f69\"",
+        "signature_base64": "de3L4EyK9nhWmnSYx8FQd5QLZIIdCiS+oUZmQGgfCV0=",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000f69\", signature=\"de3L4EyK9nhWmnSYx8FQd5QLZIIdCiS+oUZmQGgfCV0=\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000f69\", signature=\"de3L4EyK9nhWmnSYx8FQd5QLZIIdCiS+oUZmQGgfCV0=\"",
+          "Date": "Fri, 25 Sep 2026 12:00:00 GMT",
+          "Content-Digest": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:, sha-512=:/BE9DVToegd+YvBsVYNx9nATEzmKa9wf0pToVetGYxvPi+J+YmElGvN1KtiXL3yP0UvTsk/BXfgMFmcK0xNzQg==:",
+          "Host": "api.example.com"
+        }
+      },
+      "provenance": "auditor-computed with python3 hmac/hashlib/base64 (script: scratchpad/vec/hmac_vectors.py, reproduced in docs/audit/gateway-auth-profiles.md). Inputs are the fixed constants of tests/unit/plugins/hmac_auth_tests.rs:25-27 (TEST_SECRET/TEST_USERNAME/TEST_AUTHORITY), DEFAULT_NAMESPACE='ferrum' (src/config/types.rs:3491), V2Request method/path (tests/unit/plugins/hmac_auth_tests.rs:1982-1985) and test_nonce(seed) (:1968); the gateway test uses Utc::now() for Date, so the Date here is a fixed auditor choice. Signing-string layout per build_signing_string (src/plugins/hmac_auth.rs:1902-1943) and test helper build_v2_signing_string (tests/unit/plugins/hmac_auth_tests.rs:1940). Signature = base64 STANDARD (padded) of HMAC(secret_utf8, signing_string_utf8). Mirrors v2_accepts_combined_rfc9530_sha256_and_sha512_when_both_match (:2955); two members joined by ', ' exactly as the gateway folds repeated field lines (src/plugins/mod.rs:5966-5973, separator ', ' at :6367-6372)."
+    },
+    {
+      "name": "v2_get_with_raw_query",
+      "inputs": {
+        "profile": "ferrum-hmac-v2",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "api.example.com",
+        "method": "GET",
+        "raw_path": "/api/orders",
+        "raw_query": "status=open&sort=-created%20at",
+        "request_target": "/api/orders?status=open&sort=-created%20at",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "",
+        "body_len": 0,
+        "digest_header_name": "Content-Digest",
+        "digest_header_value": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+        "nonce": "zzzzzzzzzzzzzzzzzzzzzz",
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v2\nferrum\nhmacuser\napi.example.com\nGET\n/api/orders\nstatus=open&sort=-created%20at\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\nzzzzzzzzzzzzzzzzzzzzzz",
+        "signing_string_escaped": "\"ferrum-hmac-v2\\nferrum\\nhmacuser\\napi.example.com\\nGET\\n/api/orders\\nstatus=open&sort=-created%20at\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\\nzzzzzzzzzzzzzzzzzzzzzz\"",
+        "signature_base64": "+4Uvj3L5tWN6PLyFKacsJlq7AsuYrtrp4UWprD1aW+8=",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"zzzzzzzzzzzzzzzzzzzzzz\", signature=\"+4Uvj3L5tWN6PLyFKacsJlq7AsuYrtrp4UWprD1aW+8=\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"zzzzzzzzzzzzzzzzzzzzzz\", signature=\"+4Uvj3L5tWN6PLyFKacsJlq7AsuYrtrp4UWprD1aW+8=\"",
+          "Date": "Fri, 25 Sep 2026 12:00:00 GMT",
+          "Content-Digest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+          "Host": "api.example.com"
+        }
+      },
+      "provenance": "auditor-computed with python3 hmac/hashlib/base64 (script: scratchpad/vec/hmac_vectors.py, reproduced in docs/audit/gateway-auth-profiles.md). Inputs are the fixed constants of tests/unit/plugins/hmac_auth_tests.rs:25-27 (TEST_SECRET/TEST_USERNAME/TEST_AUTHORITY), DEFAULT_NAMESPACE='ferrum' (src/config/types.rs:3491), V2Request method/path (tests/unit/plugins/hmac_auth_tests.rs:1982-1985) and test_nonce(seed) (:1968); the gateway test uses Utc::now() for Date, so the Date here is a fixed auditor choice. Signing-string layout per build_signing_string (src/plugins/hmac_auth.rs:1902-1943) and test helper build_v2_signing_string (tests/unit/plugins/hmac_auth_tests.rs:1940). Signature = base64 STANDARD (padded) of HMAC(secret_utf8, signing_string_utf8). Query and 22-char base64url nonce ('zzzzzzzzzzzzzzzzzzzzzz' is admitted per all_hex_nonces_are_held_to_the_hex_entropy_floor, :2250-2268) are auditor choices; query is signed verbatim (still percent-encoded, no leading '?')."
+    },
+    {
+      "name": "v2_hmac_sha512_rfc3339_date",
+      "inputs": {
+        "profile": "ferrum-hmac-v2",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "api.example.com",
+        "method": "DELETE",
+        "raw_path": "/api/orders/42",
+        "raw_query": "",
+        "request_target": "/api/orders/42",
+        "date": "2026-09-25T12:00:00+00:00",
+        "body_utf8": "",
+        "body_len": 0,
+        "digest_header_name": "Digest",
+        "digest_header_value": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+        "nonce": "00000000000000000000000000000007",
+        "algorithm": "hmac-sha512"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v2\nferrum\nhmacuser\napi.example.com\nDELETE\n/api/orders/42\n\n2026-09-25T12:00:00+00:00\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n00000000000000000000000000000007",
+        "signing_string_escaped": "\"ferrum-hmac-v2\\nferrum\\nhmacuser\\napi.example.com\\nDELETE\\n/api/orders/42\\n\\n2026-09-25T12:00:00+00:00\\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\\n00000000000000000000000000000007\"",
+        "signature_base64": "B1IAK6ZaRhnwjw4BoRSplDXI9S86Q5reLiJtMCLU6pRWfiqI/qubeutpd6NPVtWyZaQimbnEZ5fFBD4COXOk/A==",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha512\", nonce=\"00000000000000000000000000000007\", signature=\"B1IAK6ZaRhnwjw4BoRSplDXI9S86Q5reLiJtMCLU6pRWfiqI/qubeutpd6NPVtWyZaQimbnEZ5fFBD4COXOk/A==\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha512\", nonce=\"00000000000000000000000000000007\", signature=\"B1IAK6ZaRhnwjw4BoRSplDXI9S86Q5reLiJtMCLU6pRWfiqI/qubeutpd6NPVtWyZaQimbnEZ5fFBD4COXOk/A==\"",
+          "Date": "2026-09-25T12:00:00+00:00",
+          "Digest": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+          "Host": "api.example.com"
+        }
+      },
+      "provenance": "auditor-computed with python3 hmac/hashlib/base64 (script: scratchpad/vec/hmac_vectors.py, reproduced in docs/audit/gateway-auth-profiles.md). Inputs are the fixed constants of tests/unit/plugins/hmac_auth_tests.rs:25-27 (TEST_SECRET/TEST_USERNAME/TEST_AUTHORITY), DEFAULT_NAMESPACE='ferrum' (src/config/types.rs:3491), V2Request method/path (tests/unit/plugins/hmac_auth_tests.rs:1982-1985) and test_nonce(seed) (:1968); the gateway test uses Utc::now() for Date, so the Date here is a fixed auditor choice. Signing-string layout per build_signing_string (src/plugins/hmac_auth.rs:1902-1943) and test helper build_v2_signing_string (tests/unit/plugins/hmac_auth_tests.rs:1940). Signature = base64 STANDARD (padded) of HMAC(secret_utf8, signing_string_utf8). algorithm hmac-sha512 (src/plugins/hmac_auth.rs:643,1242-1249) and an RFC 3339 Date (accepted by validate_date, :1280) are auditor choices."
+    },
+    {
+      "name": "v2_authority_with_nondefault_port",
+      "inputs": {
+        "profile": "ferrum-hmac-v2",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "localhost:8443",
+        "method": "PUT",
+        "raw_path": "/v1/items/a%3Ab",
+        "raw_query": "",
+        "request_target": "/v1/items/a%3Ab",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "{\"ping\":1}",
+        "body_len": 10,
+        "digest_header_name": "Content-Digest",
+        "digest_header_value": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:",
+        "nonce": "00000000000000000000000000000063",
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v2\nferrum\nhmacuser\nlocalhost:8443\nPUT\n/v1/items/a%3Ab\n\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:\n00000000000000000000000000000063",
+        "signing_string_escaped": "\"ferrum-hmac-v2\\nferrum\\nhmacuser\\nlocalhost:8443\\nPUT\\n/v1/items/a%3Ab\\n\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:\\n00000000000000000000000000000063\"",
+        "signature_base64": "UQQaTebRcF345dWSHDPdzqULb8HDMMDJX0665jpL1qk=",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000063\", signature=\"UQQaTebRcF345dWSHDPdzqULb8HDMMDJX0665jpL1qk=\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", nonce=\"00000000000000000000000000000063\", signature=\"UQQaTebRcF345dWSHDPdzqULb8HDMMDJX0665jpL1qk=\"",
+          "Date": "Fri, 25 Sep 2026 12:00:00 GMT",
+          "Content-Digest": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:",
+          "Host": "localhost:8443"
+        }
+      },
+      "provenance": "auditor-computed with python3 hmac/hashlib/base64 (script: scratchpad/vec/hmac_vectors.py, reproduced in docs/audit/gateway-auth-profiles.md). Inputs are the fixed constants of tests/unit/plugins/hmac_auth_tests.rs:25-27 (TEST_SECRET/TEST_USERNAME/TEST_AUTHORITY), DEFAULT_NAMESPACE='ferrum' (src/config/types.rs:3491), V2Request method/path (tests/unit/plugins/hmac_auth_tests.rs:1982-1985) and test_nonce(seed) (:1968); the gateway test uses Utc::now() for Date, so the Date here is a fixed auditor choice. Signing-string layout per build_signing_string (src/plugins/hmac_auth.rs:1902-1943) and test helper build_v2_signing_string (tests/unit/plugins/hmac_auth_tests.rs:1940). Signature = base64 STANDARD (padded) of HMAC(secret_utf8, signing_string_utf8). Authority 'localhost:8443' = normalize_request_authority_for_signing of Host 'LOCALHOST:8443' on an https listener (src/proxy/mod.rs:46864-46885: host lowercased, non-default port kept). NOTE: raw path '/v1/items/a%3Ab' canonicalizes (':' is pchar) so the gateway keeps the raw spelling for HMAC via set_raw_path_for_hmac (src/proxy/mod.rs:30360-30366) -> sign the raw wire path."
+    },
+    {
+      "name": "nonce_wire_form: empty",
+      "inputs": {
+        "nonce": ""
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: far below the entropy floor",
+      "inputs": {
+        "nonce": "short"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: 31 hex chars: below 128 bits",
+      "inputs": {
+        "nonce": "0123456789abcdef0123456789abcde"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: 30 hex chars: below 128 bits",
+      "inputs": {
+        "nonce": "0123456789abcdef0123456789abcd"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: 21 base64url chars: below 128 bits",
+      "inputs": {
+        "nonce": "aaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: whitespace",
+      "inputs": {
+        "nonce": "aaaa aaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: control byte",
+      "inputs": {
+        "nonce": "aaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: base64 padding is not base64url-unpadded",
+      "inputs": {
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAA=="
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: standard-base64 alphabet",
+      "inputs": {
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAA+/"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: above the length ceiling (87 chars)",
+      "inputs": {
+        "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: 22 chars, all hex, 88 bits (all_hex_nonces_are_held_to_the_hex_entropy_floor)",
+      "inputs": {
+        "nonce": "0123456789abcdef012345"
+      },
+      "expected": {
+        "accepted": false,
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed nonce in HMAC authorization\"}"
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: 22 non-hex base64url chars, 132 bits",
+      "inputs": {
+        "nonce": "zzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "expected": {
+        "accepted": true,
+        "reject_status": null,
+        "reject_body": null
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "nonce_wire_form: test_nonce(1): 32 lowercase hex chars",
+      "inputs": {
+        "nonce": "00000000000000000000000000000001"
+      },
+      "expected": {
+        "accepted": true,
+        "reject_status": null,
+        "reject_body": null
+      },
+      "provenance": "copied from gateway tests tests/unit/plugins/hmac_auth_tests.rs:2204-2246 (v2_rejects_a_missing_or_malformed_nonce_before_backend_dispatch) and :2250-2268 (all_hex_nonces_are_held_to_the_hex_entropy_floor); the 32-hex positive case is test_nonce(1) (:1968-1970). Reject body per src/plugins/hmac_auth.rs:218 returned by parse_hmac_authorization (:650-657) when nonce_wire_form_is_valid (:247-262) is false. Tests assert only status 401; the exact body is read from source."
+    },
+    {
+      "name": "empty body, legacy Digest sha-256",
+      "inputs": {
+        "header": "Digest",
+        "body_utf8": ""
+      },
+      "expected": {
+        "value": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
+      },
+      "provenance": "auditor-computed: python3 base64.b64encode(hashlib.sha256|sha512(body).digest()); format per test helpers tests/unit/plugins/hmac_auth_tests.rs:241-271 and tests/common/hmac_helpers.rs:184-206. The empty-body Content-Digest value also appears verbatim in gateway docs docs/plugins.md:2968. Cross-checked sha-256 values with `openssl dgst -sha256 -binary | base64`."
+    },
+    {
+      "name": "empty body, Content-Digest sha-256 (also the WebSocket handshake value)",
+      "inputs": {
+        "header": "Content-Digest",
+        "body_utf8": ""
+      },
+      "expected": {
+        "value": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+      },
+      "provenance": "auditor-computed: python3 base64.b64encode(hashlib.sha256|sha512(body).digest()); format per test helpers tests/unit/plugins/hmac_auth_tests.rs:241-271 and tests/common/hmac_helpers.rs:184-206. The empty-body Content-Digest value also appears verbatim in gateway docs docs/plugins.md:2968. Cross-checked sha-256 values with `openssl dgst -sha256 -binary | base64`."
+    },
+    {
+      "name": "empty body, legacy Digest sha-512",
+      "inputs": {
+        "header": "Digest",
+        "body_utf8": ""
+      },
+      "expected": {
+        "value": "sha-512=z4PhNX7vuL3xVChQ1m2AB9Yg5AULVxXcg/SpIdNs6c5H0NE8XYXysP+DGNKHfuwvY7kxvUdBeoGlODJ6+SfaPg=="
+      },
+      "provenance": "auditor-computed: python3 base64.b64encode(hashlib.sha256|sha512(body).digest()); format per test helpers tests/unit/plugins/hmac_auth_tests.rs:241-271 and tests/common/hmac_helpers.rs:184-206. The empty-body Content-Digest value also appears verbatim in gateway docs docs/plugins.md:2968. Cross-checked sha-256 values with `openssl dgst -sha256 -binary | base64`."
+    },
+    {
+      "name": "{\"ping\":1}, legacy Digest sha-256",
+      "inputs": {
+        "header": "Digest",
+        "body_utf8": "{\"ping\":1}"
+      },
+      "expected": {
+        "value": "sha-256=ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g="
+      },
+      "provenance": "auditor-computed: python3 base64.b64encode(hashlib.sha256|sha512(body).digest()); format per test helpers tests/unit/plugins/hmac_auth_tests.rs:241-271 and tests/common/hmac_helpers.rs:184-206. The empty-body Content-Digest value also appears verbatim in gateway docs docs/plugins.md:2968. Cross-checked sha-256 values with `openssl dgst -sha256 -binary | base64`."
+    },
+    {
+      "name": "{\"ping\":1}, Content-Digest sha-256",
+      "inputs": {
+        "header": "Content-Digest",
+        "body_utf8": "{\"ping\":1}"
+      },
+      "expected": {
+        "value": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:"
+      },
+      "provenance": "auditor-computed: python3 base64.b64encode(hashlib.sha256|sha512(body).digest()); format per test helpers tests/unit/plugins/hmac_auth_tests.rs:241-271 and tests/common/hmac_helpers.rs:184-206. The empty-body Content-Digest value also appears verbatim in gateway docs docs/plugins.md:2968. Cross-checked sha-256 values with `openssl dgst -sha256 -binary | base64`."
+    },
+    {
+      "name": "{\"ping\":1}, Content-Digest sha-512",
+      "inputs": {
+        "header": "Content-Digest",
+        "body_utf8": "{\"ping\":1}"
+      },
+      "expected": {
+        "value": "sha-512=:/BE9DVToegd+YvBsVYNx9nATEzmKa9wf0pToVetGYxvPi+J+YmElGvN1KtiXL3yP0UvTsk/BXfgMFmcK0xNzQg==:"
+      },
+      "provenance": "auditor-computed: python3 base64.b64encode(hashlib.sha256|sha512(body).digest()); format per test helpers tests/unit/plugins/hmac_auth_tests.rs:241-271 and tests/common/hmac_helpers.rs:184-206. The empty-body Content-Digest value also appears verbatim in gateway docs docs/plugins.md:2968. Cross-checked sha-256 values with `openssl dgst -sha256 -binary | base64`."
+    },
+    {
+      "name": "hello world, legacy Digest sha-256",
+      "inputs": {
+        "header": "Digest",
+        "body_utf8": "hello world"
+      },
+      "expected": {
+        "value": "sha-256=uU0nuZNNPgilLlLX2n2r+sSE7+N6U4DukIj3rOLvzek="
+      },
+      "provenance": "auditor-computed: python3 base64.b64encode(hashlib.sha256|sha512(body).digest()); format per test helpers tests/unit/plugins/hmac_auth_tests.rs:241-271 and tests/common/hmac_helpers.rs:184-206. The empty-body Content-Digest value also appears verbatim in gateway docs docs/plugins.md:2968. Cross-checked sha-256 values with `openssl dgst -sha256 -binary | base64`."
+    },
+    {
+      "name": "sha-1 unsupported",
+      "inputs": {
+        "header": "Digest",
+        "value": "sha-1=abc123=="
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Unsupported digest algorithm\"}"
+      },
+      "provenance": "copied from src/plugins/hmac_auth.rs:2006-2018 (inline test verify_body_digest_rejects_unknown_algorithm)"
+    },
+    {
+      "name": "md5 companion member",
+      "inputs": {
+        "header": "Digest",
+        "value": "md5=ignored, sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Unsupported digest algorithm\"}"
+      },
+      "provenance": "copied from src/plugins/hmac_auth.rs:2043-2056 (body 'hello' in test; algorithm check fails before value comparison so body is irrelevant)"
+    },
+    {
+      "name": "garbage base64",
+      "inputs": {
+        "header": "Digest",
+        "value": "sha-256=not-valid-base64!!!"
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed digest header\"}"
+      },
+      "provenance": "copied from src/plugins/hmac_auth.rs:2021-2029; body string from parse_standard_base64_digest (:270-281)"
+    },
+    {
+      "name": "legacy spelling on Content-Digest",
+      "inputs": {
+        "header": "Content-Digest",
+        "value": "sha-256=not-a-byte-sequence"
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed digest header\"}"
+      },
+      "provenance": "copied from tests/unit/plugins/hmac_auth_tests.rs:2913-2952 (line 2946)"
+    },
+    {
+      "name": "RFC 9530 spelling on legacy Digest",
+      "inputs": {
+        "header": "Digest",
+        "value": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed digest header\"}"
+      },
+      "provenance": "src/plugins/hmac_auth.rs:2059-2075 (verify_body_digest_accepts_rfc9530_byte_sequence_form asserts Rfc3230 parse fails); parse_legacy_digest_value rejects ':' (:295-306)"
+    },
+    {
+      "name": "duplicate algorithm key",
+      "inputs": {
+        "header": "Content-Digest",
+        "value": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:, sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:"
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed digest header\"}"
+      },
+      "provenance": "copied from tests/unit/plugins/hmac_auth_tests.rs:2981-3002 (line 2996)"
+    },
+    {
+      "name": "mixed RFC 9530 + legacy member spellings",
+      "inputs": {
+        "header": "Content-Digest",
+        "value": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:, sha-512=/BE9DVToegd+YvBsVYNx9nATEzmKa9wf0pToVetGYxvPi+J+YmElGvN1KtiXL3yP0UvTsk/BXfgMFmcK0xNzQg=="
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Malformed digest header\"}"
+      },
+      "provenance": "copied from tests/unit/plugins/hmac_auth_tests.rs:3004-3018 (value built there as sha256_content_digest_header(body) + ', ' + sha512_digest_header(body))"
+    },
+    {
+      "name": "both Digest and Content-Digest present",
+      "inputs": {
+        "headers": {
+          "Content-Digest": "sha-256=:ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g=:",
+          "Digest": "sha-256=ZId/Ft8ue8HkIp/hVZzPZbPIfx9wUS0PscyMwyMul3g="
+        }
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Ambiguous Digest and Content-Digest headers\"}"
+      },
+      "provenance": "copied from tests/unit/plugins/hmac_auth_tests.rs:2805-2829; body string src/plugins/hmac_auth.rs:222"
+    },
+    {
+      "name": "neither digest header",
+      "inputs": {
+        "headers": {}
+      },
+      "expected": {
+        "reject_status": 401,
+        "reject_body": "{\"error\":\"Missing required Digest header\"}"
+      },
+      "provenance": "src/plugins/hmac_auth.rs:221,416; tests/unit/plugins/hmac_auth_tests.rs:1785 (test_missing_digest_rejected)"
+    }
+  ]
+}

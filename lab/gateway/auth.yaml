@@ -1,0 +1,193 @@
+# Ferrum Anvil failure lab - profile "auth" (ferrum-edge v0.9.5, file mode)
+#
+# Scenarios: AUTH-001 (key_auth header name), AUTH-003 (basic_auth), AUTH-007 (jwt_auth
+#            consumer claim), AUTH-018..022 (hmac_auth v2), AUTH-024/025 (jwks_auth + DPoP),
+#            GW-011 (access_control).
+# Settings:  auth.conf (proxy HTTP 127.0.0.1:18180, admin 127.0.0.1:18190).
+# Fixtures:  echo 127.0.0.1:19101, JWKS 127.0.0.1:19102 (/.well-known/jwks.json).
+# Tokens:    {{BASIC_AUTH_ALICE_HASH}} = "hmac_sha256:" + hex(HMAC-SHA256(key=FERRUM_BASIC_AUTH_HMAC_SECRET,
+#            msg="anvil-lab-alice-password")) computed by the lab runner (types.rs:9009-9031).
+#            File mode rejects plaintext `password` (src/config/file_loader.rs:288-306).
+#
+# Lab-only credentials below are fixed test values for a loopback lab; they are not secrets
+# of any real system. Credential values must be ARRAYS of objects (types.rs:8563-8596);
+# jwt / hmac_auth secrets need >= 32 characters (types.rs:8617-8664).
+version: "1"
+
+resource_counts:
+  proxies: 6
+  consumers: 2
+  plugin_configs: 8
+  upstreams: 0
+
+proxies:
+  # AUTH-001: key expected in X-Lab-Api-Key. Sending the right key under X-API-Key (the
+  # default name) is treated as "no credential" -> 401 Authentication required.
+  - id: auth001-key-auth
+    listen_path: /auth/key
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth001-key-auth
+
+  # AUTH-003: Basic auth for consumer alice.
+  - id: auth003-basic-auth
+    listen_path: /auth/basic
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth003-basic-auth
+
+  # AUTH-007: HS256 JWT; identity is read from the non-default claim `anvil_consumer`.
+  - id: auth007-jwt
+    listen_path: /auth/jwt
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth007-jwt
+
+  # AUTH-018..022: HMAC v2 (ferrum-hmac-v2) with in-process replay store (no Redis).
+  - id: auth018-hmac
+    listen_path: /auth/hmac
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth018-hmac
+
+  # AUTH-024/025: JWKS-validated access token bound to a DPoP proof (cnf.jkt).
+  # htu is derived from the Host header and ctx.path (src/plugins/jwks_auth.rs:1211-1225);
+  # strip_listen_path is false so the path the proof signs is the path the gateway checks.
+  - id: auth024-dpop
+    listen_path: /auth/dpop
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: false
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth024-jwks-dpop
+
+  # GW-011: key_auth identifies the consumer, access_control requires group lab-admins.
+  # alice (engineering) -> 403, bob (lab-admins) -> 200.
+  - id: gw011-acl
+    listen_path: /gw/acl
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw011-key-auth
+      - plugin_config_id: gw011-acl
+
+consumers:
+  - id: consumer-alice
+    username: alice
+    custom_id: alice-001
+    credentials:
+      keyauth:
+        - key: anvil-lab-alice-api-key-0001
+      basicauth:
+        - password_hash: "{{BASIC_AUTH_ALICE_HASH}}"
+      jwt:
+        - secret: anvil-lab-alice-jwt-secret-0123456789abcdef
+      hmac_auth:
+        - secret: anvil-lab-alice-hmac-secret-0123456789abcdef
+    acl_groups:
+      - engineering
+
+  - id: consumer-bob
+    username: bob
+    custom_id: bob-002
+    credentials:
+      keyauth:
+        - key: anvil-lab-bob-api-key-0002
+    acl_groups:
+      - lab-admins
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}
+
+  - id: auth001-key-auth
+    plugin_name: key_auth
+    scope: proxy
+    proxy_id: auth001-key-auth
+    enabled: true
+    config:
+      key_location: "header:X-Lab-Api-Key"
+      hide_credentials: true
+
+  - id: auth003-basic-auth
+    plugin_name: basic_auth
+    scope: proxy
+    proxy_id: auth003-basic-auth
+    enabled: true
+    config:
+      hide_credentials: true
+
+  - id: auth007-jwt
+    plugin_name: jwt_auth
+    scope: proxy
+    proxy_id: auth007-jwt
+    enabled: true
+    config:
+      token_lookup: "header:Authorization"
+      consumer_claim_field: anvil_consumer
+      require_exp: true
+
+  - id: auth018-hmac
+    plugin_name: hmac_auth
+    scope: proxy
+    proxy_id: auth018-hmac
+    enabled: true
+    config:
+      signing_profile: ferrum-hmac-v2
+      replay_scope: process
+      clock_skew_seconds: 300
+
+  - id: auth024-jwks-dpop
+    plugin_name: jwks_auth
+    scope: proxy
+    proxy_id: auth024-dpop
+    enabled: true
+    config:
+      providers:
+        - jwks_uri: "http://127.0.0.1:19102/.well-known/jwks.json"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+          require_dpop: true
+          dpop_replay_scope: process
+          dpop_clock_skew_secs: 30
+
+  - id: gw011-key-auth
+    plugin_name: key_auth
+    scope: proxy
+    proxy_id: gw011-acl
+    enabled: true
+    config:
+      key_location: "header:X-Lab-Api-Key"
+
+  - id: gw011-acl
+    plugin_name: access_control
+    scope: proxy
+    proxy_id: gw011-acl
+    enabled: true
+    config:
+      allowed_groups:
+        - lab-admins

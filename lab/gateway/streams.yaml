@@ -1,0 +1,122 @@
+# Ferrum Anvil failure lab - profile "streams" (ferrum-edge v0.9.5, file mode)
+#
+# Scenarios: PROTO-006 (HTTP/3), PROTO-012 (WebSocket over HTTP/2 extended CONNECT),
+#            PROTO-013 (WebSocket over HTTP/3 extended CONNECT), PROTO-014 (gRPC HTTP 200 +
+#            non-zero grpc-status), PROTO-019 (TCP half-close), PROTO-020/021 (UDP),
+#            PROTO-022 happy path / wrong-root leg (server-only DTLS).
+# Settings:  streams.conf. Gateway: HTTP 127.0.0.1:18480 (h1 + h2c), HTTPS+H3 127.0.0.1:18443
+#            (TCP h1/h2 + UDP QUIC), admin 127.0.0.1:18490, streams 127.0.0.1:18401-18409.
+# Fixtures:  127.0.0.1:19400-19499.
+#
+# Stream proxies route on listen_port, MUST NOT set listen_path, and MUST set backend_scheme
+# (tcp | tcps | udp | dtls) (src/config/types.rs:7890-7897,8177-8182). WebSocket and gRPC are
+# NOT schemes: an http/https proxy detects them per request (docs/routing.md:9-12).
+version: "1"
+
+resource_counts:
+  proxies: 10
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  # PROTO-006: plain echo; call https://localhost:18443/proto/h3 with forced HTTP/3.
+  - id: proto006-h3-echo
+    listen_path: /proto/h3
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19403
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # PROTO-012 / PROTO-013: WebSocket echo (backend leg is HTTP/1.1 Upgrade, ws://).
+  #   H1 Upgrade:           ws://127.0.0.1:18480/proto/ws
+  #   H2 extended CONNECT:  h2c on 18480 or h2 (TLS) on 18443, :protocol=websocket
+  #   H3 extended CONNECT:  QUIC on 18443, :protocol=websocket
+  - id: proto012-ws-echo
+    listen_path: /proto/ws
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19401
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # PROTO-014: gRPC fixture over h2c. gRPC paths are /package.Service/Method, so the route
+  # is the service prefix and is NOT stripped.
+  #   /anvil.lab.v1.Probe/Ok    -> HTTP 200, grpc-status 0
+  #   /anvil.lab.v1.Probe/Fail  -> HTTP 200, trailers grpc-status 5 (NOT_FOUND) + grpc-message
+  #   /anvil.lab.v1.Probe/TrailersOnly -> HTTP 200, grpc-status in the initial HEADERS
+  - id: proto014-grpc
+    listen_path: /anvil.lab.v1.Probe
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19402
+    strip_listen_path: false
+
+  # PROTO-014 control: gRPC to a closed port -> HTTP 200 with grpc-status 14 (UNAVAILABLE)
+  # (tests/functional/functional_grpc_test.rs:1084-1112).
+  - id: proto014-grpc-down
+    listen_path: /anvil.lab.v1.Down
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19409
+    strip_listen_path: false
+
+  # PROTO-019: TCP echo that replies only after it reads EOF (client half-close).
+  - id: proto019-tcp-halfclose
+    listen_port: 18401
+    backend_scheme: tcp
+    backend_host: 127.0.0.1
+    backend_port: 19404
+    tcp_idle_timeout_seconds: 30
+
+  # PROTO-020: UDP to a fixture that never replies.
+  - id: proto020-udp-silent
+    listen_port: 18402
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19406
+    udp_idle_timeout_seconds: 30
+
+  # PROTO-021: UDP echo that drops / reorders / duplicates by sequence number.
+  - id: proto021-udp-lossy
+    listen_port: 18403
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19407
+    udp_idle_timeout_seconds: 30
+
+  # UDP positive control (plain echo).
+  - id: udp-echo
+    listen_port: 18404
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19405
+    udp_idle_timeout_seconds: 30
+
+  # PROTO-022: DTLS terminated at the gateway (server-only; certificate from
+  # FERRUM_DTLS_CERT_PATH) -> plain UDP echo. Wrong-root leg: client trusts a CA other than
+  # frontend-ca. Wrong client identity leg lives in the tls profile (DTLS client CA set).
+  - id: proto022-dtls
+    listen_port: 18405
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19405
+    frontend_tls: true
+    udp_idle_timeout_seconds: 30
+
+  # TCP+TLS frontend (server-only) -> TCP echo; stream TLS positive control.
+  - id: tcp-tls-echo
+    listen_port: 18406
+    backend_scheme: tcp
+    backend_host: 127.0.0.1
+    backend_port: 19404
+    frontend_tls: true
+    tcp_idle_timeout_seconds: 30
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}

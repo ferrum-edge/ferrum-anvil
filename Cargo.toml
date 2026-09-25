@@ -1,0 +1,113 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/anvil-domain",
+    "crates/anvil-transport",
+    "crates/anvil-diagnostics",
+    "crates/anvil-storage",
+    "crates/anvil-auth",
+    "crates/anvil-portability",
+    "crates/anvil-engine",
+    "crates/anvil-runner",
+    "crates/anvil-load",
+    "crates/anvil-cli",
+    "crates/anvil-lab",
+    "crates/anvil-fixtures",
+
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license-file = "LICENSE"
+repository = "https://github.com/ferrum-edge/ferrum-anvil"
+publish = false
+
+[workspace.dependencies]
+anvil-domain = { path = "crates/anvil-domain" }
+anvil-transport = { path = "crates/anvil-transport" }
+anvil-diagnostics = { path = "crates/anvil-diagnostics" }
+anvil-storage = { path = "crates/anvil-storage" }
+anvil-auth = { path = "crates/anvil-auth" }
+anvil-portability = { path = "crates/anvil-portability" }
+anvil-engine = { path = "crates/anvil-engine" }
+anvil-runner = { path = "crates/anvil-runner" }
+anvil-load = { path = "crates/anvil-load" }
+
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+schemars = { version = "1.2.2", features = ["uuid1", "chrono04"] }
+uuid = { version = "1.26.1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+futures = "0.3.34"
+bytes = "1.12.1"
+http = "1.5.0"
+hyper = { version = "1.11.1", features = ["client", "http1", "http2", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "server-auto", "http1", "http2"] }
+http-body-util = "0.1.5"
+url = "2.5.8"
+percent-encoding = "2.3.2"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = "1.15.1"
+rustls-pemfile = "2.2.0"
+rustls-native-certs = "0.8.4"
+x509-parser = "0.18.1"
+rcgen = "0.14.10"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+prost = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+protox = "0.9.1"
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
+dns-lookup = "4.0.1"
+socket2 = "0.6.5"
+sha2 = "0.11.0"
+sha1 = "0.11.0"
+hmac = "0.13.0"
+base64 = "0.23.1"
+rand = "0.10.3"
+hex = "0.4.3"
+chacha20poly1305 = "0.11.0"
+argon2 = "0.6.0"
+zeroize = { version = "1.9.0", features = ["derive"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+keyring = "4.2.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "rust_crypto"] }
+p256 = { version = "0.14.0", features = ["ecdsa", "jwk", "pem"] }
+serde_norway = "0.9.42"
+roxmltree = "0.21.1"
+quick-xml = "0.42.0"
+jsonschema = { version = "0.57.0", default-features = false }
+serde_json_path = "0.7.2"
+csv = "1.4.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+hdrhistogram = { version = "7.6.0", default-features = false, features = ["serialization"] }
+flate2 = "1.1.10"
+brotli = "9.0.0"
+zstd = "0.14.0"
+regex = "1.13.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tempfile = "3.27.0"
+proptest = "1.11.0"
+httpdate = "1.0.3"
+dimpl = { version = "0.6", default-features = false, features = ["rust-crypto"] }
+parking_lot = "0.12.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "symbols"
+panic = "unwind"
+
+[profile.dev.package."*"]
+opt-level = 1

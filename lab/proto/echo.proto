@@ -1,0 +1,24 @@
+// Anvil lab gRPC fixture service. Used for protocol tests and the gateway lab.
+syntax = "proto3";
+
+package anvil.lab.v1;
+
+message EchoRequest {
+  string message = 1;
+  // Server-streaming: number of replies to send.
+  int32 count = 2;
+  // When non-zero, finish the RPC with this grpc-status after replying.
+  int32 fail_with = 3;
+}
+
+message EchoReply {
+  string message = 1;
+  int32 index = 2;
+}
+
+service Echo {
+  rpc Unary(EchoRequest) returns (EchoReply);
+  rpc ServerStream(EchoRequest) returns (stream EchoReply);
+  rpc ClientStream(stream EchoRequest) returns (EchoReply);
+  rpc Bidi(stream EchoRequest) returns (stream EchoReply);
+}

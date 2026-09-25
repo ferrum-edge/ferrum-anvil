@@ -1,0 +1,174 @@
+# Ferrum Anvil failure lab - profile "tls" (ferrum-edge v0.9.5, file mode)
+#
+# Scenarios: TLS-005, TLS-006, TLS-008 (frontend mTLS on HTTPS 127.0.0.1:18343),
+#            UP-004..UP-008 and UP-016 (backend TLS, via plaintext listener 127.0.0.1:18380),
+#            PROTO-022 wrong-identity leg (DTLS mTLS on UDP 127.0.0.1:18301).
+# Settings:  tls.conf. Fixtures: 127.0.0.1:19300-19399.
+# Tokens:    {{LAB_CERTS}} -> absolute directory, filled by the lab runner.
+#
+# Backend TLS fields exist on proxies only for direct backends (no upstream_id):
+#   backend_tls_verify_server_cert (default true), backend_tls_server_ca_cert_path,
+#   backend_tls_client_cert_path, backend_tls_client_key_path (src/config/types.rs:2679-2695).
+# They are rejected on backend_scheme http/tcp/udp (types.rs:8151-8174). A configured CA is the
+# only trust anchor used (docs/backend_mtls.md:57-65). There is no proxy-level SNI override;
+# the verified name is backend_host, so fixtures are addressed as `localhost` with
+# `dns_override: "127.0.0.1"` (pattern from tests/functional/functional_mtls_test.rs:568-577).
+version: "1"
+
+resource_counts:
+  proxies: 12
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  # ---- frontend mTLS (request over https://localhost:18343) ----------------
+  # TLS-005 (no client cert), TLS-006 (client-rogue.pem), TLS-008 (client-good.pem).
+  - id: tls-frontend-echo
+    listen_path: /tls/echo
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19309
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # ---- backend TLS (requests over http://127.0.0.1:18380) -------------------
+  # Positive control: fixture presents backend-good.pem (SAN localhost,127.0.0.1).
+  - id: up-tls-trusted
+    listen_path: /up/tls-trusted
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19301
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+
+  # UP-004: fixture presents a self-signed cert not issued by backend-ca.
+  - id: up004-tls-untrusted
+    listen_path: /up/tls-untrusted
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19302
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+
+  # UP-005: fixture cert is issued by backend-ca but only for wrong-name.anvil-lab.invalid.
+  - id: up005-tls-wrong-name
+    listen_path: /up/tls-wrong-name
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19303
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+
+  # UP-006 / UP-016: fixture REQUIRES a client cert (backend-client-ca), TLS 1.3, ALPN
+  # http/1.1 only; gateway presents none -> reqwest HTTP/1 pool path. Every TLS fixture in
+  # this profile offers ONLY http/1.1 in ALPN so the startup capability probe never moves a
+  # route onto the direct-H2 pool.
+  - id: up006-mtls-missing-h1
+    listen_path: /up/mtls-missing
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19304
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+
+  # UP-006 variant: same client-cert requirement, but the fixture is pinned to TLS 1.2 so the
+  # rejection happens inside the handshake (expected tls_error; see the audit doc caveat).
+  - id: up006-mtls-missing-tls12
+    listen_path: /up/mtls-missing-tls12
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19305
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+
+  # UP-006 recovery / backend mTLS positive: same fixture as h1 variant, gateway presents
+  # gateway-backend-client.pem.
+  - id: up006-mtls-ok
+    listen_path: /up/mtls-ok
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19304
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+    backend_tls_client_cert_path: "{{LAB_CERTS}}/gateway-backend-client.pem"
+    backend_tls_client_key_path: "{{LAB_CERTS}}/gateway-backend-client.key"
+
+  # UP-007: fixture accepts TCP and never answers the ClientHello.
+  - id: up007-tls-stall
+    listen_path: /up/tls-stall
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19306
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_connect_timeout_ms: 1000
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+
+  # UP-008a: gateway speaks TLS to a plaintext HTTP fixture.
+  - id: up008-https-to-plain
+    listen_path: /up/scheme-https-to-plain
+    backend_scheme: https
+    backend_host: localhost
+    dns_override: "127.0.0.1"
+    backend_port: 19307
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_tls_verify_server_cert: true
+    backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/backend-ca.pem"
+
+  # UP-008b: gateway speaks plaintext HTTP to a TLS fixture (backend-good.pem).
+  - id: up008-http-to-tls
+    listen_path: /up/scheme-http-to-tls
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19308
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # ---- DTLS frontend with required client certs (PROTO-022) ------------------
+  # DTLS client -> 127.0.0.1:18301 (gateway cert from FERRUM_DTLS_CERT_PATH, client cert
+  # verified against FERRUM_DTLS_CLIENT_CA_CERT_PATH) -> plain UDP echo fixture.
+  - id: proto022-dtls-mtls
+    listen_port: 18301
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19310
+    frontend_tls: true
+    udp_idle_timeout_seconds: 30
+
+  # TCP+TLS frontend with required client cert (same client CA) -> plain TCP echo.
+  # Optional extra leg for stream-level mTLS evidence.
+  - id: tls-stream-mtls
+    listen_port: 18302
+    backend_scheme: tcp
+    backend_host: 127.0.0.1
+    backend_port: 19311
+    frontend_tls: true
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}

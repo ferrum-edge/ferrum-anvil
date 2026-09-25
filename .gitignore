@@ -1,0 +1,10 @@
+/target
+**/node_modules
+/apps/desktop/dist
+/apps/desktop/src-tauri/gen
+/lab/.run
+/lab/bin
+/lab/certs/generated
+*.log
+.DS_Store
+/results/tmp
