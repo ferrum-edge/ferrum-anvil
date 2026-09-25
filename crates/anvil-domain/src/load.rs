@@ -105,29 +105,93 @@ pub struct LatencySummary {
     pub p99_us: u64,
 }
 
-/// Counts that must balance: scheduled = started + dropped (open workloads);
-/// started = completed + failed + canceled + in-flight-at-end.
+/// Iteration ledger of the measured window. One *iteration* is one arrival
+/// (open workload) or one pass of a virtual user / concurrency lane: a single
+/// request for a weighted mix, or the whole sequential chain.
+///
+/// The counts always balance:
+/// * `scheduled = started + dropped` (only open workloads drop; closed and
+///   iteration workloads schedule exactly what they start);
+/// * `started = completed + transport_failures + timeouts + canceled + in_flight_at_end`
+///   — the five terminal classes are disjoint.
+///
+/// `application_failures` and `assertion_failures` are *subsets* of
+/// `completed` (a complete response that failed at the application level or
+/// an assertion) and may overlap each other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct LoadCounts {
     pub scheduled: u64,
     pub started: u64,
+    /// Open-workload arrivals not started because `max_in_flight` was reached.
     pub dropped: u64,
+    /// Every step of the iteration received a complete response (any status).
     pub completed: u64,
-    /// Transport failures (no complete response).
+    /// Ended by a transport failure other than a deadline (no complete response).
     pub transport_failures: u64,
-    /// Complete responses with application failure (4xx/5xx, gRPC non-OK).
+    /// Completed iterations with at least one application failure (4xx/5xx, gRPC non-OK).
     pub application_failures: u64,
+    /// Completed iterations with at least one failed assertion.
     pub assertion_failures: u64,
-    /// Requests that hit a deadline (censored latency).
+    /// Ended by a deadline (censored latency; see [`CensoredTimeouts`]).
+    pub timeouts: u64,
+    /// Ended by run cancellation (user cancel, abort rule, graceful-stop limit).
+    pub canceled: u64,
+    /// Started but with no known outcome when the report was produced (worker
+    /// crash, or a send that ignored cancellation past the drain limit).
+    pub in_flight_at_end: u64,
+}
+
+/// Send ledger of the measured window: one entry per `Engine::execute` call.
+/// Balances like [`LoadCounts`]:
+/// `started = completed + transport_failures + timeouts + canceled + in_flight_at_end`.
+///
+/// `completed` means a complete response was received for a request/response
+/// protocol. Datagram and stream denominators (UDP datagrams sent/received,
+/// WebSocket messages, gRPC stream messages) are not modelled here: the load
+/// engine refuses non-HTTP requests rather than implying delivery (LOAD-013).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct RequestCounts {
+    pub started: u64,
+    pub completed: u64,
+    pub transport_failures: u64,
     pub timeouts: u64,
     pub canceled: u64,
     pub in_flight_at_end: u64,
+    /// Subset of `completed`.
+    pub application_failures: u64,
+    /// Subset of `completed`.
+    pub assertion_failures: u64,
+    /// Attempts that opened a new connection (engine evidence).
+    pub connections_opened: u64,
+    /// Attempts served on a reused pooled connection.
+    pub connections_reused: u64,
+}
+
+/// Sends abandoned at a deadline. Their elapsed time is a *lower bound* on the
+/// latency the target would have produced, so they are excluded from both
+/// latency distributions and summarised separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct CensoredTimeouts {
+    pub count: u64,
+    /// Smallest / largest configured deadline that elapsed, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms_max: Option<u64>,
+    /// Elapsed time when each send was abandoned (censored values, not latencies).
+    pub elapsed_at_timeout: LatencySummary,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct GeneratorHealth {
+    /// Peak process CPU (user + system time over wall time; 100 = one core).
+    /// `None` when the platform measurement is unavailable.
     pub peak_cpu_percent: Option<f64>,
     pub peak_rss_bytes: Option<u64>,
+    /// Peak open file descriptors (sockets included), when measurable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_open_fds: Option<u64>,
     /// Maximum observed lag between a scheduled arrival and its start.
     pub max_schedule_lag_us: u64,
     pub p99_schedule_lag_us: u64,
@@ -136,16 +200,30 @@ pub struct GeneratorHealth {
     pub notes: Vec<String>,
 }
 
+/// One timeline bucket (send level, except `dropped`, which counts arrivals).
+/// Includes warmup seconds, flagged, which are excluded from summary metrics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TimeBucket {
+    /// Bucket start, seconds from run start.
     pub second: u64,
+    /// Sends started in the bucket.
     pub started: u64,
+    /// Sends that received a complete response in the bucket (any status).
     pub completed: u64,
+    /// Sends that failed in the bucket (transport, timeout, application or assertion).
     pub failures: u64,
+    /// Arrivals dropped in the bucket (open workloads).
     pub dropped: u64,
+    /// Successful-send latency percentiles of sends completing in the bucket.
     pub p50_us: u64,
     pub p99_us: u64,
+    /// Peak sends in flight during the bucket.
     pub in_flight: u64,
+    #[serde(default)]
+    pub warmup: bool,
+    /// p99 start lag (scheduled arrival → actual start) of arrivals in the bucket.
+    #[serde(default)]
+    pub p99_schedule_lag_us: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -186,10 +264,14 @@ pub struct LoadReport {
     pub warmup_included_in_metrics: bool,
     pub destination_summary: Vec<String>,
     pub counts: LoadCounts,
+    /// Iterations started per second over the measured window.
     pub achieved_rate_per_sec: f64,
-    /// Latency of complete successful responses.
+    /// Network-exchange latency (sum of attempt durations) of successful sends:
+    /// complete response, application success, assertions passed or not run.
     pub latency_success: LatencySummary,
-    /// Latency of failed attempts (to failure time).
+    /// Latency of failed sends to their failure point: transport failures,
+    /// application failures and assertion failures. Timeouts (censored) and
+    /// cancellations are excluded.
     pub latency_failure: LatencySummary,
     /// Mergeable serialized HDR histogram (V2 + DEFLATE, base64) of success latency.
     pub histogram_success_b64: String,
@@ -200,4 +282,36 @@ pub struct LoadReport {
     pub bytes_received: u64,
     pub generator: GeneratorHealth,
     pub notes: Vec<String>,
+    /// Send ledger (see [`RequestCounts`]); equals `counts` for single-request iterations.
+    #[serde(default)]
+    pub requests: RequestCounts,
+    /// Human label of the workload semantics (closed/open/iterations).
+    #[serde(default)]
+    pub workload_label: String,
+    /// Scheduled arrivals per second over the measured window (open workloads only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_rate_per_sec: Option<f64>,
+    /// Length of the measured window (after warmup, until scheduling stopped).
+    #[serde(default)]
+    pub measured_duration_secs: f64,
+    #[serde(default)]
+    pub timeouts_censored: CensoredTimeouts,
+    /// Local time around the network exchange: preparation, token
+    /// acquisition/refresh, retry backoff and record assembly.
+    #[serde(default)]
+    pub latency_setup: LatencySummary,
+    /// Mergeable serialized HDR histogram (V2 + DEFLATE, base64) of failure latency.
+    #[serde(default)]
+    pub histogram_failure_b64: String,
+    /// Negotiated application protocols observed (e.g. `http/1.1`, `h2`) → sends.
+    #[serde(default)]
+    pub protocols: Vec<(String, u64)>,
+    #[serde(default)]
+    pub warmup_iterations_excluded: u64,
+    #[serde(default)]
+    pub warmup_sends_excluded: u64,
+    /// SHA-256 of the canonical JSON of this report with this field unset;
+    /// verified when a saved report is reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity_sha256: Option<String>,
 }
