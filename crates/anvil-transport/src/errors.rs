@@ -133,6 +133,33 @@ pub fn classify_rustls(e: &rustls::Error, after_handshake: bool) -> (FailureKind
     }
 }
 
+/// Plain-language description of a certificate validation error (never the
+/// library's debug text). `None` for errors that are not certificate errors.
+pub fn describe_rustls(e: &rustls::Error) -> Option<String> {
+    use rustls::CertificateError as C;
+    let rustls::Error::InvalidCertificate(ce) = e else { return None };
+    Some(
+        match ce {
+            C::Expired | C::ExpiredContext { .. } => "the certificate has expired",
+            C::NotValidYet | C::NotValidYetContext { .. } => "the certificate is not valid yet",
+            C::UnknownIssuer => "the certificate was not issued by a trusted certificate authority",
+            C::NotValidForName | C::NotValidForNameContext { .. } => "the certificate does not cover this host name",
+            C::Revoked => "the certificate has been revoked",
+            C::BadEncoding => "the certificate could not be decoded",
+            C::BadSignature => "the certificate's signature is invalid",
+            C::UnhandledCriticalExtension => "the certificate has a critical extension that cannot be processed",
+            C::InvalidPurpose | C::InvalidPurposeContext { .. } => "the certificate is not valid for server authentication (extended key usage)",
+            C::ApplicationVerificationFailure => "the certificate failed an additional verification check",
+            C::Other(o) if format!("{o:?}").contains("CaUsedAsEndEntity") => {
+                "the server presented a CA certificate as its own certificate (typical of a self-signed certificate made without a separate CA); it cannot be accepted as a server certificate"
+            }
+            C::Other(o) if format!("{o:?}").contains("UnsupportedSignatureAlgorithm") => "the certificate uses an unsupported signature algorithm",
+            _ => "the certificate failed validation",
+        }
+        .to_string(),
+    )
+}
+
 /// Classify an error returned by a TLS handshake (tokio-rustls `connect`).
 pub fn classify_tls_handshake(e: &io::Error) -> TransportFailure {
     let mut f = TransportFailure::new(Phase::TlsHandshake, FailureKind::TlsOther, display_chain(e));
@@ -142,6 +169,9 @@ pub fn classify_tls_handshake(e: &io::Error) -> TransportFailure {
         let (k, alert) = classify_rustls(r, false);
         f.kind = k;
         f.tls_alert = alert;
+        if let Some(d) = describe_rustls(r) {
+            f.message = d;
+        }
         return f;
     }
     f.kind = match e.kind() {

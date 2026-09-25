@@ -213,7 +213,10 @@ npm run e2e         # wdio run ./wdio.conf.ts
 | `02-http-success` | new request → local JSON fixture started by the test → 200, transport `completed`, application `success`, the fixture saw exactly that request, Body shows the JSON, History lists it |
 | `03-failure-diagnosis` | request to a closed loopback port → `No response`, transport `failed`, application `not evaluated`, dispatch `not dispatched`; finding "The connection was refused" (`client.connect.refused`) with the `Confirmed` badge, scope, and a non-empty "This does not prove" list; no Ferrum attribution |
 | `04-effective-request` | Effective request lists user headers and headers Anvil adds; `Authorization` is shown redacted and the secret never reaches the page |
-| `05-lock` | Lock button → lock screen; backend refuses `history_list`, `workspaces_list`, `tree_get`, `settings_get` with `LOCKED` (runs last) |
+| `06-gateway-diagnosis` | (with `ANVIL_E2E_GATEWAY`) route whose backend refuses connections through the real lab gateway declared as a Ferrum profile → 502; first finding "Gateway could not prepare a connection to the backend" at `Likely`, scope gateway → backend, "does not prove … TLS failed"; no confirmed gateway claim |
+| `07-tls-untrusted` | HTTPS fixture whose leaf is signed by a throwaway CA → transport `failed`, dispatch `not dispatched`, `client.tls.untrusted_issuer` on the caller's leg; the first remediation never suggests disabling verification (skipped without `openssl`) |
+| `08-load-report` | load plan over a saved request (via real IPC) → Run… keeps Start disabled until the authorization acknowledgement → run through the self-launched worker → `completed` report; the fixture saw exactly 300 requests |
+| `99-lock` | Lock button → lock screen; backend refuses `history_list`, `workspaces_list`, `tree_get`, `settings_get` with `LOCKED` (runs last because the app stays locked) |
 
 `@wdio/tauri-service` expects its companion plugin (`tauri-plugin-wdio`) for
 mocking and window-focus helpers; Anvil does not ship it. The config selects the

@@ -258,7 +258,8 @@ impl ServerCertVerifier for ObservingVerifier {
                 Ok(_) => slot.0.verification = Some(TlsVerification::Verified),
                 Err(e) => {
                     let (kind, _) = classify_rustls(e, false);
-                    slot.0.verification = Some(TlsVerification::Failed { problem: kind, detail: e.to_string() });
+                    let detail = crate::errors::describe_rustls(e).unwrap_or_else(|| e.to_string());
+                    slot.0.verification = Some(TlsVerification::Failed { problem: kind, detail });
                 }
             }
             result
