@@ -59,7 +59,7 @@ fn v2() -> String {
 }
 
 #[test]
-fn reimport_preserves_edits_and_never_deletes() {
+fn data_012_reimport_preserves_edits_and_never_deletes() {
     let first = import(V1.as_bytes(), &opts()).unwrap();
     let mut previous = first.requests.clone();
     // The user edits createOrder (adds a header).

@@ -249,6 +249,8 @@ struct Shard {
 enum StopReason {
     ScheduleEnd,
     UserCancel,
+    /// The vault locked: the app's stop-runs-on-lock policy.
+    Lock,
     Abort(String),
 }
 
@@ -950,6 +952,13 @@ impl LoadRun {
     /// Run to completion, cancellation or abort. Always returns a report;
     /// anything but a normal completion is marked partial.
     pub async fn execute(self, cancel: CancellationToken, progress: Option<ProgressSink>) -> LoadReport {
+        self.execute_lockable(cancel, CancellationToken::new(), progress).await
+    }
+
+    /// Like [`LoadRun::execute`], with a second token for the lock policy:
+    /// cancelling `lock` stops the run like a user cancel but records
+    /// `stopped_by_lock`.
+    pub async fn execute_lockable(self, cancel: CancellationToken, lock: CancellationToken, progress: Option<ProgressSink>) -> LoadReport {
         let LoadRun { mut meta, opts, steps, mix_cumulative, dataset, slots } = self;
         let plan = meta.plan.clone();
         let planned_secs = match &plan.workload {
@@ -983,11 +992,16 @@ impl LoadRun {
 
         // User cancel → stop scheduling and stop chains.
         let link = {
-            let (c, sh) = (cancel.clone(), sh.clone());
+            let (c, sh, lock) = (cancel.clone(), sh.clone(), lock.clone());
             tokio::spawn(async move {
                 tokio::select! {
                     _ = c.cancelled() => {
                         sh.set_reason(StopReason::UserCancel);
+                        sh.halt.cancel();
+                        sh.stop.cancel();
+                    }
+                    _ = lock.cancelled() => {
+                        sh.set_reason(StopReason::Lock);
                         sh.halt.cancel();
                         sh.stop.cancel();
                     }
@@ -1081,6 +1095,10 @@ impl LoadRun {
             StopReason::UserCancel => {
                 notes.push("Canceled by the user: scheduling stopped, in-flight sends were given the drain window, and the rest were canceled. Metrics cover the run up to the cancel.".into());
                 RunCompletion::CanceledByUser
+            }
+            StopReason::Lock => {
+                notes.push("Stopped because the vault locked (stop-runs-on-lock policy): scheduling stopped, in-flight sends were given the drain window, and the rest were canceled.".into());
+                RunCompletion::StoppedByLock
             }
             StopReason::Abort(note) => {
                 notes.push(note.clone());

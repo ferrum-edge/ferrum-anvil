@@ -51,6 +51,9 @@ pub enum WorkerMessage {
 struct ControlLine {
     #[serde(default)]
     cancel: bool,
+    /// `"lock"` when the app locked (recorded as `stopped_by_lock`).
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 fn line(m: &WorkerMessage) -> String {
@@ -118,19 +121,23 @@ async fn run<R: AsyncRead + Unpin + Send + 'static>(input: R, tx: tokio::sync::m
 
     // Cancel on a {"cancel":true} line or on EOF (parent gone).
     let cancel = CancellationToken::new();
+    let lock = CancellationToken::new();
     {
-        let cancel = cancel.clone();
+        let (cancel, lock) = (cancel.clone(), lock.clone());
         tokio::spawn(async move {
             let mut l = Vec::new();
             loop {
                 l.clear();
                 match (&mut reader).take(MAX_CONTROL_LINE).read_until(b'\n', &mut l).await {
                     Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        if serde_json::from_slice::<ControlLine>(l.trim_ascii()).is_ok_and(|c| c.cancel) {
-                            break;
+                    Ok(_) => match serde_json::from_slice::<ControlLine>(l.trim_ascii()) {
+                        Ok(c) if c.cancel && c.reason.as_deref() == Some("lock") => {
+                            lock.cancel();
+                            return;
                         }
-                    }
+                        Ok(c) if c.cancel => break,
+                        _ => {}
+                    },
                 }
             }
             cancel.cancel();
@@ -140,7 +147,7 @@ async fn run<R: AsyncRead + Unpin + Send + 'static>(input: R, tx: tokio::sync::m
     let ptx = tx.clone();
     let sink: ProgressSink =
         Arc::new(move |p: &Progress| ptx.try_send(line(&WorkerMessage::Progress { progress: Box::new(p.clone()) })).is_ok());
-    let report = run.execute(cancel, Some(sink)).await;
+    let report = run.execute_lockable(cancel, lock, Some(sink)).await;
     let _ = tx.send(line(&WorkerMessage::Report { report: Box::new(report) })).await;
     0
 }

@@ -61,7 +61,8 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     let mut controller = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await.map_err(|x| x.to_string())?;
     let run_key = Id::new().to_string();
     let cancel = tokio_util::sync::CancellationToken::new();
-    st.load_runs.lock().insert(run_key.clone(), cancel.clone());
+    let lock = tokio_util::sync::CancellationToken::new();
+    st.load_runs.lock().insert(run_key.clone(), (cancel.clone(), lock.clone()));
     let key = run_key.clone();
     tauri::async_runtime::spawn(async move {
         let mut canceled = false;
@@ -77,6 +78,10 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
                     canceled = true;
                     controller.cancel().await;
                 }
+                _ = lock.cancelled(), if !canceled => {
+                    canceled = true;
+                    controller.cancel_for_lock().await;
+                }
             }
         }
         let result = controller.wait().await;
@@ -84,14 +89,22 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
         st.load_runs.lock().remove(&key);
         let ev = match result {
             Ok(report) => {
-                let stored = st.app().and_then(|a| a.save_load_report(&report).map_err(e));
-                match stored {
-                    Ok(()) => LoadFinishedEvent { run_key: key.clone(), run_id: Some(report.run_id), error: None },
-                    Err(err) => LoadFinishedEvent {
-                        run_key: key.clone(),
-                        run_id: None,
-                        error: Some(format!("the run finished but its report could not be saved: {err}")),
+                let run_id = report.run_id;
+                match st.app() {
+                    Ok(a) => match a.save_load_report(&report) {
+                        Ok(()) => LoadFinishedEvent { run_key: key.clone(), run_id: Some(run_id), error: None },
+                        Err(err) => LoadFinishedEvent {
+                            run_key: key.clone(),
+                            run_id: None,
+                            error: Some(format!("the run finished but its report could not be saved: {}", e(err))),
+                        },
                     },
+                    // Locked mid-run: keep the (redacted) partial report and
+                    // store it at the next unlock.
+                    Err(_) => {
+                        st.pending_load_reports.lock().push(report);
+                        LoadFinishedEvent { run_key: key.clone(), run_id: Some(run_id), error: None }
+                    }
                 }
             }
             Err(err) => LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(err.to_string()) },
@@ -104,8 +117,8 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
 #[tauri::command]
 pub fn load_run_cancel(st: State<'_, DesktopState>, run_key: String) -> bool {
     match st.load_runs.lock().get(&run_key) {
-        Some(t) => {
-            t.cancel();
+        Some((user, _)) => {
+            user.cancel();
             true
         }
         None => false,

@@ -15,8 +15,11 @@ pub struct DesktopState {
     pub app: RwLock<Option<Arc<App>>>,
     /// Running executions (for cancel and lock-time stop).
     pub running: Mutex<HashMap<Id, CancellationToken>>,
-    /// Load runs in worker processes, by run key (cancel and lock-time stop).
-    pub load_runs: Mutex<HashMap<String, CancellationToken>>,
+    /// Load runs in worker processes, by run key: (user cancel, lock stop).
+    pub load_runs: Mutex<HashMap<String, (CancellationToken, CancellationToken)>>,
+    /// Load reports that finished while the vault was locked (stop-on-lock);
+    /// saved at the next unlock. Reports are already redacted.
+    pub pending_load_reports: Mutex<Vec<anvil_domain::load::LoadReport>>,
     /// Open interactive sessions by execution id.
     pub sessions: Mutex<HashMap<String, crate::cmd_sessions::SessionSlot>>,
     pub last_activity: Mutex<Instant>,
@@ -32,6 +35,7 @@ impl DesktopState {
             running: Mutex::new(HashMap::new()),
             load_runs: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            pending_load_reports: Mutex::new(Vec::new()),
             last_activity: Mutex::new(Instant::now()),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
         }
@@ -54,6 +58,22 @@ impl DesktopState {
         }
     }
 
+    /// Persist reports that finished while locked. Called after unlock.
+    pub fn flush_pending_reports(&self) {
+        let pending: Vec<_> = std::mem::take(&mut *self.pending_load_reports.lock());
+        if pending.is_empty() {
+            return;
+        }
+        match self.app() {
+            Ok(app) => {
+                for r in &pending {
+                    let _ = app.save_load_report(r);
+                }
+            }
+            Err(_) => self.pending_load_reports.lock().extend(pending),
+        }
+    }
+
     /// Lock: stop active runs (policy: stop runs on lock), drop keys and
     /// cached credentials/connections.
     pub fn lock(&self) {
@@ -62,8 +82,8 @@ impl DesktopState {
         }
         // Load workers are asked to stop and finalize a partial report
         // (completion `stopped_by_lock` is recorded by the run policy).
-        for t in self.load_runs.lock().values() {
-            t.cancel();
+        for (_, lock) in self.load_runs.lock().values() {
+            lock.cancel();
         }
         // Interactive sessions are aborted; their watcher records the result.
         let open: Vec<_> = self.sessions.lock().values().cloned().collect();

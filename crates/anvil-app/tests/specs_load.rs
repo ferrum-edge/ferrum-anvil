@@ -93,7 +93,7 @@ fn spec_import_into_existing_workspace_nests_under_a_new_folder() {
 }
 
 #[test]
-fn spec_reimport_adds_new_operations_and_preserves_user_edits() {
+fn data_012_spec_reimport_adds_new_operations_and_preserves_user_edits() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let done = app.spec_import(SPEC_V1.as_bytes(), "orders.yaml", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();

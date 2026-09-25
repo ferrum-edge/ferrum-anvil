@@ -457,7 +457,7 @@ async fn proto_005_h2c_against_http1_only_peer_fails_cleanly() {
 }
 
 #[tokio::test]
-async fn http2_only_refuses_http1_alpn() {
+async fn tls_012_http2_only_refuses_http1_alpn() {
     init();
     let mut o = TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone());
     o.alpn = vec!["http/1.1".into()];

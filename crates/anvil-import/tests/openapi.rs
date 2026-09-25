@@ -12,7 +12,7 @@ const SEARCH: &str = "openapi/search-3.2.yaml";
 const SWAGGER: &str = "openapi/files-swagger-2.0.json";
 
 #[test]
-fn detects_each_dialect_explicitly() {
+fn data_011_detects_each_dialect_explicitly() {
     assert_eq!(detect(&fixture(PETSTORE)).dialect, Dialect::OpenApi30);
     assert_eq!(detect(&fixture(ACCOUNTS)).dialect, Dialect::OpenApi31);
     assert_eq!(detect(&fixture(SEARCH)).dialect, Dialect::OpenApi32);
@@ -23,7 +23,7 @@ fn detects_each_dialect_explicitly() {
 }
 
 #[test]
-fn unknown_openapi_versions_are_refused() {
+fn data_011_unknown_openapi_versions_are_refused() {
     let doc = br#"{"openapi": "4.0.0", "info": {"title": "x", "version": "1"}, "paths": {}}"#;
     assert_eq!(detect(doc).dialect, Dialect::OpenApiUnsupported);
     match import(doc, &opts()) {
@@ -160,7 +160,7 @@ fn recursion_composition_and_contradictions_are_reported() {
 }
 
 #[test]
-fn external_refs_are_reported_never_fetched() {
+fn data_009_external_refs_are_reported_never_fetched() {
     let r = run(PETSTORE, &opts());
     let ext = &r.report.external_refs;
     assert_eq!(ext.len(), 1);
@@ -265,7 +265,7 @@ fn operation_keys_and_generated_hashes() {
 }
 
 #[test]
-fn blank_mode_is_structural_and_never_uses_examples() {
+fn data_010_blank_mode_is_structural_and_never_uses_examples() {
     let o = ImportOptions { mode: SampleMode::Blank, ..opts() };
     let r = run(PETSTORE, &o);
     assert_eq!(json_body(&req(&r, "createPet").spec), json!({"name": "", "category": {"name": ""}, "password": ""}));

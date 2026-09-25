@@ -6,8 +6,11 @@ A skip or block is never counted as a pass.
 | Status | Cases |
 |---|---|
 | ✅ live (real gateway) | 17 |
-| ✅ automated test | 85 |
-| ⚠ not covered | 80 |
+| ✅ automated test | 107 |
+| ⛔ blocked — see reason | 6 |
+| ➖ not applicable — see reason | 2 |
+| ◐ partial — see reason | 3 |
+| ⚠ not covered | 47 |
 | **Total** | **182** |
 
 ## Client preparation and local failures
@@ -17,13 +20,13 @@ A skip or block is never counted as a pass.
 | LOCAL-001 | Malformed URL | ✅ automated test | `crates/anvil-engine/src/prepare.rs` |
 | LOCAL-002 | Missing variable | ✅ automated test | `crates/anvil-engine/src/vars.rs`, `crates/anvil-engine/tests/engine_scenarios.rs` |
 | LOCAL-003 | Variable recursion | ✅ automated test | `crates/anvil-engine/src/vars.rs` |
-| LOCAL-004 | Missing attachment | ⚠ not covered | — |
+| LOCAL-004 | Missing attachment | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | LOCAL-005 | Unreadable private key | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
-| LOCAL-006 | Proxy configuration invalid | ⚠ not covered | — |
+| LOCAL-006 | Proxy configuration invalid | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | LOCAL-007 | Local DNS NXDOMAIN | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
-| LOCAL-008 | Client resolver deadline | ⚠ not covered | — |
+| LOCAL-008 | Client resolver deadline | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | LOCAL-009 | Connection refused | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
-| LOCAL-010 | Connect deadline | ⚠ not covered | — |
+| LOCAL-010 | Connect deadline | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | LOCAL-011 | Cancel during upload | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | LOCAL-012 | Local response display cap | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 
@@ -42,12 +45,12 @@ A skip or block is never counted as a pass.
 | TLS-009 | TLS versus plaintext port | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | TLS-010 | TLS handshake stall | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | TLS-011 | Unadorned handshake reset | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-012 | ALPN mismatch | ⚠ not covered | — |
-| TLS-013 | Custom CA isolation | ⚠ not covered | — |
+| TLS-012 | ALPN mismatch | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
+| TLS-013 | Custom CA isolation | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | TLS-014 | mTLS pool isolation | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | TLS-015 | Verification-bypass scope | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
-| TLS-016 | TLS off versus verification off | ⚠ not covered | — |
-| TLS-017 | TLS through forward proxy | ⚠ not covered | — |
+| TLS-016 | TLS off versus verification off | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
+| TLS-017 | TLS through forward proxy | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | TLS-018 | Redirect certificate boundary | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 
 ## Gateway-to-upstream failures
@@ -114,11 +117,11 @@ A skip or block is never counted as a pass.
 | AUTH-008 | JWKS unknown key | ⚠ not covered | — |
 | AUTH-009 | JWKS issuer or audience mismatch | ⚠ not covered | — |
 | AUTH-010 | JWT algorithm confusion | ⚠ not covered | — |
-| AUTH-011 | OAuth PKCE round trip | ⚠ not covered | — |
-| AUTH-012 | OAuth state mismatch | ✅ automated test | `crates/anvil-auth/src/oauth.rs` |
-| AUTH-013 | OAuth redirect spoof | ⚠ not covered | — |
-| AUTH-014 | OAuth refresh race | ✅ automated test | `crates/anvil-auth/src/oauth.rs` |
-| AUTH-015 | OAuth issuer outage | ⚠ not covered | — |
+| AUTH-011 | OAuth PKCE round trip | ✅ automated test | `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-012 | OAuth state mismatch | ✅ automated test | `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-013 | OAuth redirect spoof | ✅ automated test | `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-014 | OAuth refresh race | ✅ automated test | `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs` |
+| AUTH-015 | OAuth issuer outage | ✅ automated test | `crates/anvil-auth/src/oauth.rs`, `crates/anvil-identity/tests/api_oauth.rs` |
 | AUTH-016 | OAuth client credentials | ⚠ not covered | — |
 | AUTH-017 | OIDC browser session | ⚠ not covered | — |
 | AUTH-018 | HMAC v2 happy path | ✅ automated test | `crates/anvil-auth/tests/hmac_vectors.rs` |
@@ -144,7 +147,7 @@ A skip or block is never counted as a pass.
 | PROTO-001 | HTTP1 keepalive reuse | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-002 | HTTP2 trailers | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-003 | HTTP2 stream reset | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
-| PROTO-004 | HTTP2 GOAWAY | ⚠ not covered | — |
+| PROTO-004 | HTTP2 GOAWAY | ◐ partial — see reason — HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet. | — |
 | PROTO-005 | h2c mismatch | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-006 | H3 forced success | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |
 | PROTO-007 | H3 UDP unavailable | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |
@@ -165,24 +168,24 @@ A skip or block is never counted as a pass.
 | PROTO-022 | DTLS handshake/mTLS | ✅ automated test | `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
 | PROTO-023 | SOAP fault HTTP200 | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | PROTO-024 | GraphQL errors HTTP200 | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
-| PROTO-025 | Compressed/binary body | ⚠ not covered | — |
+| PROTO-025 | Compressed/binary body | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 
 ## Diagnostic trust and uncertainty
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
 | TRUST-001 | Forged marker from ordinary API | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
-| TRUST-002 | Stripped marker | ⚠ not covered | — |
+| TRUST-002 | Stripped marker | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | TRUST-003 | Unknown future token | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-004 | Conflicting duplicate headers | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-005 | Coarse-equivalent causes | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-006 | 403 indistinguishable origins | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-007 | Post-header failure | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
-| TRUST-008 | Multi-attempt provenance | ⚠ not covered | — |
-| TRUST-009 | Cross-tenant lookup | ⚠ not covered | — |
-| TRUST-010 | Diagnostic retention expired | ⚠ not covered | — |
-| TRUST-011 | Gateway detail spoofing | ⚠ not covered | — |
-| TRUST-012 | Uncertain log correlation | ⚠ not covered | — |
+| TRUST-008 | Multi-attempt provenance | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
+| TRUST-009 | Cross-tenant lookup | ⛔ blocked — see reason — Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable. | — |
+| TRUST-010 | Diagnostic retention expired | ⛔ blocked — see reason — Depends on G01 detail retention; not available in any gateway release. | — |
+| TRUST-011 | Gateway detail spoofing | ⛔ blocked — see reason — Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass). | — |
+| TRUST-012 | Uncertain log correlation | ➖ not applicable — see reason — Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth. | — |
 | TRUST-013 | Response prompt injection | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 
 ## Persistence, import, settings and protection
@@ -197,17 +200,17 @@ A skip or block is never counted as a pass.
 | DATA-006 | ID merge collisions | ✅ automated test | `crates/anvil-portability/tests/bundles.rs` |
 | DATA-007 | Archive traversal/bomb | ✅ automated test | `crates/anvil-portability/tests/bundles.rs` |
 | DATA-008 | Untrusted import auto-run | ✅ automated test | `crates/anvil-portability/tests/bundles.rs` |
-| DATA-009 | External spec ref | ⚠ not covered | — |
-| DATA-010 | OpenAPI blank/sample mode | ⚠ not covered | — |
-| DATA-011 | OpenAPI dialect handling | ⚠ not covered | — |
-| DATA-012 | OpenAPI reimport | ⚠ not covered | — |
+| DATA-009 | External spec ref | ✅ automated test | `crates/anvil-import/tests/openapi.rs` |
+| DATA-010 | OpenAPI blank/sample mode | ✅ automated test | `crates/anvil-import/tests/openapi.rs` |
+| DATA-011 | OpenAPI dialect handling | ✅ automated test | `crates/anvil-import/tests/openapi.rs` |
+| DATA-012 | OpenAPI reimport | ✅ automated test | `crates/anvil-app/tests/specs_load.rs`, `crates/anvil-import/tests/reimport.rs` |
 | DATA-013 | XML entity expansion | ✅ automated test | `crates/anvil-engine/src/lint.rs` |
-| DATA-014 | HTML response execution | ⚠ not covered | — |
+| DATA-014 | HTML response execution | ✅ automated test | `apps/desktop/src/security.test.tsx` |
 | DATA-015 | Lock backend enforcement | ✅ automated test | `crates/anvil-app/tests/roundtrip.rs`, `crates/anvil-storage/tests/store_security.rs` |
-| DATA-016 | OS lock active load | ⚠ not covered | — |
+| DATA-016 | OS lock active load | ✅ automated test | `crates/anvil-load/tests/load_scenarios.rs` |
 | DATA-017 | Lost vault key recovery | ✅ automated test | `crates/anvil-storage/src/vault.rs` |
-| DATA-018 | Social identity versus vault | ⚠ not covered | — |
-| DATA-019 | Provider outage/offline start | ⚠ not covered | — |
+| DATA-018 | Social identity versus vault | ✅ automated test | `crates/anvil-app/tests/identity.rs` |
+| DATA-019 | Provider outage/offline start | ✅ automated test | `crates/anvil-app/tests/identity.rs` |
 | DATA-020 | Redaction across artifacts | ✅ automated test | `crates/anvil-engine/src/redact.rs`, `crates/anvil-engine/tests/engine_scenarios.rs` |
 
 ## Load correctness and report durability
@@ -225,7 +228,7 @@ A skip or block is never counted as a pass.
 | LOAD-009 | Cancel and worker crash | ✅ automated test | `crates/anvil-load/tests/load_scenarios.rs` |
 | LOAD-010 | Bounded error sampling | ✅ automated test | `crates/anvil-load/src/metrics.rs`, `crates/anvil-load/tests/load_scenarios.rs` |
 | LOAD-011 | Report export/reimport | ✅ automated test | `crates/anvil-load/src/html.rs`, `crates/anvil-load/src/report.rs`, `crates/anvil-load/tests/load_scenarios.rs` |
-| LOAD-012 | JMeter parity gate | ⚠ not covered | — |
+| LOAD-012 | JMeter parity gate | ➖ not applicable — see reason — The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md. | — |
 | LOAD-013 | Datagram accounting | ✅ automated test | `crates/anvil-load/tests/load_scenarios.rs` |
 | LOAD-014 | Warmup and run comparison | ✅ automated test | `crates/anvil-load/src/compare.rs` |
 
@@ -233,11 +236,11 @@ A skip or block is never counted as a pass.
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
-| REL-001 | Clean native installs | ⚠ not covered | — |
+| REL-001 | Clean native installs | ⛔ blocked — see reason — Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. | — |
 | REL-002 | Production driver absence | ⚠ not covered | — |
-| REL-003 | Signed update integrity | ⚠ not covered | — |
+| REL-003 | Signed update integrity | ⛔ blocked — see reason — No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build. | — |
 | REL-004 | Update/migration rollback | ✅ automated test | `crates/anvil-storage/tests/store_security.rs` |
 | REL-005 | Offline no-account smoke | ⚠ not covered | — |
-| REL-006 | Download manifest match | ⚠ not covered | — |
-| REL-007 | Website navigation | ⚠ not covered | — |
-| REL-008 | Website feature truth | ⚠ not covered | — |
+| REL-006 | Download manifest match | ⛔ blocked — see reason — No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. | — |
+| REL-007 | Website navigation | ◐ partial — see reason — Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release. | — |
+| REL-008 | Website feature truth | ◐ partial — see reason — Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence. | — |

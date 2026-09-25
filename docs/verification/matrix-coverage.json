@@ -2,9 +2,12 @@
  "source": "docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json",
  "total": 182,
  "totals": {
-  "verified_test": 85,
-  "not_covered": 80,
-  "verified_live": 17
+  "verified_test": 107,
+  "verified_live": 17,
+  "not_covered": 47,
+  "partial": 3,
+  "blocked": 6,
+  "not_applicable": 2
  },
  "cases": [
   {
@@ -71,9 +74,17 @@
    "id": "LOCAL-004",
    "category": "Client preparation and local failures",
    "title": "Missing attachment",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 87,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -99,9 +110,17 @@
    "id": "LOCAL-006",
    "category": "Client preparation and local failures",
    "title": "Proxy configuration invalid",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 104,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -127,9 +146,17 @@
    "id": "LOCAL-008",
    "category": "Client preparation and local failures",
    "title": "Client resolver deadline",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 131,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -155,9 +182,17 @@
    "id": "LOCAL-010",
    "category": "Client preparation and local failures",
    "title": "Connect deadline",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 153,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -399,9 +434,17 @@
    "id": "TLS-012",
    "category": "Frontend TLS and certificate selection",
    "title": "ALPN mismatch",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 460,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -409,9 +452,17 @@
    "id": "TLS-013",
    "category": "Frontend TLS and certificate selection",
    "title": "Custom CA isolation",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 173,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -455,9 +506,17 @@
    "id": "TLS-016",
    "category": "Frontend TLS and certificate selection",
    "title": "TLS off versus verification off",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 191,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -465,9 +524,17 @@
    "id": "TLS-017",
    "category": "Frontend TLS and certificate selection",
    "title": "TLS through forward proxy",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 215,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -1487,9 +1554,17 @@
    "id": "AUTH-011",
    "category": "Authentication generation, binding and identity dependencies",
    "title": "OAuth PKCE round trip",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 107,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -1499,13 +1574,19 @@
    "title": "OAuth state mismatch",
    "status": "verified_test",
    "evidence_kinds": [
+    "integration_test",
     "unit_test"
    ],
    "references": [
     {
      "path": "crates/anvil-auth/src/oauth.rs",
-     "line": 324,
+     "line": 535,
      "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 171,
+     "kind": "integration_test"
     }
    ],
    "lab": null,
@@ -1515,9 +1596,17 @@
    "id": "AUTH-013",
    "category": "Authentication generation, binding and identity dependencies",
    "title": "OAuth redirect spoof",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 190,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -1527,13 +1616,19 @@
    "title": "OAuth refresh race",
    "status": "verified_test",
    "evidence_kinds": [
+    "integration_test",
     "unit_test"
    ],
    "references": [
     {
      "path": "crates/anvil-auth/src/oauth.rs",
-     "line": 305,
+     "line": 453,
      "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 289,
+     "kind": "integration_test"
     }
    ],
    "lab": null,
@@ -1543,9 +1638,23 @@
    "id": "AUTH-015",
    "category": "Authentication generation, binding and identity dependencies",
    "title": "OAuth issuer outage",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-auth/src/oauth.rs",
+     "line": 511,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 335,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -1801,11 +1910,11 @@
    "id": "PROTO-004",
    "category": "Protocol completion and semantics",
    "title": "HTTP2 GOAWAY",
-   "status": "not_covered",
+   "status": "partial",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet."
   },
   {
    "id": "PROTO-005",
@@ -2221,9 +2330,17 @@
    "id": "PROTO-025",
    "category": "Protocol completion and semantics",
    "title": "Compressed/binary body",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 245,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2249,9 +2366,17 @@
    "id": "TRUST-002",
    "category": "Diagnostic trust and uncertainty",
    "title": "Stripped marker",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 279,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2349,9 +2474,17 @@
    "id": "TRUST-008",
    "category": "Diagnostic trust and uncertainty",
    "title": "Multi-attempt provenance",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 299,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2359,41 +2492,41 @@
    "id": "TRUST-009",
    "category": "Diagnostic trust and uncertainty",
    "title": "Cross-tenant lookup",
-   "status": "not_covered",
+   "status": "blocked",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
   },
   {
    "id": "TRUST-010",
    "category": "Diagnostic trust and uncertainty",
    "title": "Diagnostic retention expired",
-   "status": "not_covered",
+   "status": "blocked",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "Depends on G01 detail retention; not available in any gateway release."
   },
   {
    "id": "TRUST-011",
    "category": "Diagnostic trust and uncertainty",
    "title": "Gateway detail spoofing",
-   "status": "not_covered",
+   "status": "blocked",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass)."
   },
   {
    "id": "TRUST-012",
    "category": "Diagnostic trust and uncertainty",
    "title": "Uncertain log correlation",
-   "status": "not_covered",
+   "status": "not_applicable",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."
   },
   {
    "id": "TRUST-013",
@@ -2586,9 +2719,17 @@
    "id": "DATA-009",
    "category": "Persistence, import, settings and protection",
    "title": "External spec ref",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 163,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2596,9 +2737,17 @@
    "id": "DATA-010",
    "category": "Persistence, import, settings and protection",
    "title": "OpenAPI blank/sample mode",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 268,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2606,9 +2755,22 @@
    "id": "DATA-011",
    "category": "Persistence, import, settings and protection",
    "title": "OpenAPI dialect handling",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 15,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 26,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2616,9 +2778,22 @@
    "id": "DATA-012",
    "category": "Persistence, import, settings and protection",
    "title": "OpenAPI reimport",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/specs_load.rs",
+     "line": 96,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-import/tests/reimport.rs",
+     "line": 62,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2644,9 +2819,27 @@
    "id": "DATA-014",
    "category": "Persistence, import, settings and protection",
    "title": "HTML response execution",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "renderer_test"
+   ],
+   "references": [
+    {
+     "path": "apps/desktop/src/security.test.tsx",
+     "line": 1,
+     "kind": "renderer_test"
+    },
+    {
+     "path": "apps/desktop/src/security.test.tsx",
+     "line": 67,
+     "kind": "renderer_test"
+    },
+    {
+     "path": "apps/desktop/src/security.test.tsx",
+     "line": 79,
+     "kind": "renderer_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2677,9 +2870,22 @@
    "id": "DATA-016",
    "category": "Persistence, import, settings and protection",
    "title": "OS lock active load",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 675,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 680,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2705,9 +2911,22 @@
    "id": "DATA-018",
    "category": "Persistence, import, settings and protection",
    "title": "Social identity versus vault",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/identity.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-app/tests/identity.rs",
+     "line": 99,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2715,9 +2934,17 @@
    "id": "DATA-019",
    "category": "Persistence, import, settings and protection",
    "title": "Provider outage/offline start",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/identity.rs",
+     "line": 133,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -2986,11 +3213,11 @@
    "id": "LOAD-012",
    "category": "Load correctness and report durability",
    "title": "JMeter parity gate",
-   "status": "not_covered",
+   "status": "not_applicable",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md."
   },
   {
    "id": "LOAD-013",
@@ -3037,11 +3264,11 @@
    "id": "REL-001",
    "category": "Installer, updater and website release",
    "title": "Clean native installs",
-   "status": "not_covered",
+   "status": "blocked",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only."
   },
   {
    "id": "REL-002",
@@ -3057,11 +3284,11 @@
    "id": "REL-003",
    "category": "Installer, updater and website release",
    "title": "Signed update integrity",
-   "status": "not_covered",
+   "status": "blocked",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build."
   },
   {
    "id": "REL-004",
@@ -3095,31 +3322,31 @@
    "id": "REL-006",
    "category": "Installer, updater and website release",
    "title": "Download manifest match",
-   "status": "not_covered",
+   "status": "blocked",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist."
   },
   {
    "id": "REL-007",
    "category": "Installer, updater and website release",
    "title": "Website navigation",
-   "status": "not_covered",
+   "status": "partial",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release."
   },
   {
    "id": "REL-008",
    "category": "Installer, updater and website release",
    "title": "Website feature truth",
-   "status": "not_covered",
+   "status": "partial",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": null
+   "note": "Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence."
   }
  ]
 }

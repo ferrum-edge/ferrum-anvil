@@ -97,8 +97,18 @@ impl LoadController {
     /// the worker has not finished within its drain window plus a margin, it
     /// is killed and the report is rebuilt from the last progress.
     pub async fn cancel(&self) {
+        self.stop(b"{\"cancel\":true}\n").await;
+    }
+
+    /// Stop because the app locked: like [`LoadController::cancel`], but the
+    /// report records `stopped_by_lock`.
+    pub async fn cancel_for_lock(&self) {
+        self.stop(b"{\"cancel\":true,\"reason\":\"lock\"}\n").await;
+    }
+
+    async fn stop(&self, line: &[u8]) {
         if let Some(mut s) = self.stdin.lock().await.take() {
-            let _ = s.write_all(b"{\"cancel\":true}\n").await;
+            let _ = s.write_all(line).await;
             let _ = s.flush().await;
         }
         let (kill, deadline) = (self.kill.clone(), self.cancel_deadline);

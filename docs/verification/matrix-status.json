@@ -1,0 +1,47 @@
+{
+  "_comment": "Reasoned statuses for failure-matrix cases that cannot be executed as live or automated tests yet. Used by scripts/matrix-coverage.py only when no test/lab evidence exists. Never counted as passed.",
+  "TRUST-009": {
+    "status": "blocked",
+    "reason": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
+  },
+  "TRUST-010": {
+    "status": "blocked",
+    "reason": "Depends on G01 detail retention; not available in any gateway release."
+  },
+  "TRUST-011": {
+    "status": "blocked",
+    "reason": "Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass)."
+  },
+  "TRUST-012": {
+    "status": "not_applicable",
+    "reason": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."
+  },
+  "LOAD-012": {
+    "status": "not_applicable",
+    "reason": "The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md."
+  },
+  "PROTO-004": {
+    "status": "partial",
+    "reason": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet."
+  },
+  "REL-001": {
+    "status": "blocked",
+    "reason": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only."
+  },
+  "REL-003": {
+    "status": "blocked",
+    "reason": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build."
+  },
+  "REL-006": {
+    "status": "blocked",
+    "reason": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist."
+  },
+  "REL-007": {
+    "status": "partial",
+    "reason": "Covered by the staged website PR's navigation and link tests (ferrum-edge/ferrumedge); not publishable until release."
+  },
+  "REL-008": {
+    "status": "partial",
+    "reason": "Staged website copy is limited to built and tested capabilities with limitations; publication gated on release evidence."
+  }
+}

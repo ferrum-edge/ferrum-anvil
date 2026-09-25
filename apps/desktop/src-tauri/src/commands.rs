@@ -106,12 +106,15 @@ pub fn profile_unlock(st: State<'_, DesktopState>, profile_id: String, passphras
         {
             a.unlock(key).map_err(e)?;
             st.touch();
+            drop(g);
+            st.flush_pending_reports();
             return Ok(());
         }
     }
     let app = App::open(p.dir, header, key).map_err(e)?;
     *st.app.write() = Some(Arc::new(app));
     st.touch();
+    st.flush_pending_reports();
     Ok(())
 }
 
