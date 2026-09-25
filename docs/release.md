@@ -261,30 +261,40 @@ E2E build and requires it to fail.
 
 ## Local verification record
 
-Recorded on macOS 26 (Darwin 25.6, Apple silicon), Rust 1.98.1, Node 23.11,
-from branch `claude/anvil-desktop-client-3f372d`.
+Recorded 2026-09-25 on macOS 26 (Darwin 25.6), Apple M4, Rust 1.98.1,
+Node 23.11, branch `claude/anvil-desktop-client-3f372d` (draft PR
+ferrum-edge/ferrum-anvil#1), after the last functional merge.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| CI Rust lane (macOS) | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo check -p anvil-desktop` with and without `--features e2e`; `cargo test --locked --workspace --exclude anvil-desktop` | all exit 0; tests: 47 test binaries, 308 passed, 0 failed, 0 ignored |
-| Contract drift | `cargo run -p anvil-cli -- schema --out contracts/schemas` + `npm run contracts` | **drift found at base commit `29b2f3d`**: `LoadReport.schema.json` and `contracts.ts` were stale (LoadReport gained `requests`, `workload_label`, `offered_rate_per_sec`, … without regeneration). The committed files at the current tip of `claude/anvil-desktop-client-3f372d` match the regenerated schema, i.e. it was fixed upstream; the CI job would have caught it |
-| cargo-deny | `cargo deny --locked check` | advisories ok (3 reviewed ignores), bans ok, licenses ok, sources ok; 79 duplicate-version warnings |
+| Format and lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings` | clean |
+| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 65 test binaries: 427 passed, 0 failed, 0 ignored |
+| Contract drift | `cargo run -p anvil-cli -- schema --out contracts/schemas` + `npm run contracts` | no drift |
+| Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 24 passed (3 files) |
+| Native E2E through the gateway | `npm run e2e:build`, `anvil-lab up core`, `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` | 9 spec files, 18 tests passed (boot, success, refusal diagnosis, effective request, gateway diagnosis, untrusted TLS, load report, offline/no-account, lock) |
+| Native E2E, release-profile build | `npx tauri build --no-bundle --features e2e` (release profile), same suite | 9 spec files passed; app peak RSS 236 MiB, load worker 21 MiB (see `docs/performance.md`) |
+| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.5 release binary) | 304 passed, 0 failed, 16 skipped with stated reasons: core 36/0/0, policy 46/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 76/0/5, streams 58/0/1, cpdp 10/0/0 |
+| Lab profile lint | `ruby lab/gateway/lint-profiles.rb` | 8 profiles OK; a mistyped nested plugin key is caught |
+| Release check, production artifacts | `npx tauri build --ci --bundles app,dmg`; `cargo build --release --locked -p anvil-cli`; `scripts/release-check.sh --runtime-probe` over the `.app`, `.dmg`, raw `anvil-desktop` and `anvil` | **pass**: graph without the WebDriver plugin or `e2e`, 0 of 11 hook strings in each, no WebDriver listener and no env-driven unlock at runtime |
+| Release check, negative control | `scripts/release-check.sh --no-graph target/debug/anvil-desktop` (e2e build) | **fail (exit 1)** as required: all 11 strings found |
+| cargo-deny | `cargo deny --locked check` | advisories, bans, licenses, sources ok |
+| License inventory | `node scripts/licenses.mjs --check` | up to date: 782 crates, 5 npm packages |
+| Secret scan | `gitleaks git --log-opts origin/main..HEAD` with `.gitleaks.toml`; `gitleaks dir .` | no leaks in the branch history; the directory scan's findings are all in git-ignored lab output, build output and throwaway lab keys (`results/`, `target/`, `lab/.run/`), none in tracked files |
+| Plaintext at rest | `cargo test -p anvil-app --test at_rest` | no planted marker in profile files, WAL/SHM side files or new temp files |
+| Failure matrix | `python3 scripts/matrix-coverage.py` | 172 of 182 with executed evidence (95 live, 76 automated, 1 release check); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
+
+Earlier on this branch (still valid; the scripts and workflows they exercise are unchanged in substance):
+
+| Check | Command | Result |
+| --- | --- | --- |
 | cargo-deny ban guard | `cargo deny --locked --features e2e check bans` | fails as intended: `tauri-plugin-wdio-webdriver` is banned |
-| License inventory | `node scripts/licenses.mjs --check` | up to date: 773 crates, 5 npm packages, no violations |
-| Secret scan | `gitleaks git` (all local refs, 73 commits) / `gitleaks dir` with `.gitleaks.toml` | no leaks (without the config: 8 findings, then a 9th from the runner tests on the shared branch — all test vectors, fixtures or planted canaries) |
-| Release check, release build | `cargo build -p anvil-desktop --release`, then `scripts/release-check.sh --runtime-probe <binary>` | **pass** — graph clean, 0 of 11 hook strings, no WebDriver listener, no profile created |
 | Release check, e2e build | `cargo build -p anvil-desktop --release --features e2e`, then `scripts/release-check.sh --features e2e --runtime-probe <binary>` | **fail (exit 1)** as required — graph contains the plugin, 10 of 11 hook strings found (the `e2e_unlock` symbol is stripped), WebDriver answered HTTP 200 on the probe port |
-| Release check, debug e2e build | `scripts/release-check.sh --no-graph target/debug/anvil-desktop` | **fail (exit 1)** — all 11 strings found |
 | Release check, inconclusive input | `/bin/ls`, `README.md` | exit 2 (no Anvil marker / unsupported type) — never a pass |
 | Release bundle dry run (macOS arm64) | `npx tauri build --ci --bundles app,dmg`, `cargo build --release -p anvil-cli`, then the release workflow's collect, release-check (with probe), signature-verification, SBOM, license-report and evidence steps | release check **pass** on the `.dmg`, the `.app`, the CLI `.tar.gz` and the raw binary; signing recorded as `unsigned — owner credentials not configured (ad-hoc signature only, not a Developer ID)`; `release-evidence.json` with 7 artifacts, empty `problems`; `shasum -c SHA256SUMS` OK |
 | Release check, other formats | synthetic `.deb` (ar fallback) and `.zip` around the release/e2e binaries | clean → pass; `.deb` carrying the e2e binary → fail (exit 1) |
-| Renderer tests | `npm test` | 22 passed (2 files) |
 | Catalog drift | `cargo test -p anvil-diagnostics --test catalog_drift` | 3 passed; renaming one catalog key makes it fail with the emitting file named |
-| Native E2E | `npm run e2e:build && npm run e2e` | 5 spec files, 11 tests passed (local JSON fixture) |
 | Lab gateway pin | `lab/scripts/fetch-gateway.sh`; separately downloaded `ferrum-edge-linux-x86_64` (v0.9.5) and compared with `RELEASE.lock` | macOS asset downloaded and verified; Linux x86_64 asset SHA-256 matches the lock (`31573f0a…297c`) |
-| Native E2E through the gateway | `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` with the core lab gateway (Ferrum Edge v0.9.5) running | 5 spec files, 11 tests passed; the echo shows the request passed through `via: 1.1 ferrum-edge` |
 
-Not run locally: the Linux and Windows lanes and E2E runs, the x86_64 macOS
-cross build, `.msi`/NSIS/`.rpm`/`.AppImage` unpacking, the signing branches
-(no credentials), and the lab workflow (another lab was running on the fixed
-lab ports on the verification machine).
+Not run locally: Windows and Linux builds and tests (they run in CI; see the
+PR checks), the x86_64 macOS cross build, `.msi`/NSIS/`.rpm`/`.AppImage`
+unpacking, and the signing branches (no credentials).
