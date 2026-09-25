@@ -408,6 +408,29 @@ impl Store {
         Ok(id)
     }
 
+    /// Keep a blob out of history retention. Attachments (binary bodies,
+    /// multipart files, datasets, imported spec sources) are referenced from
+    /// encrypted objects that `prune_history` cannot see. The pin row holds
+    /// only the keyed blob id, never content.
+    pub fn pin_blob(&self, id: &str) -> Result<()> {
+        let _ = self.key()?;
+        self.conn
+            .lock()
+            .execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
+        Ok(())
+    }
+
+    /// Drop a blob's pin and delete it unless a history body still uses it.
+    pub fn release_blob(&self, id: &str) -> Result<()> {
+        let _ = self.key()?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM meta WHERE key=?1", params![format!("pin:{id}")])?;
+        tx.execute("DELETE FROM blobs WHERE id=?1 AND id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL)", params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let key = self.key()?;
         let env: Option<Vec<u8>> =
@@ -495,7 +518,13 @@ impl Store {
                 removed += tx.execute("DELETE FROM history WHERE id=?1", params![id])?;
             }
         }
-        tx.execute("DELETE FROM blobs WHERE id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL) AND id NOT IN (SELECT id FROM blobs WHERE id IN (SELECT value FROM meta WHERE key LIKE 'pin:%'))", [])?;
+        // Only history bodies are collectable here: attachment blobs are
+        // pinned (see `pin_blob`) because the objects referencing them are
+        // encrypted and invisible to this query.
+        tx.execute(
+            "DELETE FROM blobs WHERE id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL) AND id NOT IN (SELECT value FROM meta WHERE key LIKE 'pin:%')",
+            [],
+        )?;
         tx.commit()?;
         Ok(removed)
     }

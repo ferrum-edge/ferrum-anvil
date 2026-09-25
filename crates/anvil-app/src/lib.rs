@@ -67,6 +67,7 @@ impl App {
         let store = Arc::new(Store::open(&dir, key)?);
         let app = App { header, dir, store, engine: Arc::new(Engine::new()) };
         app.ensure_settings()?;
+        app.pin_attachment_blobs()?;
         Ok(app)
     }
 

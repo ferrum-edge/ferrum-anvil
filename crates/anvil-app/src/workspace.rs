@@ -439,6 +439,7 @@ impl App {
     ) -> Result<anvil_domain::request::AttachmentRef> {
         let sha = hex::encode(Sha256::digest(bytes));
         let blob = self.store.put_blob(bytes)?;
+        self.store.pin_blob(&blob)?;
         self.store.put(
             kind::IMPORT_SOURCE,
             &attachment_index_id(&sha),
@@ -448,6 +449,40 @@ impl App {
             &serde_json::json!({"attachment": sha, "blob": blob}),
         )?;
         Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+    }
+
+    /// Pin the blob of every stored attachment (idempotent). Profiles created
+    /// before blobs were pinned could lose attachments to history retention;
+    /// this protects whatever is still there.
+    pub(crate) fn pin_attachment_blobs(&self) -> Result<()> {
+        let idx: Vec<serde_json::Value> = self.store.list(kind::IMPORT_SOURCE, None)?;
+        for i in idx {
+            if let (Some(_), Some(blob)) = (i.get("attachment"), i.get("blob").and_then(|b| b.as_str())) {
+                self.store.pin_blob(blob)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete a stored attachment once nothing references it any more.
+    /// Content addressing means several requests, revisions, datasets or spec
+    /// sources can share one attachment, so every object that can hold one is
+    /// checked first. Returns whether it was deleted.
+    pub fn release_attachment(&self, sha256: &str) -> Result<bool> {
+        for k in [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN] {
+            let objects: Vec<serde_json::Value> = self.store.list(k, None)?;
+            if objects.iter().any(|o| o.to_string().contains(sha256)) {
+                return Ok(false);
+            }
+        }
+        let id = attachment_index_id(sha256);
+        let idx: Option<serde_json::Value> = self.store.get(kind::IMPORT_SOURCE, &id)?;
+        let Some(idx) = idx else { return Ok(false) };
+        if let Some(blob) = idx.get("blob").and_then(|b| b.as_str()) {
+            self.store.release_blob(blob)?;
+        }
+        self.store.delete(kind::IMPORT_SOURCE, &id)?;
+        Ok(true)
     }
 
     pub fn get_attachment(&self, sha256: &str) -> Result<Option<Vec<u8>>> {

@@ -80,3 +80,20 @@ needing rebinding.
 Configurable in Settings: enable/disable history, keep or drop response bodies,
 maximum age (days) and total size; pruning keeps the newest records within the
 budget. "Clear all history" deletes history records only.
+
+Stored attachments (binary and multipart bodies, datasets, imported spec
+sources) are separate from history: their encrypted blobs are pinned, so
+retention never removes them. Deleting a dataset deletes its content once no
+request, revision, dataset, spec source, scenario or load plan still refers to
+the same (content-addressed) attachment. Pins are re-applied to existing
+attachments whenever a profile opens.
+
+## Plaintext at rest
+
+`crates/anvil-app/tests/at_rest.rs` plants a distinct marker in a workspace
+name, a request name, URL, header and body, a vault secret, a secret variable,
+an attachment and a dataset, sends the request (so the echoed exchange lands in
+history), and then scans every file under the profile root (database, `-wal`,
+`-shm` and journal side files, headers) and new files in the system temp
+directory, as UTF-8 and UTF-16. No marker may appear, both while the store is
+open and after it is closed. Anvil writes no crash reports.

@@ -438,7 +438,11 @@ impl App {
     }
 
     pub fn delete_dataset(&self, id: &Id) -> Result<()> {
+        let d = self.dataset(id).ok();
         self.store.delete(kind::DATASET, id)?;
+        if let Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) = d.map(|d| d.attachment) {
+            self.release_attachment(&sha256)?;
+        }
         Ok(())
     }
 }
