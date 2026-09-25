@@ -291,6 +291,39 @@ mod tests {
         }
     }
 
+    /// The admission profile's mesh instance (UP-018) stays on loopback in
+    /// the admission block too, and its ServiceEntries point into 195xx.
+    #[test]
+    fn admission_mesh_instance_stays_inside_the_admission_block() {
+        let conf = std::fs::read_to_string(repo_root().join("lab/gateway/admission-mesh.conf")).unwrap();
+        for line in conf.lines().filter(|l| !l.starts_with('#')) {
+            if line.contains("_PORT =") {
+                let port: u16 = line.rsplit('=').next().unwrap().trim().parse().unwrap();
+                assert!(port == 0 || (18500..18600).contains(&port), "admission-mesh.conf: {line}");
+            }
+            if line.contains("LISTEN_ADDR =") {
+                let addr = line.rsplit('=').next().unwrap().trim();
+                let port: u16 = addr.strip_prefix("127.0.0.1:").expect("loopback listener").parse().unwrap();
+                assert!((18500..18600).contains(&port), "admission-mesh.conf: {line}");
+            }
+            if line.contains("BIND_ADDRESS") {
+                assert!(line.trim_end().ends_with("127.0.0.1"), "admission-mesh.conf binds beyond loopback: {line}");
+            }
+        }
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(repo_root().join("lab/gateway/admission-mesh.json")).unwrap()).unwrap();
+        for se in doc["mesh"]["service_entries"].as_array().unwrap() {
+            for p in se["ports"].as_array().unwrap() {
+                let port = p["port"].as_u64().unwrap();
+                assert!((19500..19600).contains(&port), "ServiceEntry port {port} outside 195xx");
+            }
+            for h in se["hosts"].as_array().unwrap() {
+                assert!(matches!(h.as_str(), Some("localhost" | "127.0.0.1")), "non-loopback ServiceEntry host {h}");
+            }
+        }
+        assert_eq!(crate::fixtures_admission_mesh::EGRESS_PORT, 18589);
+    }
+
     #[test]
     fn profile_registry_names_are_unique() {
         let names: Vec<&str> = crate::profiles::all().iter().map(|p| p.name).collect();

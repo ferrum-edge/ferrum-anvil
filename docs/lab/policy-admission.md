@@ -8,13 +8,24 @@ is injected as an enum.
 | Profile | Gateway listeners | Fixture ports | Config | Scenarios |
 |---|---|---|---|---|
 | `policy` | HTTP 127.0.0.1:18280, admin :18290 | 19201–19210 (19207 and 19209 stay unbound on purpose) | `lab/gateway/policy.{conf,yaml}` | `crates/anvil-lab/src/policy.rs` |
-| `admission` | HTTP 127.0.0.1:18580, admin :18590 | 19501–19502 | `lab/gateway/admission.{conf,yaml}` | `crates/anvil-lab/src/admission.rs` |
+| `admission` | HTTP 127.0.0.1:18580, admin :18590; **mesh instance**: egress mTLS 127.0.0.1:18589, admin :18592 (plus loopback 18581/18586/18588) | 19501–19503 | `lab/gateway/admission.{conf,yaml}`, `lab/gateway/admission-mesh.{conf,json}` | `crates/anvil-lab/src/admission.rs`, `fixtures_admission_mesh.rs` |
 | `drain` | HTTP 127.0.0.1:18680, admin :18690 | 19601–19602 | `lab/gateway/drain.{conf,yaml}` | `crates/anvil-lab/src/drain.rs` |
 
 Fixtures and shared helpers are in `crates/anvil-lab/src/fixtures_policy.rs`. The OPA and AI-provider
 mocks are in `crates/anvil-fixtures/src/policy.rs`. `admission` and `drain` each change process-wide
 behaviour (`FERRUM_MAX_REQUESTS=1`, a 64 KiB retained-response budget, SIGTERM), so each one runs as its
 own gateway instance.
+
+The `admission` profile also starts a **second gateway process in mesh mode** for UP-018. On 0.9.5
+the only per-destination physical-connection ceiling is DestinationRule
+`connectionPool.tcp.maxConnections` (`Upstream.port_overrides[].max_connections`). File mode rejects
+that field, and only the mesh slice-apply layer projects it. The instance runs the egress-gateway
+topology from a localized mesh document (`FERRUM_MESH_CONFIG_PROTOCOL=file`):
+
+- One `mesh_external` ServiceEntry, `localhost:19503`, with a DestinationRule `max_connections: 1`.
+- A per-run SPIFFE PKI from `crates/anvil-fixtures/src/mesh_pki.rs`.
+- The egress listener is SVID-mTLS. Anvil drives it with a verified TLS profile: it presents the lab
+  client SVID and trusts the lab mesh root. There is no verification bypass.
 
 ## 1. Running
 
@@ -101,14 +112,16 @@ byte-identical where noted.
 | GW-019-REJECT-KNOWN | GW-019, TRUST-011 | A reject-path hook adds a **known** token (`overload`) to an IP-deny 403. Before the fix, Anvil reported "Gateway refused the request (overload category)" as **likely**. It now reports `ferrum.marker.inconsistent` (conflicting evidence), with no token finding and no overload or CPU claim (§4). |
 | GW-014-GEO | GW-014 | **Skipped.** `geo_restriction` needs a readable MaxMind country `.mmdb`. `ferrum-edge validate` rejects a missing `db_path` ("not accessible before open"). No database is vendored and the lab may not download one, so neither the country-deny path nor the database-unavailable path is reachable. |
 
-### `admission` (3 scenarios per pass, plus 1 skip)
+### `admission` (4 scenarios per pass, plus 2 skips)
 
 | ID | Matrix | What it proves |
 |---|---|---|
 | CTRL-ADM-001 | — | Positive control. |
 | UP-015 | UP-015 | **Retained-buffer exhaustion.** The backend answered a valid 200 with 256 KiB (ground truth); the gateway returns 503 `{"error":"Response buffering capacity exceeded"}` with **`X-Gateway-Error: backend_error`**. Operator log: `error_class=gateway_buffer_capacity`. Anvil reports `ferrum.token.backend_error` (≤ likely, scope **unknown**, gateway-local-limit caveat) and `ferrum.outcome_ambiguous`, whose candidates include `gateway.capacity.response_buffer`: 0.9.5 has two sources of this exact signal. There is no backend-passthrough claim, no `upstream_application` or `gateway_to_upstream` finding at ≥ likely, and no "unhealthy" claim. **Lookalike:** the application's own 503 is not called a buffer-capacity refusal. Recovery: 32 KiB fits and returns 200. |
 | GW-002 | GW-002 | **Overload refusal** with `FERRUM_MAX_REQUESTS=1`. While one request holds the slot, the operator `/overload` level is `critical` and the log shows `Overload CRITICAL: rejecting new requests`. The probe gets 503 `{"error":"Service overloaded"}` with `overload` and never reaches a backend. An **unrouted** path also gets 503 `overload`, not 404, which shows the refusal precedes routing. Anvil reports `ferrum.token.overload` (≤ likely, gateway admission, CPU caveat) and the catalog match, with no application blame and no CPU claim. The fence lifts at the next monitor tick (about 50–100 ms after the slot frees; ground truth: `level` back to `normal`). **Lookalike:** the application's byte-identical 503 gets `backend_error` and no overload claim. Recovery: 200. |
+| UP-018 | UP-018 | **Backend connection ceiling, HTTP/1.1 (reqwest) lane**, on the mesh egress gateway. A 3 s request holds the destination's only permitted connection, and a probe 500 ms later needs a second socket. The probe gets 503 `{"error":"Backend connection limit exceeded"}` with `X-Gateway-Error: backend_error`. Ground truth: the backend served the occupant and **never saw the probe**; the operator log has `error_class=dispatch_policy_rejected` and the WARN "Refusing new backend connection: DestinationRule maxConnections reached". Anvil reports `ferrum.outcome` = `upstream.connection_limit.reqwest` (≤ likely, gateway admission, identical-bytes caveat) and `ferrum.token.backend_error` (≤ likely, scope unknown). There is no backend-passthrough, `upstream_application` or client-leg finding, and no "crash", "unhealthy", "down" or "overload" claim. **Lookalikes:** the application's own 503 through the same capped route is not called a connection ceiling. A byte-identical application body stays ≤ likely with the identical-bytes caveat. Recovery: once the occupant finishes, the pooled connection serves the next request (200; the backend saw it). |
 | GW-005 | GW-005 | **Skipped.** It needs a real CP plus DP pair; file mode never installs the DP freshness fence. It is owned by the `cpdp` profile (ports 187xx/197xx). |
+| UP-018-H2 | UP-018 | **Skipped: the pooled lanes (direct H2, gRPC, H3) could not be driven into the ceiling here.** The direct-H2 pool multiplexes, so it never re-dials. With the backend advertising `SETTINGS_MAX_CONCURRENT_STREAMS=1`, the second request queued about 2.5 s behind the first on the one connection (200, one backend connection). With a backend that sends GOAWAY on each connection, the pool reused the draining connection and got 502 `connection_failure` with operator `error_class=connection_pool_error`: a pool cancellation, not the ceiling. That public signal (502 `connection_failure` "Backend unavailable") is covered by the contract test below. |
 
 ### `drain` (2 scenarios per pass)
 
@@ -116,6 +129,27 @@ byte-identical where noted.
 |---|---|---|
 | CTRL-DRN-001 | — | Positive control. |
 | GW-003 | GW-003 | **Graceful drain.** A keep-alive connection and a 6 s in-flight request are open when the gateway gets SIGTERM. The sequence that follows: (a) admin `/health` gives 503 `{"status":"draining","ready":false}` while a new connection in the 3 s pre-drain is still served (Anvil: plain success). (b) After the pre-drain, a raw connect is refused. Anvil reports `client.connect.refused` (confirmed, client-to-peer) with no `ferrum.*` finding and no "crash" claim; the "service is restarting" caveat is shown. (c) The in-flight request completes with 200 and `Connection: close`. (d) The keep-alive request during the drain is **racy by design**: a 503 overload, a closed socket or a refused re-dial are all possible. The check asserts that Anvil's explanation matches whatever occurred; in every recorded run the idle socket was closed and the re-dial refused. The gateway exits 0 after "All connections and requests drained successfully". Recovery: a fresh instance serves 200. |
+
+### Public-signal contract tests (not live)
+
+`crates/anvil-diagnostics/tests/upstream_setup_contract.rs` feeds only the exact public signal that the
+source-audited catalog records into the diagnosis. These are **not** live reproductions and **not**
+hook-based tests.
+
+| Test | Matrix | Why not live |
+|---|---|---|
+| `up_017_port_exhaustion_signal_is_coarse_and_hook_free`, `up_017_untrusted_destination_gets_no_gateway_family` | UP-017 | 0.9.5 assigns `port_exhaustion` only to EADDRNOTAVAIL at connect and ships no dial hook. Exhausting the host's real ephemeral ports is unsafe. |
+| `up_019_trust_withdrawn_signal_makes_no_certificate_claim` | UP-019 | Trust withdrawal is emitted only on mesh HBONE / sidecar-mTLS transports, and no such trust-publication lab exists. |
+| `up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family`, `up_018_reqwest_lane_ceiling_is_a_gateway_limit_not_a_backend_failure` | UP-018 | The pooled lane is not reachable here (see UP-018-H2). The reqwest lane is also asserted live. |
+
+The shared 502 `connection_failure` "Backend unavailable" signal stays in the ambiguous
+connection-failure family:
+
+- Port exhaustion, trust withdrawal and the pooled ceiling appear only as unknown-confidence catalog
+  candidates.
+- No finding at likely or above states port exhaustion, host resources, a certificate problem, TLS or
+  DNS.
+- The caller's own certificate is never blamed.
 
 ## 3. Live 0.9.5 behaviour recorded by these runs
 
@@ -149,6 +183,18 @@ These results confirm or correct `docs/audit/gateway-lab-config.md` items that w
 - **Some runtime WARNs are sampled.** OPA, IP, transformer-ceiling and similar plugin WARNs are
   sampled to one per 10 s per reason. The lab keeps them as supporting evidence but asserts only on
   transaction-line fields.
+- **The connection ceiling is mesh-only and fragile.** DestinationRule `maxConnections` exists only
+  in mesh mode. In the egress gateway it attaches by matching the DR host against the upstream
+  **target** host. A `resolution: static` ServiceEntry's target is its endpoint IP, so a DR on its
+  hostname silently never applies; the lab uses a DNS-resolved `localhost` entry.
+- **The startup probe can occupy the ceiling.** The capability probe to a plain-HTTP backend is an
+  h2c prior-knowledge connection. When the backend accepts h2c, that pooled connection occupies a
+  `maxConnections: 1` slot, and every request on the reqwest lane is refused. The lab backend is
+  therefore strictly HTTP/1.1 (`crates/anvil-fixtures/src/http1_only.rs`).
+- **The ceiling body is distinct but the token is misleading.** The HTTP/1.1 ceiling answers 503
+  `{"error":"Backend connection limit exceeded"}` with `backend_error`, and the operator class is
+  `dispatch_policy_rejected`. The idle pooled connection keeps the slot after a request finishes,
+  so reuse succeeds and only a *second concurrent* socket is refused.
 - **Via differs, and Anvil ignores it.** A WAF header-phase reject has no `Via`; the body-phase reject
   and backend responses do. Anvil does not use `Via`, which is spoofable.
 
@@ -184,6 +230,10 @@ disabling the WAF, TLS or a policy.
   engine or provider.
 - **Not covered here.** ACL denial (GW-011) belongs to the `auth` profile, and stale DP config
   (GW-005) to `cpdp`.
+- **UP-017, UP-019 and pooled-lane UP-018** have public-signal contract tests only (see above).
+  `docs/verification/matrix-status.json` records their live reproduction as blocked.
+- **Mesh instance scope.** The admission mesh instance is a single egress gateway with plaintext
+  external destinations. It exercises no HBONE, sidecar-mTLS or multi-workload mesh behaviour.
 - **Drain.** The in-connection overload refusal is racy and cannot be forced. Only its diagnosis is
   checked, whichever branch occurs.
 - **Timing.** Scenarios depend on wall-clock gaps:
@@ -202,13 +252,17 @@ The runs below used `anvil-lab run <profile> --untrusted-pass` against v0.9.5, o
 | Profile | Run 1 | Run 2 | Run 3 | Wall time per run |
 |---|---|---|---|---|
 | policy | 46 passed / 0 failed / 1 skipped | 46 / 0 / 1 | 46 / 0 / 1 | ~40 s |
-| admission | 6 / 0 / 1 | 6 / 0 / 1 | 6 / 0 / 1 | ~8 s |
+| admission (before UP-018) | 6 / 0 / 1 | 6 / 0 / 1 | 6 / 0 / 1 | ~8 s |
+| admission (with the UP-018 mesh instance) | 8 / 0 / 2 | 8 / 0 / 2 | 8 / 0 / 2 | ~15 s |
 | drain | 4 / 0 / 0 | 4 / 0 / 0 | 4 / 0 / 0 | ~22 s |
 
 - The passed counts include both passes: the trusted pass and the `-untrusted` repeat of each
   scenario. Skips are listed once, with their reason, and are never counted as passes.
 - Across all eight recorded GW-003 passes, the keep-alive request during drain ended the same way:
   the idle socket was closed and the re-dial refused, and Anvil reported `client.connect.refused`.
+- The UP-018 runs were made after the branch was reset to the integration branch
+  (`claude/anvil-desktop-client-3f372d` at 517f8c1) and the UP-017/018/019 commits were applied. The
+  second admission skip is UP-018-H2.
 - **Core regression check.** The unchanged `core` profile passed 36/36 with these diagnostics changes.
   Another session held the core ports (180xx/190xx) at the time, so the check ran from a scratch copy
   of this tree with only core's port numbers shifted into the idle policy block (182xx/192xx).

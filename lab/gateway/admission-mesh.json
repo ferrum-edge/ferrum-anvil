@@ -1,0 +1,32 @@
+{
+  "mesh": {
+    "service_entries": [
+      {
+        "name": "anvil-lab-h1-capped",
+        "namespace": "ferrum",
+        "hosts": [
+          "localhost"
+        ],
+        "resolution": "dns",
+        "location": "mesh_external",
+        "ports": [
+          {
+            "port": 19503,
+            "protocol": "http",
+            "name": "http"
+          }
+        ]
+      }
+    ],
+    "destination_rules": [
+      {
+        "name": "anvil-lab-h1-cap",
+        "namespace": "ferrum",
+        "host": "localhost",
+        "traffic_policy": {
+          "max_connections": 1
+        }
+      }
+    ]
+  }
+}
