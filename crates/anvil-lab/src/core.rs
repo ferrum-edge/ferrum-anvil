@@ -5,7 +5,9 @@
 
 use crate::fixtures::CoreFixtures;
 use crate::gateway::Gateway;
-use crate::scenario::{CheckKind, Checks};
+use crate::harness::{self, LabEnv, Outcome, RunCtx};
+use crate::profiles::{BoxFut, Profile, RunArgs};
+use crate::scenario::{CheckKind, Checks, ScenarioResult};
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::request::{Body, RequestSpec};
@@ -25,20 +27,16 @@ pub struct Env {
     pub trusted: bool,
 }
 
-pub struct Outcome {
-    pub main: Option<ExecutionOutput>,
-    pub recovery: Option<ExecutionOutput>,
-    pub checks: Checks,
-    pub operator_log: Vec<String>,
+impl LabEnv for Env {
+    fn set_trusted(&mut self, trusted: bool) {
+        self.trusted = trusted;
+    }
+    fn operator_logs(&self) -> Vec<std::path::PathBuf> {
+        vec![self.gateway.log_path.clone()]
+    }
 }
 
-pub type ScenarioFn = for<'a> fn(&'a Env) -> Pin<Box<dyn Future<Output = Outcome> + 'a>>;
-
-pub struct Def {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub run: ScenarioFn,
-}
+type Def = harness::Def<Env>;
 
 pub fn ctx(env: &Env, method: &str, path: &str) -> ExecutionContext {
     let mut c = ExecutionContext::standalone(RequestSpec::http(method, &format!("{GATEWAY}{path}")));
@@ -422,4 +420,40 @@ pub fn all() -> Vec<Def> {
         Def { id: "GW-017", title: "Application 5xx", run: gw017 },
         Def { id: "GW-018", title: "Degraded but successful routing", run: gw018 },
     ]
+}
+
+pub fn profile() -> Profile {
+    Profile {
+        name: "core",
+        about: "Upstream failures, gateway admission and response ownership (HTTP 18080)",
+        scenarios: || all().into_iter().map(|d| (d.id, d.title)).collect(),
+        run: |args| Box::pin(run(args)) as BoxFut<_>,
+        up: || Box::pin(up()) as BoxFut<_>,
+    }
+}
+
+async fn start() -> anyhow::Result<Env> {
+    let fixtures = CoreFixtures::start().await?;
+    let gateway = Gateway::start("core", "core.conf", "core.yaml", &[], 18090, &[]).await?;
+    Ok(Env { engine: Engine::new(), fixtures, gateway, trusted: true })
+}
+
+async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
+    let ctx = RunCtx::new("core")?;
+    let mut env = start().await?;
+    let results = harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await?;
+    harness::finish(&ctx, &env, &results)?;
+    env.gateway.stop().await;
+    Ok(results)
+}
+
+async fn up() -> anyhow::Result<()> {
+    let env = start().await?;
+    println!("core lab running: gateway {GATEWAY} (admin 127.0.0.1:18090); operator log {}", env.gateway.log_path.display());
+    println!(
+        "routes: /ok/… (healthy), /up/dns /up/refused /up/connect-stall /up/header-stall /up/body-stall /up/reset /up/short-body /up/oversize… /gw/breaker /gw/methods /gw/request-size /gw/app-403 /gw/app-500 /gw/degraded"
+    );
+    harness::wait_for_shutdown().await?;
+    env.gateway.stop().await;
+    Ok(())
 }
