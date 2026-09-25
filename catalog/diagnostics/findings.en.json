@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-3",
+  "version": "2026.09.25-4",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -678,6 +678,28 @@
       ],
       "confirm_with": [
         "The peer's TLS logs."
+      ]
+    },
+    "client.tls.closed_after_certificate_request": {
+      "title": "The connection closed right after a client certificate was requested",
+      "explanation": "{host} asked for a client certificate during a TLS 1.3 handshake and Anvil presented {client_cert}. The new connection then closed before any response, without a TLS alert Anvil could read. In TLS 1.3 the peer checks the client certificate only after the client has finished its side of the handshake, and its refusal alert can be lost when the peer resets the connection, so this is consistent with the peer refusing the client certificate. No HTTP response was received.",
+      "alternatives": [
+        "The peer closed the connection for an unrelated reason (overload, restart or connection policy).",
+        "Something between Anvil and the peer reset the connection."
+      ],
+      "does_not_prove": [
+        "That the client certificate was the reason.",
+        "That an HTTP 401 was received.",
+        "That a gateway's certificate for its backend is wrong."
+      ],
+      "remediation": [
+        {
+          "text": "Check that the intended client certificate is selected for this host and issued by a CA the peer accepts.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The peer's TLS logs for this connection."
       ]
     },
     "client.tls.version_mismatch": {

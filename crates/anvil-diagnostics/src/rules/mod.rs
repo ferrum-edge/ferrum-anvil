@@ -76,7 +76,7 @@ pub const RULES: &[RuleMeta] = &[
         id: "tls.handshake",
         version: 1,
         summary: "TLS handshake rejections, alerts, stalls and protocol mismatches",
-        fixtures: &["TLS-005", "TLS-006", "TLS-009", "TLS-010", "TLS-011", "TLS-012"],
+        fixtures: &["TLS-005", "TLS-006", "TLS-009", "TLS-010", "TLS-011", "TLS-012", "TLS-014"],
     },
     RuleMeta { id: "tls.bypass", version: 1, summary: "Scoped verification bypass warning", fixtures: &["TLS-015", "TLS-016"] },
     RuleMeta {
