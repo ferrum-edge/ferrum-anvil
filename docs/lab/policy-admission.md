@@ -209,3 +209,6 @@ The runs below used `anvil-lab run <profile> --untrusted-pass` against v0.9.5, o
   scenario. Skips are listed once, with their reason, and are never counted as passes.
 - Across all eight recorded GW-003 passes, the keep-alive request during drain ended the same way:
   the idle socket was closed and the re-dial refused, and Anvil reported `client.connect.refused`.
+- **Core regression check.** The unchanged `core` profile passed 36/36 with these diagnostics changes.
+  Another session held the core ports (180xx/190xx) at the time, so the check ran from a scratch copy
+  of this tree with only core's port numbers shifted into the idle policy block (182xx/192xx).
