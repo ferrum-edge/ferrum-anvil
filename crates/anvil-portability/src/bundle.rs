@@ -165,6 +165,11 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
     counts.insert("requests".into(), graph.requests.len());
     counts.insert("environments".into(), graph.environments.len());
     counts.insert("tls_profiles".into(), graph.tls_profiles.len());
+    counts.insert("proxy_profiles".into(), graph.proxy_profiles.len());
+    counts.insert("gateway_profiles".into(), graph.integrations.len());
+    counts.insert("scenarios".into(), graph.scenarios.len());
+    counts.insert("datasets".into(), graph.datasets.len());
+    counts.insert("load_plans".into(), graph.load_plans.len());
     counts.insert("attachments".into(), graph.attachments.len());
     counts.insert("secrets".into(), if encrypted { graph.secrets.len() } else { 0 });
     counts.insert("history".into(), if opts.include_history { graph.history.len() } else { 0 });

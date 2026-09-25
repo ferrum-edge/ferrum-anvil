@@ -257,11 +257,34 @@ fn data_008_imports_never_activate_bypass_or_trust() {
         stop_on_failure: false,
         trusted: true,
     });
+    g.integrations.push(anvil_domain::integration::IntegrationProfile {
+        id: Id::new(),
+        workspace_id: g.workspaces[0].meta.id,
+        name: "lab gateway".into(),
+        kind: anvil_domain::integration::IntegrationKind::FerrumGateway {
+            hosts: vec![anvil_domain::tls::HostBinding { host: "api.example.com".into(), port: None }],
+            compatibility_id: "ferrum-edge-0.9.5".into(),
+            require_verified_tls: false,
+            detail: None,
+            console_url: None,
+        },
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    });
+    g.requests[0].spec.settings.redirects =
+        Some(anvil_domain::settings::RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
     let (bytes, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
     let opened = bundle::open(&bytes, None).unwrap();
     assert!(opened.graph.tls_profiles.iter().all(|t| t.verify), "verification bypass is not imported as active");
     assert!(opened.graph.scenarios.iter().all(|s| !s.trusted));
     assert!(opened.warnings.iter().any(|w| w.contains("re-enabled")));
+    let anvil_domain::integration::IntegrationKind::FerrumGateway { require_verified_tls, .. } = &opened.graph.integrations[0].kind;
+    assert!(*require_verified_tls, "plain-HTTP marker trust is not imported as active");
+    assert!(
+        opened.graph.requests.iter().all(|r| r.spec.settings.redirects.as_ref().is_none_or(|p| !p.forward_credentials_cross_origin)),
+        "cross-origin credential forwarding is not imported as active"
+    );
+    assert!(opened.warnings.iter().any(|w| w.contains("other origins")));
 }
 
 #[test]

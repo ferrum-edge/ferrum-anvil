@@ -16,7 +16,10 @@ pub struct ImportReport {
     pub secrets_restored: bool,
     pub missing_secrets: Vec<String>,
     pub checkpoint: Option<String>,
+    /// Workspace names as they will appear (or appear) after import.
     pub workspaces: Vec<String>,
+    /// Ids of the imported workspaces (after any duplicate remap); empty for a preview.
+    pub workspace_ids: Vec<String>,
 }
 
 impl App {
@@ -134,6 +137,7 @@ impl App {
             missing_secrets: missing_secrets(&opened.graph),
             checkpoint: None,
             workspaces: opened.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
+            workspace_ids: vec![],
         })
     }
 
@@ -145,6 +149,14 @@ impl App {
         let plan = plan::plan(&g, &existing, policy);
         if policy == ConflictPolicy::Duplicate {
             plan::remap_all(&mut g);
+        }
+        // A different workspace with the same name would be indistinguishable
+        // in the UI; label the incoming copy.
+        let local = self.workspaces()?;
+        for w in &mut g.workspaces {
+            if local.iter().any(|l| l.name == w.name && l.meta.id != w.meta.id) {
+                w.name = format!("{} (imported)", w.name);
+            }
         }
         let checkpoint = self.store.checkpoint("before-import")?;
         let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.contains(id);
@@ -225,6 +237,7 @@ impl App {
             missing_secrets: missing_secrets(&g),
             checkpoint: Some(checkpoint.display().to_string()),
             workspaces: g.workspaces.iter().map(|w| w.name.clone()).collect(),
+            workspace_ids: g.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
         })
     }
 }

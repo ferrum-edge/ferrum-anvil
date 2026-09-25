@@ -117,9 +117,22 @@ pub fn diagnose(input: &DiagnosticInput<'_>) -> Diagnosis {
     // Cap confidence when the only provenance is an unauthenticated channel.
     let findings = drafts.into_iter().map(render::render).collect::<Vec<_>>();
     let mut findings = dedupe(findings);
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.confidence.cmp(&a.confidence)));
+    findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(specificity(b).cmp(&specificity(a))).then(b.confidence.cmp(&a.confidence)));
     warnings.dedup_by(|a, b| a.code == b.code);
     Diagnosis { findings, warnings, body }
+}
+
+/// Presentation order only (each finding keeps its own confidence): evidence
+/// about a specific hop or phase is more actionable than the generic
+/// status-code explanation, which stays listed as the fallback.
+fn specificity(f: &DiagnosticFinding) -> u8 {
+    if f.code.starts_with("http.") {
+        0
+    } else if f.scope == anvil_domain::diagnostics::SourceScope::Unknown {
+        1
+    } else {
+        2
+    }
 }
 
 fn dedupe(v: Vec<DiagnosticFinding>) -> Vec<DiagnosticFinding> {

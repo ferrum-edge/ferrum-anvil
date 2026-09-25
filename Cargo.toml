@@ -14,6 +14,7 @@ members = [
     "crates/anvil-lab",
     "crates/anvil-fixtures",
     "crates/anvil-app",
+    "apps/desktop/src-tauri",
 
 ]
 

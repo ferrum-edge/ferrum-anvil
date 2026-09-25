@@ -72,6 +72,34 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
     if !g.load_plans.is_empty() {
         warnings.push(format!("{} load plan(s) imported as untrusted; they never start automatically.", g.load_plans.len()));
     }
+    for i in &mut g.integrations {
+        let anvil_domain::integration::IntegrationKind::FerrumGateway { require_verified_tls, .. } = &mut i.kind;
+        if !*require_verified_tls {
+            *require_verified_tls = true;
+            warnings.push(format!(
+                "Gateway profile '{}' trusted markers over unverified connections; the import turned that off. Re-enable it deliberately for a local lab.",
+                i.name
+            ));
+        }
+    }
+    let mut forwarding = 0;
+    for s in g
+        .workspaces
+        .iter_mut()
+        .map(|w| &mut w.settings)
+        .chain(g.folders.iter_mut().map(|f| &mut f.settings))
+        .chain(g.requests.iter_mut().map(|r| &mut r.spec.settings))
+    {
+        if let Some(r) = s.redirects.as_mut()
+            && r.forward_credentials_cross_origin
+        {
+            r.forward_credentials_cross_origin = false;
+            forwarding += 1;
+        }
+    }
+    if forwarding > 0 {
+        warnings.push(format!("{forwarding} item(s) forwarded credentials to other origins on redirect; the import turned that off."));
+    }
     let mut legacy = 0;
     for r in &mut g.requests {
         disable_legacy(&mut r.spec.auth, &mut legacy);
