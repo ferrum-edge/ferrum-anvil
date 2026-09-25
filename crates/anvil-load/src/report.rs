@@ -18,6 +18,10 @@ pub const CENSORED_LABEL: &str = "Censored at the deadline: each value is the ti
 pub const TARGET_RATIO: f64 = 0.9;
 /// Late-run lag must exceed this (µs) and twice the early-run lag to count as growing.
 pub const LAG_GROWTH_FLOOR_US: u64 = 50_000;
+/// A p99 start lag above this (µs) means the open schedule was not kept.
+pub const LATE_START_P99_US: u64 = 50_000;
+/// Diagnostic finding code for local port/address exhaustion (generator-side).
+pub const LOCAL_ADDRESS_EXHAUSTION_CODE: &str = "client.connect.address_unavailable";
 
 /// Immutable identity of a run, known before any traffic starts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,16 +120,26 @@ pub fn assemble(
                     snap.counts.dropped, snap.counts.scheduled
                 ));
             }
-            if growing {
-                generator.notes.push("Start lag grew over the run: arrivals started increasingly late, so the generator (or its host) fell behind the schedule.".into());
+            let late = generator.p99_schedule_lag_us > LATE_START_P99_US;
+            let mut reasons = Vec::new();
+            if ratio < TARGET_RATIO {
+                reasons.push(format!("started {:.1}/s of {:.1}/s offered ({:.0} %)", snap.achieved_rate_per_sec, offered, ratio * 100.0));
             }
-            if ratio < TARGET_RATIO || growing {
+            if growing {
+                reasons.push("start lag grew over the run (the generator fell further behind the schedule)".into());
+            }
+            if late {
+                reasons.push(format!(
+                    "arrivals started late (p99 start lag {:.1} ms, max {:.1} ms), so the offered arrival process was not honoured and catch-up bursts raised concurrency",
+                    generator.p99_schedule_lag_us as f64 / 1e3,
+                    generator.max_schedule_lag_us as f64 / 1e3
+                ));
+            }
+            if !reasons.is_empty() {
                 generator.target_not_achieved = true;
                 generator.notes.push(format!(
-                    "Target not achieved: started {:.1}/s of {:.1}/s offered ({:.0} %). This run does not establish the target's capacity — the limit may be the generator (in-flight cap, CPU, sockets) rather than the system under test. Use a separate, adequately sized generator host or lower the rate.",
-                    snap.achieved_rate_per_sec,
-                    offered,
-                    ratio * 100.0
+                    "Target not achieved: {}. This run does not establish the target's capacity — the limit may be the generator or its host (in-flight cap, CPU, scheduling, sockets) rather than the system under test. Use a separate, adequately sized generator host or lower the rate.",
+                    reasons.join("; ")
                 ));
             }
         }
@@ -156,6 +170,19 @@ pub fn assemble(
     notes.push("Latency is the sum of attempt durations (connect … last body byte) measured by the shared engine; local preparation and token acquisition are reported separately as setup time. Bytes are logical request/response header+body sizes (HTTP/2 header sizes are estimates), not wire bytes.".into());
     if snap.timeouts_censored.count > 0 {
         notes.push(format!("{} send(s) timed out. {}", snap.timeouts_censored.count, CENSORED_LABEL));
+    }
+    if snap.counts.started == 0 && snap.warmup_iterations_excluded > 0 {
+        notes.push(format!(
+            "Nothing was measured: all {} iteration(s) started during the {} s warmup. Shorten the warmup or lengthen the run.",
+            snap.warmup_iterations_excluded, plan.warmup_secs
+        ));
+    }
+    let port_exhaustion: u64 =
+        snap.failure_categories.iter().filter(|c| c.category.contains(LOCAL_ADDRESS_EXHAUSTION_CODE)).map(|c| c.count).sum();
+    if port_exhaustion > 0 {
+        generator.notes.push(format!(
+            "{port_exhaustion} send(s) failed because this machine ran out of local ports or addresses. This is a generator-side limit, not a failure of the target: every closed connection holds its client port in TIME_WAIT (tens of seconds), so fresh-connection runs exhaust the ephemeral range quickly. Use persistent connections, more source addresses or a lower connection rate."
+        ));
     }
     notes.extend(extra_notes);
 
@@ -390,6 +417,11 @@ pub(crate) mod tests {
     use super::*;
 
     pub fn sample_report() -> LoadReport {
+        let (meta, snap, timeline) = sample_parts();
+        assemble(&meta, snap, timeline, RunCompletion::Completed, Utc::now(), vec![])
+    }
+
+    pub fn sample_parts() -> (RunMeta, MetricsSnapshot, Vec<TimeBucket>) {
         let plan = LoadPlan {
             id: Id::new(),
             workspace_id: Id::new(),
@@ -477,7 +509,45 @@ pub(crate) mod tests {
                 p99_schedule_lag_us: 300,
             })
             .collect();
-        assemble(&meta, snap, timeline, RunCompletion::Completed, Utc::now(), vec![])
+        (meta, snap, timeline)
+    }
+
+    #[test]
+    fn generator_side_limits_and_empty_measurement_are_called_out() {
+        let (meta, mut snap, timeline) = sample_parts();
+        snap.failure_categories.push(FailureSample {
+            category: format!("transport_failure: {LOCAL_ADDRESS_EXHAUSTION_CODE}"),
+            count: 7,
+            examples: vec![],
+        });
+        let r = assemble(&meta, snap, timeline.clone(), RunCompletion::Completed, Utc::now(), vec![]);
+        assert!(r.generator.notes.iter().any(|n| n.starts_with("7 send(s) failed because this machine ran out of local ports")));
+
+        let (mut meta, mut snap, _) = sample_parts();
+        meta.plan.warmup_secs = 1;
+        snap.counts = LoadCounts::default();
+        snap.warmup_iterations_excluded = 30;
+        let r = assemble(&meta, snap, vec![], RunCompletion::Completed, Utc::now(), vec![]);
+        assert!(r.notes.iter().any(|n| n.starts_with("Nothing was measured: all 30 iteration(s)")), "{:?}", r.notes);
+    }
+
+    #[test]
+    fn load_007_late_starts_mean_target_not_achieved_even_when_every_arrival_started() {
+        let (meta, mut snap, timeline) = sample_parts();
+        snap.counts.dropped = 0;
+        snap.counts.scheduled = snap.counts.started;
+        snap.achieved_rate_per_sec = 10.0;
+        let ok = assemble(&meta, snap.clone(), timeline.clone(), RunCompletion::Completed, Utc::now(), vec![]);
+        assert!(!ok.generator.target_not_achieved);
+        snap.generator.p99_schedule_lag_us = 221_000;
+        snap.generator.max_schedule_lag_us = 268_000;
+        let late = assemble(&meta, snap, timeline, RunCompletion::Completed, Utc::now(), vec![]);
+        assert!(late.generator.target_not_achieved);
+        assert!(
+            late.generator.notes.iter().any(|n| n.contains("arrivals started late (p99 start lag 221.0 ms")),
+            "{:?}",
+            late.generator.notes
+        );
     }
 
     #[test]
