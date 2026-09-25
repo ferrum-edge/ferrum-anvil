@@ -1915,6 +1915,33 @@
       ],
       "confirm_with": []
     },
+    "dtls.closed_without_response": {
+      "title": "The DTLS peer closed the session without answering",
+      "explanation": "The DTLS handshake with {host} completed from Anvil's side, {sent} datagram(s) were sent, and the peer then closed the session (close_notify) without sending any data back.",
+      "alternatives": [
+        "The peer did not accept the client certificate. With DTLS 1.3 the peer checks it only after the client's final handshake flight, so the client sees the handshake finish before the refusal.",
+        "A gateway in front of the service could not set up its own connection to the backend and closed the session.",
+        "The peer's policy ended the session."
+      ],
+      "does_not_prove": [
+        "Which of these reasons applies.",
+        "That the datagrams reached an application.",
+        "That nothing is listening on the port: a DTLS peer answered the handshake."
+      ],
+      "remediation": [
+        {
+          "text": "Check the client identity selected in the DTLS profile against the peer's accepted CA.",
+          "owner": "caller"
+        },
+        {
+          "text": "Check the peer's (or gateway's) logs for this session's close reason.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The peer's or gateway's logs for this session."
+      ]
+    },
     "udp.no_response": {
       "title": "No UDP response was observed",
       "explanation": "{sent} datagram(s) were sent and none were received within {window_ms} ms. UDP gives no delivery confirmation: silence shows only that no response was observed.",

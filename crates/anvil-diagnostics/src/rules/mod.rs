@@ -150,7 +150,7 @@ pub const RULES: &[RuleMeta] = &[
         id: "protocol.streams",
         version: 1,
         summary: "SSE / TCP / UDP session semantics",
-        fixtures: &["PROTO-018", "PROTO-019", "PROTO-020", "PROTO-021"],
+        fixtures: &["PROTO-018", "PROTO-019", "PROTO-020", "PROTO-021", "PROTO-022"],
     },
     RuleMeta {
         id: "protocol.http3",
