@@ -14,6 +14,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [recovery, setRecovery] = useState<string | null>(null);
+  const [resetStep, setResetStep] = useState(false);
 
   useEffect(() => {
     api.profiles().then((p) => {
@@ -33,7 +34,9 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
       else if (mode === "recovery") await api.unlock(selected, null, secret);
       else await api.unlock(selected, secret, null);
       setSecret("");
-      props.onUnlocked();
+      // After a recovery-key unlock, offer to set a new passphrase right away.
+      if (mode === "recovery") setResetStep(true);
+      else props.onUnlocked();
     } catch (e) {
       setError(String((e as Error).message));
     } finally {
@@ -60,6 +63,48 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
     } finally {
       setBusy(false);
     }
+  }
+
+  if (resetStep) {
+    return (
+      <div className="lock">
+        <form
+          className="lock-card"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setError(null);
+            if (secret.length < 8) return setError("The passphrase needs at least 8 characters.");
+            if (secret !== pass2) return setError("The passphrases do not match.");
+            try {
+              await api.changePassphrase(secret);
+              setSecret("");
+              setPass2("");
+              props.onUnlocked();
+            } catch (err) {
+              setError(String((err as Error).message));
+            }
+          }}
+        >
+          <h1>Set a new passphrase</h1>
+          <p className="muted">You unlocked with the recovery key. Choose a new passphrase; your recovery key keeps working.</p>
+          <label className="lbl">
+            New passphrase
+            <input className="field" type="password" autoFocus value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" />
+          </label>
+          <label className="lbl">
+            Repeat passphrase
+            <input className="field" type="password" value={pass2} onChange={(e) => setPass2(e.target.value)} autoComplete="new-password" />
+          </label>
+          {error && <div className="bad-box" role="alert">{error}</div>}
+          <button className="btn primary" type="submit">
+            Save passphrase
+          </button>
+          <button type="button" className="btn ghost small" onClick={() => props.onUnlocked()}>
+            Not now
+          </button>
+        </form>
+      </div>
+    );
   }
 
   if (recovery) {

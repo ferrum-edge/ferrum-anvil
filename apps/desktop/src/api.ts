@@ -310,6 +310,7 @@ export const api = {
   unlock: (profileId: string, passphrase: string | null, recoveryKey: string | null) =>
     call<void>("profile_unlock", { profileId, passphrase, recoveryKey }),
   lock: () => call<void>("app_lock"),
+  changePassphrase: (newPassphrase: string) => call<void>("profile_change_passphrase", { newPassphrase }),
   touch: () => call<void>("touch"),
 
   workspaces: () => call<Workspace[]>("workspaces_list"),

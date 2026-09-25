@@ -106,3 +106,17 @@ impl ProfileManager {
         Ok((h, k))
     }
 }
+
+impl crate::App {
+    /// Set a new unlock passphrase (e.g. after unlocking with the recovery
+    /// key). Re-wraps the existing data key; nothing is re-encrypted and the
+    /// recovery key stays valid.
+    pub fn change_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<()> {
+        if new_passphrase.chars().count() < 8 {
+            return Err(AppError::Invalid("the passphrase needs at least 8 characters".into()));
+        }
+        let mut h = vault::read_header(&self.dir)?;
+        self.store.with_key(|k| vault::change_passphrase(&self.dir, &mut h, k, new_passphrase, kdf))??;
+        Ok(())
+    }
+}

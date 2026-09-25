@@ -828,6 +828,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
         Extra names to always redact (comma-separated headers, params, fields)
         <input className="field mono" value={s.redaction_names.join(", ")} onChange={(e) => setS({ ...s, redaction_names: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
       </label>
+      <ChangePassphrase />
       <button
         className="btn danger small"
         style={{ alignSelf: "start" }}
@@ -852,5 +853,44 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
       )}
       {err && <div className="hint">{err}</div>}
     </Modal>
+  );
+}
+
+function ChangePassphrase() {
+  const [open, setOpen] = useState(false);
+  const [a, setA] = useState("");
+  const [b, setB] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  if (!open)
+    return (
+      <button className="btn small" style={{ alignSelf: "start" }} onClick={() => setOpen(true)}>
+        Change unlock passphrase…
+      </button>
+    );
+  return (
+    <fieldset className="box">
+      <legend>Change unlock passphrase</legend>
+      <div className="row">
+        <input className="field grow" type="password" aria-label="New passphrase" placeholder="new passphrase" value={a} onChange={(e) => setA(e.target.value)} autoComplete="new-password" />
+        <input className="field grow" type="password" aria-label="Repeat passphrase" placeholder="repeat" value={b} onChange={(e) => setB(e.target.value)} autoComplete="new-password" />
+        <button
+          className="btn small"
+          onClick={async () => {
+            if (a.length < 8 || a !== b) return setMsg("Enter the same passphrase twice (at least 8 characters).");
+            try {
+              await api.changePassphrase(a);
+              setA("");
+              setB("");
+              setMsg("Passphrase changed. The recovery key still works.");
+            } catch (e) {
+              setMsg(String((e as Error).message));
+            }
+          }}
+        >
+          Save
+        </button>
+      </div>
+      {msg && <div className="hint">{msg}</div>}
+    </fieldset>
   );
 }

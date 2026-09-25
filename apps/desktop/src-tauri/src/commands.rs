@@ -115,6 +115,12 @@ pub fn profile_unlock(st: State<'_, DesktopState>, profile_id: String, passphras
     Ok(())
 }
 
+/// Re-wrap the data key under a new passphrase (the app must be unlocked).
+#[tauri::command]
+pub fn profile_change_passphrase(st: State<'_, DesktopState>, new_passphrase: String) -> R<()> {
+    st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)
+}
+
 #[tauri::command]
 pub fn app_lock(st: State<'_, DesktopState>, app: AppHandle) {
     st.lock();

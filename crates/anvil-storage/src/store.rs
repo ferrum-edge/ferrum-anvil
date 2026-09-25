@@ -212,6 +212,13 @@ impl Store {
     }
 
     /// Drop the in-memory key. Every subsequent data call returns `Locked`.
+    /// Run `f` with the unlocked data key (for re-wrapping it under a new
+    /// passphrase). Fails while locked; the key never leaves the backend.
+    pub fn with_key<R>(&self, f: impl FnOnce(&Key) -> R) -> Result<R> {
+        let k = self.key()?;
+        Ok(f(&k))
+    }
+
     pub fn lock(&self) {
         *self.key.write() = None;
     }

@@ -83,6 +83,7 @@ pub fn run() {
             commands::profile_create,
             commands::profile_unlock,
             commands::app_lock,
+            commands::profile_change_passphrase,
             commands::touch,
             commands::system_info,
             commands::workspaces_list,
