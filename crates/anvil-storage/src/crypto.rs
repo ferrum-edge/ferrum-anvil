@@ -2,6 +2,7 @@
 //!
 //! * AEAD: XChaCha20-Poly1305 with a random 192-bit nonce per message.
 //! * KDF: Argon2id with parameters stored beside the wrapped key.
+//!
 //! Envelope layout: `version(1) || nonce(24) || ciphertext+tag`.
 
 use argon2::{Algorithm, Argon2, Params, Version};

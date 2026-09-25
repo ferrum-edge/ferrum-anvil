@@ -39,3 +39,6 @@ base64.workspace = true
 # Test-only: embedded WebDriver for native E2E. Never enabled in release builds
 # (the release check verifies the binary contains no WebDriver server).
 e2e = ["dep:tauri-plugin-wdio-webdriver"]
+
+[lints]
+workspace = true

@@ -14,3 +14,6 @@ schemars.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

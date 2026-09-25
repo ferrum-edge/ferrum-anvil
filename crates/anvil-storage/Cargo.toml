@@ -33,3 +33,6 @@ os-keychain = ["dep:keyring"]
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite.workspace = true
+
+[lints]
+workspace = true

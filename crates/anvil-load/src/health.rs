@@ -12,6 +12,7 @@ pub struct Sample {
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code)] // getrusage has no safe std equivalent; see SAFETY notes.
 pub fn sample() -> Option<Sample> {
     // SAFETY: `rusage` is a plain C struct; zeroed is a valid initial value,
     // and getrusage only writes into the struct we pass.

@@ -36,3 +36,6 @@ prost.workspace = true
 protox.workspace = true
 prost-reflect.workspace = true
 dimpl.workspace = true
+
+[lints]
+workspace = true

@@ -51,7 +51,7 @@ impl App {
 
     pub fn workspaces(&self) -> Result<Vec<Workspace>> {
         let mut v: Vec<Workspace> = self.store.list(kind::WORKSPACE, None)?;
-        v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        v.sort_by_key(|a| a.name.to_lowercase());
         Ok(v)
     }
 

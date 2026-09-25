@@ -89,8 +89,6 @@ pub async fn serve(bind: &str, mode: RawMode, tls: Option<TlsServerOptions>) -> 
                     (_, Some(acc)) => match acc.accept(stream).await {
                         Ok(s) => {
                             log.push(GroundTruth::TlsHandshakeCompleted { alpn: None, client_cert_cn: None });
-                            let (s, tcp_reset) = (s, ());
-                            let _ = tcp_reset;
                             handle(s, mode, log, cancel, None).await;
                         }
                         Err(e) => log.push(GroundTruth::TlsHandshakeFailed { error: e.to_string() }),

@@ -69,15 +69,14 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                         },
                     ),
             ),
-            (None, GrpcStatusSource::Missing) => {
-                if http_status.is_some() {
+            (None, GrpcStatusSource::Missing)
+                if http_status.is_some() => {
                     out.push(
                         Draft::new("app.grpc_status_missing", "protocol.grpc", Confidence::Confirmed, SourceScope::ResponseDelivery, Owner::Unknown, Severity::Error)
                             .ev_at(E::GrpcStatus, "grpc-status", "missing", idx)
                             .var("http_status", http_status.map(|s| s.to_string()).unwrap_or_default()),
                     );
                 }
-            }
             _ => {}
         },
         ProtocolStatus::WebSocket { handshake_status, close_code, close_reason, closed_by } => {

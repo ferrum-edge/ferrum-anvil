@@ -41,3 +41,6 @@ tracing.workspace = true
 [dev-dependencies]
 anvil-fixtures = { path = "../anvil-fixtures" }
 chrono.workspace = true
+
+[lints]
+workspace = true

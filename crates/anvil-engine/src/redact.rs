@@ -88,10 +88,10 @@ impl Redactor {
         if is_sensitive_name(name, &self.extra_names) {
             // Keep the scheme word for Authorization-like headers (e.g. "Bearer").
             let lower = name.to_ascii_lowercase();
-            if lower == "authorization" || lower == "proxy-authorization" {
-                if let Some((scheme, _)) = value.split_once(' ') {
-                    return format!("{scheme} {REDACTED}");
-                }
+            if (lower == "authorization" || lower == "proxy-authorization")
+                && let Some((scheme, _)) = value.split_once(' ')
+            {
+                return format!("{scheme} {REDACTED}");
             }
             if lower == "cookie" {
                 return value

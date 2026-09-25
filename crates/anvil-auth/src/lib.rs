@@ -51,7 +51,9 @@ impl SignableRequest {
 }
 
 /// Auth with all secret references already resolved by the engine.
+/// Built once per send; variant sizes are irrelevant at that rate.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ResolvedAuth {
     None,
     ApiKey {

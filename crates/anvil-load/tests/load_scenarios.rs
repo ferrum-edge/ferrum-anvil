@@ -1,3 +1,4 @@
+#![allow(unsafe_code)] // one libc::kill to simulate a crashed worker
 //! Load-engine scenarios against loopback fixtures. Each test is small
 //! (≤ a few hundred requests, a few seconds) and the tests run one at a time
 //! so timing assertions do not compete for CPU. Fixture ground truth (what

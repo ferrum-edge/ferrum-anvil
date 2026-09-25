@@ -27,3 +27,6 @@ serde_json.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 zeroize.workspace = true
+
+[lints]
+workspace = true

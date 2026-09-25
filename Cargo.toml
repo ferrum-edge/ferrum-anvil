@@ -117,3 +117,12 @@ panic = "unwind"
 
 [profile.dev.package."*"]
 opt-level = 1
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Transport failures are typed evidence records (phase, kind, TLS alert, H2/QUIC
+# codes, deadline) that flow into ExecutionRecord unchanged. They are returned
+# once per failed attempt, never on a hot path, so boxing them buys nothing.
+result_large_err = "allow"

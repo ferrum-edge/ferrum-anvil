@@ -5,6 +5,9 @@ use anvil_fixtures::http::{self, Fixture};
 use anvil_fixtures::raw::{self, RawFixture, RawMode};
 use anyhow::Result;
 
+/// Every field is held so its server keeps running for the whole lab run,
+/// even when no scenario reads it back.
+#[allow(dead_code)]
 pub struct CoreFixtures {
     pub ok: Fixture,
     pub upload_stall: RawFixture,

@@ -38,3 +38,6 @@ libc.workspace = true
 
 [dev-dependencies]
 anvil-fixtures = { path = "../anvil-fixtures" }
+
+[lints]
+workspace = true

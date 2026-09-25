@@ -17,6 +17,8 @@ use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+/// A decrypted history record and its optional stored response body.
+pub type HistoryRecord<T> = (T, Option<Zeroizing<Vec<u8>>>);
 pub const DB_FILE: &str = "anvil.db";
 /// Current on-disk schema version. Increase only with a migration below.
 pub const DB_SCHEMA_VERSION: i64 = 1;
@@ -444,7 +446,7 @@ impl Store {
         Ok(rows)
     }
 
-    pub fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<(T, Option<Zeroizing<Vec<u8>>>)>> {
+    pub fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
         let key = self.key()?;
         let row: Option<(Vec<u8>, Option<String>)> = self
             .conn

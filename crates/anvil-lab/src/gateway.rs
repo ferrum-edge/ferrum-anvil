@@ -77,6 +77,7 @@ pub struct Gateway {
     pub profile: String,
     pub admin: String,
     pub log_path: PathBuf,
+    #[allow(dead_code)] // kept for debugging output paths
     pub run_dir: PathBuf,
 }
 

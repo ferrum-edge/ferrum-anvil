@@ -30,3 +30,6 @@ uuid.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 anvil-fixtures = { path = "../anvil-fixtures" }
+
+[lints]
+workspace = true
