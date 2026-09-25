@@ -1,6 +1,7 @@
 //! Ferrum Anvil desktop shell.
 
 mod cmd_load;
+mod cmd_sessions;
 mod cmd_specs;
 mod commands;
 mod state;
@@ -142,6 +143,9 @@ pub fn run() {
             cmd_load::load_compare,
             cmd_load::datasets_list,
             cmd_load::dataset_add,
+            cmd_sessions::session_open,
+            cmd_sessions::session_send,
+            cmd_sessions::session_cancel,
             cmd_specs::spec_preview,
             cmd_specs::spec_import,
             cmd_specs::spec_sources,

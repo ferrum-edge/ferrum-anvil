@@ -2,7 +2,8 @@
 // the request/response split.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { api, onExecutionEvent, type ExecutionView, type HistoryItem, type TreeNode } from "./api";
+import { api, onExecutionEvent, onSessionEnded, type ExecutionView, type HistoryItem, type StreamMessage, type TreeNode } from "./api";
+import { SessionConsole } from "./SessionConsole";
 import type { Environment, RequestDefinition, Workspace } from "./generated/contracts";
 import { EnvironmentsDialog, ExportDialog, ImportDialog, ProfilesDialog, SettingsDialog } from "./Dialogs";
 import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
@@ -17,6 +18,7 @@ interface OpenTab {
   running: boolean;
   execId: string | null;
   progress: number | null;
+  session?: { execId: string; messages: StreamMessage[] } | null;
 }
 
 type Dialog = null | "env" | "profiles" | "export" | "import" | "settings" | { kind: "rename"; id: string; isFolder: boolean; name: string } | { kind: "history"; view: ExecutionView };
@@ -56,6 +58,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   }, []);
   const loadTree = useCallback(async () => ws && setTree(await api.tree(ws.id)), [ws]);
   const loadHistory = useCallback(async () => ws && setHistory(await api.history(ws.id, null, 200)), [ws]);
+  const loadHistoryRef = useRef(loadHistory);
+  loadHistoryRef.current = loadHistory;
   const loadProfiles = useCallback(async () => {
     if (!ws) return;
     const [tls, proxy, integrations] = await Promise.all([api.tlsProfiles(ws.id), api.proxyProfiles(ws.id), api.integrations(ws.id)]);
@@ -75,14 +79,27 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     void Promise.all([loadTree(), loadHistory(), loadProfiles(), loadEnvs()]).catch(fail);
   }, [ws?.id]);
 
-  // Live progress events.
+  // Live progress and session messages.
   useEffect(() => {
     const un = onExecutionEvent((ev) => {
-      if (ev.event !== "body_progress") return;
-      setTabs((ts) => ts.map((t) => (t.execId === ev.execution_id ? { ...t, progress: ev.bytes } : t)));
+      if (ev.event === "body_progress") {
+        setTabs((ts) => ts.map((t) => (t.execId === ev.execution_id ? { ...t, progress: ev.bytes } : t)));
+      } else if (ev.event === "message") {
+        setTabs((ts) =>
+          ts.map((t) =>
+            t.session?.execId === ev.execution_id ? { ...t, session: { ...t.session, messages: [...t.session.messages, ev.message].slice(-5000) } } : t,
+          ),
+        );
+      }
+    });
+    const ended = onSessionEnded((e) => {
+      setTabs((ts) => ts.map((t) => (t.session?.execId === e.execution_id ? { ...t, session: null, view: e.view ?? t.view } : t)));
+      if (e.error) setToast(`Session ended: ${e.error}`);
+      void loadHistoryRef.current?.();
     });
     return () => {
       void un.then((f) => f());
+      void ended.then((f) => f());
     };
   }, []);
 
@@ -147,6 +164,19 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       }
     } catch (e) {
       updateTab(rid, { running: false, execId: null });
+      fail(e);
+    }
+  };
+
+  const connect = async () => {
+    const t = tabsRef.current.find((x) => x.req.id === active);
+    if (!t || !ws || t.running || t.session) return;
+    const execId = uid();
+    updateTab(t.req.id, { session: { execId, messages: [] }, view: null });
+    try {
+      await api.sessionOpen({ workspace_id: ws.id, request_id: t.req.id, spec: t.req.spec, environment_id: ws.active_environment_id ?? null, send_anyway: false }, execId);
+    } catch (e) {
+      updateTab(t.req.id, { session: null });
       fail(e);
     }
   };
@@ -422,6 +452,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   req={tab.req}
                   onChange={(req) => updateTab(tab.req.id, { req })}
                   onSend={(anyway) => void send(anyway)}
+                  onConnect={() => void connect()}
+                  connected={!!tab.session}
                   onSave={() => void saveTab()}
                   onCancel={() => void cancel()}
                   running={tab.running}
@@ -440,7 +472,16 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   drag(e, "y", (_d, ev) => setReqHeight(Math.min(75, Math.max(15, ((ev.clientY - host.top - 90) / host.height) * 100))));
                 }}
               />
-              <ResponsePanel view={tab.view} running={tab.running} progressBytes={tab.progress} onCancel={() => void cancel()} />
+              {tab.session ? (
+                <SessionConsole
+                  protocol={tab.req.spec.protocol ?? "http"}
+                  messages={tab.session.messages}
+                  onSend={(c) => api.sessionSend(tab.session!.execId, c)}
+                  onCancel={() => void api.sessionCancel(tab.session!.execId)}
+                />
+              ) : (
+                <ResponsePanel view={tab.view} running={tab.running} progressBytes={tab.progress} onCancel={() => void cancel()} />
+              )}
             </div>
           ) : (
             <div className="empty">

@@ -17,6 +17,8 @@ pub struct DesktopState {
     pub running: Mutex<HashMap<Id, CancellationToken>>,
     /// Load runs in worker processes, by run key (cancel and lock-time stop).
     pub load_runs: Mutex<HashMap<String, CancellationToken>>,
+    /// Open interactive sessions by execution id.
+    pub sessions: Mutex<HashMap<String, crate::cmd_sessions::SessionSlot>>,
     pub last_activity: Mutex<Instant>,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
@@ -29,6 +31,7 @@ impl DesktopState {
             app: RwLock::new(None),
             running: Mutex::new(HashMap::new()),
             load_runs: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(Instant::now()),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
         }
@@ -61,6 +64,15 @@ impl DesktopState {
         // (completion `stopped_by_lock` is recorded by the run policy).
         for t in self.load_runs.lock().values() {
             t.cancel();
+        }
+        // Interactive sessions are aborted; their watcher records the result.
+        let open: Vec<_> = self.sessions.lock().values().cloned().collect();
+        for slot in open {
+            tauri::async_runtime::spawn(async move {
+                if let Some(s) = slot.lock().await.as_ref() {
+                    s.cancel();
+                }
+            });
         }
         if let Some(a) = self.app.read().as_ref() {
             a.lock();

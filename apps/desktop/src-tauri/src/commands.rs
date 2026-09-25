@@ -346,7 +346,7 @@ pub struct SendInput {
     pub run_override: Option<SettingsOverrides>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct BodyView {
     pub text: Option<String>,
     pub pretty: Option<String>,
@@ -357,7 +357,7 @@ pub struct BodyView {
     pub captured_bytes: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ExecutionView {
     pub record: ExecutionRecord,
     pub body: BodyView,

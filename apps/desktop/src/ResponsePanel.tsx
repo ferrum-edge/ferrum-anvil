@@ -25,7 +25,9 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
   const findings = view?.record.findings ?? [];
   const hasProblems = findings.some((f) => f.severity !== "info");
   const [tab, setTab] = useState<Tab>("diagnosis");
-  const effectiveTab: Tab = tab === "diagnosis" && !hasProblems && findings.length === 0 && view ? "body" : tab;
+  const isStream = !!view?.record.stream;
+  const quiet = !hasProblems && findings.length === 0 && !!view;
+  const effectiveTab: Tab = tab === "diagnosis" && quiet ? (isStream ? "messages" : "body") : tab === "body" && isStream && !view?.record.response ? "messages" : tab;
 
   if (running) {
     return (
@@ -61,7 +63,7 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "diagnosis", label: "Diagnosis", count: findings.length },
     ...(stream ? [{ id: "messages" as Tab, label: "Messages", count: stream.messages.length }] : []),
-    { id: "body", label: "Body" },
+    ...(stream && !resp ? [] : [{ id: "body" as Tab, label: "Body" }]),
     { id: "headers", label: "Headers", count: (resp?.headers.length ?? 0) + (resp?.trailers.length ?? 0) },
     { id: "timing", label: "Timing" },
     { id: "connection", label: "Connection" },

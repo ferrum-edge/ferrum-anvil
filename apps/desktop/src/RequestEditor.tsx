@@ -43,6 +43,8 @@ export function RequestEditor(props: {
   req: RequestDefinition;
   onChange: (r: RequestDefinition) => void;
   onSend: (sendAnyway: boolean) => void;
+  onConnect: () => void;
+  connected: boolean;
   onSave: () => void;
   onCancel: () => void;
   running: boolean;
@@ -97,15 +99,25 @@ export function RequestEditor(props: {
           spellCheck={false}
           value={spec.url}
           placeholder={placeholderFor(protocol)}
-          onChange={(e) => set({ url: e.target.value })}
+          onChange={(e) => {
+            const url = e.target.value;
+            // A non-HTTP scheme typed into an HTTP request selects the matching protocol.
+            const inferred = protocol === "http" ? protocolForScheme(url) : null;
+            set(inferred ? { url, protocol: inferred } : { url });
+          }}
         />
+        {interactive(spec) && !props.running && (
+          <button type="button" className="btn" disabled={props.connected} title="Open an interactive session: send and receive messages live" onClick={props.onConnect}>
+            {props.connected ? "Connected" : "Connect"}
+          </button>
+        )}
         {props.running ? (
           <button type="submit" className="btn">
             Cancel
           </button>
         ) : (
-          <button type="submit" className="btn primary" title="Send (⌘/Ctrl+Enter)">
-            Send
+          <button type="submit" className="btn primary" disabled={props.connected} title={protocol === "http" ? "Send (⌘/Ctrl+Enter)" : "Run the scripted exchange and stop (⌘/Ctrl+Enter)"}>
+            {protocol === "http" ? "Send" : "Run"}
           </button>
         )}
         <button type="button" className="btn" onClick={props.onSave} disabled={!props.dirty} title="Save (⌘/Ctrl+S)">
@@ -130,6 +142,30 @@ export function RequestEditor(props: {
       </div>
     </>
   );
+}
+
+function protocolForScheme(url: string): RequestSpec["protocol"] | null {
+  const m = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url.trim());
+  switch (m?.[1].toLowerCase()) {
+    case "ws":
+    case "wss":
+      return "web_socket";
+    case "tcp":
+    case "tls":
+      return "tcp";
+    case "udp":
+    case "dtls":
+      return "udp";
+    default:
+      return null;
+  }
+}
+
+/** Protocols with an interactive session mode. */
+function interactive(spec: RequestSpec): boolean {
+  const p = spec.protocol ?? "http";
+  if (p === "web_socket" || p === "tcp" || p === "udp" || p === "sse") return true;
+  return p === "grpc" && (spec.grpc?.mode === "client_streaming" || spec.grpc?.mode === "bidirectional");
 }
 
 function placeholderFor(p: string): string {

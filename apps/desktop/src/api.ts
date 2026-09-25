@@ -11,6 +11,8 @@ import type {
   LoadPlan,
   LoadReport,
   RunCompletion,
+  SessionCommand,
+  StreamMessage,
   TimeBucket,
   DiagnosticFinding,
   Environment,
@@ -31,6 +33,8 @@ import type {
 } from "./generated/contracts";
 
 export type {
+  SessionCommand,
+  StreamMessage,
   AppSettings,
   AttachmentRef,
   Dataset,
@@ -374,6 +378,10 @@ export const api = {
   addDataset: (workspaceId: string, path: string, name: string, sensitiveColumns: string[]) =>
     call<Dataset>("dataset_add", { workspaceId, path, name, sensitiveColumns }),
 
+  sessionOpen: (input: SendInput, executionId: string) => call<string>("session_open", { input, executionId }),
+  sessionSend: (executionId: string, command: SessionCommand) => call<void>("session_send", { executionId, command }),
+  sessionCancel: (executionId: string) => call<void>("session_cancel", { executionId }),
+
   specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
   specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
   readTextFile: (path: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
@@ -390,6 +398,10 @@ export function onLoadProgress(cb: (e: { run_key: string; progress: LoadProgress
 
 export function onLoadFinished(cb: (e: { run_key: string; run_id?: string | null; error?: string | null }) => void): Promise<UnlistenFn> {
   return listen<{ run_key: string; run_id?: string | null; error?: string | null }>("load-finished", (ev) => cb(ev.payload));
+}
+
+export function onSessionEnded(cb: (e: { execution_id: string; view?: ExecutionView | null; error?: string | null }) => void): Promise<UnlistenFn> {
+  return listen<{ execution_id: string; view?: ExecutionView | null; error?: string | null }>("session-ended", (ev) => cb(ev.payload));
 }
 
 export function onLocked(cb: (reason: string) => void): Promise<UnlistenFn> {
