@@ -21,4 +21,4 @@ paths = ['''^crates/anvil-import/tests/fixtures/''']
 
 [[allowlists]]
 description = "Canary secrets planted by leak/redaction tests; the tests assert these never reach logs, reports or exports"
-regexes = ['''sk-live-(TOPSECRET|LEAKME)[A-Za-z0-9-]*''']
+regexes = ['''(sk-live-(TOPSECRET|LEAKME)|tok-SENSITIVE-)[A-Za-z0-9-]*''']
