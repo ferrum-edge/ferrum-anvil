@@ -314,10 +314,16 @@ fn gateway_via_hop(r: &anvil_domain::execution::ResponseRecord) -> Option<String
 }
 
 /// Outcomes rendered by the gateway's pre-dispatch reject builder (no Via):
-/// authentication / authorization rejections. Credential-lifetime expiry is
-/// excluded because it can replace a response after dispatch.
+/// authentication / authorization 4xx rejections. Credential-lifetime expiry
+/// is excluded because it can replace a response after dispatch, and 5xx
+/// plugin outcomes because some are raised at the final request body, where
+/// the audit could not rule out the backend-response builder.
 fn pre_dispatch_reject(o: &ferrum::Outcome) -> bool {
-    matches!(o.family.as_str(), "auth" | "authorization") && !o.id.contains("lifetime") && !o.id.starts_with("protocol.")
+    matches!(o.family.as_str(), "auth" | "authorization")
+        && !o.id.contains("lifetime")
+        && !o.id.starts_with("protocol.")
+        && !o.statuses.is_empty()
+        && o.statuses.iter().all(|s| *s < 500)
 }
 
 fn catalog_title(id: &str) -> String {

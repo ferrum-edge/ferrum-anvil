@@ -115,6 +115,18 @@ fn auth_x05_ambiguous_gateway_candidates_are_all_contradicted_by_via() {
     assert!(codes(&http(&r, body, true)).contains(&"ferrum.outcome_ambiguous"), "without Via the gateway candidates stay listed");
 }
 
+/// Authentication 5xx outcomes are left alone: some are raised at the final
+/// request body, where the audit could not rule out the backend builder (and
+/// a relayed backend 5xx would carry `backend_error` anyway).
+#[test]
+fn auth_5xx_outcomes_are_not_contradicted_by_via() {
+    let body = br#"{"error":"Token introspection unavailable"}"#;
+    let r = response(503, &[("via", "1.1 ferrum-edge")], body);
+    let d = http(&r, body, true);
+    assert!(codes(&d).contains(&"ferrum.outcome"), "{:?}", codes(&d));
+    assert!(!codes(&d).contains(&"ferrum.relayed_backend_response"));
+}
+
 /// Gateway-synthesized upstream failures DO carry Via; the relay rule must
 /// not touch them (they are not authentication rejections).
 #[test]
