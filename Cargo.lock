@@ -205,6 +205,7 @@ dependencies = [
  "anvil-engine",
  "anvil-fixtures",
  "anvil-portability",
+ "anvil-runner",
  "anvil-storage",
  "anvil-transport",
  "bytes",

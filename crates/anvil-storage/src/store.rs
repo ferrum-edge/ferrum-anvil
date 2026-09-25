@@ -61,6 +61,8 @@ pub mod kind {
     pub const APP_SETTINGS: &str = "app_settings";
     pub const USER_PROFILE: &str = "user_profile";
     pub const IMPORT_SOURCE: &str = "import_source";
+    /// Saved collection-run reports (`anvil_domain::runner::RunReport`).
+    pub const RUN_REPORT: &str = "run_report";
     pub const ALL: &[&str] = &[
         WORKSPACE,
         FOLDER,
@@ -76,6 +78,7 @@ pub mod kind {
         APP_SETTINGS,
         USER_PROFILE,
         IMPORT_SOURCE,
+        RUN_REPORT,
     ];
 }
 
