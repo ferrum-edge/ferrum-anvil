@@ -9,6 +9,7 @@ pub mod dtls;
 pub mod grpc;
 pub mod h3server;
 pub mod http;
+pub mod lab_streams;
 pub mod log;
 pub mod pki;
 pub mod raw;
