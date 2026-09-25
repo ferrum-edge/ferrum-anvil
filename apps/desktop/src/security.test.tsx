@@ -1,7 +1,6 @@
 // DATA-014: remote content is inert. A response carrying HTML, scripts and
 // privileged URLs renders as text only; the CSP forbids remote code.
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import tauriConf from "../src-tauri/tauri.conf.json";
 import { render } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -77,7 +76,7 @@ test("data_014 hostile HTML response renders as inert text", () => {
 });
 
 test("data_014 CSP forbids remote scripts, frames and fetches", () => {
-  const conf = JSON.parse(readFileSync(resolve(__dirname, "../src-tauri/tauri.conf.json"), "utf8"));
+  const conf = tauriConf as { app: { security: { csp: string }; withGlobalTauri: boolean } };
   const csp: string = conf.app.security.csp;
   expect(csp).toContain("script-src 'self'");
   expect(csp).toContain("frame-src 'none'");

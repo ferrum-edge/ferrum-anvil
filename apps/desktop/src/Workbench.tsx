@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, onExecutionEvent, onSessionEnded, type ExecutionView, type HistoryItem, type StreamMessage, type TreeNode } from "./api";
 import { SessionConsole } from "./SessionConsole";
+import { ScopeSettingsDialog } from "./ScopeSettings";
 import type { Environment, RequestDefinition, Workspace } from "./generated/contracts";
 import { EnvironmentsDialog, ExportDialog, ImportDialog, ProfilesDialog, SettingsDialog } from "./Dialogs";
 import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
@@ -22,7 +23,17 @@ interface OpenTab {
   session?: { execId: string; messages: StreamMessage[] } | null;
 }
 
-type Dialog = null | "env" | "profiles" | "export" | "import" | "settings" | { kind: "rename"; id: string; isFolder: boolean; name: string } | { kind: "history"; view: ExecutionView };
+type Dialog =
+  | null
+  | "env"
+  | "profiles"
+  | "export"
+  | "import"
+  | "settings"
+  | "workspace"
+  | { kind: "rename"; id: string; isFolder: boolean; name: string }
+  | { kind: "history"; view: ExecutionView }
+  | { kind: "folder"; id: string };
 
 const snap = (r: RequestDefinition) => JSON.stringify({ n: r.name, s: r.spec });
 
@@ -296,6 +307,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           ))}
           <option value="__new">+ New workspace…</option>
         </select>
+        <button className="btn ghost icon-btn" aria-label="Workspace settings" title="Workspace auth, variables and settings" onClick={() => setDialog("workspace")}>
+          ⚙
+        </button>
         <select
           className="field"
           aria-label="Environment"
@@ -401,6 +415,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                 onNewRequest={newRequest}
                 onNewFolder={newFolder}
                 onRename={(n) => setDialog({ kind: "rename", id: n.id, isFolder: n.kind === "folder", name: n.name })}
+                onFolderSettings={(id) => setDialog({ kind: "folder", id })}
                 onDuplicate={async (n) => {
                   await api.duplicateRequest(n.id);
                   await loadTree();
@@ -527,6 +542,23 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             await loadWorkspaces(ws.id);
           }}
         />
+      )}
+      {dialog === "workspace" && ws && (
+        <ScopeSettingsDialog
+          target={{ kind: "workspace", workspace: ws }}
+          workspaceId={ws.id}
+          profiles={profiles}
+          onClose={() => setDialog(null)}
+          onSaved={(w) => {
+            if (w) {
+              setWs(w);
+              setWorkspaces((l) => l.map((x) => (x.id === w.id ? w : x)));
+            }
+          }}
+        />
+      )}
+      {typeof dialog === "object" && dialog?.kind === "folder" && ws && (
+        <ScopeSettingsDialog target={{ kind: "folder", id: dialog.id }} workspaceId={ws.id} profiles={profiles} onClose={() => setDialog(null)} onSaved={() => void loadTree()} />
       )}
       {dialog === "profiles" && ws && <ProfilesDialog workspaceId={ws.id} onClose={() => setDialog(null)} onChanged={loadProfiles} />}
       {dialog === "export" && <ExportDialog workspace={ws} onClose={() => setDialog(null)} notify={notify} />}
@@ -679,6 +711,7 @@ function Tree(props: {
   onNewRequest: (folder: string) => void;
   onNewFolder: (parent: string) => void;
   onRename: (n: TreeNode) => void;
+  onFolderSettings: (id: string) => void;
   onDuplicate: (n: TreeNode) => void;
   onDelete: (n: TreeNode) => void;
   onMove: (id: string, kind: string, folder: string | null) => void;
@@ -727,6 +760,9 @@ function Tree(props: {
                     </button>
                     <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="New subfolder" aria-label="New subfolder" onClick={() => props.onNewFolder(n.id)}>
                       ⊞
+                    </button>
+                    <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="Folder auth, variables and settings" aria-label="Folder settings" onClick={() => props.onFolderSettings(n.id)}>
+                      ⚙
                     </button>
                   </>
                 )}

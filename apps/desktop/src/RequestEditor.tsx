@@ -816,8 +816,14 @@ function fromTri(s: string): boolean | null {
 }
 
 function SettingsEditor({ spec, set, profiles }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; profiles: Profiles }) {
-  const s: SettingsOverrides = spec.settings ?? {};
-  const upd = (patch: Partial<SettingsOverrides>) => set({ settings: { ...s, ...patch } });
+  return <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} />;
+}
+
+/** Settings overrides for any layer (workspace, folder, request). Blank or
+ * "inherit" leaves the value to the outer layer. */
+export function SettingsOverridesEditor({ value, onChange, profiles }: { value: SettingsOverrides; onChange: (s: SettingsOverrides) => void; profiles: Profiles }) {
+  const s: SettingsOverrides = value;
+  const upd = (patch: Partial<SettingsOverrides>) => onChange({ ...s, ...patch });
   const t = s.timeouts ?? {};
   const selectedTls = profiles.tls.find((p) => p.id === s.tls_profile_id);
   return (
