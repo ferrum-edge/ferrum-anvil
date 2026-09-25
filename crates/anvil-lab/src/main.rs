@@ -10,10 +10,12 @@
 
 mod core;
 mod fixtures;
+mod fixtures_streams;
 mod gateway;
 mod harness;
 mod profiles;
 mod scenario;
+mod streams;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
