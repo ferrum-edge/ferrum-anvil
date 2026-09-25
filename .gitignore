@@ -8,3 +8,4 @@
 *.log
 .DS_Store
 /results/tmp
+/results/lab

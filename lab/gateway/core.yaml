@@ -53,11 +53,14 @@ proxies:
     strip_listen_path: true
     pool_enable_http2: false
 
-  # UP-003: fixture listener with a saturated accept backlog that never accepts.
+  # UP-003: TEST-NET-1 (RFC 5737) blackhole address: SYNs get no answer, so the
+  # gateway's connect deadline fires. (A saturated-backlog loopback listener does
+  # not stall connects on macOS; see docs/lab.md.) Network-dependent: a host with
+  # no default route reports EHOSTUNREACH instead, which the scenario also accepts.
   - id: up003-connect-stall
     listen_path: /up/connect-stall
     backend_scheme: http
-    backend_host: 127.0.0.1
+    backend_host: 192.0.2.1
     backend_port: 19003
     strip_listen_path: true
     pool_enable_http2: false

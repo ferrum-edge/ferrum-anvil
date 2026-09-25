@@ -455,3 +455,45 @@ fn observation_from_slot(
     obs.client_certificate_presented = if s.0.client_cert_presented { prepared.client_summary.clone() } else { None };
     obs
 }
+
+/// Handle for reading TLS evidence from a connection built with
+/// [`client_config_observed`] (used by QUIC, where the handshake is driven
+/// by quinn rather than tokio-rustls).
+pub struct ObservationHandle {
+    slot: Arc<Mutex<SlotHandle>>,
+    sni: String,
+    alpn: Vec<String>,
+}
+
+/// A client config (TLS 1.3 only when `tls13_only`) with observing verifier
+/// and client-certificate resolver.
+pub fn client_config_observed(
+    prepared: &PreparedTls,
+    host: &str,
+    alpn: &[&str],
+    tls13_only: bool,
+) -> Result<(ClientConfig, ServerName<'static>, ObservationHandle), TransportFailure> {
+    let server_name = server_name_for(host, prepared)?;
+    let slot = Arc::new(Mutex::new(SlotHandle::default()));
+    let versions: &[&'static rustls::SupportedProtocolVersion] = if tls13_only || prepared.min_version == TlsMinVersion::Tls13 {
+        &[&rustls::version::TLS13]
+    } else {
+        &[&rustls::version::TLS13, &rustls::version::TLS12]
+    };
+    let verifier = Arc::new(ObservingVerifier { inner: prepared.verifier.clone(), verify: prepared.verify, slot: slot.clone() });
+    let mut cfg = ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(versions)
+        .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("TLS versions unsupported: {e}"), "tls.min_version"))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_client_cert_resolver(Arc::new(ObservingClientCert { key: prepared.client_key.clone(), slot: slot.clone() }));
+    cfg.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
+    cfg.resumption = Resumption::store(prepared.sessions.clone());
+    let sni = server_name_string(&server_name);
+    Ok((cfg, server_name, ObservationHandle { slot, sni, alpn: alpn.iter().map(|s| s.to_string()).collect() }))
+}
+
+pub fn observe(h: &ObservationHandle, prepared: &PreparedTls, completed: bool) -> TlsObservation {
+    let alpn: Vec<&str> = h.alpn.iter().map(|s| s.as_str()).collect();
+    observation_from_slot(&h.slot, &h.sni, &alpn, prepared, completed)
+}

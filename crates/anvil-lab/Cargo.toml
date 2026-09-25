@@ -1,9 +1,32 @@
 [package]
 name = "anvil-lab"
+description = "Local failure laboratory: runs the real Ferrum Edge release binary against controllable fixtures and executes matrix scenarios through the shared Anvil engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license-file.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "anvil-lab"
+path = "src/main.rs"
+
 [dependencies]
+anvil-domain.workspace = true
+anvil-engine.workspace = true
+anvil-transport.workspace = true
+anvil-diagnostics.workspace = true
+anvil-fixtures = { path = "../anvil-fixtures" }
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+rand.workspace = true
+base64.workspace = true
+hmac.workspace = true

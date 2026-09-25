@@ -10,6 +10,7 @@ pub mod connector;
 pub mod decode;
 pub mod dns;
 pub mod errors;
+pub mod h3;
 pub mod http;
 pub mod net;
 pub mod recorder;

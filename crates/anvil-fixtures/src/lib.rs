@@ -4,6 +4,7 @@
 //! This crate is lab/test-only. Release builds of the desktop app and CLI do
 //! not depend on it (verified by the release artifact check).
 
+pub mod dns;
 pub mod grpc;
 pub mod http;
 pub mod log;

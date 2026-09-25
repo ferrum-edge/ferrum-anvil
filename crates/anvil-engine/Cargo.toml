@@ -1,5 +1,6 @@
 [package]
 name = "anvil-engine"
+description = "Shared request preparation and execution engine: variables, settings resolution, serialization, lint, auth per send, redirects, retries, diagnostics, assertions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,3 +8,36 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+anvil-domain.workspace = true
+anvil-transport.workspace = true
+anvil-diagnostics.workspace = true
+anvil-auth.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+bytes.workspace = true
+http.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+rand.workspace = true
+uuid.workspace = true
+regex.workspace = true
+roxmltree.workspace = true
+serde_json_path.workspace = true
+jsonschema.workspace = true
+zeroize.workspace = true
+parking_lot.workspace = true
+cookie_store = "0.22.1"
+p12-keystore = "0.3.2"
+tracing.workspace = true
+
+[dev-dependencies]
+anvil-fixtures = { path = "../anvil-fixtures" }
+chrono.workspace = true

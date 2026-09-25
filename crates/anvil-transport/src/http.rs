@@ -842,7 +842,7 @@ fn finalize_fail(mut out: AttemptOutput, stats: &ConnStats, written_before: u64,
     out
 }
 
-pub(crate) async fn sleep_until_opt(at: Option<Instant>) {
+pub async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
         None => std::future::pending::<()>().await,
