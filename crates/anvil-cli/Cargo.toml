@@ -20,6 +20,7 @@ anvil-portability.workspace = true
 anvil-transport.workspace = true
 anvil-auth.workspace = true
 anvil-diagnostics.workspace = true
+anvil-runner.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -27,6 +28,11 @@ serde_json.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+anvil-fixtures = { path = "../anvil-fixtures" }
+tempfile.workspace = true
+roxmltree.workspace = true
 
 [lints]
 workspace = true
