@@ -419,6 +419,7 @@ dependencies = [
 name = "anvil-lab"
 version = "0.1.0"
 dependencies = [
+ "anvil-auth",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -430,6 +431,7 @@ dependencies = [
  "clap",
  "hex",
  "hmac 0.13.0",
+ "httpdate",
  "rand 0.10.3",
  "serde",
  "serde_json",
@@ -437,6 +439,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "zeroize",
 ]
 
 [[package]]

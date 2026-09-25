@@ -8,8 +8,10 @@
 //! ```
 //! Results: `results/lab/<timestamp>-<profile>/{summary.json, <ID>.json}`.
 
+mod auth;
 mod core;
 mod fixtures;
+mod fixtures_auth;
 mod fixtures_tls;
 mod gateway;
 mod harness;

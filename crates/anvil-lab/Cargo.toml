@@ -12,6 +12,7 @@ name = "anvil-lab"
 path = "src/main.rs"
 
 [dependencies]
+anvil-auth.workspace = true
 anvil-domain.workspace = true
 anvil-engine.workspace = true
 anvil-transport.workspace = true
@@ -30,6 +31,8 @@ url.workspace = true
 rand.workspace = true
 base64.workspace = true
 hmac.workspace = true
+httpdate.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

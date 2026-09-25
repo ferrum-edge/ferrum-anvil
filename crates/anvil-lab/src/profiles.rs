@@ -30,7 +30,7 @@ pub struct Profile {
 }
 
 pub fn all() -> Vec<Profile> {
-    vec![crate::core::profile(), crate::tls::profile()]
+    vec![crate::core::profile(), crate::tls::profile(), crate::auth::profile()]
 }
 
 pub fn find(name: &str) -> Result<Profile> {
