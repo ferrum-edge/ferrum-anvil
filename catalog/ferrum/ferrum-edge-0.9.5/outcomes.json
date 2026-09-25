@@ -25678,7 +25678,7 @@
       "error_class": null,
       "public_signal": {
         "http_status": 502,
-        "x_gateway_error": null,
+        "x_gateway_error": "backend_error",
         "other_headers": {
           "Content-Type": "application/json (proxy default)"
         },
@@ -25696,7 +25696,7 @@
       "fixture_ids": [
         "GW-020"
       ],
-      "notes": "The upstream call already completed and was billed. On the backend path this likely also carries X-Gateway-Error: backend_error (caveat). Also applies to synthetic 2xx responses (ai_federation, cache HIT). Public reason detail: detected_types: built-in PII names, custom_pii_patterns names, 'blocked_phrase:{index}' (phrase text not revealed), blocked_patterns[].name. Distinguishability: Redact-failure message: 'Response contains restricted content that could not be redacted before delivery.' Body family: plain_error_json"
+      "notes": "The upstream call already completed and was billed. Carries X-Gateway-Error: backend_error on the backend path (live-verified: lab policy profile GW-020-CONTENT, 2026-09-25). Also applies to synthetic 2xx responses (ai_federation, cache HIT). Public reason detail: detected_types: built-in PII names, custom_pii_patterns names, 'blocked_phrase:{index}' (phrase text not revealed), blocked_patterns[].name. Distinguishability: Redact-failure message: 'Response contains restricted content that could not be redacted before delivery.' Body family: plain_error_json"
     },
     {
       "id": "plugin.ai_response_guard.streaming_rejected",
