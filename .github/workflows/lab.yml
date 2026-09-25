@@ -54,6 +54,8 @@ jobs:
           tauri-deps: "false"
           node: "false"
           cache-key: lab
+      - name: Lint gateway lab profiles (plugin keys from the pinned source)
+        run: ruby lab/gateway/lint-profiles.rb
       - name: Fetch and verify the pinned Ferrum Edge gateway
         env:
           GH_TOKEN: ${{ github.token }}
