@@ -229,3 +229,11 @@ async fn locking_mid_run_aborts_with_a_partial_report() {
     assert!(r.notes.iter().any(|n| n.contains("not saved")), "{:?}", r.notes);
     assert_eq!(*f.state.counters.lock().get("second").unwrap_or(&0), 0, "nothing is sent after the lock");
 }
+
+/// The desktop shell spawns runs on the async runtime: the run futures must be `Send`.
+#[allow(dead_code)]
+fn run_futures_are_send(app: &App, id: &anvil_domain::Id) {
+    fn is_send<T: Send>(_: T) {}
+    is_send(app.run_scenario(id, RunSettings::default(), CancellationToken::new()));
+    is_send(app.run_folder(id, None, RunSettings::default(), CancellationToken::new()));
+}
