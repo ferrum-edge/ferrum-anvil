@@ -7,6 +7,7 @@ pub mod load;
 pub mod port;
 pub mod profiles;
 pub mod specs;
+pub mod runner;
 pub mod workspace;
 
 use anvil_engine::Engine;

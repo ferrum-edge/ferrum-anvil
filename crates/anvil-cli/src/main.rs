@@ -4,9 +4,17 @@
 //! Exit codes: 0 success · 1 transport/application failure · 2 assertion
 //! failure · 3 local/usage error.
 //!
+//! `anvil run` maps a collection run onto the same codes: 2 when any step
+//! failed an assertion (and assertions count as failures), otherwise 1 when
+//! any step failed or could not be sent, or the run was canceled/aborted;
+//! 3 when the run could not start (untrusted scenario, invalid scenario or
+//! dataset, locked profile, usage error).
+//!
 //! Unlocking a passphrase profile: `--passphrase-stdin` (preferred) or the
 //! `ANVIL_PASSPHRASE` environment variable (visible to other processes of the
 //! same user; use only in isolated CI). Keychain profiles unlock automatically.
+
+mod collection;
 
 use anvil_app::App;
 use anvil_app::exec::SendOptions;
@@ -59,6 +67,13 @@ enum Cmd {
     Add(AddArgs),
     /// Send a saved request or an ad-hoc URL and print the diagnosis.
     Send(SendArgs),
+    /// Run a scenario or every request of a folder (collection runner).
+    Run(RunArgs),
+    /// Manage collection-runner scenarios.
+    Scenario {
+        #[command(subcommand)]
+        cmd: ScenarioCmd,
+    },
     /// List recent history.
     History {
         #[arg(long)]
@@ -159,6 +174,113 @@ struct SendArgs {
     /// Send even if the body fails syntax lint.
     #[arg(long)]
     send_anyway: bool,
+}
+
+#[derive(clap::Args)]
+struct RunArgs {
+    /// Workspace (id or name).
+    workspace: String,
+    /// Scenario to run (id or name).
+    #[arg(long, conflicts_with = "folder", required_unless_present = "folder")]
+    scenario: Option<String>,
+    /// Folder to run, like `Orders/Refunds` (`/` = every request of the workspace).
+    #[arg(long)]
+    folder: Option<String>,
+    /// Environment name (defaults to the workspace's active environment).
+    #[arg(long)]
+    env: Option<String>,
+    /// CSV or JSON (array of objects) dataset file; replaces the scenario's dataset.
+    #[arg(long)]
+    dataset: Option<PathBuf>,
+    /// Dataset format (inferred from the file extension when omitted).
+    #[arg(long, value_enum)]
+    dataset_format: Option<DsFormat>,
+    /// Dataset column whose values are secrets (repeatable).
+    #[arg(long = "sensitive-column")]
+    sensitive_columns: Vec<String>,
+    /// Iterations (default: the scenario's, else one per dataset row, else 1).
+    #[arg(long)]
+    iterations: Option<u32>,
+    /// Stop each iteration at its first failed step (overrides the scenario).
+    #[arg(long, conflicts_with = "continue_on_failure")]
+    stop_on_failure: bool,
+    /// Run every step even after a failure (overrides the scenario).
+    #[arg(long)]
+    continue_on_failure: bool,
+    /// Dimensions that make a step fail (comma-separated). Default: all three.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    fail_on: Vec<Dimension>,
+    /// Run an untrusted (imported) scenario once, after you reviewed it.
+    #[arg(long)]
+    allow_untrusted: bool,
+    /// Do not record the executed steps in history.
+    #[arg(long)]
+    no_history: bool,
+    /// Write the JSON report here.
+    #[arg(long)]
+    json: Option<PathBuf>,
+    /// Write a JUnit XML report here.
+    #[arg(long)]
+    junit: Option<PathBuf>,
+    /// Write a standalone offline HTML summary here.
+    #[arg(long)]
+    html: Option<PathBuf>,
+    /// No live progress on stderr.
+    #[arg(long, short)]
+    quiet: bool,
+}
+
+#[derive(Subcommand)]
+enum ScenarioCmd {
+    /// Create a scenario from saved requests, in order.
+    Create {
+        workspace: String,
+        name: String,
+        /// Saved request (id, name or Folder/Path/Name); repeat in run order.
+        #[arg(long = "step", required = true)]
+        steps: Vec<String>,
+        /// Iterations (default: one per dataset row, else 1).
+        #[arg(long)]
+        iterations: Option<u32>,
+        #[arg(long)]
+        stop_on_failure: bool,
+        /// Think time before every step after the first.
+        #[arg(long, default_value_t = 0)]
+        delay_ms: u64,
+        /// Attach a CSV / JSON dataset file (stored in the workspace).
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        #[arg(long, value_enum)]
+        dataset_format: Option<DsFormat>,
+        #[arg(long = "sensitive-column")]
+        sensitive_columns: Vec<String>,
+    },
+    List {
+        workspace: String,
+    },
+    Show {
+        workspace: String,
+        scenario: String,
+    },
+    /// Mark a reviewed scenario as trusted so it can run (imported scenarios
+    /// start untrusted).
+    Trust {
+        workspace: String,
+        scenario: String,
+    },
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum DsFormat {
+    Csv,
+    Json,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Dimension {
+    Transport,
+    Application,
+    Assertions,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -262,7 +384,16 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
 #[tokio::main]
 async fn main() {
     anvil_transport::init();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            // --help / --version print to stdout and succeed; usage errors
+            // are local errors (3), not assertion failures (clap's default 2).
+            let code = if e.use_stderr() { 3 } else { 0 };
+            let _ = e.print();
+            std::process::exit(code);
+        }
+    };
     let code = match run(cli).await {
         Ok(c) => c,
         Err(e) => {
@@ -476,6 +607,8 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 0
             })
         }
+        Cmd::Run(a) => collection::run_collection(&app, a).await,
+        Cmd::Scenario { cmd } => collection::scenario_cmd(&app, cmd),
         Cmd::History { workspace, limit } => {
             let ws = match workspace {
                 Some(w) => Some(app.find_workspace(w)?.meta.id),

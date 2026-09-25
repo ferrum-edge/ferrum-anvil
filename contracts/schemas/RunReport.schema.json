@@ -1,0 +1,893 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunReport",
+  "description": "Saved, self-describing collection-run report. Viewable offline; exported\nas JSON, JUnit XML and a standalone HTML summary.",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "report_version": {
+      "description": "[`RUN_REPORT_VERSION`].",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "schema_version": {
+      "description": "Persisted object schema version ([`crate::SCHEMA_VERSION`]).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "runner_version": {
+      "description": "Runner build identity (runner crate version + transport adapter version).",
+      "type": "string"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "description": "Display name of the run (scenario name or folder path).",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/RunSource"
+    },
+    "environment_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environment_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "dataset": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RunDatasetSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fail_on": {
+      "$ref": "#/$defs/FailOn"
+    },
+    "stop_on_failure": {
+      "type": "boolean"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "completion": {
+      "$ref": "#/$defs/RunnerCompletion"
+    },
+    "partial": {
+      "description": "True unless every planned iteration ran (cancel / abort).",
+      "type": "boolean"
+    },
+    "abort_reason": {
+      "description": "Redacted reason when the run was aborted.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "totals": {
+      "$ref": "#/$defs/RunTotals"
+    },
+    "iterations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RunIteration"
+      }
+    },
+    "notes": {
+      "description": "Redacted notes (bounds applied, history recording problems, possibly\nprocessed canceled requests, dataset remarks, ...).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    }
+  },
+  "required": [
+    "run_id",
+    "report_version",
+    "schema_version",
+    "runner_version",
+    "workspace_id",
+    "name",
+    "source",
+    "fail_on",
+    "stop_on_failure",
+    "started_at",
+    "finished_at",
+    "duration_ms",
+    "completion",
+    "partial",
+    "totals",
+    "iterations"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "RunSource": {
+      "description": "What was run.",
+      "oneOf": [
+        {
+          "description": "A saved scenario.",
+          "type": "object",
+          "properties": {
+            "scenario_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "name": {
+              "type": "string"
+            },
+            "untrusted_override": {
+              "description": "The scenario was not trusted (e.g. imported) and ran only because\nthe user explicitly allowed it for this run.",
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "scenario"
+            }
+          },
+          "required": [
+            "kind",
+            "scenario_id",
+            "name"
+          ]
+        },
+        {
+          "description": "An ad-hoc run of every request in a folder subtree, in tree order.",
+          "type": "object",
+          "properties": {
+            "folder_id": {
+              "description": "`None` = the workspace root.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "path": {
+              "description": "Display path (`Orders/Refunds`, or `/` for the root).",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "folder"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        }
+      ]
+    },
+    "RunDatasetSummary": {
+      "description": "Dataset identity recorded with the run (never its values).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/DatasetFormat"
+        },
+        "sha256": {
+          "description": "SHA-256 of the exact dataset bytes.",
+          "type": "string"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sensitive_columns": {
+          "description": "Columns whose values were treated as secrets.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "format",
+        "sha256",
+        "rows",
+        "columns",
+        "sensitive_columns"
+      ]
+    },
+    "DatasetFormat": {
+      "type": "string",
+      "enum": [
+        "csv",
+        "json"
+      ]
+    },
+    "FailOn": {
+      "description": "Which outcome dimensions make a step count as *failed* (for the step\nstatus, `stop_on_failure`, totals and exit codes).\n\nThe default counts all three: a step fails when its transport did not\ncomplete, its application status is a failure (HTTP 4xx/5xx, gRPC\nnon-OK, SOAP fault, GraphQL errors) or any enabled assertion failed. A\nstep the runner could not even prepare (`error`) always counts as failed.",
+      "type": "object",
+      "properties": {
+        "transport": {
+          "type": "boolean",
+          "default": true
+        },
+        "application": {
+          "type": "boolean",
+          "default": true
+        },
+        "assertions": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "RunnerCompletion": {
+      "description": "How the run ended.",
+      "oneOf": [
+        {
+          "description": "Every planned iteration ran to its end (steps may still have failed).",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "The user (or app shutdown / lock policy) canceled the run.",
+          "type": "string",
+          "const": "canceled"
+        },
+        {
+          "description": "The run could not continue (e.g. the vault locked, the workspace\ndisappeared); the report is partial.",
+          "type": "string",
+          "const": "aborted"
+        }
+      ]
+    },
+    "RunTotals": {
+      "description": "Counts over the whole run. The step ledger balances:\n* `steps_executed = steps_passed + steps_failed + steps_canceled_in_flight`;\n* every planned step of a started iteration is exactly one of executed,\n  `steps_errored`, `steps_skipped` or `steps_canceled` (not started).\n\nThe per-dimension counters (`transport_failures`, `application_failures`,\n`assertion_failures`) count executed steps whose dimension failed,\nregardless of [`FailOn`]; they are independent and may overlap.",
+      "type": "object",
+      "properties": {
+        "iterations_planned": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "iterations_started": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "iterations_passed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "iterations_failed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "iterations_incomplete": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "steps_executed": {
+          "description": "Engine executions (one `ExecutionRecord` each).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_passed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_errored": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_skipped": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_canceled": {
+          "description": "Steps not started because the run was canceled or aborted.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_canceled_in_flight": {
+          "description": "Executed steps that were canceled mid-flight.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "transport_failures": {
+          "description": "Executed steps whose transport did not complete.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "application_failures": {
+          "description": "Executed steps whose application status was a failure.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "assertion_failures": {
+          "description": "Executed steps with at least one failed assertion.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "assertions_passed": {
+          "description": "Individual assertion results.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "assertions_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "step_time_ms": {
+          "description": "Sum of step wall-clock durations.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "iterations_planned",
+        "iterations_started",
+        "iterations_passed",
+        "iterations_failed",
+        "iterations_incomplete",
+        "steps_executed",
+        "steps_passed",
+        "steps_failed",
+        "steps_errored",
+        "steps_skipped",
+        "steps_canceled",
+        "steps_canceled_in_flight",
+        "transport_failures",
+        "application_failures",
+        "assertion_failures",
+        "assertions_passed",
+        "assertions_failed",
+        "step_time_ms"
+      ]
+    },
+    "RunIteration": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "description": "0-based iteration number (the `anvil.iteration` variable).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "dataset_row": {
+          "description": "1-based dataset row used by this iteration.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/RunIterationStatus"
+        },
+        "stopped_at_step": {
+          "description": "Set when `stop_on_failure` ended the iteration early: the index of the\nstep that failed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunStep"
+          }
+        },
+        "steps_omitted": {
+          "description": "Passing/skipped step summaries dropped by the report-size bound (the\ntotals still count them; failed steps are kept preferentially).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "required": [
+        "index",
+        "started_at",
+        "duration_ms",
+        "status",
+        "steps"
+      ]
+    },
+    "RunIterationStatus": {
+      "description": "Status of one iteration.",
+      "oneOf": [
+        {
+          "description": "Every executed step passed (skipped disabled steps do not count).",
+          "type": "string",
+          "const": "passed"
+        },
+        {
+          "description": "At least one step failed or errored.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The run was canceled or aborted during this iteration.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "RunStep": {
+      "description": "Bounded summary of one step execution. Never contains a response body.",
+      "type": "object",
+      "properties": {
+        "index": {
+          "description": "Position in the scenario / folder order (0-based).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "revision_id": {
+          "description": "Exact request revision executed (when the request has been saved).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Protocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "method": {
+          "type": "string",
+          "default": ""
+        },
+        "url": {
+          "description": "Redacted URL as prepared (or the template when the step never ran).",
+          "type": "string",
+          "default": ""
+        },
+        "status": {
+          "$ref": "#/$defs/RunStepStatus"
+        },
+        "failed_dimensions": {
+          "description": "Dimensions that failed, whether or not [`FailOn`] counts them.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OutcomeDimension"
+          },
+          "default": []
+        },
+        "execution_id": {
+          "description": "Id of the step's `ExecutionRecord` (history), when it was executed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransportState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "application": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assertions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssertionState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dispatch": {
+          "description": "Whether the request may have been processed by the peer.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "http_status": {
+          "description": "HTTP status (or handshake status) when a response head arrived.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "grpc_status": {
+          "description": "gRPC terminal status when applicable.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "summary": {
+          "description": "Redacted one-line summary.",
+          "type": "string",
+          "default": ""
+        },
+        "message": {
+          "description": "Redacted reason for `error` / `skipped` / `canceled`, or the typed\ntransport failure message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "description": "Wall-clock time of the step (preparation, auth, exchange, diagnosis).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "exchange_ms": {
+          "description": "Sum of the network attempt durations (what latency assertions see is\nthe final attempt only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "delay_ms": {
+          "description": "Think time waited before the step.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "assertion_results": {
+          "description": "Assertion results (redacted, bounded).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssertionResult"
+          },
+          "default": []
+        },
+        "assertion_results_omitted": {
+          "description": "Assertion results dropped by the per-step bound.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        },
+        "findings": {
+          "description": "Highest-severity findings first (bounded).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunFindingSummary"
+          },
+          "default": []
+        },
+        "extracted": {
+          "description": "Names of variables this step extracted (values are never reported).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "index",
+        "request_id",
+        "name",
+        "status"
+      ]
+    },
+    "Protocol": {
+      "description": "Wire protocol family of a saved request. SOAP and GraphQL are HTTP body\nkinds, not separate transports.",
+      "type": "string",
+      "enum": [
+        "http",
+        "web_socket",
+        "grpc",
+        "sse",
+        "tcp",
+        "udp"
+      ]
+    },
+    "RunStepStatus": {
+      "description": "Status of one step in one iteration.",
+      "oneOf": [
+        {
+          "description": "Executed; no dimension counted by [`FailOn`] failed.",
+          "type": "string",
+          "const": "passed"
+        },
+        {
+          "description": "Executed; at least one dimension counted by [`FailOn`] failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Not executed: the runner could not obtain the request (deleted,\nunreadable secret, ...). Nothing was sent. Always counts as failed.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "Not executed: disabled in the scenario, or the iteration stopped at an\nearlier failed step (`stop_on_failure`).",
+          "type": "string",
+          "const": "skipped"
+        },
+        {
+          "description": "Canceled while in flight (the request may or may not have reached the\npeer — see `dispatch`), or not started because the run was canceled.",
+          "type": "string",
+          "const": "canceled"
+        }
+      ]
+    },
+    "OutcomeDimension": {
+      "description": "One of the three independent outcome dimensions of a step.",
+      "oneOf": [
+        {
+          "description": "The exchange did not complete (failed before a response, incomplete\nresponse, local preparation failure).",
+          "type": "string",
+          "const": "transport"
+        },
+        {
+          "description": "A response arrived but reports an application failure.",
+          "type": "string",
+          "const": "application"
+        },
+        {
+          "description": "At least one enabled assertion failed (or could not be evaluated).",
+          "type": "string",
+          "const": "assertions"
+        }
+      ]
+    },
+    "TransportState": {
+      "description": "Transport completion, independent of HTTP/RPC status.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "canceled",
+            "unknown"
+          ]
+        },
+        {
+          "description": "The exchange completed at the transport level (full response framing).",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "The exchange failed before a response was received.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "A response started but did not complete (headers then truncated body,\nmissing gRPC terminal status, abnormal stream end).",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "ApplicationState": {
+      "description": "Application-level result: HTTP status class, gRPC status, SOAP fault,\nGraphQL errors. Evaluated only when a response exists.",
+      "type": "string",
+      "enum": [
+        "success",
+        "failure",
+        "not_evaluated"
+      ]
+    },
+    "AssertionState": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "not_run"
+      ]
+    },
+    "DispatchState": {
+      "description": "Whether request bytes of an attempt may have reached the peer.\n\nDerived from typed transport state (bytes written to the socket, response\nreceived, HTTP/2 `REFUSED_STREAM`, ...), never from error message text.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "unknown"
+          ]
+        },
+        {
+          "description": "No request bytes were written (failure before the request was sent), or\nthe peer explicitly guaranteed non-processing (HTTP/2 REFUSED_STREAM).",
+          "type": "string",
+          "const": "not_dispatched"
+        },
+        {
+          "description": "The peer received the request (a response to it arrived).",
+          "type": "string",
+          "const": "sent"
+        },
+        {
+          "description": "Bytes were written but no response was received; processing may have occurred.",
+          "type": "string",
+          "const": "may_have_been_sent"
+        }
+      ]
+    },
+    "AssertionResult": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "actual": {
+          "description": "Redacted observed value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "passed",
+        "message"
+      ]
+    },
+    "RunFindingSummary": {
+      "description": "A diagnostic finding reduced to what a run report needs.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "code",
+        "title",
+        "confidence",
+        "severity"
+      ]
+    },
+    "Confidence": {
+      "description": "Qualitative confidence. Anvil never invents probability percentages.\n`Unknown` is a correct answer when evidence is insufficient.",
+      "type": "string",
+      "enum": [
+        "conflicting_evidence",
+        "unknown",
+        "likely",
+        "confirmed"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    }
+  }
+}

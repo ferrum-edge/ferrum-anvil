@@ -28,6 +28,8 @@ pub fn all() -> Vec<(&'static str, serde_json::Value)> {
         ("DiagnosticFinding", s::<crate::diagnostics::DiagnosticFinding>()),
         ("LoadPlan", s::<crate::load::LoadPlan>()),
         ("LoadReport", s::<crate::load::LoadReport>()),
+        ("RunReport", s::<crate::runner::RunReport>()),
+        ("RunEvent", s::<crate::runner::RunEvent>()),
     ]
 }
 

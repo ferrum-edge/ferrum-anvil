@@ -207,6 +207,7 @@ dependencies = [
  "anvil-import",
  "anvil-load",
  "anvil-portability",
+ "anvil-runner",
  "anvil-storage",
  "anvil-transport",
  "bytes",
@@ -261,13 +262,17 @@ dependencies = [
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
+ "anvil-fixtures",
  "anvil-portability",
+ "anvil-runner",
  "anvil-storage",
  "anvil-transport",
  "anyhow",
  "chrono",
  "clap",
+ "roxmltree",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "zeroize",
@@ -495,6 +500,22 @@ dependencies = [
 [[package]]
 name = "anvil-runner"
 version = "0.1.0"
+dependencies = [
+ "anvil-domain",
+ "anvil-engine",
+ "anvil-fixtures",
+ "anvil-load",
+ "anvil-transport",
+ "bytes",
+ "chrono",
+ "parking_lot",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "anvil-storage"

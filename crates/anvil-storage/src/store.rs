@@ -63,6 +63,8 @@ pub mod kind {
     pub const IMPORT_SOURCE: &str = "import_source";
     /// Provenance of spec/collection imports (OpenAPI, WSDL, Postman, …).
     pub const SPEC_SOURCE: &str = "spec_source";
+    /// Saved collection-run reports (`anvil_domain::runner::RunReport`).
+    pub const RUN_REPORT: &str = "run_report";
     pub const ALL: &[&str] = &[
         WORKSPACE,
         FOLDER,
@@ -79,6 +81,7 @@ pub mod kind {
         USER_PROFILE,
         IMPORT_SOURCE,
         SPEC_SOURCE,
+        RUN_REPORT,
     ];
 }
 

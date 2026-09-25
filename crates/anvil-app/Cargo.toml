@@ -17,6 +17,7 @@ anvil-diagnostics.workspace = true
 anvil-load.workspace = true
 anvil-import.workspace = true
 url.workspace = true
+anvil-runner.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
