@@ -15,6 +15,7 @@ members = [
     "crates/anvil-fixtures",
     "crates/anvil-app",
     "apps/desktop/src-tauri",
+    "crates/anvil-import",
 
 ]
 
@@ -37,6 +38,7 @@ anvil-engine = { path = "crates/anvil-engine" }
 anvil-runner = { path = "crates/anvil-runner" }
 anvil-load = { path = "crates/anvil-load" }
 anvil-app = { path = "crates/anvil-app" }
+anvil-import = { path = "crates/anvil-import" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"

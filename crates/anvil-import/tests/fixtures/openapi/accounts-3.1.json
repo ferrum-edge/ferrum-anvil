@@ -1,0 +1,104 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Accounts", "version": "2.0.0", "summary": "3.1 fixture" },
+  "jsonSchemaDialect": "https://example.com/custom-dialect",
+  "servers": [{ "url": "/api" }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/accounts": {
+      "post": {
+        "operationId": "createAccount",
+        "summary": "Create account",
+        "requestBody": {
+          "content": {
+            "application/vnd.accounts+json": {
+              "schema": { "$ref": "#/components/schemas/Account" },
+              "examples": {
+                "basic": { "$ref": "#/components/examples/BasicAccount" }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "created" } }
+      },
+      "get": {
+        "operationId": "listAccounts",
+        "parameters": [
+          { "name": "ids", "in": "query", "style": "pipeDelimited", "explode": false, "required": true,
+            "schema": { "type": "array", "items": { "type": "integer" }, "examples": [[1, 2, 3]] } },
+          { "name": "tags", "in": "query", "style": "spaceDelimited", "explode": false, "required": true,
+            "schema": { "type": "array", "items": { "type": "string", "const": "vip" } } },
+          { "name": "access_token", "in": "query", "schema": { "type": "string" } },
+          { "name": "filter", "in": "query", "required": true,
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "active": { "type": "boolean", "const": true } }, "required": ["active"] } } } }
+        ],
+        "security": [{ "mtls": [] }, { "bearerAuth": [] }],
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/accounts/{id}": {
+      "$ref": "#/components/pathItems/AccountItem"
+    }
+  },
+  "webhooks": {
+    "accountClosed": {
+      "post": { "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "ok" } } }
+    }
+  },
+  "components": {
+    "examples": {
+      "BasicAccount": { "value": { "name": "Ada", "nickname": null, "tier": "gold" } },
+      "Remote": { "externalValue": "https://examples.example.com/account.json" }
+    },
+    "pathItems": {
+      "AccountItem": {
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "patch": {
+          "operationId": "patchAccount",
+          "requestBody": {
+            "content": {
+              "application/merge-patch+json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["nickname", "limits", "tier"],
+                  "properties": {
+                    "nickname": { "type": ["string", "null"], "maxLength": 12 },
+                    "limits": { "type": "array", "prefixItems": [{ "type": "integer", "exclusiveMinimum": 0, "maximum": 5 }, { "type": "string", "const": "daily" }] },
+                    "tier": { "$ref": "#/components/schemas/Tier", "description": "sibling description is fine", "default": "silver" },
+                    "flags": { "type": "object", "additionalProperties": { "type": "boolean" }, "minProperties": 1 }
+                  }
+                }
+              }
+            }
+          },
+          "responses": { "200": { "description": "ok" } }
+        }
+      }
+    },
+    "schemas": {
+      "Account": {
+        "type": "object",
+        "required": ["name", "tier", "createdAt", "owner"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid", "readOnly": true },
+          "name": { "type": "string", "minLength": 2 },
+          "nickname": { "type": ["string", "null"] },
+          "tier": { "$ref": "#/components/schemas/Tier" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "owner": { "$ref": "#/components/schemas/Owner", "required": ["email"] },
+          "anything": true,
+          "never": false
+        }
+      },
+      "Owner": {
+        "type": "object",
+        "properties": { "email": { "type": "string", "format": "email" }, "phone": { "type": "string", "pattern": "^\\+[0-9]{8,15}$" } }
+      },
+      "Tier": { "type": "string", "enum": ["bronze", "silver", "gold"] }
+    },
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" },
+      "mtls": { "type": "mutualTLS" }
+    }
+  }
+}

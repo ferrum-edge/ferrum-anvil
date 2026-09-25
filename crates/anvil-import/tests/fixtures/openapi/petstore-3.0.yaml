@@ -1,0 +1,333 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.4.0
+  description: A petstore-like API used by the anvil-import fixtures.
+servers:
+  - url: https://{region}.petstore.example.com/{basePath}
+    description: Production
+    variables:
+      region:
+        default: eu
+        enum: [eu, us]
+        description: Data residency region
+      basePath:
+        default: v1
+  - url: http://localhost:8080/v1
+    description: Local
+tags:
+  - name: store
+    description: Orders
+  - name: pets
+    description: Everything about pets
+security:
+  - api_key: []
+paths:
+  /pets:
+    get:
+      tags: [pets]
+      summary: List pets
+      operationId: listPets
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, format: int32, minimum: 1, maximum: 100, default: 20 }
+        - name: status
+          in: query
+          required: true
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: { type: string, enum: [available, pending, sold] }
+        - name: filter
+          in: query
+          style: deepObject
+          explode: true
+          required: true
+          schema:
+            type: object
+            required: [color]
+            properties:
+              color: { type: string, example: brown }
+        - name: X-Request-ID
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+        - name: locale
+          in: cookie
+          required: true
+          schema: { type: string, example: en-GB }
+        - name: theme
+          in: cookie
+          schema: { type: string, example: dark }
+      responses:
+        '200':
+          description: A page of pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Pet' }
+    post:
+      tags: [pets]
+      summary: Create a pet
+      operationId: createPet
+      security:
+        - petstore_auth: [write:pets, read:pets]
+      requestBody:
+        $ref: '#/components/requestBodies/PetBody'
+      callbacks:
+        onAdopted:
+          '{$request.body#/callbackUrl}':
+            post:
+              responses:
+                '200': { description: ok }
+      responses:
+        '201': { description: Created }
+  /pets/{petId}:
+    parameters:
+      - $ref: '#/components/parameters/PetId'
+    get:
+      tags: [pets]
+      summary: Get a pet
+      operationId: getPet
+      security: []
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml:
+              schema: { $ref: '#/components/schemas/Pet' }
+    put:
+      tags: [pets]
+      operationId: updatePet
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema: { $ref: '#/components/schemas/Pet' }
+          application/json:
+            schema: { $ref: '#/components/schemas/Pet' }
+      responses:
+        '200': { description: ok }
+    delete:
+      tags: [pets]
+      operationId: deletePet
+      deprecated: true
+      parameters:
+        - name: api_key
+          in: header
+          schema: { type: string }
+      security:
+        - basicAuth: []
+          api_key: []
+      responses:
+        '204': { description: deleted }
+  /pets/{petId}/xml:
+    put:
+      tags: [pets]
+      operationId: replacePetXml
+      parameters:
+        - $ref: '#/components/parameters/PetId'
+      requestBody:
+        content:
+          application/xml:
+            schema: { $ref: '#/components/schemas/Pet' }
+      responses:
+        '200': { description: ok }
+  /pets/{petId}/photo:
+    post:
+      tags: [pets]
+      operationId: uploadPhoto
+      parameters:
+        - $ref: '#/components/parameters/PetId'
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, caption]
+              properties:
+                file: { type: string, format: binary }
+                caption: { type: string, maxLength: 40 }
+                meta:
+                  type: object
+                  properties:
+                    width: { type: integer }
+            encoding:
+              file:
+                contentType: image/png
+      responses:
+        '200': { description: ok }
+  /pets/{petId}/label{fmt}:
+    get:
+      tags: [pets]
+      operationId: petLabel
+      parameters:
+        - $ref: '#/components/parameters/PetId'
+        - name: fmt
+          in: path
+          required: true
+          style: label
+          schema: { type: array, items: { type: string }, example: [png, large] }
+      responses:
+        '200': { description: ok }
+  /store/orders:
+    post:
+      tags: [store]
+      operationId: placeOrder
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/Order' }
+      responses:
+        '200': { description: ok }
+  /store/inventory:
+    get:
+      tags: [store]
+      operationId: getInventory
+      responses:
+        '200': { description: ok }
+  /tree:
+    post:
+      operationId: postTree
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TreeNode' }
+      responses:
+        '200': { description: ok }
+  /shapes:
+    post:
+      operationId: postShape
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Shape' }
+      responses:
+        '200': { description: ok }
+  /external:
+    post:
+      operationId: postExternal
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: 'common/schemas.yaml#/Widget' }
+      responses:
+        '200': { description: ok }
+  /contradiction:
+    post:
+      operationId: postContradiction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [n, s]
+              properties:
+                n: { type: integer, minimum: 10, maximum: 1 }
+                s: { type: string, minLength: 5, maxLength: 2 }
+      responses:
+        '200': { description: ok }
+components:
+  parameters:
+    PetId:
+      name: petId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, example: 42 }
+  requestBodies:
+    PetBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/NewPet' }
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      xml: { name: pet }
+      properties:
+        id: { type: integer, format: int64, readOnly: true }
+        name: { type: string, example: Rex }
+        tag: { type: string, nullable: true }
+        photoUrls:
+          type: array
+          xml: { wrapped: true }
+          items: { type: string, format: uri, xml: { name: photoUrl } }
+        kind: { type: string, xml: { attribute: true }, example: dog }
+    NewPet:
+      allOf:
+        - $ref: '#/components/schemas/Pet'
+        - type: object
+          required: [category, password]
+          properties:
+            category: { $ref: '#/components/schemas/Category' }
+            password: { type: string, writeOnly: true }
+            born: { type: string, format: date }
+    Category:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, enum: [dogs, cats] }
+    Order:
+      type: object
+      required: [petId, quantity, tags]
+      properties:
+        petId: { type: integer, format: int64 }
+        quantity: { type: integer, minimum: 1, maximum: 5 }
+        tags: { type: array, items: { type: string }, minItems: 2, maxItems: 2 }
+        address:
+          type: object
+          properties:
+            city: { type: string }
+    TreeNode:
+      type: object
+      required: [value, children]
+      properties:
+        value: { type: string }
+        children:
+          type: array
+          items: { $ref: '#/components/schemas/TreeNode' }
+    Shape:
+      oneOf:
+        - $ref: '#/components/schemas/Circle'
+        - $ref: '#/components/schemas/Square'
+      discriminator:
+        propertyName: shapeType
+        mapping:
+          circle: '#/components/schemas/Circle'
+          square: '#/components/schemas/Square'
+    Circle:
+      type: object
+      required: [shapeType, radius]
+      properties:
+        shapeType: { type: string }
+        radius: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 10 }
+    Square:
+      type: object
+      required: [shapeType, side]
+      properties:
+        shapeType: { type: string }
+        side: { type: number }
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: X-API-Key
+      in: header
+    basicAuth:
+      type: http
+      scheme: basic
+    petstore_auth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.petstore.example.com/token
+          scopes:
+            write:pets: modify pets
+            read:pets: read pets
+        implicit:
+          authorizationUrl: https://auth.petstore.example.com/authorize
+          scopes: {}

@@ -1,0 +1,147 @@
+{
+  "info": {
+    "_postman_id": "3d1c2b7e-8a0f-4b0e-9d7c-1f2e3a4b5c6d",
+    "name": "Shop API",
+    "description": "Postman v2.1 fixture with nested folders and scripts",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+  },
+  "event": [
+    { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["pm.variables.set('ts', Date.now());"] } }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "https://shop.example.com/api" },
+    { "key": "accessToken", "value": "eyJhbGciOiJIUzI1NiJ9.literal.token", "type": "secret" },
+    { "key": "pageSize", "value": "25", "disabled": true }
+  ],
+  "item": [
+    {
+      "name": "Catalog",
+      "description": "Catalog endpoints",
+      "item": [
+        {
+          "name": "Products",
+          "auth": { "type": "apikey", "apikey": [{ "key": "key", "value": "X-Api-Key" }, { "key": "value", "value": "sk_live_abc123" }, { "key": "in", "value": "header" }] },
+          "item": [
+            {
+              "id": "7b0e1c7e-0001-4000-8000-000000000001",
+              "name": "List products",
+              "event": [
+                { "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('200', () => pm.response.to.have.status(200));", "pm.environment.set('first', pm.response.json()[0].id);"] } }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [
+                  { "key": "Accept", "value": "application/json" },
+                  { "key": "X-Debug", "value": "1", "disabled": true },
+                  { "key": "X-Request-Id", "value": "{{$guid}}" }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/products?limit=10&sort=price&cursor={{$randomAlphaNumeric}}",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["products"],
+                  "query": [
+                    { "key": "limit", "value": "10" },
+                    { "key": "sort", "value": "price", "disabled": true },
+                    { "key": "cursor", "value": "{{$randomAlphaNumeric}}" }
+                  ]
+                }
+              },
+              "response": [{ "name": "ok", "status": "OK", "code": 200, "body": "[]" }]
+            },
+            {
+              "id": "7b0e1c7e-0001-4000-8000-000000000002",
+              "name": "Get product",
+              "request": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{baseUrl}}/products/:productId/variants/:variant",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["products", ":productId", "variants", ":variant"],
+                  "variable": [{ "key": "productId", "value": "42" }, { "key": "variant", "value": "" }]
+                }
+              },
+              "protocolProfileBehavior": { "strictSSL": false, "followRedirects": false }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        {
+          "id": "7b0e1c7e-0001-4000-8000-000000000003",
+          "name": "Create order",
+          "request": {
+            "method": "POST",
+            "auth": { "type": "basic", "basic": [{ "key": "username", "value": "shop-bot" }, { "key": "password", "value": "hunter2" }] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"A-1\",\n  \"qty\": {{qty}}\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders"
+          }
+        },
+        {
+          "id": "7b0e1c7e-0001-4000-8000-000000000004",
+          "name": "Upload invoice",
+          "request": {
+            "method": "POST",
+            "auth": { "type": "digest", "digest": [{ "key": "username", "value": "x" }] },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "orderId", "value": "{{orderId}}", "type": "text" },
+                { "key": "invoice", "type": "file", "src": "/Users/alice/invoices/inv-1.pdf" }
+              ]
+            },
+            "url": "{{baseUrl}}/orders/invoices"
+          }
+        },
+        {
+          "id": "7b0e1c7e-0001-4000-8000-000000000005",
+          "name": "Login form",
+          "request": {
+            "method": "POST",
+            "auth": { "type": "noauth" },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "username", "value": "alice" },
+                { "key": "password", "value": "p@ss" },
+                { "key": "remember", "value": "1", "disabled": true }
+              ]
+            },
+            "url": "{{baseUrl}}/login"
+          }
+        },
+        {
+          "id": "7b0e1c7e-0001-4000-8000-000000000006",
+          "name": "GraphQL search",
+          "request": {
+            "method": "POST",
+            "auth": {
+              "type": "oauth2",
+              "oauth2": [
+                { "key": "grant_type", "value": "client_credentials" },
+                { "key": "accessTokenUrl", "value": "https://auth.example.com/token" },
+                { "key": "clientId", "value": "shop-cli" },
+                { "key": "clientSecret", "value": "{{clientSecret}}" },
+                { "key": "scope", "value": "search" },
+                { "key": "accessToken", "value": "cached-token-value" }
+              ]
+            },
+            "body": { "mode": "graphql", "graphql": { "query": "query($q: String!) { search(q: $q) { id } }", "variables": "{\"q\": \"lamp\"}" } },
+            "url": "{{baseUrl}}/graphql"
+          }
+        }
+      ]
+    }
+  ]
+}
