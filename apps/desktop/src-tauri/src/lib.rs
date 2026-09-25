@@ -9,16 +9,19 @@ pub use cmd_load::LOAD_WORKER_FLAG;
 
 /// Entry point when the executable is re-launched as a load worker: read
 /// one job from stdin, stream progress and the report to stdout, exit.
-pub fn run_load_worker() -> i32 {
+/// Exits the process directly: dropping the runtime would wait for the
+/// blocking stdin reader thread and the worker would never terminate.
+pub fn run_load_worker() -> ! {
     anvil_transport::init();
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(err) => {
             eprintln!("load worker: {err}");
-            return 70;
+            std::process::exit(70);
         }
     };
-    rt.block_on(anvil_load::worker::run_stdio())
+    let code = rt.block_on(anvil_load::worker::run_stdio());
+    std::process::exit(code)
 }
 
 use state::DesktopState;

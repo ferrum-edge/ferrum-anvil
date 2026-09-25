@@ -87,7 +87,8 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
   }, []);
 
   useEffect(() => {
-    if (sel?.kind === "plan") setDraft(plans.find((p) => p.id === sel.id) ?? null);
+    // Keep an unsaved new plan; otherwise edit the saved copy.
+    if (sel?.kind === "plan") setDraft((d) => plans.find((p) => p.id === sel.id) ?? (d?.id === sel.id ? d : null));
   }, [sel, plans]);
 
   return (
