@@ -11,16 +11,20 @@
 mod admission;
 mod auth;
 mod core;
+mod cpdp;
 mod drain;
 mod fixtures;
 mod fixtures_auth;
+mod fixtures_cpdp;
 mod fixtures_policy;
+mod fixtures_streams;
 mod fixtures_tls;
 mod gateway;
 mod harness;
 mod policy;
 mod profiles;
 mod scenario;
+mod streams;
 mod tls;
 
 use anyhow::Result;

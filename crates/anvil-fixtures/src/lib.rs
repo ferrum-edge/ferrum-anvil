@@ -13,6 +13,7 @@ pub mod grpc;
 pub mod h3server;
 pub mod http;
 pub mod idp;
+pub mod lab_streams;
 pub mod ldap;
 pub mod log;
 pub mod pki;

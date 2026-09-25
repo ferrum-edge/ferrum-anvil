@@ -37,6 +37,8 @@ pub fn all() -> Vec<Profile> {
         crate::drain::profile(),
         crate::tls::profile(),
         crate::auth::profile(),
+        crate::streams::profile(),
+        crate::cpdp::profile(),
     ]
 }
 
