@@ -700,13 +700,10 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
                         && params[0].0 == "charset"
                         && params[0].1.eq_ignore_ascii_case("utf-8")
                 };
-                let derivable = headers
-                    .iter()
-                    .filter(|h| h.enabled && h.name.eq_ignore_ascii_case("content-type"))
-                    .all(|h| is_derivable(&h.value));
-                headers.retain(|h| {
-                    !h.name.eq_ignore_ascii_case("SOAPAction") && !(derivable && h.name.eq_ignore_ascii_case("content-type"))
-                });
+                let derivable =
+                    headers.iter().filter(|h| h.enabled && h.name.eq_ignore_ascii_case("content-type")).all(|h| is_derivable(&h.value));
+                headers
+                    .retain(|h| !h.name.eq_ignore_ascii_case("SOAPAction") && !(derivable && h.name.eq_ignore_ascii_case("content-type")));
                 body = Body::Soap { version: SoapVersion::Soap11, envelope: joined, action: Some(action) };
             } else {
                 let (mut bd, _) = body_from_text(Some(&mime), joined);

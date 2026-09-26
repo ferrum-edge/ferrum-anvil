@@ -90,8 +90,7 @@ fn curl_soap_content_types_reach_preparation() {
     );
     assert_eq!(prepared_content_type(&soap_11_non_default_charset).as_deref(), Some("text/xml; charset=iso-8859-1"));
 
-    let soap_11_default_charset = imported_request(
-        b"curl -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: \"urn:lookup\"' -d '<E/>' https://example.test",
-    );
+    let soap_11_default_charset =
+        imported_request(b"curl -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: \"urn:lookup\"' -d '<E/>' https://example.test");
     assert_eq!(prepared_content_type(&soap_11_default_charset).as_deref(), Some("text/xml; charset=utf-8"));
 }
