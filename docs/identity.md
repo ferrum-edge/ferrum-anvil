@@ -44,6 +44,30 @@ errors), the send fails with `local.auth_preparation_failed` and the refresh
 token is kept for a later attempt (matrix AUTH-015). Client-credentials profiles
 behave as before. WebSocket, gRPC, SSE, TCP and UDP sessions behave the same way.
 
+Tokens are cached per **token identity**: the workspace isolation, token URL,
+authorization URL (interactive grants; its query, such as an organization,
+connection or identity-provider hint, included), client id,
+client-authentication method, grant, audience, scope and the profile's
+`token_cache_id`. When a profile sets no `token_cache_id`, the app uses the id
+of the workspace, folder or request that defines it: requests that inherit one
+profile share its sign-in, while the same settings defined in two places do
+not. A change to any of them needs its own token: a token acquired with client
+credentials is never sent for an authorization-code profile, a token for one
+audience is never sent to another, and a sign-in through one organization is
+never sent for another. Sends, sign-in, token status and sign-out all use the
+same key.
+
+Canceling an execution ends its wait for a token at once; the send ends as
+`canceled`, not dispatched. A client-credentials request is abandoned with it.
+A refresh keeps running on its own task until the issuer answers (the issuer
+may already have rotated the refresh token), and its token is cached for the
+next send; sends that arrive meanwhile wait for it rather than presenting the
+old refresh token again. Locking (which clears the token cache) or signing out
+of a profile invalidates every acquisition, refresh and code redemption still
+in flight for it, and a completed sign-in invalidates every acquisition and
+refresh that began before it: a token that arrives afterwards is discarded,
+never cached and never sent, and that send ends as `canceled`.
+
 ### The sign-in flow (RFC 8252 native app, RFC 7636 S256)
 
 `anvil_identity::authorize_api` (or `App::oauth_sign_in` from the app layer):
@@ -83,8 +107,11 @@ behave as before. WebSocket, gRPC, SSE, TCP and UDP sessions behave the same way
    timeouts. A confidential client's secret, if the profile has one, is sent
    according to the profile's client-authentication setting.
 10. Stores the token in the engine token cache under the same key sends use
-    (`<workspace>|<token URL>|<client id>|<scope>`). Tokens are held in memory
-    only: they are cleared on lock, not written to disk and never exported.
+    (the token identity above). If the app was locked, or the user signed out
+    of this profile, since the attempt began, the redeemed token is discarded
+    and the attempt ends as canceled. A refresh that began before the sign-in
+    can no longer overwrite it. Tokens are held in memory only: they are
+    cleared on lock, not written to disk and never exported.
 
 Codes, verifiers and tokens are zeroized on drop, are never part of an event,
 an error message, a log line or an execution record, and are never returned to
@@ -286,10 +313,12 @@ The webview only ever sees `IdentitySummary`.
 | Area | Tests | Matrix |
 |---|---|---|
 | Token cache: no client-credentials fallback, refresh, `invalid_grant`, issuer outage, single-flight | `crates/anvil-auth/src/oauth.rs` | AUTH-014, AUTH-015 |
+| Token identity (grant, audience, authorization URL, token-cache id, …); lock, sign-out and a newer sign-in win over in-flight acquisitions and refreshes; dropped client-credentials acquisitions cache nothing; a refresh whose caller stops waiting still stores the rotated refresh token | `crates/anvil-auth/tests/oauth_cache.rs` | — |
+| Grant, audience and authorization-URL switches through `Engine::execute`; cancel and lock while the issuer holds its answer; a send canceled during a refresh keeps the rotated refresh token | `crates/anvil-engine/tests/oauth_cache.rs` | — |
 | Callback binding, duplicates, bounded error codes | `crates/anvil-auth/src/oauth.rs` | AUTH-012, AUTH-013 |
 | Full browser round trip, then a real API request with the token; forged state; stray paths and DNS-rebinding Host; timeout; cancellation; denial; refresh; revoked refresh; issuer outage and recovery; the exchange uses the request's TLS profile; refused configurations; WebSocket parity | `crates/anvil-identity/tests/api_oauth.rs` | AUTH-011–015 |
 | Real providers typed unavailable; mock provider round trip and denial | `crates/anvil-identity/src/{provider,mock}.rs` | — |
-| Link with the mock provider; fresh-login policy (refused, allowed, wrong passphrase, stale, other account, recovery offline); identity is not a key; edited hint; relink and unlink; restoring another user's backup; target-API sign-in through the app, dropped on lock | `crates/anvil-app/tests/identity.rs` | DATA-015, DATA-017, DATA-018, DATA-019 |
+| Link with the mock provider; fresh-login policy (refused, allowed, wrong passphrase, stale, other account, recovery offline); identity is not a key; edited hint; relink and unlink; restoring another user's backup; target-API sign-in through the app, dropped on lock; token-cache identity per defining workspace, folder or request | `crates/anvil-app/tests/identity.rs` | DATA-015, DATA-017, DATA-018, DATA-019 |
 | SPIFFE Workload API: X.509-SVID and JWT-SVID sources, local checks, caching, cleared on lock, never recorded; the probe; the import stance | `crates/anvil-transport/tests/workload_api.rs`, `crates/anvil-engine/tests/workload_api.rs`, `crates/anvil-cli/tests/cli_workload.rs`, `crates/anvil-portability/tests/bundles.rs`; live: lab `workload` (`docs/lab/workload.md`) | — |
 
 ---

@@ -56,7 +56,8 @@ pub struct ExecutionOutput {
 }
 
 pub struct Engine {
-    pub http: HttpTransport,
+    /// Shared so a token refresh can finish on a task of its own.
+    pub http: Arc<HttpTransport>,
     pub h3: anvil_transport::h3::H3Transport,
     pub tokens: Arc<anvil_auth::oauth::TokenCache>,
     /// Reusable gRPC channels. `None` (the default, manual Send): every gRPC
@@ -80,7 +81,7 @@ impl Engine {
     pub fn new() -> Self {
         anvil_transport::init();
         Engine {
-            http: HttpTransport::new(),
+            http: Arc::new(HttpTransport::new()),
             h3: anvil_transport::h3::H3Transport::new(),
             tokens: Arc::new(anvil_auth::oauth::TokenCache::new()),
             grpc_channels: None,

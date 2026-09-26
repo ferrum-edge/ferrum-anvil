@@ -5,6 +5,7 @@
 
 use crate::flow::{AuthorizationRequest, authorize_in_browser};
 use crate::{BrowserOpener, FlowError, FlowEvent, FlowObserver, FlowOptions, failed, require_secure_endpoint};
+use anvil_auth::AuthError;
 use anvil_domain::auth::OAuthGrant;
 use anvil_engine::oauth_http::{self, InteractiveOAuth, TokenSummary};
 use anvil_engine::{Engine, ExecutionContext};
@@ -34,7 +35,8 @@ pub fn target(ctx: &ExecutionContext) -> Result<InteractiveOAuth, FlowError> {
 ///
 /// The next [`Engine::execute`] with the same context uses the token, and
 /// refreshes it with the issued refresh token when it expires. Cancellation
-/// via `cancel` ends the attempt at any point (the listener closes).
+/// via `cancel` ends the attempt at any point (the listener closes). A lock
+/// or sign-out while the attempt runs discards its token.
 pub async fn authorize_api(
     engine: &Engine,
     ctx: &ExecutionContext,
@@ -50,15 +52,21 @@ pub async fn authorize_api(
     if let Err(e) = require_secure_endpoint("the token URL", &t.token_url) {
         return Err(failed(observer, e));
     }
+    let generation = oauth_http::sign_in_generation(engine, &t);
     let request = AuthorizationRequest { authorization_endpoint: &t.authorization_endpoint, client_id: &t.client_id, scope: &t.scope };
     let grant = authorize_in_browser(&request, opener, observer, opts, cancel).await?;
     observer.event(FlowEvent::ExchangingCode);
     let redeemed = tokio::select! {
-        r = oauth_http::redeem_authorization_code(engine, ctx, &t, &grant.code, &grant.verifier, &grant.redirect_uri) => r,
+        r = oauth_http::redeem_authorization_code(
+            engine, ctx, &t, generation, &grant.code, &grant.verifier, &grant.redirect_uri, cancel,
+        ) => r,
         _ = cancel.cancelled() => return Err(failed(observer, FlowError::Canceled)),
     };
     drop(grant);
-    let token = redeemed.map_err(|e| failed(observer, FlowError::Exchange(e.to_string())))?;
+    let token = redeemed.map_err(|e| match e {
+        AuthError::Canceled(_) => failed(observer, FlowError::Canceled),
+        e => failed(observer, FlowError::Exchange(e.to_string())),
+    })?;
     observer.event(FlowEvent::Completed);
     Ok(ApiAuthorization {
         profile_scope: t.scope_label.clone(),

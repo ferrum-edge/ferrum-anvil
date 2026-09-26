@@ -3,6 +3,7 @@
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
@@ -108,11 +109,20 @@ impl App {
         if let Some(o) = &opts.run_override {
             settings_layers.push(("run".into(), o.clone()));
         }
-        let mut auth_layers = vec![("workspace".to_string(), ws.auth.clone())];
+        // Each OAuth profile caches its token under the id of the workspace,
+        // folder or request that defines it (unless it names its own).
+        let owned = |auth: &AuthConfig, owner: Option<Id>| {
+            let mut auth = auth.clone();
+            if let Some(owner) = owner {
+                auth.bind_token_cache(owner);
+            }
+            auth
+        };
+        let mut auth_layers = vec![("workspace".to_string(), owned(&ws.auth, Some(ws.meta.id)))];
         for f in &chain {
-            auth_layers.push((format!("folder:{}", f.name), f.auth.clone()));
+            auth_layers.push((format!("folder:{}", f.name), owned(&f.auth, Some(f.meta.id))));
         }
-        auth_layers.push(("request".into(), spec.auth.clone()));
+        auth_layers.push(("request".into(), owned(&spec.auth, req.as_ref().map(|r| r.meta.id))));
         let mut var_layers = vec![layer("workspace".into(), &ws.variables, &secrets)?];
         let env_id = opts.environment.or(ws.active_environment_id);
         if let Some(eid) = env_id {
