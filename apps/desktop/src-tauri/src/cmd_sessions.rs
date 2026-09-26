@@ -49,13 +49,17 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
     };
     let ctx = app.build_context(rid, &ws, input.spec, &opts).map_err(e)?;
     let h2 = handle.clone();
+    let owner = app.clone();
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
-        let _ = h2.emit("execution-event", &ev);
+        // Only to the window of the profile the session was opened under.
+        if h2.state::<DesktopState>().is_current(&owner) {
+            let _ = h2.emit("execution-event", &ev);
+        }
     });
     let open = app.engine.open_session(ctx, EventCtx { execution_id: exec_id, sink: Some(sink) });
     let publish = |session| {
         let slot: SessionSlot = Arc::new(tokio::sync::Mutex::new(Some(session)));
-        st.sessions.lock().insert(execution_id.clone(), slot.clone());
+        st.sessions.lock().insert(execution_id.clone(), (app.clone(), slot.clone()));
         slot
     };
     let Some((slot, canceled)) = pending.open(open, publish).await else {
@@ -64,7 +68,8 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
     if canceled && let Some(s) = slot.lock().await.as_ref() {
         s.cancel();
     }
-    // Watch for the end (peer close, local close, cancel, lock) and publish the record.
+    // Watch for the end (peer close, local close, cancel, lock, another
+    // profile opening) and publish the record.
     let key = execution_id.clone();
     tauri::async_runtime::spawn(async move {
         loop {
@@ -83,10 +88,22 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
         let ev = match taken {
             Some(s) => {
                 let out = s.finish().await;
-                let recorded = st.app().and_then(|a| a.record(&out).map_err(e));
-                let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
-                let view = ExecutionView { body: body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref()), record: out.record };
-                SessionEnded { execution_id: key.clone(), view: Some(view), error: recorded.err() }
+                // Into the profile the session was opened under, never the
+                // one open now; refused while that profile is locked.
+                let recorded = app.record(&out).map_err(e);
+                if st.is_current(&app) {
+                    let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
+                    let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
+                    let view = ExecutionView { body, record: out.record };
+                    SessionEnded { execution_id: key.clone(), view: Some(view), error: recorded.err() }
+                } else {
+                    // Another profile is open: its window shows nothing of this one.
+                    SessionEnded {
+                        execution_id: key.clone(),
+                        view: None,
+                        error: Some("the profile the session was opened in was closed".into()),
+                    }
+                }
             }
             None => SessionEnded { execution_id: key.clone(), view: None, error: Some("the session was already finished".into()) },
         };
@@ -100,7 +117,12 @@ where
     F: for<'a> FnOnce(&'a SessionHandle) -> std::pin::Pin<Box<dyn std::future::Future<Output = R<()>> + Send + 'a>>,
 {
     st.app()?;
-    let slot = st.sessions.lock().get(execution_id).cloned().ok_or_else(|| "the session is no longer open".to_string())?;
+    let closed = || "the session is no longer open".to_string();
+    let (owner, slot) = st.sessions.lock().get(execution_id).cloned().ok_or_else(closed)?;
+    // A session of a profile that is no longer open is not driven from another.
+    if !st.is_current(&owner) {
+        return Err(closed());
+    }
     let guard = slot.lock().await;
     match guard.as_ref() {
         Some(s) => f(s).await,
