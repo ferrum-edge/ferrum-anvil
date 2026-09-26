@@ -758,6 +758,14 @@ impl AttemptObservation {
     }
 }
 
+/// Exchange time of a send: the sum of every attempt's duration (redirect
+/// hops, protocol fallback and retries included), or `None` when nothing was
+/// attempted. Latency assertions, the runner's `exchange_ms` and load latency
+/// all use this one definition.
+pub fn exchange_duration_us(attempts: &[AttemptObservation]) -> Option<u64> {
+    if attempts.is_empty() { None } else { Some(attempts.iter().map(|a| a.duration_us).sum()) }
+}
+
 /// Header entry (order and duplicates preserved).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HeaderEntry {

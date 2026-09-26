@@ -188,8 +188,8 @@ pub struct RunStep {
     /// Wall-clock time of the step (preparation, auth, exchange, diagnosis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Sum of the network attempt durations (what latency assertions see is
-    /// the final attempt only).
+    /// Sum of the network attempt durations (the same exchange time latency
+    /// assertions evaluate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange_ms: Option<u64>,
     /// Think time waited before the step.
