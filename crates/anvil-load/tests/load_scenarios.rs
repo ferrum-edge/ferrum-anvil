@@ -578,12 +578,7 @@ async fn load_soap_and_graphql_outcomes_not_determined_from_the_body_are_not_suc
         .code
         .clone();
     let id = Id::new();
-    let r = run(
-        plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]),
-        vec![(id, request)],
-        None,
-    )
-    .await;
+    let r = run(plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]), vec![(id, request)], None).await;
     assert_eq!(r.requests.application_failures, 1);
     assert_eq!(r.failure_categories[0].category, format!("application_failure: {top}"));
     assert_ne!(r.failure_categories[0].category, "application_failure: application.not_determined_from_body");
