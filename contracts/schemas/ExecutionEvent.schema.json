@@ -427,9 +427,39 @@
           "const": "oauth_interaction_required"
         },
         {
+          "description": "The mutual-TLS handshake with the HBONE endpoint failed. The precise\nTLS cause is `connection.tunnel.failure` (and the tunnel's TLS\nobservation); the inner destination was never contacted.",
+          "type": "string",
+          "const": "hbone_endpoint_tls_failed"
+        },
+        {
+          "description": "The HBONE endpoint answered the HTTP/2 `CONNECT` with a non-2xx status\n(kept, with the bounded body, in `connection.tunnel`).",
+          "type": "string",
+          "const": "hbone_connect_refused"
+        },
+        {
+          "description": "HTTP/2 failure on the tunnel before a `CONNECT` status (no h2 ALPN,\npreface/SETTINGS failure, stream reset, GOAWAY, deadline).",
+          "type": "string",
+          "const": "hbone_protocol_error"
+        },
+        {
           "description": "Peer sent a fatal alert after the client finished its handshake\n(TLS 1.3 client-certificate rejection surfaces here).",
           "type": "string",
           "const": "tls_alert_after_handshake"
+        },
+        {
+          "description": "SPIFFE verification: the X.509-SVID's SPIFFE ID differs from the\nexpected server SPIFFE ID (same trust domain).",
+          "type": "string",
+          "const": "tls_spiffe_id_mismatch"
+        },
+        {
+          "description": "SPIFFE verification: the server's SPIFFE ID belongs to a trust domain\nthe profile does not trust (or no configured bundle anchors it).",
+          "type": "string",
+          "const": "tls_untrusted_trust_domain"
+        },
+        {
+          "description": "SPIFFE verification: the leaf is not a valid X.509-SVID (no URI SAN,\nseveral URI SANs, or a malformed `spiffe://` ID).",
+          "type": "string",
+          "const": "tls_invalid_svid"
         }
       ]
     }

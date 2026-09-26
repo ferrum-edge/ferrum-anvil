@@ -94,6 +94,7 @@ pub fn request(mesh: &MeshInstance, lane: &Target, trusted: bool, path: &str) ->
         bindings: vec![],
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
+        server_spiffe: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

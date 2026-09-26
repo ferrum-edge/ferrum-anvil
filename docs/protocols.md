@@ -34,12 +34,12 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
   - query-parameter auth on gRPC;
   - any auth profile on raw TCP/UDP, because payloads are sent verbatim. Client certificates come from the TLS profile instead.
 - **Combinations refused before traffic** (`unsupported_combination`, `phase = prepare`, `dispatch = not_dispatched`):
-  - a proxy with UDP/DTLS (HTTP CONNECT and SOCKS5 CONNECT carry only TCP);
+  - a proxy with UDP/DTLS (HTTP CONNECT, SOCKS5 and HBONE tunnels carry only TCP);
   - WebSocket over HTTP/3 with `ws://` (QUIC is always encrypted) or through a proxy;
   - gRPC with the HTTP/1.1-only or HTTP/3 policies, or `plaintext` with a TLS URL;
   - SSE over HTTP/3;
   - a gRPC call mode that does not match the method descriptor. Unary alone never proves streaming.
-- **Proxies.** TCP-based sessions go through the configured HTTP or SOCKS5 proxy as a CONNECT tunnel. This includes `ws://` and cleartext SSE.
+- **Proxies.** TCP-based sessions go through the configured HTTP or SOCKS5 proxy as a CONNECT tunnel. This includes `ws://` and cleartext SSE. A mesh HBONE proxy works the same way (§3.8): WebSocket, raw TCP/TLS, SSE and gRPC run over the HTTP/2 CONNECT stream.
 - **Transcripts.** Every message, event, frame or datagram becomes a `StreamMessage` and is also emitted live as `ExecutionEvent::Message`. The transcript is bounded:
   - The defaults are 2,000 entries and a 2 KiB preview per entry.
   - It keeps the first half and the most recent half. Entries in between are counted in `dropped_messages`.
@@ -156,6 +156,39 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 - **PROTO-007, no UDP listener.** The result is `quic_handshake_timeout`, with a single attempt, and the TCP fixture on the same port sees no connection.
 - **PROTO-008, automatic fallback.** Two attempts are recorded, the second with reason `protocol_fallback{from: h3}`. The response is not HTTP/3, and there is a `client.h3.fallback_used` finding plus a `protocol_fallback` warning. The fallback finding previously never fired, because the engine did not pass `protocol_fallback_from`. That is fixed.
 
+### 3.8 Mesh client: HBONE tunnels, SPIFFE server identity, SNI override
+
+Anvil can test Ferrum Mesh (and Istio-style) mesh listeners directly, without being part of the mesh.
+
+**HBONE proxy profile (`ProxyKind::Hbone`).** A proxy profile of kind `hbone` names the HBONE endpoint (`host:port`, for example a mesh proxy's HBONE listener or a sidecar's inbound mTLS listener) and a **TLS profile** (`tls_profile_id`, required). For each connection Anvil:
+
+1. resolves and connects to the endpoint (`dns`, `connect`);
+2. runs **mutual TLS** with ALPN `h2`, presenting the TLS profile's client identity (the client SVID) and verifying the endpoint's server identity with the same profile (normally by SPIFFE ID, see below);
+3. sends the HTTP/2 connection preface, then `CONNECT` with `:authority = <request host:port>` (IPv6 bracketed). Optional headers come from the profile: a protocol marker (`x-ferrum-mesh-protocol: hbone` or `x-istio-protocol: hbone`; none by default, as Istio ztunnel sends none), a W3C `baggage` value (for example `source.principal=…`, honored by the endpoint only for trusted assertors) and extra headers. Connection-specific headers are refused before traffic;
+4. treats a `2xx` as an open tunnel. The inner connection (HTTP/1.1, HTTP/2 with its own ALPN, TLS with the request's own TLS profile, raw TCP/TLS, WebSocket, SSE, gRPC) then runs over the tunnel stream exactly as over an HTTP CONNECT proxy tunnel. The endpoint resolves and dials the destination, so Anvil records the inner `dns` and `connect` phases as `not_applicable`.
+
+Evidence keeps the two legs apart:
+
+- The attempt's phases show the whole outer leg as one `proxy_tunnel` phase. `ConnectionObservation::tunnel` (`TunnelObservation`) holds the outer phases (`dns`, `connect`, `tls_handshake`, `protocol_handshake`, `proxy_tunnel`) on the same clock, the endpoint's addresses, the outer mTLS observation (client SVID presented, the endpoint's certificate, its SPIFFE ID and the identity check applied), the `CONNECT` headers sent, the `CONNECT` status and response headers.
+- `connection.tls` stays the **inner** TLS with the destination.
+- A non-2xx `CONNECT` is a typed `hbone_connect_refused` failure (phase `proxy_tunnel`) with the status and a bounded (8 KiB) body preview kept in the tunnel evidence. It is **not** a destination response: `response` is empty, dispatch is `not_dispatched`, and no HTTP-status finding is produced for the destination.
+- Tunnel-leg failures are typed separately from the destination: `proxy_connect_failed` (endpoint DNS/TCP), `hbone_endpoint_tls_failed` (the mTLS handshake; the precise TLS kind and alert are in `tunnel.failure`), `hbone_protocol_error` (no `h2`, preface, stream reset, GOAWAY or the connect deadline before a `CONNECT` answer) and `hbone_connect_refused`. A TLS 1.3 client-certificate alert that arrives after Anvil's handshake is read from the mTLS stream and attributed to the TLS leg.
+- Timeouts: the endpoint's DNS, TCP and TLS use the request's DNS, connect and TLS deadlines; the HTTP/2 preface and the `CONNECT` answer share the connect deadline.
+
+A fresh HBONE connection (one HTTP/2 connection, one `CONNECT` stream) is opened per inner connection and never pooled, because the tunnel carries one execution's identity and headers. HTTP/3 and UDP/DTLS through an HBONE proxy are refused before traffic (`unsupported_combination`). Proxy credentials are refused for HBONE (the client is authenticated by its SVID).
+
+**SPIFFE server identity (`TlsProfile::server_spiffe`).** A TLS profile can set `expected_server_spiffe_id`, `trust_domain`, or both (the ID must then be in that trust domain; invalid values are refused before traffic). When set, the peer's X.509-SVID is verified as the SPIFFE X.509-SVID specification requires, **instead of** host-name verification:
+
+- the chain must anchor in the profile's CA certificates (the trust bundle; server-auth EKU when present), with no DNS-name check;
+- the leaf must carry **exactly one** URI SAN that is a valid `spiffe://` ID, must not be a CA, must set `digitalSignature` and neither `keyCertSign` nor `cRLSign` (a certificate with several URI SANs is invalid);
+- its trust domain must equal the configured one, and with an expected ID the ID must match exactly.
+
+Verification stays **on by default**: without `server_spiffe` the ordinary host-name verification applies. Failures are typed (`tls_spiffe_id_mismatch`, `tls_untrusted_trust_domain`, `tls_invalid_svid`; an unanchored SVID that names another trust domain is `tls_untrusted_trust_domain`) and stop the handshake before any request byte. `verify = false` still records what the SPIFFE check would have concluded. The same check applies to HTTP/1.1, HTTP/2, HTTP/3, raw TLS, WebSocket, gRPC, SSE, DTLS and the HBONE endpoint. The peer's SPIFFE ID (a single `spiffe://` URI SAN) is recorded in `TlsObservation::peer_spiffe_id` for **every** TLS server, verified or not, and `identity_check` records which check applied (`host_name`, `spiffe_id` or `spiffe_trust_domain`).
+
+**SNI override (`TlsProfile::server_name_override`).** The configured name is sent as SNI instead of the URL host (the HTTP authority is unchanged), for example an east-west passthrough name like `outbound_.8080_._.svc.ns.svc.cluster.local` (underscores are accepted). The certificate is verified against that name, or against the SPIFFE identity when one is configured. `TlsObservation::sni` records the SNI actually sent (`None` when the name is an IP address, which TLS never sends as SNI), and `server_name_overridden` marks that it came from the profile. An invalid override is refused before traffic.
+
+Live coverage: the `mesh` lab profile (`docs/lab/mesh.md`) drives the real Ferrum Edge 0.9.7 in mesh mode.
+
 ## 4. Failure-matrix coverage
 
 | Case | Test (real sockets) |
@@ -178,6 +211,12 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 | PROTO-021 | `…::proto_021_udp_loss_and_repeats_are_counted_not_explained` |
 | PROTO-022 | `…::proto_022_dtls_handshake_with_verified_peer`, `…_wrong_root_is_a_typed_client_side_verification_failure`, `…_mutual_tls_positive_and_negative`; `sessions_streams.rs::proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline` |
 
+Mesh client tests (real sockets, the `anvil_fixtures::hbone` HTTP/2 CONNECT-over-mTLS fixture and the SPIFFE certificates in `anvil_fixtures::mesh_pki`):
+
+- `anvil-transport/tests/mesh_spiffe_hbone.rs`: SPIFFE ID and trust-domain verification of a URI-only SVID, host-name verification staying on by default, wrong ID, foreign trust domain (anchored and unanchored), several URI SANs, no URI SAN, a bypass recording what SPIFFE would have concluded, invalid SPIFFE settings refused before traffic, SNI override sent and verified (including an east-west name), and HBONE: inner HTTP/1.1 and inner TLS + HTTP/2 through the tunnel with separate outer evidence, no pooling, 403/503 refusals with their bodies, missing client SVID (mTLS refusal or the unauthenticated-peer 403), an untrusted client SVID, an endpoint identity mismatch, the SNI the endpoint received, an unreachable endpoint and an endpoint without `h2`.
+- `anvil-engine/tests/mesh_hbone.rs`: the same through proxy/TLS profiles and the findings, plus WebSocket and raw TCP over HBONE, HTTP/3 through HBONE refused, and an HBONE profile without a TLS profile refused before traffic.
+- `anvil-diagnostics/tests/mesh_hbone_contract.rs`: tunnel-leg findings over public evidence and their lookalikes.
+
 Other tests cover SSE reconnect with `Last-Event-ID`, WebSocket handshake rejection, WSS auth with secret redaction, interactive WebSocket/TCP/UDP/gRPC sessions, TCP framing with mTLS, and refusal before traffic for UDP through a proxy and for auth on raw TCP.
 
 New fixtures, all lab-only in `anvil-fixtures`:
@@ -197,4 +236,6 @@ The HTTP fixture's WebSocket route now flushes its Close reply, so a client-init
 5. **SSE.** No reconnect after a clean end of stream, which differs from browser behavior. Compressed streams are not supported.
 6. **UDP.** Connected-socket mode only. Replies from a different address or port are not accepted.
 7. **Connections.** Session adapters open a fresh connection per execution or session. Unlike HTTP/1.1, HTTP/2 and HTTP/3, they do not use the pool.
-8. **Diagnostic wording.** Three findings (`grpc.reflection_unavailable`, `udp.icmp_port_unreachable`, `udp.repeated_payloads`) carry their wording inline in the engine, not in `catalog/diagnostics/findings.en.json`. They should move into the catalog once the catalog owners agree.
+8. **HBONE.** One tunnel per inner connection (no HTTP/2 stream sharing across executions). No double-HBONE (tunnel inside a tunnel), no HBONE over HTTP/3 (QUIC), and no Anvil-side capture: Anvil is a direct client of the endpoint. A `CONNECT` refusal is reported with its public status and body only; which mesh policy refused is never claimed.
+9. **SPIFFE.** X.509-SVID only (no JWT-SVID), one trust bundle per TLS profile (its CA certificates), no SPIFFE federation bundle endpoint and no revocation checking (as for every TLS profile).
+10. **Diagnostic wording.** Three findings (`grpc.reflection_unavailable`, `udp.icmp_port_unreachable`, `udp.repeated_payloads`) carry their wording inline in the engine, not in `catalog/diagnostics/findings.en.json`. They should move into the catalog once the catalog owners agree.

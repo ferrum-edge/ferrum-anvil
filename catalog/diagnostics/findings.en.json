@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-7",
+  "version": "2026.09.25-8",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2197,6 +2197,263 @@
         }
       ],
       "confirm_with": []
+    },
+    "client.tls.spiffe_id_mismatch": {
+      "title": "The server's SPIFFE ID is not the expected one",
+      "explanation": "{host} presented a valid X.509-SVID that chains to this profile's trust bundle, but its SPIFFE ID is {peer_spiffe_id}, not {expected}. Anvil verifies this server by SPIFFE identity (not by host name), so it ended the handshake before any request was sent.",
+      "alternatives": [
+        "The request reached a different workload than intended (routing, SNI or an address that now belongs to another workload).",
+        "The expected SPIFFE ID in the TLS profile is outdated (the workload's service account or namespace changed)."
+      ],
+      "does_not_prove": [
+        "That the server's certificate is untrusted: its chain was valid for the configured trust domain.",
+        "That the server received or rejected the request: nothing was sent."
+      ],
+      "remediation": [
+        {
+          "text": "Check which workload should answer on this address and update the expected SPIFFE ID in the TLS profile only if the presented identity is the intended one.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The destination workload's SVID (its SPIFFE ID) from the mesh control plane or the workload itself."
+      ]
+    },
+    "client.tls.untrusted_trust_domain": {
+      "title": "The server's SPIFFE trust domain is not trusted",
+      "explanation": "{host} presented an identity outside the trusted trust domain {trust_domain}: {detail}. Anvil verifies this server by SPIFFE identity and ended the handshake before any request was sent.",
+      "alternatives": [
+        "The server belongs to another mesh or trust domain (for example a federated cluster) whose trust bundle this profile does not include.",
+        "The TLS profile names the wrong trust domain."
+      ],
+      "does_not_prove": [
+        "That the server's own certificate is malformed.",
+        "That the server received the request: nothing was sent."
+      ],
+      "remediation": [
+        {
+          "text": "Trust only the intended trust domain: set the profile's trust domain and add that domain's trust bundle (CA certificates), never an unrelated one.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The trust domains the mesh federates and their bundles."
+      ]
+    },
+    "client.tls.invalid_svid": {
+      "title": "The server certificate is not a valid X.509-SVID",
+      "explanation": "The TLS profile verifies {host} by SPIFFE identity, but its certificate is not a valid X.509-SVID: {detail}. Anvil ended the handshake before any request was sent.",
+      "alternatives": [
+        "The server is not a SPIFFE workload (an ordinary TLS server answered on this address).",
+        "The server's SVID was issued with several URI SANs or a malformed SPIFFE ID."
+      ],
+      "does_not_prove": [
+        "That the certificate chain is untrusted: this concerns the identity it carries.",
+        "That the server received the request: nothing was sent."
+      ],
+      "remediation": [
+        {
+          "text": "Point the request at the mesh listener that serves an X.509-SVID, or remove the SPIFFE check from the TLS profile for a non-mesh server.",
+          "owner": "caller"
+        },
+        {
+          "text": "If this is the intended mesh workload, reissue its SVID with exactly one spiffe:// URI SAN.",
+          "owner": "api_owner"
+        }
+      ],
+      "confirm_with": []
+    },
+    "client.tls.sni_override": {
+      "title": "A configured TLS server name was used",
+      "explanation": "For {host}, Anvil {sni_sent} from the TLS profile's server-name override ({server_name}) instead of the URL host, and verified the server by {identity_check}. The HTTP authority is unchanged.",
+      "alternatives": [],
+      "does_not_prove": [
+        "That the override name reached the intended virtual host or passthrough route; only the handshake outcome shows that."
+      ],
+      "remediation": [
+        {
+          "text": "Remove the override when it is no longer needed; mesh east-west passthrough names (outbound_.PORT_._.HOST) only make sense for a gateway that routes on SNI.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "hbone.endpoint_unreachable": {
+      "title": "The HBONE endpoint could not be reached",
+      "explanation": "Anvil could not connect to the HBONE endpoint {endpoint}: {detail}. No tunnel was opened, so {authority} was never contacted.",
+      "alternatives": [
+        "The endpoint address or port in the proxy profile is wrong.",
+        "The mesh listener (for example the HBONE or inbound port) is not running or is bound elsewhere."
+      ],
+      "does_not_prove": [
+        "That the destination {authority} is down: it was never contacted."
+      ],
+      "remediation": [
+        {
+          "text": "Check the HBONE endpoint address in the proxy profile and that the mesh listener is up.",
+          "owner": "network_administrator"
+        }
+      ],
+      "confirm_with": []
+    },
+    "hbone.endpoint_identity_rejected": {
+      "title": "Anvil rejected the HBONE endpoint's identity",
+      "explanation": "Anvil verified the HBONE endpoint {endpoint} by {expected} and rejected it: {problem}. The endpoint's certificate names {peer_spiffe_id}. This decision was made by Anvil on the client leg; no tunnel was opened and {authority} was never contacted.",
+      "alternatives": [
+        "The endpoint address belongs to a different mesh proxy or workload than intended.",
+        "The proxy's TLS profile has the wrong trust bundle, trust domain or expected SPIFFE ID."
+      ],
+      "does_not_prove": [
+        "That the endpoint rejected Anvil's client SVID: the handshake stopped on Anvil's side.",
+        "Anything about the destination {authority}."
+      ],
+      "remediation": [
+        {
+          "text": "Confirm which mesh proxy should terminate this tunnel, then correct the trust bundle or expected identity in the HBONE proxy's TLS profile.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The endpoint's SVID as issued by the mesh (SPIFFE ID and trust bundle)."
+      ]
+    },
+    "hbone.client_svid_required": {
+      "title": "The HBONE endpoint requires a client SVID",
+      "explanation": "The HBONE endpoint {endpoint} asked for a client certificate, Anvil presented none, and the endpoint ended the handshake with a {alert} alert. HBONE is mutual TLS: without a client SVID no tunnel is opened, and {authority} was never contacted.",
+      "alternatives": [],
+      "does_not_prove": [
+        "That the destination {authority} or its policy refused anything: the tunnel was never opened."
+      ],
+      "remediation": [
+        {
+          "text": "Add the workload's client SVID (certificate chain and key) to the HBONE proxy's TLS profile, and check that its host bindings include the endpoint.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "hbone.client_svid_rejected": {
+      "title": "The HBONE endpoint rejected the client SVID",
+      "explanation": "Anvil presented {client_svid} and the HBONE endpoint {endpoint} ended the mutual-TLS handshake with a {alert} alert. That alert is consistent with the endpoint not accepting this SVID. No tunnel was opened and {authority} was never contacted.",
+      "alternatives": [
+        "The SVID's trust domain is not trusted (or federated) by the endpoint.",
+        "The SVID chains to a CA the endpoint does not trust, or it is expired, revoked or lacks the client-authentication usage."
+      ],
+      "does_not_prove": [
+        "Which of these reasons applies: the alert does not say.",
+        "That a mesh authorization policy denied the request: admission did not get that far."
+      ],
+      "remediation": [
+        {
+          "text": "Use an SVID issued by the mesh's trust domain (or a federated one the endpoint trusts).",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The endpoint's TLS/handshake logs for this connection."
+      ]
+    },
+    "hbone.endpoint_tls_failed": {
+      "title": "Mutual TLS with the HBONE endpoint failed",
+      "explanation": "The mutual-TLS handshake with the HBONE endpoint {endpoint} failed: {detail}. No tunnel was opened and {authority} was never contacted.",
+      "alternatives": [
+        "The endpoint is not speaking TLS on this port.",
+        "A timeout or connection reset interrupted the handshake."
+      ],
+      "does_not_prove": [
+        "Which side ended the handshake or why, beyond the recorded failure.",
+        "Anything about the destination {authority}."
+      ],
+      "remediation": [
+        {
+          "text": "Check that the proxy profile points at the mesh's mTLS listener (HBONE or inbound port).",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "hbone.tunnel_refused": {
+      "title": "The HBONE endpoint refused to open the tunnel",
+      "explanation": "The HBONE endpoint {endpoint} answered the HTTP/2 CONNECT to {authority} with HTTP {status}. Its body says {body_error}. The tunnel was not opened: {authority} was never contacted and nothing was sent to it.",
+      "alternatives": [
+        "A mesh authorization policy denied this client identity.",
+        "The endpoint only relays to destinations it terminates for, and {authority} is not one of them.",
+        "The endpoint has no route or relay for {authority} (some mesh terminators answer 404 for a destination they do not terminate).",
+        "The endpoint did not accept the client as an authenticated mesh peer (for example no or an untrusted client SVID)."
+      ],
+      "does_not_prove": [
+        "Which mesh policy or admission rule refused the tunnel: the public response does not identify it beyond its body, and several reasons can share one response.",
+        "That the destination {authority} is down or refused anything."
+      ],
+      "remediation": [
+        {
+          "text": "Check the tunnel's CONNECT authority and the client SVID used, then ask the mesh operator which policy applies to this identity and destination.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The mesh proxy's operator log or policy-deny records for this CONNECT."
+      ]
+    },
+    "hbone.tunnel_unavailable": {
+      "title": "The HBONE endpoint could not open the tunnel",
+      "explanation": "The HBONE endpoint {endpoint} answered the HTTP/2 CONNECT to {authority} with HTTP {status}. Its body says {body_error}. No tunnel was opened and nothing was sent to {authority}.",
+      "alternatives": [
+        "The endpoint could not reach or dial the destination.",
+        "The endpoint is overloaded or at a session limit."
+      ],
+      "does_not_prove": [
+        "Which of these applies, or whether the destination itself is down: a 5xx on CONNECT does not say which leg failed."
+      ],
+      "remediation": [
+        {
+          "text": "Retry later; if it persists, ask the mesh operator to check the endpoint's view of the destination.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The mesh proxy's operator log for this CONNECT."
+      ]
+    },
+    "hbone.tunnel_protocol_error": {
+      "title": "The HBONE tunnel could not be set up over HTTP/2",
+      "explanation": "The HTTP/2 exchange with the HBONE endpoint {endpoint} failed before a CONNECT answer: {detail}. No tunnel was opened and {authority} was never contacted.",
+      "alternatives": [
+        "The endpoint does not speak HTTP/2 (HBONE requires ALPN h2).",
+        "The endpoint reset the stream or closed the connection.",
+        "The configured connect deadline elapsed."
+      ],
+      "does_not_prove": [
+        "That the destination {authority} refused anything: it was never contacted."
+      ],
+      "remediation": [
+        {
+          "text": "Check that the proxy profile points at an HBONE (HTTP/2 CONNECT) listener.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "hbone.closed_after_certificate_request": {
+      "title": "The HBONE endpoint closed the connection after asking for a client certificate",
+      "explanation": "The HBONE endpoint {endpoint} requested a client certificate during the TLS 1.3 handshake; Anvil presented {client_svid}, completed its side of the handshake, and the fresh connection then closed before any answer to the CONNECT ({detail}). No TLS alert was readable, which is how a TLS 1.3 server's rejection of a missing or unacceptable client certificate often looks when its reset discards the alert. The tunnel was not opened and {authority} was never contacted.",
+      "alternatives": [
+        "The endpoint required a client SVID and none was presented, or it did not accept the presented one.",
+        "The endpoint closed the connection for an unrelated reason (overload, restart)."
+      ],
+      "does_not_prove": [
+        "Which of these applies: no alert or HTTP/2 answer was received.",
+        "Anything about the destination {authority}."
+      ],
+      "remediation": [
+        {
+          "text": "Check that the HBONE proxy's TLS profile carries the workload's client SVID from the mesh's trust domain and that its host bindings include the endpoint.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The endpoint's operator log for this handshake (for example 'peer sent no certificates')."
+      ]
     }
   }
 }

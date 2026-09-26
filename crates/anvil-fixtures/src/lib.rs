@@ -11,6 +11,7 @@ pub mod gateway_pki;
 pub mod goaway;
 pub mod grpc;
 pub mod h3server;
+pub mod hbone;
 pub mod http;
 pub mod http1_only;
 pub mod idp;

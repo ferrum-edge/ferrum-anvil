@@ -37,21 +37,90 @@ and worded from `catalog/diagnostics/findings.en.json`. Each finding has:
   headers, body, timing, local config);
 - **does not prove**, **alternatives**, **remediation** and **confirm with**.
 
-The catalog has 119 finding codes (catalog version shown in the app status
+The catalog has 139 finding codes (catalog version shown in the app status
 bar and in every record):
 
 | Family | Codes | Examples |
 |---|---|---|
-| `local.*` | 15 | unresolved variable, lint blocked, vault locked, invalid client identity; nothing was sent |
-| `client.*` | 34 | DNS, connect, TLS (untrusted issuer, name mismatch, expired, client cert required/rejected, ALPN), QUIC/H3, DTLS |
+| `local.*` | 16 | unresolved variable, lint blocked, vault locked, invalid client identity; nothing was sent |
+| `client.*` | 39 | DNS, connect, TLS (untrusted issuer, name mismatch, expired, client cert required/rejected, ALPN, SPIFFE ID mismatch, untrusted trust domain, invalid SVID, SNI override), QUIC/H3, DTLS |
 | `proxy.*` | 4 | forward-proxy CONNECT failures and authentication |
+| `hbone.*` | 9 | mesh HBONE tunnel leg: endpoint unreachable, mTLS split by leg, CONNECT refused/unavailable, HTTP/2 tunnel errors |
 | `exchange.*` | 11 | write failures, header timeout, HTTP/2 GOAWAY/RST/REFUSED_STREAM, closed before response |
 | `response.*` | 4 | incomplete body, idle/total body timeouts, stream reset mid-body |
 | `request.*` | 4 | canceled; processing uncertain; an earlier attempt may have processed |
 | `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings) |
-| `ferrum.*` | 15 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers |
-| `app.*`, `auth.*` | 6 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry |
-| `ws.*`, `sse.*`, `tcp.*`, `udp.*` | 12 | close codes, idle/cancel, abnormal close, no UDP response observed |
+| `ferrum.*` | 17 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers |
+| `app.*`, `auth.*` | 7 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry |
+| `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 14 | close codes, idle/cancel, abnormal close, no UDP response observed |
+
+## TLS identity: host names, SPIFFE IDs and SNI
+
+Every TLS observation (HTTPS, raw TLS, WebSocket, gRPC, SSE, QUIC, DTLS and
+the HBONE endpoint's mTLS) records which identity the verifier checked and
+what the peer presented:
+
+| Evidence | Meaning |
+|---|---|
+| `tls.identity_check` | `host_name` (RFC 6125, the default), `spiffe_id` (exact X.509-SVID ID) or `spiffe_trust_domain` |
+| `peer.spiffe_id` | the leaf's single `spiffe://` URI SAN, recorded for any server that presents one, verified or not |
+| `tls.sni` | the SNI actually sent (none for an IP address) |
+| `tls.server_name_override` | the SNI / verification name came from the TLS profile, not the URL |
+
+SPIFFE verification replaces host-name matching **only** when a TLS profile
+sets an expected server SPIFFE ID or trust domain; otherwise host-name
+verification stays on. Its failures are local, confirmed decisions made by
+Anvil before any request byte (dispatch `not_dispatched`, scope
+`client_to_peer`):
+
+| Code | When |
+|---|---|
+| `client.tls.spiffe_id_mismatch` | valid SVID of the trusted trust domain, but not the expected ID |
+| `client.tls.untrusted_trust_domain` | the SVID is in another trust domain, whether or not its chain anchors in the profile's bundle |
+| `client.tls.invalid_svid` | no URI SAN, several URI SANs, a malformed SPIFFE ID, a CA leaf or an invalid key usage |
+| `client.tls.untrusted_issuer` | the chain does not anchor in the bundle (and names no other trust domain) |
+
+`client.tls.sni_override` (info) notes which SNI was sent from the profile
+and which identity was checked; `client.tls.name_mismatch` lists the override
+as an alternative when it was used. The bypass warning
+(`client.tls.verification_bypassed`) also records what the SPIFFE check would
+have concluded.
+
+## Mesh HBONE tunnels
+
+With an HBONE proxy profile the path has two legs: Anvil ↔ HBONE endpoint
+(the tunnel, scope `forward_proxy`) and endpoint ↔ destination. Tunnel-leg
+failures carry their own failure kinds and `hbone.*` findings, dispatch is
+`not_dispatched`, and **no rule describes the inner destination as failed**
+(no `http.*`, `client.connect.*`, `client.dns.*`, `ferrum.*` or
+`request.processing_uncertain` finding): the destination was never contacted.
+
+| Code | Leg / decision | Confidence |
+|---|---|---|
+| `hbone.endpoint_unreachable` | Anvil could not resolve or connect to the endpoint | confirmed |
+| `hbone.endpoint_identity_rejected` | **Anvil** rejected the endpoint's certificate (SPIFFE mismatch, untrusted trust domain, invalid SVID, untrusted issuer) | confirmed |
+| `hbone.client_svid_required` | the **endpoint** sent `certificate_required` and Anvil presented no SVID | confirmed |
+| `hbone.client_svid_rejected` | the **endpoint** answered a presented SVID with a client-certificate alert (or TLS 1.3 `handshake_failure` after Anvil's Finished) | likely |
+| `hbone.closed_after_certificate_request` | TLS 1.3: certificate requested, Anvil finished, the connection closed before any `CONNECT` answer and no alert was readable | likely (no SVID) / unknown (SVID presented) |
+| `hbone.endpoint_tls_failed` | any other mTLS failure | unknown (timeouts confirmed) |
+| `hbone.tunnel_refused` | the endpoint answered `CONNECT` with a non-2xx, non-5xx status | confirmed that the endpoint refused (likely when its identity was not verified) |
+| `hbone.tunnel_unavailable` | the endpoint answered `CONNECT` with a 5xx; no leg claim | confirmed that it answered, cause unknown |
+| `hbone.tunnel_protocol_error` | HTTP/2 failure before a `CONNECT` answer (no `h2`, reset, GOAWAY, deadline) | unknown (deadline confirmed) |
+
+A `CONNECT` refusal quotes the endpoint's public body (its JSON `error`
+string, bounded) and never claims a precise mesh-policy cause: several
+admission reasons share one public response (Ferrum Edge uses one body for an
+unauthenticated peer, a withdrawn trust and a revoked SVID, and 0.9.7 answers
+a destination it does not terminate with the same `404 {"error":"Not Found"}`
+as a route miss). The attribution to the endpoint is `confirmed` only when the
+endpoint's identity was verified, because the refusal arrives on that
+authenticated HTTP/2 connection before any tunnel exists. A verification bypass
+on the endpoint's TLS profile produces `client.tls.verification_bypassed` with
+scope `forward_proxy`.
+
+The untrusted-destination rule is unchanged: Ferrum markers are only
+interpreted for a destination declared as a Ferrum gateway, and the `hbone.*`
+findings make no Ferrum-specific attribution.
 
 ## Ferrum Edge catalog (`catalog/ferrum/ferrum-edge-0.9.5/outcomes.json`)
 

@@ -634,7 +634,7 @@ fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     no_auth(&b.prep, "UDP")?;
     if let Some(p) = &b.prep.proxy {
         return Err(unsupported(
-            format!("UDP/DTLS cannot be sent through the proxy '{}' (HTTP CONNECT and SOCKS5 CONNECT carry TCP only)", p.label),
+            format!("UDP/DTLS cannot be sent through the proxy '{}' (HTTP CONNECT, SOCKS5 and HBONE tunnels carry TCP only)", p.label),
             "settings.proxy",
         ));
     }

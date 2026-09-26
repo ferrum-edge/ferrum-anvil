@@ -92,6 +92,7 @@ fn sample() -> PortableGraph {
         bindings: vec![],
         min_version: Default::default(),
         server_name_override: None,
+        server_spiffe: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

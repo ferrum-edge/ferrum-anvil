@@ -12,6 +12,19 @@
 //!   (`spiffe://cluster.local/ns/ferrum/sa/anvil-lab-client`).
 //! * `backend_ca` / `backend`: an unrelated root and `localhost` server
 //!   certificate for a TLS backend behind the egress gateway.
+//!
+//! Mesh client fixtures (the `mesh` lab profile and the SPIFFE/HBONE tests):
+//!
+//! * `svc`, `ztunnel`: server SVIDs that carry **only** a SPIFFE URI SAN (no
+//!   DNS name), so only SPIFFE verification can authenticate them.
+//! * `other`: a valid SVID for a different workload of the same trust domain
+//!   (wrong expected ID).
+//! * `two_uris`: a leaf with two URI SANs (not a valid X.509-SVID).
+//! * `no_uri`: a mesh-CA leaf with a DNS SAN only (not an X.509-SVID).
+//! * `partner_same_ca`: a mesh-CA leaf whose SPIFFE ID is in another trust
+//!   domain (`partner.example`): valid chain, untrusted trust domain.
+//! * `foreign_ca` / `foreign_client` / `foreign_server`: an unrelated root for
+//!   trust domain `partner.example` and SVIDs issued by it.
 
 use crate::pki::Pem;
 use rcgen::{
@@ -25,6 +38,12 @@ pub const TRUST_DOMAIN: &str = "cluster.local";
 pub const NAMESPACE: &str = "ferrum";
 pub const EGRESS_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-egress";
 pub const CLIENT_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-client";
+pub const SVC_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-svc";
+pub const ZTUNNEL_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-ztunnel";
+pub const OTHER_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-other";
+pub const PARTNER_TRUST_DOMAIN: &str = "partner.example";
+pub const PARTNER_CLIENT_SPIFFE_ID: &str = "spiffe://partner.example/ns/ferrum/sa/anvil-lab-client";
+pub const PARTNER_SVC_SPIFFE_ID: &str = "spiffe://partner.example/ns/ferrum/sa/anvil-lab-svc";
 
 #[derive(Clone, Debug)]
 pub struct MeshPki {
@@ -33,6 +52,15 @@ pub struct MeshPki {
     pub client: Pem,
     pub backend_ca: Pem,
     pub backend: Pem,
+    pub svc: Pem,
+    pub ztunnel: Pem,
+    pub other: Pem,
+    pub two_uris: Pem,
+    pub no_uri: Pem,
+    pub partner_same_ca: Pem,
+    pub foreign_ca: Pem,
+    pub foreign_client: Pem,
+    pub foreign_server: Pem,
 }
 
 fn dn(cn: &str) -> DistinguishedName {
@@ -55,10 +83,14 @@ fn make_ca(cn: &str) -> (CertifiedIssuer<'static, KeyPair>, String) {
 }
 
 fn leaf(cn: &str, spiffe_id: Option<&str>, local_names: bool, issuer: &CertifiedIssuer<'static, KeyPair>) -> Pem {
+    leaf_uris(cn, spiffe_id.into_iter().collect::<Vec<_>>().as_slice(), local_names, issuer)
+}
+
+fn leaf_uris(cn: &str, uris: &[&str], local_names: bool, issuer: &CertifiedIssuer<'static, KeyPair>) -> Pem {
     let mut p = CertificateParams::new(Vec::<String>::new()).expect("params");
     p.distinguished_name = dn(cn);
-    if let Some(id) = spiffe_id {
-        p.subject_alt_names.push(SanType::URI(id.try_into().expect("spiffe uri")));
+    for id in uris {
+        p.subject_alt_names.push(SanType::URI((*id).try_into().expect("uri")));
     }
     if local_names {
         p.subject_alt_names.push(SanType::DnsName("localhost".try_into().expect("dns")));
@@ -78,12 +110,22 @@ impl MeshPki {
     pub fn generate() -> Self {
         let (ca, ca_pem) = make_ca("Anvil Mesh Lab Root");
         let (backend_ca, backend_ca_pem) = make_ca("Anvil Mesh Lab Backend Root");
+        let (foreign_ca, foreign_ca_pem) = make_ca("Anvil Mesh Lab Partner Root");
         MeshPki {
             egress: leaf("anvil-lab-egress", Some(EGRESS_SPIFFE_ID), true, &ca),
             client: leaf("anvil-lab-client", Some(CLIENT_SPIFFE_ID), false, &ca),
             backend: leaf("anvil-lab-mesh-backend", None, true, &backend_ca),
+            svc: leaf("anvil-lab-svc", Some(SVC_SPIFFE_ID), false, &ca),
+            ztunnel: leaf("anvil-lab-ztunnel", Some(ZTUNNEL_SPIFFE_ID), false, &ca),
+            other: leaf("anvil-lab-other", Some(OTHER_SPIFFE_ID), false, &ca),
+            two_uris: leaf_uris("anvil-lab-two-uris", &[SVC_SPIFFE_ID, "https://anvil.test/svc"], false, &ca),
+            no_uri: leaf("anvil-lab-dns-only", None, true, &ca),
+            partner_same_ca: leaf("anvil-lab-partner-svc", Some(PARTNER_SVC_SPIFFE_ID), false, &ca),
+            foreign_client: leaf("anvil-lab-partner-client", Some(PARTNER_CLIENT_SPIFFE_ID), false, &foreign_ca),
+            foreign_server: leaf("anvil-lab-partner-svc", Some(PARTNER_SVC_SPIFFE_ID), false, &foreign_ca),
             ca: Pem { cert: ca_pem, key: String::new() },
             backend_ca: Pem { cert: backend_ca_pem, key: String::new() },
+            foreign_ca: Pem { cert: foreign_ca_pem, key: String::new() },
         }
     }
 
@@ -91,7 +133,15 @@ impl MeshPki {
     /// (mode 0600) into `dir`. CA private keys are never written.
     pub fn write_to(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
-        for (name, pem) in [("egress", &self.egress), ("client", &self.client), ("backend", &self.backend)] {
+        for (name, pem) in [
+            ("egress", &self.egress),
+            ("client", &self.client),
+            ("backend", &self.backend),
+            ("svc", &self.svc),
+            ("ztunnel", &self.ztunnel),
+            ("other", &self.other),
+            ("foreign-client", &self.foreign_client),
+        ] {
             std::fs::write(dir.join(format!("{name}.pem")), &pem.cert)?;
             let kp = dir.join(format!("{name}.key"));
             std::fs::write(&kp, &pem.key)?;
@@ -103,6 +153,7 @@ impl MeshPki {
         }
         std::fs::write(dir.join("ca.pem"), &self.ca.cert)?;
         std::fs::write(dir.join("backend-ca.pem"), &self.backend_ca.cert)?;
+        std::fs::write(dir.join("foreign-ca.pem"), &self.foreign_ca.cert)?;
         Ok(())
     }
 }

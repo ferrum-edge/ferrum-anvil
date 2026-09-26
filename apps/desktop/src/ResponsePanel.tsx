@@ -2,7 +2,7 @@
 // (no HTML rendering, no links, no scripts).
 import { useEffect, useMemo, useState } from "react";
 import type { ExecutionView } from "./api";
-import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation } from "./generated/contracts";
+import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation, TunnelObservation } from "./generated/contracts";
 import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
 
 type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
@@ -360,19 +360,55 @@ function Connection({ attempt }: { attempt?: AttemptObservation }) {
           ))}
         </tbody>
       </table>
-      {c.tls && <TlsView t={c.tls} />}
+      {c.tunnel && <TunnelView t={c.tunnel} />}
+      {c.tls && <TlsView t={c.tls} title={c.tunnel ? "TLS with the destination (inside the tunnel)" : "TLS"} />}
     </div>
   );
 }
 
-function TlsView({ t }: { t: TlsObservation }) {
+function TunnelView({ t }: { t: TunnelObservation }) {
+  return (
+    <div className="col">
+      <h4 className="faint" style={{ margin: "6px 0 0" }}>HBONE tunnel (outer leg)</h4>
+      <table className="grid">
+        <tbody>
+          <tr><td className="k">Endpoint</td><td className="v">{t.endpoint}</td></tr>
+          <tr><td className="k">Remote / local</td><td className="v">{t.remote_address ?? "—"} / {t.local_address ?? "—"}</td></tr>
+          <tr><td className="k">CONNECT :authority</td><td className="v">{t.authority}</td></tr>
+          <tr><td className="k">CONNECT status</td><td className="v">{t.connect_status ?? "no answer"}</td></tr>
+          {t.connect_headers.map((h, i) => (
+            <tr key={i}><td className="k">CONNECT header</td><td className="v">{h.name}: {h.value}</td></tr>
+          ))}
+          {t.refusal_body != null && <tr><td className="k">Refusal body (untrusted)</td><td className="v mono">{t.refusal_body}{t.refusal_body_truncated ? " …" : ""}</td></tr>}
+          {t.failure && <tr><td className="k">Tunnel failure</td><td className="v">{humanize(t.failure.kind)} at {humanize(t.failure.phase)}: {t.failure.message}</td></tr>}
+          {t.phases.map((p, i) => (
+            <tr key={`p${i}`}><td className="k">{humanize(p.phase)}</td><td className="v">{humanize(p.status)}{p.start_us != null && p.end_us != null ? ` (${fmtUs(p.end_us - p.start_us)})` : ""}{p.detail ? ` — ${p.detail}` : ""}</td></tr>
+          ))}
+        </tbody>
+      </table>
+      {t.tls && <TlsView t={t.tls} title="Mutual TLS with the HBONE endpoint" />}
+    </div>
+  );
+}
+
+function identityCheck(t: TlsObservation) {
+  const c = t.identity_check;
+  if (!c) return "—";
+  if (c.method === "host_name") return `host name ${c.name}`;
+  if (c.method === "spiffe_id") return `SPIFFE ID ${c.expected}`;
+  return `SPIFFE trust domain ${c.trust_domain}`;
+}
+
+function TlsView({ t, title = "TLS" }: { t: TlsObservation; title?: string }) {
   const v = t.verification;
   return (
     <div className="col">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>TLS</h4>
+      <h4 className="faint" style={{ margin: "6px 0 0" }}>{title}</h4>
       <table className="grid">
         <tbody>
-          <tr><td className="k">Server name (SNI)</td><td className="v">{t.server_name}</td></tr>
+          <tr><td className="k">Server name (SNI)</td><td className="v">{t.sni ?? `none sent (${t.server_name})`}{t.server_name_overridden ? " — from the TLS profile override" : ""}</td></tr>
+          <tr><td className="k">Identity checked</td><td className="v">{identityCheck(t)}</td></tr>
+          {t.peer_spiffe_id && <tr><td className="k">Peer SPIFFE ID</td><td className="v mono">{t.peer_spiffe_id}</td></tr>}
           <tr><td className="k">Version / cipher</td><td className="v">{t.version ?? "—"} / {t.cipher_suite ?? "—"}</td></tr>
           <tr><td className="k">ALPN offered → negotiated</td><td className="v">{t.alpn_offered.join(", ") || "—"} → {t.alpn_negotiated ?? "none"}</td></tr>
           <tr>

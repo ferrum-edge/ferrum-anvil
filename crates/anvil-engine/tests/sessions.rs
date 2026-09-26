@@ -84,6 +84,7 @@ fn profile(roots: &[&str], identity: Option<&Pem>, verify: bool) -> TlsProfile {
         bindings: vec![],
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
+        server_spiffe: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -1038,6 +1039,8 @@ async fn udp_with_a_proxy_fails_before_traffic_and_interactive_udp_works() {
         username: None,
         password: None,
         no_proxy: String::new(),
+        tls_profile_id: None,
+        hbone: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     });

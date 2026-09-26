@@ -156,6 +156,17 @@ pub enum FailureKind {
     ProxyTunnelRejected,
     ProxyAuthRequired,
     ProxyProtocolError,
+    // ---- mesh HBONE tunnel (client ↔ HBONE endpoint) ----
+    /// The mutual-TLS handshake with the HBONE endpoint failed. The precise
+    /// TLS cause is `connection.tunnel.failure` (and the tunnel's TLS
+    /// observation); the inner destination was never contacted.
+    HboneEndpointTlsFailed,
+    /// The HBONE endpoint answered the HTTP/2 `CONNECT` with a non-2xx status
+    /// (kept, with the bounded body, in `connection.tunnel`).
+    HboneConnectRefused,
+    /// HTTP/2 failure on the tunnel before a `CONNECT` status (no h2 ALPN,
+    /// preface/SETTINGS failure, stream reset, GOAWAY, deadline).
+    HboneProtocolError,
     // ---- TLS (client ↔ peer) ----
     TlsUntrustedIssuer,
     TlsExpired,
@@ -173,6 +184,15 @@ pub enum FailureKind {
     /// Peer sent a fatal alert after the client finished its handshake
     /// (TLS 1.3 client-certificate rejection surfaces here).
     TlsAlertAfterHandshake,
+    /// SPIFFE verification: the X.509-SVID's SPIFFE ID differs from the
+    /// expected server SPIFFE ID (same trust domain).
+    TlsSpiffeIdMismatch,
+    /// SPIFFE verification: the server's SPIFFE ID belongs to a trust domain
+    /// the profile does not trust (or no configured bundle anchors it).
+    TlsUntrustedTrustDomain,
+    /// SPIFFE verification: the leaf is not a valid X.509-SVID (no URI SAN,
+    /// several URI SANs, or a malformed `spiffe://` ID).
+    TlsInvalidSvid,
     // ---- QUIC / HTTP/3 ----
     QuicHandshakeTimeout,
     QuicIdleTimeout,
@@ -237,7 +257,25 @@ impl FailureKind {
 
     pub fn is_tls_verification(self) -> bool {
         use FailureKind::*;
-        matches!(self, TlsUntrustedIssuer | TlsExpired | TlsNotYetValid | TlsNameMismatch | TlsRevoked | TlsBadCertificate)
+        matches!(
+            self,
+            TlsUntrustedIssuer
+                | TlsExpired
+                | TlsNotYetValid
+                | TlsNameMismatch
+                | TlsRevoked
+                | TlsBadCertificate
+                | TlsSpiffeIdMismatch
+                | TlsUntrustedTrustDomain
+                | TlsInvalidSvid
+        )
+    }
+
+    /// Failures of the tunnel leg (Anvil ↔ HBONE endpoint): the inner
+    /// destination was never contacted.
+    pub fn is_tunnel_leg(self) -> bool {
+        use FailureKind::*;
+        matches!(self, HboneEndpointTlsFailed | HboneConnectRefused | HboneProtocolError)
     }
 }
 
@@ -332,10 +370,40 @@ pub enum TlsVerification {
     NotReached,
 }
 
+/// Which peer identity check the TLS verifier applied (or would have applied,
+/// when verification is bypassed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum PeerIdentityCheck {
+    /// RFC 6125 host-name (or IP address) verification against `name`.
+    HostName { name: String },
+    /// SPIFFE X.509-SVID: the leaf's single URI SAN must equal `expected`
+    /// (which implies its trust domain). DNS names are not consulted.
+    SpiffeId { expected: String, trust_domain: String },
+    /// SPIFFE X.509-SVID: the leaf's single URI SAN must be a SPIFFE ID in
+    /// `trust_domain`. DNS names are not consulted.
+    SpiffeTrustDomain { trust_domain: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TlsObservation {
     /// SNI/verification name used.
     pub server_name: String,
+    /// The SNI actually sent in the ClientHello. `None` when the server name
+    /// is an IP address (TLS carries no IP SNI) or the handshake did not start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    /// The SNI / verification name came from the TLS profile's
+    /// `server_name_override`, not from the URL host.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server_name_overridden: bool,
+    /// The identity check the verifier applied (host name or SPIFFE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_check: Option<PeerIdentityCheck>,
+    /// The peer leaf's SPIFFE ID (its single `spiffe://` URI SAN), recorded
+    /// for any TLS server that presents one, verified or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_spiffe_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,6 +460,59 @@ pub struct ConnectionObservation {
     pub tls: Option<TlsObservation>,
     /// Requests previously served on this connection (0 = fresh).
     pub prior_requests: u32,
+    /// The mesh tunnel (HBONE) the connection runs through. Its outer phases,
+    /// mTLS identities and `CONNECT` status are kept here, separate from the
+    /// inner connection's phases and TLS (`tls` above is the inner TLS with
+    /// the destination).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<TunnelObservation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelKind {
+    /// HTTP/2 `CONNECT` over mutual TLS (mesh HBONE).
+    Hbone,
+}
+
+/// Evidence for the outer tunnel leg (Anvil ↔ tunnel endpoint).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelObservation {
+    pub kind: TunnelKind,
+    /// The tunnel endpoint (`host:port`) and the proxy profile label.
+    pub endpoint: String,
+    /// `:authority` sent in the `CONNECT` (the inner destination).
+    pub authority: String,
+    pub resolved_addresses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_source: Option<String>,
+    pub connect_attempts: Vec<ConnectAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_address: Option<String>,
+    /// Outer phases (DNS, TCP connect, mTLS handshake, HTTP/2 preface,
+    /// `CONNECT`), on the same clock as the attempt's phases.
+    pub phases: Vec<PhaseTiming>,
+    /// Mutual TLS with the endpoint: the client SVID presented and the
+    /// endpoint's verified server identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsObservation>,
+    /// Non-pseudo headers sent on the `CONNECT` (markers, baggage, extras).
+    pub connect_headers: Vec<HeaderEntry>,
+    /// Status the endpoint answered the `CONNECT` with, when one arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_status: Option<u16>,
+    pub response_headers: Vec<HeaderEntry>,
+    /// Bounded UTF-8 (lossy) preview of a refusal body. Untrusted content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_body: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refusal_body_truncated: bool,
+    /// The typed failure on the tunnel leg with its precise phase and kind
+    /// (e.g. `tls_spiffe_id_mismatch` at `tls_handshake`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TransportFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

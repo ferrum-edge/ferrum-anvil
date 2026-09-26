@@ -59,6 +59,10 @@ fn attempt(s: &Shape) -> AttemptObservation {
             via_proxy: None,
             tls: Some(TlsObservation {
                 server_name: "localhost".into(),
+                sni: Some("localhost".into()),
+                server_name_overridden: false,
+                identity_check: None,
+                peer_spiffe_id: None,
                 version: Some(s.version.into()),
                 cipher_suite: None,
                 alpn_offered: vec!["h2".into(), "http/1.1".into()],
@@ -71,6 +75,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
                 resumed: Some(false),
             }),
             prior_requests: if s.reused { 3 } else { 0 },
+            tunnel: None,
         }),
         phases: vec![],
         dispatch: DispatchState::NotDispatched,

@@ -3,7 +3,19 @@
 import { useEffect, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api, type ExportPreview, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
-import type { AppSettings, ClientIdentity, Environment, IntegrationProfile, ProxyProfile, TlsProfile, Variable, Workspace } from "./generated/contracts";
+import type {
+  AppSettings,
+  ClientIdentity,
+  Environment,
+  HboneMarker,
+  HboneOptions,
+  IntegrationProfile,
+  KeyValue,
+  ProxyProfile,
+  TlsProfile,
+  Variable,
+  Workspace,
+} from "./generated/contracts";
 import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
 import { Modal, SecretField, Tabs, humanize } from "./ui";
@@ -218,14 +230,14 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
           />
           {tab === "tls" && (
             <ProfileList
-              items={tls.map((p) => ({ id: p.id, name: p.name, meta: `${p.verify === false ? "⚠ verification off" : "verification on"} · ${p.client_identity ? `client cert (${p.client_identity.format})` : "no client cert"} · ${(p.extra_roots_pem ?? []).length} extra CA` }))}
+              items={tls.map((p) => ({ id: p.id, name: p.name, meta: `${p.verify === false ? "⚠ verification off" : "verification on"}${spiffeLabel(p)} · ${p.client_identity ? `client cert (${p.client_identity.format})` : "no client cert"} · ${(p.extra_roots_pem ?? []).length} extra CA${p.server_name_override ? ` · SNI ${p.server_name_override}` : ""}` }))}
               onEdit={(id) => setEditing({ kind: "tls", value: tls.find((p) => p.id === id)! })}
               onNew={() => setEditing({ kind: "tls", value: { ...base, name: "New TLS profile", verify: true, use_system_roots: true, extra_roots_pem: [], bindings: [], min_version: "tls12" } })}
             />
           )}
           {tab === "proxy" && (
             <ProfileList
-              items={proxy.map((p) => ({ id: p.id, name: p.name, meta: `${p.kind} ${p.address}${p.no_proxy ? ` · bypass: ${p.no_proxy}` : ""}` }))}
+              items={proxy.map((p) => ({ id: p.id, name: p.name, meta: `${p.kind === "hbone" ? "HBONE" : p.kind} ${p.address}${p.tls_profile_id ? ` · TLS: ${tls.find((t) => t.id === p.tls_profile_id)?.name ?? "missing profile"}` : ""}${p.no_proxy ? ` · bypass: ${p.no_proxy}` : ""}` }))}
               onEdit={(id) => setEditing({ kind: "proxy", value: proxy.find((p) => p.id === id)! })}
               onNew={() => setEditing({ kind: "proxy", value: { ...base, name: "New proxy", kind: "http", address: "127.0.0.1:8080", no_proxy: "localhost,127.0.0.1" } })}
             />
@@ -245,7 +257,7 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
         </>
       )}
       {editing?.kind === "tls" && <TlsForm p={editing.value as TlsProfile} onChange={(value) => setEditing({ kind: "tls", value })} />}
-      {editing?.kind === "proxy" && <ProxyForm p={editing.value as ProxyProfile} onChange={(value) => setEditing({ kind: "proxy", value })} />}
+      {editing?.kind === "proxy" && <ProxyForm p={editing.value as ProxyProfile} tlsProfiles={tls} onChange={(value) => setEditing({ kind: "proxy", value })} />}
       {editing?.kind === "ferrum" && <FerrumForm p={editing.value as IntegrationProfile} onChange={(value) => setEditing({ kind: "ferrum", value })} />}
       {err && <div className="bad-box">{err}</div>}
     </Modal>
@@ -283,8 +295,15 @@ function parseHosts(s: string) {
     });
 }
 
+function spiffeLabel(p: TlsProfile) {
+  const s = p.server_spiffe;
+  if (!s || !(s.expected_server_spiffe_id || s.trust_domain)) return "";
+  return ` · SPIFFE ${s.expected_server_spiffe_id || `trust domain ${s.trust_domain}`}`;
+}
+
 function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => void }) {
   const id: ClientIdentity | null | undefined = p.client_identity;
+  const spiffe = p.server_spiffe != null;
   return (
     <div className="col">
       <label className="lbl">
@@ -336,9 +355,57 @@ function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => 
         </label>
         <label className="lbl grow">
           SNI / verification name override (advanced)
-          <input className="field mono" value={p.server_name_override ?? ""} onChange={(e) => onChange({ ...p, server_name_override: e.target.value || null })} />
+          <input
+            className="field mono"
+            value={p.server_name_override ?? ""}
+            placeholder="outbound_.8080_._.svc.ns.svc.cluster.local"
+            onChange={(e) => onChange({ ...p, server_name_override: e.target.value || null })}
+          />
         </label>
       </div>
+      {p.server_name_override && (
+        <p className="hint">
+          Sent as the TLS server name (SNI) instead of the URL host; the HTTP authority is unchanged. The certificate is verified against this name{spiffe ? ", or against the SPIFFE identity below when set" : ""}.
+        </p>
+      )}
+      <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+        <legend className="faint">Server identity (SPIFFE / mesh)</legend>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={spiffe}
+            onChange={(e) => onChange({ ...p, server_spiffe: e.target.checked ? { expected_server_spiffe_id: "", trust_domain: "" } : null })}
+          />
+          Verify the server by its SPIFFE ID instead of the host name
+        </label>
+        {spiffe && (
+          <div className="col" style={{ marginTop: 8 }}>
+            <p className="hint">
+              The server's X.509-SVID must chain to the CA certificates above (the trust domain's bundle) and carry exactly one <code>spiffe://</code> URI SAN. DNS names in the certificate are not used. Set an exact ID, a trust domain, or both.
+            </p>
+            <label className="lbl">
+              Expected server SPIFFE ID
+              <input
+                className="field mono"
+                value={p.server_spiffe?.expected_server_spiffe_id ?? ""}
+                placeholder="spiffe://cluster.local/ns/default/sa/my-service"
+                onChange={(e) => onChange({ ...p, server_spiffe: { ...p.server_spiffe, expected_server_spiffe_id: e.target.value || null } })}
+              />
+            </label>
+            <label className="lbl">
+              Trusted trust domain
+              <input
+                className="field mono"
+                value={p.server_spiffe?.trust_domain ?? ""}
+                placeholder="cluster.local"
+                onChange={(e) => onChange({ ...p, server_spiffe: { ...p.server_spiffe, trust_domain: e.target.value || null } })}
+              />
+            </label>
+            {!(p.server_spiffe?.expected_server_spiffe_id || p.server_spiffe?.trust_domain) && <div className="warn-box">Set an expected SPIFFE ID or a trust domain; an empty SPIFFE check falls back to host-name verification.</div>}
+            {(p.extra_roots_pem ?? []).length === 0 && <div className="warn-box">Add the trust domain's CA certificates (its trust bundle) above; SPIFFE verification needs them.</div>}
+          </div>
+        )}
+      </fieldset>
       <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
         <legend className="faint">Client certificate (mTLS)</legend>
         <div className="row">
@@ -431,7 +498,25 @@ function P12Picker(props: { workspaceId: string; onSecret: (v: { kind: "secret";
   );
 }
 
-function ProxyForm({ p, onChange }: { p: ProxyProfile; onChange: (p: ProxyProfile) => void }) {
+function headersText(h: KeyValue[] | undefined) {
+  return (h ?? []).map((x) => `${x.name}: ${x.value}`).join("\n");
+}
+function parseHeaders(t: string): KeyValue[] {
+  return t
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const i = l.indexOf(":");
+      return i < 0 ? { name: l, value: "", enabled: true } : { name: l.slice(0, i).trim(), value: l.slice(i + 1).trim(), enabled: true };
+    });
+}
+
+function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsProfiles: TlsProfile[]; onChange: (p: ProxyProfile) => void }) {
+  const hbone = p.kind === "hbone";
+  const opts: HboneOptions = p.hbone ?? { marker: "none", extra_headers: [] };
+  const setHbone = (h: HboneOptions) => onChange({ ...p, hbone: h });
+  const tlsProfile = tlsProfiles.find((t) => t.id === p.tls_profile_id);
   return (
     <div className="col">
       <label className="lbl">
@@ -441,22 +526,82 @@ function ProxyForm({ p, onChange }: { p: ProxyProfile; onChange: (p: ProxyProfil
       <div className="row">
         <label className="lbl">
           Type
-          <select className="field" value={p.kind} onChange={(e) => onChange({ ...p, kind: e.target.value as ProxyProfile["kind"] })}>
+          <select
+            className="field"
+            value={p.kind}
+            onChange={(e) => {
+              const kind = e.target.value as ProxyProfile["kind"];
+              onChange(kind === "hbone" ? { ...p, kind, username: null, password: null, hbone: p.hbone ?? { marker: "none", extra_headers: [] } } : { ...p, kind });
+            }}
+          >
             <option value="http">HTTP (CONNECT)</option>
             <option value="https">HTTPS (TLS to proxy)</option>
             <option value="socks5">SOCKS5</option>
+            <option value="hbone">HBONE (mesh: HTTP/2 CONNECT over mTLS)</option>
           </select>
         </label>
         <label className="lbl grow">
-          Address (host:port)
+          {hbone ? "HBONE endpoint (host:port)" : "Address (host:port)"}
           <input className="field mono" value={p.address} onChange={(e) => onChange({ ...p, address: e.target.value })} />
         </label>
       </div>
-      <label className="lbl">
-        Username (optional)
-        <input className="field mono" value={p.username ?? ""} onChange={(e) => onChange({ ...p, username: e.target.value || null })} />
-      </label>
-      <SecretField label="Password (optional)" value={p.password ?? undefined} workspaceId={p.workspace_id} onChange={(password) => onChange({ ...p, password })} />
+      {(hbone || p.kind === "https") && (
+        <label className="lbl">
+          {hbone ? "TLS profile for the endpoint (client SVID, trust bundle, expected SPIFFE ID)" : "TLS profile for the proxy (optional; default: system roots, strict)"}
+          <select className="field" value={p.tls_profile_id ?? ""} onChange={(e) => onChange({ ...p, tls_profile_id: e.target.value || null })}>
+            <option value="">{hbone ? "Choose a TLS profile…" : "Default (system roots)"}</option>
+            {tlsProfiles.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {hbone && !p.tls_profile_id && <div className="warn-box">HBONE is mutual TLS: select a TLS profile with the workload's client SVID and the mesh trust bundle. Requests through this proxy are refused before sending until one is set.</div>}
+      {hbone && tlsProfile && !tlsProfile.client_identity && <div className="warn-box">The selected TLS profile has no client certificate: the endpoint will not see an authenticated mesh peer.</div>}
+      {hbone && tlsProfile && tlsProfile.verify === false && <div className="warn-box">The selected TLS profile disables verification: the HBONE endpoint's identity is not authenticated (shown on every response).</div>}
+      {hbone && (
+        <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+          <legend className="faint">HBONE CONNECT</legend>
+          <p className="hint">
+            Anvil sends <code>CONNECT</code> with <code>:authority</code> = the request's host:port over HTTP/2; a 2xx opens the tunnel and the request (HTTP, TLS, WebSocket or TCP) runs inside it. A fresh tunnel is opened per request.
+          </p>
+          <div className="row">
+            <label className="lbl">
+              Protocol marker
+              <select className="field" value={opts.marker ?? "none"} onChange={(e) => setHbone({ ...opts, marker: e.target.value as HboneMarker })}>
+                <option value="none">None (Istio ztunnel style)</option>
+                <option value="ferrum_mesh_protocol">x-ferrum-mesh-protocol: hbone</option>
+                <option value="istio_protocol">x-istio-protocol: hbone</option>
+              </select>
+            </label>
+            <label className="lbl grow">
+              Baggage (optional)
+              <input
+                className="field mono"
+                value={opts.baggage ?? ""}
+                placeholder="source.principal=spiffe://cluster.local/ns/default/sa/client"
+                onChange={(e) => setHbone({ ...opts, baggage: e.target.value || null })}
+              />
+            </label>
+          </div>
+          <p className="hint">A marker never authenticates the client; identity baggage is honored only from trusted assertors that match the client SVID.</p>
+          <label className="lbl">
+            Extra CONNECT headers (one "Name: value" per line)
+            <textarea className="field mono" rows={2} value={headersText(opts.extra_headers)} onChange={(e) => setHbone({ ...opts, extra_headers: parseHeaders(e.target.value) })} />
+          </label>
+        </fieldset>
+      )}
+      {!hbone && (
+        <>
+          <label className="lbl">
+            Username (optional)
+            <input className="field mono" value={p.username ?? ""} onChange={(e) => onChange({ ...p, username: e.target.value || null })} />
+          </label>
+          <SecretField label="Password (optional)" value={p.password ?? undefined} workspaceId={p.workspace_id} onChange={(password) => onChange({ ...p, password })} />
+        </>
+      )}
       <label className="lbl">
         Bypass for (NO_PROXY: hosts, suffixes, CIDRs, * for all)
         <input className="field mono" value={p.no_proxy ?? ""} onChange={(e) => onChange({ ...p, no_proxy: e.target.value })} />

@@ -21,6 +21,7 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pki-types.workspace = true
 rcgen.workspace = true
+x509-parser.workspace = true
 time = "0.3"
 serde.workspace = true
 serde_json.workspace = true

@@ -327,7 +327,13 @@ export type FailureKind =
       | "internal"
     )
   | "oauth_interaction_required"
-  | "tls_alert_after_handshake";
+  | "hbone_endpoint_tls_failed"
+  | "hbone_connect_refused"
+  | "hbone_protocol_error"
+  | "tls_alert_after_handshake"
+  | "tls_spiffe_id_mismatch"
+  | "tls_untrusted_trust_domain"
+  | "tls_invalid_svid";
 /**
  * Wire protocol family of a saved request. SOAP and GraphQL are HTTP body
  * kinds, not separate transports.
@@ -361,6 +367,27 @@ export type AttemptReason =
       reason: "auth_challenge";
     };
 /**
+ * Which peer identity check the TLS verifier applied (or would have applied,
+ * when verification is bypassed).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "PeerIdentityCheck".
+ */
+export type PeerIdentityCheck =
+  | {
+      name: string;
+      method: "host_name";
+    }
+  | {
+      expected: string;
+      trust_domain: string;
+      method: "spiffe_id";
+    }
+  | {
+      trust_domain: string;
+      method: "spiffe_trust_domain";
+    };
+/**
  * Result of peer-certificate verification.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -382,6 +409,11 @@ export type TlsVerification =
   | {
       result: "not_reached";
     };
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "TunnelKind".
+ */
+export type TunnelKind = "hbone";
 /**
  * Whether request bytes of an attempt may have reached the peer.
  *
@@ -648,7 +680,7 @@ export type RunCompletion = "completed" | "canceled_by_user" | "aborted_by_rule"
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ProxyKind".
  */
-export type ProxyKind = "socks5" | "http" | "https";
+export type ProxyKind = "socks5" | "http" | "https" | "hbone";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "MultipartPart".
@@ -1079,6 +1111,15 @@ export type WssePasswordType = "password_text" | "password_digest";
  * via the `definition` "ConnectionMode".
  */
 export type ConnectionMode = "persistent" | "fresh";
+/**
+ * Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;
+ * Ferrum accepts either marker (value `hbone`) or none. A marker is a wire
+ * shape hint only and never authenticates the peer.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "HboneMarker".
+ */
+export type HboneMarker = "none" | "ferrum_mesh_protocol" | "istio_protocol";
 /**
  * Request body model. Serialization (and content-type inference) happens in
  * the engine before any body-dependent signing.
@@ -1669,6 +1710,13 @@ export interface ConnectionObservation {
    * Requests previously served on this connection (0 = fresh).
    */
   prior_requests: number;
+  /**
+   * The mesh tunnel (HBONE) the connection runs through. Its outer phases,
+   * mTLS identities and `CONNECT` status are kept here, separate from the
+   * inner connection's phases and TLS (`tls` above is the inner TLS with
+   * the destination).
+   */
+  tunnel?: TunnelObservation | null;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1688,6 +1736,25 @@ export interface TlsObservation {
    * SNI/verification name used.
    */
   server_name: string;
+  /**
+   * The SNI actually sent in the ClientHello. `None` when the server name
+   * is an IP address (TLS carries no IP SNI) or the handshake did not start.
+   */
+  sni?: string | null;
+  /**
+   * The SNI / verification name came from the TLS profile's
+   * `server_name_override`, not from the URL host.
+   */
+  server_name_overridden?: boolean;
+  /**
+   * The identity check the verifier applied (host name or SPIFFE).
+   */
+  identity_check?: PeerIdentityCheck | null;
+  /**
+   * The peer leaf's SPIFFE ID (its single `spiffe://` URI SAN), recorded
+   * for any TLS server that presents one, verified or not.
+   */
+  peer_spiffe_id?: string | null;
   version?: string | null;
   cipher_suite?: string | null;
   /**
@@ -1728,6 +1795,57 @@ export interface CertificateSummary {
   key_algorithm: string;
 }
 /**
+ * Evidence for the outer tunnel leg (Anvil ↔ tunnel endpoint).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "TunnelObservation".
+ */
+export interface TunnelObservation {
+  kind: TunnelKind;
+  /**
+   * The tunnel endpoint (`host:port`) and the proxy profile label.
+   */
+  endpoint: string;
+  /**
+   * `:authority` sent in the `CONNECT` (the inner destination).
+   */
+  authority: string;
+  resolved_addresses: string[];
+  resolution_source?: string | null;
+  connect_attempts: ConnectAttempt[];
+  local_address?: string | null;
+  remote_address?: string | null;
+  /**
+   * Outer phases (DNS, TCP connect, mTLS handshake, HTTP/2 preface,
+   * `CONNECT`), on the same clock as the attempt's phases.
+   */
+  phases: PhaseTiming[];
+  /**
+   * Mutual TLS with the endpoint: the client SVID presented and the
+   * endpoint's verified server identity.
+   */
+  tls?: TlsObservation | null;
+  /**
+   * Non-pseudo headers sent on the `CONNECT` (markers, baggage, extras).
+   */
+  connect_headers: HeaderEntry[];
+  /**
+   * Status the endpoint answered the `CONNECT` with, when one arrived.
+   */
+  connect_status?: number | null;
+  response_headers: HeaderEntry[];
+  /**
+   * Bounded UTF-8 (lossy) preview of a refusal body. Untrusted content.
+   */
+  refusal_body?: string | null;
+  refusal_body_truncated?: boolean;
+  /**
+   * The typed failure on the tunnel leg with its precise phase and kind
+   * (e.g. `tls_spiffe_id_mismatch` at `tls_handshake`).
+   */
+  failure?: TransportFailure | null;
+}
+/**
  * A measured phase. Offsets are microseconds from attempt start on a
  * monotonic clock. Concurrent phases may overlap; do not sum them blindly.
  *
@@ -1740,24 +1858,6 @@ export interface PhaseTiming {
   start_us?: number | null;
   end_us?: number | null;
   detail?: string | null;
-}
-/**
- * Byte accounting for one attempt. Logical header sizes on HTTP/2/3 are
- * estimates (HPACK/QPACK compress headers); `connection_*` counters are
- * connection-scoped TLS/transport bytes and include other multiplexed streams.
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "ByteCounts".
- */
-export interface ByteCounts {
-  request_headers_logical: number;
-  request_headers_estimated: boolean;
-  request_body: number;
-  response_headers_logical?: number | null;
-  response_body_wire?: number | null;
-  response_body_decoded?: number | null;
-  connection_bytes_written?: number | null;
-  connection_bytes_read?: number | null;
 }
 /**
  * A typed transport failure with library detail for display. `message` is
@@ -1796,6 +1896,24 @@ export interface TransportFailure {
    * The configured deadline that elapsed, for timeouts.
    */
   deadline_ms?: number | null;
+}
+/**
+ * Byte accounting for one attempt. Logical header sizes on HTTP/2/3 are
+ * estimates (HPACK/QPACK compress headers); `connection_*` counters are
+ * connection-scoped TLS/transport bytes and include other multiplexed streams.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ByteCounts".
+ */
+export interface ByteCounts {
+  request_headers_logical: number;
+  request_headers_estimated: boolean;
+  request_body: number;
+  response_headers_logical?: number | null;
+  response_body_wire?: number | null;
+  response_body_decoded?: number | null;
+  connection_bytes_written?: number | null;
+  connection_bytes_read?: number | null;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -2621,8 +2739,58 @@ export interface ProxyProfile {
    * `NO_PROXY` semantics: comma-separated hosts/suffixes/CIDRs, `*` for all.
    */
   no_proxy?: string;
+  /**
+   * TLS profile for the connection to the proxy itself: trust anchors,
+   * client identity (the client SVID for HBONE) and server identity
+   * (e.g. the endpoint's SPIFFE ID). Required for `hbone`; optional for
+   * `https` (default: system roots with strict verification).
+   */
+  tls_profile_id?: Id | null;
+  /**
+   * HBONE `CONNECT` options (kind `hbone` only).
+   */
+  hbone?: HboneOptions | null;
   created_at: string;
   updated_at: string;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "HboneOptions".
+ */
+export interface HboneOptions {
+  /**
+   * Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;
+   * Ferrum accepts either marker (value `hbone`) or none. A marker is a wire
+   * shape hint only and never authenticates the peer.
+   */
+  marker?: "none" | "ferrum_mesh_protocol" | "istio_protocol";
+  /**
+   * W3C `baggage` header value for the `CONNECT`, e.g.
+   * `source.principal=spiffe://cluster.local/ns/a/sa/b`. The endpoint honors
+   * identity baggage only from trusted assertors that match the client SVID.
+   */
+  baggage?: string | null;
+  /**
+   * Additional `CONNECT` request headers (sent verbatim, in order).
+   */
+  extra_headers?: KeyValue[];
+}
+/**
+ * Enabled/disabled name-value entry. Repeated names are legal and preserved
+ * in order (headers and query parameters may repeat).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "KeyValue".
+ */
+export interface KeyValue {
+  name: string;
+  value: string;
+  enabled?: boolean;
+  description?: string;
+  /**
+   * Marks the value as sensitive for masking/redaction/export.
+   */
+  sensitive?: boolean;
 }
 /**
  * Common persistent metadata.
@@ -2814,23 +2982,6 @@ export interface RequestSpec {
    * Reference to the imported spec operation this request came from.
    */
   source?: ImportSource | null;
-}
-/**
- * Enabled/disabled name-value entry. Repeated names are legal and preserved
- * in order (headers and query parameters may repeat).
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "KeyValue".
- */
-export interface KeyValue {
-  name: string;
-  value: string;
-  enabled?: boolean;
-  description?: string;
-  /**
-   * Marks the value as sensitive for masking/redaction/export.
-   */
-  sensitive?: boolean;
 }
 /**
  * Non-secret request settings resolved deterministically:
@@ -3361,11 +3512,40 @@ export interface TlsProfile {
   bindings?: HostBinding[];
   min_version?: "tls12" | "tls13";
   /**
-   * Override the SNI / verification name (advanced). The HTTP authority is unchanged.
+   * Override the SNI / verification name (advanced). The HTTP authority is
+   * unchanged. The certificate is verified against this name, or against
+   * the SPIFFE identity when [`TlsProfile::server_spiffe`] is set. East-west
+   * SNI passthrough uses names like `outbound_.8080_._.svc.ns.svc.cluster.local`.
    */
   server_name_override?: string | null;
+  /**
+   * SPIFFE X.509-SVID server identity (mesh). When set, the peer chain is
+   * verified against this profile's trust anchors (its trust bundle) and
+   * the certificate's single `spiffe://` URI SAN is matched instead of the
+   * DNS host name. Unset (the default) keeps ordinary host-name verification.
+   */
+  server_spiffe?: ServerSpiffeIdentity | null;
   created_at: string;
   updated_at: string;
+}
+/**
+ * Expected SPIFFE identity of a TLS server (X.509-SVID). At least one field
+ * must be set; when both are, the ID must belong to the trust domain.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ServerSpiffeIdentity".
+ */
+export interface ServerSpiffeIdentity {
+  /**
+   * Exact SPIFFE ID the server must present, e.g.
+   * `spiffe://cluster.local/ns/ferrum/sa/svc`.
+   */
+  expected_server_spiffe_id?: string | null;
+  /**
+   * Trust domain the server's SPIFFE ID must belong to, e.g. `cluster.local`
+   * (any workload of that trust domain is accepted).
+   */
+  trust_domain?: string | null;
 }
 /**
  * Local profile (a selector, not an OS security boundary).

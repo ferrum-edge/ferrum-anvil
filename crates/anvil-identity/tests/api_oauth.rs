@@ -394,6 +394,7 @@ async fn code_exchange_uses_the_request_tls_profile() {
         bindings: vec![],
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
+        server_spiffe: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

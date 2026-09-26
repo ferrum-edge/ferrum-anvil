@@ -879,9 +879,39 @@
           "const": "oauth_interaction_required"
         },
         {
+          "description": "The mutual-TLS handshake with the HBONE endpoint failed. The precise\nTLS cause is `connection.tunnel.failure` (and the tunnel's TLS\nobservation); the inner destination was never contacted.",
+          "type": "string",
+          "const": "hbone_endpoint_tls_failed"
+        },
+        {
+          "description": "The HBONE endpoint answered the HTTP/2 `CONNECT` with a non-2xx status\n(kept, with the bounded body, in `connection.tunnel`).",
+          "type": "string",
+          "const": "hbone_connect_refused"
+        },
+        {
+          "description": "HTTP/2 failure on the tunnel before a `CONNECT` status (no h2 ALPN,\npreface/SETTINGS failure, stream reset, GOAWAY, deadline).",
+          "type": "string",
+          "const": "hbone_protocol_error"
+        },
+        {
           "description": "Peer sent a fatal alert after the client finished its handshake\n(TLS 1.3 client-certificate rejection surfaces here).",
           "type": "string",
           "const": "tls_alert_after_handshake"
+        },
+        {
+          "description": "SPIFFE verification: the X.509-SVID's SPIFFE ID differs from the\nexpected server SPIFFE ID (same trust domain).",
+          "type": "string",
+          "const": "tls_spiffe_id_mismatch"
+        },
+        {
+          "description": "SPIFFE verification: the server's SPIFFE ID belongs to a trust domain\nthe profile does not trust (or no configured bundle anchors it).",
+          "type": "string",
+          "const": "tls_untrusted_trust_domain"
+        },
+        {
+          "description": "SPIFFE verification: the leaf is not a valid X.509-SVID (no URI SAN,\nseveral URI SANs, or a malformed `spiffe://` ID).",
+          "type": "string",
+          "const": "tls_invalid_svid"
         }
       ]
     },
@@ -956,6 +986,17 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "tunnel": {
+          "description": "The mesh tunnel (HBONE) the connection runs through. Its outer phases,\nmTLS identities and `CONNECT` status are kept here, separate from the\ninner connection's phases and TLS (`tls` above is the inner TLS with\nthe destination).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TunnelObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1001,6 +1042,35 @@
         "server_name": {
           "description": "SNI/verification name used.",
           "type": "string"
+        },
+        "sni": {
+          "description": "The SNI actually sent in the ClientHello. `None` when the server name\nis an IP address (TLS carries no IP SNI) or the handshake did not start.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server_name_overridden": {
+          "description": "The SNI / verification name came from the TLS profile's\n`server_name_override`, not from the URL host.",
+          "type": "boolean"
+        },
+        "identity_check": {
+          "description": "The identity check the verifier applied (host name or SPIFFE).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PeerIdentityCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peer_spiffe_id": {
+          "description": "The peer leaf's SPIFFE ID (its single `spiffe://` URI SAN), recorded\nfor any TLS server that presents one, verified or not.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "version": {
           "type": [
@@ -1073,6 +1143,66 @@
         "alpn_offered",
         "verification",
         "peer_certificates"
+      ]
+    },
+    "PeerIdentityCheck": {
+      "description": "Which peer identity check the TLS verifier applied (or would have applied,\nwhen verification is bypassed).",
+      "oneOf": [
+        {
+          "description": "RFC 6125 host-name (or IP address) verification against `name`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string",
+              "const": "host_name"
+            }
+          },
+          "required": [
+            "method",
+            "name"
+          ]
+        },
+        {
+          "description": "SPIFFE X.509-SVID: the leaf's single URI SAN must equal `expected`\n(which implies its trust domain). DNS names are not consulted.",
+          "type": "object",
+          "properties": {
+            "expected": {
+              "type": "string"
+            },
+            "trust_domain": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string",
+              "const": "spiffe_id"
+            }
+          },
+          "required": [
+            "method",
+            "expected",
+            "trust_domain"
+          ]
+        },
+        {
+          "description": "SPIFFE X.509-SVID: the leaf's single URI SAN must be a SPIFFE ID in\n`trust_domain`. DNS names are not consulted.",
+          "type": "object",
+          "properties": {
+            "trust_domain": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string",
+              "const": "spiffe_trust_domain"
+            }
+          },
+          "required": [
+            "method",
+            "trust_domain"
+          ]
+        }
       ]
     },
     "TlsVerification": {
@@ -1194,6 +1324,134 @@
         "key_algorithm"
       ]
     },
+    "TunnelObservation": {
+      "description": "Evidence for the outer tunnel leg (Anvil ↔ tunnel endpoint).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TunnelKind"
+        },
+        "endpoint": {
+          "description": "The tunnel endpoint (`host:port`) and the proxy profile label.",
+          "type": "string"
+        },
+        "authority": {
+          "description": "`:authority` sent in the `CONNECT` (the inner destination).",
+          "type": "string"
+        },
+        "resolved_addresses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resolution_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connect_attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConnectAttempt"
+          }
+        },
+        "local_address": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remote_address": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phases": {
+          "description": "Outer phases (DNS, TCP connect, mTLS handshake, HTTP/2 preface,\n`CONNECT`), on the same clock as the attempt's phases.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PhaseTiming"
+          }
+        },
+        "tls": {
+          "description": "Mutual TLS with the endpoint: the client SVID presented and the\nendpoint's verified server identity.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TlsObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connect_headers": {
+          "description": "Non-pseudo headers sent on the `CONNECT` (markers, baggage, extras).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeaderEntry"
+          }
+        },
+        "connect_status": {
+          "description": "Status the endpoint answered the `CONNECT` with, when one arrived.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "response_headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeaderEntry"
+          }
+        },
+        "refusal_body": {
+          "description": "Bounded UTF-8 (lossy) preview of a refusal body. Untrusted content.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refusal_body_truncated": {
+          "type": "boolean"
+        },
+        "failure": {
+          "description": "The typed failure on the tunnel leg with its precise phase and kind\n(e.g. `tls_spiffe_id_mismatch` at `tls_handshake`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransportFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "endpoint",
+        "authority",
+        "resolved_addresses",
+        "connect_attempts",
+        "phases",
+        "connect_headers",
+        "response_headers"
+      ]
+    },
+    "TunnelKind": {
+      "oneOf": [
+        {
+          "description": "HTTP/2 `CONNECT` over mutual TLS (mesh HBONE).",
+          "type": "string",
+          "const": "hbone"
+        }
+      ]
+    },
     "PhaseTiming": {
       "description": "A measured phase. Offsets are microseconds from attempt start on a\nmonotonic clock. Concurrent phases may overlap; do not sum them blindly.",
       "type": "object",
@@ -1306,6 +1564,90 @@
         }
       ]
     },
+    "TransportFailure": {
+      "description": "A typed transport failure with library detail for display. `message` is\nsanitized display text only; diagnostic rules must use the typed fields.",
+      "type": "object",
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "kind": {
+          "$ref": "#/$defs/FailureKind"
+        },
+        "message": {
+          "type": "string"
+        },
+        "io_error_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "os_error_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "tls_alert": {
+          "description": "TLS alert description (e.g. `certificate_required`) when one was received.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "h2_error_code": {
+          "description": "HTTP/2 error code (RST_STREAM / GOAWAY) when applicable.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "quic_error_code": {
+          "description": "QUIC transport/application error code when applicable.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "description": "HTTP status of a rejected proxy CONNECT / WebSocket handshake.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "field": {
+          "description": "Field path for local validation failures (e.g. `headers[2].value`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deadline_ms": {
+          "description": "The configured deadline that elapsed, for timeouts.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "phase",
+        "kind",
+        "message"
+      ]
+    },
     "DispatchState": {
       "description": "Whether request bytes of an attempt may have reached the peer.\n\nDerived from typed transport state (bytes written to the socket, response\nreceived, HTTP/2 `REFUSED_STREAM`, ...), never from error message text.",
       "oneOf": [
@@ -1394,90 +1736,6 @@
         "request_headers_logical",
         "request_headers_estimated",
         "request_body"
-      ]
-    },
-    "TransportFailure": {
-      "description": "A typed transport failure with library detail for display. `message` is\nsanitized display text only; diagnostic rules must use the typed fields.",
-      "type": "object",
-      "properties": {
-        "phase": {
-          "$ref": "#/$defs/Phase"
-        },
-        "kind": {
-          "$ref": "#/$defs/FailureKind"
-        },
-        "message": {
-          "type": "string"
-        },
-        "io_error_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "os_error_code": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int32"
-        },
-        "tls_alert": {
-          "description": "TLS alert description (e.g. `certificate_required`) when one was received.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "h2_error_code": {
-          "description": "HTTP/2 error code (RST_STREAM / GOAWAY) when applicable.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "quic_error_code": {
-          "description": "QUIC transport/application error code when applicable.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        },
-        "status": {
-          "description": "HTTP status of a rejected proxy CONNECT / WebSocket handshake.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "field": {
-          "description": "Field path for local validation failures (e.g. `headers[2].value`).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "deadline_ms": {
-          "description": "The configured deadline that elapsed, for timeouts.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "phase",
-        "kind",
-        "message"
       ]
     },
     "ResponseRecord": {

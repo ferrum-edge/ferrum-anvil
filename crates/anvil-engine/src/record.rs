@@ -49,6 +49,17 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
         if let Some(f) = &mut a.failure {
             f.message = r.text(&f.message);
         }
+        if let Some(t) = a.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
+            if let Some(f) = &mut t.failure {
+                f.message = r.text(&f.message);
+            }
+            if let Some(b) = &mut t.refusal_body {
+                *b = r.text(b);
+            }
+            for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
+                h.value = r.text(&h.value);
+            }
+        }
     }
 }
 

@@ -9,11 +9,21 @@
 //!   CertificateRequest and which identity (if any) was presented.
 //! * `verify = false` keeps encryption, still checks handshake signatures, and
 //!   records what strict verification would have concluded.
+//! * SPIFFE server identity (opt-in per profile): the chain is verified to
+//!   the profile's trust anchors (the trust bundle) and the leaf's single
+//!   `spiffe://` URI SAN is matched exactly or by trust domain, per the
+//!   X.509-SVID specification. Host-name verification does not apply then.
+//!   The peer's SPIFFE ID is recorded for every server that presents one.
+//! * The SNI actually sent, whether it came from the profile's override, and
+//!   the identity check applied are part of the evidence.
 
 use crate::certs::summarize;
 use crate::errors::classify_rustls;
-use anvil_domain::execution::{CertificateSummary, FailureKind, Phase, TlsObservation, TlsVerification, TransportFailure};
-use anvil_domain::tls::TlsMinVersion;
+use crate::spiffe;
+use anvil_domain::execution::{
+    CertificateSummary, FailureKind, PeerIdentityCheck, Phase, TlsObservation, TlsVerification, TransportFailure,
+};
+use anvil_domain::tls::{ServerSpiffeIdentity, TlsMinVersion};
 use parking_lot::Mutex;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{ClientSessionMemoryCache, Resumption, WebPkiServerVerifier};
@@ -50,6 +60,8 @@ pub struct TlsSettings {
     pub client_identity: Option<ClientIdentityMaterial>,
     pub min_version: TlsMinVersion,
     pub server_name_override: Option<String>,
+    /// SPIFFE server identity; replaces host-name verification when set.
+    pub server_spiffe: Option<ServerSpiffeIdentity>,
 }
 
 impl TlsSettings {
@@ -82,17 +94,37 @@ pub fn system_root_status() -> (usize, Vec<String>) {
     (r.certs.len(), r.load_errors.clone())
 }
 
+/// A validated SPIFFE server-identity expectation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpiffeExpectation {
+    /// Exact SPIFFE ID, when configured.
+    pub expected_id: Option<String>,
+    pub trust_domain: String,
+}
+
+impl SpiffeExpectation {
+    pub fn check(&self) -> PeerIdentityCheck {
+        match &self.expected_id {
+            Some(id) => PeerIdentityCheck::SpiffeId { expected: id.clone(), trust_domain: self.trust_domain.clone() },
+            None => PeerIdentityCheck::SpiffeTrustDomain { trust_domain: self.trust_domain.clone() },
+        }
+    }
+}
+
 /// Validated, reusable TLS material for one profile.
 pub struct PreparedTls {
     /// Stable fingerprint of everything that affects the TLS session
     /// (part of the connection-pool isolation key).
     pub fingerprint: String,
     pub(crate) verifier: Option<Arc<WebPkiServerVerifier>>,
+    roots: Option<Arc<RootCertStore>>,
     client_key: Option<Arc<CertifiedKey>>,
     pub client_summary: Option<CertificateSummary>,
     pub verify: bool,
     min_version: TlsMinVersion,
     pub server_name_override: Option<String>,
+    /// SPIFFE server identity check (replaces host-name verification).
+    pub spiffe: Option<SpiffeExpectation>,
     sessions: Arc<ClientSessionMemoryCache>,
 }
 
@@ -127,12 +159,63 @@ fn parse_key(pem: &str) -> Result<PrivateKeyDer<'static>, TransportFailure> {
     }
 }
 
+/// Validate the SPIFFE settings of a profile (nothing is sent on failure).
+fn spiffe_expectation(s: &ServerSpiffeIdentity) -> Result<Option<SpiffeExpectation>, TransportFailure> {
+    let id = s.expected_server_spiffe_id.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let td = s.trust_domain.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let parsed_id = match id {
+        Some(v) => {
+            Some(spiffe::parse_id(v).map_err(|e| local(FailureKind::TlsProfileInvalid, e, "tls.server_spiffe.expected_server_spiffe_id"))?)
+        }
+        None => None,
+    };
+    let parsed_td = match td {
+        Some(v) => {
+            Some(spiffe::parse_trust_domain(v).map_err(|e| local(FailureKind::TlsProfileInvalid, e, "tls.server_spiffe.trust_domain"))?)
+        }
+        None => None,
+    };
+    match (parsed_id, parsed_td) {
+        (None, None) => Ok(None),
+        (Some(id), None) => Ok(Some(SpiffeExpectation { expected_id: Some(id.as_uri()), trust_domain: id.trust_domain })),
+        (None, Some(td)) => Ok(Some(SpiffeExpectation { expected_id: None, trust_domain: td })),
+        (Some(id), Some(td)) => {
+            if id.trust_domain != td {
+                return Err(local(
+                    FailureKind::TlsProfileInvalid,
+                    format!("the expected server SPIFFE ID {} is not in the configured trust domain '{td}'", id.as_uri()),
+                    "tls.server_spiffe",
+                ));
+            }
+            Ok(Some(SpiffeExpectation { expected_id: Some(id.as_uri()), trust_domain: td }))
+        }
+    }
+}
+
 /// Validate a TLS profile: parse roots, load and key-match the client identity.
 /// All failures are local (no network activity happened).
 pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> {
     let mut hasher = Sha256::new();
     hasher.update([settings.verify as u8, settings.use_system_roots as u8, settings.min_version as u8]);
     hasher.update(settings.server_name_override.as_deref().unwrap_or("").as_bytes());
+    let spiffe = match &settings.server_spiffe {
+        Some(s) => spiffe_expectation(s)?,
+        None => None,
+    };
+    if let Some(sp) = &spiffe {
+        hasher.update(b"spiffe");
+        hasher.update(sp.trust_domain.as_bytes());
+        hasher.update(sp.expected_id.as_deref().unwrap_or("").as_bytes());
+    }
+    if let Some(o) = &settings.server_name_override
+        && ServerName::try_from(o.clone()).is_err()
+    {
+        return Err(local(
+            FailureKind::TlsProfileInvalid,
+            format!("the SNI / verification name override '{o}' is not a valid DNS name or IP address"),
+            "tls.server_name_override",
+        ));
+    }
 
     let mut roots = RootCertStore::empty();
     if settings.use_system_roots {
@@ -149,21 +232,25 @@ pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> 
             })?;
         }
     }
-    let verifier = if roots.is_empty() {
+    let (verifier, roots) = if roots.is_empty() {
         if settings.verify {
             return Err(local(
                 FailureKind::TlsProfileInvalid,
-                "certificate verification is enabled but the profile has no trust anchors (system roots disabled and no CA configured)",
+                if spiffe.is_some() {
+                    "SPIFFE verification is enabled but the profile has no trust bundle (add the trust domain's CA certificates)"
+                } else {
+                    "certificate verification is enabled but the profile has no trust anchors (system roots disabled and no CA configured)"
+                },
                 "tls.extra_roots",
             ));
         }
-        None
+        (None, None)
     } else {
-        Some(
-            WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider())
-                .build()
-                .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("trust store could not be built: {e}"), "tls.extra_roots"))?,
-        )
+        let roots = Arc::new(roots);
+        let v = WebPkiServerVerifier::builder_with_provider(roots.clone(), provider())
+            .build()
+            .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("trust store could not be built: {e}"), "tls.extra_roots"))?;
+        (Some(v), Some(roots))
     };
 
     let (client_key, client_summary) = match &settings.client_identity {
@@ -204,28 +291,170 @@ pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> 
     Ok(PreparedTls {
         fingerprint,
         verifier,
+        roots,
         client_key,
         client_summary,
         verify: settings.verify,
         min_version: settings.min_version,
         server_name_override: settings.server_name_override.clone(),
+        spiffe,
         sessions: Arc::new(ClientSessionMemoryCache::new(64)),
     })
+}
+
+/// The outcome of checking a peer certificate against a prepared profile,
+/// independent of whether verification is enforced.
+pub(crate) struct PeerVerdict {
+    /// `Err` aborts the handshake (when verification is enforced).
+    pub result: Result<(), rustls::Error>,
+    /// Typed problem and plain-language detail when `result` is `Err`.
+    pub problem: Option<(FailureKind, String)>,
+    /// The leaf's SPIFFE ID, when it carries exactly one valid one.
+    pub peer_spiffe_id: Option<String>,
+}
+
+fn rustls_problem(e: &rustls::Error) -> (FailureKind, String) {
+    let (kind, _) = classify_rustls(e, false);
+    (kind, crate::errors::describe_rustls(e).unwrap_or_else(|| e.to_string()))
+}
+
+/// What a peer certificate is checked against (borrowed from a profile).
+pub(crate) struct PeerCheck<'a> {
+    verifier: Option<&'a Arc<WebPkiServerVerifier>>,
+    roots: Option<&'a Arc<RootCertStore>>,
+    spiffe: Option<&'a SpiffeExpectation>,
+}
+
+impl PreparedTls {
+    pub(crate) fn peer_check(&self) -> PeerCheck<'_> {
+        PeerCheck { verifier: self.verifier.as_ref(), roots: self.roots.as_ref(), spiffe: self.spiffe.as_ref() }
+    }
+}
+
+/// Verify a peer leaf (and intermediates) against the profile: host-name
+/// verification, or SPIFFE X.509-SVID verification when configured.
+pub(crate) fn verify_peer(
+    check: &PeerCheck<'_>,
+    server_name: &ServerName<'_>,
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    now: UnixTime,
+) -> PeerVerdict {
+    let peer_spiffe_id = spiffe::peer_spiffe_id(end_entity.as_ref());
+    let Some(exp) = check.spiffe else {
+        let result = match check.verifier {
+            Some(v) => v.verify_server_cert(end_entity, intermediates, server_name, &[], now).map(|_| ()),
+            None => Err(rustls::Error::General("no trust anchors".into())),
+        };
+        let problem = result.as_ref().err().map(rustls_problem);
+        return PeerVerdict { result, problem, peer_spiffe_id };
+    };
+    let fail = |kind: FailureKind, detail: String| PeerVerdict {
+        result: Err(rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)),
+        problem: Some((kind, detail)),
+        peer_spiffe_id: peer_spiffe_id.clone(),
+    };
+    let Some(roots) = check.roots else {
+        let e = rustls::Error::General("no trust anchors".into());
+        return PeerVerdict { problem: Some(rustls_problem(&e)), result: Err(e), peer_spiffe_id };
+    };
+    // 1. Chain to the trust bundle (serverAuth EKU when present), no name check.
+    let chain = rustls::server::ParsedCertificate::try_from(end_entity).and_then(|parsed| {
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &parsed,
+            roots,
+            intermediates,
+            now,
+            provider().signature_verification_algorithms.all,
+        )
+    });
+    if let Err(e) = chain {
+        let (kind, detail) = rustls_problem(&e);
+        // An unanchored SVID that names another trust domain: the bundle for
+        // that domain is simply not configured.
+        if kind == FailureKind::TlsUntrustedIssuer
+            && let Some(id) = peer_spiffe_id.as_deref().and_then(|s| spiffe::parse_id(s).ok())
+            && id.trust_domain != exp.trust_domain
+        {
+            return PeerVerdict {
+                result: Err(e),
+                problem: Some((
+                    FailureKind::TlsUntrustedTrustDomain,
+                    format!(
+                        "the server presented an SVID for trust domain '{}' ({}), which no configured trust bundle anchors; this profile trusts trust domain '{}'",
+                        id.trust_domain,
+                        id.as_uri(),
+                        exp.trust_domain
+                    ),
+                )),
+                peer_spiffe_id,
+            };
+        }
+        return PeerVerdict { result: Err(e), problem: Some((kind, detail)), peer_spiffe_id };
+    }
+    // 2. X.509-SVID shape: exactly one URI SAN that is a SPIFFE ID.
+    let id = match spiffe::svid_id(end_entity.as_ref()) {
+        Ok(id) => id,
+        Err(p) => return fail(FailureKind::TlsInvalidSvid, p.describe()),
+    };
+    // 3. Identity: trust domain, then (when configured) the exact ID.
+    if id.trust_domain != exp.trust_domain {
+        return fail(
+            FailureKind::TlsUntrustedTrustDomain,
+            format!(
+                "the server's SPIFFE ID {} is in trust domain '{}', not the trusted '{}'",
+                id.as_uri(),
+                id.trust_domain,
+                exp.trust_domain
+            ),
+        );
+    }
+    if let Some(expected) = &exp.expected_id
+        && &id.as_uri() != expected
+    {
+        return fail(FailureKind::TlsSpiffeIdMismatch, format!("the server's SPIFFE ID is {}, not the expected {expected}", id.as_uri()));
+    }
+    PeerVerdict { result: Ok(()), problem: None, peer_spiffe_id }
 }
 
 #[derive(Default)]
 struct Slot {
     peer_chain: Vec<CertificateSummary>,
     verification: Option<TlsVerification>,
+    peer_spiffe_id: Option<String>,
     client_cert_requested: bool,
     client_cert_presented: bool,
 }
 
 #[derive(Debug)]
 struct ObservingVerifier {
-    inner: Option<Arc<WebPkiServerVerifier>>,
-    verify: bool,
+    prepared: Arc<PreparedView>,
     slot: Arc<Mutex<SlotHandle>>,
+}
+
+/// The parts of [`PreparedTls`] the verifier needs (cheap to clone into a
+/// rustls config, which requires `'static` + `Debug`).
+struct PreparedView {
+    verifier: Option<Arc<WebPkiServerVerifier>>,
+    roots: Option<Arc<RootCertStore>>,
+    verify: bool,
+    spiffe: Option<SpiffeExpectation>,
+}
+
+impl std::fmt::Debug for PreparedView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedView").field("verify", &self.verify).field("spiffe", &self.spiffe).finish()
+    }
+}
+
+impl PreparedView {
+    fn of(p: &PreparedTls) -> Arc<Self> {
+        Arc::new(PreparedView { verifier: p.verifier.clone(), roots: p.roots.clone(), verify: p.verify, spiffe: p.spiffe.clone() })
+    }
+
+    fn peer_check(&self) -> PeerCheck<'_> {
+        PeerCheck { verifier: self.verifier.as_ref(), roots: self.roots.as_ref(), spiffe: self.spiffe.as_ref() }
+    }
 }
 
 #[derive(Default)]
@@ -236,41 +465,40 @@ impl std::fmt::Debug for SlotHandle {
     }
 }
 
+/// Record a verdict as evidence and decide whether the handshake continues.
+pub(crate) fn verification_of(verify: bool, v: &PeerVerdict) -> TlsVerification {
+    if verify {
+        match &v.problem {
+            None => TlsVerification::Verified,
+            Some((kind, detail)) => TlsVerification::Failed { problem: *kind, detail: detail.clone() },
+        }
+    } else {
+        TlsVerification::Bypassed { would_have_failed: v.problem.as_ref().map(|(k, _)| *k) }
+    }
+}
+
 impl ServerCertVerifier for ObservingVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
         server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
+        _ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         let mut chain = vec![summarize(end_entity)];
         chain.extend(intermediates.iter().map(summarize));
-        let result = match &self.inner {
-            Some(v) => v.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now),
-            None => Err(rustls::Error::General("no trust anchors".into())),
-        };
+        let mut verdict = verify_peer(&self.prepared.peer_check(), server_name, end_entity, intermediates, now);
+        // Without any trust anchors there is nothing strict verification could
+        // have concluded (bypass only).
+        if self.prepared.verifier.is_none() && !self.prepared.verify {
+            verdict.problem = None;
+        }
         let mut slot = self.slot.lock();
         slot.0.peer_chain = chain;
-        if self.verify {
-            match &result {
-                Ok(_) => slot.0.verification = Some(TlsVerification::Verified),
-                Err(e) => {
-                    let (kind, _) = classify_rustls(e, false);
-                    let detail = crate::errors::describe_rustls(e).unwrap_or_else(|| e.to_string());
-                    slot.0.verification = Some(TlsVerification::Failed { problem: kind, detail });
-                }
-            }
-            result
-        } else {
-            let would = match (&self.inner, &result) {
-                (Some(_), Err(e)) => Some(classify_rustls(e, false).0),
-                _ => None,
-            };
-            slot.0.verification = Some(TlsVerification::Bypassed { would_have_failed: would });
-            Ok(ServerCertVerified::assertion())
-        }
+        slot.0.peer_spiffe_id = verdict.peer_spiffe_id.clone();
+        slot.0.verification = Some(verification_of(self.prepared.verify, &verdict));
+        if self.prepared.verify { verdict.result.map(|_| ServerCertVerified::assertion()) } else { Ok(ServerCertVerified::assertion()) }
     }
 
     fn verify_tls12_signature(
@@ -321,6 +549,14 @@ pub fn server_name_for(host: &str, prepared: &PreparedTls) -> Result<ServerName<
         .map_err(|_| local(FailureKind::InvalidUrl, format!("'{name}' is not a valid TLS server name"), "url"))
 }
 
+/// The identity check a profile applies for `server_name`.
+pub fn identity_check_for(prepared: &PreparedTls, server_name: &str) -> PeerIdentityCheck {
+    match &prepared.spiffe {
+        Some(s) => s.check(),
+        None => PeerIdentityCheck::HostName { name: server_name.to_string() },
+    }
+}
+
 /// Perform a TLS handshake over `io`, returning the stream and evidence. On
 /// failure the evidence gathered so far is returned with the typed failure.
 pub async fn connect<S>(
@@ -344,12 +580,13 @@ where
     };
     let connector = TlsConnector::from(Arc::new(config));
     let sni = server_name_string(&server_name);
+    let sent_sni = matches!(server_name, ServerName::DnsName(_));
     let fut = connector.connect(server_name, io);
     let res = match deadline {
         Some(d) => match tokio::time::timeout(d, fut).await {
             Ok(r) => r,
             Err(_) => {
-                let obs = observation_from_slot(&slot, &sni, alpn, prepared, false);
+                let obs = observation_from_slot(&slot, &sni, sent_sni, alpn, prepared, false);
                 let f = TransportFailure::new(
                     Phase::TlsHandshake,
                     FailureKind::TlsHandshakeTimeout,
@@ -363,7 +600,7 @@ where
     };
     match res {
         Ok(stream) => {
-            let mut obs = observation_from_slot(&slot, &sni, alpn, prepared, true);
+            let mut obs = observation_from_slot(&slot, &sni, sent_sni, alpn, prepared, true);
             let (_, conn) = stream.get_ref();
             obs.version = conn.protocol_version().map(|v| format!("{v:?}"));
             obs.cipher_suite = conn.negotiated_cipher_suite().map(|c| format!("{:?}", c.suite()));
@@ -381,11 +618,12 @@ where
             Ok((stream, obs))
         }
         Err(e) => {
-            let obs = observation_from_slot(&slot, &sni, alpn, prepared, false);
+            let obs = observation_from_slot(&slot, &sni, sent_sni, alpn, prepared, false);
             let mut f = crate::errors::classify_tls_handshake(&e);
             // Prefer the verifier's own typed conclusion when it failed.
-            if let TlsVerification::Failed { problem, .. } = &obs.verification {
+            if let TlsVerification::Failed { problem, detail } = &obs.verification {
                 f.kind = *problem;
+                f.message = detail.clone();
             }
             Err((f, obs))
         }
@@ -405,7 +643,7 @@ fn client_config(prepared: &PreparedTls, alpn: &[&str], slot: Arc<Mutex<SlotHand
         TlsMinVersion::Tls12 => &[&rustls::version::TLS13, &rustls::version::TLS12],
         TlsMinVersion::Tls13 => &[&rustls::version::TLS13],
     };
-    let verifier = Arc::new(ObservingVerifier { inner: prepared.verifier.clone(), verify: prepared.verify, slot: slot.clone() });
+    let verifier = Arc::new(ObservingVerifier { prepared: PreparedView::of(prepared), slot: slot.clone() });
     let mut cfg = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(versions)
         .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("TLS versions unsupported: {e}"), "tls.min_version"))?
@@ -420,6 +658,10 @@ fn client_config(prepared: &PreparedTls, alpn: &[&str], slot: Arc<Mutex<SlotHand
 fn empty_observation(host: &str, alpn: &[&str]) -> TlsObservation {
     TlsObservation {
         server_name: host.to_string(),
+        sni: None,
+        server_name_overridden: false,
+        identity_check: None,
+        peer_spiffe_id: None,
         version: None,
         cipher_suite: None,
         alpn_offered: alpn.iter().map(|s| s.to_string()).collect(),
@@ -436,12 +678,17 @@ fn empty_observation(host: &str, alpn: &[&str]) -> TlsObservation {
 fn observation_from_slot(
     slot: &Arc<Mutex<SlotHandle>>,
     sni: &str,
+    sent_sni: bool,
     alpn: &[&str],
     prepared: &PreparedTls,
     completed: bool,
 ) -> TlsObservation {
     let s = slot.lock();
     let mut obs = empty_observation(sni, alpn);
+    obs.sni = if sent_sni { Some(sni.to_string()) } else { None };
+    obs.server_name_overridden = prepared.server_name_override.is_some();
+    obs.identity_check = Some(identity_check_for(prepared, sni));
+    obs.peer_spiffe_id = s.0.peer_spiffe_id.clone();
     obs.peer_certificates = s.0.peer_chain.clone();
     obs.verification = s.0.verification.clone().unwrap_or(TlsVerification::NotReached);
     // "Not requested" is only asserted for a completed full handshake; a
@@ -463,6 +710,7 @@ fn observation_from_slot(
 pub struct ObservationHandle {
     slot: Arc<Mutex<SlotHandle>>,
     sni: String,
+    sent_sni: bool,
     alpn: Vec<String>,
 }
 
@@ -481,7 +729,7 @@ pub fn client_config_observed(
     } else {
         &[&rustls::version::TLS13, &rustls::version::TLS12]
     };
-    let verifier = Arc::new(ObservingVerifier { inner: prepared.verifier.clone(), verify: prepared.verify, slot: slot.clone() });
+    let verifier = Arc::new(ObservingVerifier { prepared: PreparedView::of(prepared), slot: slot.clone() });
     let mut cfg = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(versions)
         .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("TLS versions unsupported: {e}"), "tls.min_version"))?
@@ -491,10 +739,11 @@ pub fn client_config_observed(
     cfg.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
     cfg.resumption = Resumption::store(prepared.sessions.clone());
     let sni = server_name_string(&server_name);
-    Ok((cfg, server_name, ObservationHandle { slot, sni, alpn: alpn.iter().map(|s| s.to_string()).collect() }))
+    let sent_sni = matches!(server_name, ServerName::DnsName(_));
+    Ok((cfg, server_name, ObservationHandle { slot, sni, sent_sni, alpn: alpn.iter().map(|s| s.to_string()).collect() }))
 }
 
 pub fn observe(h: &ObservationHandle, prepared: &PreparedTls, completed: bool) -> TlsObservation {
     let alpn: Vec<&str> = h.alpn.iter().map(|s| s.as_str()).collect();
-    observation_from_slot(&h.slot, &h.sni, &alpn, prepared, completed)
+    observation_from_slot(&h.slot, &h.sni, h.sent_sni, &alpn, prepared, completed)
 }

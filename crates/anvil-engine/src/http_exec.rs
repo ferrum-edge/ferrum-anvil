@@ -160,16 +160,33 @@ pub(crate) fn tls_for(
         }
         return Ok((engine.prepared_tls("default-strict", &TlsSettings::strict_system())?, None, vec![]));
     };
+    let prepared = prepared_from_profile(engine, ctx, p, &target.host, target.port, inferred)?;
+    Ok((prepared, Some(p.name.clone()), p.bindings.clone()))
+}
+
+/// Prepared TLS material for one profile, presenting its client identity only
+/// to `host:port` when the profile's bindings allow it.
+pub(crate) fn prepared_from_profile(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    p: &anvil_domain::tls::TlsProfile,
+    host: &str,
+    port: u16,
+    inferred: &mut Vec<String>,
+) -> Result<Arc<PreparedTls>, TransportFailure> {
     let mut s = TlsSettings {
         verify: p.verify,
         use_system_roots: p.use_system_roots,
         extra_roots_pem: p.extra_roots_pem.clone(),
         client_identity: None,
         min_version: p.min_version,
-        server_name_override: p.server_name_override.clone(),
+        server_name_override: p.server_name_override.clone().filter(|n| !n.trim().is_empty()),
+        server_spiffe: p.server_spiffe.clone(),
     };
+    let bind =
+        Target { scheme: "https".into(), host: host.to_string(), port, authority: String::new(), path: "/".into(), query: String::new() };
     if let Some(id) = &p.client_identity {
-        if binding_matches(&p.bindings, target) {
+        if binding_matches(&p.bindings, &bind) {
             s.client_identity = Some(match id {
                 anvil_domain::tls::ClientIdentity::Pem { cert_chain_pem, private_key_pem } => {
                     let (key, _) = resolve_sensitive(private_key_pem, ctx.secrets.as_ref()).map_err(|e| {
@@ -187,27 +204,63 @@ pub(crate) fn tls_for(
                 }
             });
         } else {
-            inferred.push(format!(
-                "client certificate from TLS profile '{}' not presented: {} is not in its host bindings",
-                p.name, target.host
-            ));
+            inferred.push(format!("client certificate from TLS profile '{}' not presented: {} is not in its host bindings", p.name, host));
         }
     }
     let key = format!("{}|{}|{}", p.id, p.updated_at.timestamp_millis(), s.client_identity.is_some());
-    Ok((engine.prepared_tls(&key, &s)?, Some(p.name.clone()), p.bindings.clone()))
+    engine.prepared_tls(&key, &s)
+}
+
+fn proxy_invalid(msg: impl Into<String>, field: &str) -> TransportFailure {
+    TransportFailure::new(Phase::Prepare, FailureKind::ProxyConfigInvalid, msg).with_field(field)
+}
+
+/// Headers that are connection-specific in HTTP/2 and never sent on a CONNECT.
+const CONNECTION_SPECIFIC: &[&str] = &["host", "connection", "upgrade", "transfer-encoding", "keep-alive", "proxy-connection", "te"];
+
+/// Validated extra headers for an HBONE `CONNECT` (marker, baggage, extras).
+fn hbone_connect_headers(h: &anvil_domain::tls::HboneOptions) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, TransportFailure> {
+    use anvil_domain::tls::HboneMarker;
+    let mut out = Vec::new();
+    let mut push = |name: &str, value: &str, field: &str| -> Result<(), TransportFailure> {
+        let n = http::HeaderName::from_bytes(name.trim().as_bytes())
+            .map_err(|_| proxy_invalid(format!("'{name}' is not a valid HBONE CONNECT header name"), field))?;
+        if CONNECTION_SPECIFIC.contains(&n.as_str()) {
+            return Err(proxy_invalid(format!("'{name}' is a connection-specific header and cannot be sent on an HTTP/2 CONNECT"), field));
+        }
+        let v = http::HeaderValue::from_str(value)
+            .map_err(|_| proxy_invalid(format!("the value of HBONE CONNECT header '{name}' is not a valid header value"), field))?;
+        out.push((n, v));
+        Ok(())
+    };
+    match h.marker {
+        HboneMarker::None => {}
+        HboneMarker::FerrumMeshProtocol => push("x-ferrum-mesh-protocol", "hbone", "proxy.hbone.marker")?,
+        HboneMarker::IstioProtocol => push("x-istio-protocol", "hbone", "proxy.hbone.marker")?,
+    }
+    if let Some(b) = h.baggage.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        push("baggage", b, "proxy.hbone.baggage")?;
+    }
+    for (i, kv) in h.extra_headers.iter().enumerate().filter(|(_, kv)| kv.enabled) {
+        push(&kv.name, &kv.value, &format!("proxy.hbone.extra_headers[{i}]"))?;
+    }
+    Ok(out)
 }
 
 pub(crate) fn proxy_for(
+    engine: &Engine,
     ctx: &ExecutionContext,
     settings: &EffectiveSettings,
     target: &Target,
     inferred: &mut Vec<String>,
 ) -> Result<Option<ProxyPlan>, TransportFailure> {
+    use anvil_domain::tls::ProxyKind;
     let Some(pid) = settings.proxy_profile_id else { return Ok(None) };
-    let p = ctx.proxy_profiles.iter().find(|p| p.id == pid).ok_or_else(|| {
-        TransportFailure::new(Phase::Prepare, FailureKind::ProxyConfigInvalid, "the selected proxy profile no longer exists")
-            .with_field("settings.proxy")
-    })?;
+    let p = ctx
+        .proxy_profiles
+        .iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| proxy_invalid("the selected proxy profile no longer exists", "settings.proxy"))?;
     if anvil_transport::net::no_proxy_matches(&p.no_proxy, &target.host, target.port) {
         inferred.push(format!("proxy '{}' bypassed for {} (NO_PROXY)", p.name, target.host));
         return Ok(None);
@@ -215,39 +268,54 @@ pub(crate) fn proxy_for(
     let (host, port) = match p.address.rsplit_once(':') {
         Some((h, pt)) => match pt.parse::<u16>() {
             Ok(n) => (h.trim_start_matches('[').trim_end_matches(']').to_string(), n),
-            Err(_) => {
-                return Err(TransportFailure::new(
-                    Phase::Prepare,
-                    FailureKind::ProxyConfigInvalid,
-                    format!("proxy address '{}' has an invalid port", p.address),
-                )
-                .with_field("proxy.address"));
-            }
+            Err(_) => return Err(proxy_invalid(format!("proxy address '{}' has an invalid port", p.address), "proxy.address")),
         },
-        None => {
-            return Err(TransportFailure::new(
-                Phase::Prepare,
-                FailureKind::ProxyConfigInvalid,
-                format!("proxy address '{}' must be host:port", p.address),
-            )
-            .with_field("proxy.address"));
-        }
+        None => return Err(proxy_invalid(format!("proxy address '{}' must be host:port", p.address), "proxy.address")),
     };
     let credentials = match (&p.username, &p.password) {
         (Some(u), Some(pw)) => {
-            let (v, _) = resolve_sensitive(pw, ctx.secrets.as_ref())
-                .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::ProxyConfigInvalid, e).with_field("proxy.password"))?;
+            let (v, _) = resolve_sensitive(pw, ctx.secrets.as_ref()).map_err(|e| proxy_invalid(e, "proxy.password"))?;
             Some((u.clone(), v))
         }
         (Some(u), None) => Some((u.clone(), Zeroizing::new(String::new()))),
         _ => None,
     };
-    let tls = if p.kind == anvil_domain::tls::ProxyKind::Https {
-        Some(Arc::new(anvil_transport::tls::prepare(&TlsSettings::strict_system())?))
-    } else {
-        None
+    if p.kind == ProxyKind::Hbone && credentials.is_some() {
+        return Err(proxy_invalid(
+            "an HBONE endpoint authenticates the client by its SVID (mutual TLS); remove the proxy username/password",
+            "proxy.username",
+        ));
+    }
+    let profile_tls = match p.tls_profile_id {
+        Some(id) => {
+            let tp = ctx.tls_profiles.iter().find(|t| t.id == id).ok_or_else(|| {
+                proxy_invalid(format!("the TLS profile selected for proxy '{}' no longer exists", p.name), "proxy.tls_profile")
+            })?;
+            Some(prepared_from_profile(engine, ctx, tp, &host, port, inferred)?)
+        }
+        None => None,
     };
-    Ok(Some(ProxyPlan { kind: p.kind, host, port, credentials, tls, label: format!("{} ({})", p.name, p.address) }))
+    let tls = match p.kind {
+        ProxyKind::Https => Some(match profile_tls {
+            Some(t) => t,
+            None => Arc::new(anvil_transport::tls::prepare(&TlsSettings::strict_system())?),
+        }),
+        ProxyKind::Hbone => Some(profile_tls.ok_or_else(|| {
+            proxy_invalid(
+                format!(
+                    "HBONE proxy '{}' has no TLS profile: HBONE is HTTP/2 CONNECT over mutual TLS, so it needs the client SVID and the endpoint's trust bundle; nothing was sent",
+                    p.name
+                ),
+                "proxy.tls_profile",
+            )
+        })?),
+        _ => None,
+    };
+    let connect_headers = match (&p.kind, &p.hbone) {
+        (ProxyKind::Hbone, Some(h)) => hbone_connect_headers(h)?,
+        _ => vec![],
+    };
+    Ok(Some(ProxyPlan { kind: p.kind, host, port, credentials, tls, label: format!("{} ({})", p.name, p.address), connect_headers }))
 }
 
 pub(crate) fn trust_for(ctx: &ExecutionContext, target: &Target) -> (FerrumTrust, bool) {
@@ -281,7 +349,7 @@ pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver,
     } else {
         (None, None, vec![])
     };
-    let proxy = proxy_for(ctx, &settings, &http.target, &mut inferred)?;
+    let proxy = proxy_for(engine, ctx, &settings, &http.target, &mut inferred)?;
     let (trust, require_verified_tls) = trust_for(ctx, &http.target);
     Ok(Prepared {
         http,

@@ -35,7 +35,6 @@ use anvil_domain::outcome::ProtocolStatus;
 use anvil_domain::settings::Timeouts;
 use bytes::Bytes;
 use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion};
-use rustls::client::danger::ServerCertVerifier;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -176,27 +175,28 @@ fn drain(dtls: &mut Dtls, next_timeout: &mut Option<Instant>) -> Vec<Out> {
     outs
 }
 
-/// Validate the peer leaf with the profile's webpki verifier.
-fn verify_leaf(prepared: &PreparedTls, host: &str, der: &[u8]) -> TlsVerification {
+/// Validate the peer leaf with the profile's verifier (host name, or the
+/// SPIFFE X.509-SVID identity when the profile configures one). Returns the
+/// verification evidence and the leaf's SPIFFE ID, if it carries one.
+fn verify_leaf(prepared: &PreparedTls, host: &str, der: &[u8]) -> (TlsVerification, Option<String>) {
     let leaf = CertificateDer::from(der.to_vec());
-    let result: Result<(), rustls::Error> = match crate::tls::server_name_for(host, prepared) {
-        Err(_) => Err(rustls::Error::General(format!("'{host}' is not a valid verification name"))),
-        Ok(name) => match &prepared.verifier {
-            Some(v) => v.verify_server_cert(&leaf, &[], &name, &[], UnixTime::now()).map(|_| ()),
-            None => Err(rustls::Error::General("no trust anchors".into())),
-        },
-    };
-    if prepared.verify {
-        match result {
-            Ok(()) => TlsVerification::Verified,
-            Err(e) => TlsVerification::Failed { problem: classify_rustls(&e, false).0, detail: e.to_string() },
+    match crate::tls::server_name_for(host, prepared) {
+        Err(_) => {
+            let e = rustls::Error::General(format!("'{host}' is not a valid verification name"));
+            let v = if prepared.verify {
+                TlsVerification::Failed { problem: classify_rustls(&e, false).0, detail: e.to_string() }
+            } else {
+                TlsVerification::Bypassed { would_have_failed: None }
+            };
+            (v, crate::spiffe::peer_spiffe_id(der))
         }
-    } else {
-        let would = match (&prepared.verifier, &result) {
-            (Some(_), Err(e)) => Some(classify_rustls(e, false).0),
-            _ => None,
-        };
-        TlsVerification::Bypassed { would_have_failed: would }
+        Ok(name) => {
+            let mut verdict = crate::tls::verify_peer(&prepared.peer_check(), &name, &leaf, &[], UnixTime::now());
+            if prepared.verifier.is_none() && !prepared.verify {
+                verdict.problem = None;
+            }
+            (crate::tls::verification_of(prepared.verify, &verdict), verdict.peer_spiffe_id)
+        }
     }
 }
 
@@ -398,6 +398,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     let mut next_timeout: Option<Instant> = None;
     let mut verification = TlsVerification::NotReached;
     let mut peer_chain: Vec<CertificateSummary> = vec![];
+    let mut peer_spiffe_id: Option<String> = None;
     let mut cert_requested = false;
     let mut buf = vec![0u8; 65_535];
     enum HsEv {
@@ -411,7 +412,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
         for o in &outs {
             if let Out::PeerCert(der) = o {
                 peer_chain = vec![summarize(&CertificateDer::from(der.clone()))];
-                verification = verify_leaf(&plan.tls, &plan.host, der);
+                (verification, peer_spiffe_id) = verify_leaf(&plan.tls, &plan.host, der);
                 if let TlsVerification::Failed { problem, detail } = &verification {
                     break 'hs Err(TransportFailure::new(
                         Phase::DtlsHandshake,
@@ -496,8 +497,15 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                 .into(),
         );
     }
+    let server_name = plan.tls.server_name_override.clone().unwrap_or_else(|| plan.host.clone());
     cobs.tls = Some(TlsObservation {
-        server_name: plan.tls.server_name_override.clone().unwrap_or_else(|| plan.host.clone()),
+        // dimpl is not configured with a server name: no SNI is sent; the
+        // name is used for verification only.
+        sni: None,
+        server_name_overridden: plan.tls.server_name_override.is_some(),
+        identity_check: Some(crate::tls::identity_check_for(&plan.tls, &server_name)),
+        peer_spiffe_id,
+        server_name,
         version: version.clone(),
         cipher_suite: None,
         alpn_offered: vec![],

@@ -6,6 +6,7 @@ mod auth_session;
 mod dispatch;
 mod ferrum_rules;
 mod http_status;
+mod mesh;
 mod network;
 mod protocols;
 mod tls;
@@ -80,6 +81,18 @@ pub const RULES: &[RuleMeta] = &[
         fixtures: &["TLS-005", "TLS-006", "TLS-009", "TLS-010", "TLS-011", "TLS-012", "TLS-014"],
     },
     RuleMeta { id: "tls.bypass", version: 1, summary: "Scoped verification bypass warning", fixtures: &["TLS-015", "TLS-016"] },
+    RuleMeta {
+        id: "tls.server_name",
+        version: 1,
+        summary: "SNI / verification-name override notes (which SNI was sent, which identity was checked)",
+        fixtures: &["MESH-SNI"],
+    },
+    RuleMeta {
+        id: "mesh.hbone",
+        version: 1,
+        summary: "HBONE tunnel leg: endpoint reachability, mTLS split by leg, CONNECT refusal with its public body",
+        fixtures: &["MESH-HBONE-001", "MESH-HBONE-002", "MESH-HBONE-003", "MESH-HBONE-004", "MESH-HBONE-005"],
+    },
     RuleMeta {
         id: "transport.exchange",
         version: 1,
@@ -181,6 +194,7 @@ pub fn run_all(ctx: &Ctx<'_>, drafts: &mut Vec<Draft>, warnings: &mut Vec<Outcom
     network::local(ctx, drafts);
     network::dns_connect_proxy(ctx, drafts);
     tls::rules(ctx, drafts, warnings);
+    mesh::rules(ctx, drafts, warnings);
     transport::rules(ctx, drafts, warnings);
     dispatch::rules(ctx, drafts);
     http_status::rules(ctx, drafts);
