@@ -359,11 +359,22 @@ observed protocol set, connection mode (only a *caution* for units that open
 their own connection in either mode), dataset hash, request set. **Caution**
 (deltas shown): request revisions, load level, completeness/partial,
 generator saturation, report schema (LOAD-014). Comparable runs get
-success-latency deltas only when both have successful units, plus
+success-latency deltas only when both have successful units, the achieved
+rate, the **failed-unit ratio**, censored timeouts and dropped arrivals, plus
 per-protocol ratios (non-OK and missing-status ratios, messages per opened
 stream or session, time-to-first-message and round-trip percentiles, frames
 per exchange, the observed received/sent datagram ratio and the
 no-response ratio).
+
+The failed-unit ratio is failed units over finished units (completed,
+transport failures and timeouts; canceled and in-flight units are excluded).
+A unit counts once however many ways it failed: a completed unit with an
+application failure, a failed assertion or both is one failed unit, exactly
+as `SendObservation::is_failure` decides per unit. Because
+`application_failures` and `assertion_failures` may overlap, neither their
+maximum nor their sum is that count; the ratio uses the failure-latency
+distribution (one entry per failed non-timeout unit) plus the ledger's
+timeouts, kept within the bounds the two counters imply.
 
 ## Measured on this hardware (not product claims)
 

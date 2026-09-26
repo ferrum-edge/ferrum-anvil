@@ -177,8 +177,33 @@ struct Pooled {
     stats: Arc<ConnStats>,
     template: ConnectionObservation,
     served: Arc<std::sync::atomic::AtomicU32>,
+    /// When an HTTP/1.1 connection was last returned to the pool.
     idle_since: Instant,
     closed: Arc<AtomicBool>,
+    /// Requests in flight on the connection. Only an HTTP/2 connection stays
+    /// pooled while it carries requests (they share it), so its idleness is
+    /// read from here.
+    streams: Arc<Mutex<StreamUse>>,
+}
+
+struct StreamUse {
+    active: usize,
+    /// When the last request in flight ended (or the connection was opened).
+    idle_since: Instant,
+}
+
+/// One request's use of a shared HTTP/2 connection. While any is held the
+/// connection is busy: it is never expired or evicted as idle.
+struct StreamLease(Arc<Mutex<StreamUse>>);
+
+impl Drop for StreamLease {
+    fn drop(&mut self) {
+        let mut u = self.0.lock();
+        u.active = u.active.saturating_sub(1);
+        if u.active == 0 {
+            u.idle_since = Instant::now();
+        }
+    }
 }
 
 impl Pooled {
@@ -191,67 +216,295 @@ impl Pooled {
             Sender::H2(s) => !s.is_closed(),
         }
     }
-}
 
-/// Connection pool keyed by isolation + destination + security context.
-#[derive(Default)]
-pub struct Pool {
-    idle: Mutex<HashMap<String, Vec<Pooled>>>,
-    /// The connection that answered `425 Too Early` to early data, kept
-    /// (even with connection reuse off) for the engine's one retry on it
-    /// after the handshake (RFC 8470 §5.2).
-    too_early: Mutex<HashMap<String, Pooled>>,
+    /// Count one more request on a shared HTTP/2 connection. An HTTP/1.1
+    /// connection is out of the pool while it is used, so it needs none.
+    fn lease(&self) -> Option<StreamLease> {
+        if !matches!(self.sender, Sender::H2(_)) {
+            return None;
+        }
+        self.streams.lock().active += 1;
+        Some(StreamLease(self.streams.clone()))
+    }
+
+    /// Since when the connection has carried no request; `None` while an
+    /// HTTP/2 connection has requests in flight.
+    fn idle_start(&self) -> Option<Instant> {
+        match self.sender {
+            Sender::H1(_) => Some(self.idle_since),
+            Sender::H2(_) => {
+                let u = self.streams.lock();
+                (u.active == 0).then_some(u.idle_since)
+            }
+        }
+    }
+
+    /// Dead, or idle for at least `ttl`.
+    fn expired(&self, now: Instant, ttl: Duration) -> bool {
+        !self.is_usable() || self.idle_start().is_some_and(|t| now.saturating_duration_since(t) >= ttl)
+    }
 }
 
 const MAX_IDLE_PER_KEY: usize = 8;
+const MAX_IDLE_TOTAL: usize = 64;
 const IDLE_TTL: Duration = Duration::from_secs(90);
 
+/// Bounds of the idle connection pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolLimits {
+    /// Connections kept per pool key.
+    pub max_idle_per_key: usize,
+    /// Idle connections kept across all keys; the longest idle is closed
+    /// first when a new one would exceed it.
+    pub max_idle_total: usize,
+    /// How long a connection may stay idle before it is closed, whether or
+    /// not its key is used again.
+    pub idle_ttl: Duration,
+}
+
+impl Default for PoolLimits {
+    fn default() -> Self {
+        PoolLimits { max_idle_per_key: MAX_IDLE_PER_KEY, max_idle_total: MAX_IDLE_TOTAL, idle_ttl: IDLE_TTL }
+    }
+}
+
+/// What the pool holds right now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PoolStats {
+    /// Pool keys with at least one connection.
+    pub keys: usize,
+    /// Pooled connections, idle or carrying HTTP/2 requests.
+    pub connections: usize,
+    /// Pooled connections carrying no request.
+    pub idle: usize,
+}
+
+/// Connection pool keyed by isolation + destination + security context.
+///
+/// Idle connections are bounded per key and in total, and a background sweep
+/// closes those idle longer than the TTL even when their key is never used
+/// again. The sweep runs only while the pool holds connections.
+pub struct Pool {
+    shared: Arc<PoolShared>,
+}
+
+struct PoolShared {
+    limits: PoolLimits,
+    state: Mutex<PoolState>,
+}
+
+#[derive(Default)]
+struct PoolState {
+    idle: HashMap<String, Vec<Pooled>>,
+    /// The connection that answered `425 Too Early` to early data, kept
+    /// (even with connection reuse off) for the engine's one retry on it
+    /// after the handshake (RFC 8470 §5.2).
+    too_early: HashMap<String, Pooled>,
+    sweeper: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Default for Pool {
+    fn default() -> Self {
+        Pool::with_limits(PoolLimits::default())
+    }
+}
+
 impl Pool {
-    fn checkout(&self, key: &str) -> Option<Pooled> {
-        let mut map = self.idle.lock();
-        let list = map.get_mut(key)?;
-        list.retain(|p| p.is_usable() && p.idle_since.elapsed() < IDLE_TTL);
-        // HTTP/2 connections stay pooled and are shared (multiplexed).
-        if let Some(p) = list.iter().find(|p| matches!(p.sender, Sender::H2(_))) {
-            return Some(p.clone());
+    pub fn with_limits(limits: PoolLimits) -> Self {
+        Pool { shared: Arc::new(PoolShared { limits, state: Mutex::new(PoolState::default()) }) }
+    }
+
+    pub fn limits(&self) -> PoolLimits {
+        self.shared.limits
+    }
+
+    pub fn stats(&self) -> PoolStats {
+        let state = self.shared.state.lock();
+        let mut stats = PoolStats { keys: state.idle.len(), ..PoolStats::default() };
+        for p in state.idle.values().flatten() {
+            stats.connections += 1;
+            if p.idle_start().is_some() {
+                stats.idle += 1;
+            }
         }
-        list.pop()
+        stats
+    }
+
+    fn checkout(&self, key: &str) -> Option<(Pooled, Option<StreamLease>)> {
+        let now = Instant::now();
+        let ttl = self.shared.limits.idle_ttl;
+        let (found, stale) = {
+            let mut state = self.shared.state.lock();
+            let list = state.idle.get_mut(key)?;
+            let stale: Vec<Pooled> = list.extract_if(.., |p| p.expired(now, ttl)).collect();
+            // HTTP/2 connections stay pooled and are shared (multiplexed).
+            let found = match list.iter().find(|p| matches!(p.sender, Sender::H2(_))) {
+                Some(p) => {
+                    let lease = p.lease();
+                    Some((p.clone(), lease))
+                }
+                None => list.pop().map(|p| (p, None)),
+            };
+            if list.is_empty() {
+                state.idle.remove(key);
+            }
+            (found, stale)
+        };
+        // Closed outside the lock.
+        drop(stale);
+        found
     }
 
     fn checkin(&self, key: &str, mut p: Pooled) {
-        if matches!(p.sender, Sender::H2(_)) {
-            let mut map = self.idle.lock();
-            let list = map.entry(key.to_string()).or_default();
-            if !list.iter().any(|x| x.template.id == p.template.id) {
-                list.push(p);
-            }
-            return;
-        }
+        let limits = self.shared.limits;
         p.idle_since = Instant::now();
-        let mut map = self.idle.lock();
-        let list = map.entry(key.to_string()).or_default();
-        if list.len() < MAX_IDLE_PER_KEY {
-            list.push(p);
+        let mut dropped = Vec::new();
+        {
+            let mut state = self.shared.state.lock();
+            let list = state.idle.entry(key.to_string()).or_default();
+            if list.iter().any(|x| x.template.id == p.template.id) {
+                // A shared HTTP/2 connection is already pooled.
+                return;
+            }
+            if list.len() < limits.max_idle_per_key {
+                list.push(p);
+            } else {
+                dropped.push(p);
+            }
+            if state.idle.get(key).is_some_and(Vec::is_empty) {
+                state.idle.remove(key);
+            }
+            evict_over_cap(&mut state.idle, limits.max_idle_total, &mut dropped);
+            self.ensure_sweeper(&mut state);
         }
+        drop(dropped);
     }
 
     fn evict(&self, key: &str, conn_id: u64) {
-        let mut map = self.idle.lock();
-        if let Some(list) = map.get_mut(key) {
-            list.retain(|p| p.template.id != conn_id);
+        let removed: Vec<Pooled> = {
+            let mut state = self.shared.state.lock();
+            let Some(list) = state.idle.get_mut(key) else { return };
+            let removed = list.extract_if(.., |p| p.template.id == conn_id).collect();
+            if list.is_empty() {
+                state.idle.remove(key);
+            }
+            removed
+        };
+        drop(removed);
+    }
+
+    /// The connection kept for the retry after `425 Too Early`, if it is
+    /// still usable.
+    fn take_too_early(&self, key: &str) -> Option<(Pooled, Option<StreamLease>)> {
+        let mut state = self.shared.state.lock();
+        let p = state.too_early.remove(key)?;
+        let lease = p.is_usable().then(|| p.lease());
+        drop(state);
+        lease.map(|lease| (p, lease))
+    }
+
+    fn keep_too_early(&self, key: &str, mut p: Pooled) {
+        p.idle_since = Instant::now();
+        let replaced = {
+            let mut state = self.shared.state.lock();
+            let replaced = state.too_early.insert(key.to_string(), p);
+            self.ensure_sweeper(&mut state);
+            replaced
+        };
+        drop(replaced);
+    }
+
+    /// Start the background sweep unless it is running. It holds only a
+    /// weak reference to the pool and stops once the pool is empty.
+    fn ensure_sweeper(&self, state: &mut PoolState) {
+        if state.sweeper.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
         }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        let pool = Arc::downgrade(&self.shared);
+        let every = sweep_interval(self.shared.limits.idle_ttl);
+        state.sweeper = Some(rt.spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let Some(pool) = pool.upgrade() else { return };
+                if !pool.sweep(Instant::now()) {
+                    return;
+                }
+            }
+        }));
     }
 
     /// Drop every pooled connection (e.g. on vault lock or workspace switch).
     pub fn clear(&self) {
-        self.idle.lock().clear();
-        self.too_early.lock().clear();
+        let removed = {
+            let mut state = self.shared.state.lock();
+            (std::mem::take(&mut state.idle), std::mem::take(&mut state.too_early))
+        };
+        drop(removed);
     }
 
     /// Drop pooled connections whose key starts with an isolation prefix.
     pub fn clear_isolation(&self, isolation: &str) {
-        self.idle.lock().retain(|k, _| !k.starts_with(&format!("{isolation}|")));
-        self.too_early.lock().retain(|k, _| !k.starts_with(&format!("{isolation}|")));
+        let prefix = format!("{isolation}|");
+        let removed: (Vec<_>, Vec<_>) = {
+            let mut state = self.shared.state.lock();
+            let idle = state.idle.extract_if(|k, _| k.starts_with(&prefix)).collect();
+            let too_early = state.too_early.extract_if(|k, _| k.starts_with(&prefix)).collect();
+            (idle, too_early)
+        };
+        drop(removed);
+    }
+}
+
+impl PoolShared {
+    /// Close dead, expired and over-cap idle connections. Returns whether
+    /// the pool still holds any; the sweeper stops otherwise.
+    fn sweep(&self, now: Instant) -> bool {
+        let ttl = self.limits.idle_ttl;
+        let mut dropped = Vec::new();
+        let more = {
+            let mut state = self.state.lock();
+            state.idle.retain(|_, list| {
+                dropped.extend(list.extract_if(.., |p| p.expired(now, ttl)));
+                !list.is_empty()
+            });
+            evict_over_cap(&mut state.idle, self.limits.max_idle_total, &mut dropped);
+            dropped.extend(state.too_early.extract_if(|_, p| p.expired(now, ttl)).map(|(_, p)| p));
+            let more = !state.idle.is_empty() || !state.too_early.is_empty();
+            if !more {
+                state.sweeper = None;
+            }
+            more
+        };
+        drop(dropped);
+        more
+    }
+}
+
+/// How often the sweep runs: a connection is closed at most a sixth of the
+/// TTL (and at most 15 s) after it expired.
+fn sweep_interval(ttl: Duration) -> Duration {
+    (ttl / 6).clamp(Duration::from_millis(10), Duration::from_secs(15))
+}
+
+/// Move the longest-idle connections to `out` until at most `max` remain
+/// idle. HTTP/2 connections carrying requests are not idle and stay.
+fn evict_over_cap(idle: &mut HashMap<String, Vec<Pooled>>, max: usize, out: &mut Vec<Pooled>) {
+    let mut count = idle.values().flatten().filter(|p| p.idle_start().is_some()).count();
+    while count > max {
+        let oldest = idle
+            .iter()
+            .flat_map(|(k, list)| list.iter().enumerate().filter_map(move |(i, p)| p.idle_start().map(|t| (t, k, i))))
+            .min_by_key(|(t, _, _)| *t)
+            .map(|(_, k, i)| (k.clone(), i));
+        let Some((key, i)) = oldest else { break };
+        if let Some(list) = idle.get_mut(&key) {
+            out.push(list.remove(i));
+            if list.is_empty() {
+                idle.remove(&key);
+            }
+        }
+        count -= 1;
     }
 }
 
@@ -303,6 +556,11 @@ fn is_idempotent(m: &Method) -> bool {
 impl HttpTransport {
     pub fn new() -> Self {
         HttpTransport::default()
+    }
+
+    /// A transport whose connection pool uses `limits` instead of the defaults.
+    pub fn with_pool_limits(limits: PoolLimits) -> Self {
+        HttpTransport { pool: Pool::with_limits(limits), ..HttpTransport::default() }
     }
 
     /// Execute one logical attempt. Returns one output, or two when a pooled
@@ -443,13 +701,15 @@ impl HttpTransport {
         // The retry after `425 Too Early` goes out on the connection that
         // answered it, whose handshake is complete.
         let handed = match plan.early_data {
-            EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly) => self.pool.too_early.lock().remove(key).filter(|p| p.is_usable()),
+            EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly) => self.pool.take_too_early(key),
             _ => None,
         };
         let pooled = handed.or_else(|| if allow_pool { self.pool.checkout(key) } else { None });
         let mut deferred: Option<ConnTask> = None;
-        let (mut conn, reused) = match pooled {
-            Some(p) => {
+        // `_stream` is held until the attempt ends: a shared HTTP/2
+        // connection carrying this request is busy, not idle.
+        let (mut conn, reused, _stream) = match pooled {
+            Some((p, stream)) => {
                 rec.finish(q, PhaseStatus::Completed);
                 rec.mark(Phase::Dns, PhaseStatus::Reused, Some("pooled connection"));
                 rec.mark(Phase::Connect, PhaseStatus::Reused, Some("pooled connection"));
@@ -469,7 +729,7 @@ impl HttpTransport {
                 {
                     e.obs.not_used = Some(EarlyDataNotUsed::ConnectionReused);
                 }
-                (p, true)
+                (p, true, stream)
             }
             None => {
                 rec.finish(q, PhaseStatus::Completed);
@@ -538,7 +798,8 @@ impl HttpTransport {
                 match self.handshake(&mut rec, plan, est, early_alpn).await {
                     Ok((p, task)) => {
                         deferred = task;
-                        (p, false)
+                        let stream = p.lease();
+                        (p, false, stream)
                     }
                     Err((f, cobs)) => {
                         obs.connection = Some(cobs);
@@ -863,7 +1124,7 @@ impl HttpTransport {
         // Only an eligible request is retried after 425 (the engine's rule).
         let kept_for_retry = plan.early_data == EarlyDataIntent::Send && status == 425 && failure.is_none() && !conn_close && !tunneled;
         if kept_for_retry {
-            self.pool.too_early.lock().insert(key.to_string(), conn.clone());
+            self.pool.keep_too_early(key, conn.clone());
         }
         let reusable = failure.is_none() && plan.keepalive && !conn_close && !tunneled;
         match &conn.sender {
@@ -1012,6 +1273,7 @@ impl HttpTransport {
                 served: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 idle_since: Instant::now(),
                 closed,
+                streams: Arc::new(Mutex::new(StreamUse { active: 0, idle_since: Instant::now() })),
             },
             deferred,
         ))
