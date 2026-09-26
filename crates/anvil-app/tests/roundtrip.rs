@@ -2,7 +2,6 @@
 //! profile (different data key, no shared keychain), then a successful send.
 
 use anvil_app::exec::SendOptions;
-use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
@@ -55,7 +54,8 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
     assert_eq!(a.store.list_history(Some(&ws.meta.id), None, 10).unwrap().len(), 1);
 
     // Whole-app encrypted backup.
-    let (bytes, preview) = a.export(None, ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+    let (bytes, preview) = a.export_backup_with("export passphrase 1", KdfParams::testing()).unwrap();
+    assert!(anvil_app::backup::is_backup(&bytes));
     assert_eq!(preview.secrets_included, 1);
     let text = String::from_utf8_lossy(&bytes);
     assert!(!text.contains("k-SECRET-4242") && !text.contains("ENV-TOKEN-777"));
@@ -63,10 +63,10 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
     // Clean install elsewhere: a different profile/key.
     let b_root = tempfile::tempdir().unwrap();
     let b = new_app(b_root.path(), "machine-b");
-    let dry = b.import_preview(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    let dry = b.restore_preview(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
     assert!(dry.missing_secrets.is_empty());
     assert!(b.workspaces().unwrap().is_empty(), "preview does not mutate");
-    let rep = b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    let rep = b.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
     assert!(rep.secrets_restored);
     let ws_b = b.find_workspace("Payments").unwrap();
     let tree = b.tree(&ws_b.meta.id).unwrap();
@@ -88,16 +88,13 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
     let hdrs = fx.log.last_request_headers().unwrap();
     assert!(hdrs.iter().any(|(n, v)| n == "x-env-token" && v == "ENV-TOKEN-777"), "secret variable restored");
 
-    // Importing the same bundle again with Merge writes into the stored
-    // workspace, so only once the user approves that; then it is idempotent.
-    let e = b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap_err();
-    assert!(e.to_string().contains("existing workspace 'Payments'"), "{e}");
-    let approval = ImportApproval { existing_workspaces: vec![ws_b.meta.id] };
-    b.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &approval).unwrap();
+    // Restoring the same backup again with Merge is idempotent.
+    b.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
-    // Duplicate creates a separate copy.
-    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate).unwrap();
-    assert_eq!(b.workspaces().unwrap().len(), 2);
+    // A full backup restores every item under its own id; it is never duplicated.
+    let e = b.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate).unwrap_err();
+    assert!(matches!(e, AppError::Backup(anvil_app::backup::BackupError::DuplicateUnsupported)), "{e}");
+    assert_eq!(b.workspaces().unwrap().len(), 1);
 }
 
 #[tokio::test]

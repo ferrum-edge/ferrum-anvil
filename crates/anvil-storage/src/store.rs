@@ -133,6 +133,19 @@ pub struct RowMeta {
     pub updated_at: i64,
 }
 
+/// Every table the migrations create, besides SQLite's own. Full backups
+/// (`anvil_app::backup`) classify each one as carried or device-bound, and a
+/// test fails when a table is added without that decision.
+pub const TABLES: &[&str] = &["meta", "objects", "secrets", "blobs", "history", "load_reports"];
+
+/// A decrypted vault secret with its owner (`None` for profile-level).
+pub struct SecretRecord {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub label: String,
+    pub value: Zeroizing<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryEntry {
     pub id: String,
@@ -246,6 +259,14 @@ impl Store {
 
     pub fn schema_version(&self) -> i64 {
         DB_SCHEMA_VERSION
+    }
+
+    /// Names of the tables in the database, besides SQLite's own.
+    pub fn table_names(&self) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut st = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+        let names = st.query_map([], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(names)
     }
 
     fn key(&self) -> Result<Key> {
@@ -425,11 +446,8 @@ impl Store {
 
     pub fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let key = self.key()?;
-        let env: Option<Vec<u8>> = self.conn()?.query_row("SELECT payload FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
-        match env {
-            None => Ok(None),
-            Some(e) => Ok(Some(crypto::open(&key, &aad("blobs", "blob", id), &e).map_err(|_| StoreError::Integrity)?)),
-        }
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.get_blob(id)
     }
 
     // ------------------------------------------------------------ history
@@ -444,49 +462,20 @@ impl Store {
         body: Option<&[u8]>,
     ) -> Result<()> {
         let key = self.key()?;
-        let body_blob = match body {
-            Some(b) if !b.is_empty() => Some(self.put_blob(b)?),
-            _ => None,
-        };
-        let json = Zeroizing::new(serde_json::to_vec(record)?);
-        let id_s = id.to_string();
-        let env = crypto::seal(&key, &aad("history", "record", &id_s), &json);
-        let size = env.len() as i64 + body.map(|b| b.len() as i64).unwrap_or(0);
-        self.conn()?.execute(
-            "INSERT OR REPLACE INTO history(id,workspace_id,request_id,started_at,size,body_blob,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![id_s, workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), started_at_ms, size, body_blob, env],
-        )?;
-        Ok(())
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.add_history(id, workspace_id, request_id, started_at_ms, record, body)
     }
 
     pub fn list_history(&self, workspace_id: Option<&Id>, request_id: Option<&Id>, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let _ = self.key()?;
+        let key = self.key()?;
         let conn = self.conn()?;
-        let mut st = conn.prepare(
-            "SELECT id,workspace_id,request_id,started_at,size FROM history WHERE (?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR request_id=?2) ORDER BY started_at DESC LIMIT ?3",
-        )?;
-        let rows = st
-            .query_map(params![workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), limit as i64], |r| {
-                Ok(HistoryEntry { id: r.get(0)?, workspace_id: r.get(1)?, request_id: r.get(2)?, started_at: r.get(3)?, size: r.get(4)? })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Records { key, conn: &conn }.list_history(workspace_id, request_id, Some(limit))
     }
 
     pub fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
         let key = self.key()?;
-        let row: Option<(Vec<u8>, Option<String>)> = self
-            .conn()?
-            .query_row("SELECT payload, body_blob FROM history WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?;
-        let Some((env, blob)) = row else { return Ok(None) };
-        let pt = crypto::open(&key, &aad("history", "record", id), &env).map_err(|_| StoreError::Integrity)?;
-        let rec: T = serde_json::from_slice(&pt)?;
-        let body = match blob {
-            Some(b) => self.get_blob(&b)?,
-            None => None,
-        };
-        Ok(Some((rec, body)))
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.get_history(id)
     }
 
     /// Enforce history retention by age and total bytes; removes orphaned blobs.
@@ -530,29 +519,14 @@ impl Store {
 
     pub fn put_load_report<T: Serialize>(&self, id: &Id, workspace_id: Option<&Id>, started_at_ms: i64, report: &T) -> Result<()> {
         let key = self.key()?;
-        let json = serde_json::to_vec(report)?;
-        let id_s = id.to_string();
-        let env = crypto::seal(&key, &aad("load_reports", "report", &id_s), &json);
-        self.conn()?.execute(
-            "INSERT OR REPLACE INTO load_reports(id,workspace_id,started_at,payload) VALUES(?1,?2,?3,?4)",
-            params![id_s, workspace_id.map(|w| w.to_string()), started_at_ms, env],
-        )?;
-        Ok(())
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.put_load_report(id, workspace_id, started_at_ms, report)
     }
 
     pub fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         let key = self.key()?;
         let conn = self.conn()?;
-        let mut st = conn.prepare("SELECT id,payload FROM load_reports WHERE (?1 IS NULL OR workspace_id=?1) ORDER BY started_at DESC")?;
-        let rows: Vec<(String, Vec<u8>)> = st
-            .query_map(params![workspace_id.map(|w| w.to_string())], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        let mut out = Vec::new();
-        for (id, env) in rows {
-            let pt = crypto::open(&key, &aad("load_reports", "report", &id), &env).map_err(|_| StoreError::Integrity)?;
-            out.push(serde_json::from_slice(&pt)?);
-        }
-        Ok(out)
+        Records { key, conn: &conn }.list_load_reports(workspace_id)
     }
 
     pub fn delete_load_report(&self, id: &Id) -> Result<bool> {
@@ -730,6 +704,24 @@ impl StoreTx<'_> {
     pub fn pin_blob(&self, id: &str) -> Result<()> {
         self.records()?.pin_blob(id)
     }
+
+    /// See [`Store::add_history`].
+    pub fn add_history<T: Serialize>(
+        &self,
+        id: &Id,
+        workspace_id: Option<&Id>,
+        request_id: Option<&Id>,
+        started_at_ms: i64,
+        record: &T,
+        body: Option<&[u8]>,
+    ) -> Result<()> {
+        self.records()?.add_history(id, workspace_id, request_id, started_at_ms, record, body)
+    }
+
+    /// See [`Store::put_load_report`].
+    pub fn put_load_report<T: Serialize>(&self, id: &Id, workspace_id: Option<&Id>, started_at_ms: i64, report: &T) -> Result<()> {
+        self.records()?.put_load_report(id, workspace_id, started_at_ms, report)
+    }
 }
 
 /// Read-only access to an open transaction: from [`Store::read_consistently`]
@@ -770,10 +762,41 @@ impl StoreRead<'_> {
         let owners: Vec<(String, Option<String>)> = owners.collect::<std::result::Result<_, _>>()?;
         Ok(owners)
     }
+
+    /// Every vault secret, decrypted, with its owner.
+    pub fn secrets(&self) -> Result<Vec<SecretRecord>> {
+        self.records()?.secrets()
+    }
+
+    pub fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.records()?.get_blob(id)
+    }
+
+    /// Every history entry (no limit), newest first.
+    pub fn history_entries(&self) -> Result<Vec<HistoryEntry>> {
+        self.records()?.list_history(None, None, None)
+    }
+
+    pub fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
+        self.records()?.get_history(id)
+    }
+
+    pub fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+        self.records()?.list_load_reports(workspace_id)
+    }
+
+    /// Ids of every stored load report.
+    pub fn load_report_ids(&self) -> Result<Vec<String>> {
+        let _ = self.store.key()?;
+        let mut st = self.conn.prepare("SELECT id FROM load_reports")?;
+        let ids = st.query_map([], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(ids)
+    }
 }
 
-/// Object and secret operations on one connection: a `Store`'s (autocommit)
-/// or a `StoreTx`'s (inside its transaction).
+/// Object, secret, blob, history and load-report operations on one
+/// connection: a `Store`'s (autocommit) or a `StoreTx`'s (inside its
+/// transaction).
 struct Records<'c> {
     key: Key,
     conn: &'c Connection,
@@ -895,6 +918,20 @@ impl Records<'_> {
         Ok(())
     }
 
+    fn secrets(&self) -> Result<Vec<SecretRecord>> {
+        let rows: Vec<(String, Option<String>)> = {
+            let mut st = self.conn.prepare("SELECT id, workspace_id FROM secrets ORDER BY id")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, workspace_id) in rows {
+            let parsed: Id = id.parse().map_err(|_| StoreError::Integrity)?;
+            let (label, value) = self.get_secret(&parsed)?.ok_or_else(|| StoreError::NotFound(format!("secret {id}")))?;
+            out.push(SecretRecord { id, workspace_id, label, value });
+        }
+        Ok(out)
+    }
+
     fn put_blob(&self, bytes: &[u8]) -> Result<String> {
         use hmac::{KeyInit, Mac};
         let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(self.key.as_bytes()).expect("key");
@@ -915,5 +952,92 @@ impl Records<'_> {
     fn pin_blob(&self, id: &str) -> Result<()> {
         self.conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
         Ok(())
+    }
+
+    fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        let env: Option<Vec<u8>> = self.conn.query_row("SELECT payload FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        match env {
+            None => Ok(None),
+            Some(e) => Ok(Some(crypto::open(&self.key, &aad("blobs", "blob", id), &e).map_err(|_| StoreError::Integrity)?)),
+        }
+    }
+
+    fn add_history<T: Serialize>(
+        &self,
+        id: &Id,
+        workspace_id: Option<&Id>,
+        request_id: Option<&Id>,
+        started_at_ms: i64,
+        record: &T,
+        body: Option<&[u8]>,
+    ) -> Result<()> {
+        let body_blob = match body {
+            Some(b) if !b.is_empty() => Some(self.put_blob(b)?),
+            _ => None,
+        };
+        let json = Zeroizing::new(serde_json::to_vec(record)?);
+        let id_s = id.to_string();
+        let env = crypto::seal(&self.key, &aad("history", "record", &id_s), &json);
+        let size = env.len() as i64 + body.map(|b| b.len() as i64).unwrap_or(0);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO history(id,workspace_id,request_id,started_at,size,body_blob,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![id_s, workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), started_at_ms, size, body_blob, env],
+        )?;
+        Ok(())
+    }
+
+    /// Newest first; `None` lists every entry.
+    fn list_history(&self, workspace_id: Option<&Id>, request_id: Option<&Id>, limit: Option<usize>) -> Result<Vec<HistoryEntry>> {
+        // SQLite treats a negative LIMIT as no limit.
+        let limit = limit.map(|l| i64::try_from(l).unwrap_or(i64::MAX)).unwrap_or(-1);
+        let mut st = self.conn.prepare(
+            "SELECT id,workspace_id,request_id,started_at,size FROM history WHERE (?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR request_id=?2) ORDER BY started_at DESC, id DESC LIMIT ?3",
+        )?;
+        let rows = st
+            .query_map(params![workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), limit], |r| {
+                Ok(HistoryEntry { id: r.get(0)?, workspace_id: r.get(1)?, request_id: r.get(2)?, started_at: r.get(3)?, size: r.get(4)? })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
+        let row: Option<(Vec<u8>, Option<String>)> = self
+            .conn
+            .query_row("SELECT payload, body_blob FROM history WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((env, blob)) = row else { return Ok(None) };
+        let pt = crypto::open(&self.key, &aad("history", "record", id), &env).map_err(|_| StoreError::Integrity)?;
+        let rec: T = serde_json::from_slice(&pt)?;
+        let body = match blob {
+            Some(b) => self.get_blob(&b)?,
+            None => None,
+        };
+        Ok(Some((rec, body)))
+    }
+
+    fn put_load_report<T: Serialize>(&self, id: &Id, workspace_id: Option<&Id>, started_at_ms: i64, report: &T) -> Result<()> {
+        let json = serde_json::to_vec(report)?;
+        let id_s = id.to_string();
+        let env = crypto::seal(&self.key, &aad("load_reports", "report", &id_s), &json);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO load_reports(id,workspace_id,started_at,payload) VALUES(?1,?2,?3,?4)",
+            params![id_s, workspace_id.map(|w| w.to_string()), started_at_ms, env],
+        )?;
+        Ok(())
+    }
+
+    fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+        let mut st =
+            self.conn.prepare("SELECT id,payload FROM load_reports WHERE (?1 IS NULL OR workspace_id=?1) ORDER BY started_at DESC")?;
+        let rows: Vec<(String, Vec<u8>)> = st
+            .query_map(params![workspace_id.map(|w| w.to_string())], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut out = Vec::new();
+        for (id, env) in rows {
+            let pt = crypto::open(&self.key, &aad("load_reports", "report", &id), &env).map_err(|_| StoreError::Integrity)?;
+            out.push(serde_json::from_slice(&pt)?);
+        }
+        Ok(out)
     }
 }

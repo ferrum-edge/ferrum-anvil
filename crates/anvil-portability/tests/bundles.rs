@@ -191,7 +191,7 @@ fn data_003_encrypted_transfer_restores_exact_values() {
 #[test]
 fn data_004_wrong_passphrase_fails_safely() {
     let g = sample();
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::FullBackup, Some("correct horse battery"))).unwrap();
+    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
     assert!(matches!(bundle::open(&bytes, Some("wrong passphrase!")), Err(BundleError::WrongPassphrase)));
     assert!(matches!(bundle::open(&bytes, None), Err(BundleError::PassphraseRequired)));
 }
@@ -432,6 +432,22 @@ fn repack(bytes: &[u8], edit: impl Fn(&str, &mut Vec<u8>)) -> Vec<u8> {
         }
     }
     w.finish().unwrap().into_inner()
+}
+
+/// Re-pack a bundle with one more entry, recomputing the checksums.
+fn with_entry(bytes: &[u8], name: &str, data: &[u8]) -> Vec<u8> {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).unwrap();
+        let mut b = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut b).unwrap();
+        w.start_file(f.name().to_string(), zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(&b).unwrap();
+    }
+    w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+    w.write_all(data).unwrap();
+    repack(&w.finish().unwrap().into_inner(), |_, _| {})
 }
 
 /// Re-pack a bundle after editing one JSON entry.
@@ -988,4 +1004,37 @@ fn a_stored_attachment_is_imported_only_with_its_bytes() {
     let mut g = sample();
     g.requests[0].spec.body = Body::Binary { attachment: AttachmentRef::LinkedFile { path: "/tmp/a.bin".into() }, content_type: None };
     reopen(&g).expect("a linked local file is not a stored attachment");
+}
+
+#[test]
+fn full_backups_are_never_written_or_opened_as_bundles() {
+    let pass = "correct horse battery";
+    let e = bundle::write(&sample(), &opts(ExportMode::FullBackup, Some(pass))).unwrap_err();
+    assert!(matches!(e, BundleError::FullBackupNotABundle), "{e}");
+    let backup_kind = ExportOptions { kind: BundleKind::Backup, ..opts(ExportMode::EncryptedTransfer, Some(pass)) };
+    assert!(matches!(bundle::write(&sample(), &backup_kind), Err(BundleError::FullBackupNotABundle)));
+    assert!(matches!(bundle::preview(&sample(), &backup_kind), Err(BundleError::FullBackupNotABundle)));
+
+    // A bundle that describes a full backup, as early builds wrote them, is
+    // refused with or without its passphrase, before its objects or vault
+    // are read.
+    let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    let legacy = [
+        edit_json(&bytes, "manifest.json", |m| m["mode"] = "full_backup".into()),
+        edit_json(&bytes, "manifest.json", |m| m["kind"] = "backup".into()),
+        edit_json(&bytes, "manifest.json", |m| {
+            m["kind"] = "backup".into();
+            m["mode"] = "full_backup".into();
+        }),
+        with_entry(&bytes, "settings/portable.json", b"{}"),
+        edit_json(&bytes, "workspace/objects.json", |o| o["app_settings"] = serde_json::Value::Object(Default::default())),
+    ];
+    for b in &legacy {
+        for p in [None, Some(pass)] {
+            let e = bundle::open(b, p).unwrap_err();
+            assert!(matches!(e, BundleError::LegacyFullBackup), "{e}");
+            assert!(e.to_string().contains("restore from an ANVILBAK backup"), "{e}");
+        }
+    }
+    bundle::open(&bytes, Some(pass)).expect("the untouched bundle opens");
 }

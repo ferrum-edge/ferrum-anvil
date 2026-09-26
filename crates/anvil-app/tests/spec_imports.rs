@@ -405,7 +405,7 @@ fn only_the_user_opens_an_import_root_to_the_destination_on_this_device() {
     assert!(app.set_import_root_workspace_scope(&plain.meta.id, true).is_err());
 
     // A bundle keeps the import root but never carries the choice.
-    let (bytes, _) = app.export(Some(&dest.meta.id), ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) = app.export(Some(&dest.meta.id), ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
     let other = tempfile::tempdir().unwrap();
     let b = new_app(other.path());
     let report = b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate).unwrap();
@@ -415,6 +415,17 @@ fn only_the_user_opens_an_import_root_to_the_destination_on_this_device() {
     assert!(!root_b.use_workspace_scope);
     let deep_b = b.requests(&ws_b).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
     nothing_from_the_destination(&b.build_context(Some(deep_b.meta.id), &ws_b, None, &SendOptions::default()).unwrap());
+
+    // Nor does a full backup restored elsewhere.
+    let (bytes, _) = app.export_backup_with("export passphrase 1", KdfParams::testing()).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let c = new_app(other.path());
+    let report = c.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Replace).unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("imported collection")), "{:?}", report.warnings);
+    let root_c = c.folder(&root_id).unwrap();
+    assert!(root_c.import_root && !root_c.use_workspace_scope);
+    let deep_c = c.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
+    nothing_from_the_destination(&c.build_context(Some(deep_c.meta.id), &dest.meta.id, None, &SendOptions::default()).unwrap());
 }
 
 #[test]

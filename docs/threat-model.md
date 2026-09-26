@@ -158,6 +158,19 @@ against it).
   secrets.
 - **Lock bypass:** backend refuses privileged commands while locked; key dropped;
   sessions/executions/load runs stopped.
+- **Reading or altering a full backup:** the whole payload (objects, bodies,
+  settings, history, attachments and secrets) is one AEAD envelope under the
+  export passphrase, with the header as associated data, so a copy of the file
+  reveals nothing and any change to it is refused before anything is restored.
+  Only the header (at most 4 KiB of JSON) is parsed before authentication, to
+  bound its key-derivation costs before derivation. Authentic contents are
+  still type-checked, confined to the backup's own workspaces (revisions to
+  their request's), refused when a request or dataset names a stored
+  attachment the backup does not carry, and trust-normalised like any import.
+- **Legacy full backups:** full backups written as zip bundles, whose vault
+  authenticated nothing else in the archive, are refused on import (manifest
+  kind `backup`, mode `full_backup`, or app settings in the archive), so
+  none of their contents is restored; bundle exports never produce them.
 - **Test backdoors shipped:** E2E WebDriver and env unlock only under the `e2e`
   feature; release check fails if present (ADR 0009).
 - **Supply chain:** pinned dependencies with lockfiles, `cargo deny` (licenses,

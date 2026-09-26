@@ -674,3 +674,48 @@ fn a_stored_attachment_is_imported_only_with_its_bytes() {
     let rep = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
     assert_eq!(a.datasets(&rep.workspace_ids[0].parse().unwrap()).unwrap().len(), 1);
 }
+
+#[test]
+fn bundles_describing_a_full_backup_are_never_written_or_restored() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
+    // Full backups are ANVILBAK files; bundle exports refuse the mode.
+    for scope in [Some(&ws.meta.id), None] {
+        let e = a.export(scope, ExportMode::FullBackup, Some(EXPORT_PASS), false).unwrap_err();
+        assert!(matches!(e, AppError::Bundle(BundleError::FullBackupNotABundle)), "{e}");
+        let e = a.export_preview(scope, ExportMode::FullBackup, false).unwrap_err();
+        assert!(matches!(e, AppError::Bundle(BundleError::FullBackupNotABundle)), "{e}");
+    }
+    // A bundle of every workspace is a workspace bundle, not a backup.
+    let (all, preview) = a.export(None, ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    assert_eq!(preview.manifest.kind, BundleKind::Workspace);
+
+    // The zip full backup of early builds: an authentic vault, and a manifest
+    // naming the backup kind and mode.
+    let legacy = edit_manifest(&all, |m| {
+        m["kind"] = "backup".into();
+        m["mode"] = "full_backup".into();
+    });
+    let b_root = tempfile::tempdir().unwrap();
+    let b = new_app(b_root.path(), "b");
+    let before = b.backup_contents().unwrap();
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+        let e = b.import_preview(&legacy, Some(EXPORT_PASS), policy).unwrap_err();
+        assert!(matches!(e, AppError::Bundle(BundleError::LegacyFullBackup)), "{e}");
+        assert!(e.to_string().contains("legacy full backups are not supported; restore from an ANVILBAK backup"), "{e}");
+        let e = b.import(&legacy, Some(EXPORT_PASS), policy).unwrap_err();
+        assert!(matches!(e, AppError::Bundle(BundleError::LegacyFullBackup)), "{e}");
+    }
+    // Nor is it taken for an ANVILBAK backup.
+    assert!(!anvil_app::backup::is_backup(&legacy));
+    assert!(b.restore(&legacy, Some(EXPORT_PASS), ConflictPolicy::Merge).is_err());
+    assert!(b.workspaces().unwrap().is_empty(), "nothing was restored");
+    assert!(b.store.list_secret_ids(None).unwrap().is_empty(), "no secret was restored");
+    assert!(b.backup_contents().unwrap() == before, "a refused legacy backup changed the profile");
+
+    // The same bundle with its own manifest imports.
+    b.import(&all, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert_eq!(b.workspaces().unwrap().len(), 1);
+}

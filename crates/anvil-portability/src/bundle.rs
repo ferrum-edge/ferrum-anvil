@@ -56,6 +56,10 @@ pub enum BundleError {
     PassphraseRequired,
     #[error("the passphrase is not correct, or the encrypted vault was modified; nothing was imported")]
     WrongPassphrase,
+    #[error("legacy full backups are not supported; restore from an ANVILBAK backup")]
+    LegacyFullBackup,
+    #[error("a full backup is written as an ANVILBAK backup file, not as a bundle")]
+    FullBackupNotABundle,
     #[error("{0}")]
     Invalid(String),
     #[error("io: {0}")]
@@ -70,6 +74,8 @@ pub enum BundleError {
 #[serde(rename_all = "snake_case")]
 pub enum BundleKind {
     Workspace,
+    /// A full backup. Only ANVILBAK backup files carry this kind; a bundle
+    /// naming it is refused.
     Backup,
 }
 
@@ -80,7 +86,9 @@ pub enum ExportMode {
     ShareSafely,
     /// Selected secrets and sensitive literals re-encrypted for the recipient.
     EncryptedTransfer,
-    /// All portable state + encrypted sensitive data (personal backup).
+    /// Every stored item of a profile, encrypted and authenticated as one
+    /// ANVILBAK backup file (`anvil_app::backup`). Never written or read as a
+    /// bundle.
     FullBackup,
 }
 
@@ -156,8 +164,17 @@ fn device_bindings(graph: &PortableGraph) -> Vec<String> {
     out
 }
 
+/// Whether a manifest describes a full backup. Full backups are ANVILBAK
+/// files, whose every byte is authenticated, never bundles.
+fn is_full_backup(kind: BundleKind, mode: ExportMode) -> bool {
+    kind == BundleKind::Backup || mode == ExportMode::FullBackup
+}
+
 /// Build the manifest and sanitized objects without writing.
 pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manifest, serde_json::Value, VaultPayload), BundleError> {
+    if is_full_backup(opts.kind, opts.mode) {
+        return Err(BundleError::FullBackupNotABundle);
+    }
     let mut objects = serde_json::to_value(graph)?;
     let san = sanitize::sanitize(&mut objects);
     let mut excluded = Vec::new();
@@ -228,11 +245,6 @@ pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>
     let (mut manifest, objects, vault) = prepare(graph, opts)?;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     files.push(("workspace/objects.json".into(), serde_json::to_vec_pretty(&objects)?));
-    if opts.kind == BundleKind::Backup
-        && let Some(s) = &graph.app_settings
-    {
-        files.push(("settings/portable.json".into(), serde_json::to_vec_pretty(s)?));
-    }
     for (hash, data) in &graph.attachments {
         if sha256(data) != *hash {
             return Err(BundleError::Invalid(format!("attachment {hash} does not match its content hash")));
@@ -446,12 +458,22 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
     if manifest.format_version > FORMAT_VERSION {
         return Err(BundleError::FutureFormat { found: manifest.format_version, supported: FORMAT_VERSION });
     }
+    // Full backups were once written as bundles, with a vault that bound
+    // nothing else in the archive. They are refused before any object is
+    // interpreted or the vault is opened, so nothing of one is ever restored.
+    if is_full_backup(manifest.kind, manifest.mode) || entries.contains_key("settings/portable.json") {
+        return Err(BundleError::LegacyFullBackup);
+    }
     // Schema compatibility is settled before any object is interpreted:
     // serde would silently drop fields a newer schema added.
     check_schema(manifest.schema_version)?;
     let mut objects: serde_json::Value = serde_json::from_slice(
         entries.get("workspace/objects.json").ok_or_else(|| BundleError::NotABundle("missing workspace/objects.json".into()))?,
     )?;
+    // Only full backups carried app settings.
+    if objects.get("app_settings").is_some() {
+        return Err(BundleError::LegacyFullBackup);
+    }
     if let Some(o) = objects.as_object() {
         for (name, list) in o {
             if let Some(items) = list.as_array() {
@@ -487,11 +509,6 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
     let mut graph: PortableGraph = serde_json::from_value(objects)
         .map_err(|e| BundleError::Invalid(format!("objects.json does not match schema {}: {e}", manifest.schema_version)))?;
     graph.secrets = secrets;
-    if let Some(s) = entries.get("settings/portable.json") {
-        let settings: serde_json::Value = serde_json::from_slice(s)?;
-        check_record_schema(&settings, "settings")?;
-        graph.app_settings = Some(serde_json::from_value(settings)?);
-    }
     for (name, data) in &entries {
         if let Some(h) = name.strip_prefix("attachments/") {
             if sha256(data) != h {

@@ -70,6 +70,8 @@ commands return `LOCKED` until unlock.
     root folder, the stored original file, its folders, requests,
     environments and source record. A failure, including one taking the
     checkpoint, leaves the profile as it was.
+  - A full-backup restore writes everything, attachments included, in the
+    transaction.
 
   Changes saved meanwhile by other commands are kept, so the checkpoint is not
   restored automatically; it stays on disk for a manual restore.
@@ -80,7 +82,7 @@ commands return `LOCKED` until unlock.
 |---|---|---|
 | Share safely | One workspace | None — literal secrets become `{{placeholders}}` listed in the manifest |
 | Encrypted transfer | One workspace | Vault secrets, encrypted with a passphrase you share separately |
-| Full backup | Everything including history and settings | Encrypted |
+| Full backup | Everything including history and settings | Encrypted; an ANVILBAK file, not a bundle ([below](#full-backups)) |
 
 Import is preview-then-apply with conflict policies (duplicate, merge, replace).
 Duplicate gives every imported object, request revision and secret a new id and
@@ -139,6 +141,58 @@ workspace; the preview lists what was normalised. Device-bound items
 needing rebinding, and the preview lists each linked local file with the
 request or dataset that names it. A bundle import drops this device's
 linked-file bindings for every request and dataset it overwrites.
+
+## Full backups
+
+A full backup (*Whole app backup* in the desktop, `anvil export --mode backup`
+in the CLI) has its own file format, separate from zip bundles, so that nothing
+in it can be read or changed without the export passphrase:
+
+- The file is a short header (format version, Argon2id costs and salt)
+  followed by one XChaCha20-Poly1305 envelope that seals the whole payload: the
+  manifest and every object, secret, attachment, history record and load
+  report. The header bytes are the envelope's associated data. Without the
+  passphrase nothing in the file is readable. The header (JSON, at most 4 KiB)
+  is the only part parsed before authentication, and only to check its format
+  and costs; a change to any byte (header, costs, salt or payload) then makes
+  the restore fail before the payload is parsed or anything is written.
+- The Argon2id costs are read before anything can be authenticated, so they
+  are held to the same bounds as a bundle vault's (above) before any
+  derivation runs. Exports use 64 MiB, 3 passes and 1 lane.
+- Full backups are only ever ANVILBAK files. A zip bundle whose manifest has
+  kind `backup` or mode `full_backup` (as early development builds wrote
+  them), or that carries app settings, is refused on import with
+  "legacy full backups are not supported; restore from an ANVILBAK backup",
+  and nothing of it is restored. Bundle exports never write that kind or mode.
+- It carries every row of every stored object kind (workspaces, folders,
+  requests and all their revisions, environments, TLS, proxy and gateway
+  profiles, datasets, scenarios, load plans, app settings, user profiles,
+  spec-import provenance and run reports), every vault secret (workspace-owned
+  and profile-level), every stored attachment, the complete history with its
+  stored response bodies, and every load report.
+- It does not carry OS keychain entries, local data keys, provider sessions,
+  token-file bindings or linked-file bindings (they name files on this
+  device); the preview lists them. Attachment index entries and blob pins are
+  specific to one database and are rebuilt on restore. The restore preview
+  lists each linked local file with the request or dataset that names it; a
+  restore drops this device's linked-file bindings for every request and
+  dataset it overwrites.
+- `crates/anvil-app/tests/backup.rs` fails when the store gains a table or an
+  object kind that a full backup neither carries nor lists as left out, and
+  compares the whole inventory of a restored profile with its source.
+
+Restore is preview-then-apply. Every item is checked against its schema
+version, its type and the rest of the backup (ids, owning workspaces,
+attachment hashes, and every stored attachment a request or dataset names,
+which must be in the backup), the import trust normalisation above applies
+(an imported collection opened to its workspace is closed again), and
+everything is written in one transaction after a checkpoint. A request revision is restored under its
+request, in that request's workspace: revisions whose request is not in the
+backup (it was deleted) are left out with a warning, and one stored under
+another request or workspace is refused. Replace overwrites items that have
+the same id; Merge keeps them, including this profile's settings; Duplicate is refused,
+because a backup restores items under their own ids. Nothing else in the
+profile is deleted.
 
 ## Schema versions and migration
 

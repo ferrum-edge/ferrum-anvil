@@ -254,11 +254,11 @@ fn token_file_bindings_stay_on_this_device() {
     let ws = a.create_workspace("W").unwrap();
     let binding = a.bind_token_file(&token).unwrap();
     a.create_request(&ws.meta.id, None, "r", with_auth(jwt_svid_file(&binding.path))).unwrap();
-    let (bytes, _) = a.export(None, ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) = a.export_backup_with("export passphrase 1", KdfParams::testing()).unwrap();
 
     let b = new_app(root.path(), "b");
-    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
-    assert!(b.token_file_bindings().unwrap().is_empty(), "an import never binds a token file");
+    b.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    assert!(b.token_file_bindings().unwrap().is_empty(), "a restore never binds a token file");
     b.confine_token_files();
     let ws_b = b.workspaces().unwrap().into_iter().find(|w| w.name == "W").unwrap();
     let req = b.requests(&ws_b.meta.id).unwrap().into_iter().find(|r| r.name == "r").unwrap();
@@ -377,7 +377,7 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
     let rows = canonical(&rows);
     let d = a.save_dataset(linked_dataset(ws.meta.id, &rows)).unwrap();
     a.bind_linked_file(LinkedFileReferrer::Dataset { id: d.meta.id }, &rows).unwrap();
-    let (bytes, _) = a.export(None, ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) = a.export(None, ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
 
     let b = new_app(root.path(), "b");
     // The preview lists every linked file the bundle names, datasets included.
@@ -418,7 +418,7 @@ fn an_import_that_overwrites_a_request_drops_its_linked_file_binding() {
     let ws = app.create_workspace("W").unwrap();
     let spec = with_body(Body::Binary { attachment: linked(&path), content_type: None });
     let r = app.create_request(&ws.meta.id, None, "upload", spec).unwrap();
-    let (bytes, _) = app.export(Some(&ws.meta.id), ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) = app.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
     app.bind_linked_file(request(&r), &path).unwrap();
     app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).expect("bound");
 
