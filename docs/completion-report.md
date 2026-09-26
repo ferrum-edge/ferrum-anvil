@@ -114,10 +114,10 @@ results and reasoned statuses.
 
 ## Known limitations and unimplemented features
 
-- **No signed release.** There are no installers, notarization, updater or download assets. The website says "not yet released".
+- **No signed release.** There are no installers, notarization, updater or download assets. The website says "not yet released". Owner steps: ferrum-edge/ferrum-anvil#2.
 - **Platforms.** Only macOS arm64 was built and exercised locally. Linux and Windows are covered by CI only. No minimum OS versions have been established.
 - **G01 is not implemented** in the gateway, so gateway attribution never exceeds "likely".
-- **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md`.
+- **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md` and ferrum-edge/ferrum-anvil#3.
 - **Protocol and load gaps:**
   - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).
   - Load testing is HTTP-family only, one worker on one machine.

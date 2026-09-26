@@ -26,15 +26,15 @@
  },
  "REL-001": {
   "status": "blocked",
-  "reason": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only."
+  "reason": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. Owner steps: ferrum-edge/ferrum-anvil#2."
  },
  "REL-003": {
   "status": "blocked",
-  "reason": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build."
+  "reason": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build. Owner steps: ferrum-edge/ferrum-anvil#2."
  },
  "REL-006": {
   "status": "blocked",
-  "reason": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist."
+  "reason": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
  },
  "REL-007": {
   "status": "partial",

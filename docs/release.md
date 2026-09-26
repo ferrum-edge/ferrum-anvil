@@ -247,12 +247,11 @@ E2E build and requires it to fail.
 ## Open items
 
 - **Signing credentials** (owner): Apple Developer ID + notarization and a
-  Windows code-signing certificate. Until then every build is unsigned.
-- **License texts inside the desktop installers**: the CLI archive carries
-  `LICENSE`, `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`, but the
-  `.app`/`.dmg`/`.deb`/`.rpm`/`.AppImage`/`.msi`/NSIS bundles do not yet. Add them
-  through `bundle.resources` (and `bundle.licenseFile` for the installer
-  license page) in `apps/desktop/src-tauri/tauri.conf.json`.
+  Windows code-signing certificate. Until then every build is unsigned. Steps,
+  secret names and the recommended workflow changes: ferrum-edge/ferrum-anvil#2.
+- **Sign-in providers** (owner): Google/GitHub/Facebook registrations and an
+  identity broker before application login can use them:
+  ferrum-edge/ferrum-anvil#3.
 - **Packaged-app smoke tests** (install, first run, dialogs, uninstall) are not
   automated; the native E2E suite runs against the instrumented debug build.
 - The three advisory ignores in `deny.toml` (see above).

@@ -260,7 +260,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-001": {
@@ -309,7 +309,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-002": {
@@ -347,7 +347,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-003": {
@@ -356,7 +356,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible on Ferrum Edge 0.9.5: the gateway refuses to start with an expired frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: server TLS cert: certificate record #1 in '<run>/certs/gateway-server-expired.pem' has expired), so no client can observe one from it. Expired-certificate handling is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests."
+        "skip_reason": "infeasible on Ferrum Edge 0.9.5: the gateway refuses to start with an expired frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> has expired), so no client can observe one from it. Expired-certificate handling is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests."
        }
       }
      }
@@ -381,7 +381,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-004": {
@@ -390,7 +390,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible on Ferrum Edge 0.9.5: the gateway refuses to start with a not-yet-valid frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: server TLS cert: certificate record #1 in '<run>/certs/gateway-server-future.pem' is not yet valid). Client-side not-yet-valid classification is covered by anvil-transport tests."
+        "skip_reason": "infeasible on Ferrum Edge 0.9.5: the gateway refuses to start with a not-yet-valid frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> is not yet valid). Client-side not-yet-valid classification is covered by anvil-transport tests."
        }
       }
      }
@@ -456,7 +456,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-005.tcp": {
@@ -563,7 +563,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-006.lookalike": {
@@ -640,7 +640,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-007": {
@@ -709,7 +709,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-008.tcp": {
@@ -786,7 +786,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-009": {
@@ -824,7 +824,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-010": {
@@ -858,7 +858,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-011": {
@@ -892,7 +892,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-012": {
@@ -937,7 +937,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-013": {
@@ -991,7 +991,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-014": {
@@ -1040,7 +1040,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-015": {
@@ -1089,7 +1089,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-016": {
@@ -1127,7 +1127,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-017": {
@@ -1161,7 +1161,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:TLS-018": {
@@ -1200,7 +1200,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-001": {
@@ -1253,8 +1253,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core",
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012609Z-core",
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "core:UP-002": {
@@ -1311,7 +1311,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-003": {
@@ -1374,8 +1374,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams",
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012821Z-streams",
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "streams:UP-004-tcps": {
@@ -1446,7 +1446,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:UP-005": {
@@ -1499,7 +1499,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:UP-006": {
@@ -1556,7 +1556,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:UP-007": {
@@ -1609,7 +1609,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:UP-008.http-to-tls": {
@@ -1666,7 +1666,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-009": {
@@ -1719,8 +1719,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core",
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012609Z-core",
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "core:UP-010": {
@@ -1783,7 +1783,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-011": {
@@ -1832,7 +1832,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-012": {
@@ -1881,7 +1881,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-013": {
@@ -1924,7 +1924,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-014": {
@@ -1967,7 +1967,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220822Z-admission"
+     "results/lab/20260926T012703Z-admission"
     ],
     "variants": {
      "admission:UP-015": {
@@ -2010,7 +2010,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:UP-016": {
@@ -2122,7 +2122,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220822Z-admission"
+     "results/lab/20260926T012703Z-admission"
     ],
     "variants": {
      "admission:UP-018": {
@@ -2203,7 +2203,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:UP-020": {
@@ -2256,8 +2256,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core",
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012609Z-core",
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "core:GW-001": {
@@ -2314,7 +2314,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220822Z-admission"
+     "results/lab/20260926T012703Z-admission"
     ],
     "variants": {
      "admission:GW-002": {
@@ -2357,7 +2357,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220837Z-drain"
+     "results/lab/20260926T012718Z-drain"
     ],
     "variants": {
      "drain:GW-003": {
@@ -2400,7 +2400,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-004": {
@@ -2453,8 +2453,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220822Z-admission",
-     "results/lab/20260925T221004Z-cpdp"
+     "results/lab/20260926T012703Z-admission",
+     "results/lab/20260926T012845Z-cpdp"
     ],
     "variants": {
      "admission:GW-005": {
@@ -2549,7 +2549,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:GW-006": {
@@ -2592,7 +2592,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:GW-007": {
@@ -2635,7 +2635,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:GW-008": {
@@ -2678,7 +2678,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-009": {
@@ -2741,7 +2741,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-010": {
@@ -2812,7 +2812,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:GW-011": {
@@ -2855,7 +2855,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-012": {
@@ -2918,7 +2918,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-013-REFUSED": {
@@ -2989,7 +2989,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-014-GEO": {
@@ -3042,7 +3042,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-015": {
@@ -3091,7 +3091,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:GW-016": {
@@ -3134,7 +3134,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:GW-017": {
@@ -3183,7 +3183,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220728Z-core"
+     "results/lab/20260926T012609Z-core"
     ],
     "variants": {
      "core:GW-018": {
@@ -3266,7 +3266,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-019-REJECT-UNKNOWN": {
@@ -3395,7 +3395,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220743Z-policy"
+     "results/lab/20260926T012623Z-policy"
     ],
     "variants": {
      "policy:GW-020-GUARD": {
@@ -3486,7 +3486,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-001": {
@@ -3541,7 +3541,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-002": {
@@ -3584,7 +3584,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-003": {
@@ -3627,7 +3627,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-004": {
@@ -3670,7 +3670,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-005": {
@@ -3713,7 +3713,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-006": {
@@ -3756,7 +3756,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-007": {
@@ -3799,7 +3799,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-008": {
@@ -3842,7 +3842,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-009": {
@@ -3885,7 +3885,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-010": {
@@ -3923,7 +3923,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-011": {
@@ -3963,7 +3963,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-012": {
@@ -3997,7 +3997,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-013": {
@@ -4037,7 +4037,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-014": {
@@ -4088,7 +4088,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-015": {
@@ -4131,7 +4131,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-016": {
@@ -4210,7 +4210,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-017": {
@@ -4283,7 +4283,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-018": {
@@ -4346,7 +4346,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-019": {
@@ -4395,7 +4395,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-020": {
@@ -4438,7 +4438,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-021": {
@@ -4481,7 +4481,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-022": {
@@ -4524,7 +4524,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-023": {
@@ -4567,7 +4567,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-024": {
@@ -4610,7 +4610,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-025.nonce": {
@@ -4663,7 +4663,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "tls:AUTH-026": {
@@ -4706,7 +4706,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-027": {
@@ -4749,7 +4749,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-028": {
@@ -4823,7 +4823,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-029.text": {
@@ -4894,7 +4894,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-030": {
@@ -4937,7 +4937,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-031": {
@@ -4980,7 +4980,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220920Z-auth"
+     "results/lab/20260926T012801Z-auth"
     ],
     "variants": {
      "auth:AUTH-032": {
@@ -5029,7 +5029,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-001": {
@@ -5078,7 +5078,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-002": {
@@ -5173,7 +5173,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-005": {
@@ -5227,7 +5227,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-006": {
@@ -5276,7 +5276,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-007": {
@@ -5325,7 +5325,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-008": {
@@ -5384,7 +5384,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-009-client-close": {
@@ -5447,7 +5447,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-010": {
@@ -5514,7 +5514,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-012": {
@@ -5573,7 +5573,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-013-blocked": {
@@ -5646,7 +5646,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-014": {
@@ -5709,7 +5709,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-015": {
@@ -5788,7 +5788,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-016-deadline": {
@@ -5884,7 +5884,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-018-idle": {
@@ -5967,7 +5967,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-019-tls": {
@@ -6049,7 +6049,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-020": {
@@ -6098,7 +6098,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:PROTO-021": {
@@ -6192,8 +6192,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams",
-     "results/lab/20260925T220859Z-tls"
+     "results/lab/20260926T012821Z-streams",
+     "results/lab/20260926T012740Z-tls"
     ],
     "variants": {
      "streams:PROTO-022": {
@@ -6474,7 +6474,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260925T220940Z-streams"
+     "results/lab/20260926T012821Z-streams"
     ],
     "variants": {
      "streams:TRUST-007-sse": {
@@ -7293,7 +7293,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only."
+   "note": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. Owner steps: ferrum-edge/ferrum-anvil#2."
   },
   {
    "id": "REL-002",
@@ -7313,7 +7313,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build."
+   "note": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build. Owner steps: ferrum-edge/ferrum-anvil#2."
   },
   {
    "id": "REL-004",
@@ -7369,7 +7369,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist."
+   "note": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
   },
   {
    "id": "REL-007",

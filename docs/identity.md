@@ -190,7 +190,7 @@ The owner has to supply:
 | Facebook | Facebook Login manual flow. The code exchange and token inspection need the app secret, so they run in a broker. The account is identified by the app-scoped user id. | A Meta app with Facebook Login; the exact redirect URI(s); any app review it requires; the app id and broker URL in the deployment configuration. | Broker only |
 | Identity broker (GitHub, Facebook, optionally Google) | Not built. | A minimal HTTPS service run by the owner. It receives the authorization code, PKCE verifier and state binding from the desktop, exchanges them with the provider using the secret, verifies the account, and returns a short-lived signed identity assertion whose issuer and signing key are pinned in the desktop build. It receives identity and session data only: never API bodies, workspace data or keys. | Holds all provider secrets |
 
-Provider documentation changes. Re-check these requirements during
+Tracked as ferrum-edge/ferrum-anvil#3. Provider documentation changes. Re-check these requirements during
 registration. Before production provider support is claimed, the plan also
 requires real-provider acceptance tests with test accounts.
 
