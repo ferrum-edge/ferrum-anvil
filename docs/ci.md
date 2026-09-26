@@ -38,6 +38,19 @@ The shared setup (`.github/actions/setup`) installs the Linux Tauri libraries
 `librsvg2-dev`, `libxdo-dev`, …), the Rust toolchain from `rust-toolchain.toml`,
 a Rust build cache, Node.js 22.23.3 and the desktop npm dependencies.
 
+Build-time choices that keep the Rust lanes fast:
+
+- The Rust build cache is saved **even when a job fails** (`cache-on-failure`),
+  so a lane that keeps failing, as Windows did while platform-specific tests
+  were fixed, still starts warm instead of rebuilding the whole dependency
+  graph. Release builds opt out: a failed release never writes the cache.
+- `ci.yml` builds dev and test profiles with `debug = "line-tables-only"`
+  (`CARGO_PROFILE_{DEV,TEST}_DEBUG`). Backtraces keep file and line; full
+  debug info would mostly cost link time (worst with the MSVC linker) and
+  cache size.
+- `cargo test --no-fail-fast` reports every failing test binary in one run.
+  Without it, a failure stops at the first binary and hides later ones.
+
 ## Reproducing locally
 
 Prerequisites: rustup, Node.js ≥ 22, and on Linux the libraries listed above.
