@@ -24,7 +24,7 @@ are the required checks for a change.
 | **Frontend** | `npm ci` → `npm run typecheck` → `npm run e2e:typecheck` → `npm test` (vitest, jsdom) → `npm run build` → `npm audit --omit=dev --audit-level=high` |
 | **Contract & catalog drift** | `cargo run -p anvil-cli -- schema --out contracts/schemas` and `npm run contracts`, then fail if `contracts/` or `apps/desktop/src/generated/` changed; `cargo test -p anvil-diagnostics --test catalog_drift` |
 | **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `scripts/release-check.sh` (dependency-graph check only) |
-| **Secret scan** | gitleaks 8.30.1 (downloaded and SHA-256 verified) over the full git history and the working tree, with `.gitleaks.toml` |
+| **Secret scan** | gitleaks 8.30.1 (downloaded and SHA-256 verified) over the full git history of the checked-out commit (for a PR, its merge commit: the PR's own commits plus all of `main`; other branches are not scanned) and the working tree, with `.gitleaks.toml` |
 
 The catalog drift test (`crates/anvil-diagnostics/tests/catalog_drift.rs`)
 extracts every finding code the rules and engine adapters can emit and fails
@@ -79,7 +79,7 @@ cargo install --locked cargo-deny@0.20.2
 cargo deny --locked check
 node scripts/licenses.mjs --check        # regenerate with: node scripts/licenses.mjs
 scripts/release-check.sh                 # graph check only
-gitleaks git --config .gitleaks.toml --redact .   # gitleaks 8.30.1
+gitleaks git --config .gitleaks.toml --log-opts="--full-history --diff-filter=tuxdb HEAD" --redact .   # gitleaks 8.30.1
 
 # Lab (fixed ports 18080/18090/19000-19099 — stop any other lab first)
 lab/scripts/fetch-gateway.sh             # needs `gh` (authenticated) and verifies RELEASE.lock
