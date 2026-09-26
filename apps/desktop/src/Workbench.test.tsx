@@ -2,7 +2,8 @@
 // Tauri backend is a scripted fake). Switching workspaces keeps unsaved drafts
 // and live sessions; Runner and Load tests keep a backend run's Stop control
 // while another view is shown; closing or deleting a tab stops (after
-// confirmation) what only that tab controlled.
+// confirmation) what only that tab controlled, and a tab whose work could not
+// be stopped stays open.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -52,6 +53,10 @@ const plan: LoadPlan = {
 } as LoadPlan;
 
 let requests: Record<string, RequestDefinition>;
+// The fake's sessions, as the backend tracks them: an open still connecting
+// (its `session_open` call pending) and sessions that finished opening.
+let connecting: Map<string, (err: string) => void>;
+let openSessions: Set<string>;
 
 function backend(overrides: Record<string, (args: Record<string, unknown>) => unknown> = {}) {
   requests = {
@@ -60,6 +65,8 @@ function backend(overrides: Record<string, (args: Record<string, unknown>) => un
     r3: request("r3", "B", "Gamma"),
     s1: request("s1", "A", "Socket", { protocol: "web_socket", url: "wss://s1.test/" }),
   };
+  connecting = new Map();
+  openSessions = new Set();
   invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
     if (overrides[cmd]) return overrides[cmd](args);
     switch (cmd) {
@@ -87,8 +94,19 @@ function backend(overrides: Record<string, (args: Record<string, unknown>) => un
         return [];
       case "load_plans":
         return [plan];
-      case "session_cancel":
+      case "session_open":
+        // Stays connecting until the test opens it or it is canceled.
+        return new Promise((_resolve, reject) => connecting.set(args.executionId as string, reject));
+      case "session_cancel": {
+        // Like the backend: canceling an open still connecting fails that open.
+        const id = args.executionId as string;
+        const pending = connecting.get(id);
+        if (pending) {
+          connecting.delete(id);
+          pending("the session was canceled before it opened");
+        } else if (!openSessions.delete(id)) throw "the session is no longer open";
         return null;
+      }
       case "cancel_execution":
         return true;
       default:
@@ -106,9 +124,12 @@ async function boot() {
   await screen.findByRole("treeitem", { name: /Alpha/ });
 }
 
+// The open request tabs (the request editor has sub-tabs of its own, e.g. "WebSocket").
+const openTabs = () => within(screen.getByRole("tablist", { name: "Open requests" }));
+
 async function openTab(name: string) {
   fireEvent.click(screen.getByRole("treeitem", { name: new RegExp(name) }));
-  await screen.findByRole("tab", { name: new RegExp(name) });
+  await openTabs().findByRole("tab", { name: new RegExp(name) });
 }
 
 async function selectWorkspace(id: string, expectItem: string) {
@@ -136,21 +157,21 @@ describe("switching workspaces", () => {
     expect(screen.getAllByLabelText("unsaved")).toHaveLength(2);
 
     await selectWorkspace("B", "Gamma");
-    expect(screen.queryByRole("tab", { name: /Alpha/ })).toBeNull();
-    expect(screen.queryByRole("tab", { name: /Beta/ })).toBeNull();
+    expect(openTabs().queryByRole("tab", { name: /Alpha/ })).toBeNull();
+    expect(openTabs().queryByRole("tab", { name: /Beta/ })).toBeNull();
     expect(screen.getByRole("option", { name: /One/ }).textContent).toContain("2 unsaved");
     await openTab("Gamma");
 
     await selectWorkspace("A", "Alpha");
-    expect(screen.queryByRole("tab", { name: /Gamma/ })).toBeNull();
+    expect(openTabs().queryByRole("tab", { name: /Gamma/ })).toBeNull();
     expect(screen.getAllByLabelText("unsaved")).toHaveLength(2);
     // The tab that was active in this workspace is active again.
     expect(urlField().value).toBe("https://beta-edited.test/");
-    fireEvent.click(screen.getByRole("tab", { name: /Alpha/ }));
+    fireEvent.click(openTabs().getByRole("tab", { name: /Alpha/ }));
     await waitFor(() => expect(urlField().value).toBe("https://alpha-edited.test/"));
 
     await selectWorkspace("B", "Gamma");
-    expect(screen.getByRole("tab", { name: /Gamma/ })).toBeTruthy();
+    expect(openTabs().getByRole("tab", { name: /Gamma/ })).toBeTruthy();
     expect(calls("request_save")).toHaveLength(0);
     expect(ask).not.toHaveBeenCalled();
   });
@@ -191,13 +212,60 @@ describe("closing a tab with backend work", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
     await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
     expect(ask.mock.calls[0][0]).toContain("open session");
-    expect(screen.getByRole("tab", { name: /Socket/ })).toBeTruthy();
+    expect(openTabs().getByRole("tab", { name: /Socket/ })).toBeTruthy();
     expect(calls("session_cancel")).toHaveLength(0);
 
     ask.mockResolvedValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
     await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
-    await waitFor(() => expect(screen.queryByRole("tab", { name: /Socket/ })).toBeNull());
+    await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+    // The open was still connecting: canceling it leaves no session behind, and
+    // its failed open is not reported as an error.
+    expect(connecting.size).toBe(0);
+    expect(openSessions.size).toBe(0);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("disconnects a session that finished opening", async () => {
+    backend();
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    const execId = calls("session_open")[0].executionId as string;
+    connecting.delete(execId);
+    openSessions.add(execId);
+
+    ask.mockResolvedValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
+    await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+    expect(openSessions.size).toBe(0);
+  });
+
+  it("keeps the tab, and the request, when its session cannot be stopped", async () => {
+    backend({
+      session_cancel: () => {
+        throw "backend unavailable";
+      },
+      request_delete: (a) => void delete requests[a.requestId as string],
+    });
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+
+    ask.mockResolvedValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
+    expect((await screen.findByRole("status")).textContent).toContain("Could not stop “Socket”");
+    expect(openTabs().getByRole("tab", { name: /Socket/ })).toBeTruthy();
+
+    ask.mockResolvedValueOnce(true);
+    fireEvent.click(within(screen.getByRole("treeitem", { name: /Socket/ })).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(calls("session_cancel")).toHaveLength(2));
+    expect(calls("request_delete")).toHaveLength(0);
+    expect(openTabs().getByRole("tab", { name: /Socket/ })).toBeTruthy();
+    expect(screen.getByRole("treeitem", { name: /Socket/ })).toBeTruthy();
   });
 
   it("cancels a request in flight when its tab is closed", async () => {
@@ -212,7 +280,7 @@ describe("closing a tab with backend work", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close Alpha" }));
     await waitFor(() => expect(calls("cancel_execution")).toEqual([{ executionId: execId }]));
     expect(ask.mock.calls[0][0]).toContain("in flight");
-    await waitFor(() => expect(screen.queryByRole("tab", { name: /Alpha/ })).toBeNull());
+    await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Alpha/ })).toBeNull());
   });
 
   it("stops a live session when its request is deleted", async () => {
@@ -227,8 +295,22 @@ describe("closing a tab with backend work", () => {
     fireEvent.click(within(screen.getByRole("treeitem", { name: /Socket/ })).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
     expect(ask.mock.calls[0][0]).toContain("will be stopped");
-    expect(calls("request_delete")).toEqual([{ requestId: "s1" }]);
-    await waitFor(() => expect(screen.queryByRole("tab", { name: /Socket/ })).toBeNull());
+    await waitFor(() => expect(calls("request_delete")).toEqual([{ requestId: "s1" }]));
+    await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+    expect(connecting.size).toBe(0);
+  });
+
+  it("warns about unsaved edits when deleting an open request", async () => {
+    backend();
+    await boot();
+    await openTab("Alpha");
+    fireEvent.change(urlField(), { target: { value: "https://alpha-edited.test/" } });
+
+    ask.mockResolvedValueOnce(false);
+    fireEvent.click(within(screen.getByRole("treeitem", { name: /Alpha/ })).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    expect(ask.mock.calls[0][0]).toContain("unsaved changes will be lost");
+    expect(calls("request_delete")).toHaveLength(0);
   });
 });
 

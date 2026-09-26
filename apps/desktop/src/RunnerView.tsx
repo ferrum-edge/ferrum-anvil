@@ -39,10 +39,16 @@ export function RunnerView(props: {
   const requests = useMemo(() => flatRequests(props.tree), [props.tree]);
   const folders = useMemo(() => flatFolders(props.tree), [props.tree]);
 
+  const wsRef = useRef(props.workspaceId);
+  wsRef.current = props.workspaceId;
+  /** The workspace's reports, or null when the workspace changed meanwhile. */
   const reload = async () => {
-    const [s, r] = await Promise.all([api.scenarios(props.workspaceId), api.runReports(props.workspaceId)]);
+    const w = props.workspaceId;
+    const [s, r] = await Promise.all([api.scenarios(w), api.runReports(w)]);
+    if (w !== wsRef.current) return null;
     setScenarios(s);
     setReports(r);
+    return r;
   };
   // The run listeners outlive renders: read the current workspace and callbacks.
   const current = useRef({ reload, notify: props.notify });
@@ -58,7 +64,8 @@ export function RunnerView(props: {
     const b = onRunFinished((f) => {
       setLive((l) => (l && l.runId === f.run_id ? null : l));
       if (f.error) current.current.notify(`Run did not complete: ${f.error}`);
-      void current.current.reload().then(() => setSel({ kind: "report", id: f.run_id }));
+      // A run started in another workspace saves its report there: do not select it here.
+      void current.current.reload().then((r) => r?.some((x) => x.run_id === f.run_id) && setSel({ kind: "report", id: f.run_id }));
     });
     return () => {
       void a.then((f) => f());

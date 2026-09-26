@@ -75,6 +75,18 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   activeRef.current = active;
   const activeByWs = useRef<Record<string, string | null>>({});
   const prevWs = useRef<string | null>(null);
+  // Read after awaits (a resend, a session open): the workspaces as they are now.
+  const wsRef = useRef(ws);
+  wsRef.current = ws;
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
+  // The last selected workspace: Runner and Load tests stay mounted through a
+  // brief `ws === null` (a reload), keeping a live run's progress and Stop control.
+  const lastWs = useRef(ws);
+  if (ws) lastWs.current = ws;
+  const viewWs = ws ?? lastWs.current;
+  // Sessions this window canceled: their failed open is not an error to report.
+  const stopped = useRef(new Set<string>());
 
   const notify = (m: string) => setToast(m);
   const fail = (e: unknown) => setToast(String((e as Error).message ?? e));
@@ -125,6 +137,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       }
     });
     const ended = onSessionEnded((e) => {
+      stopped.current.delete(e.execution_id);
       setTabs((ts) => ts.map((t) => (t.session?.execId === e.execution_id ? { ...t, session: null, view: e.view ?? t.view } : t)));
       if (e.error) setToast(`Session ended: ${e.error}`);
       void loadHistoryRef.current?.();
@@ -176,8 +189,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     }
   };
 
-  // The tab's own workspace: a send can outlive a workspace switch.
-  const envOf = (wsId: string) => (wsId === ws?.id ? ws : workspaces.find((w) => w.id === wsId))?.active_environment_id ?? null;
+  // The tab's own workspace, as it is now: a send can outlive a workspace switch
+  // or an environment change (a resend runs after a prompt).
+  const envOf = (wsId: string) => {
+    const cur = wsRef.current;
+    return (cur?.id === wsId ? cur : workspacesRef.current.find((w) => w.id === wsId))?.active_environment_id ?? null;
+  };
 
   const send = async (sendAnyway = false, id: string | null = active) => {
     const t = tabsRef.current.find((x) => x.req.id === id);
@@ -213,7 +230,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       await api.sessionOpen({ workspace_id: t.wsId, request_id: t.req.id, spec: t.req.spec, environment_id: envOf(t.wsId), send_anyway: false }, execId);
     } catch (e) {
       updateTab(t.req.id, { session: null });
-      fail(e);
+      if (!stopped.current.delete(execId)) fail(e);
     }
   };
 
@@ -227,13 +244,24 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     if (tab?.execId) await api.cancel(tab.execId);
   };
 
-  // Stop what a tab still runs in the backend: the tab is its only control.
-  const stopWork = async (t: OpenTab) => {
+  // Stop what a tab still runs in the backend: the tab is its only control, so
+  // it must stay open when this fails. Returns whether nothing is left running.
+  const stopWork = async (t: OpenTab): Promise<boolean> => {
+    const sid = t.session?.execId;
     try {
-      if (t.session) await api.sessionCancel(t.session.execId);
+      if (sid) {
+        stopped.current.add(sid);
+        // Already over (its end event is on the way): nothing is left to stop.
+        await api.sessionCancel(sid).catch((e) => {
+          if (String((e as Error).message ?? e) !== "the session is no longer open") throw e;
+        });
+      }
       if (t.running && t.execId) await api.cancel(t.execId);
+      return true;
     } catch (e) {
-      fail(e);
+      if (sid) stopped.current.delete(sid);
+      notify(`Could not stop “${t.req.name}”, so its tab stays open: ${String((e as Error).message ?? e)}`);
+      return false;
     }
   };
 
@@ -256,7 +284,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       if (!discard) return;
     }
     const cur = tabsRef.current.find((x) => x.req.id === id);
-    if (cur) await stopWork(cur);
+    if (cur && !(await stopWork(cur))) return;
     setTabs((ts) => ts.filter((x) => x.req.id !== id));
     setActive((a) => (a === id ? (tabsRef.current.find((x) => x.req.id !== id && x.wsId === t.wsId)?.req.id ?? null) : a));
   };
@@ -264,15 +292,19 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const removeNode = async (n: TreeNode) => {
     // The unfiltered node: a filtered folder may hide some of its requests.
     const ids = new Set(requestIds([findNode(tree, n.id) ?? n]));
-    const live = tabsRef.current.some((t) => ids.has(t.req.id) && liveWork(t));
-    const stop = live ? " Its open session or request in flight will be stopped." : "";
-    const ok = await ask(n.kind === "folder" ? `Delete folder “${n.name}” and everything in it?${stop}` : `Delete “${n.name}”?${stop}`, { title: "Delete", kind: "warning", okLabel: "Delete" });
+    const affected = tabsRef.current.filter((t) => ids.has(t.req.id));
+    const stop = affected.some((t) => liveWork(t)) ? " Its open session or request in flight will be stopped." : "";
+    const dirty = affected.filter(isDirty).length;
+    const edits = !dirty ? "" : n.kind === "request" ? " Its unsaved changes will be lost." : ` Unsaved changes in ${dirty} open tab(s) will be lost.`;
+    const ok = await ask(n.kind === "folder" ? `Delete folder “${n.name}” and everything in it?${stop}${edits}` : `Delete “${n.name}”?${stop}${edits}`, { title: "Delete", kind: "warning", okLabel: "Delete" });
     if (!ok) return;
     try {
+      // Stop first: a tab whose work could not be stopped stays, and so does its request.
+      const gone = tabsRef.current.filter((t) => ids.has(t.req.id));
+      const results = await Promise.all(gone.map(stopWork));
+      if (results.includes(false)) return;
       if (n.kind === "folder") await api.deleteFolder(n.id);
       else await api.deleteRequest(n.id);
-      const gone = tabsRef.current.filter((t) => ids.has(t.req.id));
-      await Promise.all(gone.map(stopWork));
       setTabs((ts) => ts.filter((t) => !ids.has(t.req.id)));
       setActive((a) => (a && ids.has(a) ? null : a));
       await loadTree();
@@ -354,7 +386,10 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
               const w = await api.createWorkspace("New workspace");
               await loadWorkspaces(w.id);
               setDialog({ kind: "rename", id: w.id, isFolder: false, name: w.name });
-            } else setWs(workspaces.find((w) => w.id === e.target.value) ?? null);
+            } else {
+              const w = workspaces.find((x) => x.id === e.target.value);
+              if (w) setWs(w);
+            }
           }}
         >
           {workspaces.map((w) => (
@@ -418,9 +453,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         </button>
       </header>
 
-      {mounted.has("load") && ws && (
+      {mounted.has("load") && viewWs && (
         <LoadView
-          workspaceId={ws.id}
+          workspaceId={viewWs.id}
           tree={tree}
           environments={envs}
           notify={notify}
@@ -428,12 +463,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           onLiveChange={(load) => setLiveRuns((l) => ({ ...l, load }))}
         />
       )}
-      {mounted.has("runner") && ws && (
+      {mounted.has("runner") && viewWs && (
         <RunnerView
-          workspaceId={ws.id}
+          workspaceId={viewWs.id}
           tree={tree}
           environments={envs}
-          activeEnvironment={ws.active_environment_id ?? null}
+          activeEnvironment={viewWs.active_environment_id ?? null}
           notify={notify}
           hidden={view !== "runner"}
           onLiveChange={(runner) => setLiveRuns((l) => ({ ...l, runner }))}
