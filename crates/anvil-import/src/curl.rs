@@ -690,7 +690,20 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
                 headers.iter().find(|h| h.name.eq_ignore_ascii_case("SOAPAction")).map(|h| h.value.trim_matches('"').to_string())
                 && crate::util::is_xml_media(&mime)
             {
-                headers.retain(|h| !h.name.eq_ignore_ascii_case("SOAPAction") && !h.name.eq_ignore_ascii_case("content-type"));
+                // The engine derives `text/xml; charset=utf-8` for SOAP 1.1.
+                // Preserve any explicit type with different parameters so its
+                // charset and other media-type details reach the request.
+                let is_derivable = |content_type: &str| {
+                    let params = crate::util::media_params(content_type);
+                    crate::util::media_essence(content_type) == "text/xml"
+                        && params.len() == 1
+                        && params[0].0 == "charset"
+                        && params[0].1.eq_ignore_ascii_case("utf-8")
+                };
+                let derivable =
+                    headers.iter().filter(|h| h.enabled && h.name.eq_ignore_ascii_case("content-type")).all(|h| is_derivable(&h.value));
+                headers
+                    .retain(|h| !h.name.eq_ignore_ascii_case("SOAPAction") && !(derivable && h.name.eq_ignore_ascii_case("content-type")));
                 body = Body::Soap { version: SoapVersion::Soap11, envelope: joined, action: Some(action) };
             } else {
                 let (mut bd, _) = body_from_text(Some(&mime), joined);
