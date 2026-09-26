@@ -5,7 +5,9 @@
 //!   every secret must be owned by a workspace in the bundle; no two objects
 //!   share an id. Revisions of requests outside the bundle are left out.
 //! * Safety: imports never activate a TLS verification bypass, never mark
-//!   scenarios or load plans as trusted, and never enable legacy HMAC.
+//!   scenarios or load plans as trusted, never enable legacy HMAC, and never
+//!   open an imported collection's root folder to its workspace. Linked
+//!   local files are listed: they need choosing on this device.
 
 use crate::bundle::BundleError;
 use crate::graph::PortableGraph;
@@ -208,6 +210,32 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         warnings.push(format!(
             "TLS profile(s) {} present this machine's X.509-SVID from the SPIFFE Workload API; check their host bindings before sending.",
             svid_profiles.join(", ")
+        ));
+    }
+    // Opening an import root to its workspace is a choice made on one
+    // device; it never arrives in a bundle. An import root names only
+    // environments of its own workspace.
+    let environments: HashMap<Id, Id> = g.environments.iter().map(|e| (e.meta.id, e.workspace_id)).collect();
+    let mut opened = 0;
+    for f in &mut g.folders {
+        if f.use_workspace_scope {
+            f.use_workspace_scope = false;
+            opened += 1;
+        }
+        let ws = f.workspace_id;
+        f.import_environment_ids.retain(|e| environments.get(e) == Some(&ws));
+    }
+    if opened > 0 {
+        warnings.push(format!(
+            "{opened} imported collection(s) used their workspace's variables, environment and auth; the import turned that off. Turn it on again deliberately."
+        ));
+    }
+    let linked = g.linked_files();
+    if !linked.is_empty() {
+        warnings.push(format!(
+            "{} linked local file(s) name files on the machine that made the bundle and stay unused until chosen on this device (or attach the files instead): {}",
+            linked.len(),
+            linked.join("; ")
         ));
     }
     Ok(warnings)

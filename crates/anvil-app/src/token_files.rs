@@ -38,18 +38,7 @@ impl App {
     /// Bind the token file the user picked in the native open dialog. Only
     /// the desktop's `file_choose` calls this, with the dialog's result.
     pub fn bind_token_file(&self, picked: &Path) -> Result<TokenFileBinding> {
-        if !picked.is_absolute() {
-            return Err(AppError::Invalid("the chosen file has no absolute path".into()));
-        }
-        let canonical = std::fs::canonicalize(picked)?;
-        if !std::fs::metadata(&canonical)?.is_file() {
-            return Err(AppError::Invalid("the chosen token file is not a regular file".into()));
-        }
-        let path = canonical.to_str().ok_or_else(|| AppError::Invalid("the token file's path is not valid UTF-8".into()))?.to_string();
-        // Setting paths are templates; a bound path must read as itself.
-        if path.contains("{{") {
-            return Err(AppError::Invalid("the token file's path contains '{{', which Anvil reads as a variable".into()));
-        }
+        let path = chosen_path(picked, "token file")?;
         if let Some(b) = self.token_file_bindings()?.into_iter().find(|b| b.path == path) {
             return Ok(b);
         }
@@ -83,6 +72,24 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// The canonical path of a regular file the user picked in the native
+/// dialog, as it is bound. `what` names the file in errors.
+pub(crate) fn chosen_path(picked: &Path, what: &str) -> Result<String> {
+    if !picked.is_absolute() {
+        return Err(AppError::Invalid("the chosen file has no absolute path".into()));
+    }
+    let canonical = std::fs::canonicalize(picked)?;
+    if !std::fs::metadata(&canonical)?.is_file() {
+        return Err(AppError::Invalid(format!("the chosen {what} is not a regular file")));
+    }
+    let path = canonical.to_str().ok_or_else(|| AppError::Invalid(format!("the {what}'s path is not valid UTF-8")))?.to_string();
+    // Setting paths are templates; a bound path must read as itself.
+    if path.contains("{{") {
+        return Err(AppError::Invalid(format!("the {what}'s path contains '{{{{', which Anvil reads as a variable")));
+    }
+    Ok(path)
 }
 
 /// Paths of every JWT-SVID `file` source in an auth setting.

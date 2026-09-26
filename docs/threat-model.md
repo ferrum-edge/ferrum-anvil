@@ -21,8 +21,8 @@ against it).
 | Boundary | Untrusted side | Controls |
 |---|---|---|
 | Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; no response can call IPC or change settings |
-| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR | Size/node/ref limits, no external `$ref`/DTD fetching, XXE disabled, zip traversal/symlink/bomb checks, checksums, preview before apply, trust normalisation, nothing executes on import, scripts kept as inert notes |
-| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in backend; secrets returned only as references; file access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire, are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced); a request spec from the webview may not name a linked local file; a JWT-SVID token file is read only if it was bound in the vault through the dialog; capability allowlist (`capabilities/default.json`: no open or save dialog, no filesystem plugin). Linked files already stored in a workspace (for example from an imported bundle) are still read when that saved request runs without an edited draft, and datasets linked to a local file are still read by the load plans and scenarios that use them |
+| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR | Size/node/ref limits, no external `$ref`/DTD fetching, XXE disabled, zip traversal/symlink/bomb checks, checksums, preview before apply, trust normalisation, nothing executes on import, scripts kept as inert notes; a spec import into an existing workspace lands under an import root that keeps the source's own auth (explicitly none when it has none), variables and settings, and its requests resolve no variable, environment or auth of the destination workspace, no value extracted during a run or load chain by a request outside that root and no dataset row, no JWT-SVID of this device (Workload API or token file) and no TLS profile whose client identity is bound to no host (a bound one is presented only to its hosts), until the user opens that root on this device (desktop control pending); imported linked local files stay inert until bound on this device for the request or dataset that names them (desktop control pending) |
+| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in backend; secrets returned only as references; file access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire, are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced); a request spec from the webview may not name a linked local file; a JWT-SVID token file is read only if it was bound in the vault through the dialog; capability allowlist (`capabilities/default.json`: no open or save dialog, no filesystem plugin). A linked local file that a saved request, gRPC schema or dataset names (for example one from an imported bundle) is read only once that exact file was bound on this device through the dialog (purpose `linked_file`) for that request or dataset; the desktop control that opens this dialog is pending, so the app does not yet offer a way to bind one |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
 | Worker process | — | Job over stdin (not argv/env), only referenced secrets, killed with the parent, no inherited UI state |
@@ -92,6 +92,39 @@ against it).
 - **Malicious bundle trying to enable insecure settings:** import normalisation
   (TLS bypass, plain-HTTP marker trust, credential forwarding, legacy HMAC,
   scenario/plan trust) with warnings in the preview.
+- **Imported reference to a local file:** a linked local file
+  (`AttachmentRef::LinkedFile`) names a path on the machine that made it. On
+  any other device, and on this one until that exact file is bound in the
+  native dialog (`file_choose`, purpose `linked_file`) for the request or
+  dataset that names it, that request, gRPC schema or dataset is refused
+  before anything is read or sent. The desktop control that opens this
+  dialog is pending, so the app does not yet offer a way to bind one. A
+  binding (`anvil_app::linked_files`) covers one request or dataset and one
+  path, so a later import naming the same path cannot use it, and a bundle
+  import drops the bindings of every request and dataset it overwrites.
+  Bindings live in the vault, are never exported and cannot be created by an
+  import. The bundle import preview lists every linked file the bundle names.
+  The CLI cannot bind a linked file, but it reads one bound in the desktop
+  when it runs that saved request or dataset from the same profile. A load
+  run reads each bound file once, in the app, and hands the worker the bytes:
+  the worker never opens a local path.
+- **Imported collection using the destination's credentials:** a spec import
+  into an existing workspace lands under an import root that carries the
+  source's own auth, variables and settings (explicitly "no auth" when it has
+  none). Its requests never resolve the destination workspace's variables,
+  auth or environments, secret or not. In a collection run or load chain
+  they never see a value extracted by a request outside the import root, or
+  the dataset row, and a value they extract is not visible outside it: each
+  prepared request carries its import root (`ExecutionContext::scope`) and
+  run-local values are handed only to steps of the same scope. They never
+  present this device's JWT-SVID (Workload API or token file), and a TLS
+  profile whose client identity (certificate or X.509-SVID) is bound to no
+  host is refused for them. All of this holds until the user explicitly
+  opens the import root to the workspace on this device
+  (`App::set_import_root_workspace_scope`; the desktop control is pending);
+  that choice is never imported. TLS trust settings and proxies selected by
+  the destination still apply, and a client identity bound to hosts is
+  presented only to those hosts.
 - **Bundle key-derivation costs:** the Argon2id costs in a bundle manifest are
   read before the vault authenticates, so costs outside documented bounds
   (memory, passes, lanes, memory × passes, salt length; see

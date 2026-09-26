@@ -127,6 +127,7 @@ pub fn run() {
             commands::folder_create,
             commands::folder_get,
             commands::folder_save,
+            commands::folder_set_workspace_scope,
             commands::folder_move,
             commands::folder_delete,
             commands::request_create,
