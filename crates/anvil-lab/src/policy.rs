@@ -189,6 +189,35 @@ fn gw010_body(env: &Env) -> Fut<'_> {
     })
 }
 
+/// Release delta (docs/audit/gateway-0.9.7-delta.md, issue #5685): an
+/// allow_list entry ending in punctuation (`anvil-lab-monitor/`) followed by a
+/// non-word character. Ferrum Edge 0.9.5 anchors every entry with `\b...\b`,
+/// which can never match at that edge, so the bot pattern wins (403); 0.9.7
+/// anchors only word-character edges and lets the request through.
+fn gw010_bot_allow_edge(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = env.mark();
+        let before = env.fixtures.echo.log.count_requests();
+        let ua = "anvil-lab-bot/1.0 (anvil-lab-monitor/)";
+        let o = env.send(&with_header(env.req("GET", "/gw/bot/"), "User-Agent", ua)).await;
+        let ops = env.op(from, "gw010-bot");
+        if crate::gateway::current_lock().release == "v0.9.5" {
+            backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "bot block despite the allow entry", &mut c);
+            plugin_reject(&mut c, &o, 403, "http.forbidden");
+            no_claim(&mut c, &o, "bot", Confidence::Likely);
+        } else {
+            backend_hits(before, env.fixtures.echo.log.count_requests(), 1, "allow entry with a punctuation edge admits", &mut c);
+            c.success(CheckKind::GroundTruth, &o);
+            c.absent_prefix(&o, "ferrum.outcome");
+        }
+        operator_field(&mut c, &ops, "/request_user_agent", &[ua]);
+        let r = env.send(&with_header(env.req("GET", "/gw/bot/"), "User-Agent", "anvil-lab-client/1.0")).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
 /// GW-010 / TRUST-006: bot detection's default 403 is byte-identical to the
 /// WAF reject; Anvil must give both the same cautious answer.
 fn gw010_bot(env: &Env) -> Fut<'_> {
@@ -270,7 +299,7 @@ fn opa_fail_closed(c: &mut Checks, env: &Env, o: &ExecutionOutput) {
     catalog_match(c, o, env.trusted, "plugin.opa.fail_closed");
     if env.trusted {
         // A trusted 5xx without a marker: absence is reported as unknown and
-        // must name the plugin-rejection possibility (0.9.5 plugin rejects
+        // must name the plugin-rejection possibility (0.9.5 / 0.9.7 plugin rejects
         // carry no X-Gateway-Error).
         c.has(o, "ferrum.marker.absent");
         c.max_confidence(o, "ferrum.marker.absent", Confidence::Unknown);
@@ -680,7 +709,7 @@ fn gw020_content(env: &Env) -> Fut<'_> {
         c.status_in(&o, &[502]);
         c.not_success(&o);
         c.add(CheckKind::GroundTruth, "public body names the content guard", body_text(&o).contains("content guard"), body_text(&o));
-        // Live 0.9.5 behaviour (the source catalog lists no token here): the
+        // Live 0.9.5 / 0.9.7 behaviour (the source catalogs list no token here): the
         // gateway stamps backend_error on its own response-policy rejection.
         c.add(
             CheckKind::GroundTruth,
@@ -914,6 +943,11 @@ pub fn all() -> Vec<Def> {
         Def { id: "GW-010", title: "WAF header-rule block vs byte-identical application 403", run: gw010 },
         Def { id: "GW-010-BODY", title: "WAF request-body rule block", run: gw010_body },
         Def { id: "GW-010-BOT", title: "Bot-detection 403 indistinguishable from WAF 403", run: gw010_bot },
+        Def {
+            id: "GW-010-BOT.allow-edge",
+            title: "Bot allow-list entry with a punctuation edge (release-dependent)",
+            run: gw010_bot_allow_edge,
+        },
         Def { id: "GW-012", title: "OPA explicit denial (+ application 403 lookalikes)", run: gw012 },
         Def { id: "GW-013-TIMEOUT", title: "OPA stalls; gateway fails closed (+ application 503 lookalike)", run: gw013_timeout },
         Def { id: "GW-013-REFUSED", title: "OPA unreachable; recovery restores the policy service", run: gw013_refused },
@@ -942,7 +976,7 @@ const SKIPPED: &[(&str, &str, &str)] = &[(
     "Geo restriction (country block / GeoIP database unavailable)",
     "geo_restriction needs a readable MaxMind country .mmdb: `ferrum-edge validate` rejects a missing db_path \
      ('not accessible before open'), no database is vendored in the repo and the lab may not download one, so neither \
-     the country-deny nor the database-unavailable path is reachable with v0.9.5 file mode here.",
+     the country-deny nor the database-unavailable path is reachable with {release} file mode here.",
 )];
 
 pub fn profile() -> Profile {

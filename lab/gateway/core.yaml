@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "core" (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "core" (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: UP-001..003, UP-009..014, UP-020, GW-001, GW-006, GW-007, GW-008,
 #            GW-016, GW-017, GW-018 (+ positive control).

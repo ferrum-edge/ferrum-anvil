@@ -1,5 +1,5 @@
 //! Scenarios for the `auth` gateway profile: every authentication family
-//! Ferrum Edge 0.9.5 offers that a loopback lab can drive for real
+//! Ferrum Edge 0.9.5 / 0.9.7 offers that a loopback lab can drive for real
 //! (key_auth, basic_auth, jwt_auth, jwks_auth, DPoP, hmac_auth v2,
 //! oauth2_introspection, ldap_auth, multi-auth, access_control,
 //! soap_ws_security UsernameToken / X.509 signature / SAML, and the
@@ -531,6 +531,46 @@ fn auth009(env: &Env) -> Fut<'_> {
     })
 }
 
+/// Release delta (docs/audit/gateway-0.9.7-delta.md, issue #5522): a token
+/// whose `iss` is an array. Ferrum Edge 0.9.5 accepts it on jwt_auth (no
+/// issuer configured) and on jwks_auth when the array contains the provider's
+/// issuer; 0.9.7 rejects both with the ordinary 401 bodies. Either way the
+/// diagnosis must come from the running release's catalog.
+fn auth009_iss_array(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let rejects = crate::gateway::current_lock().release != "v0.9.5";
+        let hs = env.fx.hs256(
+            &env.fx.secrets.alice_jwt_secret,
+            300,
+            None,
+            serde_json::json!({"anvil_consumer": "alice", "iss": [ISSUER, "https://other-idp.anvil-lab.invalid"]}),
+        );
+        let o = go(env, &ctx(env, "GET", "/auth/jwt/echo", bearer(&hs))).await;
+        let es = env.fx.issuer_token_with_iss(serde_json::json!([ISSUER, "https://other-idp.anvil-lab.invalid"]));
+        let j = go(env, &ctx(env, "GET", "/auth/jwks/echo", bearer(&es))).await;
+        if rejects {
+            signal(&mut c, &o, 401, "Invalid JWT token");
+            signal(&mut c, &j, 401, "Invalid or unrecognized JWT");
+            gateway_outcome(&mut c, env, &o);
+            gateway_outcome(&mut c, env, &j);
+        } else {
+            c.success(CheckKind::GroundTruth, &o);
+            c.success(CheckKind::GroundTruth, &j);
+            for x in [&o, &j] {
+                c.absent_prefix(x, "ferrum.outcome");
+            }
+        }
+        for x in [&o, &j] {
+            no_confirmed_text(&mut c, x, "issuer");
+            c.absent_prefix(x, "ferrum.catalog.unavailable");
+        }
+        let r = go(env, &ctx(env, "GET", "/auth/jwks/echo", bearer(&env.fx.good_token()))).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
 fn auth010(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -703,6 +743,54 @@ fn authx01(env: &Env) -> Fut<'_> {
         c.absent_prefix(&o, "http.service_unavailable");
         backend_untouched(&mut c, env, before);
         let good = "idp-at-lab-registered-0001";
+        env.fx.idp.register_token(
+            good,
+            serde_json::json!({"username": "alice", "sub": "alice", "iss": ISSUER, "aud": AUDIENCE, "token_type": "bearer"}),
+        );
+        let r = go(env, &ctx(env, "GET", "/auth/introspect/echo", bearer(good))).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
+/// Release delta (docs/audit/gateway-0.9.7-delta.md, issue #5523): the IdP
+/// reports an active token whose integer `nbf` lies in the future. Ferrum Edge
+/// 0.9.5 ignores introspection `nbf` and forwards the request; 0.9.7 answers
+/// 401 `Token is not yet valid` with a Bearer `invalid_token` challenge — a
+/// credential verdict, never an unavailable dependency.
+fn authx01_nbf(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let (before, intro) = (env.fx.echo.log.count_requests(), env.fx.idp.introspections());
+        let early = "idp-at-lab-not-yet-valid-0003";
+        env.fx.idp.register_token(
+            early,
+            serde_json::json!({
+                "username": "alice", "sub": "alice", "iss": ISSUER, "aud": AUDIENCE, "token_type": "bearer",
+                "nbf": chrono::Utc::now().timestamp() + 600,
+            }),
+        );
+        let o = go(env, &ctx(env, "GET", "/auth/introspect/echo", bearer(early))).await;
+        c.add(CheckKind::GroundTruth, "the gateway introspected the token at the IdP", env.fx.idp.introspections() > intro, "");
+        if crate::gateway::current_lock().release == "v0.9.5" {
+            c.success(CheckKind::GroundTruth, &o);
+            c.absent_prefix(&o, "ferrum.outcome");
+        } else {
+            signal(&mut c, &o, 401, "Token is not yet valid");
+            let ch = raw_challenge("/auth/introspect/echo", &[("Authorization", format!("Bearer {early}"))]).await;
+            c.add(
+                CheckKind::GroundTruth,
+                "Bearer invalid_token challenge",
+                ch.as_deref().is_some_and(|v| v.contains("invalid_token")),
+                format!("{ch:?}"),
+            );
+            c.has(&o, "http.unauthorized");
+            c.absent_prefix(&o, "http.service_unavailable");
+            gateway_outcome(&mut c, env, &o);
+            no_confirmed_text(&mut c, &o, "clock");
+            backend_untouched(&mut c, env, before);
+        }
+        let good = "idp-at-lab-registered-0004";
         env.fx.idp.register_token(
             good,
             serde_json::json!({"username": "alice", "sub": "alice", "iss": ISSUER, "aud": AUDIENCE, "token_type": "bearer"}),
@@ -971,7 +1059,7 @@ fn auth025(env: &Env) -> Fut<'_> {
         let o = go(env, &manual(env, "GET", "/auth/dpop", &h, None)).await;
         signal(&mut c, &o, 401, "DPoP replay");
         gateway_outcome(&mut c, env, &o);
-        c.add(CheckKind::GroundTruth, "0.9.5 sends no DPoP-Nonce challenge", header(&o, "dpop-nonce").is_none(), "");
+        c.add(CheckKind::GroundTruth, "the gateway sends no DPoP-Nonce challenge", header(&o, "dpop-nonce").is_none(), "");
         c.add(
             CheckKind::Diagnosis,
             "no automatic retry loop (one attempt)",
@@ -1640,11 +1728,13 @@ pub fn all() -> Vec<Def> {
         Def { id: "AUTH-007", title: "JWT without the configured consumer claim", run: auth007 },
         Def { id: "AUTH-008", title: "JWKS: token signed by an unpublished key (unknown kid)", run: auth008 },
         Def { id: "AUTH-009", title: "JWKS: issuer and audience mismatch", run: auth009 },
+        Def { id: "AUTH-009.iss-array", title: "Multi-valued JWT issuer (release-dependent verdict)", run: auth009_iss_array },
         Def { id: "AUTH-010", title: "JWT algorithm confusion (alg none, HS256 on a JWKS route)", run: auth010 },
         Def { id: "AUTH-X03", title: "JWKS provider outage past max-stale: same 401 as a bad token", run: authx03 },
         Def { id: "AUTH-015", title: "OAuth token endpoint outage: API request never sent", run: auth015 },
         Def { id: "AUTH-016", title: "OAuth client credentials + gateway token introspection", run: auth016 },
         Def { id: "AUTH-X01", title: "Introspection: IdP says the token is inactive (credential rejected)", run: authx01 },
+        Def { id: "AUTH-X01.nbf", title: "Introspection: active token not yet valid (release-dependent verdict)", run: authx01_nbf },
         Def { id: "AUTH-X02", title: "Introspection endpoint unavailable (dependency failure)", run: authx02 },
         Def { id: "AUTH-018", title: "HMAC v2 signed GET and POST", run: auth018 },
         Def { id: "AUTH-018.skew", title: "HMAC Date header outside the clock-skew window", run: auth018_skew },
@@ -1688,7 +1778,7 @@ fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
         (
             "AUTH-025.nonce",
             "DPoP server-nonce challenge",
-            "infeasible on Ferrum Edge 0.9.5: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4); AUTH-025 covers the replay half live",
+            "infeasible on {release}: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4, re-checked in the 0.9.7 source); AUTH-025 covers the replay half live",
         ),
     ]
 }
@@ -1750,8 +1840,9 @@ async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     }
     for (id, title, reason) in skips() {
         if args.only.is_empty() || args.only.iter().any(|s| s.eq_ignore_ascii_case(id)) {
+            let reason = crate::gateway::release_text(reason);
             eprintln!("{id:22} skipped {title}\n    — {reason}");
-            results.push(ctx.skipped(id, title, reason));
+            results.push(ctx.skipped(id, title, &reason));
         }
     }
     let fin = harness::finish(&ctx, &env, &results);

@@ -76,12 +76,22 @@ const ferrum = readdirSync(join(root, "catalog/ferrum"))
       public_tokens: c.public_tokens ?? [],
     };
   });
-const lock = Object.fromEntries(
-  readFileSync(join(root, "lab/gateway/RELEASE.lock"), "utf8")
-    .split("\n")
-    .filter((l) => l.trim() && !l.startsWith("#"))
-    .map((l) => l.trim().split(/\s+/)),
-);
+const readLock = (file) =>
+  Object.fromEntries(
+    readFileSync(file, "utf8")
+      .split("\n")
+      .filter((l) => l.trim() && !l.startsWith("#"))
+      .map((l) => l.trim().split(/\s+/)),
+  );
+const lock = readLock(join(root, "lab/gateway/RELEASE.lock"));
+// Every release the lab can run (`anvil-lab --release <tag>`), default pin included.
+const labReleases = readdirSync(join(root, "lab/gateway/releases"))
+  .filter((f) => f.endsWith(".lock"))
+  .sort()
+  .map((f) => {
+    const l = readLock(join(root, "lab/gateway/releases", f));
+    return { release: l.release ?? null, source_sha: l.source_sha ?? null };
+  });
 
 const targets = [];
 for (const d of readdirSync(dist).sort()) {
@@ -166,7 +176,7 @@ const evidence = {
   compatibility: {
     diagnostics_catalog: findings.version,
     ferrum_catalogs: ferrum,
-    lab_gateway: { release: lock.release ?? null, source_sha: lock.source_sha ?? null },
+    lab_gateway: { release: lock.release ?? null, source_sha: lock.source_sha ?? null, supported_releases: labReleases },
   },
   tests: runs
     ? {

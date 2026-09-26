@@ -69,7 +69,7 @@ fn ferrum_profile() -> IntegrationProfile {
         name: "lab streams gateway".into(),
         kind: IntegrationKind::FerrumGateway {
             hosts: GATEWAY_PORTS.iter().map(|p| HostBinding { host: "127.0.0.1".into(), port: Some(*p) }).collect(),
-            compatibility_id: "ferrum-edge-0.9.5".into(),
+            compatibility_id: crate::gateway::compatibility_id(),
             require_verified_tls: false,
             detail: None,
             console_url: None,
@@ -285,6 +285,20 @@ fn is_success(o: &ExecutionOutput) -> bool {
 /// New operator-log lines for `proxy_id` since line `from`.
 fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
     env.gateway.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(10).collect()
+}
+
+/// Like [`op_log`], for stream-proxy (TCP/TLS) sessions: the gateway writes
+/// their transaction line when it tears the session down, which can land just
+/// after the client has observed the close. Wait up to 2 s for the line.
+async fn op_log_settled(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
+    for _ in 0..20 {
+        let lines = op_log(env, from, proxy_id);
+        if !lines.is_empty() {
+            return lines;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    op_log(env, from, proxy_id)
 }
 
 fn op_from(env: &Env) -> usize {
@@ -1401,7 +1415,7 @@ fn up002_tcp(env: &Env) -> Fut<'_> {
         c.not_success(&o);
         c.has(&o, "tcp.closed_without_data");
         c.max_confidence(&o, "tcp.closed_without_data", Confidence::Confirmed);
-        c.operator_class(&op_log(env, from, "tcp-refused"), "tcp-refused", &["connection_refused"]);
+        c.operator_class(&op_log_settled(env, from, "tcp-refused").await, "tcp-refused", &["connection_refused"]);
         let r = tcp_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcp-refused") }
     })
@@ -1429,7 +1443,7 @@ fn up004_tcps(env: &Env) -> Fut<'_> {
             connections(&env.fx.tcps_untrusted.log) > before,
             "",
         );
-        c.operator_class(&op_log(env, from, "tcps-untrusted"), "tcps-untrusted", &["tls_error"]);
+        c.operator_class(&op_log_settled(env, from, "tcps-untrusted").await, "tcps-untrusted", &["tls_error"]);
         // Recovery: the same shape through the tcps route whose backend the gateway trusts.
         let r = send(env, &tcp_ctx(env, "tls://127.0.0.1:18406", TcpFraming::NewlineDelimited, &["ok"], false, 1)).await;
         c.add(

@@ -1,7 +1,8 @@
 # Pinned Ferrum Edge release used by the Anvil failure lab.
 # Fields: <asset name> <sha256> (copied from the release's .sha256 assets and
 # verified locally on download). Source commit of the tag is recorded for
-# catalog provenance.
+# catalog provenance. An earlier supported release: selected with
+# `anvil-lab --release v0.9.5` (or ANVIL_LAB_RELEASE=v0.9.5).
 release v0.9.5
 source_sha 20e76030a05dc49c3804e969516c94ab101110b9
 ferrum-edge-macos-aarch64 6a531f2c231b032e5caf4dee92087c9f1d077e00f7e36b9091db0889f502ce5f

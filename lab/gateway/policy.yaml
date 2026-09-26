@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "policy" (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "policy" (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: GW-001 half-open recovery (circuit_breaker), GW-004 (adaptive_concurrency),
 #            GW-009 (response_transformer output ceiling + response_size_limiting lookalike),
@@ -240,7 +240,7 @@ proxies:
 
   # GW-019d: a gateway REJECTION (ip_restriction deny) decorated by a response hook with an
   # X-Gateway-Error value outside the 7-token vocabulary (reject header maps are not
-  # restored authoritatively on 0.9.5 - catalog headers[X-Gateway-Error].spoofing_notes).
+  # restored authoritatively on 0.9.5 or 0.9.7 - catalog headers[X-Gateway-Error].spoofing_notes).
   - id: gw019-reject-decorated
     listen_path: /gw/reject-decorated
     backend_scheme: http
@@ -384,6 +384,10 @@ plugin_configs:
     config:
       blocked_patterns:
         - anvil-lab-bot
+      # GW-010-BOT.allow-edge: an entry ending in punctuation. 0.9.5 never matches it
+      # before a non-word character (\b...\b anchoring); 0.9.7 does (#5685).
+      allow_list:
+        - anvil-lab-monitor/
       allow_missing_user_agent: true
 
   - id: rl-rate-limit

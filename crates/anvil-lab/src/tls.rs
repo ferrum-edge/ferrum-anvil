@@ -53,7 +53,7 @@ pub fn integration(name: &str, hosts: &[(&str, u16)]) -> IntegrationProfile {
         name: name.into(),
         kind: IntegrationKind::FerrumGateway {
             hosts: hosts.iter().map(|(h, p)| HostBinding { host: h.to_string(), port: Some(*p) }).collect(),
-            compatibility_id: "ferrum-edge-0.9.5".into(),
+            compatibility_id: crate::gateway::compatibility_id(),
             require_verified_tls: false,
             detail: None,
             console_url: None,
@@ -1228,12 +1228,13 @@ fn skips(env_probe: &[(&'static str, bool, String)]) -> Vec<(&'static str, &'sta
             })
             .unwrap_or_else(|| "the refusal probe did not run".into())
     };
+    let release = crate::gateway::release_label();
     vec![
         (
             "TLS-003",
             "Expired gateway certificate",
             format!(
-                "infeasible on Ferrum Edge 0.9.5: the gateway refuses to start with an expired frontend certificate ({}), so no client can observe one from it. Expired-certificate handling is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests.",
+                "infeasible on {release}: the gateway refuses to start with an expired frontend certificate ({}), so no client can observe one from it. Expired-certificate handling is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests.",
                 probe("expired")
             ),
         ),
@@ -1241,24 +1242,24 @@ fn skips(env_probe: &[(&'static str, bool, String)]) -> Vec<(&'static str, &'sta
             "TLS-004",
             "Not-yet-valid gateway certificate",
             format!(
-                "infeasible on Ferrum Edge 0.9.5: the gateway refuses to start with a not-yet-valid frontend certificate ({}). Client-side not-yet-valid classification is covered by anvil-transport tests.",
+                "infeasible on {release}: the gateway refuses to start with a not-yet-valid frontend certificate ({}). Client-side not-yet-valid classification is covered by anvil-transport tests.",
                 probe("future")
             ),
         ),
         (
             "TLS-010",
             "Frontend TLS handshake stall",
-            "infeasible against the real gateway: the 0.9.5 frontend always answers a ClientHello (its handshake timeout only closes clients that stall). A client-leg stall needs a non-gateway fault fixture; UP-007 covers the stall on the gateway-to-backend leg.".into(),
+            format!("infeasible against the real gateway: the {release} frontend always answers a ClientHello (its handshake timeout only closes clients that stall). A client-leg stall needs a non-gateway fault fixture; UP-007 covers the stall on the gateway-to-backend leg."),
         ),
         (
             "TLS-011",
             "Unadorned handshake reset",
-            "infeasible against the real gateway: 0.9.5 ends every frontend handshake refusal with a TLS alert; a bare reset needs a client-leg fault fixture that would not be the gateway.".into(),
+            format!("infeasible against the real gateway: {release} ends every frontend handshake refusal with a TLS alert; a bare reset needs a client-leg fault fixture that would not be the gateway."),
         ),
         (
             "TLS-012",
             "ALPN mismatch",
-            "infeasible against the real gateway: every 0.9.5 TLS listener (HTTPS and TCP+TLS share one rustls ServerConfig) offers h2, http/1.1 and acme-tls/1 (src/tls/mod.rs), and every Anvil HTTP-family policy offers h2 and/or http/1.1, so there is never an ALPN gap to observe.".into(),
+            format!("infeasible against the real gateway: every {release} TLS listener (HTTPS and TCP+TLS share one rustls ServerConfig) offers h2, http/1.1 and acme-tls/1 (src/tls/mod.rs), and every Anvil HTTP-family policy offers h2 and/or http/1.1, so there is never an ALPN gap to observe."),
         ),
         (
             "TLS-017",

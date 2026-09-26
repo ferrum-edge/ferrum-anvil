@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "auth" (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "auth" (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: AUTH-001..010, 015..025, 027..032, GW-011 and lab extensions
 #            AUTH-X01..X05 (see docs/lab/auth-tls.md).
@@ -208,7 +208,7 @@ proxies:
 
   # ---- SOAP WS-Security (soap_ws_security) --------------------------------
   # One identity-establishing soap_ws_security instance per proxy and no other
-  # auth plugin on it (0.9.5 composition rule). Credentials are inline in the
+  # auth plugin on it (0.9.5 / 0.9.7 composition rule). Credentials are inline in the
   # plugin (no consumer credential type); the password is generated per run.
   # AUTH-029: UsernameToken PasswordText; the credential is removed before the
   # backend (remove_credential needs PasswordText and allow_mtom: false).

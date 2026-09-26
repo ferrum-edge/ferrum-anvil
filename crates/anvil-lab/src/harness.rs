@@ -154,6 +154,8 @@ pub fn finish<E: LabEnv>(ctx: &RunCtx, env: &E, results: &[ScenarioResult]) -> R
         "gateway_release": ctx.lock.release,
         "gateway_source_sha": ctx.lock.source_sha,
         "gateway_binary_sha256": ctx.lock.sha256,
+        "gateway_lock": ctx.lock.file,
+        "compatibility_id": ctx.lock.compatibility_id(),
         "platform": RunCtx::platform(),
         "started": ctx.stamp,
         "total": results.len(),
@@ -169,7 +171,12 @@ pub fn finish<E: LabEnv>(ctx: &RunCtx, env: &E, results: &[ScenarioResult]) -> R
         let name = if i == 0 { "gateway-operator.log".to_string() } else { format!("gateway-operator-{i}.log") };
         std::fs::copy(p, ctx.out_dir.join(name)).ok();
     }
-    eprintln!("{}: {passed} passed, {failed} failed, {skipped} skipped; results in {}", ctx.profile, ctx.out_dir.display());
+    eprintln!(
+        "{} ({}): {passed} passed, {failed} failed, {skipped} skipped; results in {}",
+        ctx.profile,
+        ctx.lock.release,
+        ctx.out_dir.display()
+    );
     Ok((passed, failed))
 }
 

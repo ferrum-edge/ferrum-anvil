@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 
@@ -22,14 +23,59 @@ pub fn asset_name() -> &'static str {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Lock {
     pub release: String,
     pub source_sha: String,
     pub sha256: String,
+    /// The lock file this was read from (relative to the repository root).
+    pub file: String,
 }
 
-pub fn read_lock() -> Result<Lock> {
-    let text = std::fs::read_to_string(repo_root().join("lab/gateway/RELEASE.lock"))?;
+impl Lock {
+    /// The Anvil compatibility id (and diagnostics catalog) of this release,
+    /// e.g. `v0.9.7` -> `ferrum-edge-0.9.7`.
+    pub fn compatibility_id(&self) -> String {
+        compatibility_id_for(&self.release)
+    }
+}
+
+pub fn compatibility_id_for(release: &str) -> String {
+    format!("ferrum-edge-{}", release.trim().trim_start_matches('v'))
+}
+
+/// The default pin: the lab runs this release unless another is selected.
+pub const DEFAULT_LOCK: &str = "lab/gateway/RELEASE.lock";
+/// Every supported release has `<dir>/<release>.lock`.
+pub const RELEASES_DIR: &str = "lab/gateway/releases";
+
+static SELECTED_RELEASE: OnceLock<Option<String>> = OnceLock::new();
+
+/// Select the gateway release for this process (`--release`), falling back to
+/// `$ANVIL_LAB_RELEASE`, then to the default pin. Call before anything reads
+/// the lock; later calls are ignored.
+pub fn select_release(release: Option<String>) {
+    let _ = SELECTED_RELEASE.set(normalize_release(release.or_else(|| std::env::var("ANVIL_LAB_RELEASE").ok())));
+}
+
+fn normalize_release(r: Option<String>) -> Option<String> {
+    r.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).map(|s| if s.starts_with('v') { s } else { format!("v{s}") })
+}
+
+fn selected_release() -> Option<String> {
+    SELECTED_RELEASE.get_or_init(|| normalize_release(std::env::var("ANVIL_LAB_RELEASE").ok())).clone()
+}
+
+/// Releases with a lock under `lab/gateway/releases/`, sorted.
+pub fn available_releases() -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(repo_root().join(RELEASES_DIR))
+        .map(|d| d.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".lock")).map(String::from)).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn parse_lock(text: &str, file: &str) -> Result<Lock> {
     let mut release = String::new();
     let mut source_sha = String::new();
     let mut sha256 = String::new();
@@ -42,34 +88,112 @@ pub fn read_lock() -> Result<Lock> {
             _ => {}
         }
     }
-    if sha256.is_empty() {
-        bail!("no pinned checksum for {} in lab/gateway/RELEASE.lock", asset_name());
+    if release.is_empty() {
+        bail!("{file} names no release");
     }
-    Ok(Lock { release, source_sha, sha256 })
+    if sha256.is_empty() {
+        bail!("no pinned checksum for {} in {file}", asset_name());
+    }
+    Ok(Lock { release, source_sha, sha256, file: file.into() })
 }
 
-/// Locate and verify the pinned gateway binary.
-/// Search order: $ANVIL_LAB_FERRUM_BIN, lab/bin/<asset>, ../lab-bin/<asset>.
+/// Read the lock of the selected release (`lab/gateway/releases/<release>.lock`)
+/// or, when none is selected, the default pin `lab/gateway/RELEASE.lock`.
+pub fn read_lock() -> Result<Lock> {
+    let root = repo_root();
+    let Some(release) = selected_release() else {
+        return parse_lock(
+            &std::fs::read_to_string(root.join(DEFAULT_LOCK)).with_context(|| format!("reading {DEFAULT_LOCK}"))?,
+            DEFAULT_LOCK,
+        );
+    };
+    if !release.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+        bail!("invalid release name {release:?}");
+    }
+    let file = format!("{RELEASES_DIR}/{release}.lock");
+    let text = std::fs::read_to_string(root.join(&file))
+        .with_context(|| format!("no lock for Ferrum Edge {release} ({file}); supported releases: {}", available_releases().join(", ")))?;
+    let lock = parse_lock(&text, &file)?;
+    if lock.release != release {
+        bail!("{file} pins {} instead of {release}", lock.release);
+    }
+    Ok(lock)
+}
+
+/// The lock of this process's release, read once.
+pub fn current_lock() -> &'static Lock {
+    static L: OnceLock<Lock> = OnceLock::new();
+    L.get_or_init(|| read_lock().unwrap_or_else(|e| panic!("reading the lab gateway lock: {e:#}")))
+}
+
+/// Compatibility id of the release under test; every lab profile declares it
+/// in its trusted Ferrum integration profile, so diagnoses use that
+/// release's catalog.
+pub fn compatibility_id() -> String {
+    current_lock().compatibility_id()
+}
+
+/// `Ferrum Edge 0.9.7`-style name of the release under test, for skip reasons.
+pub fn release_label() -> String {
+    format!("Ferrum Edge {}", current_lock().release.trim_start_matches('v'))
+}
+
+/// Fill `{release}` in a skip reason with the release under test. Reasons
+/// using it state facts checked in the source of every supported release.
+pub fn release_text(s: &str) -> String {
+    s.replace("{release}", &release_label())
+}
+
+/// Candidate paths for the release's binary, in lookup order:
+/// `$ANVIL_LAB_FERRUM_BIN`, `lab/bin/<release>/<asset>`,
+/// `../lab-bin/<release>/<asset>`, then the legacy unversioned
+/// `lab/bin/<asset>` and `../lab-bin/<asset>`.
+fn candidates(lock: &Lock) -> Vec<(PathBuf, bool)> {
+    let root = repo_root();
+    let explicit = std::env::var("ANVIL_LAB_FERRUM_BIN").ok().filter(|s| !s.is_empty()).map(|p| (PathBuf::from(p), true));
+    explicit
+        .into_iter()
+        .chain([
+            (root.join("lab/bin").join(&lock.release).join(asset_name()), true),
+            (root.join("../lab-bin").join(&lock.release).join(asset_name()), true),
+            // Legacy locations hold whichever release was fetched last: a
+            // binary of another release there is skipped, never run.
+            (root.join("lab/bin").join(asset_name()), false),
+            (root.join("../lab-bin").join(asset_name()), false),
+        ])
+        .collect()
+}
+
+/// Locate and verify the selected release's gateway binary. A binary is only
+/// ever returned when its sha256 equals the lock's pin.
 pub fn binary() -> Result<(PathBuf, Lock)> {
     let lock = read_lock()?;
-    let root = repo_root();
-    let candidates: Vec<PathBuf> = std::env::var("ANVIL_LAB_FERRUM_BIN")
-        .ok()
-        .map(PathBuf::from)
-        .into_iter()
-        .chain([root.join("lab/bin").join(asset_name()), root.join("../lab-bin").join(asset_name())])
-        .collect();
-    for c in candidates {
+    let mut skipped = Vec::new();
+    for (c, must_match) in candidates(&lock) {
         if c.exists() {
             let bytes = std::fs::read(&c)?;
             let got = hex::encode(Sha256::digest(&bytes));
-            if got != lock.sha256 {
-                bail!("{} has sha256 {got}, but RELEASE.lock pins {} — refusing to run an unverified gateway", c.display(), lock.sha256);
+            if got == lock.sha256 {
+                return Ok((c, lock));
             }
-            return Ok((c, lock));
+            if must_match {
+                bail!(
+                    "{} has sha256 {got}, but {} pins {} for Ferrum Edge {} — refusing to run an unverified gateway",
+                    c.display(),
+                    lock.file,
+                    lock.sha256,
+                    lock.release
+                );
+            }
+            skipped.push(format!("{} (another release: sha256 {got})", c.display()));
         }
     }
-    bail!("Ferrum Edge {} binary not found; run lab/scripts/fetch-gateway.sh (it verifies the pinned sha256)", lock.release)
+    let note = if skipped.is_empty() { String::new() } else { format!("; skipped {}", skipped.join(", ")) };
+    bail!(
+        "Ferrum Edge {} binary not found; run lab/scripts/fetch-gateway.sh {} (it verifies the pinned sha256){note}",
+        lock.release,
+        lock.release
+    )
 }
 
 pub struct Gateway {
@@ -286,4 +410,49 @@ pub async fn http_get(addr: &str, path: &str) -> Result<String> {
     let mut buf = Vec::new();
     tokio::time::timeout(Duration::from_secs(3), s.read_to_end(&mut buf)).await??;
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lock_at(file: &str) -> Lock {
+        parse_lock(&std::fs::read_to_string(repo_root().join(file)).unwrap(), file).unwrap()
+    }
+
+    /// The default pin is one of the supported releases, with identical pins.
+    #[test]
+    fn default_pin_is_a_supported_release_with_the_same_pins() {
+        let text = std::fs::read_to_string(repo_root().join(DEFAULT_LOCK)).unwrap();
+        let body = |t: &str| t.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).map(String::from).collect::<Vec<_>>();
+        let default = lock_at(DEFAULT_LOCK);
+        let file = format!("{RELEASES_DIR}/{}.lock", default.release);
+        let copy = std::fs::read_to_string(repo_root().join(&file)).unwrap_or_else(|_| panic!("{file} missing"));
+        assert_eq!(body(&text), body(&copy), "{DEFAULT_LOCK} and {file} disagree");
+    }
+
+    /// Every supported release has a well-formed lock and an embedded
+    /// diagnostics catalog, so the lab's trusted profile never falls back.
+    #[test]
+    fn every_supported_release_has_a_lock_and_a_catalog() {
+        let releases = available_releases();
+        assert!(releases.len() >= 2, "{releases:?}");
+        for r in releases {
+            let l = lock_at(&format!("{RELEASES_DIR}/{r}.lock"));
+            assert_eq!(l.release, r);
+            assert_eq!(l.source_sha.len(), 40, "{r}: source sha");
+            assert_eq!(l.sha256.len(), 64, "{r}: {} checksum", asset_name());
+            let id = l.compatibility_id();
+            let cat = anvil_diagnostics::ferrum::catalog_for(&id).unwrap_or_else(|| panic!("no diagnostics catalog for {id}"));
+            assert_eq!(cat.source_sha, l.source_sha, "{r}: catalog audited at another commit than the lab runs");
+        }
+    }
+
+    #[test]
+    fn release_names_normalize_and_map_to_compatibility_ids() {
+        assert_eq!(normalize_release(Some(" 0.9.5 ".into())), Some("v0.9.5".into()));
+        assert_eq!(normalize_release(Some("v0.9.7".into())), Some("v0.9.7".into()));
+        assert_eq!(normalize_release(Some("".into())), None);
+        assert_eq!(compatibility_id_for("v0.9.7"), "ferrum-edge-0.9.7");
+    }
 }

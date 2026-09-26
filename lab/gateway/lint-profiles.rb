@@ -1,18 +1,21 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# Structural lint for the Ferrum Anvil gateway lab profiles (ferrum-edge v0.9.5).
+# Structural lint for the Ferrum Anvil gateway lab profiles (every supported ferrum-edge release:
+# v0.9.5 and v0.9.7).
 #
 # Why this exists: `ferrum-edge validate` rejects unknown keys on GatewayConfig, Proxy,
 # Consumer, PluginConfig and Upstream (serde deny_unknown_fields), and every plugin used here
 # rejects unknown `config` keys. But circuit_breaker, retry, health_checks(.active/.passive)
 # and upstream targets are LENIENT: a misspelled key there is silently ignored and the lab
 # silently misconfigures. This script checks every key against field lists copied from the
-# v0.9.5 source, plus proxy/plugin association rules and resource_counts.
+# v0.9.5 source (the field sets below are identical in v0.9.7; re-checked when v0.9.7 was added),
+# plus proxy/plugin association rules and resource_counts.
 #
 # Field lists: src/config/types.rs @ v0.9.5 (structs Proxy 2609, Consumer 3025,
 # PluginConfig 3053, Upstream 1826, UpstreamTarget 1204, ActiveHealthCheck 1448,
-# PassiveHealthCheck 1527, CircuitBreakerConfig 2225, RetryConfig 2294, GatewayConfig 3200).
+# PassiveHealthCheck 1527, CircuitBreakerConfig 2225, RetryConfig 2294, GatewayConfig 3200);
+# @ v0.9.7 the same structs are at 2646, 3073, 3101, 1843, 1217, 1463, 1542, 2262, 2331, 3252.
 #
 # Usage: ruby lab/gateway/lint-profiles.rb [profile.yaml ...]   (default: all *.yaml here)
 # Exit status 1 on any finding. `{{TOKEN}}` placeholders are tolerated.
@@ -105,7 +108,7 @@ PLUGIN_KEYS = {
                            fail_on_uninspectable_body],                               # ai_request_guard.rs:94-110 (prefix)
   'ai_rate_limiter' => %w[token_limit window_seconds count_mode limit_by expose_headers provider
                           on_unmetered_response redis_failure_policy] + REDIS,         # ai_rate_limiter.rs:351-370
-  # Added for the policy profile; accepted by `ferrum-edge validate` v0.9.5 (live-checked).
+  # Added for the policy profile; accepted by `ferrum-edge validate` v0.9.5 and v0.9.7 (live-checked).
   'bot_detection' => %w[blocked_patterns allow_list allow_missing_user_agent custom_response_code],
   'rate_limiting' => %w[limit_by expose_headers limits redis_failure_policy] + REDIS,
   'ai_response_guard' => %w[action pii_patterns custom_pii_patterns blocked_phrases blocked_patterns

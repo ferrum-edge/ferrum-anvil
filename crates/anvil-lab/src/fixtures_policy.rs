@@ -103,7 +103,7 @@ pub fn request(t: &Target, trusted: bool, method: &str, path: &str) -> Execution
             name: t.profile_name.into(),
             kind: IntegrationKind::FerrumGateway {
                 hosts: vec![HostBinding { host: "127.0.0.1".into(), port: Some(t.port) }],
-                compatibility_id: "ferrum-edge-0.9.5".into(),
+                compatibility_id: crate::gateway::compatibility_id(),
                 require_verified_tls: false,
                 detail: None,
                 console_url: None,
@@ -136,8 +136,9 @@ pub fn skips(ctx: &RunCtx, only: &[String], list: &[(&str, &str, &str)]) -> Vec<
     list.iter()
         .filter(|(id, _, _)| only.is_empty() || only.iter().any(|s| s.eq_ignore_ascii_case(id)))
         .map(|(id, title, why)| {
+            let why = crate::gateway::release_text(why);
             eprintln!("{id:22} skipped {title} — {why}");
-            ctx.skipped(id, title, why)
+            ctx.skipped(id, title, &why)
         })
         .collect()
 }

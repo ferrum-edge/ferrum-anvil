@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "admission" (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "admission" (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: UP-015 (gateway retained-buffer capacity), GW-002 (overload refusal).
 # Settings:  admission.conf (proxy HTTP 127.0.0.1:18580, admin 127.0.0.1:18590).

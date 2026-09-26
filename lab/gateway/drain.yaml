@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "drain" (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "drain" (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenario:  GW-003 (drain refusal). Settings: drain.conf (proxy HTTP 127.0.0.1:18680,
 #            admin 127.0.0.1:18690). Fixtures: 127.0.0.1:19600-19699.
