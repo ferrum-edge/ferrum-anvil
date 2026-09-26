@@ -1010,7 +1010,9 @@ export function ImportDialog(props: {
           { id: "bundle" as const, label: "Anvil bundle / backup" },
         ]}
         value={tab}
-        onChange={setTab}
+        onChange={(next) => {
+          if (busy === null) setTab(next);
+        }}
       />
       {tab === "spec" && <SpecImport workspaceId={props.workspaceId} workspaceName={props.workspaceName} onImported={props.onSpecImported} />}
       {tab === "bundle" && bundleBody()}

@@ -97,6 +97,9 @@ describe("import dialog cancellation", () => {
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
     fireEvent.click(button("Preview"));
     await screen.findByRole("button", { name: "Cancel" });
+    fireEvent.click(screen.getByRole("tab", { name: "API spec or collection" }));
+    expect(screen.getByRole("tab", { name: "Anvil bundle / backup" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
     const attempt = calls("import_preview")[0].attempt;
     expect(typeof attempt).toBe("string");
     expect(attempt).not.toBe("");

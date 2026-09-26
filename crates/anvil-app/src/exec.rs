@@ -1,7 +1,7 @@
 //! Build frozen execution contexts from storage and run them through the
 //! shared engine, recording redacted history.
 
-use crate::device_identity::uses_device_identity;
+use crate::device_identity::{selected_tls_profiles, uses_device_identity};
 use crate::file_grants::FilePurpose;
 use crate::linked_files::{LinkedFileReferrer, read_bound_file};
 use crate::{App, AppError, Result};
@@ -90,8 +90,7 @@ impl SecretResolver for ResolvedSecrets {
 fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
     let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
-    let tls_ids = [settings.tls_profile_id, proxy.and_then(|p| p.tls_profile_id)];
-    let tls: Vec<_> = ctx.tls_profiles.iter().filter(|t| tls_ids.contains(&Some(t.id))).collect();
+    let tls: Vec<_> = selected_tls_profiles(ctx).collect();
     let integration = settings.integration_profile_id.and_then(|id| ctx.integrations.iter().find(|i| i.id == id));
     Ok(vec![
         serde_json::to_value(&ctx.spec)?,
@@ -186,11 +185,10 @@ impl App {
     /// JWT-SVID from this device's Workload API or a token file is refused,
     /// until the user opens the root to the workspace on this device
     /// (`use_workspace_scope`). Settings still apply from the workspace
-    /// down, but a selected TLS profile whose client identity is bound to no
-    /// host is refused (a proxy's own TLS profile still applies to the
-    /// connection to the proxy). The context is tagged with the sealed root
-    /// (`ExecutionContext::scope`) so a run or load chain keeps values
-    /// extracted outside it, and its dataset, away from it.
+    /// down, but an unbound client identity in the request's own TLS
+    /// profile or its proxy's is refused. The context is tagged with the
+    /// sealed root (`ExecutionContext::scope`) so a run or load chain keeps
+    /// values extracted outside it, and its dataset, away from it.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -408,15 +406,20 @@ fn refuse_device_identity(auth: &AuthConfig) -> Result<()> {
 /// Refuse a TLS profile with a client identity (a certificate or this
 /// device's X.509-SVID) and no host bindings, which would present it to any
 /// destination, for a request under an import root that the user has not
-/// opened to the workspace. A bound profile presents it only to the hosts
-/// it names.
+/// opened to the workspace. Both selected profiles count: the request's own
+/// and its proxy's. A bound profile presents it only to the hosts it names.
 fn refuse_unbound_client_identity(ctx: &ExecutionContext) -> Result<()> {
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
-    let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
-    if let Some(p) = profile
-        && p.client_identity.is_some()
-        && p.bindings.is_empty()
-    {
+    let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
+    if let Some(p) = selected_tls_profiles(ctx).find(|p| p.client_identity.is_some() && p.bindings.is_empty()) {
+        if settings.tls_profile_id != Some(p.id)
+            && let Some(proxy) = proxy.filter(|proxy| proxy.tls_profile_id == Some(p.id))
+        {
+            return Err(AppError::Invalid(format!(
+                "an imported collection does not use TLS profile '{}' of proxy '{}' (a client identity bound to no host) until opened to the workspace",
+                p.name, proxy.name
+            )));
+        }
         return Err(AppError::Invalid(format!(
             "an imported collection does not use TLS profile '{}' (a client identity bound to no host) until opened to the workspace",
             p.name

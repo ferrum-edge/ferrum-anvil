@@ -860,6 +860,10 @@ fn writes_may_begin(st: &DesktopState, seen: u64, gate: &ImportGate) -> bool {
     st.epoch() == seen && gate.begin_writes()
 }
 
+fn import_result_error(st: &DesktopState, seen: u64, error: String) -> String {
+    if error == CANCELED && st.epoch() != seen { "LOCKED".into() } else { error }
+}
+
 /// A full backup is restored; anything else is imported as a bundle. With
 /// an `attempt` id, `import_cancel` (or a lock) ends the preview at once. A
 /// preview that a lock or a profile switch overlaps returns `LOCKED`: it
@@ -889,7 +893,8 @@ pub async fn import_preview(
         }
         app.import_preview(&bytes, passphrase.as_deref(), policy).map_err(e)
     })
-    .await?;
+    .await
+    .map_err(|error| import_result_error(&st, seen, error))?;
     if st.epoch() != seen {
         return Err("LOCKED".into());
     }
@@ -930,6 +935,7 @@ pub async fn import_apply(
         apply(&app, &bytes, passphrase.as_deref(), policy, &approval, &proceed)
     })
     .await
+    .map_err(|error| import_result_error(&st, seen, error))
 }
 
 /// Cancel the bundle import, backup restore or preview started with
@@ -1201,7 +1207,8 @@ mod tests {
             writes_may_begin(&st, seen, &gate)
         };
         let r = apply(&app, &bytes, Some(BACKUP_PASS), ConflictPolicy::Merge, &Default::default(), &proceed);
-        assert_eq!(r.map(|_| ()), Err(CANCELED.to_string()));
+        let result = r.map(|_| ()).map_err(|error| import_result_error(&st, seen, error));
+        assert_eq!(result, Err("LOCKED".into()));
         assert!(st.app().is_ok(), "the profile is unlocked again");
         assert_untouched(&app);
         assert!(gate.abandon(), "the writes were never claimed");

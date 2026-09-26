@@ -62,13 +62,8 @@
   schema 2 database, and a full backup made from one, as newer. Restoring a
   checkpoint refuses a newer or foreign one before touching the profile. The
   desktop reads an imported bundle or backup and derives its key on a worker
-  thread, one import at a time, and a preview or import can be canceled while
-  the key is derived (`import_apply` and `import_preview` take an optional
-  `attempt` id for `import_cancel`); a canceled import writes nothing. The
-  import dialog passes one and shows Cancel while a preview or import runs,
-  and a full-backup restore can be canceled until its key is derived and its
-  contents checked, as a bundle import can. The key a preview derives is not
-  kept for the import that follows.
+  thread, one import at a time. The key a preview derives is not kept for the
+  import that follows.
 - Full-backup restore: the preview now says when Replace restores the
   backup's app settings, which then apply to every workspace in the profile.
   A load report of a workspace that is not in the backup is left out with a
@@ -161,5 +156,11 @@
   `oauth_cancel` never cancels a request execution with the same id, nor
   `cancel_execution` a sign-in; a lock still cancels both.
 - An unlock refused by its gate (a lock that landed during the key
-  derivation) no longer locks the store itself: the lock already did, and
-  locking again could undo a newer unlock that completed meanwhile.
+  derivation) no longer locks the store itself: the lock that caused the
+  refusal clears the key itself, and locking again could undo a newer unlock
+  that completed meanwhile.
+- A request under an import root that is not opened to its workspace is now
+  also refused when the selected proxy's own TLS profile has a client
+  identity bound to no host, whatever the proxy's kind or `no_proxy`, as it
+  already was for the request's own TLS profile. This applies to a send, a
+  session, a collection run and a load run.

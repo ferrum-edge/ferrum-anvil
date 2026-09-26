@@ -372,7 +372,8 @@ impl Drop for LoadRunEntry {
     }
 }
 
-/// Settles the race between canceling a bundle import and its writes:
+/// Settles the race between canceling a bundle import or backup restore and its
+/// writes:
 /// whichever claims the gate first wins. A canceled import never writes, and
 /// one whose writes have begun is never reported as canceled.
 #[derive(Default)]
