@@ -5,8 +5,8 @@
 
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{
-    BoxFut, CachedToken, DEFAULT_EXPIRES_IN_SECS, MAX_EXPIRES_IN_SECS, OAuthResolved, TokenCache, TokenHttp, TokenKey,
-    client_credentials, exchange_code, refresh,
+    BoxFut, CachedToken, DEFAULT_EXPIRES_IN_SECS, MAX_EXPIRES_IN_SECS, OAuthResolved, TokenCache, TokenHttp, TokenKey, client_credentials,
+    exchange_code, refresh,
 };
 use anvil_domain::auth::OAuthGrant;
 use chrono::{DateTime, Duration, Utc};
