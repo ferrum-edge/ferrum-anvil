@@ -39,6 +39,7 @@ pub fn all() -> Vec<Profile> {
         crate::auth::profile(),
         crate::streams::profile(),
         crate::cpdp::profile(),
+        crate::mesh::profile(),
     ]
 }
 

@@ -23,6 +23,7 @@ mod fixtures_streams;
 mod fixtures_tls;
 mod gateway;
 mod harness;
+mod mesh;
 mod policy;
 mod profiles;
 mod scenario;
