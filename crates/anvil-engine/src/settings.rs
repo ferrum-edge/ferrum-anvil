@@ -92,6 +92,10 @@ pub fn resolve(layers: &[(String, SettingsOverrides)]) -> EffectiveSettings {
             e.integration_profile_id = Some(v);
             src(&mut sources, "integration_profile", label);
         }
+        if let Some(v) = &o.early_data {
+            e.early_data = v.clone();
+            src(&mut sources, "early_data", label);
+        }
     }
     e.sources = sources;
     e

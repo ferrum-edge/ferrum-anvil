@@ -24,7 +24,9 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
   HTTP, WebSocket, gRPC, SSE and raw TCP; SPIFFE ID or trust-domain server
   verification with X.509-SVID client identities; SNI override; PROXY
   protocol v1/v2 headers on TCP/TLS and signed datagram envelopes on
-  UDP/DTLS. See `docs/protocols.md`.
+  UDP/DTLS. Opt-in TLS 1.3 / QUIC 0-RTT early data for replay-safe
+  requests, with `425 Too Early` handled per RFC 8470 and session tickets
+  kept in memory only. See `docs/protocols.md`.
 - **Auth and TLS**:
   - Auth types: API key, Basic, Bearer, JWT signing, OAuth 2.0, Ferrum HMAC
     v2, DPoP, WS-Security, and multi-auth.

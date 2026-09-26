@@ -65,6 +65,7 @@ fn plan(url: &str, tls: Option<TlsSettings>) -> HttpPlan {
         tls: if https { Some(Arc::new(tls::prepare(&tls.unwrap_or_else(trust_lab)).expect("tls profile"))) } else { None },
         isolation: "test".into(),
         display_url: url.into(),
+        early_data: anvil_transport::http::EarlyDataIntent::Off,
     }
 }
 

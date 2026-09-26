@@ -12,15 +12,46 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GroundTruth {
-    ConnectionAccepted { peer: String },
-    TlsHandshakeCompleted { alpn: Option<String>, client_cert_cn: Option<String> },
-    TlsHandshakeFailed { error: String },
-    RequestReceived { method: String, path: String, body_bytes: u64, headers: Vec<(String, String)> },
-    ResponseStarted { status: u16 },
-    FaultApplied { fault: String },
-    DatagramReceived { bytes: u64 },
-    MessageReceived { bytes: u64 },
-    DatagramRelayed { bytes: u64, via: String },
+    ConnectionAccepted {
+        peer: String,
+    },
+    TlsHandshakeCompleted {
+        alpn: Option<String>,
+        client_cert_cn: Option<String>,
+    },
+    TlsHandshakeFailed {
+        error: String,
+    },
+    RequestReceived {
+        method: String,
+        path: String,
+        body_bytes: u64,
+        headers: Vec<(String, String)>,
+    },
+    ResponseStarted {
+        status: u16,
+    },
+    FaultApplied {
+        fault: String,
+    },
+    DatagramReceived {
+        bytes: u64,
+    },
+    MessageReceived {
+        bytes: u64,
+    },
+    DatagramRelayed {
+        bytes: u64,
+        via: String,
+    },
+    /// An early-data fixture received a request; `early` = it arrived in
+    /// TLS 1.3 / QUIC 0-RTT early data the server accepted.
+    EarlyDataRequest {
+        method: String,
+        path: String,
+        early: bool,
+        status: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

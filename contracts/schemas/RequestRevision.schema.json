@@ -1201,6 +1201,17 @@
               "type": "null"
             }
           ]
+        },
+        "early_data": {
+          "description": "TLS 1.3 / QUIC 0-RTT early data (off unless a layer enables it).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EarlyDataPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -1489,6 +1500,25 @@
         "max_decoded_bytes",
         "max_response_header_bytes",
         "max_request_body_bytes"
+      ]
+    },
+    "EarlyDataPolicy": {
+      "description": "TLS 1.3 / QUIC 0-RTT early data (RFC 8446 §2.3, RFC 9001 §4.6) with the\nRFC 8470 semantics. Off by default: data sent before the handshake\ncompletes can be replayed by anyone on the path, so only requests that are\nsafe to repeat may use it.\n\nWith `enabled`, a request whose method is eligible (GET, HEAD, OPTIONS, and\nthe idempotent methods listed in `extra_methods`) is sent as early data on\na new connection that resumes an earlier session of the same workspace, TLS\nprofile, client identity, server name and port. Any other method is sent\nnormally, after the handshake, and the record says why early data was not\nused. A non-idempotent method in `extra_methods` is refused before traffic.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "extra_methods": {
+          "description": "Idempotent methods allowed in early data besides GET, HEAD and OPTIONS\n(`PUT`, `DELETE`, `TRACE`). Only an explicit choice adds them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "enabled"
       ]
     },
     "Assertion": {

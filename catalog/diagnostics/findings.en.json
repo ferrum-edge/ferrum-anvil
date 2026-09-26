@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-11",
+  "version": "2026.09.26-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2659,6 +2659,108 @@
       ],
       "confirm_with": [
         "The gateway's release version from its operator (for example `ferrum-edge --version`)."
+      ]
+    },
+    "request.too_early": {
+      "title": "The server answered 425 Too Early",
+      "explanation": "{host} answered this {method} with 425 Too Early (RFC 8470): by that status, the server declined to process a request that might be replayed. {sent}. {retry}",
+      "alternatives": [],
+      "does_not_prove": [
+        "Which component behind the address answered 425: a gateway's early-data policy, or a backend that received the request marked `Early-Data: 1`.",
+        "That the operation could never be accepted: after the handshake the same request is not early data."
+      ],
+      "remediation": [
+        {
+          "text": "Send this method only after the handshake: remove it from the request's early-data methods, or turn early data off for it.",
+          "owner": "caller"
+        },
+        {
+          "text": "If this method should be accepted as early data, allow it in the server's early-data policy (only for operations that are safe to repeat).",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The server's or gateway's log for this request, including whether it counted it as early data."
+      ]
+    },
+    "early_data.accepted": {
+      "title": "Sent as 0-RTT early data and accepted",
+      "explanation": "The {method} was sent to {host} as {transport} ({bytes} bytes before the handshake completed) on a resumed session, and the server accepted the early data. Early data is not protected against replay: anyone who captured it can send it to the server again, which is why Anvil only sends replay-safe methods this way.",
+      "alternatives": [],
+      "does_not_prove": [
+        "That the server processed the request only once: early data can be replayed (RFC 8446 §8), and a server's anti-replay protection (single-use tickets, a freshness window) is not visible to the client.",
+        "That the application behind a gateway knew the request arrived as early data (gateways mark it with `Early-Data: 1`, RFC 8470 §5.1)."
+      ],
+      "remediation": [
+        {
+          "text": "Keep early data to methods that are safe to repeat, and turn it off for requests whose repetition matters.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The server's log of early-data requests, or the `Early-Data: 1` header seen by the backend."
+      ]
+    },
+    "early_data.rejected": {
+      "title": "The server rejected the early data",
+      "explanation": "{host} resumed the session but did not accept the {bytes} bytes of {transport}: a server discards rejected early data unread (RFC 8446 §4.2.10, RFC 9001 §4.6.2). {resend}. That second transmission is how the protocol delivers rejected early data, not an application retry: the server never saw the first one.",
+      "alternatives": [
+        "The server does not accept early data now (its configuration changed after it issued the ticket).",
+        "The ticket was already used or is unknown to the instance that answered (single-use tickets, a restart, another instance behind the address).",
+        "The ticket's age was outside the server's freshness window (clock skew).",
+        "The negotiated protocol (ALPN) or cipher suite differs from the ticket's."
+      ],
+      "does_not_prove": [
+        "Which of these reasons applied: the handshake does not say why early data was rejected."
+      ],
+      "remediation": [
+        {
+          "text": "Nothing is needed for this request. If early data is expected to work, check the server's early-data configuration and whether requests reach the instance that issued the ticket.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The server's TLS/QUIC log for this connection."
+      ]
+    },
+    "early_data.no_ticket": {
+      "title": "The server sent no session ticket",
+      "explanation": "Early data needs a session ticket from an earlier connection. This full handshake with {host} ended without a TLS 1.3 session ticket for this workspace and TLS profile, so the next request cannot resume the session or send early data.",
+      "alternatives": [
+        "The server does not issue session tickets (resumption is disabled, for example while client certificates are re-verified on every handshake).",
+        "The server sends its tickets later in the connection, after this exchange ended."
+      ],
+      "does_not_prove": [
+        "That the server never issues tickets: they can arrive later in a connection, or only on other listeners.",
+        "That the server would reject early data."
+      ],
+      "remediation": [
+        {
+          "text": "Nothing is needed for this request. Early data cannot be used with this server until it issues session tickets.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The server's TLS configuration (session tickets and resumption)."
+      ]
+    },
+    "early_data.ticket_without_early_data": {
+      "title": "The server's session tickets do not allow early data",
+      "explanation": "The connection to {host} resumed a session ticket, but the server issued it without permission for early data (max_early_data_size 0), so the request was sent after the handshake.",
+      "alternatives": [
+        "Early data is disabled on this listener; some servers allow it only over HTTP/3 (QUIC), or only when an operator lists the methods that may use it."
+      ],
+      "does_not_prove": [
+        "That the server refuses early data on another listener or transport."
+      ],
+      "remediation": [
+        {
+          "text": "Nothing is needed for this request. Use the server's HTTP/3 listener if it allows early data there.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The server's early-data configuration."
       ]
     }
   },

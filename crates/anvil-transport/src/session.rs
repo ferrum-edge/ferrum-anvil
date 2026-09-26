@@ -300,6 +300,7 @@ impl SessionOutput {
 /// Fresh attempt observation for a session attempt.
 pub fn new_attempt(index: u32, reason: AttemptReason, method: &str, url: &str) -> AttemptObservation {
     AttemptObservation {
+        early_data: None,
         index,
         reason,
         method: method.to_string(),

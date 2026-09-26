@@ -39,6 +39,9 @@ protox.workspace = true
 prost-reflect.workspace = true
 dimpl.workspace = true
 quinn.workspace = true
+# The 0-RTT fixture wraps quinn's rustls session to learn, per connection,
+# whether the server accepted early data (quinn does not expose it).
+quinn-proto = { version = "0.11.18", default-features = false, features = ["rustls-ring"] }
 h3.workspace = true
 h3-quinn.workspace = true
 

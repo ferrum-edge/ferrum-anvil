@@ -6,6 +6,7 @@
 
 pub mod dns;
 pub mod dtls;
+pub mod early_data;
 pub mod gateway_idp;
 pub mod gateway_pki;
 pub mod goaway;

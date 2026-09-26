@@ -232,7 +232,11 @@ struct Base {
 fn base(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, schemes: &[&str]) -> Result<Base, TransportFailure> {
     let prep = http_exec::prepare_all(engine, ctx, r, schemes)?;
     let redactor = Redactor::new(r.used_secrets.lock().clone(), ctx.redaction_names.clone());
-    let inferred = prep.inferred.clone();
+    let mut inferred = prep.inferred.clone();
+    if prep.settings.early_data.enabled {
+        // The opt-in covers HTTP requests only; say so instead of ignoring it.
+        inferred.push("0-RTT early data is not used for sessions (WebSocket, gRPC, SSE, TCP, UDP): the early-data setting applies to HTTP requests only".into());
+    }
     Ok(Base { prep, redactor, inferred })
 }
 

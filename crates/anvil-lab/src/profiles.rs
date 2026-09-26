@@ -42,6 +42,7 @@ pub fn all() -> Vec<Profile> {
         crate::h3x::profile(),
         crate::mesh::profile(),
         crate::proxyproto::profile(),
+        crate::early::profile(),
     ]
 }
 

@@ -345,6 +345,7 @@ pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: Da
             omitted_secrets: vec![],
         },
         attempts: vec![AttemptObservation {
+            early_data: None,
             index: 0,
             reason: AttemptReason::Initial,
             method: ctx.spec.method.clone(),

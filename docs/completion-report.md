@@ -57,7 +57,7 @@ pass.
   - Locking the app stops the run and keeps a partial report.
   - See `docs/load.md`.
 - **Real-gateway failure lab.**
-  - 11 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`. The mesh profile runs the gateway in mesh mode (HBONE, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP; proxyproto covers PROXY protocol listeners.
+  - 12 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto, early) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`. The mesh profile runs the gateway in mesh mode (HBONE, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP; proxyproto covers PROXY protocol listeners; early covers TLS 1.3 / QUIC 0-RTT early data and `425 Too Early`.
   - Ground truth is independent of the diagnosis.
   - Every scenario runs twice: trusted, and with the gateway untrusted.
   - See `docs/lab/`.

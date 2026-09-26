@@ -372,6 +372,44 @@ fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
+/// A policy that asks for replay of a non-idempotent method is refused
+/// before any traffic: early data can be replayed by anyone on the path.
+fn early_data_policy_check(p: &anvil_domain::settings::EarlyDataPolicy) -> Result<(), TransportFailure> {
+    match p.invalid_extra_method().filter(|_| p.enabled) {
+        None => Ok(()),
+        Some(m) => Err(TransportFailure::new(
+            Phase::Prepare,
+            FailureKind::UnsupportedCombination,
+            format!(
+                "{m} cannot be sent as 0-RTT early data: early data can be replayed, and only idempotent methods (RFC 9110 §9.2.2: PUT, DELETE, TRACE besides GET, HEAD and OPTIONS) may be listed; nothing was sent"
+            ),
+        )
+        .with_field("settings.early_data.extra_methods")),
+    }
+}
+
+/// How the early-data opt-in applies to one attempt: off without the opt-in
+/// or without TLS; held (resumption only) for a method the policy does not
+/// allow and for the retry after `425 Too Early`; otherwise sent as early data
+/// when a ticket allows it.
+fn early_intent(
+    p: &anvil_domain::settings::EarlyDataPolicy,
+    method: &str,
+    https: bool,
+    reason: &AttemptReason,
+) -> anvil_transport::http::EarlyDataIntent {
+    use anvil_transport::http::EarlyDataIntent;
+    if !p.enabled || !https {
+        EarlyDataIntent::Off
+    } else if matches!(reason, AttemptReason::TooEarlyRetry) {
+        EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly)
+    } else if !p.allows(method) {
+        EarlyDataIntent::Hold(EarlyDataNotUsed::MethodNotEligible)
+    } else {
+        EarlyDataIntent::Send
+    }
+}
+
 struct AttemptTarget {
     method: String,
     target: Target,
@@ -386,7 +424,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     let started_at = Utc::now();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     let prepared = prepare_all(engine, ctx, &resolver, &["https", "http"]);
-    let mut prep = match prepared {
+    let mut prep = match prepared.and_then(|p| early_data_policy_check(&p.settings.early_data).map(|()| p)) {
         Ok(p) => p,
         Err(f) => return record::local_failure(ctx, &resolver, started_at, f),
     };
@@ -424,6 +462,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     let mut redirects = 0u8;
     let mut retries = 0u8;
     let mut dpop_challenge_used = false;
+    let mut too_early_retried = false;
     let mut reason = AttemptReason::Initial;
     let mut credentials_stripped = false;
     let mut final_auth_facts: Vec<(String, String)> = vec![];
@@ -515,6 +554,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             tls: current.tls.clone(),
             isolation: ctx.isolation.clone(),
             display_url,
+            early_data: early_intent(&prep.settings.early_data, &current.method, current.target.scheme == "https", &reason),
         };
         let index = attempts.len() as u32;
         let outs = match prep.settings.http_version {
@@ -623,6 +663,22 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                 *n = Some(nonce);
             }
             reason = AttemptReason::AuthChallenge { scheme: "DPoP".into() };
+            last = Some(out);
+            continue;
+        }
+
+        // ---- 425 Too Early (RFC 8470 §5.2): the server did not process the
+        // request; one retry after the handshake, never as early data, and
+        // only for a request eligible for early data under the opt-in ----
+        if let Some(resp) = &out.response
+            && resp.status == 425
+            && !too_early_retried
+            && current.target.scheme == "https"
+            && prep.settings.early_data.enabled
+            && prep.settings.early_data.allows(&current.method)
+        {
+            too_early_retried = true;
+            reason = AttemptReason::TooEarlyRetry;
             last = Some(out);
             continue;
         }

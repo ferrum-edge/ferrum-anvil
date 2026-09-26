@@ -126,6 +126,10 @@ pub struct PreparedTls {
     /// SPIFFE server identity check (replaces host-name verification).
     pub spiffe: Option<SpiffeExpectation>,
     sessions: Arc<ClientSessionMemoryCache>,
+    /// Which TLS profile (and revision) this material was prepared from, set
+    /// by the caller; part of the session-ticket isolation key, so tickets are
+    /// never shared between two profiles even with identical settings.
+    pub profile_key: String,
 }
 
 fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFailure {
@@ -299,6 +303,7 @@ pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> 
         server_name_override: settings.server_name_override.clone(),
         spiffe,
         sessions: Arc::new(ClientSessionMemoryCache::new(64)),
+        profile_key: String::new(),
     })
 }
 
@@ -427,9 +432,9 @@ struct Slot {
 }
 
 #[derive(Debug)]
-struct ObservingVerifier {
+pub(crate) struct ObservingVerifier {
     prepared: Arc<PreparedView>,
-    slot: Arc<Mutex<SlotHandle>>,
+    slot: Arc<SlotCell>,
 }
 
 /// The parts of [`PreparedTls`] the verifier needs (cheap to clone into a
@@ -458,10 +463,38 @@ impl PreparedView {
 }
 
 #[derive(Default)]
-struct SlotHandle(Slot);
+pub(crate) struct SlotHandle(Slot);
 impl std::fmt::Debug for SlotHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("TlsObservationSlot")
+    }
+}
+
+/// Where the observing verifier and client-certificate resolver record a
+/// handshake's evidence. A per-connection config owns its slot. A session
+/// resumption context ([`crate::tickets`]) keeps one verifier and resolver for
+/// all its connections, because rustls resumes a ticket only with the same
+/// verifier and resolver instances; it points the cell at the slot of the
+/// connection that holds its handshake gate.
+pub(crate) struct SlotCell(Mutex<Arc<Mutex<SlotHandle>>>);
+
+impl SlotCell {
+    pub(crate) fn new(slot: Arc<Mutex<SlotHandle>>) -> Arc<Self> {
+        Arc::new(SlotCell(Mutex::new(slot)))
+    }
+
+    fn current(&self) -> Arc<Mutex<SlotHandle>> {
+        self.0.lock().clone()
+    }
+
+    pub(crate) fn route_to(&self, slot: Arc<Mutex<SlotHandle>>) {
+        *self.0.lock() = slot;
+    }
+}
+
+impl std::fmt::Debug for SlotCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TlsObservationSlotCell")
     }
 }
 
@@ -494,7 +527,8 @@ impl ServerCertVerifier for ObservingVerifier {
         if self.prepared.verifier.is_none() && !self.prepared.verify {
             verdict.problem = None;
         }
-        let mut slot = self.slot.lock();
+        let slot = self.slot.current();
+        let mut slot = slot.lock();
         slot.0.peer_chain = chain;
         slot.0.peer_spiffe_id = verdict.peer_spiffe_id.clone();
         slot.0.verification = Some(verification_of(self.prepared.verify, &verdict));
@@ -525,14 +559,15 @@ impl ServerCertVerifier for ObservingVerifier {
 }
 
 #[derive(Debug)]
-struct ObservingClientCert {
+pub(crate) struct ObservingClientCert {
     key: Option<Arc<CertifiedKey>>,
-    slot: Arc<Mutex<SlotHandle>>,
+    slot: Arc<SlotCell>,
 }
 
 impl rustls::client::ResolvesClientCert for ObservingClientCert {
     fn resolve(&self, _root_hint_subjects: &[&[u8]], _sigschemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
-        let mut slot = self.slot.lock();
+        let slot = self.slot.current();
+        let mut slot = slot.lock();
         slot.0.client_cert_requested = true;
         slot.0.client_cert_presented = self.key.is_some();
         self.key.clone()
@@ -630,6 +665,72 @@ where
     }
 }
 
+/// A TLS connect over TCP through a session resumption context (the caller
+/// holds its handshake gate and routed `handle`). With `early_data` the
+/// stream comes back *during* the handshake when the ticket allowed early
+/// data (`true` = still handshaking: writes become early data and the
+/// handshake completes on the first flush); otherwise after the handshake.
+pub(crate) async fn connect_resumable<S>(
+    config: ClientConfig,
+    io: S,
+    server_name: ServerName<'static>,
+    early_data: bool,
+    deadline: Option<Duration>,
+) -> Result<(TlsStream<S>, bool), TransportFailure>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let connector = TlsConnector::from(Arc::new(config)).early_data(early_data);
+    let fut = connector.connect(server_name, io);
+    let res = match deadline {
+        Some(d) => match tokio::time::timeout(d, fut).await {
+            Ok(r) => r,
+            Err(_) => {
+                return Err(TransportFailure::new(
+                    Phase::TlsHandshake,
+                    FailureKind::TlsHandshakeTimeout,
+                    format!("TLS handshake did not complete within {} ms", d.as_millis()),
+                )
+                .with_deadline(Some(d.as_millis() as u64)));
+            }
+        },
+        None => fut.await,
+    };
+    match res {
+        Ok(stream) => {
+            let handshaking = stream.get_ref().1.is_handshaking();
+            Ok((stream, handshaking))
+        }
+        Err(e) => Err(crate::errors::classify_tls_handshake(&e)),
+    }
+}
+
+/// TLS evidence for a completed handshake of a resumption context's
+/// connection: the resumed-session view when rustls resumed, otherwise the
+/// full-handshake observation.
+pub(crate) fn completed_observation(
+    h: &ObservationHandle,
+    prepared: &PreparedTls,
+    conn: &rustls::ClientConnection,
+) -> (TlsObservation, bool) {
+    let version = conn.protocol_version().map(|v| format!("{v:?}"));
+    let cipher = conn.negotiated_cipher_suite().map(|c| format!("{:?}", c.suite()));
+    let alpn = conn.alpn_protocol().map(|p| String::from_utf8_lossy(p).into_owned());
+    let resumed = matches!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
+    if resumed {
+        let chain: Vec<CertificateDer<'static>> =
+            conn.peer_certificates().map(|c| c.iter().map(|x| x.clone().into_owned()).collect()).unwrap_or_default();
+        (resumed_observation(h, prepared, &chain, version, cipher, alpn), true)
+    } else {
+        let mut obs = observe(h, prepared, true);
+        obs.version = version;
+        obs.cipher_suite = cipher;
+        obs.alpn_negotiated = alpn;
+        obs.resumed = Some(false);
+        (obs, false)
+    }
+}
+
 fn server_name_string(n: &ServerName<'_>) -> String {
     match n {
         ServerName::DnsName(d) => d.as_ref().to_string(),
@@ -643,16 +744,122 @@ fn client_config(prepared: &PreparedTls, alpn: &[&str], slot: Arc<Mutex<SlotHand
         TlsMinVersion::Tls12 => &[&rustls::version::TLS13, &rustls::version::TLS12],
         TlsMinVersion::Tls13 => &[&rustls::version::TLS13],
     };
-    let verifier = Arc::new(ObservingVerifier { prepared: PreparedView::of(prepared), slot: slot.clone() });
+    let cell = SlotCell::new(slot);
+    let verifier = Arc::new(ObservingVerifier { prepared: PreparedView::of(prepared), slot: cell.clone() });
     let mut cfg = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(versions)
         .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("TLS versions unsupported: {e}"), "tls.min_version"))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_client_cert_resolver(Arc::new(ObservingClientCert { key: prepared.client_key.clone(), slot }));
+        .with_client_cert_resolver(Arc::new(ObservingClientCert { key: prepared.client_key.clone(), slot: cell }));
     cfg.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
     cfg.resumption = Resumption::store(prepared.sessions.clone());
     Ok(cfg)
+}
+
+/// The stable verifier and client-certificate resolver of a session
+/// resumption context: every connection of the context shares them (rustls
+/// only resumes a ticket with the instances that obtained it), and `cell`
+/// routes their evidence to the connection holding the context's gate.
+pub(crate) fn stable_identity(prepared: &PreparedTls, cell: Arc<SlotCell>) -> (Arc<ObservingVerifier>, Arc<ObservingClientCert>) {
+    (
+        Arc::new(ObservingVerifier { prepared: PreparedView::of(prepared), slot: cell.clone() }),
+        Arc::new(ObservingClientCert { key: prepared.client_key.clone(), slot: cell }),
+    )
+}
+
+/// A client config for a session resumption context: the context's stable
+/// verifier and resolver, its ticket store, and TLS 1.3 early data when
+/// `early_data` (the ClientHello then offers it whenever the ticket allows).
+pub(crate) fn resumable_config(
+    prepared: &PreparedTls,
+    verifier: Arc<ObservingVerifier>,
+    resolver: Arc<ObservingClientCert>,
+    store: Arc<dyn rustls::client::ClientSessionStore>,
+    alpn: &[&str],
+    tls13_only: bool,
+    early_data: bool,
+) -> Result<ClientConfig, TransportFailure> {
+    let versions: &[&'static rustls::SupportedProtocolVersion] = if tls13_only || prepared.min_version == TlsMinVersion::Tls13 {
+        &[&rustls::version::TLS13]
+    } else {
+        &[&rustls::version::TLS13, &rustls::version::TLS12]
+    };
+    let mut cfg = ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(versions)
+        .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("TLS versions unsupported: {e}"), "tls.min_version"))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_client_cert_resolver(resolver);
+    cfg.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
+    cfg.resumption = Resumption::store(store);
+    cfg.enable_early_data = early_data;
+    Ok(cfg)
+}
+
+/// An observation handle whose slot the caller routes a resumption context's
+/// verifier to (see [`SlotCell::route_to`]).
+pub(crate) fn routed_handle(
+    prepared: &PreparedTls,
+    host: &str,
+    alpn: &[&str],
+) -> Result<(ServerName<'static>, ObservationHandle), TransportFailure> {
+    let server_name = server_name_for(host, prepared)?;
+    let sni = server_name_string(&server_name);
+    let sent_sni = matches!(server_name, ServerName::DnsName(_));
+    let slot = Arc::new(Mutex::new(SlotHandle::default()));
+    Ok((server_name, ObservationHandle { slot, sni, sent_sni, alpn: alpn.iter().map(|s| s.to_string()).collect() }))
+}
+
+impl ObservationHandle {
+    pub(crate) fn slot(&self) -> Arc<Mutex<SlotHandle>> {
+        self.slot.clone()
+    }
+
+    /// Whether the verifier saw a certificate on this connection (a full
+    /// handshake; a resumed TLS 1.3 session sends none).
+    pub(crate) fn certificate_seen(&self) -> bool {
+        self.slot.lock().0.verification.is_some()
+    }
+}
+
+/// TLS evidence for a connection that resumed a session: no certificate was
+/// exchanged, so the chain is the one stored with the ticket and the
+/// verification is the original handshake's. A ticket of a verifying profile
+/// exists only because that handshake passed this profile's verifier; with a
+/// bypass the chain is checked again to say what strict verification would
+/// conclude.
+pub(crate) fn resumed_observation(
+    h: &ObservationHandle,
+    prepared: &PreparedTls,
+    chain: &[CertificateDer<'_>],
+    version: Option<String>,
+    cipher_suite: Option<String>,
+    alpn_negotiated: Option<String>,
+) -> TlsObservation {
+    let mut obs = observe(h, prepared, true);
+    obs.version = version;
+    obs.cipher_suite = cipher_suite;
+    obs.alpn_negotiated = alpn_negotiated;
+    obs.resumed = Some(true);
+    obs.client_certificate_requested = None;
+    obs.client_certificate_presented = None;
+    obs.peer_certificates = chain.iter().map(summarize).collect();
+    if let Some(leaf) = chain.first() {
+        obs.peer_spiffe_id = spiffe::peer_spiffe_id(leaf.as_ref());
+    }
+    obs.verification = if prepared.verify {
+        TlsVerification::Verified
+    } else {
+        let would_have_failed = match (chain.first(), ServerName::try_from(h.sni.clone())) {
+            (Some(leaf), Ok(name)) if prepared.verifier.is_some() => {
+                verify_peer(&prepared.peer_check(), &name, leaf, &chain[1..], UnixTime::now()).problem.map(|(k, _)| k)
+            }
+            _ => None,
+        };
+        TlsVerification::Bypassed { would_have_failed }
+    };
+    obs
 }
 
 fn empty_observation(host: &str, alpn: &[&str]) -> TlsObservation {
@@ -729,13 +936,14 @@ pub fn client_config_observed(
     } else {
         &[&rustls::version::TLS13, &rustls::version::TLS12]
     };
-    let verifier = Arc::new(ObservingVerifier { prepared: PreparedView::of(prepared), slot: slot.clone() });
+    let cell = SlotCell::new(slot.clone());
+    let verifier = Arc::new(ObservingVerifier { prepared: PreparedView::of(prepared), slot: cell.clone() });
     let mut cfg = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(versions)
         .map_err(|e| local(FailureKind::TlsProfileInvalid, format!("TLS versions unsupported: {e}"), "tls.min_version"))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_client_cert_resolver(Arc::new(ObservingClientCert { key: prepared.client_key.clone(), slot: slot.clone() }));
+        .with_client_cert_resolver(Arc::new(ObservingClientCert { key: prepared.client_key.clone(), slot: cell }));
     cfg.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
     cfg.resumption = Resumption::store(prepared.sessions.clone());
     let sni = server_name_string(&server_name);

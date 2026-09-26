@@ -916,6 +916,15 @@ impl LoadRun {
             // Run-level override layer (highest precedence): the plan's
             // connection mode and a bounded per-send capture.
             let effective = anvil_engine::settings::resolve(&ctx.settings_layers);
+            if effective.early_data.enabled {
+                // Early-data handshakes of one session-ticket context are
+                // serialized (their evidence is per connection), which would
+                // distort a load measurement; the report has no early-data
+                // denominators either.
+                return Err(LoadError::Unsupported(format!(
+                    "request {id} enables 0-RTT early data, which load runs do not support (handshakes that share session tickets are serialized and the report does not count early data); turn early data off for the requests of this plan"
+                )));
+            }
             let capture = effective.limits.capture_bytes.min(opts.response_capture_bytes.max(1));
             ctx.settings_layers.push((
                 "run:load".into(),

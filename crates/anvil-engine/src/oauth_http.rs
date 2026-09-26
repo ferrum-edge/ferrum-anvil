@@ -83,6 +83,7 @@ impl TokenHttp for EngineTokenHttp<'_> {
                 tls,
                 isolation: format!("{}|oauth", self.ctx.isolation),
                 display_url: url.to_string(),
+                early_data: anvil_transport::http::EarlyDataIntent::Off,
             };
             let mut outs = self.engine.http.execute(&plan, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
             let out = outs.pop().ok_or("no attempt")?;

@@ -576,6 +576,20 @@ async fn load_013_datagram_requests_are_refused_not_counted_as_delivered() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn early_data_requests_are_refused_before_a_load_run() {
+    let _g = serial().await;
+    let mut s = RequestSpec::http("GET", "https://127.0.0.1:9/");
+    s.settings.early_data = Some(anvil_domain::settings::EarlyDataPolicy { enabled: true, extra_methods: vec![] });
+    let id = Id::new();
+    let job = LoadJob { requests: HashMap::from([(id, ctx(s))]), dataset: None };
+    match LoadRun::prepare(plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]), job, opts()) {
+        Err(anvil_load::LoadError::Unsupported(m)) => assert!(m.contains("0-RTT early data"), "{m}"),
+        Err(e) => panic!("wrong refusal: {e}"),
+        Ok(_) => panic!("load runs must refuse early data before any traffic"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chain_extraction_feeds_next_step_with_dataset_rows() {
     let _g = serial().await;
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();

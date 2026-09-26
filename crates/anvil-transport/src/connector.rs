@@ -312,6 +312,140 @@ pub async fn establish_with(
     tls_to_destination(rec, target, timeouts, io, stats, obs).await
 }
 
+/// A direct TLS connection through the session-ticket cache (early-data
+/// opt-in): the ClientHello resumes a ticket when there is one and, with
+/// `send_early`, offers early data when the ticket allows it.
+pub struct TlsResumption<'a> {
+    pub tickets: &'a crate::tickets::TicketCache,
+    pub isolation: &'a str,
+    pub prepared: Arc<PreparedTls>,
+    pub send_early: bool,
+}
+
+/// [`establish`] for a direct connection (no proxy, no PROXY header) whose
+/// TLS goes through the session-ticket cache. The returned info carries the
+/// resumption evidence; when early data is in flight the stream comes back
+/// before the handshake completed (see [`crate::early_tls`]).
+pub async fn establish_resumable(
+    rec: &mut Recorder,
+    target: &Target<'_>,
+    dns_cfg: &DnsConfig,
+    timeouts: &Timeouts,
+    r: TlsResumption<'_>,
+) -> (Result<Established, (TransportFailure, ConnectionObservation)>, Option<crate::early_tls::ResumableInfo>) {
+    let mut obs = blank_observation(next_connection_id());
+    let stats = ConnStats::new();
+    let dns_idx = rec.start(Phase::Dns);
+    let resolution = match dns::resolve(target.host, target.port, dns_cfg, ms(timeouts.dns_ms)).await {
+        Ok(res) => res,
+        Err(f) => {
+            let status = if f.kind == FailureKind::DnsTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed };
+            rec.finish(dns_idx, if f.phase == Phase::Prepare { PhaseStatus::NotApplicable } else { status });
+            return (Err((f, obs)), None);
+        }
+    };
+    if resolution.source == "literal" || resolution.source == "override" {
+        rec.phases[dns_idx].status = PhaseStatus::NotApplicable;
+        rec.phases[dns_idx].start_us = None;
+        rec.phases[dns_idx].detail = Some(format!("address from {}", resolution.source));
+    } else {
+        rec.finish(dns_idx, PhaseStatus::Completed);
+    }
+    obs.resolved_addresses = resolution.addrs.iter().map(|a| a.to_string()).collect();
+    obs.resolution_source = Some(resolution.source.to_string());
+    let conn_idx = rec.start(Phase::Connect);
+    let connected = match net::connect_tcp(&resolution.addrs, ms(timeouts.connect_ms)).await {
+        Ok(c) => c,
+        Err((f, attempts)) => {
+            obs.connect_attempts = attempts;
+            rec.finish(conn_idx, if f.kind == FailureKind::ConnectTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed });
+            return (Err((f, obs)), None);
+        }
+    };
+    rec.finish(conn_idx, PhaseStatus::Completed);
+    obs.connect_attempts = connected.attempts;
+    obs.remote_address = Some(connected.remote.to_string());
+    obs.local_address = connected.stream.local_addr().ok().map(|a| a.to_string());
+    let io: BoxIo = Box::new(CountingIo::new(connected.stream, stats.clone()));
+    resumable_tls(rec, target, timeouts, io, stats, obs, r).await
+}
+
+async fn resumable_tls(
+    rec: &mut Recorder,
+    target: &Target<'_>,
+    timeouts: &Timeouts,
+    io: BoxIo,
+    stats: Arc<ConnStats>,
+    mut obs: ConnectionObservation,
+    r: TlsResumption<'_>,
+) -> (Result<Established, (TransportFailure, ConnectionObservation)>, Option<crate::early_tls::ResumableInfo>) {
+    use crate::early_tls::{EarlyPending, EarlyTlsIo, ResumableInfo};
+    let prepared = r.prepared.clone();
+    let ctx = r.tickets.context(r.isolation, crate::tickets::TicketTransport::Tls, target.host, target.port, &prepared, target.alpn);
+    let mut info = ResumableInfo { ctx: ctx.clone(), tickets_before: ctx.store.received(), taken: None, resumed: None, early: None };
+    let (sn, handle) = match tls::routed_handle(&prepared, target.host, target.alpn) {
+        Ok(x) => x,
+        Err(f) => return (Err((f, obs)), Some(info)),
+    };
+    let hs = ms(timeouts.tls_handshake_ms);
+    // Handshakes of one ticket context are serialized so the shared
+    // verifier's evidence belongs to this connection.
+    let q = rec.start(Phase::Queue);
+    let guard = match hs {
+        Some(d) => match tokio::time::timeout(d, ctx.begin(&handle)).await {
+            Ok(g) => g,
+            Err(_) => {
+                rec.finish_with(q, PhaseStatus::TimedOut, "waiting for another handshake of the same session-ticket context");
+                let f = TransportFailure::new(
+                    Phase::Queue,
+                    FailureKind::TlsHandshakeTimeout,
+                    "another handshake to this server with the same TLS profile did not finish before the handshake deadline",
+                )
+                .with_deadline(timeouts.tls_handshake_ms);
+                return (Err((f, obs)), Some(info));
+            }
+        },
+        None => ctx.begin(&handle).await,
+    };
+    rec.finish(q, PhaseStatus::Completed);
+    let cfg = match ctx.config(&prepared, target.alpn, false, r.send_early) {
+        Ok(c) => c,
+        Err(f) => return (Err((f, obs)), Some(info)),
+    };
+    let idx = rec.start(Phase::TlsHandshake);
+    let result = tls::connect_resumable(cfg, io, sn, r.send_early, hs).await;
+    info.taken = ctx.store.taken();
+    let io: BoxIo = match result {
+        Ok((stream, true)) => {
+            // Early data: the handshake completes on the first flush.
+            obs.tls = Some(tls::observe(&handle, &prepared, false));
+            let (eio, state) = EarlyTlsIo::new(stream, guard, handle, prepared.clone());
+            info.early = Some(EarlyPending { state, tls_phase: idx });
+            Box::new(crate::stats::TlsErrorTap::new(eio, stats.clone()))
+        }
+        Ok((stream, false)) => {
+            let (tls_obs, resumed) = tls::completed_observation(&handle, &prepared, stream.get_ref().1);
+            drop(guard);
+            info.resumed = Some(resumed);
+            rec.finish_with(idx, PhaseStatus::Completed, if resumed { "resumed session (TLS 1.3 PSK)" } else { "full handshake" });
+            obs.tls = Some(tls_obs);
+            Box::new(crate::stats::TlsErrorTap::new(stream, stats.clone()))
+        }
+        Err(mut f) => {
+            drop(guard);
+            let tls_obs = tls::observe(&handle, &prepared, false);
+            if let anvil_domain::execution::TlsVerification::Failed { problem, detail } = &tls_obs.verification {
+                f.kind = *problem;
+                f.message = detail.clone();
+            }
+            rec.finish(idx, if f.kind == FailureKind::TlsHandshakeTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed });
+            obs.tls = Some(tls_obs);
+            return (Err((f, obs)), Some(info));
+        }
+    };
+    (Ok(Established { io, stats, observation: obs }), Some(info))
+}
+
 async fn tls_to_destination(
     rec: &mut Recorder,
     target: &Target<'_>,

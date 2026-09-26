@@ -28,9 +28,9 @@ CLI (`anvil`) = same anvil-app services without a webview.
 
 - **Lock is enforced in the backend.** Every data command goes through
   `DesktopState::app()`, which refuses while locked. Locking drops the data
-  key, clears token caches and pooled connections, cancels executions and
-  sessions, and stops load workers. The lock screen is only a view of that
-  state.
+  key, clears token caches, pooled connections and TLS/QUIC session tickets,
+  cancels executions and sessions, and stops load workers. The lock screen is
+  only a view of that state.
 - **Load traffic never runs in the UI process.** The desktop re-launches its
   own executable with a fixed, non-secret flag and sends the job over stdin.
   The job carries only the secrets its requests reference.
