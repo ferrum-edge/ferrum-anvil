@@ -133,8 +133,7 @@ const MERGE_NOTE: &str =
     "Merge keeps this profile's settings and every item that already exists here; Replace restores the backup's versions.";
 const KEPT_SETTINGS_NOTE: &str =
     "Replace keeps this profile's app settings: they apply to every workspace here, and some are not in the backup.";
-const REPLACED_SETTINGS_NOTE: &str =
-    "Replace restores the backup's app settings (default request settings such as DNS overrides, resolver, proxy and TLS, and the lock, history and redaction policies): they apply to every workspace here, including ones created later.";
+const REPLACED_SETTINGS_NOTE: &str = "Replace restores the backup's app settings (default request settings such as DNS overrides, resolver, proxy and TLS, and the lock, history and redaction policies): they apply to every workspace here, including ones created later.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
