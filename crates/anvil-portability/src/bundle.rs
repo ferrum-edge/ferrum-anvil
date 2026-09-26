@@ -148,10 +148,9 @@ fn sha256(b: &[u8]) -> String {
 }
 
 fn device_bindings(graph: &PortableGraph) -> Vec<String> {
-    let text = serde_json::to_string(&graph.requests).unwrap_or_default();
     let mut out = Vec::new();
-    if text.contains("\"kind\":\"linked_file\"") {
-        out.push("Requests reference linked local files; attach them to the workspace or relink them on the target machine.".into());
+    if !graph.linked_files().is_empty() {
+        out.push("Requests or datasets name linked local files; attach them, or choose them again on the target machine.".into());
     }
     out.push("OS keychain entries, local master keys and signed-in provider sessions are device-bound and are never exported.".into());
     out

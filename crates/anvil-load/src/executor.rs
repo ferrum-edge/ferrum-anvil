@@ -605,17 +605,17 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
     } else {
         vec![pick_weighted(sh.plan.seed, &sh.mix_cumulative, iter)]
     };
-    let mut extra = vec![VarLayer {
+    let load = VarLayer {
         label: "load".into(),
         vars: vec![
             VarEntry { name: "anvil.iteration".into(), value: iter.to_string(), secret: false },
             VarEntry { name: "anvil.vu".into(), value: slot.to_string(), secret: false },
         ],
-    }];
-    if let Some(d) = &sh.dataset {
-        extra.push(d.row_layer(iter));
-    }
-    let mut extracted: Vec<VarEntry> = Vec::new();
+    };
+    let row = sh.dataset.as_ref().map(|d| d.row_layer(iter));
+    // Values extracted this iteration, each with the scope of the step that
+    // extracted it (`ExecutionContext::scope`).
+    let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
     let (mut terminal, mut app, mut assertion) = (Terminal::Completed, false, false);
     for (pos, &si) in steps.iter().enumerate() {
         if pos > 0 && sh.halt.is_cancelled() {
@@ -624,9 +624,19 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
         }
         let base = &sh.steps[si];
         let mut ctx = ExecutionContext::clone(base);
-        ctx.var_layers.extend(extra.iter().cloned());
-        if !extracted.is_empty() {
-            ctx.var_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: extracted.clone() });
+        ctx.var_layers.push(load.clone());
+        // A step under a sealed import root sees only values extracted under
+        // that root, and no dataset row (the dataset is the workspace's); a
+        // step outside it never sees what it extracted.
+        let scope = base.scope;
+        if scope.is_none()
+            && let Some(l) = &row
+        {
+            ctx.var_layers.push(l.clone());
+        }
+        let visible: Vec<VarEntry> = extracted.iter().filter(|(s, _)| *s == scope).map(|(_, e)| e.clone()).collect();
+        if !visible.is_empty() {
+            ctx.var_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: visible });
         }
         ctx.seed = Some(derive_seed(sh.plan.seed, base.seed.unwrap_or(0), iter, pos as u64));
         sh.begin_send(slot, measured);
@@ -641,8 +651,8 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
             break;
         }
         for (name, value, secret) in out.extracted {
-            extracted.retain(|e| e.name != name);
-            extracted.push(VarEntry { name, value, secret });
+            extracted.retain(|(s, e)| *s != scope || e.name != name);
+            extracted.push((scope, VarEntry { name, value, secret }));
         }
     }
     sh.end_iteration(measured, terminal, app, assertion);

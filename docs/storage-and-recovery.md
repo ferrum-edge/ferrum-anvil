@@ -52,9 +52,10 @@ commands return `LOCKED` until unlock.
   is inside it:
   - A bundle import writes its objects and secrets in the transaction; its
     attachments are stored after the commit and stay if storing one fails.
-  - A spec import writes its folders, requests, environments and source record
-    in the transaction; the new workspace or root folder and the stored
-    original file are written before it and stay if the transaction fails.
+  - A spec import writes everything in the transaction: the new workspace or
+    root folder, the stored original file, its folders, requests,
+    environments and source record. A failure, including one taking the
+    checkpoint, leaves the profile as it was.
 
   Changes saved meanwhile by other commands are kept, so the checkpoint is not
   restored automatically; it stays on disk for a manual restore.
@@ -90,9 +91,12 @@ any passphrase is asked for or any derivation runs, unless they are within:
 Exports use 64 MiB, 3 passes and 1 lane.
 Imports never send requests, run scripts or load plans, and never activate TLS
 bypasses, plain-HTTP marker trust, cross-origin credential forwarding or the
-legacy HMAC opt-in; the preview lists what was normalised. Device-bound items
+legacy HMAC opt-in, and never open an imported collection's root folder to its
+workspace; the preview lists what was normalised. Device-bound items
 (keychain entries, provider sessions, linked local files) are reported as
-needing rebinding.
+needing rebinding, and the preview lists each linked local file with the
+request or dataset that names it. A bundle import drops this device's
+linked-file bindings for every request and dataset it overwrites.
 
 ## Schema versions and migration
 

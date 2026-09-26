@@ -9,7 +9,7 @@ use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SecretRef;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::*;
-use anvil_storage::kind;
+use anvil_storage::{StoreTx, kind};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -109,12 +109,38 @@ impl App {
             variables: vec![],
             auth: AuthConfig::Inherit,
             tags: vec![],
+            import_root: false,
+            import_environment_ids: vec![],
+            use_workspace_scope: false,
         };
         self.store.put(kind::FOLDER, &f.meta.id, Some(ws), parent.as_ref(), f.sort_key, &f)?;
         Ok(f)
     }
 
+    /// Save a folder. Whether it is an import root, and whether that root is
+    /// open to the workspace, are kept as stored: only a spec import makes
+    /// an import root, and only [`App::set_import_root_workspace_scope`]
+    /// opens one.
     pub fn save_folder(&self, mut f: Folder) -> Result<Folder> {
+        let stored: Option<Folder> = self.store.get(kind::FOLDER, &f.meta.id)?;
+        f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
+        f.import_environment_ids = stored.as_ref().map(|s| s.import_environment_ids.clone()).unwrap_or_default();
+        f.use_workspace_scope = stored.as_ref().is_some_and(|s| s.use_workspace_scope);
+        f.meta.updated_at = chrono::Utc::now();
+        self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
+        Ok(f)
+    }
+
+    /// The user's explicit choice on this device to let requests under an
+    /// import root also resolve the workspace's variables, active
+    /// environment and auth, and this device's workload identity and token
+    /// files (`Folder::use_workspace_scope`). An import never sets this.
+    pub fn set_import_root_workspace_scope(&self, id: &Id, allow: bool) -> Result<Folder> {
+        let mut f = self.folder(id)?;
+        if !f.import_root {
+            return Err(AppError::Invalid("only the root folder of an imported collection has a scope of its own".into()));
+        }
+        f.use_workspace_scope = allow;
         f.meta.updated_at = chrono::Utc::now();
         self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
         Ok(f)
@@ -458,25 +484,15 @@ impl App {
         Ok(d)
     }
 
-    /// Store an attachment (content-addressed by sha256).
+    /// Store an attachment (content-addressed by sha256). The blob, its pin
+    /// and its index entry are written together or not at all.
     pub fn put_attachment(
         &self,
         file_name: &str,
         bytes: &[u8],
         media_type: Option<String>,
     ) -> Result<anvil_domain::request::AttachmentRef> {
-        let sha = hex::encode(Sha256::digest(bytes));
-        let blob = self.store.put_blob(bytes)?;
-        self.store.pin_blob(&blob)?;
-        self.store.put(
-            kind::IMPORT_SOURCE,
-            &attachment_index_id(&sha),
-            None,
-            None,
-            0.0,
-            &serde_json::json!({"attachment": sha, "blob": blob}),
-        )?;
-        Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+        Ok(self.store.atomically(|s| put_attachment_in(s, file_name, bytes, media_type))?)
     }
 
     /// Pin the blob of every stored attachment (idempotent). Profiles created
@@ -519,6 +535,21 @@ impl App {
         let blob = idx.get("blob").and_then(|b| b.as_str()).unwrap_or_default().to_string();
         Ok(self.store.get_blob(&blob)?.map(|z| z.to_vec()))
     }
+}
+
+/// [`App::put_attachment`] inside the caller's transaction, so the stored
+/// attachment is rolled back with everything else the caller writes.
+pub(crate) fn put_attachment_in(
+    s: &StoreTx<'_>,
+    file_name: &str,
+    bytes: &[u8],
+    media_type: Option<String>,
+) -> anvil_storage::store::Result<anvil_domain::request::AttachmentRef> {
+    let sha = hex::encode(Sha256::digest(bytes));
+    let blob = s.put_blob(bytes)?;
+    s.pin_blob(&blob)?;
+    s.put(kind::IMPORT_SOURCE, &attachment_index_id(&sha), None, None, 0.0, &serde_json::json!({"attachment": sha, "blob": blob}))?;
+    Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
 }
 
 /// Deterministic object id for the attachment index entry of a content hash.
