@@ -655,7 +655,7 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
               <input className="field mono" aria-label="MASQUE URI template" value={m.uri_template ?? MASQUE_DEFAULT_TEMPLATE} onChange={(e) => setMasque({ uri_template: e.target.value })} />
             </label>
             <p className="hint">
-              The request URL stays the UDP target (udp://host:port); {"{target_host}"} and {"{target_port}"} are filled from it. Headers and auth go on the CONNECT request and the TLS profile applies to the proxy. A refusal is the proxy&apos;s answer, never evidence about the target. DTLS inside the tunnel is not supported.
+              The request URL stays the UDP target (udp://host:port); {"{target_host}"} and {"{target_port}"} are filled from it. Headers and auth go on the CONNECT request and the TLS profile applies to the proxy. A refusal is the proxy&apos;s answer, never evidence about the target. With dtls:// the DTLS handshake runs inside the tunnel: every DTLS record is one HTTP Datagram, and the TLS profile applies to both the proxy and the DTLS peer.
             </p>
           </div>
         )}

@@ -457,7 +457,6 @@ async fn masque_settings_are_validated_before_traffic() {
         lab_ctx(s, None)
     };
     for (c, field) in [
-        (local("dtls://127.0.0.1:9", "https://127.0.0.1:9", None), "udp.masque"),
         (local("udp://127.0.0.1:9", "http://127.0.0.1:9", None), "udp.masque.proxy_url"),
         (local("udp://127.0.0.1:9", "https://127.0.0.1:9/prefix", None), "udp.masque.proxy_url"),
         (local("udp://127.0.0.1:9", "https://127.0.0.1:9", Some("/masque/{target_host}/")), "udp.masque.uri_template"),

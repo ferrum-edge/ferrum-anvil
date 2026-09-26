@@ -11,6 +11,7 @@
 
 pub mod certs;
 pub mod connector;
+pub mod datagram;
 pub mod decode;
 pub mod dns;
 pub mod dtls;

@@ -1,8 +1,10 @@
 //! Fixtures for the `h3x` profile (ports 19800–19899, lab/gateway/h3x.yaml):
-//! SSE backends behind the gateway's HTTP/3 listener, UDP targets behind its
-//! CONNECT-UDP route, and a TCP-only path to the QUIC port (UDP blocked).
+//! SSE backends behind the gateway's HTTP/3 listener, UDP and DTLS targets
+//! behind its CONNECT-UDP route, and a TCP-only path to the QUIC port (UDP
+//! blocked).
 
 use anvil_fixtures::LabPki;
+use anvil_fixtures::dtls::{self, DtlsFixture, DtlsServerOptions};
 use anvil_fixtures::http::{self, Fixture};
 use anvil_fixtures::lab_streams::{self, SlowFixture, TcpRelay};
 use anvil_fixtures::streams::{self, StreamFixture, UdpMode};
@@ -28,6 +30,14 @@ pub struct H3xFixtures {
     pub udp_silent: StreamFixture,
     /// A live echo that is NOT a MASQUE destination of the route.
     pub udp_unlisted: StreamFixture,
+    /// Admitted CONNECT-UDP destination: a DTLS 1.2 echo whose certificate
+    /// chains to the lab CA.
+    pub dtls_echo: DtlsFixture,
+    /// Admitted destination: a DTLS echo whose certificate is signed by a root
+    /// the lab TLS profile does not trust.
+    pub dtls_untrusted: DtlsFixture,
+    /// A live DTLS echo that is NOT a MASQUE destination of the route.
+    pub dtls_unlisted: DtlsFixture,
     /// TCP-only path to the gateway's HTTPS port: nothing answers QUIC on
     /// 19820/udp, which models a network that blocks UDP.
     pub udp_blocked_path: TcpRelay,
@@ -39,7 +49,12 @@ impl H3xFixtures {
         let pki = LabPki::generate();
         pki.write_to(certs_dir)?;
         let https: std::net::SocketAddr = "127.0.0.1:18843".parse()?;
+        let dtls_opts =
+            |p: &anvil_fixtures::pki::Pem| DtlsServerOptions { cert_pem: p.cert.clone(), key_pem: p.key.clone(), client_ca_pem: None };
         Ok(H3xFixtures {
+            dtls_echo: dtls::serve("127.0.0.1:19808", dtls_opts(&pki.server)).await?,
+            dtls_untrusted: dtls::serve("127.0.0.1:19809", dtls_opts(&pki.server_untrusted)).await?,
+            dtls_unlisted: dtls::serve("127.0.0.1:19810", dtls_opts(&pki.server)).await?,
             echo: http::serve("127.0.0.1:19803", None).await?,
             sse: http::serve("127.0.0.1:19813", None).await?,
             sse_abort: lab_streams::sse_abort("127.0.0.1:19816").await?,
@@ -63,6 +78,9 @@ impl H3xFixtures {
             &self.udp_echo.log,
             &self.udp_silent.log,
             &self.udp_unlisted.log,
+            &self.dtls_echo.log,
+            &self.dtls_untrusted.log,
+            &self.dtls_unlisted.log,
             &self.udp_blocked_path.log,
         ] {
             l.clear();

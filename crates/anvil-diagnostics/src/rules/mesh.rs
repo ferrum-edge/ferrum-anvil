@@ -18,7 +18,7 @@ use super::Ctx;
 use super::tls::{describe_check, identity_evidence};
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
-use anvil_domain::execution::{FailureKind as K, TlsObservation, TlsVerification, TunnelObservation};
+use anvil_domain::execution::{FailureKind as K, TlsObservation, TlsVerification, TunnelKind, TunnelObservation};
 use anvil_domain::outcome::{OutcomeWarning, WarningCode};
 
 /// Alerts that concern the client's certificate (the endpoint judged the SVID).
@@ -60,7 +60,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         out.push(sni_note(t, SourceScope::ForwardProxy, tunnel.map(|x| x.endpoint.clone()).unwrap_or_default(), a.index));
     }
 
-    let Some(t) = tunnel else { return };
+    // The rest is the HBONE leg. A CONNECT-UDP tunnel's facts are judged by
+    // the MASQUE rules (`protocol.masque`) from the protocol status.
+    let Some(t) = tunnel.filter(|t| t.kind == TunnelKind::Hbone) else { return };
     let endpoint = t.endpoint.clone();
 
     // ---- verification bypass on the tunnel's mTLS ----

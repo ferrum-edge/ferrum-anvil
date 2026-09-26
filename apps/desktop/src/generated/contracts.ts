@@ -437,7 +437,7 @@ export type AddressOrigin = "socket" | "configured";
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "TunnelKind".
  */
-export type TunnelKind = "hbone";
+export type TunnelKind = "hbone" | "connect_udp";
 /**
  * Whether request bytes of an attempt may have reached the peer.
  *
@@ -1788,10 +1788,11 @@ export interface ConnectionObservation {
    */
   proxy_header?: ProxyHeaderObservation | null;
   /**
-   * The mesh tunnel (HBONE) the connection runs through. Its outer phases,
-   * mTLS identities and `CONNECT` status are kept here, separate from the
-   * inner connection's phases and TLS (`tls` above is the inner TLS with
-   * the destination).
+   * The tunnel the connection runs through: a mesh HBONE tunnel, or the
+   * CONNECT-UDP (MASQUE) tunnel a DTLS session runs inside. Its outer
+   * phases, TLS identities and `CONNECT` status are kept here, separate
+   * from the inner connection's phases and TLS (`tls` above is the inner
+   * TLS or DTLS with the destination).
    */
   tunnel?: TunnelObservation | null;
 }
@@ -1939,7 +1940,8 @@ export interface TunnelObservation {
    */
   endpoint: string;
   /**
-   * `:authority` sent in the `CONNECT` (the inner destination).
+   * The inner destination: the HBONE `CONNECT` `:authority`, or the
+   * CONNECT-UDP target (expanded into the request's `:path`).
    */
   authority: string;
   resolved_addresses: string[];
@@ -1949,12 +1951,15 @@ export interface TunnelObservation {
   remote_address?: string | null;
   /**
    * Outer phases (DNS, TCP connect, mTLS handshake, HTTP/2 preface,
-   * `CONNECT`), on the same clock as the attempt's phases.
+   * `CONNECT`; for CONNECT-UDP: DNS, the QUIC handshake, the proxy's
+   * SETTINGS and the extended `CONNECT`), on the same clock as the
+   * attempt's phases.
    */
   phases: PhaseTiming[];
   /**
-   * Mutual TLS with the endpoint: the client SVID presented and the
-   * endpoint's verified server identity.
+   * TLS with the endpoint: for HBONE the mutual TLS (client SVID presented,
+   * the endpoint's verified server identity); for CONNECT-UDP the QUIC
+   * handshake's TLS 1.3 with the proxy.
    */
   tls?: TlsObservation | null;
   /**

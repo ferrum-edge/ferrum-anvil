@@ -157,6 +157,51 @@ describe("ResponsePanel", () => {
     expect(screen.getByText(/2 received in 800 ms · via MASQUE 127\.0\.0\.1:18843 \(capsules\)/)).toBeTruthy();
   });
 
+  it("shows DTLS inside a CONNECT-UDP tunnel as two legs: the DTLS peer and the MASQUE proxy", () => {
+    const tlsObs = (patch: Record<string, unknown>) => ({
+      sni: null,
+      server_name: "127.0.0.1",
+      server_name_overridden: false,
+      version: "TLSv1_3",
+      alpn_offered: [],
+      verification: { result: "verified" },
+      peer_certificates: [],
+      client_certificate_requested: null,
+      ...patch,
+    });
+    const v = view({ findings: [] });
+    const attempt = v.record.attempts[0] as unknown as Record<string, unknown>;
+    attempt.connection = {
+      id: 7,
+      reused: false,
+      protocol: "dtlsv1_2",
+      resolved_addresses: [],
+      connect_attempts: [],
+      prior_requests: 0,
+      via_proxy: "MASQUE CONNECT-UDP proxy 127.0.0.1:18843",
+      tls: tlsObs({ version: "DTLSv1_2", client_certificate_requested: false }),
+      tunnel: {
+        kind: "connect_udp",
+        endpoint: "127.0.0.1:18843 (MASQUE CONNECT-UDP proxy)",
+        authority: "127.0.0.1:19808",
+        resolved_addresses: ["127.0.0.1:18843"],
+        connect_attempts: [],
+        phases: [],
+        tls: tlsObs({ alpn_offered: ["h3"], alpn_negotiated: "h3" }),
+        connect_headers: [{ name: "capsule-protocol", value: "?1" }],
+        connect_status: 200,
+        response_headers: [],
+      },
+    };
+    render(<ResponsePanel view={v} running={false} progressBytes={null} onCancel={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: /Connection/ }));
+    expect(screen.getByText("CONNECT-UDP (MASQUE) tunnel (outer leg)")).toBeTruthy();
+    expect(screen.getByText("QUIC TLS with the MASQUE proxy")).toBeTruthy();
+    expect(screen.getByText("DTLS with the destination (inside the tunnel)")).toBeTruthy();
+    expect(screen.getByText("UDP target (in the CONNECT :path)").nextElementSibling?.textContent).toBe("127.0.0.1:19808");
+    expect(screen.queryByText(/HBONE/)).toBeNull();
+  });
+
   it("shows a cancel control while a request is running", () => {
     const onCancel = vi.fn();
     render(<ResponsePanel view={null} running progressBytes={2048} onCancel={onCancel} />);

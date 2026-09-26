@@ -56,8 +56,9 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
             if let Some(b) = &mut t.refusal_body {
                 *b = r.text(b);
             }
+            // A CONNECT-UDP request carries the request's auth headers.
             for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
-                h.value = r.text(&h.value);
+                h.value = r.header(&h.name, &h.value);
             }
         }
     }

@@ -51,7 +51,7 @@ enum Plan {
     Sse(sse::SsePlan),
     Tcp(rawtcp::TcpPlan),
     Udp(udp::UdpPlan),
-    Dtls(dtls::DtlsPlan),
+    Dtls(Box<dtls::DtlsPlan>),
     Masque(masque::MasquePlan),
 }
 
@@ -703,13 +703,7 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
                 "udp.proxy_protocol",
             ));
         }
-        if use_dtls {
-            return Err(unsupported(
-                "DTLS inside a CONNECT-UDP tunnel is not implemented: the MASQUE proxy relays UDP payloads, and Anvil does not run a DTLS handshake through it. Use udp:// through the proxy, or dtls:// without it",
-                "udp.masque",
-            ));
-        }
-        return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams).await;
+        return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams, use_dtls).await;
     }
     if let Some(e) = &envelope {
         b.inferred.push(crate::proxy_protocol::envelope_note(e));
@@ -719,28 +713,7 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     let display_url = b.redactor.url(&url);
     let settings = b.prep.settings.clone();
     let plan = if use_dtls {
-        let (t, name, _) = http_exec::tls_for(engine, ctx, &settings, &target, &mut b.inferred)?;
-        b.prep.tls_profile_name = name;
-        b.prep.tls = Some(t.clone());
-        let identity = match identity_material(ctx, &settings, &target)? {
-            Some(m) => Some(dtls::identity_from_pem(&m.cert_chain_pem, &m.private_key_pem)?),
-            None => None,
-        };
-        Plan::Dtls(dtls::DtlsPlan {
-            host: target.host.clone(),
-            port: target.port,
-            dns: dns_config(&settings),
-            timeouts: settings.timeouts,
-            tls: t,
-            identity,
-            datagrams: datagrams.clone(),
-            response_window_ms: spec.response_window_ms,
-            max_datagrams: spec.max_datagrams,
-            display_url,
-            transcript: TranscriptLimits::default(),
-            redact: Some(redact_fn(&b.redactor)),
-            envelope,
-        })
+        Plan::Dtls(Box::new(dtls_plan(engine, ctx, &mut b, &spec, &target, datagrams.clone(), display_url, envelope, None)?))
     } else {
         Plan::Udp(udp::UdpPlan {
             host: target.host.clone(),
@@ -760,6 +733,46 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     let mut p = finish_prep(b, plan, scheme.to_ascii_uppercase(), url, vec![], body, vec![]);
     p.content_type = None;
     Ok(p)
+}
+
+/// A DTLS plan for `target`: the TLS profile's trust and client identity
+/// apply to the DTLS peer, directly or inside a CONNECT-UDP tunnel.
+#[allow(clippy::too_many_arguments)]
+fn dtls_plan(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    b: &mut Base,
+    spec: &UdpSpec,
+    target: &Target,
+    datagrams: Vec<Bytes>,
+    display_url: String,
+    envelope: Option<anvil_transport::proxy_protocol::EnvelopePlan>,
+    masque: Option<masque::MasqueTunnelPlan>,
+) -> Result<dtls::DtlsPlan, TransportFailure> {
+    let settings = b.prep.settings.clone();
+    let (t, name, _) = http_exec::tls_for(engine, ctx, &settings, target, &mut b.inferred)?;
+    b.prep.tls_profile_name = name;
+    b.prep.tls = Some(t.clone());
+    let identity = match identity_material(ctx, &settings, target)? {
+        Some(m) => Some(dtls::identity_from_pem(&m.cert_chain_pem, &m.private_key_pem)?),
+        None => None,
+    };
+    Ok(dtls::DtlsPlan {
+        host: target.host.clone(),
+        port: target.port,
+        dns: dns_config(&settings),
+        timeouts: settings.timeouts,
+        tls: t,
+        identity,
+        datagrams,
+        response_window_ms: spec.response_window_ms,
+        max_datagrams: spec.max_datagrams,
+        display_url,
+        transcript: TranscriptLimits::default(),
+        redact: Some(redact_fn(&b.redactor)),
+        envelope,
+        masque,
+    })
 }
 
 /// RFC 6570 simple-string expansion of one value: everything except the
@@ -822,10 +835,11 @@ fn expand_masque_template(template: &str, host: &str, port: u16) -> Result<Strin
     Ok(out)
 }
 
-/// UDP through an RFC 9298 CONNECT-UDP proxy: the proxy's origin and the
-/// expanded URI Template become the HTTP/3 extended CONNECT; TLS, trust and
-/// auth apply to the proxy (the only HTTP peer). The UDP target stays the
-/// request URL.
+/// UDP or DTLS through an RFC 9298 CONNECT-UDP proxy: the proxy's origin and
+/// the expanded URI Template become the HTTP/3 extended CONNECT; trust, the
+/// TLS profile and auth apply to the proxy (the only HTTP peer). The UDP
+/// target stays the request URL; with DTLS the TLS profile also applies to
+/// the DTLS handshake with the target inside the tunnel.
 #[allow(clippy::too_many_arguments)]
 async fn prepare_masque(
     engine: &Engine,
@@ -836,6 +850,7 @@ async fn prepare_masque(
     m: &MasqueSpec,
     target: &Target,
     datagrams: Vec<Bytes>,
+    use_dtls: bool,
 ) -> Result<SessionPrep, TransportFailure> {
     for (i, d) in datagrams.iter().enumerate() {
         if d.len() > masque::MAX_UDP_PAYLOAD {
@@ -907,7 +922,7 @@ async fn prepare_masque(
             MasqueDatagramMode::Capsules => "DATAGRAM capsules",
         }
     ));
-    let plan = masque::MasquePlan {
+    let tunnel = masque::MasqueTunnelPlan {
         proxy_host: t.host.clone(),
         proxy_port: t.port,
         proxy_authority: t.authority.clone(),
@@ -919,16 +934,26 @@ async fn prepare_masque(
         dns: dns_config(&settings),
         timeouts: settings.timeouts,
         limits: settings.limits,
-        datagrams: datagrams.clone(),
-        response_window_ms: spec.response_window_ms,
-        max_datagrams: spec.max_datagrams,
         display_url,
-        transcript: TranscriptLimits::default(),
-        redact: Some(redact_fn(&b.redactor)),
     };
-    let url = format!("udp://{}", target.authority);
+    let scheme = if use_dtls { "dtls" } else { "udp" };
+    let url = format!("{scheme}://{}", target.authority);
+    let plan = if use_dtls {
+        b.inferred.push("DTLS runs inside the tunnel: every DTLS record is one HTTP Datagram, and the TLS profile's trust and client identity apply to the DTLS peer as well as to the proxy".into());
+        let display = b.redactor.url(&url);
+        Plan::Dtls(Box::new(dtls_plan(engine, ctx, &mut b, spec, target, datagrams.clone(), display, None, Some(tunnel))?))
+    } else {
+        Plan::Masque(masque::MasquePlan {
+            tunnel,
+            datagrams: datagrams.clone(),
+            response_window_ms: spec.response_window_ms,
+            max_datagrams: spec.max_datagrams,
+            transcript: TranscriptLimits::default(),
+            redact: Some(redact_fn(&b.redactor)),
+        })
+    };
     let body = concat(&datagrams);
-    let mut p = finish_prep(b, Plan::Masque(plan), "UDP".into(), url, headers, body, facts);
+    let mut p = finish_prep(b, plan, scheme.to_ascii_uppercase(), url, headers, body, facts);
     p.content_type = None;
     p.proxy = Some(format!("MASQUE CONNECT-UDP proxy {}", t.authority));
     Ok(p)

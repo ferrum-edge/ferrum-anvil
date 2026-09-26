@@ -1,6 +1,6 @@
 //! Scenarios for the `h3x` gateway profile: server-sent events over HTTP/3
-//! and RFC 9298 CONNECT-UDP (MASQUE), both *through the real Ferrum Edge
-//! gateway's QUIC listener*.
+//! and RFC 9298 CONNECT-UDP (MASQUE), including DTLS inside the tunnel, all
+//! *through the real Ferrum Edge gateway's QUIC listener*.
 //!
 //! Public-evidence mode: Anvil sees only what a client sees. Fixture logs
 //! and the gateway's operator log are independent ground truth, never given
@@ -15,7 +15,9 @@ use crate::profiles::{BoxFut, Profile, RunArgs};
 use crate::scenario::{CheckKind, Checks, ScenarioResult};
 use anvil_domain::Id;
 use anvil_domain::diagnostics::{Confidence, SourceScope};
-use anvil_domain::execution::{AttemptObservation, AttemptReason, Direction, DispatchState, FailureKind, Phase, PhaseStatus};
+use anvil_domain::execution::{
+    AttemptObservation, AttemptReason, Direction, DispatchState, FailureKind, Phase, PhaseStatus, TlsVerification,
+};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::outcome::{ApplicationState, ClosedBy, MasqueEncoding, MasqueTunnel, ProtocolStatus, TransportState};
 use anvil_domain::request::*;
@@ -41,6 +43,12 @@ const UDP_BLOCKED: &str = "127.0.0.1:19820";
 const UDP_ECHO: &str = "127.0.0.1:19805";
 const UDP_SILENT: &str = "127.0.0.1:19806";
 const UDP_UNLISTED: &str = "127.0.0.1:19807";
+/// Admitted DTLS echo (lab-CA certificate).
+const DTLS_ECHO: &str = "127.0.0.1:19808";
+/// Admitted DTLS echo whose certificate chains to a root the profile does not trust.
+const DTLS_UNTRUSTED: &str = "127.0.0.1:19809";
+/// A live DTLS echo that is not an admitted MASQUE destination.
+const DTLS_UNLISTED: &str = "127.0.0.1:19810";
 /// Every listener of the three gateway instances.
 const GATEWAY_PORTS: &[u16] = &[18880, 18843, 18881, 18844, 18882, 18845];
 const MASQUE_PROXY_ID: &str = "h3x-masque";
@@ -146,6 +154,8 @@ struct Masque<'a> {
     datagrams: &'a [&'a str],
     window_ms: u64,
     dtls: bool,
+    /// TLS (and DTLS) handshake deadline override.
+    handshake_ms: Option<u64>,
 }
 
 impl Default for Masque<'_> {
@@ -158,6 +168,7 @@ impl Default for Masque<'_> {
             datagrams: &["masque-1"],
             window_ms: 800,
             dtls: false,
+            handshake_ms: None,
         }
     }
 }
@@ -174,7 +185,7 @@ fn masque_ctx(env: &Env, m: Masque<'_>) -> ExecutionContext {
         max_datagrams: 100,
         masque: Some(MasqueSpec { proxy_url: format!("https://{}", m.proxy), uri_template: m.template.into(), datagrams: m.mode }),
     });
-    let handshake = if m.proxy == UDP_BLOCKED { Some(800) } else { None };
+    let handshake = if m.proxy == UDP_BLOCKED { Some(800) } else { m.handshake_ms };
     ctx_with(env, s, None, handshake)
 }
 
@@ -917,29 +928,274 @@ fn masque009(env: &Env) -> Fut<'_> {
     })
 }
 
-fn masque010(env: &Env) -> Fut<'_> {
+// ------------------------------------------------- DTLS inside the tunnel ---
+
+fn dtls_ctx<'a>(env: &Env, target: &'a str, datagrams: &'a [&'a str], handshake_ms: Option<u64>) -> ExecutionContext {
+    masque_ctx(env, Masque { target, datagrams, dtls: true, handshake_ms, window_ms: 1_000, ..Default::default() })
+}
+
+fn dtls_obs(o: &ExecutionOutput) -> Option<&anvil_domain::execution::TlsObservation> {
+    last(o).and_then(|a| a.connection.as_ref()).and_then(|c| c.tls.as_ref())
+}
+
+fn outer_leg(o: &ExecutionOutput) -> Option<&anvil_domain::execution::TunnelObservation> {
+    last(o).and_then(|a| a.connection.as_ref()).and_then(|c| c.tunnel.as_ref())
+}
+
+fn handshakes(f: &anvil_fixtures::dtls::DtlsFixture) -> usize {
+    f.completed_handshakes().len()
+}
+
+/// The CONNECT-UDP leg to the gateway opened (200, capsules) and was verified.
+fn tunnel_leg_ok(c: &mut Checks, o: &ExecutionOutput) {
+    let t = outer_leg(o);
+    c.add(
+        CheckKind::Diagnosis,
+        "the gateway leg is a CONNECT-UDP tunnel: 200 over h3 with a verified certificate, HTTP Datagrams as capsules",
+        t.map(|t| {
+            t.kind == anvil_domain::execution::TunnelKind::ConnectUdp
+                && t.connect_status == Some(200)
+                && t.tls
+                    .as_ref()
+                    .map(|x| x.alpn_negotiated.as_deref() == Some("h3") && x.verification == TlsVerification::Verified)
+                    .unwrap_or(false)
+                && t.phases.iter().any(|p| p.phase == Phase::QuicHandshake && p.status == PhaseStatus::Completed)
+        })
+        .unwrap_or(false)
+            && tunnel(o).map(|t| t.2.encoding == Some(MasqueEncoding::Capsule) && t.2.h3_datagrams == Some(false)).unwrap_or(false),
+        format!("{:?}", t.map(|t| (&t.kind, t.connect_status))),
+    );
+    c.add(
+        CheckKind::Diagnosis,
+        "the attempt addresses the DTLS target; the gateway's QUIC connection is tunnel evidence, not an attempt phase",
+        last(o)
+            .map(|a| {
+                a.method == "DTLS"
+                    && a.url.starts_with("dtls://")
+                    && a.phase(Phase::ProxyTunnel).map(|p| p.status) == Some(PhaseStatus::Completed)
+                    && a.phase(Phase::QuicHandshake).is_none()
+            })
+            .unwrap_or(false),
+        format!("{:?}", last(o).map(|a| (&a.method, &a.url))),
+    );
+    c.add(CheckKind::Diagnosis, "the gateway's 200 is not presented as a response of the DTLS target", o.record.response.is_none(), "");
+}
+
+fn masque_dtls_001(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let before = datagrams(&env.fx.dtls_echo.log);
+        let hs_before = handshakes(&env.fx.dtls_echo);
+        let o = send(env, &dtls_ctx(env, DTLS_ECHO, &["dtls-one", "dtls-two"], None)).await;
+        c.add(
+            CheckKind::Diagnosis,
+            "DTLS handshake completed inside the tunnel; 2 sent, 2 echoed with boundaries kept",
+            failure_kind(&o).is_none()
+                && tunnel(&o).map(|(s, r, _)| (s, r)) == Some((2, 2))
+                && previews(&o, Direction::Received, "datagram") == vec!["dtls-one", "dtls-two"],
+            outcome_line(&o),
+        );
+        let t = dtls_obs(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "the DTLS peer's certificate (the target's, not the gateway's) was verified against the TLS profile",
+            t.map(|t| {
+                t.version.as_deref() == Some("DTLSv1_2")
+                    && t.verification == TlsVerification::Verified
+                    && t.peer_certificates.first().map(|p| p.subject.contains("anvil-lab-server")).unwrap_or(false)
+                    && t.client_certificate_requested == Some(false)
+            })
+            .unwrap_or(false),
+            format!("{:?}", t.map(|t| (&t.version, &t.verification))),
+        );
+        tunnel_leg_ok(&mut c, &o);
+        let m = tunnel(&o).map(|t| t.2);
+        c.add(
+            CheckKind::Diagnosis,
+            "handshake flights and records travelled as DATAGRAM capsules both ways; Anvil ended the tunnel",
+            m.as_ref().map(|m| m.sent_capsules >= 4 && m.received_capsules >= 4 && m.closed_by == ClosedBy::Client).unwrap_or(false),
+            format!("{m:?}"),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "no MASQUE, UDP, DTLS or TLS problem finding",
+            !codes(&o).iter().any(|x| x.starts_with("masque.") || x.starts_with("udp.") || x.starts_with("client.")),
+            format!("{:?}", codes(&o)),
+        );
+        c.add(CheckKind::Diagnosis, "an echo was observed, so dispatch is sent", o.record.outcome.dispatch == DispatchState::Sent, "");
+        c.add(CheckKind::Diagnosis, "transport completed", o.record.outcome.transport == TransportState::Completed, "");
+        c.absent_prefix(&o, "ferrum.");
+        c.add(
+            CheckKind::GroundTruth,
+            "the DTLS echo behind the gateway completed one handshake and received the 2 datagrams",
+            handshakes(&env.fx.dtls_echo) == hs_before + 1 && datagrams(&env.fx.dtls_echo.log) >= before + 2,
+            format!(
+                "handshakes {hs_before} → {}, datagrams {before} → {}",
+                handshakes(&env.fx.dtls_echo),
+                datagrams(&env.fx.dtls_echo.log)
+            ),
+        );
+        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        operator_status(&mut c, &lines, 200);
+        operator_says(&mut c, &lines, "CONNECT-UDP (RFC 9298) tunnel established");
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
+    })
+}
+
+fn masque_dtls_002(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
-        let before = datagrams(&env.fx.udp_echo.log);
-        let o = send(env, &masque_ctx(env, Masque { dtls: true, ..Default::default() })).await;
+        let before = datagrams(&env.fx.dtls_untrusted.log);
+        let hs_before = handshakes(&env.fx.dtls_untrusted);
+        let o = send(env, &dtls_ctx(env, DTLS_UNTRUSTED, &["must not arrive"], None)).await;
         let f = last(&o).and_then(|a| a.failure.clone());
         c.add(
             CheckKind::Diagnosis,
-            "DTLS inside the CONNECT-UDP tunnel is refused locally, before any traffic",
-            f.as_ref()
-                .map(|f| {
-                    f.kind == FailureKind::UnsupportedCombination && f.phase == Phase::Prepare && f.field.as_deref() == Some("udp.masque")
-                })
-                .unwrap_or(false),
+            "Anvil rejected the DTLS target's certificate: typed untrusted issuer in dtls_handshake",
+            f.as_ref().map(|f| f.kind == FailureKind::TlsUntrustedIssuer && f.phase == Phase::DtlsHandshake).unwrap_or(false),
             format!("{f:?}"),
         );
-        c.has(&o, "local.unsupported_combination");
-        c.add(CheckKind::Diagnosis, "nothing was dispatched", o.record.outcome.dispatch == DispatchState::NotDispatched, "");
+        c.add(
+            CheckKind::Diagnosis,
+            "the presented DTLS certificate is kept as evidence of a failed verification",
+            dtls_obs(&o)
+                .map(|t| matches!(t.verification, TlsVerification::Failed { .. }) && !t.peer_certificates.is_empty())
+                .unwrap_or(false),
+            "",
+        );
+        tunnel_leg_ok(&mut c, &o);
+        c.has(&o, "client.tls.untrusted_issuer");
+        let d = o.record.findings.iter().find(|f| f.code == "client.tls.untrusted_issuer");
+        c.add(
+            CheckKind::Diagnosis,
+            "the finding names the DTLS target, not the gateway",
+            d.map(|d| d.explanation.contains(DTLS_UNTRUSTED) && !d.explanation.contains("18843")).unwrap_or(false),
+            d.map(|d| d.explanation.chars().take(160).collect::<String>()).unwrap_or_default(),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "no MASQUE finding: the gateway did its part",
+            !codes(&o).iter().any(|x| x.starts_with("masque.")),
+            format!("{:?}", codes(&o)),
+        );
+        c.add(CheckKind::Diagnosis, "no application data was dispatched", o.record.outcome.dispatch == DispatchState::NotDispatched, "");
+        c.absent_prefix(&o, "ferrum.");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        c.add(
+            CheckKind::GroundTruth,
+            "the untrusted DTLS echo saw the handshake start through the gateway but never completed it or got data",
+            env.fx.dtls_untrusted.log.entries().iter().any(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. }))
+                && handshakes(&env.fx.dtls_untrusted) == hs_before
+                && datagrams(&env.fx.dtls_untrusted.log) == before,
+            format!("handshakes {hs_before} → {}", handshakes(&env.fx.dtls_untrusted)),
+        );
         let lines = op_log(env, from, MASQUE_PROXY_ID);
-        c.add(CheckKind::GroundTruth, "the gateway saw no request", lines.is_empty(), format!("{lines:?}"));
-        c.add(CheckKind::GroundTruth, "the target received nothing", datagrams(&env.fx.udp_echo.log) == before, "");
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
+        operator_status(&mut c, &lines, 200);
+        let r = send(env, &dtls_ctx(env, DTLS_ECHO, &["recovered"], None)).await;
+        c.add(
+            CheckKind::Recovery,
+            "DTLS through the gateway to the trusted echo answers the datagram",
+            previews(&r, Direction::Received, "datagram") == vec!["recovered"],
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
+    })
+}
+
+fn masque_dtls_003(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let o = send(env, &dtls_ctx(env, DTLS_UNLISTED, &["not admitted"], None)).await;
+        refusal_checks(&mut c, &o, 403, "not an allowed destination", DTLS_UNLISTED);
+        c.add(
+            CheckKind::Diagnosis,
+            "no DTLS was attempted: the attempt is the gateway's CONNECT, with no dtls_handshake phase or DTLS evidence",
+            last(&o)
+                .map(|a| {
+                    a.method == "CONNECT"
+                        && a.phase(Phase::DtlsHandshake).is_none()
+                        && a.connection.as_ref().map(|c| c.tunnel.is_none()).unwrap_or(true)
+                })
+                .unwrap_or(false)
+                && !codes(&o).iter().any(|x| x.starts_with("client.dtls.") || x.starts_with("client.tls.")),
+            format!("{:?}", codes(&o)),
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "the unlisted DTLS echo (live) saw nothing at all",
+            env.fx.dtls_unlisted.log.entries().is_empty(),
+            format!("{} entries", env.fx.dtls_unlisted.log.entries().len()),
+        );
+        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        operator_status(&mut c, &lines, 403);
+        operator_says(&mut c, &lines, "connect_udp_target_not_allowed");
+        let r = send(env, &dtls_ctx(env, DTLS_ECHO, &["recovered"], None)).await;
+        c.add(
+            CheckKind::Recovery,
+            "DTLS through the gateway to the admitted echo answers the datagram",
+            previews(&r, Direction::Received, "datagram") == vec!["recovered"],
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
+    })
+}
+
+fn masque_dtls_004(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let before = datagrams(&env.fx.udp_silent.log);
+        let o = send(env, &dtls_ctx(env, UDP_SILENT, &["anyone there?"], Some(1_500))).await;
+        let f = last(&o).and_then(|a| a.failure.clone());
+        c.add(
+            CheckKind::Diagnosis,
+            "no DTLS answer through an open tunnel: a DTLS handshake timeout with its deadline, not a tunnel failure",
+            f.as_ref().map(|f| f.kind == FailureKind::DtlsHandshakeTimeout && f.deadline_ms == Some(1_500)).unwrap_or(false),
+            format!("{f:?}"),
+        );
+        tunnel_leg_ok(&mut c, &o);
+        c.add(
+            CheckKind::Diagnosis,
+            "the ClientHello went through the tunnel, nothing came back, and Anvil ended the tunnel",
+            tunnel(&o).map(|t| t.2.sent_capsules >= 1 && t.2.received_capsules == 0 && t.2.closed_by == ClosedBy::Client).unwrap_or(false),
+            format!("{:?}", tunnel(&o).map(|t| t.2)),
+        );
+        c.has(&o, "client.dtls.handshake_timeout");
+        let d = o.record.findings.iter().find(|f| f.code == "client.dtls.handshake_timeout");
+        c.add(
+            CheckKind::Diagnosis,
+            "the timeout is about the target and does not claim it is down",
+            d.map(|d| d.explanation.contains(UDP_SILENT) && d.does_not_prove.iter().any(|x| x.contains("down"))).unwrap_or(false),
+            "",
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "no MASQUE finding and no UDP silence claim",
+            !codes(&o).iter().any(|x| x.starts_with("masque.") || x == "udp.no_response"),
+            format!("{:?}", codes(&o)),
+        );
+        c.add(CheckKind::Diagnosis, "no application data was dispatched", o.record.outcome.dispatch == DispatchState::NotDispatched, "");
+        c.absent_prefix(&o, "ferrum.");
+        c.add(
+            CheckKind::GroundTruth,
+            "the silent target did receive the DTLS handshake datagrams through the gateway",
+            datagrams(&env.fx.udp_silent.log) > before,
+            format!("{before} → {}", datagrams(&env.fx.udp_silent.log)),
+        );
+        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        operator_status(&mut c, &lines, 200);
+        let r = send(env, &dtls_ctx(env, DTLS_ECHO, &["recovered"], None)).await;
+        c.add(
+            CheckKind::Recovery,
+            "DTLS through the gateway to the echo answers the datagram",
+            previews(&r, Direction::Received, "datagram") == vec!["recovered"],
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
 }
 
@@ -971,7 +1227,18 @@ pub fn all() -> Vec<Def> {
             run: masque008,
         },
         Def { id: "MASQUE-009", title: "MASQUE proxy on a UDP-blocked path: QUIC timeout, no fallback", run: masque009 },
-        Def { id: "MASQUE-010", title: "DTLS inside the CONNECT-UDP tunnel is refused before traffic", run: masque010 },
+        Def { id: "MASQUE-DTLS-001", title: "DTLS inside the CONNECT-UDP tunnel: verified handshake and echo", run: masque_dtls_001 },
+        Def {
+            id: "MASQUE-DTLS-002",
+            title: "DTLS inside the tunnel: the target's certificate is untrusted (client-side verification)",
+            run: masque_dtls_002,
+        },
+        Def {
+            id: "MASQUE-DTLS-003",
+            title: "DTLS to a destination the route does not admit: 403, no DTLS attempted",
+            run: masque_dtls_003,
+        },
+        Def { id: "MASQUE-DTLS-004", title: "DTLS inside the tunnel to a silent destination: handshake deadline", run: masque_dtls_004 },
     ]
 }
 
@@ -1040,7 +1307,7 @@ async fn up() -> anyhow::Result<()> {
         env.gateway.log_path.display()
     );
     println!(
-        "routes: /h3x/echo /sse /sse-abort/* /sse-flaky/* /.well-known/masque/udp/{{host}}/{{port}}/ (admits udp 127.0.0.1:19805 echo, 19806 silent) /masque-get-only/*; udp 19807 is a live echo that is not admitted; 19820 is a TCP-only path to 18843"
+        "routes: /h3x/echo /sse /sse-abort/* /sse-flaky/* /.well-known/masque/udp/{{host}}/{{port}}/ (admits udp 127.0.0.1:19805 echo, 19806 silent, dtls 19808 echo, 19809 untrusted-certificate echo) /masque-get-only/*; udp 19807 and dtls 19810 are live echoes that are not admitted; 19820 is a TCP-only path to 18843"
     );
     harness::wait_for_shutdown().await?;
     stop(env).await;

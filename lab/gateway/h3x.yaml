@@ -5,12 +5,14 @@
 #   Last-Event-ID reconnect, UDP-blocked path) and RFC 9298 CONNECT-UDP through the same
 #   listener (echo, silent target, destination refusal, malformed template, method
 #   policy, profile disabled, no extended CONNECT, HTTP/3 datagrams required, UDP-blocked
-#   path, DTLS-in-tunnel refused locally).
+#   path) and DTLS inside the CONNECT-UDP tunnel (verified echo, untrusted DTLS certificate,
+#   destination not admitted, silent destination).
 # Settings:  h3x.conf (main: HTTP 18880, HTTPS+QUIC 18843, admin 18890), h3x-off.conf
 #            (CONNECT-UDP disabled: 18881 / 18844 / 18891) and h3x-noext.conf (no extended
 #            CONNECT: 18882 / 18845 / 18892) share this file.
-# Fixtures:  127.0.0.1:19800-19899. 19807/udp is a live echo that is deliberately NOT a
-#            MASQUE destination (the refusal must leave it untouched).
+# Fixtures:  127.0.0.1:19800-19899. 19807/udp (UDP echo) and 19810/udp (DTLS echo) are
+#            live but deliberately NOT MASQUE destinations (a refusal must leave them
+#            untouched).
 #
 # CONNECT-UDP destinations are ADMITTED, not load balanced (docs/http3.md "Routing,
 # policy, and destination admission"): the requested target_host:target_port must be the
@@ -27,13 +29,19 @@ resource_counts:
   upstreams: 1
 
 upstreams:
-  # The MASQUE route's admitted UDP destinations: echo (19805) and a silent sink (19806).
+  # The MASQUE route's admitted UDP destinations: echo (19805), a silent sink (19806),
+  # and two DTLS echoes (19808 lab-CA certificate, 19809 untrusted-root certificate) that
+  # Anvil reaches with a DTLS handshake inside the tunnel.
   - id: h3x-udp-targets
     targets:
       - host: 127.0.0.1
         port: 19805
       - host: 127.0.0.1
         port: 19806
+      - host: 127.0.0.1
+        port: 19808
+      - host: 127.0.0.1
+        port: 19809
 
 proxies:
   # Positive control: forced HTTP/3 request through the QUIC listener.

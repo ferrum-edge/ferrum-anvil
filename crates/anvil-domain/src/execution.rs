@@ -473,10 +473,11 @@ pub struct ConnectionObservation {
     /// PROXY protocol header / datagram envelope Anvil sent, when enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_header: Option<crate::proxy_protocol::ProxyHeaderObservation>,
-    /// The mesh tunnel (HBONE) the connection runs through. Its outer phases,
-    /// mTLS identities and `CONNECT` status are kept here, separate from the
-    /// inner connection's phases and TLS (`tls` above is the inner TLS with
-    /// the destination).
+    /// The tunnel the connection runs through: a mesh HBONE tunnel, or the
+    /// CONNECT-UDP (MASQUE) tunnel a DTLS session runs inside. Its outer
+    /// phases, TLS identities and `CONNECT` status are kept here, separate
+    /// from the inner connection's phases and TLS (`tls` above is the inner
+    /// TLS or DTLS with the destination).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel: Option<TunnelObservation>,
 }
@@ -486,6 +487,10 @@ pub struct ConnectionObservation {
 pub enum TunnelKind {
     /// HTTP/2 `CONNECT` over mutual TLS (mesh HBONE).
     Hbone,
+    /// HTTP/3 extended `CONNECT` with `:protocol = connect-udp` (RFC 9298
+    /// MASQUE): the QUIC connection to the proxy a DTLS session runs inside.
+    /// The tunnel's datagram accounting is in `ProtocolStatus::Udp::masque`.
+    ConnectUdp,
 }
 
 /// Evidence for the outer tunnel leg (Anvil ↔ tunnel endpoint).
@@ -494,7 +499,8 @@ pub struct TunnelObservation {
     pub kind: TunnelKind,
     /// The tunnel endpoint (`host:port`) and the proxy profile label.
     pub endpoint: String,
-    /// `:authority` sent in the `CONNECT` (the inner destination).
+    /// The inner destination: the HBONE `CONNECT` `:authority`, or the
+    /// CONNECT-UDP target (expanded into the request's `:path`).
     pub authority: String,
     pub resolved_addresses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,10 +511,13 @@ pub struct TunnelObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_address: Option<String>,
     /// Outer phases (DNS, TCP connect, mTLS handshake, HTTP/2 preface,
-    /// `CONNECT`), on the same clock as the attempt's phases.
+    /// `CONNECT`; for CONNECT-UDP: DNS, the QUIC handshake, the proxy's
+    /// SETTINGS and the extended `CONNECT`), on the same clock as the
+    /// attempt's phases.
     pub phases: Vec<PhaseTiming>,
-    /// Mutual TLS with the endpoint: the client SVID presented and the
-    /// endpoint's verified server identity.
+    /// TLS with the endpoint: for HBONE the mutual TLS (client SVID presented,
+    /// the endpoint's verified server identity); for CONNECT-UDP the QUIC
+    /// handshake's TLS 1.3 with the proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsObservation>,
     /// Non-pseudo headers sent on the `CONNECT` (markers, baggage, extras).

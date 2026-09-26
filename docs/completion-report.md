@@ -27,7 +27,7 @@ pass.
   - Effective-request preview.
   - Live lint.
   - Timing and sizes.
-  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3); gRPC in four modes over HTTP/2 or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or HTTP/3; TCP/TLS; UDP, direct or through an HTTP/3 CONNECT-UDP (MASQUE) proxy; DTLS.
+  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3); gRPC in four modes over HTTP/2 or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or HTTP/3; TCP/TLS; UDP and DTLS, direct or through an HTTP/3 CONNECT-UDP (MASQUE) proxy.
   - Mesh and edge features: HBONE tunnels (HTTP/2 CONNECT over mTLS), SPIFFE ID or trust-domain server verification with X.509-SVID client identities, SNI override, and PROXY protocol v1/v2 headers (TCP/TLS) and datagram envelopes (UDP/DTLS).
   - Interactive sessions for the session protocols.
   - See `docs/protocols.md`.
@@ -57,7 +57,7 @@ pass.
   - Locking the app stops the run and keeps a partial report.
   - See `docs/load.md`.
 - **Real-gateway failure lab.**
-  - 11 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`. The mesh profile runs the gateway in mesh mode (HBONE, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP; proxyproto covers PROXY protocol listeners.
+  - 11 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`. The mesh profile runs the gateway in mesh mode (HBONE, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP (UDP and DTLS in the tunnel); proxyproto covers PROXY protocol listeners.
   - Ground truth is independent of the diagnosis.
   - Every scenario runs twice: trusted, and with the gateway untrusted.
   - See `docs/lab/`.

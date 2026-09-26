@@ -28,9 +28,12 @@
 //!   connection closes with `H3_NO_ERROR`). A proxy FIN is a proxy close; a
 //!   stream reset, a lost QUIC connection or a FIN inside a capsule is an
 //!   abnormal end (incomplete, never success).
-//! * DTLS inside the tunnel is not implemented; the engine refuses it before
-//!   traffic.
+//! * **Channel.** An open tunnel is a [`DatagramChannel`]: the UDP session
+//!   here and a DTLS session ([`crate::dtls`]) run over the same
+//!   [`MasqueChannel`], so DTLS records travel as HTTP Datagrams exactly like
+//!   UDP payloads.
 
+use crate::datagram::{DatagramChannel, Inbound, Sent};
 use crate::dns::DnsConfig;
 use crate::h3::{H3_NO_ERROR, H3ClientOptions, QuicConnected};
 use crate::http::{AttemptOutput, sleep_until_opt};
@@ -45,7 +48,7 @@ use anvil_domain::settings::{Limits, Timeouts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{HeaderName, HeaderValue, Method, Request};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -59,9 +62,10 @@ const MAX_CAPSULE_HEADER: usize = 16;
 /// A Context ID varint is at most 8 bytes.
 const CONTEXT_ID_SLACK: usize = 8;
 
-/// A fully prepared CONNECT-UDP exchange (auth already applied to `headers`).
+/// The CONNECT-UDP leg: how to reach the proxy and which tunnel to ask for
+/// (auth already applied to `headers`). Shared by UDP and DTLS sessions.
 #[derive(Clone)]
-pub struct MasquePlan {
+pub struct MasqueTunnelPlan {
     pub proxy_host: String,
     pub proxy_port: u16,
     /// `:authority` of the proxy.
@@ -76,13 +80,19 @@ pub struct MasquePlan {
     pub dns: DnsConfig,
     pub timeouts: Timeouts,
     pub limits: Limits,
+    /// Redacted proxy request URL for evidence.
+    pub display_url: String,
+}
+
+/// A fully prepared UDP exchange through a CONNECT-UDP tunnel.
+#[derive(Clone)]
+pub struct MasquePlan {
+    pub tunnel: MasqueTunnelPlan,
     pub datagrams: Vec<Bytes>,
     /// How long to wait for responses after the last datagram is sent.
     pub response_window_ms: u64,
     /// Stop receiving after this many datagrams.
     pub max_datagrams: u32,
-    /// Redacted proxy request URL for evidence.
-    pub display_url: String,
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
 }
@@ -271,7 +281,7 @@ impl CapsuleDecoder {
     }
 }
 
-// ---------------------------------------------------------------- session ---
+// ----------------------------------------------------------------- tunnel ---
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
     match rx {
@@ -280,7 +290,7 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
     }
 }
 
-fn encoding_name(e: MasqueEncoding) -> &'static str {
+pub(crate) fn encoding_name(e: MasqueEncoding) -> &'static str {
     match e {
         MasqueEncoding::QuicDatagram => "QUIC DATAGRAM frames",
         MasqueEncoding::Capsule => "DATAGRAM capsules on the CONNECT stream",
@@ -288,58 +298,275 @@ fn encoding_name(e: MasqueEncoding) -> &'static str {
 }
 
 type SendHalf = h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
+type RecvHalf = h3::client::RequestStream<h3_quinn::RecvStream, Bytes>;
 
-/// Datagram accounting shared by scripted and interactive sends.
-struct Tunnel<'a> {
-    plan: &'a MasquePlan,
-    quic: quinn::Connection,
-    tx: SendHalf,
-    quarter: u64,
-    tr: Transcript,
-    status: MasqueTunnel,
-    sent: u64,
-    capsule_fallback_noted: bool,
+/// Why a CONNECT-UDP bootstrap did not open a tunnel. Nothing was sent
+/// through a tunnel; the attempt stays the CONNECT to the proxy.
+pub(crate) struct NotOpened {
+    failure: TransportFailure,
+    /// `None` when the exchange never reached the proxy's HTTP/3 layer.
+    tunnel: Option<MasqueTunnel>,
+    /// The proxy's refusal (status, headers, bounded body).
+    refusal: Option<(ResponseRecord, Bytes)>,
 }
 
-impl Tunnel<'_> {
-    /// Send one UDP payload in the chosen encoding. A payload too large for
-    /// a QUIC DATAGRAM frame goes as a capsule in automatic mode and is not
-    /// sent when QUIC datagrams are required. Never counts what was not
-    /// handed to the connection.
-    async fn send(&mut self, payload: &[u8]) -> Result<(), TransportFailure> {
-        if payload.len() > MAX_UDP_PAYLOAD {
-            self.tr.note("not_sent", &format!("a {}-byte datagram exceeds the RFC 9298 limit of {MAX_UDP_PAYLOAD} bytes", payload.len()));
-            return Ok(());
+impl NotOpened {
+    /// The single-attempt output for a tunnel that never opened.
+    pub(crate) fn into_output(
+        self,
+        rec: Recorder,
+        obs: AttemptObservation,
+        facts: SessionFacts,
+        window_ms: u64,
+        events: &EventCtx,
+    ) -> SessionOutput {
+        let status = match self.tunnel {
+            Some(t) => ProtocolStatus::Udp { datagrams_sent: 0, datagrams_received: 0, window_ms, masque: Some(t) },
+            None => ProtocolStatus::None,
+        };
+        let mut out = fail_attempt(rec, obs, self.failure, DispatchState::NotDispatched, events);
+        if let Some((response, body)) = self.refusal {
+            out.response = Some(response);
+            out.body = body;
         }
+        SessionOutput::single(out, None, status, facts)
+    }
+}
+
+/// An open CONNECT-UDP tunnel: the [`DatagramChannel`] UDP payloads (and a
+/// DTLS session's records) travel through. Counts every datagram per
+/// encoding in its [`MasqueTunnel`] and holds the QUIC connection open until
+/// [`close`](Self::close).
+pub struct MasqueChannel {
+    quic: quinn::Connection,
+    /// Keeps the HTTP/3 connection's request side alive for the tunnel.
+    _requests: crate::h3::SendReq,
+    tx: SendHalf,
+    rx: RecvHalf,
+    quarter: u64,
+    mode: MasqueDatagramMode,
+    status: MasqueTunnel,
+    decoder: CapsuleDecoder,
+    queue: VecDeque<Queued>,
+    stream_open: bool,
+    ended: bool,
+    capsule_fallback_noted: bool,
+    before: quinn::ConnectionStats,
+    /// The CONNECT request's header fields and the proxy's answer.
+    connect_headers: Vec<HeaderEntry>,
+    response: ResponseRecord,
+    proxy_authority: String,
+}
+
+/// Decoded input waiting to be delivered, in arrival order.
+enum Queued {
+    Udp(Bytes, MasqueEncoding),
+    Dropped(String),
+    Ended(Option<TransportFailure>, String),
+}
+
+impl MasqueChannel {
+    /// The tunnel facts so far.
+    pub fn status(&self) -> &MasqueTunnel {
+        &self.status
+    }
+
+    /// Record how the session ended the tunnel. An end the channel observed
+    /// itself (the proxy's close, or an abnormal end) is kept.
+    pub fn set_closed_by(&mut self, by: ClosedBy) {
+        if matches!(self.status.closed_by, ClosedBy::NotClosed) {
+            self.status.closed_by = by;
+        }
+    }
+
+    /// End the tunnel: a clean FIN on the CONNECT stream unless the stream
+    /// already ended or the session was canceled, then the QUIC connection
+    /// closes with `H3_NO_ERROR`. Returns the tunnel facts and the QUIC
+    /// connection's UDP bytes written and read while the tunnel was open.
+    pub async fn close(mut self, canceled: bool) -> (MasqueTunnel, u64, u64) {
+        if self.stream_open && !canceled {
+            let _ = tokio::time::timeout(Duration::from_millis(500), self.tx.finish()).await;
+        }
+        let after = self.quic.stats();
+        self.quic.close(H3_NO_ERROR.into(), b"");
+        (
+            self.status,
+            after.udp_tx.bytes.saturating_sub(self.before.udp_tx.bytes),
+            after.udp_rx.bytes.saturating_sub(self.before.udp_rx.bytes),
+        )
+    }
+
+    fn end(&mut self, failure: Option<TransportFailure>, note: &str) {
+        self.stream_open = false;
+        self.status.closed_by = if failure.is_some() { ClosedBy::Abnormal } else { ClosedBy::Peer };
+        self.queue.push_back(Queued::Ended(failure, note.to_string()));
+    }
+
+    fn on_quic(&mut self, d: Result<Bytes, quinn::ConnectionError>) {
+        match d {
+            Ok(d) => match decode_quic_datagram(&d, self.quarter) {
+                QuicDatagram::Udp(p) => self.queue.push_back(Queued::Udp(p, MasqueEncoding::QuicDatagram)),
+                QuicDatagram::UnregisteredContext(c) => {
+                    self.queue.push_back(Queued::Dropped(format!("an HTTP Datagram with unregistered context ID {c}")))
+                }
+                QuicDatagram::OtherStream(q) => {
+                    self.queue.push_back(Queued::Dropped(format!("a QUIC DATAGRAM frame for another request stream (quarter ID {q})")))
+                }
+                QuicDatagram::Malformed => self.queue.push_back(Queued::Dropped("a malformed QUIC DATAGRAM frame".into())),
+            },
+            Err(e) => {
+                let mut f = crate::h3::quic_failure(&e, false, None);
+                f.phase = Phase::Session;
+                f.message = format!("the QUIC connection to the MASQUE proxy ended during the tunnel: {}", f.message);
+                self.end(Some(f), "the QUIC connection to the proxy ended");
+            }
+        }
+    }
+
+    fn on_stream(&mut self, c: Result<Option<Bytes>, h3::error::StreamError>) {
+        match c {
+            Ok(Some(bytes)) => {
+                let mut rest: &[u8] = &bytes;
+                while !rest.is_empty() {
+                    let n = rest.len().min(CapsuleDecoder::feed_limit());
+                    self.decoder.push(&rest[..n]);
+                    rest = &rest[n..];
+                    loop {
+                        match self.decoder.decode_next() {
+                            Ok(Some(Capsule::Udp(p))) => self.queue.push_back(Queued::Udp(p, MasqueEncoding::Capsule)),
+                            Ok(Some(Capsule::UnregisteredContext(c))) => {
+                                self.queue.push_back(Queued::Dropped(format!("a DATAGRAM capsule with unregistered context ID {c}")))
+                            }
+                            Ok(Some(Capsule::Unknown(ty))) => {
+                                self.queue.push_back(Queued::Dropped(format!("a capsule of unknown type 0x{ty:x}")))
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                // A length-framed stream cannot be resynchronized.
+                                let f = TransportFailure::new(
+                                    Phase::Session,
+                                    FailureKind::HttpProtocolError,
+                                    format!("the proxy's capsule stream is malformed: {}", e.describe()),
+                                );
+                                self.end(Some(f), "the proxy's capsule stream is malformed");
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None) => match self.decoder.finish() {
+                Ok(()) => self.end(None, "the proxy closed the tunnel (FIN on the CONNECT stream)"),
+                Err(e) => {
+                    let f = TransportFailure::new(
+                        Phase::Session,
+                        FailureKind::BodyIncomplete,
+                        format!("the proxy ended the CONNECT-UDP stream abnormally: {}", e.describe()),
+                    );
+                    self.end(Some(f), "the proxy ended the CONNECT-UDP stream inside a capsule");
+                }
+            },
+            Err(e) => {
+                let f = crate::h3::stream_failure(&e, Phase::Session, FailureKind::BodyReset, "the proxy reset the CONNECT-UDP stream");
+                self.end(Some(f), "the proxy reset the CONNECT-UDP stream");
+            }
+        }
+    }
+
+    /// Re-express the CONNECT attempt as the outer leg of a session that runs
+    /// inside this tunnel (DTLS): the QUIC connection, SETTINGS and extended
+    /// CONNECT recorded so far become a CONNECT-UDP [`TunnelObservation`], the
+    /// attempt keeps one `proxy_tunnel` phase for them and addresses the
+    /// target from here on. The proxy's 2xx is tunnel evidence, not a
+    /// response of the target.
+    pub fn into_outer_leg(&self, rec: &mut Recorder, obs: &mut AttemptObservation, method: &str, url: &str) {
+        let outer = std::mem::take(&mut rec.phases);
+        let quic = obs.connection.take().unwrap_or_else(|| crate::connector::blank_observation(crate::connector::next_connection_id()));
+        let start = outer.iter().filter_map(|p| p.start_us).min();
+        let end = outer.iter().filter_map(|p| p.end_us).max();
+        let encoding = self.status.encoding.map(encoding_name).unwrap_or("HTTP Datagrams");
+        rec.mark(
+            Phase::Dns,
+            PhaseStatus::NotApplicable,
+            Some("the MASQUE proxy resolves the target (the proxy's own DNS is tunnel evidence)"),
+        );
+        rec.mark(
+            Phase::Connect,
+            PhaseStatus::NotApplicable,
+            Some("datagrams reach the target inside the CONNECT-UDP tunnel (the QUIC connection to the proxy is tunnel evidence)"),
+        );
+        rec.phases.push(PhaseTiming {
+            phase: Phase::ProxyTunnel,
+            status: PhaseStatus::Completed,
+            start_us: start,
+            end_us: end,
+            detail: Some(format!(
+                "CONNECT-UDP via {} → {} (HTTP {}; {encoding})",
+                self.proxy_authority, self.status.target, self.response.status
+            )),
+        });
+        let mut c = crate::connector::blank_observation(crate::connector::next_connection_id());
+        c.via_proxy = Some(format!("MASQUE CONNECT-UDP proxy {}", self.proxy_authority));
+        c.tunnel = Some(TunnelObservation {
+            kind: TunnelKind::ConnectUdp,
+            endpoint: format!("{} (MASQUE CONNECT-UDP proxy)", self.status.proxy),
+            authority: self.status.target.clone(),
+            resolved_addresses: quic.resolved_addresses,
+            resolution_source: quic.resolution_source,
+            connect_attempts: quic.connect_attempts,
+            local_address: quic.local_address,
+            remote_address: quic.remote_address,
+            phases: outer,
+            tls: quic.tls,
+            connect_headers: self.connect_headers.clone(),
+            connect_status: Some(self.response.status),
+            response_headers: self.response.headers.clone(),
+            refusal_body: None,
+            refusal_body_truncated: false,
+            failure: None,
+        });
+        obs.connection = Some(c);
+        obs.method = method.to_string();
+        obs.url = url.to_string();
+        obs.response_status = None;
+        obs.bytes = ByteCounts::default();
+    }
+}
+
+impl DatagramChannel for MasqueChannel {
+    /// Send one UDP payload in the chosen encoding. A payload too large for a
+    /// QUIC DATAGRAM frame goes as a capsule in automatic mode and is not sent
+    /// when QUIC datagrams are required. Never counts what was not handed to
+    /// the connection.
+    async fn send(&mut self, payload: &[u8]) -> Result<Sent, TransportFailure> {
+        if payload.len() > MAX_UDP_PAYLOAD {
+            return Ok(Sent::NotSent(format!("a {}-byte datagram exceeds the RFC 9298 limit of {MAX_UDP_PAYLOAD} bytes", payload.len())));
+        }
+        let mut note = None;
         if self.status.encoding == Some(MasqueEncoding::QuicDatagram) {
             match self.quic.send_datagram(encode_quic_datagram(self.quarter, payload)) {
                 Ok(()) => {
                     self.status.sent_quic_datagrams += 1;
-                    self.sent += 1;
-                    self.tr.data(Direction::Sent, "datagram", payload);
-                    return Ok(());
+                    return Ok(Sent::Sent(None));
                 }
-                Err(quinn::SendDatagramError::TooLarge) if self.plan.mode == MasqueDatagramMode::Auto => {
+                Err(quinn::SendDatagramError::TooLarge) if self.mode == MasqueDatagramMode::Auto => {
                     if !self.capsule_fallback_noted {
                         self.capsule_fallback_noted = true;
-                        self.tr.note(
-                            "encoding",
-                            "a datagram larger than the QUIC path's DATAGRAM frame limit was sent as a DATAGRAM capsule instead",
+                        note = Some(
+                            "a datagram larger than the QUIC path's DATAGRAM frame limit was sent as a DATAGRAM capsule instead"
+                                .to_string(),
                         );
                     }
                 }
                 Err(quinn::SendDatagramError::TooLarge) => {
-                    self.tr.note(
-                        "not_sent",
-                        &format!(
-                            "a {}-byte datagram exceeds the QUIC DATAGRAM frame limit ({} bytes) and QUIC datagrams are required; it was not sent",
-                            payload.len(),
-                            self.quic.max_datagram_size().unwrap_or(0)
-                        ),
-                    );
-                    return Ok(());
+                    return Ok(Sent::NotSent(format!(
+                        "a {}-byte datagram exceeds the QUIC DATAGRAM frame limit ({} bytes) and QUIC datagrams are required; it was not sent",
+                        payload.len(),
+                        self.quic.max_datagram_size().unwrap_or(0)
+                    )));
                 }
                 Err(e) => {
+                    self.status.closed_by = ClosedBy::Abnormal;
                     return Err(TransportFailure::new(
                         Phase::Session,
                         FailureKind::RequestWriteFailed,
@@ -351,27 +578,91 @@ impl Tunnel<'_> {
         match self.tx.send_data(encode_capsule(payload)).await {
             Ok(()) => {
                 self.status.sent_capsules += 1;
-                self.sent += 1;
-                self.tr.data(Direction::Sent, "datagram", payload);
-                Ok(())
+                Ok(Sent::Sent(note))
             }
-            Err(e) => Err(crate::h3::stream_failure(
-                &e,
-                Phase::Session,
-                FailureKind::RequestWriteFailed,
-                "sending a DATAGRAM capsule on the CONNECT stream failed",
-            )),
+            Err(e) => {
+                self.status.closed_by = ClosedBy::Abnormal;
+                Err(crate::h3::stream_failure(
+                    &e,
+                    Phase::Session,
+                    FailureKind::RequestWriteFailed,
+                    "sending a DATAGRAM capsule on the CONNECT stream failed",
+                ))
+            }
+        }
+    }
+
+    /// The next UDP payload (either encoding), a dropped item, or the end of
+    /// the tunnel. Decoded input is queued in `self` before anything else is
+    /// awaited, so dropping this future loses nothing.
+    async fn recv(&mut self) -> Inbound {
+        enum Ev {
+            Quic(Result<Bytes, quinn::ConnectionError>),
+            Stream(Result<Option<Bytes>, h3::error::StreamError>),
+        }
+        loop {
+            if let Some(q) = self.queue.pop_front() {
+                return match q {
+                    Queued::Udp(p, enc) => {
+                        match enc {
+                            MasqueEncoding::QuicDatagram => self.status.received_quic_datagrams += 1,
+                            MasqueEncoding::Capsule => self.status.received_capsules += 1,
+                        }
+                        Inbound::Datagram(p)
+                    }
+                    Queued::Dropped(what) => {
+                        self.status.dropped += 1;
+                        Inbound::Dropped(what)
+                    }
+                    Queued::Ended(failure, note) => {
+                        self.ended = true;
+                        Inbound::Ended { failure, note }
+                    }
+                };
+            }
+            if self.ended {
+                return std::future::pending().await;
+            }
+            let stream_open = self.stream_open;
+            let ev = tokio::select! {
+                d = self.quic.read_datagram() => Ev::Quic(d),
+                c = self.rx.recv_data(), if stream_open => Ev::Stream(c.map(|o| o.map(|mut b| { let n = b.remaining(); b.copy_to_bytes(n) }))),
+            };
+            match ev {
+                Ev::Quic(d) => self.on_quic(d),
+                Ev::Stream(c) => self.on_stream(c),
+            }
+        }
+    }
+
+    fn max_datagram(&self) -> Option<usize> {
+        // A QUIC DATAGRAM frame carries the quarter stream ID and Context ID 0
+        // in front of the payload; capsules carry any UDP payload.
+        match self.status.encoding {
+            Some(MasqueEncoding::QuicDatagram) => {
+                let mut ids = BytesMut::new();
+                put_varint(&mut ids, self.quarter);
+                put_varint(&mut ids, 0);
+                self.quic.max_datagram_size().map(|m| m.saturating_sub(ids.len()))
+            }
+            _ => None,
         }
     }
 }
 
-pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
-    let interactive = commands.is_some();
-    let mut rec = Recorder::new(0, events.clone());
-    events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
-    let mut obs = new_attempt(0, AttemptReason::Initial, "CONNECT", &plan.display_url);
-    let mut facts = SessionFacts::default();
-    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
+/// Open a CONNECT-UDP tunnel: a fresh QUIC connection to the proxy (Anvil
+/// advertises `SETTINGS_H3_DATAGRAM`), the proxy's SETTINGS (nothing is sent
+/// before they allow extended CONNECT), then the extended CONNECT and its
+/// answer. Phases go into `rec` and the QUIC connection into `obs`.
+pub(crate) async fn open(
+    plan: &MasqueTunnelPlan,
+    rec: &mut Recorder,
+    obs: &mut AttemptObservation,
+    facts: &mut SessionFacts,
+    events: &EventCtx,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
+) -> Result<MasqueChannel, NotOpened> {
     let mut tunnel = MasqueTunnel {
         proxy: format!("{}:{}", plan.proxy_host, plan.proxy_port),
         target: plan.target.clone(),
@@ -386,21 +677,13 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
         dropped: 0,
         closed_by: ClosedBy::NotClosed,
     };
-    let udp_status = |t: &MasqueTunnel, sent: u64, received: u64| ProtocolStatus::Udp {
-        datagrams_sent: sent,
-        datagrams_received: received,
-        window_ms: plan.response_window_ms,
-        masque: Some(t.clone()),
-    };
-    let early = |rec: Recorder, obs: AttemptObservation, f: TransportFailure, facts: SessionFacts, status: ProtocolStatus| {
-        SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, status, facts)
-    };
     let close_quic = |q: &quinn::Connection| q.close(H3_NO_ERROR.into(), b"");
+    let not_opened = |failure: TransportFailure, tunnel: Option<MasqueTunnel>| NotOpened { failure, tunnel, refusal: None };
 
     // ---- QUIC + HTTP/3 to the proxy (Anvil advertises SETTINGS_H3_DATAGRAM) ----
     let connected = {
         let connect = crate::h3::quic_connect_with(
-            &mut rec,
+            rec,
             &plan.proxy_host,
             plan.proxy_port,
             &plan.dns,
@@ -419,7 +702,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
         Some(Ok(c)) => c,
         Some(Err((f, cobs))) => {
             obs.connection = cobs;
-            return early(rec, obs, f, facts, ProtocolStatus::None);
+            return Err(not_opened(f, None));
         }
         None => {
             let f = TransportFailure::new(
@@ -428,7 +711,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
                 "total deadline elapsed during the QUIC connection to the MASQUE proxy",
             )
             .with_deadline(plan.timeouts.total_ms);
-            return early(rec, obs, f, facts, ProtocolStatus::None);
+            return Err(not_opened(f, None));
         }
     };
     obs.connection = Some(observation);
@@ -448,7 +731,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
                     FailureKind::Canceled,
                     "canceled while waiting for the proxy's HTTP/3 SETTINGS",
                 );
-                return early(rec, obs, f, facts, ProtocolStatus::None);
+                return Err(not_opened(f, None));
             }
             let mut f = TransportFailure::new(
                 Phase::ProtocolHandshake,
@@ -458,7 +741,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
                 ),
             );
             f.deadline_ms = Some(wait_ms);
-            return early(rec, obs, f, facts, udp_status(&tunnel, 0, 0));
+            return Err(not_opened(f, Some(tunnel)));
         }
     };
     let quic_datagrams = peer.h3_datagram && quic.max_datagram_size().is_some();
@@ -471,7 +754,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
             FailureKind::MasqueUnsupported,
             "the proxy's HTTP/3 SETTINGS do not enable extended CONNECT (SETTINGS_ENABLE_CONNECT_PROTOCOL), so a CONNECT-UDP request cannot be made on this connection; nothing was sent",
         );
-        return early(rec, obs, f, facts, udp_status(&tunnel, 0, 0));
+        return Err(not_opened(f, Some(tunnel)));
     }
     let no_quic_datagrams_why = if !peer.h3_datagram {
         "the proxy's SETTINGS do not enable HTTP/3 datagrams (SETTINGS_H3_DATAGRAM)"
@@ -488,7 +771,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
                 FailureKind::MasqueUnsupported,
                 format!("QUIC DATAGRAM frames were required for this tunnel, but {no_quic_datagrams_why}; nothing was sent"),
             );
-            return early(rec, obs, f, facts, udp_status(&tunnel, 0, 0));
+            return Err(not_opened(f, Some(tunnel)));
         }
         MasqueDatagramMode::Auto if quic_datagrams => MasqueEncoding::QuicDatagram,
         MasqueDatagramMode::Auto => MasqueEncoding::Capsule,
@@ -520,7 +803,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
             let f =
                 TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("the CONNECT-UDP request could not be built: {e}"))
                     .with_field("udp.masque.uri_template");
-            return early(rec, obs, f, facts, udp_status(&tunnel, 0, 0));
+            return Err(not_opened(f, Some(tunnel)));
         }
     };
     for (n, v) in &plan.headers {
@@ -553,7 +836,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
         Ok(s) => s,
         Err(f) => {
             close_quic(&quic);
-            return early(rec, obs, f, facts, udp_status(&tunnel, 0, 0));
+            return Err(not_opened(f, Some(tunnel)));
         }
     };
     rec.finish_with(
@@ -577,14 +860,14 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
         Err(f) => {
             close_quic(&quic);
             // The request reached the proxy but no datagram was sent.
-            return early(rec, obs, f, facts, udp_status(&tunnel, 0, 0));
+            return Err(not_opened(f, Some(tunnel)));
         }
     };
     rec.finish(h_idx, PhaseStatus::Completed);
     let status = resp.status().as_u16();
     obs.response_status = Some(status);
     tunnel.connect_status = Some(status);
-    events.emit(ExecutionEvent::ResponseHead { execution_id: events.execution_id, attempt: 0, status });
+    events.emit(ExecutionEvent::ResponseHead { execution_id: events.execution_id, attempt: obs.index, status });
     let headers = header_entries(resp.headers());
     obs.bytes.response_headers_logical = Some(logical_header_bytes(&headers));
     let content_type = resp.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
@@ -632,17 +915,10 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
             ),
         );
         f.status = Some(status);
-        obs.failure = Some(f);
         obs.bytes.response_body_wire = Some(wire);
-        let obs = finish_attempt(rec, obs, events);
         let captured = captured.freeze();
         let response = response_record(status, http::Version::HTTP_3, headers, body_capture(completeness, wire, &captured, content_type));
-        return SessionOutput::single(
-            AttemptOutput { observation: obs, response: Some(response), body: captured },
-            None,
-            udp_status(&tunnel, 0, 0),
-            facts,
-        );
+        return Err(NotOpened { failure: f, tunnel: Some(tunnel), refusal: Some((response, captured)) });
     }
     let capsule_protocol = resp.headers().get("capsule-protocol").map(|v| v.as_bytes() == b"?1").unwrap_or(false);
     if !capsule_protocol {
@@ -651,163 +927,167 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
         );
     }
     let response = response_record(status, http::Version::HTTP_3, headers, body_capture(BodyCompleteness::NoBody, 0, &[], content_type));
+    let quarter = stream.id().into_inner() / 4;
+    let (tx, rx) = stream.split();
+    Ok(MasqueChannel {
+        quic,
+        _requests: send,
+        tx,
+        rx,
+        quarter,
+        mode: plan.mode,
+        status: tunnel,
+        decoder: CapsuleDecoder::new(),
+        queue: VecDeque::new(),
+        stream_open: true,
+        ended: false,
+        capsule_fallback_noted: false,
+        before,
+        connect_headers: req_headers,
+        response,
+        proxy_authority: plan.proxy_authority.clone(),
+    })
+}
+
+/// The inspector note for items the tunnel dropped.
+pub(crate) fn note_dropped(facts: &mut SessionFacts, tunnel: &MasqueTunnel) {
+    if tunnel.dropped > 0 {
+        facts.notes.push(format!(
+            "{} HTTP Datagram(s) or capsule(s) not addressed to this tunnel's UDP context were dropped, as RFC 9298 §4 and RFC 9297 §3.1 require",
+            tunnel.dropped
+        ));
+    }
+}
+
+// ------------------------------------------------------------ UDP session ---
+
+/// Send one UDP payload through the tunnel and record it (or why it was not sent).
+async fn send_recorded(chan: &mut MasqueChannel, tr: &mut Transcript, sent: &mut u64, payload: &[u8]) -> Result<(), TransportFailure> {
+    match chan.send(payload).await? {
+        Sent::Sent(note) => {
+            *sent += 1;
+            tr.data(Direction::Sent, "datagram", payload);
+            if let Some(n) = note {
+                tr.note("encoding", &n);
+            }
+        }
+        Sent::NotSent(why) => tr.note("not_sent", &why),
+    }
+    Ok(())
+}
+
+pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
+    let interactive = commands.is_some();
+    let mut rec = Recorder::new(0, events.clone());
+    events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
+    let mut obs = new_attempt(0, AttemptReason::Initial, "CONNECT", &plan.tunnel.display_url);
+    let mut facts = SessionFacts::default();
+    let total_deadline = if interactive { None } else { deadline_from(plan.tunnel.timeouts.total_ms) };
+    let mut chan = match open(&plan.tunnel, &mut rec, &mut obs, &mut facts, events, cancel, total_deadline).await {
+        Ok(c) => c,
+        Err(n) => return n.into_output(rec, obs, facts, plan.response_window_ms, events),
+    };
+    let response = chan.response.clone();
+    let encoding = chan.status.encoding.unwrap_or(MasqueEncoding::Capsule);
 
     // ---- the tunnel ----
-    let quarter = stream.id().into_inner() / 4;
-    let (tx, mut rx) = stream.split();
-    let tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
-    let mut t = Tunnel { plan, quic: quic.clone(), tx, quarter, tr, status: tunnel, sent: 0, capsule_fallback_noted: false };
-    t.tr.note(
+    let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
+    tr.note(
         "tunnel",
         &format!(
-            "CONNECT-UDP tunnel to {} open through {} (HTTP {status}); HTTP Datagrams as {}",
-            plan.target,
-            plan.proxy_authority,
+            "CONNECT-UDP tunnel to {} open through {} (HTTP {}); HTTP Datagrams as {}",
+            plan.tunnel.target,
+            plan.tunnel.proxy_authority,
+            response.status,
             encoding_name(encoding)
         ),
     );
     let s_idx = rec.start(Phase::Session);
+    let mut sent = 0u64;
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
-    let mut decoder = CapsuleDecoder::new();
     let mut dropped_noted = false;
 
     for d in &plan.datagrams {
-        if let Err(f) = t.send(d).await {
+        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, d).await {
             failure = Some(f);
-            t.status.closed_by = ClosedBy::Abnormal;
             break;
         }
     }
 
     let window = Duration::from_millis(plan.response_window_ms);
     let mut window_end = Instant::now() + window;
-    let mut stream_open = true;
     enum Ev {
-        Quic(Result<Bytes, quinn::ConnectionError>),
-        Stream(Result<Option<Bytes>, h3::error::StreamError>),
+        In(Inbound),
         Cmd(Option<SessionCommand>),
         WindowEnd,
         Deadline,
         Canceled,
     }
-    // What arrived, in either encoding, for this tunnel.
-    enum Got {
-        Udp(Bytes, MasqueEncoding),
-        Dropped(String),
-    }
-    'session: while failure.is_none() {
+    while failure.is_none() {
         let window_deadline = if interactive { None } else { Some(window_end) };
         let ev = tokio::select! {
-            d = quic.read_datagram() => Ev::Quic(d),
-            c = rx.recv_data(), if stream_open => Ev::Stream(c.map(|o| o.map(|mut b| { let n = b.remaining(); b.copy_to_bytes(n) }))),
+            i = chan.recv() => Ev::In(i),
             c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
             _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
             _ = sleep_until_opt(total_deadline) => Ev::Deadline,
             _ = cancel.cancelled() => Ev::Canceled,
         };
-        let mut got: Vec<Got> = Vec::new();
         match ev {
-            Ev::Quic(Ok(d)) => match decode_quic_datagram(&d, quarter) {
-                QuicDatagram::Udp(p) => got.push(Got::Udp(p, MasqueEncoding::QuicDatagram)),
-                QuicDatagram::UnregisteredContext(c) => {
-                    got.push(Got::Dropped(format!("an HTTP Datagram with unregistered context ID {c}")))
+            Ev::In(Inbound::Datagram(p)) => {
+                received += 1;
+                let mut digest = [0u8; 32];
+                digest.copy_from_slice(&Sha256::digest(&p));
+                if !seen.insert(digest) {
+                    facts.repeated_datagrams += 1;
                 }
-                QuicDatagram::OtherStream(q) => {
-                    got.push(Got::Dropped(format!("a QUIC DATAGRAM frame for another request stream (quarter ID {q})")))
-                }
-                QuicDatagram::Malformed => got.push(Got::Dropped("a malformed QUIC DATAGRAM frame".into())),
-            },
-            Ev::Quic(Err(e)) => {
-                let mut f = crate::h3::quic_failure(&e, false, None);
-                f.phase = Phase::Session;
-                f.message = format!("the QUIC connection to the MASQUE proxy ended during the tunnel: {}", f.message);
-                failure = Some(f);
-                t.status.closed_by = ClosedBy::Abnormal;
-            }
-            Ev::Stream(Ok(Some(bytes))) => {
-                let mut rest: &[u8] = &bytes;
-                while !rest.is_empty() {
-                    let n = rest.len().min(CapsuleDecoder::feed_limit());
-                    decoder.push(&rest[..n]);
-                    rest = &rest[n..];
-                    loop {
-                        match decoder.decode_next() {
-                            Ok(Some(Capsule::Udp(p))) => got.push(Got::Udp(p, MasqueEncoding::Capsule)),
-                            Ok(Some(Capsule::UnregisteredContext(c))) => {
-                                got.push(Got::Dropped(format!("a DATAGRAM capsule with unregistered context ID {c}")))
-                            }
-                            Ok(Some(Capsule::Unknown(ty))) => got.push(Got::Dropped(format!("a capsule of unknown type 0x{ty:x}"))),
-                            Ok(None) => break,
-                            Err(e) => {
-                                failure = Some(TransportFailure::new(
-                                    Phase::Session,
-                                    FailureKind::HttpProtocolError,
-                                    format!("the proxy's capsule stream is malformed: {}", e.describe()),
-                                ));
-                                t.status.closed_by = ClosedBy::Abnormal;
-                                break;
-                            }
-                        }
-                    }
-                    if failure.is_some() {
-                        break;
-                    }
+                tr.data(Direction::Received, "datagram", &p);
+                if received >= plan.max_datagrams as u64 {
+                    tr.note("note", &format!("stopped receiving at max_datagrams ({})", plan.max_datagrams));
+                    chan.set_closed_by(ClosedBy::Client);
+                    break;
                 }
             }
-            Ev::Stream(Ok(None)) => {
-                stream_open = false;
-                match decoder.finish() {
-                    Ok(()) => {
-                        t.status.closed_by = ClosedBy::Peer;
-                        t.tr.note("tunnel_closed", "the proxy closed the tunnel (FIN on the CONNECT stream)");
-                    }
-                    Err(e) => {
-                        failure = Some(TransportFailure::new(
-                            Phase::Session,
-                            FailureKind::BodyIncomplete,
-                            format!("the proxy ended the CONNECT-UDP stream abnormally: {}", e.describe()),
-                        ));
-                        t.status.closed_by = ClosedBy::Abnormal;
-                    }
+            Ev::In(Inbound::Dropped(what)) => {
+                if !dropped_noted {
+                    dropped_noted = true;
+                    tr.note("dropped", &format!("dropped {what} (RFC 9298 §4 / RFC 9297 §3.1)"));
                 }
             }
-            Ev::Stream(Err(e)) => {
-                stream_open = false;
-                failure =
-                    Some(crate::h3::stream_failure(&e, Phase::Session, FailureKind::BodyReset, "the proxy reset the CONNECT-UDP stream"));
-                t.status.closed_by = ClosedBy::Abnormal;
+            Ev::In(Inbound::Ended { failure: Some(f), .. }) => failure = Some(f),
+            Ev::In(Inbound::Ended { failure: None, note }) => {
+                tr.note("tunnel_closed", &note);
+                break;
             }
+            Ev::In(Inbound::PortUnreachable(e) | Inbound::Error(e)) => tr.note("error", &format!("receive error: {e}")),
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    if let Err(f) = t.send(text.as_bytes()).await {
+                    if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, text.as_bytes()).await {
                         failure = Some(f);
-                        t.status.closed_by = ClosedBy::Abnormal;
                     }
                     window_end = Instant::now() + window;
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                     Ok(b) => {
-                        if let Err(f) = t.send(&b).await {
+                        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, &b).await {
                             failure = Some(f);
-                            t.status.closed_by = ClosedBy::Abnormal;
                         }
                         window_end = Instant::now() + window;
                     }
-                    Err(e) => t.tr.note("error", &format!("datagram not sent: {e}")),
+                    Err(e) => tr.note("error", &format!("datagram not sent: {e}")),
                 },
                 Some(SessionCommand::Ping) | Some(SessionCommand::HalfClose) => {
-                    t.tr.note("unsupported_command", "UDP has no ping or half-close; send a datagram or Close")
+                    tr.note("unsupported_command", "UDP has no ping or half-close; send a datagram or Close")
                 }
                 Some(SessionCommand::Close { .. }) | None => {
-                    t.status.closed_by = ClosedBy::Client;
-                    break 'session;
+                    chan.set_closed_by(ClosedBy::Client);
+                    break;
                 }
             },
             Ev::WindowEnd => {
-                t.status.closed_by = ClosedBy::Client;
-                break 'session;
+                chan.set_closed_by(ClosedBy::Client);
+                break;
             }
             Ev::Deadline => {
                 failure = Some(
@@ -816,69 +1096,27 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
                         FailureKind::TotalTimeout,
                         "the total deadline elapsed during the CONNECT-UDP exchange",
                     )
-                    .with_deadline(plan.timeouts.total_ms),
+                    .with_deadline(plan.tunnel.timeouts.total_ms),
                 );
-                t.status.closed_by = ClosedBy::Timeout;
+                chan.set_closed_by(ClosedBy::Timeout);
             }
             Ev::Canceled => {
                 failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the CONNECT-UDP exchange was canceled"));
-                t.status.closed_by = ClosedBy::Client;
+                chan.set_closed_by(ClosedBy::Client);
             }
-        }
-        for g in got {
-            match g {
-                Got::Udp(p, enc) => {
-                    received += 1;
-                    match enc {
-                        MasqueEncoding::QuicDatagram => t.status.received_quic_datagrams += 1,
-                        MasqueEncoding::Capsule => t.status.received_capsules += 1,
-                    }
-                    let mut digest = [0u8; 32];
-                    digest.copy_from_slice(&Sha256::digest(&p));
-                    if !seen.insert(digest) {
-                        facts.repeated_datagrams += 1;
-                    }
-                    t.tr.data(Direction::Received, "datagram", &p);
-                    if received >= plan.max_datagrams as u64 {
-                        t.tr.note("note", &format!("stopped receiving at max_datagrams ({})", plan.max_datagrams));
-                        t.status.closed_by = ClosedBy::Client;
-                        break 'session;
-                    }
-                }
-                Got::Dropped(what) => {
-                    t.status.dropped += 1;
-                    if !dropped_noted {
-                        dropped_noted = true;
-                        t.tr.note("dropped", &format!("dropped {what} (RFC 9298 §4 / RFC 9297 §3.1)"));
-                    }
-                }
-            }
-        }
-        if !stream_open && failure.is_none() {
-            break;
         }
     }
 
     // ---- end of the tunnel ----
-    let Tunnel { mut tx, tr, status: tunnel, sent, .. } = t;
-    if stream_open && !matches!(failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled)) {
-        // Anvil's own end of the tunnel: a clean FIN on the CONNECT stream.
-        let _ = tokio::time::timeout(Duration::from_millis(500), tx.finish()).await;
-    }
-    let after = quic.stats();
-    close_quic(&quic);
+    let canceled = matches!(failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled));
+    let (tunnel, written, read) = chan.close(canceled).await;
     if facts.repeated_datagrams > 0 {
         facts.notes.push(format!(
             "{} received datagram(s) were byte-identical to an earlier received datagram (UDP may duplicate datagrams; the peer may also send identical replies)",
             facts.repeated_datagrams
         ));
     }
-    if tunnel.dropped > 0 {
-        facts.notes.push(format!(
-            "{} HTTP Datagram(s) or capsule(s) not addressed to this tunnel's UDP context were dropped, as RFC 9298 §4 and RFC 9297 §3.1 require",
-            tunnel.dropped
-        ));
-    }
+    note_dropped(&mut facts, &tunnel);
     rec.finish(
         s_idx,
         match &failure {
@@ -896,10 +1134,15 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
     obs.failure = failure;
     obs.bytes.request_body = tr.sent_bytes();
     obs.bytes.response_body_wire = Some(tr.received_bytes());
-    obs.bytes.connection_bytes_written = Some(after.udp_tx.bytes.saturating_sub(before.udp_tx.bytes));
-    obs.bytes.connection_bytes_read = Some(after.udp_rx.bytes.saturating_sub(before.udp_rx.bytes));
+    obs.bytes.connection_bytes_written = Some(written);
+    obs.bytes.connection_bytes_read = Some(read);
     let obs = finish_attempt(rec, obs, events);
-    let ps = udp_status(&tunnel, sent, received);
+    let ps = ProtocolStatus::Udp {
+        datagrams_sent: sent,
+        datagrams_received: received,
+        window_ms: plan.response_window_ms,
+        masque: Some(tunnel),
+    };
     SessionOutput::single(AttemptOutput { observation: obs, response: Some(response), body: Bytes::new() }, Some(tr.finish()), ps, facts)
 }
 
