@@ -3,7 +3,8 @@
 //! relays throttled progress and stores the final report.
 
 use crate::commands::{R, e, id};
-use crate::state::DesktopState;
+use crate::state::{DesktopState, LoadRunEntry, VaultId};
+use anvil_app::AppError;
 use anvil_app::file_grants::{FilePurpose, ReadFile};
 use anvil_app::load::{LoadPlanCheck, LoadPreflight, LoadReportSummary};
 use anvil_domain::Id;
@@ -59,18 +60,25 @@ pub struct LoadFinishedEvent {
 }
 
 /// Start a run after the user confirmed the preflight. Returns a run key
-/// for progress events and cancellation.
+/// for progress events and cancellation. The report is saved only into the
+/// profile the run started under.
 #[tauri::command]
 pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan_id: String, acknowledged: bool) -> R<String> {
+    // Registered before the app is read (see `DesktopState::lock`), so a lock
+    // or another profile opening from now on either refuses `app()` or stops
+    // this run. The run's task owns the entry; an early return below retires it.
+    let entry = LoadRunEntry::register(&st.load_runs);
     let app = st.app()?;
+    let vault = VaultId::of(&app);
     let plan = app.load_plan(&id(&plan_id)?).map_err(e)?;
     let job = app.worker_job(&plan, acknowledged).map_err(e)?;
     let exe = std::env::current_exe().map_err(|x| x.to_string())?;
     let mut controller = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await.map_err(|x| x.to_string())?;
-    let run_key = Id::new().to_string();
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let lock = tokio_util::sync::CancellationToken::new();
-    st.load_runs.lock().insert(run_key.clone(), (cancel.clone(), lock.clone()));
+    let run_key = entry.key().to_string();
+    let cancel = entry.cancel_token().clone();
+    // Canceled already if a lock landed while the worker started: the loop
+    // below then stops it at once.
+    let lock = entry.lock_token().clone();
     let key = run_key.clone();
     tauri::async_runtime::spawn(async move {
         let mut canceled = false;
@@ -93,26 +101,26 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
             }
         }
         let result = controller.wait().await;
+        drop(entry);
         let st = handle.state::<DesktopState>();
-        st.load_runs.lock().remove(&key);
         let ev = match result {
             Ok(report) => {
                 let run_id = report.run_id;
-                match st.app() {
-                    Ok(a) => match a.save_load_report(&report) {
-                        Ok(()) => LoadFinishedEvent { run_key: key.clone(), run_id: Some(run_id), error: None },
-                        Err(err) => LoadFinishedEvent {
-                            run_key: key.clone(),
-                            run_id: None,
-                            error: Some(format!("the run finished but its report could not be saved: {}", e(err))),
-                        },
-                    },
-                    // Locked mid-run: keep the (redacted) partial report and
-                    // store it at the next unlock.
-                    Err(_) => {
-                        st.pending_load_reports.lock().push(report);
+                // Into the profile the run started under, never the one open now.
+                match app.save_load_report(&report) {
+                    Ok(()) => LoadFinishedEvent { run_key: key.clone(), run_id: Some(run_id), error: None },
+                    // Locked mid-run, or another profile opened: keep the
+                    // (redacted) partial report and store it when this
+                    // profile is next unlocked.
+                    Err(AppError::Locked) => {
+                        st.hold_report(vault, report);
                         LoadFinishedEvent { run_key: key.clone(), run_id: Some(run_id), error: None }
                     }
+                    Err(err) => LoadFinishedEvent {
+                        run_key: key.clone(),
+                        run_id: None,
+                        error: Some(format!("the run finished but its report could not be saved: {}", e(err))),
+                    },
                 }
             }
             Err(err) => LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(err.to_string()) },

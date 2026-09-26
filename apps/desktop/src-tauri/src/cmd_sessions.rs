@@ -64,7 +64,8 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
     if canceled && let Some(s) = slot.lock().await.as_ref() {
         s.cancel();
     }
-    // Watch for the end (peer close, local close, cancel, lock) and publish the record.
+    // Watch for the end (peer close, local close, cancel, lock, another
+    // profile opening) and publish the record.
     let key = execution_id.clone();
     tauri::async_runtime::spawn(async move {
         loop {
@@ -83,10 +84,22 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
         let ev = match taken {
             Some(s) => {
                 let out = s.finish().await;
-                let recorded = st.app().and_then(|a| a.record(&out).map_err(e));
-                let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
-                let view = ExecutionView { body: body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref()), record: out.record };
-                SessionEnded { execution_id: key.clone(), view: Some(view), error: recorded.err() }
+                // Into the profile the session was opened under, never the
+                // one open now; refused while that profile is locked.
+                let recorded = app.record(&out).map_err(e);
+                if st.is_current(&app) {
+                    let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
+                    let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
+                    let view = ExecutionView { body, record: out.record };
+                    SessionEnded { execution_id: key.clone(), view: Some(view), error: recorded.err() }
+                } else {
+                    // Another profile is open: its window shows nothing of this one.
+                    SessionEnded {
+                        execution_id: key.clone(),
+                        view: None,
+                        error: Some("the profile the session was opened in was closed".into()),
+                    }
+                }
             }
             None => SessionEnded { execution_id: key.clone(), view: None, error: Some("the session was already finished".into()) },
         };

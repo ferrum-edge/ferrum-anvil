@@ -444,11 +444,15 @@ fn read_token_file(path: &str) -> Result<Zeroizing<String>, TransportFailure> {
     let unreadable = |e: std::io::Error| fail(format!("the JWT-SVID file {path} is not readable: {e}"));
     let not_regular = || fail(format!("the JWT-SVID file {path} is not a regular file"));
     let too_large = || fail(format!("the JWT-SVID file {path} is larger than {MAX_TOKEN_FILE_BYTES} bytes"));
-    // Checked before opening, so a FIFO or device is never opened.
-    if !std::fs::metadata(path).map_err(unreadable)?.is_file() {
+    // A cheap filter only: the path can change before the open below.
+    let found = std::fs::symlink_metadata(path).map_err(unreadable)?;
+    if found.is_symlink() {
+        return Err(fail(format!("the JWT-SVID file {path} is a link; name the file it points to")));
+    }
+    if !found.is_file() {
         return Err(not_regular());
     }
-    let file = std::fs::File::open(path).map_err(unreadable)?;
+    let file = open_token_file(path).map_err(unreadable)?;
     // The checks that count are on the opened handle, not on the path.
     let meta = file.metadata().map_err(unreadable)?;
     if !meta.is_file() {
@@ -464,6 +468,22 @@ fn read_token_file(path: &str) -> Result<Zeroizing<String>, TransportFailure> {
         return Err(too_large());
     }
     Ok(Zeroizing::new(raw.trim().to_string()))
+}
+
+/// Open a token file for reading. A FIFO or device swapped in at the path
+/// never blocks the open: on Unix the file is opened non-blocking (which does
+/// not change how a regular file reads), never as a controlling terminal and
+/// without following a link swapped in for the last component. The caller
+/// checks the type of the opened handle.
+fn open_token_file(path: &str) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW);
+    }
+    options.open(path)
 }
 
 fn ts(v: Option<&serde_json::Value>) -> Option<i64> {
@@ -983,5 +1003,76 @@ mod tests {
     fn device_is_not_read_as_a_token_file() {
         let err = read_token_file("/dev/zero").unwrap_err();
         assert!(err.message.contains("is not a regular file"), "{}", err.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_is_not_followed_to_a_token_file() {
+        let target = temp_path("target");
+        std::fs::write(&target, "a.b.c").unwrap();
+        let link = temp_path("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = read_token_file(link.to_str().unwrap()).unwrap_err();
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        assert!(err.message.contains("is a link"), "{}", err.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_is_refused_without_blocking() {
+        let p = temp_path("fifo");
+        mkfifo(&p);
+        let path = p.to_str().unwrap().to_string();
+        let err = within_seconds(move || read_token_file(&path)).unwrap_err();
+        std::fs::remove_file(&p).unwrap();
+        assert!(err.message.contains("is not a regular file"), "{}", err.message);
+    }
+
+    /// A FIFO swapped in after the path check: the open itself does not block,
+    /// and the opened handle is not a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn fifo_open_does_not_block() {
+        let p = temp_path("fifo-open");
+        mkfifo(&p);
+        let path = p.to_str().unwrap().to_string();
+        let opened = within_seconds(move || open_token_file(&path).and_then(|f| f.metadata()).map(|m| m.is_file()));
+        std::fs::remove_file(&p).unwrap();
+        assert!(!opened.unwrap());
+    }
+
+    /// A link swapped in after the path check is not followed by the open.
+    #[cfg(unix)]
+    #[test]
+    fn link_open_is_refused() {
+        let target = temp_path("open-target");
+        std::fs::write(&target, "a.b.c").unwrap();
+        let link = temp_path("open-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let opened = open_token_file(link.to_str().unwrap());
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        assert!(opened.is_err());
+    }
+
+    /// Runs `f` on its own thread, failing the test instead of hanging if it blocks.
+    #[cfg(unix)]
+    fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the open blocked")
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn mkfifo(path: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a NUL-terminated string that outlives the call.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
     }
 }

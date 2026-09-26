@@ -30,7 +30,13 @@ CLI (`anvil`) = same anvil-app services without a webview.
   `DesktopState::app()`, which refuses while locked. Locking drops the data
   key, clears token caches, pooled connections and TLS/QUIC session tickets,
   cancels executions and sessions, and stops load workers. The lock screen is
-  only a view of that state.
+  only a view of that state. Opening another profile (`DesktopState::set_app`)
+  locks the previous one and stops its work the same way. Work is bound to
+  the profile it started under: a collection run, send, session or load run
+  records only into that profile, and a load report that finished while it
+  was locked is held for it (`state::VaultId`) and saved when that profile is
+  next unlocked, never into another. `load_run_start` registers the run
+  before it reads the profile, as `session_open` does.
 - **A session open is cancelable from its first moment.** `session_open`
   registers its cancellation token before it reads the profile or builds the
   request. Locking locks the profile before it cancels the registered tokens,

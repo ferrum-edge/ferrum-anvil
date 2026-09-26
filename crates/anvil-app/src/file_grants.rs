@@ -399,12 +399,13 @@ impl FileGrants {
     }
 }
 
-/// Open `path` for reading if it is a regular file; `None` when it is not.
-/// `path` is canonical, so it ends in no link. A FIFO or device found at the
-/// path never blocks the open, even one swapped in just before it: on Unix the
-/// file is opened non-blocking (which does not change how a regular file
-/// reads), never as a controlling terminal and without following a link swapped
-/// in for the last component, and the opened handle is checked. The path is
+/// Open `path` for reading if it is a regular file; `None` when it is not, a
+/// link included. Callers canonicalize `path` just before, so a link at its
+/// last component was swapped in since. A FIFO or device found at the path
+/// never blocks the open, even one swapped in just before it: on Unix the file
+/// is opened non-blocking (which does not change how a regular file reads),
+/// never as a controlling terminal and without following a link swapped in
+/// for the last component, and the opened handle is checked. The path is
 /// checked first as a cheap filter; elsewhere that check is also what keeps a
 /// folder out, as one cannot be opened there.
 pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadata)>> {
