@@ -53,6 +53,9 @@ describe("UDP through a proxy profile", () => {
     expect(help).toContain("HBONE datagram tunnel");
     expect(help).toContain("x-ferrum-mesh-protocol: udp");
     expect(help).toContain("65,535");
+    expect(help).toContain("With dtls:// the DTLS handshake runs inside the tunnel");
+    expect(help).toContain("A PROXY protocol envelope is refused");
+    expect(help).not.toContain("DTLS and a PROXY");
     expect(screen.queryByRole("alert")).toBeNull();
 
     fireEvent.change(proxySelect(), { target: { value: "p-istio" } });
@@ -80,7 +83,9 @@ describe("UDP through a proxy profile", () => {
     const help = screen.getByTestId("udp-hbone-help").textContent ?? "";
     expect(help).toContain("HBONE datagram tunnel");
     expect(help).toContain("[u16 length][payload]");
-    expect(help).toContain("DTLS through HBONE is not supported yet");
+    expect(help).toContain("With dtls:// the DTLS handshake and session run inside that tunnel");
+    expect(help).toContain("every DTLS record is one record");
+    expect(help).not.toContain("not supported yet");
   });
 
   it("states the udp marker an HBONE profile sends for UDP requests", () => {

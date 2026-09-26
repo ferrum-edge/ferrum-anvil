@@ -41,23 +41,23 @@ use anvil_transport::recorder::EventCtx;
 use std::time::Duration;
 
 /// Not declared by any workload (relay-synthesis refusal stimulus; unbound).
-const UNDECLARED_UDP_PORT: u16 = 17899;
+pub(crate) const UNDECLARED_UDP_PORT: u16 = 17899;
 /// Ambient's declared names (mesh-ambient.json / .conf).
-const LOOPBACK_NAME: &str = "udp-loopback.anvil-lab.test";
+pub(crate) const LOOPBACK_NAME: &str = "udp-loopback.anvil-lab.test";
 const UNRESOLVABLE_NAME: &str = "udp-unresolvable.anvil-lab.invalid";
 
-fn counts(o: &ExecutionOutput) -> Option<(u64, u64)> {
+pub(crate) fn counts(o: &ExecutionOutput) -> Option<(u64, u64)> {
     match &o.record.outcome.protocol_status {
         ProtocolStatus::Udp { datagrams_sent, datagrams_received, masque: None, .. } => Some((*datagrams_sent, *datagrams_received)),
         _ => None,
     }
 }
 
-fn channel(o: &ExecutionOutput) -> Option<&HboneDatagramChannel> {
+pub(crate) fn channel(o: &ExecutionOutput) -> Option<&HboneDatagramChannel> {
     tunnel_of(o).and_then(|t| t.datagrams.as_ref())
 }
 
-fn received(o: &ExecutionOutput) -> Vec<String> {
+pub(crate) fn received(o: &ExecutionOutput) -> Vec<String> {
     o.record
         .stream
         .as_ref()
@@ -80,7 +80,7 @@ fn sizes(f: &StreamFixture, from: usize) -> Vec<u64> {
         .collect()
 }
 
-fn check_counts(c: &mut Checks, o: &ExecutionOutput, sent: u64, received: u64) {
+pub(crate) fn check_counts(c: &mut Checks, o: &ExecutionOutput, sent: u64, received: u64) {
     c.add(
         CheckKind::Diagnosis,
         format!("{sent} datagram(s) sent, {received} received"),
@@ -90,7 +90,7 @@ fn check_counts(c: &mut Checks, o: &ExecutionOutput, sent: u64, received: u64) {
 }
 
 /// The tunnel was opened with the datagram marker over verified mTLS.
-fn tunnel_opened(c: &mut Checks, o: &ExecutionOutput, authority: &str) {
+pub(crate) fn tunnel_opened(c: &mut Checks, o: &ExecutionOutput, authority: &str) {
     let t = tunnel_of(o);
     c.add(
         CheckKind::Diagnosis,
@@ -111,7 +111,7 @@ fn tunnel_opened(c: &mut Checks, o: &ExecutionOutput, authority: &str) {
 
 /// A datagram-tunnel CONNECT refusal: the public status and body, forward-proxy
 /// scope, the datagram alternatives, nothing sent, the destination never blamed.
-fn udp_tunnel_refused(c: &mut Checks, o: &ExecutionOutput, status: u16, body: &str) {
+pub(crate) fn udp_tunnel_refused(c: &mut Checks, o: &ExecutionOutput, status: u16, body: &str) {
     let code = if status >= 500 { "hbone.tunnel_unavailable" } else { "hbone.tunnel_refused" };
     let got = attempt(o).and_then(|a| a.failure.as_ref()).map(|f| f.kind);
     c.add(CheckKind::Diagnosis, "typed failure HboneConnectRefused", got == Some(FailureKind::HboneConnectRefused), format!("{got:?}"));
@@ -159,7 +159,7 @@ fn no_destination_blame(c: &mut Checks, o: &ExecutionOutput) {
     not_dispatched(c, o);
 }
 
-fn no_policy_claim(c: &mut Checks, o: &ExecutionOutput) {
+pub(crate) fn no_policy_claim(c: &mut Checks, o: &ExecutionOutput) {
     c.add(
         CheckKind::Diagnosis,
         "no precise mesh-policy cause is confirmed",

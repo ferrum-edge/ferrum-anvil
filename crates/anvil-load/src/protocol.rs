@@ -16,8 +16,10 @@
 //!   first run a reflection RPC, so a unit would not be one call);
 //! * SSE with automatic reconnection (one unit would become several
 //!   connections with server-chosen delays);
-//! * UDP through a MASQUE proxy (a QUIC connection and CONNECT-UDP tunnel
-//!   per exchange, with no tunnel reuse or tunnel denominators);
+//! * UDP or DTLS through a MASQUE proxy (a QUIC connection and CONNECT-UDP
+//!   tunnel per exchange, with no tunnel reuse or tunnel denominators);
+//! * UDP or DTLS through a mesh HBONE proxy (an mTLS connection and datagram
+//!   tunnel per exchange, likewise);
 //! * a mesh HBONE proxy with persistent connections for HTTP and gRPC
 //!   (tunnels are never pooled, so the mode could not be honoured).
 
@@ -42,7 +44,7 @@ pub enum RefusalCode {
     SseReconnect,
     /// UDP through a MASQUE (CONNECT-UDP) proxy.
     UdpMasque,
-    /// UDP through a mesh HBONE datagram tunnel.
+    /// UDP or DTLS through a mesh HBONE datagram tunnel.
     UdpHbone,
     /// A mesh HBONE proxy with the persistent connection mode (HTTP, gRPC).
     HbonePersistent,
@@ -202,7 +204,11 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             if is_hbone(ctx) {
                 return refuse(
                     RefusalCode::UdpHbone,
-                    "UDP through an HBONE tunnel cannot be load tested yet: every exchange would open its own mTLS connection and datagram tunnel, and there are no tunnel denominators. Send to the UDP target directly".into(),
+                    format!(
+                        "{} through an HBONE tunnel cannot be load tested yet: every exchange would open its own mTLS connection and datagram tunnel, and there are no tunnel denominators. Send to the {} target directly",
+                        if uses_dtls(ctx) { "DTLS" } else { "UDP" },
+                        if uses_dtls(ctx) { "DTLS" } else { "UDP" }
+                    ),
                 );
             }
             Ok(StepUnit::of(if uses_dtls(ctx) { LoadUnitKind::DtlsExchange } else { LoadUnitKind::UdpExchange }))

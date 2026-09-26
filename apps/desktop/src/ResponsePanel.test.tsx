@@ -255,6 +255,57 @@ describe("ResponsePanel", () => {
     expect(screen.queryByText(/HBONE/)).toBeNull();
   });
 
+  it("shows DTLS inside an HBONE datagram tunnel as two legs: the DTLS peer and the HBONE endpoint", () => {
+    const tlsObs = (patch: Record<string, unknown>) => ({
+      sni: null,
+      server_name: "127.0.0.1",
+      server_name_overridden: false,
+      version: "TLSv1_3",
+      alpn_offered: [],
+      verification: { result: "verified" },
+      peer_certificates: [],
+      client_certificate_requested: null,
+      ...patch,
+    });
+    const v = view({ findings: [] });
+    const rec = v.record as unknown as { outcome: { protocol_status: unknown }; attempts: Record<string, unknown>[] };
+    rec.outcome.protocol_status = { protocol: "udp", datagrams_sent: 1, datagrams_received: 1, window_ms: 500, masque: null };
+    rec.attempts[0].connection = {
+      id: 9,
+      reused: false,
+      protocol: "dtlsv1_2",
+      resolved_addresses: [],
+      connect_attempts: [],
+      prior_requests: 0,
+      via_proxy: "lab mesh HBONE (127.0.0.1:17606)",
+      tls: tlsObs({ version: "DTLSv1_2", client_certificate_requested: false }),
+      tunnel: {
+        kind: "hbone",
+        endpoint: "lab mesh HBONE (127.0.0.1:17606)",
+        authority: "127.0.0.1:17806",
+        resolved_addresses: ["127.0.0.1:17606"],
+        connect_attempts: [],
+        phases: [],
+        tls: tlsObs({ alpn_offered: ["h2"], alpn_negotiated: "h2", peer_spiffe_id: "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-svc" }),
+        connect_headers: [{ name: "x-ferrum-mesh-protocol", value: "udp" }],
+        connect_status: 200,
+        response_headers: [],
+        datagrams: { records_sent: 5, records_received: 4, oversize_refused: 0, truncated_tail_bytes: 0, closed_by: "client" },
+      },
+    };
+    render(<ResponsePanel view={v} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByText(/1 sent · 1 received in 500 ms · via HBONE lab mesh HBONE \(127\.0\.0\.1:17606\)/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /Connection/ }));
+    expect(screen.getByText("HBONE UDP tunnel (outer leg)")).toBeTruthy();
+    expect(screen.getByText("Mutual TLS with the HBONE endpoint")).toBeTruthy();
+    expect(screen.getByText("DTLS with the destination (inside the tunnel)")).toBeTruthy();
+    expect(screen.getByText("DTLS records").nextElementSibling?.textContent).toBe(
+      "5 sent · 4 received ([u16 length][payload] on the CONNECT stream; handshake flights included)",
+    );
+    expect(screen.getByText("CONNECT :authority").nextElementSibling?.textContent).toBe("127.0.0.1:17806");
+    expect(screen.queryByText(/MASQUE/)).toBeNull();
+  });
+
   it("shows a cancel control while a request is running", () => {
     const onCancel = vi.fn();
     render(<ResponsePanel view={null} running progressBytes={2048} onCancel={onCancel} />);

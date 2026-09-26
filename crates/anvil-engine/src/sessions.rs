@@ -775,22 +775,13 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
         return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams, use_dtls).await;
     }
     if let Some(p) = hbone {
-        if use_dtls {
-            return Err(unsupported(
-                format!(
-                    "DTLS through the HBONE proxy '{}' is not implemented yet: the HBONE datagram tunnel carries UDP payloads, and Anvil's DTLS adapter cannot yet run its handshake over that channel. Use udp:// through the HBONE proxy, or dtls:// without a proxy",
-                    p.label
-                ),
-                "settings.proxy",
-            ));
-        }
         if envelope.is_some() {
             return Err(unsupported(
                 "a PROXY protocol datagram envelope cannot be sent through an HBONE tunnel: mesh relays carry the peer's identity instead and never read the envelope, so it would reach the destination as payload",
                 "udp.proxy_protocol",
             ));
         }
-        return prepare_hbone_udp(ctx, b, &spec, p, &target, datagrams);
+        return prepare_hbone_udp(engine, ctx, b, &spec, p, &target, datagrams, use_dtls);
     }
     if let Some(e) = &envelope {
         b.inferred.push(crate::proxy_protocol::envelope_note(e));
@@ -800,7 +791,7 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     let display_url = b.redactor.url(&url);
     let settings = b.prep.settings.clone();
     let plan = if use_dtls {
-        Plan::Dtls(Box::new(dtls_plan(engine, ctx, &mut b, &spec, &target, datagrams.clone(), display_url, envelope, None)?))
+        Plan::Dtls(Box::new(dtls_plan(engine, ctx, &mut b, &spec, &target, datagrams.clone(), display_url, envelope, DtlsPath::Direct)?))
     } else {
         Plan::Udp(udp::UdpPlan {
             host: target.host.clone(),
@@ -822,17 +813,22 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     Ok(p)
 }
 
-/// UDP through an HBONE proxy profile: a datagram tunnel (`CONNECT` with the
-/// `udp` marker, `[u16 length][payload]` records). The endpoint's mTLS and
-/// identity come from the proxy profile, exactly as for TCP through HBONE;
-/// the request URL stays the UDP destination.
+/// UDP or DTLS through an HBONE proxy profile: a datagram tunnel (`CONNECT`
+/// with the `udp` marker, `[u16 length][payload]` records). The endpoint's
+/// mTLS and identity come from the proxy profile, exactly as for TCP through
+/// HBONE; the request URL stays the UDP destination. With DTLS every DTLS
+/// record is one record in the tunnel, and the TLS profile applies to the
+/// DTLS peer.
+#[allow(clippy::too_many_arguments)]
 fn prepare_hbone_udp(
+    engine: &Engine,
     ctx: &ExecutionContext,
     mut b: Base,
     spec: &UdpSpec,
     mut proxy: anvil_transport::connector::ProxyPlan,
     target: &Target,
     datagrams: Vec<Bytes>,
+    use_dtls: bool,
 ) -> Result<SessionPrep, TransportFailure> {
     for (i, d) in datagrams.iter().enumerate() {
         if d.len() > hbone_udp::MAX_RECORD_PAYLOAD {
@@ -858,30 +854,47 @@ fn prepare_hbone_udp(
         "sent through the HBONE proxy {} as a datagram tunnel: CONNECT {} with {marker}; each datagram is one [u16 length][payload] record on the CONNECT stream (Ferrum Mesh datagram-over-HBONE)",
         proxy.label, target.authority
     ));
-    let url = format!("udp://{}", target.authority);
+    let scheme = if use_dtls { "dtls" } else { "udp" };
+    let url = format!("{scheme}://{}", target.authority);
     let label = proxy.label.clone();
-    let plan = hbone_udp::HboneUdpPlan {
-        host: target.host.clone(),
-        port: target.port,
-        proxy,
-        dns: dns_config(&settings),
-        timeouts: settings.timeouts,
-        datagrams: datagrams.clone(),
-        response_window_ms: spec.response_window_ms,
-        max_datagrams: spec.max_datagrams,
-        display_url: b.redactor.url(&url),
-        transcript: TranscriptLimits::default(),
-        redact: Some(redact_fn(&b.redactor)),
+    let display_url = b.redactor.url(&url);
+    let plan = if use_dtls {
+        b.inferred.push("DTLS runs inside the HBONE datagram tunnel: every DTLS record (handshake flights included) is one [u16 length][payload] record; the TLS profile's trust and client identity apply to the DTLS peer, the proxy profile's to the HBONE endpoint".into());
+        Plan::Dtls(Box::new(dtls_plan(engine, ctx, &mut b, spec, target, datagrams.clone(), display_url, None, DtlsPath::Hbone(proxy))?))
+    } else {
+        Plan::HboneUdp(hbone_udp::HboneUdpPlan {
+            host: target.host.clone(),
+            port: target.port,
+            proxy,
+            dns: dns_config(&settings),
+            timeouts: settings.timeouts,
+            datagrams: datagrams.clone(),
+            response_window_ms: spec.response_window_ms,
+            max_datagrams: spec.max_datagrams,
+            display_url,
+            transcript: TranscriptLimits::default(),
+            redact: Some(redact_fn(&b.redactor)),
+        })
     };
     let body = concat(&datagrams);
-    let mut p = finish_prep(b, Plan::HboneUdp(plan), "UDP".into(), url, vec![], body, vec![]);
+    let mut p = finish_prep(b, plan, scheme.to_ascii_uppercase(), url, vec![], body, vec![]);
     p.content_type = None;
     p.proxy = Some(label);
     Ok(p)
 }
 
+/// The path a DTLS session runs over.
+enum DtlsPath {
+    /// A UDP socket connected to the target (optionally with a PROXY envelope).
+    Direct,
+    /// An RFC 9298 CONNECT-UDP tunnel through a MASQUE proxy.
+    Masque(Box<masque::MasqueTunnelPlan>),
+    /// A Ferrum Mesh HBONE datagram tunnel through this endpoint.
+    Hbone(anvil_transport::connector::ProxyPlan),
+}
+
 /// A DTLS plan for `target`: the TLS profile's trust and client identity
-/// apply to the DTLS peer, directly or inside a CONNECT-UDP tunnel.
+/// apply to the DTLS peer, directly or inside a CONNECT-UDP or HBONE tunnel.
 #[allow(clippy::too_many_arguments)]
 fn dtls_plan(
     engine: &Engine,
@@ -892,7 +905,7 @@ fn dtls_plan(
     datagrams: Vec<Bytes>,
     display_url: String,
     envelope: Option<anvil_transport::proxy_protocol::EnvelopePlan>,
-    masque: Option<masque::MasqueTunnelPlan>,
+    path: DtlsPath,
 ) -> Result<dtls::DtlsPlan, TransportFailure> {
     let settings = b.prep.settings.clone();
     let (t, name, _) = http_exec::tls_for(engine, ctx, &settings, target, &mut b.inferred)?;
@@ -901,6 +914,11 @@ fn dtls_plan(
     let identity = match identity_material(ctx, &settings, target)? {
         Some(m) => Some(dtls::identity_from_pem(&m.cert_chain_pem, &m.private_key_pem)?),
         None => None,
+    };
+    let (masque, hbone) = match path {
+        DtlsPath::Direct => (None, None),
+        DtlsPath::Masque(m) => (Some(*m), None),
+        DtlsPath::Hbone(p) => (None, Some(p)),
     };
     Ok(dtls::DtlsPlan {
         host: target.host.clone(),
@@ -917,6 +935,7 @@ fn dtls_plan(
         redact: Some(redact_fn(&b.redactor)),
         envelope,
         masque,
+        hbone,
     })
 }
 
@@ -1086,7 +1105,17 @@ async fn prepare_masque(
     let plan = if use_dtls {
         b.inferred.push("DTLS runs inside the tunnel: every DTLS record is one HTTP Datagram, and the TLS profile's trust and client identity apply to the DTLS peer as well as to the proxy".into());
         let display = b.redactor.url(&url);
-        Plan::Dtls(Box::new(dtls_plan(engine, ctx, &mut b, spec, target, datagrams.clone(), display, None, Some(tunnel))?))
+        Plan::Dtls(Box::new(dtls_plan(
+            engine,
+            ctx,
+            &mut b,
+            spec,
+            target,
+            datagrams.clone(),
+            display,
+            None,
+            DtlsPath::Masque(Box::new(tunnel)),
+        )?))
     } else {
         Plan::Masque(masque::MasquePlan {
             tunnel,

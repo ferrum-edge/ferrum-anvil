@@ -16,7 +16,10 @@
 //! * A UDP (datagram) tunnel adds its channel facts: datagrams Anvil refused
 //!   locally, a record the stream ended inside, and an end of the tunnel
 //!   before Anvil closed it. The endpoint sends no reason for an end, so the
-//!   causes stay alternatives; datagrams exchanged before it are kept.
+//!   causes stay alternatives; datagrams exchanged before it are kept. With
+//!   DTLS inside the tunnel the channel counts DTLS records, and an end
+//!   during the DTLS handshake is what failed the handshake (an error, and
+//!   never a finding about the DTLS peer).
 
 use super::Ctx;
 use super::tls::{describe_check, identity_evidence};
@@ -282,8 +285,20 @@ fn datagram_rules(ctx: &Ctx<'_>, t: &TunnelObservation, ch: &HboneDatagramChanne
         );
         return;
     }
-    let failure = ctx.final_attempt().and_then(|a| a.failure.as_ref()).map(|f| f.kind);
-    let (how, conf, severity) = match (ch.closed_by, failure) {
+    let failure = ctx.final_attempt().and_then(|a| a.failure.as_ref());
+    // DTLS inside the tunnel: the channel counts DTLS records (handshake
+    // flights included), and an end during the handshake failed it.
+    let dtls = ctx.final_attempt().and_then(|a| a.connection.as_ref()).is_some_and(|c| c.tls.is_some());
+    let during_handshake = failure.is_some_and(|f| f.phase == anvil_domain::execution::Phase::DtlsHandshake);
+    let counts = if dtls {
+        format!(
+            "{} DTLS record(s) had been received and {} sent through it, handshake flights included; the application datagrams among them are kept.",
+            ch.records_received, ch.records_sent
+        )
+    } else {
+        format!("{} datagram(s) had been received and {} sent; they are kept.", ch.records_received, ch.records_sent)
+    };
+    let (how, conf, severity) = match (ch.closed_by, failure.map(|f| f.kind)) {
         (ClosedBy::Peer, _) => {
             ("the endpoint sent END_STREAM, a clean end of the CONNECT stream".to_string(), by_endpoint, Severity::Warning)
         }
@@ -298,9 +313,14 @@ fn datagram_rules(ctx: &Ctx<'_>, t: &TunnelObservation, ch: &HboneDatagramChanne
         }
         _ => return,
     };
+    let (how, severity) = match during_handshake {
+        true => (format!("{how}, during the DTLS handshake, so no DTLS session was established"), Severity::Error),
+        false => (how, severity),
+    };
     let mut d = base("hbone.udp_tunnel_ended", conf, SourceScope::ForwardProxy, Owner::Unknown, severity)
         .ev_at(E::NativeTransport, "tunnel.closed_by", format!("{:?}", ch.closed_by), idx)
-        .var("how", how);
+        .var("how", how)
+        .var("counts", counts);
     if let Some(c) = &ch.reset_code {
         d = d.ev_at(E::NativeTransport, "h2.error_code", c.clone(), idx);
     }

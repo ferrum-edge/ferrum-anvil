@@ -2,7 +2,7 @@ use super::Ctx;
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
 use anvil_domain::execution::{BodyCompleteness, FailureKind as K, Phase};
-use anvil_domain::outcome::{OutcomeWarning, WarningCode};
+use anvil_domain::outcome::{ClosedBy, OutcomeWarning, WarningCode};
 
 pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarning>) {
     let Some(a) = ctx.final_attempt() else { return };
@@ -31,9 +31,15 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     let Some(f) = a.failure.as_ref() else { return };
     // The end of an HBONE datagram tunnel mid-session belongs to the tunnel's
     // stream, which the endpoint owns: the mesh rules explain it, and no
-    // exchange finding may describe it as the destination's reset.
-    let datagram_tunnel = a.connection.as_ref().and_then(|c| c.tunnel.as_ref()).is_some_and(|t| t.datagrams.is_some());
-    if datagram_tunnel && f.phase == Phase::Session && !matches!(f.kind, K::TotalTimeout | K::Canceled) {
+    // exchange finding may describe it as the destination's reset. The same
+    // holds for a DTLS handshake inside the tunnel that failed because the
+    // endpoint ended the tunnel: the DTLS peer had no part in that.
+    let channel = a.connection.as_ref().and_then(|c| c.tunnel.as_ref()).and_then(|t| t.datagrams.as_ref());
+    let tunnel_ended = channel.is_some_and(|ch| matches!(ch.closed_by, ClosedBy::Peer | ClosedBy::Abnormal));
+    if channel.is_some()
+        && (f.phase == Phase::Session || (f.phase == Phase::DtlsHandshake && tunnel_ended))
+        && !matches!(f.kind, K::TotalTimeout | K::Canceled)
+    {
         return;
     }
     let status = a.response_status;
@@ -106,7 +112,14 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             Some(d)
         }
         K::DtlsHandshakeTimeout => {
-            Some(base("client.dtls.handshake_timeout", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Error))
+            let mut d =
+                base("client.dtls.handshake_timeout", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Error);
+            // Through an HBONE datagram tunnel the endpoint relays the
+            // handshake without acknowledgement, and ICMP errors reach it.
+            if let Some(t) = a.connection.as_ref().and_then(|c| c.tunnel.as_ref()).filter(|t| t.datagrams.is_some()) {
+                d = d.var("authority", t.authority.clone()).alt_fragment(super::mesh::UDP_SILENCE);
+            }
+            Some(d)
         }
         K::DtlsHandshakeFailed => {
             Some(base("client.dtls.handshake_failed", Confidence::Unknown, SourceScope::ClientToPeer, Owner::Unknown, Severity::Error))

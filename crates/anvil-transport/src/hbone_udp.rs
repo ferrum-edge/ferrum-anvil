@@ -29,11 +29,17 @@
 //!   the total deadline. The endpoint's `END_STREAM` is the peer's close; a
 //!   reset, a lost connection or a stream that ends inside a record is an
 //!   abnormal end (incomplete, never success).
+//! * **Channel.** An open tunnel is a [`DatagramChannel`] ([`HboneChannel`]):
+//!   the UDP session here and a DTLS session ([`crate::dtls`]) run over the
+//!   same channel, so every DTLS record (handshake flights, retransmissions,
+//!   application data, `close_notify`) is one `[u16 length][payload]` record
+//!   exactly like a UDP payload, and the endpoint relays it as one datagram.
 //!
 //! One fresh HBONE connection carries one tunnel (never pooled), as for the
 //! byte-stream tunnel.
 
 use crate::connector::{self, ProxyPlan};
+use crate::datagram::{DatagramChannel, Inbound, Sent};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_h2};
 use crate::hbone::{self, Leg};
@@ -48,7 +54,7 @@ use anvil_domain::settings::Timeouts;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Method, Request};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -135,7 +141,7 @@ pub struct HboneUdpPlan {
 }
 
 /// An open datagram tunnel: the `CONNECT` stream's halves and the HTTP/2
-/// connection that carries it.
+/// connection that carries it. [`HboneChannel`] moves datagrams over it.
 pub struct DatagramTunnel {
     tx: h2::SendStream<Bytes>,
     rx: h2::RecvStream,
@@ -340,46 +346,296 @@ async fn write_record(tx: &mut h2::SendStream<Bytes>, mut record: Bytes) -> Resu
     Ok(())
 }
 
-/// Datagram accounting shared by scripted and interactive sends.
-struct Channel {
+// ----------------------------------------------------------------- channel ---
+
+/// An open HBONE datagram tunnel as a [`DatagramChannel`]: one datagram per
+/// `[u16 length][payload]` record in both directions. The UDP session here
+/// and a DTLS session ([`crate::dtls`]) run over it. Counts every record in
+/// its [`HboneDatagramChannel`] and keeps the HTTP/2 connection open until
+/// [`close`](Self::close).
+pub struct HboneChannel {
     tx: h2::SendStream<Bytes>,
-    tr: Transcript,
+    rx: h2::RecvStream,
+    sender: h2::client::SendRequest<Bytes>,
+    conn: tokio::task::JoinHandle<()>,
+    stats: Arc<ConnStats>,
+    /// Connection bytes written and read when the tunnel opened.
+    before: (u64, u64),
     facts: HboneDatagramChannel,
+    decoder: RecordDecoder,
+    /// Decoded input waiting to be delivered, in arrival order.
+    queue: VecDeque<Inbound>,
+    stream_open: bool,
     /// Why the stream stopped accepting records (the endpoint closed or
-    /// reset it); later datagrams are recorded as not sent.
+    /// reset it); later datagrams are not sent.
     send_closed: Option<String>,
+    authority: String,
+    marker: String,
+    status: u16,
 }
 
-impl Channel {
+impl HboneChannel {
+    fn new(tunnel: DatagramTunnel, t: &TunnelObservation) -> Self {
+        let DatagramTunnel { tx, rx, sender, conn, stats } = tunnel;
+        let marker = t
+            .connect_headers
+            .iter()
+            .find(|h| h.name == "x-ferrum-mesh-protocol" || h.name == "x-istio-protocol")
+            .map(|h| format!("{}: {}", h.name, h.value))
+            .unwrap_or_else(|| "no protocol marker".into());
+        HboneChannel {
+            before: (stats.bytes_written(), stats.bytes_read()),
+            tx,
+            rx,
+            sender,
+            conn,
+            stats,
+            facts: HboneDatagramChannel::new(),
+            decoder: RecordDecoder::new(),
+            queue: VecDeque::new(),
+            stream_open: true,
+            send_closed: None,
+            authority: t.authority.clone(),
+            marker,
+            status: t.connect_status.unwrap_or(200),
+        }
+    }
+
+    /// The channel facts so far.
+    pub fn facts(&self) -> &HboneDatagramChannel {
+        &self.facts
+    }
+
+    /// The `CONNECT` authority (the UDP destination).
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+
+    /// The `udp` protocol marker the `CONNECT` carried (`name: value`).
+    pub fn marker(&self) -> &str {
+        &self.marker
+    }
+
+    /// Record how the session ended the tunnel. An end the channel observed
+    /// itself (the endpoint's `END_STREAM`, or an abnormal end) is kept.
+    pub fn set_closed_by(&mut self, by: ClosedBy) {
+        if matches!(self.facts.closed_by, ClosedBy::NotClosed) {
+            self.facts.closed_by = by;
+        }
+    }
+
+    /// End the tunnel: `END_STREAM` on the `CONNECT` stream, or a reset when
+    /// `abort` (cancel, total deadline). After Anvil's own `END_STREAM` on a
+    /// stream the endpoint still holds open, it waits briefly for the
+    /// endpoint to end its side, so the close is delivered rather than
+    /// discarded by the reset h2 sends when a half-open stream is dropped;
+    /// nothing read then is counted (the session is over). Dropping the last
+    /// handles lets h2 send GOAWAY and close the connection. Returns the
+    /// channel facts and the connection bytes written and read while the
+    /// tunnel was open.
+    pub async fn close(self, abort: bool) -> (HboneDatagramChannel, u64, u64) {
+        let HboneChannel { mut tx, mut rx, sender, conn, stats, before, facts, stream_open, send_closed, .. } = self;
+        if abort {
+            tx.send_reset(h2::Reason::CANCEL);
+        } else if send_closed.is_none() && tx.send_data(Bytes::new(), true).is_ok() && stream_open {
+            let _ = tokio::time::timeout(CLOSE_LINGER, async {
+                while let Some(Ok(d)) = rx.data().await {
+                    let _ = rx.flow_control().release_capacity(d.len());
+                }
+            })
+            .await;
+        }
+        let (written, read) = (stats.bytes_written().saturating_sub(before.0), stats.bytes_read().saturating_sub(before.1));
+        drop((tx, rx, sender));
+        let mut conn = conn;
+        if tokio::time::timeout(CLOSE_LINGER, &mut conn).await.is_err() {
+            conn.abort();
+        }
+        (facts, written, read)
+    }
+
+    fn end(&mut self, closed_by: ClosedBy, failure: Option<TransportFailure>, note: String) {
+        self.stream_open = false;
+        self.facts.closed_by = closed_by;
+        self.queue.push_back(Inbound::Ended { failure, note });
+    }
+
+    fn on_data(&mut self, d: Option<Result<Bytes, h2::Error>>) {
+        match d {
+            Some(Ok(chunk)) => {
+                let _ = self.rx.flow_control().release_capacity(chunk.len());
+                self.decoder.push(&chunk);
+                while let Some(p) = self.decoder.next_record() {
+                    self.queue.push_back(Inbound::Datagram(p));
+                }
+            }
+            None => {
+                let tail = self.decoder.pending();
+                if tail > 0 {
+                    self.facts.truncated_tail_bytes = tail as u64;
+                    let f = TransportFailure::new(
+                        Phase::Session,
+                        FailureKind::BodyIncomplete,
+                        format!(
+                            "the HBONE endpoint ended the datagram tunnel inside a record: {tail} byte(s) of an incomplete [u16 length][payload] record were discarded"
+                        ),
+                    );
+                    self.end(
+                        ClosedBy::Abnormal,
+                        Some(f),
+                        format!("the HBONE endpoint ended the tunnel inside a datagram record; {tail} byte(s) of the incomplete record were discarded"),
+                    );
+                } else {
+                    self.end(
+                        ClosedBy::Peer,
+                        None,
+                        "the HBONE endpoint ended the datagram tunnel (END_STREAM on the CONNECT stream)".into(),
+                    );
+                }
+            }
+            Some(Err(e)) => {
+                let mut f = classify_h2(&e, HyperStage::Body);
+                f.phase = Phase::Session;
+                if hbone::tls_tap(&mut f, &self.stats) {
+                    f.phase = Phase::Session;
+                }
+                let how = match f.h2_error_code {
+                    Some(c) if e.is_reset() => format!("the HBONE endpoint reset the tunnel stream (RST_STREAM {})", reason_name(c)),
+                    Some(c) => format!("the HTTP/2 connection to the HBONE endpoint ended (GOAWAY {})", reason_name(c)),
+                    None => format!("the connection to the HBONE endpoint was lost: {}", f.message),
+                };
+                self.facts.reset_code = f.h2_error_code.map(reason_name);
+                f.message = format!("the datagram tunnel ended abnormally: {how}");
+                self.end(ClosedBy::Abnormal, Some(f), how);
+            }
+        }
+    }
+}
+
+impl DatagramChannel for HboneChannel {
     /// Frame and write one datagram. A datagram over the record limit is
-    /// refused and recorded; nothing is counted that the stream did not take.
-    async fn send(&mut self, payload: &[u8]) {
+    /// refused and counted; nothing is counted that the stream did not take.
+    /// A stream that no longer takes data does not fail the send: the
+    /// receive side reports how the tunnel ended.
+    async fn send(&mut self, payload: &[u8]) -> Result<Sent, TransportFailure> {
         let Some(record) = encode_record(payload) else {
             self.facts.oversize_refused += 1;
-            self.tr.note(
-                "not_sent",
-                &format!(
-                    "a {}-byte datagram exceeds the {MAX_RECORD_PAYLOAD} bytes one HBONE datagram record can carry; it was refused locally and not sent",
-                    payload.len()
-                ),
-            );
-            return;
+            return Ok(Sent::NotSent(format!(
+                "a {}-byte datagram exceeds the {MAX_RECORD_PAYLOAD} bytes one HBONE datagram record can carry; it was refused locally and not sent",
+                payload.len()
+            )));
         };
         if let Some(why) = &self.send_closed {
-            self.tr.note("not_sent", &format!("a {}-byte datagram was not sent: {why}", payload.len()));
-            return;
+            return Ok(Sent::NotSent(format!("a {}-byte datagram was not sent: {why}", payload.len())));
         }
         match write_record(&mut self.tx, record).await {
             Ok(()) => {
                 self.facts.records_sent += 1;
-                self.tr.data(Direction::Sent, "datagram", payload);
+                Ok(Sent::Sent(None))
             }
             Err(why) => {
-                self.tr.note("not_sent", &format!("a {}-byte datagram was not sent: {why}", payload.len()));
+                let note = format!("a {}-byte datagram was not sent: {why}", payload.len());
                 self.send_closed = Some(why);
+                Ok(Sent::NotSent(note))
             }
         }
     }
+
+    /// The next record's payload, or the end of the tunnel. Decoded records
+    /// are queued in `self` before anything else is awaited (and `h2`'s
+    /// `data()` is cancel-safe), so dropping this future loses nothing.
+    async fn recv(&mut self) -> Inbound {
+        loop {
+            if let Some(i) = self.queue.pop_front() {
+                if matches!(i, Inbound::Datagram(_)) {
+                    self.facts.records_received += 1;
+                }
+                return i;
+            }
+            if !self.stream_open {
+                return std::future::pending().await;
+            }
+            let d = self.rx.data().await;
+            self.on_data(d);
+        }
+    }
+
+    /// One record carries at most 65,535 payload bytes (the `u16` prefix).
+    /// The endpoint relays each record as one UDP datagram, so a DTLS
+    /// session keeps its own (smaller) record size for the path beyond.
+    fn max_datagram(&self) -> Option<usize> {
+        Some(MAX_RECORD_PAYLOAD)
+    }
+}
+
+/// Open the datagram tunnel for a session whose attempt addresses the UDP
+/// destination itself (`udp://`, or `dtls://` with DTLS inside the tunnel):
+/// DNS and connect are `not_applicable` (the endpoint resolves and reaches
+/// the destination), the whole outer leg is one `proxy_tunnel` phase, and
+/// the attempt's connection records it as its HBONE `tunnel` with the
+/// datagram channel. `Err` is the attempt's failure: no tunnel was opened
+/// and nothing was sent to the destination.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn open_channel(
+    rec: &mut Recorder,
+    obs: &mut AttemptObservation,
+    p: &ProxyPlan,
+    host: &str,
+    port: u16,
+    dns: &DnsConfig,
+    timeouts: &Timeouts,
+    total_deadline: Option<Instant>,
+    cancel: &CancellationToken,
+) -> Result<HboneChannel, TransportFailure> {
+    let mut cobs = connector::blank_observation(connector::next_connection_id());
+    cobs.protocol = Some("udp".into());
+    cobs.via_proxy = Some(p.label.clone());
+    rec.mark(Phase::Dns, PhaseStatus::NotApplicable, Some("the HBONE endpoint resolves the destination (outer DNS: tunnel evidence)"));
+    rec.mark(
+        Phase::Connect,
+        PhaseStatus::NotApplicable,
+        Some("UDP is connectionless; the HBONE endpoint opens the UDP socket toward the destination (outer TCP: tunnel evidence)"),
+    );
+    let idx = rec.start(Phase::ProxyTunnel);
+    let opened = tokio::select! {
+        r = open(rec, p, host, port, dns, timeouts) => Ok(r),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::TotalTimeout,
+            "the total deadline elapsed while opening the HBONE datagram tunnel").with_deadline(timeouts.total_ms)),
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::Canceled,
+            "canceled while opening the HBONE datagram tunnel")),
+    };
+    let (tunnel, t) = match opened {
+        Ok(Ok(x)) => x,
+        Ok(Err((f, t))) => {
+            let timed_out = t.failure.as_ref().is_some_and(|i| i.deadline_ms.is_some());
+            rec.finish_with(
+                idx,
+                if timed_out { PhaseStatus::TimedOut } else { PhaseStatus::Failed },
+                format!("HBONE datagram tunnel via {}", p.label),
+            );
+            cobs.tunnel = Some(t);
+            obs.connection = Some(cobs);
+            return Err(f);
+        }
+        Err(f) => {
+            rec.finish(idx, phase_status_for(f.kind));
+            let mut t = hbone::blank(p, &hbone::authority(host, port));
+            t.datagrams = Some(HboneDatagramChannel::new());
+            t.failure = Some(f.clone());
+            cobs.tunnel = Some(t);
+            obs.connection = Some(cobs);
+            return Err(f);
+        }
+    };
+    let chan = HboneChannel::new(tunnel, &t);
+    rec.finish_with(
+        idx,
+        PhaseStatus::Completed,
+        format!("HBONE datagram tunnel via {} (CONNECT {} → {}, {})", p.label, chan.authority, chan.status, chan.marker),
+    );
+    cobs.tunnel = Some(t);
+    obs.connection = Some(cobs);
+    Ok(chan)
 }
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
@@ -391,6 +647,15 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
 
 fn reason_name(code: u32) -> String {
     format!("{:?}", h2::Reason::from(code))
+}
+
+/// Send one datagram through the tunnel and record it (or why it was not sent).
+async fn send_recorded(chan: &mut HboneChannel, tr: &mut Transcript, payload: &[u8]) {
+    match chan.send(payload).await {
+        Ok(Sent::Sent(_)) => tr.data(Direction::Sent, "datagram", payload),
+        Ok(Sent::NotSent(why)) => tr.note("not_sent", &why),
+        Err(f) => tr.note("not_sent", &f.message),
+    }
 }
 
 pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
@@ -406,92 +671,41 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
         window_ms: plan.response_window_ms,
         masque: None,
     };
-    let mut cobs = connector::blank_observation(connector::next_connection_id());
-    cobs.protocol = Some("udp".into());
-    cobs.via_proxy = Some(plan.proxy.label.clone());
 
     // ---- the tunnel (the whole outer leg is one proxy_tunnel phase) ----
-    rec.mark(Phase::Dns, PhaseStatus::NotApplicable, Some("the HBONE endpoint resolves the destination (outer DNS: tunnel evidence)"));
-    rec.mark(
-        Phase::Connect,
-        PhaseStatus::NotApplicable,
-        Some("UDP is connectionless; the HBONE endpoint opens the UDP socket toward the destination (outer TCP: tunnel evidence)"),
-    );
-    let idx = rec.start(Phase::ProxyTunnel);
-    let opened = tokio::select! {
-        r = open(&rec, &plan.proxy, &plan.host, plan.port, &plan.dns, &plan.timeouts) => Ok(r),
-        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::TotalTimeout,
-            "the total deadline elapsed while opening the HBONE datagram tunnel").with_deadline(plan.timeouts.total_ms)),
-        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::Canceled,
-            "canceled while opening the HBONE datagram tunnel")),
-    };
-    let (tunnel, t) = match opened {
-        Ok(Ok(x)) => x,
-        Ok(Err((f, t))) => {
-            let timed_out = t.failure.as_ref().is_some_and(|i| i.deadline_ms.is_some());
-            rec.finish_with(
-                idx,
-                if timed_out { PhaseStatus::TimedOut } else { PhaseStatus::Failed },
-                format!("HBONE datagram tunnel via {}", plan.proxy.label),
-            );
-            cobs.tunnel = Some(t);
-            obs.connection = Some(cobs);
-            return SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, udp_status(0, 0), facts);
-        }
+    let opened =
+        open_channel(&mut rec, &mut obs, &plan.proxy, &plan.host, plan.port, &plan.dns, &plan.timeouts, total_deadline, cancel).await;
+    let mut chan = match opened {
+        Ok(c) => c,
         Err(f) => {
-            rec.finish(idx, phase_status_for(f.kind));
-            let mut t = hbone::blank(&plan.proxy, &hbone::authority(&plan.host, plan.port));
-            t.datagrams = Some(HboneDatagramChannel::new());
-            t.failure = Some(f.clone());
-            cobs.tunnel = Some(t);
-            obs.connection = Some(cobs);
             return SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, udp_status(0, 0), facts);
         }
     };
-    let status = t.connect_status.unwrap_or(200);
-    let authority = t.authority.clone();
-    let marker = t
-        .connect_headers
-        .iter()
-        .find(|h| h.name == "x-ferrum-mesh-protocol" || h.name == "x-istio-protocol")
-        .map(|h| format!("{}: {}", h.name, h.value))
-        .unwrap_or_else(|| "no protocol marker".into());
-    rec.finish_with(
-        idx,
-        PhaseStatus::Completed,
-        format!("HBONE datagram tunnel via {} (CONNECT {authority} → {status}, {marker})", plan.proxy.label),
-    );
-    cobs.tunnel = Some(t);
-    obs.connection = Some(cobs);
+    let (authority, marker, status) = (chan.authority.clone(), chan.marker.clone(), chan.status);
     facts.notes.push(format!(
         "UDP to {authority} through the HBONE endpoint {}: CONNECT with {marker}; each datagram is one [u16 length][payload] record on the CONNECT stream",
         plan.proxy.label
     ));
 
-    let DatagramTunnel { tx, mut rx, sender, conn, stats } = tunnel;
-    let (written_before, read_before) = (stats.bytes_written(), stats.bytes_read());
-    let tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
-    let mut ch = Channel { tx, tr, facts: HboneDatagramChannel::new(), send_closed: None };
-    ch.tr.note("tunnel", &format!("HBONE datagram tunnel to {authority} open through {} (HTTP {status}; {marker})", plan.proxy.label));
+    let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
+    tr.note("tunnel", &format!("HBONE datagram tunnel to {authority} open through {} (HTTP {status}; {marker})", plan.proxy.label));
     let s_idx = rec.start(Phase::Session);
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
-    let mut decoder = RecordDecoder::new();
-    let mut stream_open = true;
 
     for d in &plan.datagrams {
         tokio::select! {
-            _ = ch.send(d) => {}
+            _ = send_recorded(&mut chan, &mut tr, d) => {}
             _ = sleep_until_opt(total_deadline) => {
                 failure = Some(TransportFailure::new(Phase::Session, FailureKind::TotalTimeout,
                     "the total deadline elapsed while sending datagrams into the HBONE tunnel").with_deadline(plan.timeouts.total_ms));
-                ch.facts.closed_by = ClosedBy::Timeout;
+                chan.set_closed_by(ClosedBy::Timeout);
                 break;
             }
             _ = cancel.cancelled() => {
                 failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the UDP exchange through the HBONE tunnel was canceled"));
-                ch.facts.closed_by = ClosedBy::Client;
+                chan.set_closed_by(ClosedBy::Client);
                 break;
             }
         }
@@ -500,7 +714,7 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
     let window = Duration::from_millis(plan.response_window_ms);
     let mut window_end = Instant::now() + window;
     enum Ev {
-        Data(Option<Result<Bytes, h2::Error>>),
+        In(Inbound),
         Cmd(Option<SessionCommand>),
         WindowEnd,
         Deadline,
@@ -509,95 +723,56 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
     'session: while failure.is_none() {
         let window_deadline = if interactive { None } else { Some(window_end) };
         let ev = tokio::select! {
-            d = rx.data(), if stream_open => Ev::Data(d),
+            i = chan.recv() => Ev::In(i),
             c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
             _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
             _ = sleep_until_opt(total_deadline) => Ev::Deadline,
             _ = cancel.cancelled() => Ev::Canceled,
         };
         match ev {
-            Ev::Data(Some(Ok(chunk))) => {
-                let _ = rx.flow_control().release_capacity(chunk.len());
-                decoder.push(&chunk);
-                while let Some(p) = decoder.next_record() {
-                    received += 1;
-                    ch.facts.records_received += 1;
-                    let mut digest = [0u8; 32];
-                    digest.copy_from_slice(&Sha256::digest(&p));
-                    if !seen.insert(digest) {
-                        facts.repeated_datagrams += 1;
-                    }
-                    ch.tr.data(Direction::Received, "datagram", &p);
-                    if received >= plan.max_datagrams as u64 {
-                        ch.tr.note("note", &format!("stopped receiving at max_datagrams ({})", plan.max_datagrams));
-                        ch.facts.closed_by = ClosedBy::Client;
-                        break 'session;
-                    }
+            Ev::In(Inbound::Datagram(p)) => {
+                received += 1;
+                let mut digest = [0u8; 32];
+                digest.copy_from_slice(&Sha256::digest(&p));
+                if !seen.insert(digest) {
+                    facts.repeated_datagrams += 1;
+                }
+                tr.data(Direction::Received, "datagram", &p);
+                if received >= plan.max_datagrams as u64 {
+                    tr.note("note", &format!("stopped receiving at max_datagrams ({})", plan.max_datagrams));
+                    chan.set_closed_by(ClosedBy::Client);
+                    break 'session;
                 }
             }
-            Ev::Data(None) => {
-                stream_open = false;
-                let tail = decoder.pending();
-                if tail > 0 {
-                    ch.facts.truncated_tail_bytes = tail as u64;
-                    ch.facts.closed_by = ClosedBy::Abnormal;
-                    ch.tr.note(
-                        "tunnel_closed",
-                        &format!("the HBONE endpoint ended the tunnel inside a datagram record; {tail} byte(s) of the incomplete record were discarded"),
-                    );
-                    failure = Some(TransportFailure::new(
-                        Phase::Session,
-                        FailureKind::BodyIncomplete,
-                        format!(
-                            "the HBONE endpoint ended the datagram tunnel inside a record: {tail} byte(s) of an incomplete [u16 length][payload] record were discarded"
-                        ),
-                    ));
-                } else {
-                    ch.facts.closed_by = ClosedBy::Peer;
-                    ch.tr.note("tunnel_closed", "the HBONE endpoint ended the datagram tunnel (END_STREAM on the CONNECT stream)");
-                }
+            Ev::In(Inbound::Ended { failure: f, note }) => {
+                tr.note("tunnel_closed", &note);
+                failure = f;
                 break 'session;
             }
-            Ev::Data(Some(Err(e))) => {
-                stream_open = false;
-                let mut f = classify_h2(&e, HyperStage::Body);
-                f.phase = Phase::Session;
-                if hbone::tls_tap(&mut f, &stats) {
-                    f.phase = Phase::Session;
-                }
-                let how = match f.h2_error_code {
-                    Some(c) if e.is_reset() => format!("the HBONE endpoint reset the tunnel stream (RST_STREAM {})", reason_name(c)),
-                    Some(c) => format!("the HTTP/2 connection to the HBONE endpoint ended (GOAWAY {})", reason_name(c)),
-                    None => format!("the connection to the HBONE endpoint was lost: {}", f.message),
-                };
-                ch.facts.reset_code = f.h2_error_code.map(reason_name);
-                ch.facts.closed_by = ClosedBy::Abnormal;
-                ch.tr.note("tunnel_closed", &how);
-                f.message = format!("the datagram tunnel ended abnormally: {how}");
-                failure = Some(f);
-            }
+            // The tunnel carries no ICMP or socket errors: they reach the endpoint.
+            Ev::In(Inbound::PortUnreachable(_) | Inbound::Error(_) | Inbound::Dropped(_)) => {}
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    ch.send(text.as_bytes()).await;
+                    send_recorded(&mut chan, &mut tr, text.as_bytes()).await;
                     window_end = Instant::now() + window;
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                     Ok(b) => {
-                        ch.send(&b).await;
+                        send_recorded(&mut chan, &mut tr, &b).await;
                         window_end = Instant::now() + window;
                     }
-                    Err(e) => ch.tr.note("error", &format!("datagram not sent: {e}")),
+                    Err(e) => tr.note("error", &format!("datagram not sent: {e}")),
                 },
                 Some(SessionCommand::Ping) | Some(SessionCommand::HalfClose) => {
-                    ch.tr.note("unsupported_command", "UDP has no ping or half-close; send a datagram or Close")
+                    tr.note("unsupported_command", "UDP has no ping or half-close; send a datagram or Close")
                 }
                 Some(SessionCommand::Close { .. }) | None => {
-                    ch.facts.closed_by = ClosedBy::Client;
+                    chan.set_closed_by(ClosedBy::Client);
                     break 'session;
                 }
             },
             Ev::WindowEnd => {
-                ch.facts.closed_by = ClosedBy::Client;
+                chan.set_closed_by(ClosedBy::Client);
                 break 'session;
             }
             Ev::Deadline => {
@@ -605,39 +780,18 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
                     TransportFailure::new(Phase::Session, FailureKind::TotalTimeout, "the total deadline elapsed during the UDP exchange")
                         .with_deadline(plan.timeouts.total_ms),
                 );
-                ch.facts.closed_by = ClosedBy::Timeout;
+                chan.set_closed_by(ClosedBy::Timeout);
             }
             Ev::Canceled => {
                 failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the UDP exchange was canceled"));
-                ch.facts.closed_by = ClosedBy::Client;
+                chan.set_closed_by(ClosedBy::Client);
             }
         }
     }
 
     // ---- end of the tunnel ----
-    let Channel { mut tx, tr, facts: channel, send_closed } = ch;
     let aborted = matches!(failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled | FailureKind::TotalTimeout));
-    if aborted {
-        tx.send_reset(h2::Reason::CANCEL);
-    } else if send_closed.is_none() && tx.send_data(Bytes::new(), true).is_ok() && stream_open {
-        // Anvil's own clean end: wait briefly for the endpoint to end its
-        // side, so the END_STREAM is delivered rather than discarded by the
-        // reset h2 sends when a half-open stream is dropped. Nothing read
-        // now is counted: the session is over.
-        let _ = tokio::time::timeout(CLOSE_LINGER, async {
-            while let Some(Ok(d)) = rx.data().await {
-                let _ = rx.flow_control().release_capacity(d.len());
-            }
-        })
-        .await;
-    }
-    let (written_after, read_after) = (stats.bytes_written(), stats.bytes_read());
-    // Dropping the last handles lets h2 send GOAWAY and close the connection.
-    drop((tx, rx, sender));
-    let mut conn = conn;
-    if tokio::time::timeout(CLOSE_LINGER, &mut conn).await.is_err() {
-        conn.abort();
-    }
+    let (channel, written, read) = chan.close(aborted).await;
     let sent = channel.records_sent;
     if facts.repeated_datagrams > 0 {
         facts.notes.push(format!(
@@ -668,8 +822,8 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
     obs.failure = failure;
     obs.bytes.request_body = tr.sent_bytes();
     obs.bytes.response_body_wire = Some(tr.received_bytes());
-    obs.bytes.connection_bytes_written = Some(written_after.saturating_sub(written_before));
-    obs.bytes.connection_bytes_read = Some(read_after.saturating_sub(read_before));
+    obs.bytes.connection_bytes_written = Some(written);
+    obs.bytes.connection_bytes_read = Some(read);
     if let Some(t) = obs.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
         t.datagrams = Some(channel);
     }

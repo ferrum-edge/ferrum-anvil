@@ -506,12 +506,7 @@ async fn unsupported_udp_combinations_are_refused_before_traffic() {
         assert!(f.message.contains(needle), "{}", f.message);
     };
 
-    // DTLS through HBONE is not implemented yet.
-    let tls = client_svid();
-    let p = proxy_profile(ProxyKind::Hbone, &ep.address(), Some(&tls), marker(HboneMarker::None));
-    let o = run(&with_proxy(&format!("dtls://{}", echo.addr), udp_spec(&["x"], 300), p, Some(tls))).await;
-    refused(&o, "settings.proxy", "DTLS through the HBONE proxy");
-
+    // (DTLS through HBONE runs inside the tunnel: tests/mesh_hbone_dtls.rs.)
     // A PROXY v2 datagram envelope would reach the destination as payload.
     let mut spec = udp_spec(&["x"], 300);
     spec.proxy_protocol = Some(DatagramEnvelopeSpec {

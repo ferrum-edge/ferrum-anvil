@@ -9,11 +9,13 @@ dials the mesh listeners directly. Anvil verifies every listener by **SPIFFE ID*
 bypass) and presents the lab client SVID.
 
 The profile exercises the client features added for mesh testing (`docs/protocols.md` §3.9):
-the HBONE proxy profile, SPIFFE server-identity verification, the SNI override, and UDP through an HBONE
-tunnel (Ferrum Mesh datagram-over-HBONE, MESH-018 to MESH-028).
+the HBONE proxy profile, SPIFFE server-identity verification, the SNI override, UDP through an HBONE
+tunnel (Ferrum Mesh datagram-over-HBONE, MESH-018 to MESH-028), and DTLS inside that tunnel (MESH-031 to
+MESH-034).
 
 **Independent ground truth**, never passed to the engine: the echo fixture's request log (did the
-workload receive the request?), the UDP fixtures' datagram logs (sizes, in order), and each gateway's
+workload receive the request?), the UDP fixtures' datagram logs (sizes, in order), the DTLS fixtures' logs
+(associations, completed handshakes with the client certificate's CN, application datagram sizes), and each gateway's
 operator log (transaction lines, TLS handshake warnings, the HBONE gate warnings, the debug-level
 relay-synthesis refusal with its reason and the debug-level `HBONE UDP tunnel relay completed` line with
 the relayed byte counts).
@@ -51,14 +53,16 @@ ever bound (a unit test in `crates/anvil-lab/src/mesh.rs` checks the configurati
 | `mesh-ambient` | `lab/gateway/mesh-ambient.{conf,json}` | Ambient, STRICT | HBONE `17618` (15008-equivalent) | inbound 17616, outbound 17611, egress 17619, DNS 17654 | 17691 |
 | workload | `anvil_fixtures::http` echo | — | `127.0.0.1:17801` | — | — |
 | workload UDP | `anvil_fixtures::streams::udp` | echo / silent / closes after its first reply (bound per scenario) / declared, nothing listening | `127.0.0.1:17802` / `17803` / `17804` / `17805` | — | — |
+| workload DTLS | `anvil_fixtures::dtls` (dimpl DTLS 1.2) | echo presenting the workload SVID `…/sa/anvil-lab-svc` and requiring a mesh client certificate / echo presenting a `partner.example` SVID from a root the mesh does not trust | `127.0.0.1:17806` / `17807` | — | — |
 
 The mesh documents declare the local workload (`spiffe://cluster.local/ns/ferrum/sa/anvil-lab-svc`,
 or `…/sa/anvil-lab-ztunnel` for Ambient) at `127.0.0.1:17801`, service `svc`, the PeerAuthentication,
 and (sidecar) one MeshPolicy that **denies** the lab client identity on `/denied/*`. The sidecars
 materialize an inbound loopback route for `svc` (Host `svc.ferrum.svc.cluster.local`) and relay an
 authenticated bare HTTP/2 CONNECT to the workload's declared address:port. The sidecar workload also
-declares the `udp` ports 17802-17805, so a CONNECT with `x-ferrum-mesh-protocol: udp` to one of them is
-relayed as datagram records to a local UDP socket. The Ambient workload also declares two names and the
+declares the `udp` ports 17802-17807, so a CONNECT with `x-ferrum-mesh-protocol: udp` to one of them is
+relayed as datagram records to a local UDP socket (17806/17807 are the DTLS workloads: to the relay their
+DTLS records are opaque datagrams). The Ambient workload also declares two names and the
 `udp` port 17802: `udp-loopback.anvil-lab.test` (resolved to `127.0.0.1` by the Ambient instance's
 `FERRUM_DNS_OVERRIDES`) and `udp-unresolvable.anvil-lab.invalid` (RFC 6761 `.invalid`, never resolves).
 The Ambient instance clears `FERRUM_MESH_NODE_WAYPOINT_POD_REGISTRY_DIR`: with the default directory and
@@ -104,6 +108,10 @@ no gateway attribution.
 | MESH-026 | UDP through HBONE, interactive: the workload (17804) answers `first`, closes its socket, then Anvil sends `second` | the session ends without Anvil closing it: `hbone.udp_tunnel_ended` (the endpoint's `END_STREAM`; ICMP at the endpoint's socket stays an alternative; the destination is not called down), 1 reply kept, no `exchange.*` | the workload got only the 5-byte datagram and closed; debug `HBONE UDP tunnel relay completed` with `bytes_in` 11, `bytes_out` 5 |
 | MESH-027 | UDP through HBONE to the declared port 17805, where nothing listens | `udp.no_response` and `hbone.udp_tunnel_ended`; never `udp.icmp_port_unreachable` (the ICMP reaches the gateway's socket, not Anvil) | the port could be bound (nothing listened); debug `HBONE UDP tunnel relay completed` with `bytes_in` 6, `bytes_out` 0 |
 | MESH-028 | UDP `CONNECT 127.0.0.1:17802` at Ambient | `hbone.tunnel_refused` (404) | debug: `denial = address_not_terminated_here` (Ambient never relays to loopback) |
+| MESH-031 | **DTLS** through HBONE at the sidecar inbound: `dtls://127.0.0.1:17806`, the proxy profile presents the client SVID to the endpoint (verified as `…/sa/anvil-lab-svc`), the request's TLS profile verifies the DTLS workload by the same SPIFFE ID and presents the client SVID to it; datagrams `mesh-dtls-1`, `mesh-dtls-two` | success, 2 sent and 2 echoed (decrypted); attempt `DTLS` with `dns`/`connect` `not_applicable`, one `proxy_tunnel` phase, `dtls_handshake`; DTLS evidence DTLS 1.2, verified by SPIFFE ID, client certificate requested and presented; tunnel `CONNECT` 200 with the `udp` marker, endpoint verified; channel counts DTLS records (6 sent, 5 received in every run), `closed_by = client`; no warning | the DTLS fixture accepted one association, completed one handshake with client CN `anvil-lab-client` and got 11 and 13 bytes; operator transaction on `__mesh-inbound-hbone-relay` with `backend_target` `udp://127.0.0.1:17806` |
+| MESH-032 | DTLS through HBONE to `127.0.0.1:17807`, whose DTLS certificate is a `partner.example` SVID from an untrusted root | `tls_untrusted_trust_domain` in `dtls_handshake`; `client.tls.untrusted_trust_domain` (`client_to_peer`) naming `127.0.0.1:17807`, never the endpoint; the endpoint leg verified; no `hbone.*` finding; nothing dispatched | the fixture saw the handshake through the relay (one association) but completed none and got no application data; operator transaction for `udp://127.0.0.1:17807` |
+| MESH-033 | DTLS `CONNECT 127.0.0.1:17899` at the sidecar (undeclared port) | exactly the UDP shape (MESH-023): `hbone.tunnel_refused` (404 `Not Found`), no `dtls_handshake` phase, no DTLS evidence, no `client.dtls.*`/`client.tls.*` finding | debug: relay synthesis refused, `denial = port_not_declared` |
+| MESH-034 | DTLS `CONNECT udp-loopback.anvil-lab.test:17802` at Ambient | exactly the UDP shape (MESH-024): `hbone.tunnel_refused` quoting 403 `{"error":"HBONE UDP relay destination not allowed"}`, no DTLS attempted | operator `hbone_udp_relay_destination_denied` |
 
 ### Skipped (never counted as passes)
 
@@ -134,6 +142,13 @@ no gateway attribution.
 - **An absent node-agent registry is authoritative on Ambient.** With the default
   `FERRUM_MESH_NODE_WAYPOINT_POD_REGISTRY_DIR` and no node agent, every declared name was refused at
   relay synthesis (`unresolvable_authority`); the lab clears the directory for the Ambient instance.
+- **DTLS rides the datagram relay unchanged on both releases.** Every DTLS record Anvil wrote as a
+  `[u16 length][payload]` record reached the workload as one UDP datagram and every reply came back as one
+  record (MESH-031): the handshake (a hybrid DTLS 1.2/1.3 ClientHello, the cookie exchange, the client
+  SVID) completed end to end, and the gateway's transaction line counts the DTLS bytes it relayed (2,249 in,
+  about 1,087 out). The relay never terminates or inspects DTLS, so a DTLS certificate the mesh does not
+  trust is Anvil's own verification decision about the workload (MESH-032), and a refused tunnel never
+  reaches a DTLS handshake (MESH-033/034).
 - **Failed DNS is retried in the background.** After MESH-025 the gateway keeps logging `DNS failed
   retry` warnings for the `.invalid` name (its failed-lookup retry); the public answer stays 502.
 
@@ -197,14 +212,30 @@ run produced a `ferrum.token.*` or `ferrum.outcome*` finding. In every run and p
 saw the endpoint's `END_STREAM` (`closed_by = peer`), never a reset. The lost-alert shapes appeared in runs
 2 and 3 (MESH-012) and on v0.9.5 (MESH-006, MESH-013), explained by the lost-alert findings.
 
+With DTLS through HBONE (MESH-031 to MESH-034, commit "DTLS through HBONE datagram tunnels"), on
+2026-09-26 on the final code (macOS arm64, the pinned `ferrum-edge-macos-aarch64` binaries):
+
+| Run | Result |
+|---|---|
+| v0.9.7 run 1 (`results/lab/20260926T054744Z-mesh`) | 60 passed, 0 failed, 4 skipped |
+| v0.9.7 run 2 (`results/lab/20260926T054757Z-mesh`) | 60 passed, 0 failed, 4 skipped |
+| v0.9.7 run 3 (`results/lab/20260926T054809Z-mesh`) | 60 passed, 0 failed, 4 skipped |
+| v0.9.5 (`--release v0.9.5`, `results/lab/20260926T054821Z-mesh`) | 60 passed, 0 failed, 4 skipped |
+
+(An earlier set of the same four runs before formatting, `20260926T053733Z`…`053810Z`, had the same results.)
+
+60 = 30 scenarios × (trusted + untrusted pass); the skips are unchanged. MESH-031 counted 6 DTLS records
+sent and 5 received in every run and pass; MESH-032 2 and 2 (the ClientHello and its cookie retry, then the
+server's flights until Anvil rejected the certificate). No untrusted run produced a Ferrum-marker finding.
+
 ## 5. Limitations
 
 - No Kubernetes, CNI, eBPF or node agent: captured (transparent) traffic, NodeWaypoint and the Ambient
   positive relay (TCP and UDP) are out of reach on a loopback-only host (MESH-016, MESH-029).
 - No EgressGateway instance: the allow-listed external UDP relay and its session cap are not driven
   live (MESH-030).
-- DTLS through an HBONE tunnel is refused by Anvil before traffic (not implemented yet), so no DTLS
-  scenario runs here; Ferrum's relay would carry DTLS records opaquely as datagrams.
+- DTLS through HBONE is driven only on the Sidecar inbound listener (the Ambient positive relay is out of
+  reach, as for UDP); the DTLS workloads are dimpl DTLS 1.2 echoes (ECDSA only, as the lab SVIDs are).
 - No control plane: VirtualService-driven route overrides, and so the post-plugin `403` relay refusal,
   are out of reach (MESH-017).
 - The Ferrum compatibility catalog is still 0.9.5 (`ferrum-edge-0.9.5`); mesh-mode public bodies are

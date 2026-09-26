@@ -669,7 +669,7 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
         )}
         <p className="hint">UDP has no delivery signal: silence means no reply arrived within the window, not that the datagram was lost or dropped by a specific hop.</p>
         <p className="hint" data-testid="udp-hbone-help">
-          Mesh: with an HBONE proxy profile selected in Settings, udp:// runs through an HBONE datagram tunnel (Ferrum Mesh framing: one [u16 length][payload] record per datagram, at most 65,535 bytes; larger datagrams are refused and not sent). HTTP and SOCKS5 proxies carry TCP only. DTLS through HBONE is not supported yet.
+          Mesh: with an HBONE proxy profile selected in Settings, udp:// runs through an HBONE datagram tunnel (Ferrum Mesh framing: one [u16 length][payload] record per datagram, at most 65,535 bytes; larger datagrams are refused and not sent). With dtls:// the DTLS handshake and session run inside that tunnel: every DTLS record is one record, the request&apos;s TLS profile applies to the DTLS peer and the proxy profile&apos;s (client SVID) to the HBONE endpoint. HTTP and SOCKS5 proxies carry TCP only.
         </p>
         <DatagramEnvelopeEditor
           value={u.proxy_protocol}
@@ -1098,7 +1098,7 @@ export function SettingsOverridesEditor({
       )}
       {udp && selectedProxy?.kind === "hbone" && (
         <p className="hint" data-testid="udp-proxy-help">
-          UDP goes through “{selectedProxy.name}” as an HBONE datagram tunnel: an HTTP/2 CONNECT to the request&apos;s host:port with {selectedProxy.hbone?.marker === "istio_protocol" ? "x-istio-protocol" : "x-ferrum-mesh-protocol"}: udp, then one [u16 length][payload] record per datagram (at most 65,535 bytes). The endpoint relays to the destination without acknowledgement, and ICMP errors reach the endpoint, not Anvil. DTLS and a PROXY protocol envelope are refused through it.
+          UDP goes through “{selectedProxy.name}” as an HBONE datagram tunnel: an HTTP/2 CONNECT to the request&apos;s host:port with {selectedProxy.hbone?.marker === "istio_protocol" ? "x-istio-protocol" : "x-ferrum-mesh-protocol"}: udp, then one [u16 length][payload] record per datagram (at most 65,535 bytes). The endpoint relays to the destination without acknowledgement, and ICMP errors reach the endpoint, not Anvil. With dtls:// the DTLS handshake runs inside the tunnel (one record per DTLS record; the request&apos;s TLS profile applies to the DTLS peer). A PROXY protocol envelope is refused through it.
         </p>
       )}
       {udp && selectedProxy && selectedProxy.kind !== "hbone" && (
