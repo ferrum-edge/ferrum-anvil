@@ -83,7 +83,7 @@ const PROBE: WorkloadProbe = {
 };
 
 describe("JWT-SVID auth editor", () => {
-  it("defaults to the Workload API with bundle verification and edits audiences and sources", () => {
+  it("defaults to the Workload API with bundle verification and edits audiences and sources", async () => {
     let last = { type: "none" } as AuthConfig;
     render(<AuthHarness onValue={(a) => (last = a)} />);
     fireEvent.change(screen.getByLabelText("Type"), { target: { value: "jwt_svid" } });
@@ -109,9 +109,13 @@ describe("JWT-SVID auth editor", () => {
     expect(last.type === "jwt_svid" && last.config.source).toEqual({ kind: "value", token: { kind: "template", value: "" } });
     fireEvent.click(screen.getByLabelText(/Verify the signature/));
     expect(screen.queryByLabelText(/Workload API endpoint/)).toBeNull();
+    // A token file comes only from the backend's dialog, which binds it; the path is not typed.
     fireEvent.change(screen.getByLabelText("Token source"), { target: { value: "file" } });
-    fireEvent.change(screen.getByLabelText("Token file"), { target: { value: "/run/secrets/jwt" } });
-    expect(last.type === "jwt_svid" && last.config.source).toEqual({ kind: "file", path: "/run/secrets/jwt" });
+    expect((screen.getByLabelText("Token file") as HTMLInputElement).readOnly).toBe(true);
+    invoke.mockImplementation(async (cmd: string) => (cmd === "file_choose" ? [{ token: "binding", file_name: "jwt", path: "/run/secrets/jwt" }] : null));
+    fireEvent.click(screen.getByRole("button", { name: "Choose…" }));
+    await waitFor(() => expect(last.type === "jwt_svid" && last.config.source).toEqual({ kind: "file", path: "/run/secrets/jwt" }));
+    expect(invoke).toHaveBeenCalledWith("file_choose", { purpose: "jwt_svid_file", options: { multiple: false } });
   });
 
   it("warns before sending a token that failed its checks", () => {

@@ -1,6 +1,5 @@
 // API auth editor (identity presented to the API — not the app login).
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api, onOAuthFlow, type FlowEvent, type JwtInspection, type SendInput, type TokenSummary } from "./api";
 import type { AuthConfig, DpopConfig, HmacConfig, JwtAlgorithm, OAuth2Config, SensitiveValue, WsseConfig } from "./generated/contracts";
 import { Modal, SecretField } from "./ui";
@@ -473,10 +472,10 @@ export function PemFromFile(props: { label: string; workspaceId: string | null; 
         className="btn small"
         onClick={async () => {
           setErr(null);
-          const path = await open({ multiple: false, directory: false });
-          if (typeof path !== "string") return;
           try {
-            const r = await api.readTextFile(path, props.workspaceId, path.split(/[\\/]/).pop() ?? "key");
+            const file = await api.chooseFile("pem_file");
+            if (!file) return;
+            const r = await api.readTextFile(file.token, props.workspaceId, file.file_name || "key");
             if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
           } catch (e) {
             setErr(String((e as Error).message));

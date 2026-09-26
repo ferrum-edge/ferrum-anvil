@@ -32,6 +32,9 @@ zeroize.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio-util.workspace = true

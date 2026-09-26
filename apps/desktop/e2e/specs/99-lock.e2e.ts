@@ -34,6 +34,9 @@ describe("lock", () => {
       ["workspaces_list", {}],
       ["tree_get", { workspaceId }],
       ["settings_get", {}],
+      // No file dialog opens and no file is read while locked.
+      ["file_choose", { purpose: "pem_file", options: null }],
+      ["read_text_file", { grant: `fg-${"0".repeat(32)}`, workspaceId: null, storeAsSecret: null, base64: false }],
     ] as const) {
       const r = await invoke(cmd, args);
       expect({ cmd, ok: r.ok, err: r.err }).toEqual({ cmd, ok: undefined, err: "LOCKED" });

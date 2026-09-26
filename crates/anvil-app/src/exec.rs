@@ -79,7 +79,9 @@ pub struct SendOptions {
 impl App {
     /// Build the frozen context for a saved request (optionally with an
     /// unsaved draft spec) — settings, auth and variable layers resolved
-    /// from workspace → folders → request.
+    /// from workspace → folders → request. A draft never names a linked
+    /// local file, and (when confined) a JWT-SVID token file is read only if
+    /// it was bound in the native dialog.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -87,6 +89,9 @@ impl App {
         draft: Option<RequestSpec>,
         opts: &SendOptions,
     ) -> Result<ExecutionContext> {
+        if let Some(d) = &draft {
+            refuse_linked_files(d)?;
+        }
         let ws = self.workspace(ws_id)?;
         let (req, spec) = match (request_id, draft) {
             (Some(id), Some(d)) => (Some(self.request(&id)?), d),
@@ -145,7 +150,7 @@ impl App {
             }
         });
         let settings_app = self.settings()?;
-        Ok(ExecutionContext {
+        let ctx = ExecutionContext {
             workspace_id: Some(*ws_id),
             request_id: req.as_ref().map(|r| r.meta.id),
             revision_id: req.as_ref().and_then(|r| r.revision_id),
@@ -163,7 +168,9 @@ impl App {
             send_anyway: opts.send_anyway,
             seed: opts.seed,
             redaction_names: settings_app.redaction_names.clone(),
-        })
+        };
+        self.check_token_files(&ctx.effective_auth().1)?;
+        Ok(ctx)
     }
 
     /// Execute and (optionally) record history per the retention policy.
@@ -203,6 +210,24 @@ impl App {
         )?;
         self.store.prune_history(policy.max_age_days, policy.max_total_bytes)?;
         Ok(())
+    }
+}
+
+/// Refuse a spec that names a linked local file (`AttachmentRef::LinkedFile`,
+/// an arbitrary path). Unsaved drafts and every spec the desktop webview
+/// supplies may reference only attachments stored in Anvil.
+pub fn refuse_linked_files(spec: &RequestSpec) -> Result<()> {
+    if has_linked_file(&serde_json::to_value(spec)?) {
+        return Err(AppError::Invalid("this request names a linked local file; attach the file instead (Anvil stores a copy)".into()));
+    }
+    Ok(())
+}
+
+fn has_linked_file(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(o) => o.get("kind").and_then(|k| k.as_str()) == Some("linked_file") || o.values().any(has_linked_file),
+        serde_json::Value::Array(a) => a.iter().any(has_linked_file),
+        _ => false,
     }
 }
 

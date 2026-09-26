@@ -4,6 +4,7 @@
 
 use crate::commands::{R, e, id};
 use crate::state::DesktopState;
+use anvil_app::file_grants::{FilePurpose, ReadFile};
 use anvil_app::load::{LoadPlanCheck, LoadPreflight, LoadReportSummary};
 use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport};
@@ -147,11 +148,11 @@ pub fn load_report_delete(st: State<'_, DesktopState>, run_id: String) -> R<()> 
     st.app()?.delete_load_report(&id(&run_id)?).map_err(e)
 }
 
-/// Export to a path chosen in the native save dialog: `json` (integrity-
-/// hashed, re-openable), `csv` (summary), `timeline_csv`, or `html` (offline,
-/// no scripts).
+/// Export to the destination chosen in the native save dialog (`grant`,
+/// purpose `load_report_export`): `json` (integrity-hashed, re-openable),
+/// `csv` (summary), `timeline_csv`, or `html` (offline, no scripts).
 #[tauri::command]
-pub fn load_report_export(st: State<'_, DesktopState>, run_id: String, format: String, path: String) -> R<usize> {
+pub fn load_report_export(st: State<'_, DesktopState>, run_id: String, format: String, grant: String) -> R<usize> {
     let r = st.app()?.load_report(&id(&run_id)?).map_err(e)?;
     let text = match format.as_str() {
         "json" => anvil_load::report::to_json(&r),
@@ -160,8 +161,7 @@ pub fn load_report_export(st: State<'_, DesktopState>, run_id: String, format: S
         "html" => anvil_load::html::to_html(&r),
         other => return Err(format!("unknown export format {other}")),
     };
-    std::fs::write(&path, text.as_bytes()).map_err(|x| x.to_string())?;
-    Ok(text.len())
+    st.file_grants.write(&grant, FilePurpose::LoadReportExport, text.as_bytes()).map_err(|x| x.to_string())
 }
 
 #[tauri::command]
@@ -177,23 +177,20 @@ pub fn datasets_list(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec
     st.app()?.datasets(&id(&workspace_id)?).map_err(e)
 }
 
-/// Copy a CSV/JSON file into encrypted storage as a dataset after checking
+/// Copy a CSV/JSON file the user picked in the native open dialog (`grant`,
+/// purpose `dataset`) into encrypted storage as a dataset after checking
 /// that it parses.
 #[tauri::command]
 pub fn dataset_add(
     st: State<'_, DesktopState>,
     workspace_id: String,
-    path: String,
+    grant: String,
     name: String,
     sensitive_columns: Vec<String>,
 ) -> R<Dataset> {
-    const MAX: u64 = 64 * 1024 * 1024;
-    let meta = std::fs::metadata(&path).map_err(|x| x.to_string())?;
-    if meta.len() > MAX {
-        return Err("datasets are limited to 64 MiB".into());
-    }
-    let bytes = std::fs::read(&path).map_err(|x| x.to_string())?;
-    let lower = path.to_ascii_lowercase();
+    let app = st.app()?;
+    let ReadFile { bytes, file_name } = st.file_grants.read(&grant, FilePurpose::Dataset).map_err(|x| x.to_string())?;
+    let lower = file_name.to_ascii_lowercase();
     let (format, load_fmt) = if lower.ends_with(".json") {
         (DatasetFormat::Json, anvil_load::DatasetFormat::Json)
     } else {
@@ -203,8 +200,6 @@ pub fn dataset_add(
     if let Some(missing) = sensitive_columns.iter().find(|c| !parsed.columns.contains(c)) {
         return Err(format!("the dataset has no column named '{missing}'"));
     }
-    let app = st.app()?;
-    let file_name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dataset".into());
     let attachment = app.put_attachment(&file_name, &bytes, None).map_err(e)?;
     let d = Dataset {
         meta: anvil_domain::workspace::Meta::new(),

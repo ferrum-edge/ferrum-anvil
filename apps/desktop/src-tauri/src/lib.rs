@@ -1,5 +1,6 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_files;
 mod cmd_identity;
 mod cmd_load;
 mod cmd_runner;
@@ -164,6 +165,7 @@ pub fn run() {
             commands::import_apply,
             commands::attachment_add,
             commands::read_text_file,
+            cmd_files::file_choose,
             cmd_load::load_plans,
             cmd_load::load_plan_save,
             cmd_load::load_plan_delete,
@@ -225,7 +227,7 @@ fn e2e_unlock(st: &DesktopState) {
     };
     match anvil_app::profiles::ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(&pass)) {
         Ok((header, key)) => match anvil_app::App::open(dir, header, key) {
-            Ok(app) => *st.app.write() = Some(std::sync::Arc::new(app)),
+            Ok(app) => st.set_app(app),
             Err(e) => eprintln!("e2e: open failed: {e}"),
         },
         Err(e) => eprintln!("e2e: unlock failed: {e}"),

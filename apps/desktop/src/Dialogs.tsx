@@ -1,8 +1,7 @@
 // Management dialogs: environments, connection profiles, export/import and
 // app settings. All persistence happens in Rust.
 import { useEffect, useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { api, type ExportPreview, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
+import { api, type ExportPreview, type FileGrant, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
 import type {
   AppSettings,
   ClientIdentity,
@@ -345,9 +344,9 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
         className="btn small"
         style={{ alignSelf: "start" }}
         onClick={async () => {
-          const path = await open({ multiple: false });
-          if (typeof path !== "string") return;
-          const r = await api.readTextFile(path, p.workspace_id, null);
+          const file = await api.chooseFile("pem_file");
+          if (!file) return;
+          const r = await api.readTextFile(file.token, p.workspace_id, null);
           if (r.text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), r.text] });
         }}
       >
@@ -452,9 +451,9 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
               className="btn small"
               style={{ alignSelf: "start" }}
               onClick={async () => {
-                const path = await open({ multiple: false });
-                if (typeof path !== "string") return;
-                const r = await api.readTextFile(path, p.workspace_id, null);
+                const file = await api.chooseFile("pem_file");
+                if (!file) return;
+                const r = await api.readTextFile(file.token, p.workspace_id, null);
                 if (r.text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: r.text } });
               }}
             >
@@ -493,12 +492,11 @@ function P12Picker(props: { workspaceId: string; onSecret: (v: { kind: "secret";
         className="btn small"
         onClick={async () => {
           setErr(null);
-          const path = await open({ multiple: false, filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
-          if (typeof path !== "string") return;
           try {
+            const file = await api.chooseFile("pkcs12_file", { filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
+            if (!file) return;
             // The bundle goes straight into the vault as base64; only a reference returns.
-            const label = path.split(/[\\/]/).pop() ?? "client.p12";
-            const r = await api.readTextFile(path, props.workspaceId, label, true);
+            const r = await api.readTextFile(file.token, props.workspaceId, file.file_name || "client.p12", true);
             if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
           } catch (e) {
             setErr(String((e as Error).message));
@@ -693,12 +691,15 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
     setErr(null);
     if (encrypted && (pass.length < 8 || pass !== pass2)) return setErr("Enter the same passphrase twice (at least 8 characters).");
     const stamp = new Date().toISOString().slice(0, 10);
-    const path = await save({ defaultPath: `${scope === "all" ? "anvil-backup" : props.workspace!.name.replace(/[^\w.-]+/g, "_")}-${stamp}.anvil`, filters: [{ name: "Anvil bundle", extensions: ["anvil"] }] });
-    if (!path) return;
     setBusy(true);
     try {
-      const n = await api.exportToPath(wsId, effMode, encrypted ? pass : null, path);
-      props.notify(`Exported ${(n / 1024).toFixed(1)} KB to ${path}`);
+      const file = await api.chooseFile("bundle_export", {
+        file_name: `${scope === "all" ? "anvil-backup" : props.workspace!.name.replace(/[^\w.-]+/g, "_")}-${stamp}.anvil`,
+        filters: [{ name: "Anvil bundle", extensions: ["anvil"] }],
+      });
+      if (!file) return;
+      const n = await api.exportToPath(wsId, effMode, encrypted ? pass : null, file.token);
+      props.notify(`Exported ${(n / 1024).toFixed(1)} KB to ${file.file_name}`);
       props.onClose();
     } catch (e) {
       setErr(String((e as Error).message));
@@ -800,25 +801,30 @@ export function ImportDialog(props: {
   onSpecImported: (r: SpecImported) => void;
 }) {
   const [tab, setTab] = useState<"spec" | "bundle">("spec");
-  const [path, setPath] = useState<string | null>(null);
+  const [file, setFile] = useState<FileGrant | null>(null);
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
   const [preview, setPreview] = useState<ImportReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const choose = async () => {
-    const p = await open({ multiple: false, filters: [{ name: "Anvil bundle", extensions: ["anvil", "zip"] }] });
-    if (typeof p === "string") {
-      setPath(p);
-      setPreview(null);
+    setErr(null);
+    try {
+      const f = await api.chooseFile("bundle_import", { filters: [{ name: "Anvil bundle", extensions: ["anvil", "zip"] }] });
+      if (f) {
+        setFile(f);
+        setPreview(null);
+      }
+    } catch (e) {
+      setErr(String((e as Error).message));
     }
   };
   const doPreview = async () => {
-    if (!path) return;
+    if (!file) return;
     setErr(null);
     setBusy(true);
     try {
-      setPreview(await api.importPreview(path, pass || null, policy));
+      setPreview(await api.importPreview(file.token, pass || null, policy));
     } catch (e) {
       setPreview(null);
       setErr(String((e as Error).message));
@@ -827,11 +833,11 @@ export function ImportDialog(props: {
     }
   };
   const apply = async () => {
-    if (!path) return;
+    if (!file) return;
     setBusy(true);
     setErr(null);
     try {
-      const r = await api.importApply(path, pass || null, policy);
+      const r = await api.importApply(file.token, pass || null, policy);
       props.onImported(r.workspace_ids);
       props.onClose();
     } catch (e) {
@@ -848,7 +854,7 @@ export function ImportDialog(props: {
       footer={
         tab === "bundle" ? (
           <>
-            <button className="btn" disabled={!path || busy} onClick={doPreview}>
+            <button className="btn" disabled={!file || busy} onClick={doPreview}>
               Preview
             </button>
             <button className="btn primary" disabled={!preview || busy} onClick={apply}>
@@ -878,7 +884,7 @@ export function ImportDialog(props: {
           Choose bundle…
         </button>
         <span className="mono faint grow" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-          {path ?? "No file selected"}
+          {file?.file_name ?? "No file selected"}
         </span>
       </div>
       <label className="lbl">

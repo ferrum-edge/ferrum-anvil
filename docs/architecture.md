@@ -31,6 +31,26 @@ CLI (`anvil`) = same anvil-app services without a webview.
   key, clears token caches, pooled connections and TLS/QUIC session tickets,
   cancels executions and sessions, and stops load workers. The lock screen is
   only a view of that state.
+- **File commands never take a path from the webview.** The backend shows
+  the native open or save dialog itself (`file_choose`), keeps the chosen
+  path and returns an opaque grant bound to one purpose (bundle import or
+  export, attachment, PEM or PKCS#12 file, spec source, dataset, load or run
+  report export); file commands accept only such a grant
+  (`anvil_app::file_grants`). A read grant is refused if the file or a folder
+  on its path was replaced after the choice; a write goes to a new temporary
+  file that is renamed over the chosen name, and spends the grant (a bundle
+  or backup is created readable only by its owner on Unix). Grants expire
+  after 30 minutes, are capped at 32 and are revoked on lock; a dialog that
+  was open when the app locked grants nothing.
+- **Request specs from the webview name no local file.** `build_context`
+  refuses an unsaved draft that references a linked file
+  (`AttachmentRef::LinkedFile`), and the desktop refuses to create or save
+  a request that does. A JWT-SVID token file is re-read at every send, so
+  it is bound instead of granted: `file_choose` with purpose
+  `jwt_svid_file` records the chosen canonical path in the vault
+  (`anvil_app::token_files`, never exported or imported), and the desktop
+  confines the app so a token-file path that is not bound is refused before
+  anything is read.
 - **Pooled HTTP connections are bounded.** Each engine keeps at most 8 idle
   HTTP/1.1 or HTTP/2 connections per pool key (isolation, destination and
   security context) and 64 in total; one more closes the connection idle

@@ -4,7 +4,6 @@
 // record. The backend does every Workload API call; keys and tokens never
 // reach the webview — only SPIFFE IDs, expiry, key ids and check results.
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api, type WorkloadProbe } from "./api";
 import type { CheckResult, ClientIdentity, JwtSvidConfig, JwtSvidSource, JwtSvidSummary, WorkloadApiCall, WorkloadApiEvidence } from "./generated/contracts";
 import { SecretField, humanize } from "./ui";
@@ -186,14 +185,15 @@ export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; 
         <div className="row">
           <label className="lbl grow">
             Token file
-            <input className="field mono" value={src.path} placeholder="/run/secrets/jwt_svid.token" onChange={(e) => onChange({ ...c, source: { kind: "file", path: e.target.value } })} />
+            <input className="field mono" value={src.path} placeholder="Choose the token file" readOnly />
           </label>
           <button
             className="btn small"
             style={{ alignSelf: "end" }}
             onClick={async () => {
-              const path = await open({ multiple: false, directory: false });
-              if (typeof path === "string") onChange({ ...c, source: { kind: "file", path } });
+              // The backend shows the dialog and binds the chosen file; only a bound file is read at send time.
+              const g = await api.chooseFile("jwt_svid_file");
+              if (g?.path) onChange({ ...c, source: { kind: "file", path: g.path } });
             }}
           >
             Choose…

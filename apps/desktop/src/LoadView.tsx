@@ -4,12 +4,12 @@
 // WebSocket sessions, TCP or UDP/DTLS exchanges); the editor shows which one,
 // or the typed refusal, before anything can run (LOAD-013).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   api,
   onLoadFinished,
   onLoadProgress,
   type Dataset,
+  type FileGrant,
   type LoadComparison,
   type LoadPlan,
   type LoadPlanCheck,
@@ -701,7 +701,7 @@ function Num(props: { label: string; value: number; onChange: (v: number) => voi
 }
 
 function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdded: (d: Dataset) => void }) {
-  const [path, setPath] = useState<string | null>(null);
+  const [file, setFile] = useState<FileGrant | null>(null);
   const [name, setName] = useState("");
   const [sensitive, setSensitive] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -712,10 +712,10 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
       footer={
         <button
           className="btn primary"
-          disabled={!path || !name.trim()}
+          disabled={!file || !name.trim()}
           onClick={async () => {
             try {
-              props.onAdded(await api.addDataset(props.workspaceId, path!, name.trim(), sensitive.split(",").map((s) => s.trim()).filter(Boolean)));
+              props.onAdded(await api.addDataset(props.workspaceId, file!.token, name.trim(), sensitive.split(",").map((s) => s.trim()).filter(Boolean)));
             } catch (e) {
               setErr(String((e as Error).message));
             }
@@ -730,16 +730,20 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
           className="btn"
           data-autofocus
           onClick={async () => {
-            const p = await open({ multiple: false, filters: [{ name: "CSV or JSON", extensions: ["csv", "json"] }] });
-            if (typeof p === "string") {
-              setPath(p);
-              if (!name) setName(p.split(/[\\/]/).pop() ?? "dataset");
+            try {
+              const f = await api.chooseFile("dataset", { filters: [{ name: "CSV or JSON", extensions: ["csv", "json"] }] });
+              if (f) {
+                setFile(f);
+                if (!name) setName(f.file_name);
+              }
+            } catch (e) {
+              setErr(String((e as Error).message));
             }
           }}
         >
           Choose CSV/JSON…
         </button>
-        <span className="mono faint">{path ?? "No file selected"}</span>
+        <span className="mono faint">{file?.file_name ?? "No file selected"}</span>
       </div>
       <label className="lbl">
         Name
@@ -848,10 +852,12 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
   const [, many] = unitWords(r.protocol_metrics);
   const exportAs = async (format: "json" | "csv" | "timeline_csv" | "html") => {
     const ext = format === "html" ? "html" : format === "json" ? "json" : "csv";
-    const path = await save({ defaultPath: `anvil-load-${r.plan.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}` });
-    if (!path) return;
-    const n = await api.exportLoadReport(r.run_id, format, path);
-    props.notify(`Exported ${fmtBytes(n)} to ${path}`);
+    const file = await api.chooseFile("load_report_export", {
+      file_name: `anvil-load-${r.plan.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
+    });
+    if (!file) return;
+    const n = await api.exportLoadReport(r.run_id, format, file.token);
+    props.notify(`Exported ${fmtBytes(n)} to ${file.file_name}`);
   };
   return (
     <div className="col" style={{ gap: 14 }}>
