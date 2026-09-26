@@ -258,10 +258,30 @@ impl App {
         policy: ConflictPolicy,
         approval: &ImportApproval,
     ) -> Result<ImportReport> {
+        self.import_approved_if(bytes, passphrase, policy, approval, &|| true)
+    }
+
+    /// [`App::import_approved`] that asks `proceed` once the bundle is open
+    /// (its vault key derived and its contents checked) and before anything
+    /// is written, the restore checkpoint included. `false` ends the import
+    /// there with [`AppError::Canceled`], and nothing is written: the desktop
+    /// cancels an import this way, since the key derivation itself cannot be
+    /// interrupted.
+    pub fn import_approved_if(
+        &self,
+        bytes: &[u8],
+        passphrase: Option<&str>,
+        policy: ConflictPolicy,
+        approval: &ImportApproval,
+        proceed: &dyn Fn() -> bool,
+    ) -> Result<ImportReport> {
         approval.check_file(bytes, "imported")?;
         let opened = bundle::open(bytes, passphrase)?;
         let mut g = opened.graph;
         let uncarried = validate::uncarried_attachments(&g)?;
+        if !proceed() {
+            return Err(AppError::Canceled);
+        }
         let checkpoint = self.store.checkpoint("before-import")?;
         let imported_at = chrono::Utc::now();
         // A failure rolls back this import's own transaction and nothing else.

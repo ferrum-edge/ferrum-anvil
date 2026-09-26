@@ -928,3 +928,55 @@ fn a_passphrase_is_refused_for_a_bundle_that_is_not_encrypted() {
     b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
     assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn a_secret_moved_into_another_workspace_on_disk_does_not_resolve_there() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let (owner, other) = (a.create_workspace("Payments").unwrap(), a.create_workspace("Sandbox").unwrap());
+    let token = a.set_secret(&owner.meta.id, "bearer", TOKEN).unwrap();
+    let request = a.create_request(&other.meta.id, None, "Use token", bearer(&token, "https://api.example.test/")).unwrap();
+    refused_auth(&a, &other.meta.id, &request.meta.id).await;
+
+    // The owner column changed in the database file itself.
+    let db = rusqlite::Connection::open(a.dir.join(anvil_storage::store::DB_FILE)).unwrap();
+    let sql = "UPDATE secrets SET workspace_id=?1 WHERE id=?2";
+    let moved = db.execute(sql, rusqlite::params![other.meta.id.to_string(), token.id.to_string()]);
+    assert_eq!(moved.unwrap(), 1);
+    refused_auth(&a, &other.meta.id, &request.meta.id).await;
+}
+
+#[test]
+fn an_import_declined_once_its_bundle_is_open_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
+    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+
+    let b_root = tempfile::tempdir().unwrap();
+    let b = new_app(b_root.path(), "b");
+    let none = ImportApproval::default();
+    let asked = std::cell::Cell::new(0);
+    let decline = || {
+        asked.set(asked.get() + 1);
+        false
+    };
+    // A bundle that does not open fails before the import is asked.
+    let e = b.import_approved_if(&bytes, Some("another passphrase"), ConflictPolicy::Merge, &none, &decline).unwrap_err();
+    assert!(!matches!(e, AppError::Canceled), "{e}");
+    assert_eq!(asked.get(), 0);
+    // Declined once the key is derived: nothing is written, not even a checkpoint.
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+        let e = b.import_approved_if(&bytes, Some(EXPORT_PASS), policy, &none, &decline).unwrap_err();
+        assert!(matches!(e, AppError::Canceled), "{policy:?}: {e}");
+    }
+    assert_eq!(asked.get(), 3);
+    assert!(b.workspaces().unwrap().is_empty());
+    assert!(b.store.list_secret_ids(None).unwrap().is_empty());
+    assert!(!b.dir.join("checkpoints").exists(), "no checkpoint was taken");
+
+    let rep = b.import_approved_if(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &none, &|| true).unwrap();
+    assert_eq!(rep.workspace_ids, vec![ws.meta.id.to_string()]);
+    assert_eq!(b.store.list_secret_ids(Some(&ws.meta.id)).unwrap().len(), 1);
+}
