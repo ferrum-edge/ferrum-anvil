@@ -35,7 +35,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 1;
+/// Version of the job wire format. Bump on any field a worker must honour:
+/// an older worker would otherwise ignore it and run the job without it.
+/// 2 added `WorkerRequest::scope` (the sealed import root).
+pub const WORKER_PROTOCOL_VERSION: u32 = 2;
 
 /// A sensitive string: zeroized on drop, redacted in `Debug`.
 #[derive(Clone, Default)]
@@ -569,5 +572,19 @@ mod tests {
         assert!(wj.clone().into_load_job().is_ok());
         wj.attachments[0].data_b64 = base64::engine::general_purpose::STANDARD.encode(b"tampered");
         assert!(wj.into_load_job().is_err());
+    }
+
+    #[test]
+    fn a_job_from_before_import_root_scope_is_refused() {
+        let wj = WorkerJob {
+            protocol_version: 1,
+            plan: plan(vec![]),
+            options: RunOptions::default(),
+            requests: vec![],
+            secrets: vec![],
+            attachments: vec![],
+            dataset: None,
+        };
+        assert!(matches!(wj.into_load_job(), Err(LoadError::Protocol(_))));
     }
 }

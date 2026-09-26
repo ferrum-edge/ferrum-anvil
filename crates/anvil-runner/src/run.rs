@@ -10,6 +10,7 @@ use anvil_domain::execution::{DispatchState, ExecutionRecord, exchange_duration_
 use anvil_domain::outcome::{ApplicationState, AssertionState, ProtocolStatus, TransportState};
 use anvil_domain::runner::*;
 use anvil_engine::Engine;
+use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_transport::recorder::EventCtx;
 use chrono::Utc;
@@ -250,10 +251,12 @@ impl Run {
             // under that root, and no dataset row (the dataset is the
             // workspace's); a step outside it never sees what it extracted.
             let scope = ctx.scope;
-            if scope.is_none()
-                && let Some(l) = &dataset_layer
-            {
-                ctx.var_layers.push(l.clone());
+            if let Some(l) = &dataset_layer {
+                if scope.is_none() {
+                    ctx.var_layers.push(l.clone());
+                } else {
+                    self.notes.push(&self.secrets, DATASET_SKIPPED_UNDER_IMPORT_ROOT);
+                }
             }
             let visible: Vec<VarEntry> = extracted.iter().filter(|(s, _)| *s == scope).map(|(_, e)| e.clone()).collect();
             if !visible.is_empty() {

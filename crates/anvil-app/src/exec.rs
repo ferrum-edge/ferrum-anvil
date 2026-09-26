@@ -86,8 +86,6 @@ fn layer(label: String, vars: &[Variable], secrets: &dyn SecretResolver) -> std:
 pub struct SendOptions {
     pub environment: Option<Id>,
     pub run_override: Option<SettingsOverrides>,
-    /// Extra highest-precedence variables (dataset row / extracted values).
-    pub iteration_vars: Vec<VarEntry>,
     pub send_anyway: bool,
     pub record_history: bool,
     pub seed: Option<u64>,
@@ -108,8 +106,9 @@ impl App {
     /// JWT-SVID from this device's Workload API or a token file is refused,
     /// until the user opens the root to the workspace on this device
     /// (`use_workspace_scope`). Settings still apply from the workspace
-    /// down, but a TLS profile whose client identity is bound to no host is
-    /// refused. The context is tagged with the sealed root
+    /// down, but a selected TLS profile whose client identity is bound to no
+    /// host is refused (a proxy's own TLS profile still applies to the
+    /// connection to the proxy). The context is tagged with the sealed root
     /// (`ExecutionContext::scope`) so a run or load chain keeps values
     /// extracted outside it, and its dataset, away from it.
     pub fn build_context(
@@ -195,9 +194,6 @@ impl App {
         }
         for f in nested {
             var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
-        }
-        if !opts.iteration_vars.is_empty() {
-            var_layers.push(VarLayer { label: "iteration".into(), vars: opts.iteration_vars.clone() });
         }
         // Attachments referenced by the spec.
         let mut index = std::collections::HashMap::new();

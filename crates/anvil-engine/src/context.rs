@@ -61,6 +61,11 @@ pub fn resolve_sensitive(v: &SensitiveValue, secrets: &dyn SecretResolver) -> Re
     }
 }
 
+/// Run and load-test note for a dataset whose rows a step under a sealed
+/// import root (`ExecutionContext::scope`) did not receive.
+pub const DATASET_SKIPPED_UNDER_IMPORT_ROOT: &str =
+    "Dataset rows were not applied to steps of an imported collection not opened to this workspace; open its import root to use them.";
+
 #[derive(Clone)]
 pub struct ExecutionContext {
     pub workspace_id: Option<Id>,

@@ -27,6 +27,7 @@ use crate::schedule;
 use anvil_domain::Id;
 use anvil_domain::load::*;
 use anvil_domain::settings::{Limits, SettingsOverrides};
+use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext};
 use anvil_transport::recorder::EventCtx;
@@ -1171,6 +1172,9 @@ impl LoadRun {
                 d.rows.len(),
                 &d.sha256[..16.min(d.sha256.len())]
             ));
+            if sh.steps.iter().any(|s| s.scope.is_some()) {
+                notes.push(DATASET_SKIPPED_UNDER_IMPORT_ROOT.into());
+            }
         }
         if health::sample().is_none() {
             snap.generator.notes.push("Generator CPU and memory measurement is unavailable on this platform.".into());
