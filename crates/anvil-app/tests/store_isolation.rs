@@ -2,11 +2,11 @@
 //! `App::save_workspace` down with it, and a transaction always ends.
 
 use anvil_app::App;
+use anvil_app::AppError;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::Id;
 use anvil_domain::request::RequestSpec;
 use anvil_storage::{KdfParams, StoreError, kind};
-use anvil_app::AppError;
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::Duration;
