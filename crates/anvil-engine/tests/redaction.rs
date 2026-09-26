@@ -179,10 +179,8 @@ fn json_escaped_secrets_are_scrubbed_from_text() {
 #[test]
 fn a_link_anchor_parameter_is_redacted_as_a_url() {
     let r = redactor();
-    let quoted = r.header(
-        "Link",
-        r#"<https://h/next>; rel="next"; anchor="https://h/u/AUDIT%2fsecret%2Bwith%3Dreserved?token=eyJ.anchor""#,
-    );
+    let quoted =
+        r.header("Link", r#"<https://h/next>; rel="next"; anchor="https://h/u/AUDIT%2fsecret%2Bwith%3Dreserved?token=eyJ.anchor""#);
     assert_eq!(quoted, format!(r#"<https://h/next>; rel="next"; anchor="https://h/u/{REDACTED}?token={REDACTED}""#));
     let bare = r.header("Link", "<https://h/a>; Anchor = /u/AUDIT%2fsecret%2Bwith%3Dreserved; rel=up, <https://h/b>; rel=next");
     assert_eq!(bare, format!("<https://h/a>; Anchor = /u/{REDACTED}; rel=up, <https://h/b>; rel=next"));

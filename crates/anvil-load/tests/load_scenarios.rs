@@ -563,18 +563,11 @@ async fn load_soap_and_graphql_outcomes_not_determined_from_the_body_are_not_suc
             action: None,
         },
         settings: small_capture.clone(),
-        ..RequestSpec::http(
-            "POST",
-            &f.url("/redirect?to=%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3Dfixture"),
-        )
+        ..RequestSpec::http("POST", &f.url("/redirect?to=%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3Dfixture"))
     };
     let id = Id::new();
-    let r = run(
-        plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]),
-        vec![(id, ctx(authorization_redirect))],
-        None,
-    )
-    .await;
+    let r =
+        run(plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]), vec![(id, ctx(authorization_redirect))], None).await;
     assert_eq!(r.requests.application_failures, 1);
     assert_eq!(r.failure_categories[0].category, "application_failure: auth.browser_session_required");
 
