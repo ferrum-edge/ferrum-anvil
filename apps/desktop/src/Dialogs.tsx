@@ -161,7 +161,14 @@ export function VariablesEditor(props: { vars: Variable[]; onChange: (v: Variabl
             <input className="field mono" aria-label="Variable name" placeholder="name" value={v.name} onChange={(e) => set(i, { ...v, name: e.target.value })} />
             <div className="var-value">
               {v.secret ? (
-                <SecretField label={v.name || "Secret value"} hideLabel value={v.value} workspaceId={props.workspaceId} onChange={(value) => set(i, { ...v, value })} />
+                <SecretField
+                  label={v.name || "Secret value"}
+                  vaultLabel="Value (secret)"
+                  hideLabel
+                  value={v.value}
+                  workspaceId={props.workspaceId}
+                  onChange={(value) => set(i, { ...v, value })}
+                />
               ) : (
                 <input
                   className="field mono"
@@ -780,12 +787,12 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
         </>
       }
     >
-      <div className="segmented" role="group" aria-label="What to export">
-        <button aria-pressed={scope === "workspace"} disabled={!props.workspace} onClick={() => setScope("workspace")}>
+      <div className="segmented" role="radiogroup" aria-label="What to export">
+        <button role="radio" aria-checked={scope === "workspace"} disabled={!props.workspace} onClick={() => setScope("workspace")}>
           <Icon name="layers" size={14} />
           This workspace{props.workspace ? ` (${props.workspace.name})` : ""}
         </button>
-        <button aria-pressed={scope === "all"} onClick={() => setScope("all")}>
+        <button role="radio" aria-checked={scope === "all"} onClick={() => setScope("all")}>
           <Icon name="download" size={14} />
           Whole app backup
         </button>

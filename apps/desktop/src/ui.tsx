@@ -202,9 +202,10 @@ function KvRow({ r, onSet, onRemove }: { r: KeyValue; onSet: (p: Partial<KeyValu
 }
 
 /** Sensitive value editor: a literal/`{{variable}}` template, or a vault secret reference.
- * `label` also names the vault entry; `hideLabel` keeps it for screen readers only (table cells). */
+ * `label` also names the vault entry unless `vaultLabel` is provided; `hideLabel` keeps it for screen readers only (table cells). */
 export function SecretField(props: {
   label: string;
+  vaultLabel?: string;
   value: SensitiveValue | undefined;
   onChange: (v: SensitiveValue) => void;
   workspaceId: string | null;
@@ -258,7 +259,7 @@ export function SecretField(props: {
             if (!workspaceId) return;
             setStoring(true);
             try {
-              const ref = await api.createSecret(workspaceId, props.label, v.value);
+              const ref = await api.createSecret(workspaceId, props.vaultLabel ?? props.label, v.value);
               props.onChange({ kind: "secret", secret: ref });
             } finally {
               setStoring(false);

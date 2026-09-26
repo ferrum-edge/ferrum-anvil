@@ -2,7 +2,7 @@
 // wording, the explicit "does not prove" section, and inert rendering of
 // untrusted response bodies. jsdom only — the native path is covered by
 // apps/desktop/e2e.
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ExecutionView } from "./api";
 import type { DiagnosticFinding } from "./generated/contracts";
 import { FindingCard, ResponsePanel } from "./ResponsePanel";
@@ -136,6 +136,30 @@ describe("ResponsePanel", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector("script")).toBeNull();
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
+  });
+
+  it("notifies when copying the response body fails", async () => {
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn().mockRejectedValue(new Error("clipboard unavailable"));
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const notify = vi.fn();
+
+    try {
+      render(
+        <ResponsePanel
+          view={view({ bodyText: "response" })}
+          running={false}
+          progressBytes={null}
+          onCancel={() => {}}
+          notify={notify}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+      await waitFor(() => expect(notify).toHaveBeenCalledWith("Could not copy response body: clipboard unavailable"));
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
   });
 
   it("names the MASQUE proxy and its refusal in the UDP badge, never the target", () => {

@@ -424,7 +424,7 @@ body.dragging-y, body.dragging-y * { cursor: row-resize !important; user-select:
 .kv .kv-cell > .row > .field { height: 32px; border: none; }
 .kv > input.field.kv-name:hover { border-color: var(--border); }
 .kv .kv-cell > .row { flex: 1; gap: 0; flex-wrap: nowrap; }
-.kv > input.field.kv-name:focus, .kv .kv-cell .field:focus { box-shadow: inset 0 0 0 1px var(--accent); border-color: var(--border); }
+.kv > input.field.kv-name:focus, .kv .kv-cell .field:focus { box-shadow: inset 0 0 0 2px var(--accent); border-color: var(--border); }
 .kv > .kv-name.off, .kv .kv-cell.off > .row > .field { color: var(--text-3); }
 .kv > .kv-foot { grid-column: 1 / -1; border-bottom: none; display: flex; align-items: center; padding: 4px 6px; background: var(--chrome); }
 .kv-empty { grid-column: 1 / -1; padding: 12px; color: var(--text-3); font-size: 12px; text-align: center; }

@@ -586,12 +586,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
               <Icon name="send" size={14} />
               <span className="vs-label">Requests</span>
             </button>
-            <button aria-pressed={view === "runner"} aria-label="Runner" title={liveRuns.runner ? "A run is in progress" : "Collection runner"} onClick={() => show("runner")}>
+            <button aria-pressed={view === "runner"} aria-label={liveRuns.runner ? "Runner (run in progress)" : "Runner"} title={liveRuns.runner ? "A run is in progress" : "Collection runner"} onClick={() => show("runner")}>
               <Icon name="listChecks" size={14} />
               <span className="vs-label">Runner</span>
               {liveRuns.runner && <span className="live-dot" data-testid="runner-live" />}
             </button>
-            <button aria-pressed={view === "load"} aria-label="Load tests" title={liveRuns.load ? "A load run is in progress" : "Load tests"} onClick={() => show("load")}>
+            <button aria-pressed={view === "load"} aria-label={liveRuns.load ? "Load tests (run in progress)" : "Load tests"} title={liveRuns.load ? "A load run is in progress" : "Load tests"} onClick={() => show("load")}>
               <Icon name="zap" size={14} />
               <span className="vs-label">Load tests</span>
               {liveRuns.load && <span className="live-dot" data-testid="load-live" />}
@@ -735,7 +735,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           </aside>
           <SidebarResizer />
           <section className="work">
-            <nav className="tabbar" aria-label="Open requests">
+            <nav className="tabbar">
               <div className="tabs-scroll" role="tablist" aria-label="Open requests">
                 {wsTabs.map((t) => {
                   const dirty = isDirty(t);
@@ -836,7 +836,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     onCancel={() => void cancelSession(tab.session!.execId)}
                   />
                 ) : (
-                  <ResponsePanel view={tab.view} running={tab.running} progressBytes={tab.progress} onCancel={() => void cancel()} />
+                  <ResponsePanel view={tab.view} running={tab.running} progressBytes={tab.progress} onCancel={() => void cancel()} notify={notify} />
                 )}
               </div>
             ) : (
@@ -1014,7 +1014,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             }
           >
             <div className="history-view">
-              <ResponsePanel view={dialog.view} running={false} progressBytes={null} onCancel={() => {}} />
+              <ResponsePanel view={dialog.view} running={false} progressBytes={null} onCancel={() => {}} notify={notify} />
             </div>
           </Modal>
         )}

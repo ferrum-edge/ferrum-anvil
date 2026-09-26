@@ -25,7 +25,13 @@ const SCOPE_LABEL: Record<SourceScope, string> = {
 
 const CONF_LABEL = { confirmed: "Confirmed", likely: "Likely", unknown: "Unknown", conflicting_evidence: "Conflicting evidence" } as const;
 
-export function ResponsePanel(props: { view: ExecutionView | null; running: boolean; progressBytes: number | null; onCancel: () => void }) {
+export function ResponsePanel(props: {
+  view: ExecutionView | null;
+  running: boolean;
+  progressBytes: number | null;
+  onCancel: () => void;
+  notify?: (message: string) => void;
+}) {
   const { view, running } = props;
   const findings = view?.record.findings ?? [];
   const hasProblems = findings.some((f) => f.severity !== "info");
@@ -126,14 +132,14 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
       </div>
       <Tabs tabs={tabs} value={effectiveTab} onChange={setTab} />
       <div className="pane">
-        {effectiveTab === "diagnosis" && <Findings view={view} />}
+        {effectiveTab === "diagnosis" && <Findings view={view} notify={props.notify} />}
         {effectiveTab === "messages" && stream && (
           <>
             {wsExtensions && <WsExtensionsEvidence e={wsExtensions} />}
             <Messages t={stream} />
           </>
         )}
-        {effectiveTab === "body" && <Body view={view} />}
+        {effectiveTab === "body" && <Body view={view} notify={props.notify} />}
         {effectiveTab === "headers" && <Headers view={view} />}
         {effectiveTab === "timing" && <Timing attempt={last} />}
         {effectiveTab === "connection" && (
@@ -161,7 +167,7 @@ function Dim(props: { label: string; value: string; good: boolean }) {
   );
 }
 
-function Findings({ view }: { view: ExecutionView }) {
+function Findings({ view, notify }: { view: ExecutionView; notify?: (message: string) => void }) {
   const r = view.record;
   const [copied, setCopied] = useState(false);
   if (r.findings.length === 0) {
@@ -173,10 +179,15 @@ function Findings({ view }: { view: ExecutionView }) {
   }
   const bundle = () => {
     const b = { format: "anvil-support-bundle", version: 1, generated_at: new Date().toISOString(), note: "Redacted by Anvil; review before sharing.", record: r };
-    void navigator.clipboard.writeText(JSON.stringify(b, null, 2)).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+    void navigator.clipboard
+      .writeText(JSON.stringify(b, null, 2))
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch((e: unknown) =>
+        notify?.(`Could not copy support bundle: ${String((e as Error).message ?? e)}`),
+      );
   };
   return (
     <div>
@@ -272,7 +283,7 @@ export function FindingCard({ f }: { f: DiagnosticFinding }) {
   );
 }
 
-function Body({ view }: { view: ExecutionView }) {
+function Body({ view, notify }: { view: ExecutionView; notify?: (message: string) => void }) {
   const [mode, setMode] = useState<"pretty" | "raw" | "hex">(view.body.pretty ? "pretty" : view.body.is_binary ? "hex" : "raw");
   const [copied, setCopied] = useState(false);
   const b = view.body;
@@ -309,10 +320,15 @@ function Body({ view }: { view: ExecutionView }) {
             className="btn small ghost"
             title="Copy the body as shown"
             onClick={() =>
-              void navigator.clipboard.writeText(text).then(() => {
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1600);
-              })
+              void navigator.clipboard
+                .writeText(text)
+                .then(() => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1600);
+                })
+                .catch((e: unknown) =>
+                  notify?.(`Could not copy response body: ${String((e as Error).message ?? e)}`),
+                )
             }
           >
             <Icon name={copied ? "check" : "copy"} size={13} />
