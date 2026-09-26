@@ -55,6 +55,8 @@ commands return `LOCKED` until unlock.
   - A spec import writes its folders, requests, environments and source record
     in the transaction; the new workspace or root folder and the stored
     original file are written before it and stay if the transaction fails.
+  - A full-backup restore writes everything, attachments included, in the
+    transaction.
 
   Changes saved meanwhile by other commands are kept, so the checkpoint is not
   restored automatically; it stays on disk for a manual restore.
@@ -73,6 +75,45 @@ bypasses, plain-HTTP marker trust, cross-origin credential forwarding or the
 legacy HMAC opt-in; the preview lists what was normalised. Device-bound items
 (keychain entries, provider sessions, linked local files) are reported as
 needing rebinding.
+
+## Full backups
+
+A full backup (*Whole app backup* in the desktop, `anvil export --mode backup`
+in the CLI) has its own file format, separate from zip bundles, so that nothing
+in it can be read or changed without the export passphrase:
+
+- The file is a short header (format version, Argon2id costs and salt)
+  followed by one XChaCha20-Poly1305 envelope that seals the whole payload: the
+  manifest and every object, secret, attachment, history record and load
+  report. The header bytes are the envelope's associated data. Without the
+  passphrase nothing in the file is readable, and a change to any byte (header,
+  costs, salt or payload) makes the restore fail before anything is parsed or
+  written.
+- The Argon2id costs are read before anything can be authenticated, so they
+  are refused, before any derivation runs, unless they are within: memory 8 KiB
+  per lane up to 256 MiB, 1 to 10 passes, 1 to 4 lanes, memory x passes at most
+  1 GiB, and a salt of 8 to 64 bytes. Exports use 64 MiB, 3 passes and 1 lane.
+- It carries every row of every stored object kind (workspaces, folders,
+  requests and all their revisions, environments, TLS, proxy and gateway
+  profiles, datasets, scenarios, load plans, app settings, user profiles,
+  spec-import provenance and run reports), every vault secret (workspace-owned
+  and profile-level), every stored attachment, the complete history with its
+  stored response bodies, and every load report.
+- It does not carry OS keychain entries, local data keys, provider sessions or
+  token-file bindings (they name files on this device); the preview lists them.
+  Attachment index entries and blob pins are specific to one database and are
+  rebuilt on restore. Linked local files are listed as needing rebinding.
+- `crates/anvil-app/tests/backup.rs` fails when the store gains a table or an
+  object kind that a full backup neither carries nor lists as left out, and
+  compares the whole inventory of a restored profile with its source.
+
+Restore is preview-then-apply. Every item is checked against its type and
+against the rest of the backup (ids, owning workspaces, attachment hashes), the
+import trust normalisation above applies, and everything is written in one
+transaction after a checkpoint. Replace overwrites items that have the same id;
+Merge keeps them, including this profile's settings; Duplicate is refused,
+because a backup restores items under their own ids. Nothing else in the
+profile is deleted.
 
 ## Schema versions and migration
 

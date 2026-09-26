@@ -2,6 +2,7 @@
 //! the CLI. All security-relevant state (vault key, lock) lives here and in
 //! `anvil-storage`; UI layers only call these services.
 
+pub mod backup;
 pub mod exec;
 pub mod file_grants;
 pub mod identity;
@@ -32,6 +33,8 @@ pub enum AppError {
     Vault(#[from] anvil_storage::VaultError),
     #[error("{0}")]
     Bundle(#[from] anvil_portability::BundleError),
+    #[error("{0}")]
+    Backup(#[from] backup::BackupError),
     #[error("storage: {0}")]
     Store(StoreError),
     #[error("io: {0}")]

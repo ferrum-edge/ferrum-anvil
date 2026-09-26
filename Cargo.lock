@@ -211,6 +211,7 @@ dependencies = [
  "anvil-runner",
  "anvil-storage",
  "anvil-transport",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "hex",

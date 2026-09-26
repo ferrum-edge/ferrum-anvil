@@ -79,7 +79,7 @@ CLI (`anvil`) = same anvil-app services without a webview.
 | `anvil-import` | OpenAPI 2.0/3.0/3.1/3.2, WSDL 1.1, Postman, Insomnia, cURL and HAR importers with reports and reimport diffs. |
 | `anvil-load` | Open, closed and iteration workloads over the same engine; mergeable HDR histograms; balanced ledgers; generator health; the worker protocol; JSON, CSV and HTML reports; run comparison. |
 | `anvil-runner` | Collection runner: scenarios and folders, datasets, chained extraction, stop-on-failure, JUnit/HTML/JSON reports. |
-| `anvil-app` | Services shared by the desktop and CLI: profiles/unlock, the workspace tree, revisions, environments, secrets, profiles, the history policy, send/record, export/import, spec import, load plans/runs, and scenarios. |
+| `anvil-app` | Services shared by the desktop and CLI: profiles/unlock, the workspace tree, revisions, environments, secrets, profiles, the history policy, send/record, export/import, full backups (one encrypted, authenticated file; see `storage-and-recovery.md`), spec import, load plans/runs, and scenarios. |
 | `anvil-cli` | The `anvil` command-line client. |
 | `anvil-lab` | Real-gateway failure laboratory: the pinned Ferrum Edge binary, profile configs, fixtures, operator-log ground truth, and trusted/untrusted passes. |
 | `anvil-fixtures` | Controllable test peers: HTTP(S) routes, raw fault modes, TLS servers, WS, gRPC with reflection, SSE, TCP/UDP, DTLS, DNS, and an OAuth IdP. |

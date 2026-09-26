@@ -504,7 +504,7 @@ impl App {
 }
 
 /// Deterministic object id for the attachment index entry of a content hash.
-fn attachment_index_id(sha: &str) -> Id {
+pub(crate) fn attachment_index_id(sha: &str) -> Id {
     let d = Sha256::digest(format!("anvil-attachment-index:{sha}").as_bytes());
     let mut b = [0u8; 16];
     b.copy_from_slice(&d[..16]);

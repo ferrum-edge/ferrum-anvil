@@ -10,7 +10,10 @@
   - **Encrypted transfer**: vault secrets are included, encrypted under an
     export passphrase.
   - **Full backup**: everything, encrypted. It restores into a clean install
-    without the original keychain.
+    without the original keychain. It is not a zip bundle: one AEAD envelope
+    seals the whole payload, bound to the header that names its key-derivation
+    costs and salt, so no part of it is readable or modifiable without the
+    passphrase (see `docs/storage-and-recovery.md#full-backups`).
 - Import happens in two steps: preview, then apply.
   - **Checks:** size limits, path traversal, symlinks, zip bombs and
     checksums. A wrong passphrase is rejected before anything changes.

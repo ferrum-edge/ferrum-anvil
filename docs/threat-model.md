@@ -91,6 +91,13 @@ against it).
   scenario/plan trust) with warnings in the preview.
 - **Lock bypass:** backend refuses privileged commands while locked; key dropped;
   sessions/executions/load runs stopped.
+- **Reading or altering a full backup:** the whole payload (objects, bodies,
+  settings, history, attachments and secrets) is one AEAD envelope under the
+  export passphrase, with the header as associated data, so a copy of the file
+  reveals nothing and any change to it is refused before anything is restored.
+  Its key-derivation costs are bounded before derivation, and authentic
+  contents are still type-checked, confined to the backup's own workspaces and
+  trust-normalised like any import.
 - **Test backdoors shipped:** E2E WebDriver and env unlock only under the `e2e`
   feature; release check fails if present (ADR 0009).
 - **Supply chain:** pinned dependencies with lockfiles, `cargo deny` (licenses,
