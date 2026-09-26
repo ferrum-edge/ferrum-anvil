@@ -1,0 +1,274 @@
+{
+  "run_id": "01a0d958-e7b3-7254-8ac9-f61cef28f38e",
+  "report_version": 1,
+  "schema_version": 1,
+  "runner_version": "anvil-runner/0.1.0+anvil-transport/0.1.0",
+  "workspace_id": "01a0d958-e566-76c3-8980-25571fda3089",
+  "name": "Workspace",
+  "source": {
+    "kind": "folder",
+    "path": "/"
+  },
+  "fail_on": {
+    "transport": true,
+    "application": true,
+    "assertions": true
+  },
+  "stop_on_failure": false,
+  "started_at": "2026-09-25T16:14:37.491110Z",
+  "finished_at": "2026-09-25T16:14:37.501247Z",
+  "duration_ms": 10,
+  "completion": "completed",
+  "partial": false,
+  "totals": {
+    "iterations_planned": 1,
+    "iterations_started": 1,
+    "iterations_passed": 0,
+    "iterations_failed": 1,
+    "iterations_incomplete": 0,
+    "steps_executed": 6,
+    "steps_passed": 1,
+    "steps_failed": 5,
+    "steps_errored": 0,
+    "steps_skipped": 0,
+    "steps_canceled": 0,
+    "steps_canceled_in_flight": 0,
+    "transport_failures": 0,
+    "application_failures": 5,
+    "assertion_failures": 0,
+    "assertions_passed": 0,
+    "assertions_failed": 0,
+    "step_time_ms": 8
+  },
+  "iterations": [
+    {
+      "index": 0,
+      "started_at": "2026-09-25T16:14:37.491114Z",
+      "duration_ms": 10,
+      "status": "failed",
+      "steps": [
+        {
+          "index": 0,
+          "request_id": "01a0d958-e5b9-7418-8a92-a6b4550e41f2",
+          "revision_id": "01a0d958-e5b9-7418-8a92-a6b513a25948",
+          "name": "OK",
+          "protocol": "http",
+          "method": "GET",
+          "url": "http://127.0.0.1:18080/ok/echo",
+          "status": "passed",
+          "failed_dimensions": [],
+          "execution_id": "01a0d958-e7bb-7651-9816-ac5c98b6fb39",
+          "transport": "completed",
+          "application": "success",
+          "assertions": "not_run",
+          "dispatch": "sent",
+          "http_status": 200,
+          "summary": "HTTP 200 OK — transport completed, application success",
+          "duration_ms": 8,
+          "exchange_ms": 0,
+          "delay_ms": 0,
+          "assertion_results": [],
+          "assertion_results_omitted": 0,
+          "findings": [],
+          "extracted": []
+        },
+        {
+          "index": 1,
+          "request_id": "01a0d958-e60c-76c1-84ff-5cd9e794e92c",
+          "revision_id": "01a0d958-e60c-76c1-84ff-5cda1e17ed03",
+          "name": "Backend refuses connections",
+          "protocol": "http",
+          "method": "GET",
+          "url": "http://127.0.0.1:18080/up/refused/",
+          "status": "failed",
+          "failed_dimensions": [
+            "application"
+          ],
+          "execution_id": "01a0d958-e7bb-7651-9816-ac5db70ab601",
+          "transport": "completed",
+          "application": "failure",
+          "assertions": "not_run",
+          "dispatch": "sent",
+          "http_status": 502,
+          "summary": "HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)",
+          "duration_ms": 0,
+          "exchange_ms": 0,
+          "delay_ms": 0,
+          "assertion_results": [],
+          "assertion_results_omitted": 0,
+          "findings": [
+            {
+              "code": "http.bad_gateway",
+              "title": "Bad gateway (502)",
+              "confidence": "confirmed",
+              "severity": "error"
+            },
+            {
+              "code": "ferrum.marker.unverified",
+              "title": "Ferrum-like header from an unverified destination",
+              "confidence": "confirmed",
+              "severity": "info"
+            }
+          ],
+          "extracted": []
+        },
+        {
+          "index": 2,
+          "request_id": "01a0d958-e65e-7641-81c6-4e69904800c0",
+          "revision_id": "01a0d958-e65e-7641-81c6-4e6abcf62f71",
+          "name": "Backend name does not resolve",
+          "protocol": "http",
+          "method": "GET",
+          "url": "http://127.0.0.1:18080/up/dns/",
+          "status": "failed",
+          "failed_dimensions": [
+            "application"
+          ],
+          "execution_id": "01a0d958-e7bc-72d5-97a0-cd0a3441f5a2",
+          "transport": "completed",
+          "application": "failure",
+          "assertions": "not_run",
+          "dispatch": "sent",
+          "http_status": 502,
+          "summary": "HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)",
+          "duration_ms": 0,
+          "exchange_ms": 0,
+          "delay_ms": 0,
+          "assertion_results": [],
+          "assertion_results_omitted": 0,
+          "findings": [
+            {
+              "code": "http.bad_gateway",
+              "title": "Bad gateway (502)",
+              "confidence": "confirmed",
+              "severity": "error"
+            },
+            {
+              "code": "ferrum.marker.unverified",
+              "title": "Ferrum-like header from an unverified destination",
+              "confidence": "confirmed",
+              "severity": "info"
+            }
+          ],
+          "extracted": []
+        },
+        {
+          "index": 3,
+          "request_id": "01a0d958-e6b1-7480-be1e-bb378efcc2e1",
+          "revision_id": "01a0d958-e6b1-7480-be1e-bb3841eb9c22",
+          "name": "Backend ends the body early",
+          "protocol": "http",
+          "method": "GET",
+          "url": "http://127.0.0.1:18080/up/short-body/",
+          "status": "failed",
+          "failed_dimensions": [
+            "application"
+          ],
+          "execution_id": "01a0d958-e7bc-72d5-97a0-cd0b58e23bd3",
+          "transport": "completed",
+          "application": "failure",
+          "assertions": "not_run",
+          "dispatch": "sent",
+          "http_status": 502,
+          "summary": "HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)",
+          "duration_ms": 0,
+          "exchange_ms": 0,
+          "delay_ms": 0,
+          "assertion_results": [],
+          "assertion_results_omitted": 0,
+          "findings": [
+            {
+              "code": "http.bad_gateway",
+              "title": "Bad gateway (502)",
+              "confidence": "confirmed",
+              "severity": "error"
+            },
+            {
+              "code": "ferrum.marker.unverified",
+              "title": "Ferrum-like header from an unverified destination",
+              "confidence": "confirmed",
+              "severity": "info"
+            }
+          ],
+          "extracted": []
+        },
+        {
+          "index": 4,
+          "request_id": "01a0d958-e705-764b-a6f4-3d030fc89f72",
+          "revision_id": "01a0d958-e705-764b-a6f4-3d041e8ea6fd",
+          "name": "Application 500 (not the gateway)",
+          "protocol": "http",
+          "method": "GET",
+          "url": "http://127.0.0.1:18080/gw/app-500/status/500",
+          "status": "failed",
+          "failed_dimensions": [
+            "application"
+          ],
+          "execution_id": "01a0d958-e7bc-72d5-97a0-cd0c56fae30a",
+          "transport": "completed",
+          "application": "failure",
+          "assertions": "not_run",
+          "dispatch": "sent",
+          "http_status": 500,
+          "summary": "HTTP 500 Internal Server Error — transport completed, application failure: Server error (500)",
+          "duration_ms": 0,
+          "exchange_ms": 0,
+          "delay_ms": 0,
+          "assertion_results": [],
+          "assertion_results_omitted": 0,
+          "findings": [
+            {
+              "code": "http.server_error",
+              "title": "Server error (500)",
+              "confidence": "confirmed",
+              "severity": "error"
+            },
+            {
+              "code": "ferrum.marker.unverified",
+              "title": "Ferrum-like header from an unverified destination",
+              "confidence": "confirmed",
+              "severity": "info"
+            }
+          ],
+          "extracted": []
+        },
+        {
+          "index": 5,
+          "request_id": "01a0d958-e758-775e-a7f3-089f11c41b2d",
+          "revision_id": "01a0d958-e758-775e-a7f3-08a06a8f46cf",
+          "name": "Application 403 (not a WAF)",
+          "protocol": "http",
+          "method": "GET",
+          "url": "http://127.0.0.1:18080/gw/app-403/status/403",
+          "status": "failed",
+          "failed_dimensions": [
+            "application"
+          ],
+          "execution_id": "01a0d958-e7bd-76cc-9a66-a15e5874f5ef",
+          "transport": "completed",
+          "application": "failure",
+          "assertions": "not_run",
+          "dispatch": "sent",
+          "http_status": 403,
+          "summary": "HTTP 403 Forbidden — transport completed, application failure: The request was refused (403)",
+          "duration_ms": 0,
+          "exchange_ms": 0,
+          "delay_ms": 0,
+          "assertion_results": [],
+          "assertion_results_omitted": 0,
+          "findings": [
+            {
+              "code": "http.forbidden",
+              "title": "The request was refused (403)",
+              "confidence": "confirmed",
+              "severity": "error"
+            }
+          ],
+          "extracted": []
+        }
+      ],
+      "steps_omitted": 0
+    }
+  ],
+  "notes": []
+}

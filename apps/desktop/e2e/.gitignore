@@ -1,0 +1,4 @@
+# Screenshots are produced by each run (and uploaded as CI artifacts);
+# they are evidence of a specific build, not source.
+screenshots/*.png
+logs/

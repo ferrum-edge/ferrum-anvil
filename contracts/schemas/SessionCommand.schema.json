@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SessionCommand",
+  "description": "Commands for an interactive session (WebSocket / TCP / UDP / bidi gRPC).",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string",
+          "const": "send_text"
+        }
+      },
+      "required": [
+        "command",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "hex": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string",
+          "const": "send_binary_hex"
+        }
+      },
+      "required": [
+        "command",
+        "hex"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "ping"
+        }
+      },
+      "required": [
+        "command"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "reason": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string",
+          "const": "close"
+        }
+      },
+      "required": [
+        "command",
+        "code",
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "const": "half_close"
+        }
+      },
+      "required": [
+        "command"
+      ]
+    }
+  ]
+}

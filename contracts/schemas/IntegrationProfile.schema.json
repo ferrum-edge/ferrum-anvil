@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IntegrationProfile",
+  "description": "Explicit user decision that a destination is a Ferrum Edge gateway.\n\nWithout such a profile a `X-Gateway-Error` header is only a \"Ferrum-like\nmarker\" from an unverified peer: any server can emit that header.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "workspace_id",
+    "name",
+    "created_at",
+    "updated_at"
+  ],
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "hosts": {
+          "description": "Hosts (and optional ports) that are this gateway's frontends.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HostBinding"
+          }
+        },
+        "compatibility_id": {
+          "description": "Compatibility catalog id, e.g. `ferrum-edge-0.9.5`.",
+          "type": "string"
+        },
+        "require_verified_tls": {
+          "description": "Only treat markers as gateway-authored when the TLS peer was\nverified. Plain-HTTP trust is allowed only for explicitly marked\nlocal/lab destinations and caps confidence at `likely`.",
+          "type": "boolean",
+          "default": true
+        },
+        "detail": {
+          "description": "Optional authorized diagnostic detail endpoint (proposed gateway\ncontract; unavailable on current releases).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticDetailAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "console_url": {
+          "description": "Link to Foundry/Nexus for read-only context (never auto-edited).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "const": "ferrum_gateway"
+        }
+      },
+      "required": [
+        "kind",
+        "hosts",
+        "compatibility_id"
+      ]
+    }
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "HostBinding": {
+      "description": "Host/port pattern a TLS profile or client identity is bound to. Wildcards\nare allowed only as a leading `*.` label and produce a UI warning.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "host"
+      ]
+    },
+    "DiagnosticDetailAccess": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": "string"
+        },
+        "credential": {
+          "description": "Dedicated least-privilege diagnostic credential (never an admin JWT).",
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        "namespace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "base_url",
+        "credential"
+      ]
+    },
+    "SensitiveValue": {
+      "description": "A field that may carry sensitive material (password, token, key).\n\n* `Template` — text that may contain `{{variable}}` references. A literal\n  (non-variable) template in a sensitive field is itself treated as\n  sensitive: it is masked in the UI, redacted in history, and replaced by a\n  placeholder in safe-share exports.\n* `Secret` — a vault reference.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "template"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "secret"
+            }
+          },
+          "required": [
+            "kind",
+            "secret"
+          ]
+        }
+      ]
+    },
+    "SecretRef": {
+      "description": "Reference to a value held in the encrypted vault. The value itself never\nappears in ordinary object graphs, logs or safe-share exports.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "description": "Human label shown in the UI and in export previews (\"prod API key\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    }
+  }
+}

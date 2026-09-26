@@ -1,0 +1,346 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunEvent",
+  "description": "Bounded, throttled live events of a collection run. The final\n[`RunReport`] is authoritative; events may be coalesced under load\n(failure events are preferred, `run_started` / `run_finished` are never\ndropped).",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "iterations": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "steps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "event": {
+          "type": "string",
+          "const": "run_started"
+        }
+      },
+      "required": [
+        "event",
+        "run_id",
+        "name",
+        "iterations",
+        "steps"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "iteration": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "dataset_row": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "event": {
+          "type": "string",
+          "const": "iteration_started"
+        }
+      },
+      "required": [
+        "event",
+        "run_id",
+        "iteration"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "iteration": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "step": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string",
+          "const": "step_started"
+        }
+      },
+      "required": [
+        "event",
+        "run_id",
+        "iteration",
+        "step",
+        "request_id",
+        "name"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "iteration": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "step": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/RunStepStatus"
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "http_status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "progress": {
+          "$ref": "#/$defs/RunProgress"
+        },
+        "event": {
+          "type": "string",
+          "const": "step_finished"
+        }
+      },
+      "required": [
+        "event",
+        "run_id",
+        "iteration",
+        "step",
+        "status",
+        "progress"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "iteration": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/RunIterationStatus"
+        },
+        "progress": {
+          "$ref": "#/$defs/RunProgress"
+        },
+        "event": {
+          "type": "string",
+          "const": "iteration_finished"
+        }
+      },
+      "required": [
+        "event",
+        "run_id",
+        "iteration",
+        "status",
+        "progress"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "completion": {
+          "$ref": "#/$defs/RunnerCompletion"
+        },
+        "progress": {
+          "$ref": "#/$defs/RunProgress"
+        },
+        "dropped_events": {
+          "description": "Events dropped by throttling.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "event": {
+          "type": "string",
+          "const": "run_finished"
+        }
+      },
+      "required": [
+        "event",
+        "run_id",
+        "completion",
+        "progress",
+        "dropped_events"
+      ]
+    }
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "RunStepStatus": {
+      "description": "Status of one step in one iteration.",
+      "oneOf": [
+        {
+          "description": "Executed; no dimension counted by [`FailOn`] failed.",
+          "type": "string",
+          "const": "passed"
+        },
+        {
+          "description": "Executed; at least one dimension counted by [`FailOn`] failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Not executed: the runner could not obtain the request (deleted,\nunreadable secret, ...). Nothing was sent. Always counts as failed.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "Not executed: disabled in the scenario, or the iteration stopped at an\nearlier failed step (`stop_on_failure`).",
+          "type": "string",
+          "const": "skipped"
+        },
+        {
+          "description": "Canceled while in flight (the request may or may not have reached the\npeer — see `dispatch`), or not started because the run was canceled.",
+          "type": "string",
+          "const": "canceled"
+        }
+      ]
+    },
+    "RunProgress": {
+      "description": "Live progress snapshot carried by run events.",
+      "type": "object",
+      "properties": {
+        "steps_done": {
+          "description": "Steps finished so far (executed, errored, skipped or canceled).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_total": {
+          "description": "Planned steps (iterations × steps).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "steps_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "iterations_done": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "iterations_total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "steps_done",
+        "steps_total",
+        "steps_failed",
+        "iterations_done",
+        "iterations_total"
+      ]
+    },
+    "RunIterationStatus": {
+      "description": "Status of one iteration.",
+      "oneOf": [
+        {
+          "description": "Every executed step passed (skipped disabled steps do not count).",
+          "type": "string",
+          "const": "passed"
+        },
+        {
+          "description": "At least one step failed or errored.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The run was canceled or aborted during this iteration.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "RunnerCompletion": {
+      "description": "How the run ended.",
+      "oneOf": [
+        {
+          "description": "Every planned iteration ran to its end (steps may still have failed).",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "The user (or app shutdown / lock policy) canceled the run.",
+          "type": "string",
+          "const": "canceled"
+        },
+        {
+          "description": "The run could not continue (e.g. the vault locked, the workspace\ndisappeared); the report is partial.",
+          "type": "string",
+          "const": "aborted"
+        }
+      ]
+    }
+  }
+}

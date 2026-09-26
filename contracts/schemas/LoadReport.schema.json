@@ -1,0 +1,1552 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoadReport",
+  "description": "Saved, self-describing load report. Viewable offline.",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "engine": {
+      "type": "string"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "plan": {
+      "$ref": "#/$defs/LoadPlan"
+    },
+    "request_revisions": {
+      "description": "Revision ids of the requests executed.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "dataset_sha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completion": {
+      "$ref": "#/$defs/RunCompletion"
+    },
+    "partial": {
+      "description": "True if the report is partial (cancel, crash, abort, lock).",
+      "type": "boolean"
+    },
+    "warmup_included_in_metrics": {
+      "type": "boolean"
+    },
+    "destination_summary": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "counts": {
+      "$ref": "#/$defs/LoadCounts"
+    },
+    "achieved_rate_per_sec": {
+      "description": "Iterations started per second over the measured window.",
+      "type": "number",
+      "format": "double"
+    },
+    "latency_success": {
+      "description": "Network-exchange latency (sum of attempt durations) of successful sends:\ncomplete response, application success, assertions passed or not run.",
+      "$ref": "#/$defs/LatencySummary"
+    },
+    "latency_failure": {
+      "description": "Latency of failed sends to their failure point: transport failures,\napplication failures and assertion failures. Timeouts (censored) and\ncancellations are excluded.",
+      "$ref": "#/$defs/LatencySummary"
+    },
+    "histogram_success_b64": {
+      "description": "Mergeable serialized HDR histogram (V2 + DEFLATE, base64) of success latency.",
+      "type": "string"
+    },
+    "status_distribution": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "failure_categories": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FailureSample"
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TimeBucket"
+      }
+    },
+    "bytes_sent": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "bytes_received": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "generator": {
+      "$ref": "#/$defs/GeneratorHealth"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requests": {
+      "description": "Send ledger (see [`RequestCounts`]); equals `counts` for single-request iterations.",
+      "$ref": "#/$defs/RequestCounts",
+      "default": {
+        "started": 0,
+        "completed": 0,
+        "transport_failures": 0,
+        "timeouts": 0,
+        "canceled": 0,
+        "in_flight_at_end": 0,
+        "application_failures": 0,
+        "assertion_failures": 0,
+        "connections_opened": 0,
+        "connections_reused": 0
+      }
+    },
+    "workload_label": {
+      "description": "Human label of the workload semantics (closed/open/iterations).",
+      "type": "string",
+      "default": ""
+    },
+    "offered_rate_per_sec": {
+      "description": "Scheduled arrivals per second over the measured window (open workloads only).",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "measured_duration_secs": {
+      "description": "Length of the measured window (after warmup, until scheduling stopped).",
+      "type": "number",
+      "format": "double",
+      "default": 0.0
+    },
+    "timeouts_censored": {
+      "$ref": "#/$defs/CensoredTimeouts",
+      "default": {
+        "count": 0,
+        "elapsed_at_timeout": {
+          "count": 0,
+          "min_us": 0,
+          "max_us": 0,
+          "mean_us": 0,
+          "p50_us": 0,
+          "p90_us": 0,
+          "p95_us": 0,
+          "p99_us": 0
+        },
+        "label": ""
+      }
+    },
+    "latency_setup": {
+      "description": "Local time around the network exchange: preparation, token\nacquisition/refresh, retry backoff and record assembly.",
+      "$ref": "#/$defs/LatencySummary",
+      "default": {
+        "count": 0,
+        "min_us": 0,
+        "max_us": 0,
+        "mean_us": 0,
+        "p50_us": 0,
+        "p90_us": 0,
+        "p95_us": 0,
+        "p99_us": 0
+      }
+    },
+    "histogram_failure_b64": {
+      "description": "Mergeable serialized HDR histogram (V2 + DEFLATE, base64) of failure latency.",
+      "type": "string",
+      "default": ""
+    },
+    "protocols": {
+      "description": "Negotiated application protocols observed (e.g. `http/1.1`, `h2`) → sends.",
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      },
+      "default": []
+    },
+    "warmup_iterations_excluded": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "default": 0
+    },
+    "warmup_sends_excluded": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "default": 0
+    },
+    "protocol_metrics": {
+      "description": "The unit kind, its definitions and its protocol-specific denominators\n(messages, sessions, frames, datagrams). `None` only in reports written\nbefore protocol load existed, which were HTTP-only.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProtocolLoadMetrics"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "integrity_sha256": {
+      "description": "SHA-256 of the canonical JSON of this report with this field unset;\nverified when a saved report is reopened.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "run_id",
+    "schema_version",
+    "engine",
+    "engine_version",
+    "plan",
+    "request_revisions",
+    "started_at",
+    "finished_at",
+    "completion",
+    "partial",
+    "warmup_included_in_metrics",
+    "destination_summary",
+    "counts",
+    "achieved_rate_per_sec",
+    "latency_success",
+    "latency_failure",
+    "histogram_success_b64",
+    "status_distribution",
+    "failure_categories",
+    "timeline",
+    "bytes_sent",
+    "bytes_received",
+    "generator",
+    "notes"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "LoadPlan": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "workload": {
+          "$ref": "#/$defs/Workload"
+        },
+        "chain": {
+          "description": "A sequential chain executed per iteration (with extraction), or a\nweighted mix (one request per iteration) when `mix` is non-empty.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "default": []
+        },
+        "mix": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeightedStep"
+          },
+          "default": []
+        },
+        "dataset_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection_mode": {
+          "$ref": "#/$defs/ConnectionMode",
+          "default": "persistent"
+        },
+        "warmup_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "abort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbortRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seed": {
+          "description": "Seed for weighted selection / generated data.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "trusted": {
+          "description": "Imported plans are never auto-started; the user must acknowledge the\ndestination and ownership reminder for each run.",
+          "type": "boolean",
+          "default": false
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "name",
+        "workload",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "Workload": {
+      "oneOf": [
+        {
+          "description": "Closed workload: fixed virtual users; slow responses reduce offered rate.",
+          "type": "object",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Stage"
+              }
+            },
+            "think_time_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "default": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "closed_virtual_users"
+            }
+          },
+          "required": [
+            "model",
+            "stages"
+          ]
+        },
+        {
+          "description": "Open workload: scheduled arrivals independent of response time. Late\narrivals beyond `max_in_flight` are dropped and counted, never queued\nwithout bound.",
+          "type": "object",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Stage"
+              }
+            },
+            "max_in_flight": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "open_arrival_rate"
+            }
+          },
+          "required": [
+            "model",
+            "stages",
+            "max_in_flight"
+          ]
+        },
+        {
+          "description": "Fixed number of iterations as fast as `concurrency` allows.",
+          "type": "object",
+          "properties": {
+            "iterations": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "concurrency": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "model": {
+              "type": "string",
+              "const": "iterations"
+            }
+          },
+          "required": [
+            "model",
+            "iterations",
+            "concurrency"
+          ]
+        }
+      ]
+    },
+    "Stage": {
+      "type": "object",
+      "properties": {
+        "duration_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "target": {
+          "description": "Target at the end of the stage (arrivals/s for open workloads, VUs for\nclosed); linear ramp from the previous stage's target.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "duration_secs",
+        "target"
+      ]
+    },
+    "WeightedStep": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "weight": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1
+        }
+      },
+      "required": [
+        "request_id"
+      ]
+    },
+    "ConnectionMode": {
+      "oneOf": [
+        {
+          "description": "Reuse connections within each virtual user / slot.",
+          "type": "string",
+          "const": "persistent"
+        },
+        {
+          "description": "Force a new connection per iteration.",
+          "type": "string",
+          "const": "fresh"
+        }
+      ]
+    },
+    "AbortRule": {
+      "type": "object",
+      "properties": {
+        "max_failure_permille": {
+          "description": "Abort when the failure ratio over the last window exceeds this (0–1, as permille).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "window_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_failure_permille",
+        "window_secs"
+      ]
+    },
+    "RunCompletion": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "canceled_by_user",
+        "aborted_by_rule",
+        "worker_crashed",
+        "stopped_by_lock"
+      ]
+    },
+    "LoadCounts": {
+      "description": "Iteration ledger of the measured window. One *iteration* is one arrival\n(open workload) or one pass of a virtual user / concurrency lane: a single\nrequest for a weighted mix, or the whole sequential chain.\n\nThe counts always balance:\n* `scheduled = started + dropped` (only open workloads drop; closed and\n  iteration workloads schedule exactly what they start);\n* `started = completed + transport_failures + timeouts + canceled + in_flight_at_end`\n  — the five terminal classes are disjoint.\n\n`application_failures` and `assertion_failures` are *subsets* of\n`completed` (a complete response that failed at the application level or\nan assertion) and may overlap each other.",
+      "type": "object",
+      "properties": {
+        "scheduled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "started": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "dropped": {
+          "description": "Open-workload arrivals not started because `max_in_flight` was reached.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completed": {
+          "description": "Every step of the iteration received a complete response (any status).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "transport_failures": {
+          "description": "Ended by a transport failure other than a deadline (no complete response).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "application_failures": {
+          "description": "Completed iterations with at least one application failure (4xx/5xx, gRPC non-OK).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "assertion_failures": {
+          "description": "Completed iterations with at least one failed assertion.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeouts": {
+          "description": "Ended by a deadline (censored latency; see [`CensoredTimeouts`]).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "canceled": {
+          "description": "Ended by run cancellation (user cancel, abort rule, graceful-stop limit).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "in_flight_at_end": {
+          "description": "Started but with no known outcome when the report was produced (worker\ncrash, or a send that ignored cancellation past the drain limit).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scheduled",
+        "started",
+        "dropped",
+        "completed",
+        "transport_failures",
+        "application_failures",
+        "assertion_failures",
+        "timeouts",
+        "canceled",
+        "in_flight_at_end"
+      ]
+    },
+    "LatencySummary": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "min_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mean_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p90_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p95_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p99_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "count",
+        "min_us",
+        "max_us",
+        "mean_us",
+        "p50_us",
+        "p90_us",
+        "p95_us",
+        "p99_us"
+      ]
+    },
+    "FailureSample": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "examples": {
+          "description": "Up to a bounded number of representative redacted examples.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "category",
+        "count",
+        "examples"
+      ]
+    },
+    "TimeBucket": {
+      "description": "One timeline bucket (send level, except `dropped`, which counts arrivals).\nIncludes warmup seconds, flagged, which are excluded from summary metrics.",
+      "type": "object",
+      "properties": {
+        "second": {
+          "description": "Bucket start, seconds from run start.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "started": {
+          "description": "Sends started in the bucket.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completed": {
+          "description": "Sends that received a complete response in the bucket (any status).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "failures": {
+          "description": "Sends that failed in the bucket (transport, timeout, application or assertion).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "dropped": {
+          "description": "Arrivals dropped in the bucket (open workloads).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50_us": {
+          "description": "Successful-send latency percentiles of sends completing in the bucket.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p99_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "in_flight": {
+          "description": "Peak sends in flight during the bucket.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warmup": {
+          "type": "boolean",
+          "default": false
+        },
+        "p99_schedule_lag_us": {
+          "description": "p99 start lag (scheduled arrival → actual start) of arrivals in the bucket.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "required": [
+        "second",
+        "started",
+        "completed",
+        "failures",
+        "dropped",
+        "p50_us",
+        "p99_us",
+        "in_flight"
+      ]
+    },
+    "GeneratorHealth": {
+      "type": "object",
+      "properties": {
+        "peak_cpu_percent": {
+          "description": "Peak process CPU (user + system time over wall time; 100 = one core).\n`None` when the platform measurement is unavailable.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "peak_rss_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "peak_open_fds": {
+          "description": "Peak open file descriptors (sockets included), when measurable.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_schedule_lag_us": {
+          "description": "Maximum observed lag between a scheduled arrival and its start.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p99_schedule_lag_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "target_not_achieved": {
+          "description": "True when the generator could not sustain the planned target.",
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "max_schedule_lag_us",
+        "p99_schedule_lag_us",
+        "target_not_achieved",
+        "notes"
+      ]
+    },
+    "RequestCounts": {
+      "description": "Unit ledger of the measured window: one entry per `Engine::execute` call,\ni.e. one *unit* of the plan's [`LoadUnitKind`] (an HTTP request, a gRPC\ncall or stream, an SSE stream, a WebSocket session, a TCP exchange or a\nUDP/DTLS exchange). Balances like [`LoadCounts`]:\n`started = completed + transport_failures + timeouts + canceled + in_flight_at_end`.\n\nWhat `completed` means depends on the unit (see\n[`ProtocolLoadMetrics::semantics`]): a complete response for HTTP, a\nterminal gRPC status with complete framing, a stream or session that ended\nwithout a failure, an exchange that ran to its stop condition. Messages,\nevents, frames and datagrams are counted per unit in\n[`ProtocolLoadMetrics`]; they are never folded into these counts, and a\ndatagram sent is never counted as delivered (LOAD-013).",
+      "type": "object",
+      "properties": {
+        "started": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "transport_failures": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeouts": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "canceled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "in_flight_at_end": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "application_failures": {
+          "description": "Subset of `completed`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "assertion_failures": {
+          "description": "Subset of `completed`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_opened": {
+          "description": "Attempts that opened a new connection (engine evidence).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_reused": {
+          "description": "Attempts served on a reused pooled connection.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "started",
+        "completed",
+        "transport_failures",
+        "timeouts",
+        "canceled",
+        "in_flight_at_end",
+        "application_failures",
+        "assertion_failures",
+        "connections_opened",
+        "connections_reused"
+      ]
+    },
+    "CensoredTimeouts": {
+      "description": "Sends abandoned at a deadline. Their elapsed time is a *lower bound* on the\nlatency the target would have produced, so they are excluded from both\nlatency distributions and summarised separately.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "deadline_ms_min": {
+          "description": "Smallest / largest configured deadline that elapsed, when recorded.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "deadline_ms_max": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "elapsed_at_timeout": {
+          "description": "Elapsed time when each send was abandoned (censored values, not latencies).",
+          "$ref": "#/$defs/LatencySummary"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "count",
+        "elapsed_at_timeout",
+        "label"
+      ]
+    },
+    "ProtocolLoadMetrics": {
+      "description": "Protocol-specific denominators of a run (LOAD-013). Exactly one family\nblock is set for the plan's unit kind (gRPC streams set `grpc` and `stream`).",
+      "type": "object",
+      "properties": {
+        "version": {
+          "description": "[`PROTOCOL_METRICS_VERSION`] of the producing engine.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "unit": {
+          "$ref": "#/$defs/LoadUnitKind"
+        },
+        "semantics": {
+          "$ref": "#/$defs/UnitSemantics"
+        },
+        "http": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpLoadMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grpc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcLoadMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamLoadMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "websocket": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebSocketLoadMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tcp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TcpLoadMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "datagram": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatagramLoadMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "unit",
+        "semantics"
+      ]
+    },
+    "LoadUnitKind": {
+      "description": "What one load *unit* is (LOAD-013). A plan has exactly one unit kind:\nevery request in its chain or mix must produce the same kind, so every\ncount, rate and latency in a report has a single denominator.",
+      "oneOf": [
+        {
+          "description": "One HTTP request/response over HTTP/1.1, HTTP/2 or HTTP/3 (redirects,\nretries and an HTTP/3 → TCP fallback are attempts inside it).",
+          "type": "string",
+          "const": "http_request"
+        },
+        {
+          "description": "One unary gRPC or gRPC-Web call.",
+          "type": "string",
+          "const": "grpc_call"
+        },
+        {
+          "description": "One server-streaming gRPC or gRPC-Web call.",
+          "type": "string",
+          "const": "grpc_stream"
+        },
+        {
+          "description": "One server-sent-events stream.",
+          "type": "string",
+          "const": "sse_stream"
+        },
+        {
+          "description": "One WebSocket session: handshake, scripted messages, close.",
+          "type": "string",
+          "const": "websocket_session"
+        },
+        {
+          "description": "One TCP or TLS connection carrying the request's scripted frames.",
+          "type": "string",
+          "const": "tcp_exchange"
+        },
+        {
+          "description": "One UDP exchange: the request's datagrams, then its response window.",
+          "type": "string",
+          "const": "udp_exchange"
+        },
+        {
+          "description": "One DTLS handshake, then the request's datagrams and response window.",
+          "type": "string",
+          "const": "dtls_exchange"
+        }
+      ]
+    },
+    "UnitSemantics": {
+      "description": "Plain-language definitions that travel with every report, so a reader\nnever has to guess what a count or a latency refers to.",
+      "type": "object",
+      "properties": {
+        "unit_singular": {
+          "description": "`request`, `call`, `stream`, `session`, `exchange`.",
+          "type": "string"
+        },
+        "unit_plural": {
+          "type": "string"
+        },
+        "completed_means": {
+          "description": "When a unit counts as `completed` in the unit ledger.",
+          "type": "string"
+        },
+        "success_means": {
+          "description": "When a completed unit is a success (and enters the success latency).",
+          "type": "string"
+        },
+        "latency_means": {
+          "description": "What `latency_success` / `latency_failure` measure for this unit.",
+          "type": "string"
+        },
+        "connection_mode_means": {
+          "description": "How the plan's connection mode applies to this unit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit_singular",
+        "unit_plural",
+        "completed_means",
+        "success_means",
+        "latency_means",
+        "connection_mode_means"
+      ]
+    },
+    "HttpLoadMetrics": {
+      "description": "HTTP requests (all HTTP versions).",
+      "type": "object",
+      "properties": {
+        "protocol_fallback_attempts": {
+          "description": "Attempts made over TCP after HTTP/3 failed before a response (the\nautomatic HTTP/3 policy). Extra attempts inside a request, never\nextra requests.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "units_with_fallback": {
+          "description": "Requests that needed such a fallback.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "units_over_h3": {
+          "description": "Requests whose final attempt ran over HTTP/3.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "protocol_fallback_attempts",
+        "units_with_fallback",
+        "units_over_h3"
+      ]
+    },
+    "GrpcLoadMetrics": {
+      "description": "gRPC calls and streams (native gRPC and gRPC-Web).",
+      "type": "object",
+      "properties": {
+        "status_codes": {
+          "description": "Terminal `grpc-status` of every completed unit (code → count). Sums to\nthe unit ledger's `completed`: a unit completes only with a status and\ncomplete framing.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "integer",
+                "format": "int32"
+              },
+              {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "ok": {
+          "description": "Completed with status 0 (OK).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "non_ok": {
+          "description": "Completed with a non-OK status; equals the ledger's application failures.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "missing_status": {
+          "description": "A response arrived but no terminal status did: the RPC result is\nunknown, so the unit is incomplete (a transport failure or timeout in\nthe ledger) and never a success.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "protocol_fallback_attempts": {
+          "description": "Attempts over TCP after HTTP/3 failed before the call was sent.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status_codes",
+        "ok",
+        "non_ok",
+        "missing_status",
+        "protocol_fallback_attempts"
+      ]
+    },
+    "StreamLoadMetrics": {
+      "description": "Server-streaming gRPC calls and SSE streams.",
+      "type": "object",
+      "properties": {
+        "opened": {
+          "description": "Streams whose response head was accepted (gRPC: HTTP 200; SSE: 2xx).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "messages_received": {
+          "description": "gRPC response messages or SSE events received, over all measured streams.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "with_messages": {
+          "description": "Opened streams that received at least one message or event.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "time_to_first_message": {
+          "description": "Unit start → first message/event, over streams that received one.",
+          "$ref": "#/$defs/LatencySummary"
+        },
+        "ended_by": {
+          "description": "SSE only: how opened streams ended (`peer` = the server ended it,\n`client` = the request's `max_events`, `timeout` = its idle timeout or\nthe total deadline, `abnormal` = a failure).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClosedCount"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "opened",
+        "messages_received",
+        "with_messages",
+        "time_to_first_message"
+      ]
+    },
+    "ClosedCount": {
+      "description": "How many units ended one way.",
+      "type": "object",
+      "properties": {
+        "closed_by": {
+          "$ref": "#/$defs/ClosedBy"
+        },
+        "code": {
+          "description": "WebSocket close code, when one was exchanged.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "closed_by",
+        "count"
+      ]
+    },
+    "ClosedBy": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "peer",
+            "client",
+            "timeout",
+            "not_closed"
+          ]
+        },
+        {
+          "description": "Connection ended without a closing handshake (e.g. WebSocket 1006).",
+          "type": "string",
+          "const": "abnormal"
+        }
+      ]
+    },
+    "WebSocketLoadMetrics": {
+      "description": "WebSocket sessions.",
+      "type": "object",
+      "properties": {
+        "opened": {
+          "description": "Handshake accepted (101, or 200 for extended CONNECT).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "handshake_rejected": {
+          "description": "The server answered the handshake with another status (see the status distribution).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "not_opened": {
+          "description": "No usable handshake answer: DNS, connect, proxy, TLS, an invalid\nhandshake response, a timeout or a cancel before the session opened.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "closed_cleanly": {
+          "description": "Opened sessions that ended without a failure (a close handshake by\neither side, the request's `expect_messages`, or its idle close).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "messages_sent": {
+          "description": "Text and binary messages sent / received (control frames excluded).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "messages_received": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rtt_defined": {
+          "description": "Round-trip times exist only when a request defines `expect_messages`:\nthe i-th scripted data message sent is paired with the i-th data\nmessage received (an echo-style exchange). Otherwise no RTT is claimed.",
+          "type": "boolean"
+        },
+        "rtt_pairs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rtt": {
+          "$ref": "#/$defs/LatencySummary"
+        },
+        "rtt_unpaired_sessions": {
+          "description": "Opened sessions whose messages could not be paired (transcript bound\nreached, or a reply arrived before its message was sent).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "close_codes": {
+          "description": "Opened sessions by who closed and the close code.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClosedCount"
+          }
+        }
+      },
+      "required": [
+        "opened",
+        "handshake_rejected",
+        "not_opened",
+        "closed_cleanly",
+        "messages_sent",
+        "messages_received",
+        "rtt_defined",
+        "rtt_pairs",
+        "rtt",
+        "rtt_unpaired_sessions",
+        "close_codes"
+      ]
+    },
+    "TcpLoadMetrics": {
+      "description": "TCP/TLS framed exchanges.",
+      "type": "object",
+      "properties": {
+        "connected": {
+          "description": "Connections that completed setup (TCP, proxy tunnel, TLS) — one per exchange.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "frames_sent": {
+          "description": "Frames (with a framing preset) or chunks (without one) sent / received.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "frames_received": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "payload_bytes_sent": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "payload_bytes_received": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "partial_frames": {
+          "description": "Exchanges that ended with a partial trailing frame.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "peer_closes": {
+          "description": "Exchanges the peer closed (FIN) before a local stop condition.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expected_frames": {
+          "description": "The request's `expect_frames`, when it has a framing preset.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "expectation_met": {
+          "description": "Completed exchanges that received the expected frames.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expectation_short": {
+          "description": "Completed exchanges that received fewer (counted as application failures).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "connected",
+        "frames_sent",
+        "frames_received",
+        "payload_bytes_sent",
+        "payload_bytes_received",
+        "partial_frames",
+        "peer_closes",
+        "expectation_met",
+        "expectation_short"
+      ]
+    },
+    "DatagramLoadMetrics": {
+      "description": "UDP and DTLS datagram exchanges. Sent and received are separate counts:\nUDP has no acknowledgement, so nothing here infers delivery or loss.",
+      "type": "object",
+      "properties": {
+        "datagrams_sent": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "datagrams_received": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "exchanges_with_response": {
+          "description": "Completed exchanges with at least one datagram received.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "exchanges_silent": {
+          "description": "Completed exchanges with none received in the window: \"no response\nobserved\" — not a failure, not a loss, not a delivery.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "repeated_payloads": {
+          "description": "Received datagrams byte-identical to an earlier one in the same exchange.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "echoed_payloads": {
+          "description": "Received datagrams byte-identical to a datagram sent in the same\nexchange (echo-shaped). The rest are \"other payloads\"; neither says\nwhich datagram, if any, was delivered.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "icmp_unreachable_exchanges": {
+          "description": "Exchanges in which the OS reported ICMP port unreachable.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "time_to_first_datagram": {
+          "description": "First datagram sent → first datagram received, per responding exchange.",
+          "$ref": "#/$defs/LatencySummary"
+        },
+        "dtls_handshakes": {
+          "description": "DTLS exchanges only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandshakeMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "datagrams_sent",
+        "datagrams_received",
+        "exchanges_with_response",
+        "exchanges_silent",
+        "repeated_payloads",
+        "echoed_payloads",
+        "icmp_unreachable_exchanges",
+        "time_to_first_datagram"
+      ]
+    },
+    "HandshakeMetrics": {
+      "description": "A DTLS handshake measured as its own phase.",
+      "type": "object",
+      "properties": {
+        "attempted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timed_out": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "duration": {
+          "description": "Duration of completed handshakes.",
+          "$ref": "#/$defs/LatencySummary"
+        }
+      },
+      "required": [
+        "attempted",
+        "completed",
+        "failed",
+        "timed_out",
+        "duration"
+      ]
+    }
+  }
+}

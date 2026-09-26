@@ -1,0 +1,7805 @@
+{
+ "source": "docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json",
+ "gateway_release": "v0.9.7",
+ "total": 182,
+ "totals": {
+  "verified_test": 74,
+  "verified_live": 97,
+  "blocked": 6,
+  "not_applicable": 2,
+  "verified_check": 1,
+  "partial": 2
+ },
+ "cases": [
+  {
+   "id": "LOCAL-001",
+   "category": "Client preparation and local failures",
+   "title": "Malformed URL",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/src/prepare.rs",
+     "line": 406,
+     "kind": "unit_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-002",
+   "category": "Client preparation and local failures",
+   "title": "Missing variable",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/src/vars.rs",
+     "line": 230,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 188,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-003",
+   "category": "Client preparation and local failures",
+   "title": "Variable recursion",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/src/vars.rs",
+     "line": 239,
+     "kind": "unit_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-004",
+   "category": "Client preparation and local failures",
+   "title": "Missing attachment",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 88,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-005",
+   "category": "Client preparation and local failures",
+   "title": "Unreadable private key",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 232,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-006",
+   "category": "Client preparation and local failures",
+   "title": "Proxy configuration invalid",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 105,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-007",
+   "category": "Client preparation and local failures",
+   "title": "Local DNS NXDOMAIN",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 515,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-008",
+   "category": "Client preparation and local failures",
+   "title": "Client resolver deadline",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 134,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-009",
+   "category": "Client preparation and local failures",
+   "title": "Connection refused",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 120,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-010",
+   "category": "Client preparation and local failures",
+   "title": "Connect deadline",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 156,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-011",
+   "category": "Client preparation and local failures",
+   "title": "Cancel during upload",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 495,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOCAL-012",
+   "category": "Client preparation and local failures",
+   "title": "Local response display cap",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 379,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TLS-001",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Unknown root",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 424,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1186,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 136,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-001": {
+      "profile": "tls",
+      "scenario": "TLS-001",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-002",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Hostname mismatch",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 440,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1187,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 149,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-002": {
+      "profile": "tls",
+      "scenario": "TLS-002",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-003",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Expired peer certificate",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 157,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-003": {
+      "profile": "tls",
+      "scenario": "TLS-003",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "infeasible on Ferrum Edge 0.9.7: the gateway refuses to start with an expired frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> has expired), so no client can observe one from it. Expired-certificate handling is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-004",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Not-yet-valid certificate",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 157,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-004": {
+      "profile": "tls",
+      "scenario": "TLS-004",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "infeasible on Ferrum Edge 0.9.7: the gateway refuses to start with a not-yet-valid frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> is not yet valid). Client-side not-yet-valid classification is covered by anvil-transport tests."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-005",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Missing client certificate",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_tls13_refusal.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_tls13_refusal.rs",
+     "line": 118,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 480,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 484,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 831,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1188,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1189,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1202,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 168,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-005.tcp": {
+      "profile": "tls",
+      "scenario": "TLS-005.tcp",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:TLS-005": {
+      "profile": "tls",
+      "scenario": "TLS-005",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:TLS-005.tls12": {
+      "profile": "tls",
+      "scenario": "TLS-005.tls12",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-006",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Rejected client certificate",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_tls13_refusal.rs",
+     "line": 2,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_tls13_refusal.rs",
+     "line": 137,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 511,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 515,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 521,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1190,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1191,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1192,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 187,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-006.lookalike": {
+      "profile": "tls",
+      "scenario": "TLS-006.lookalike",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:TLS-006.tls12": {
+      "profile": "tls",
+      "scenario": "TLS-006.tls12",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:TLS-006": {
+      "profile": "tls",
+      "scenario": "TLS-006",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-007",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Client certificate key mismatch",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 552,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1193,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 215,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-007": {
+      "profile": "tls",
+      "scenario": "TLS-007",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-008",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Valid frontend mTLS",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 367,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 410,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 812,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1184,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1185,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1201,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 187,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-008.tcp": {
+      "profile": "tls",
+      "scenario": "TLS-008.tcp",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:TLS-008.tls12": {
+      "profile": "tls",
+      "scenario": "TLS-008.tls12",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:TLS-008": {
+      "profile": "tls",
+      "scenario": "TLS-008",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-009",
+   "category": "Frontend TLS and certificate selection",
+   "title": "TLS versus plaintext port",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 571,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1194,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 244,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-009": {
+      "profile": "tls",
+      "scenario": "TLS-009",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-010",
+   "category": "Frontend TLS and certificate selection",
+   "title": "TLS handshake stall",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 254,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-010": {
+      "profile": "tls",
+      "scenario": "TLS-010",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "infeasible against the real gateway: the Ferrum Edge 0.9.7 frontend always answers a ClientHello (its handshake timeout only closes clients that stall). A client-leg stall needs a non-gateway fault fixture; UP-007 covers the stall on the gateway-to-backend leg."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-011",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Unadorned handshake reset",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 266,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-011": {
+      "profile": "tls",
+      "scenario": "TLS-011",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "infeasible against the real gateway: Ferrum Edge 0.9.7 ends every frontend handshake refusal with a TLS alert; a bare reset needs a client-leg fault fixture that would not be the gateway."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-012",
+   "category": "Frontend TLS and certificate selection",
+   "title": "ALPN mismatch",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 482,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-012": {
+      "profile": "tls",
+      "scenario": "TLS-012",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "infeasible against the real gateway: every Ferrum Edge 0.9.7 TLS listener (HTTPS and TCP+TLS share one rustls ServerConfig) offers h2, http/1.1 and acme-tls/1 (src/tls/mod.rs), and every Anvil HTTP-family policy offers h2 and/or http/1.1, so there is never an ALPN gap to observe."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-013",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Custom CA isolation",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 176,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 613,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1196,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-013": {
+      "profile": "tls",
+      "scenario": "TLS-013",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-014",
+   "category": "Frontend TLS and certificate selection",
+   "title": "mTLS pool isolation",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_tls13_refusal.rs",
+     "line": 2,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 632,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1197,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 292,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-014": {
+      "profile": "tls",
+      "scenario": "TLS-014",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-015",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Verification-bypass scope",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 669,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1198,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 276,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-015": {
+      "profile": "tls",
+      "scenario": "TLS-015",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-016",
+   "category": "Frontend TLS and certificate selection",
+   "title": "TLS off versus verification off",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 194,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 708,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1199,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-016": {
+      "profile": "tls",
+      "scenario": "TLS-016",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-017",
+   "category": "Frontend TLS and certificate selection",
+   "title": "TLS through forward proxy",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 218,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-017": {
+      "profile": "tls",
+      "scenario": "TLS-017",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "out of this profile: needs a forward-proxy fixture in front of the gateway; the gateway plays no part in the proxy CONNECT leg."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TLS-018",
+   "category": "Frontend TLS and certificate selection",
+   "title": "Redirect certificate boundary",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 252,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:TLS-018": {
+      "profile": "tls",
+      "scenario": "TLS-018",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "out of this profile: the gateway only relays a backend redirect; the certificate-boundary decision is Anvil's redirect policy, covered by engine tests."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-001",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend DNS failure",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 90,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 405,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-001": {
+      "profile": "core",
+      "scenario": "UP-001",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-002",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend connect refused",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 107,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 406,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2522,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2969,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core",
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "core:UP-002": {
+      "profile": "core",
+      "scenario": "UP-002",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:UP-002-tcp": {
+      "profile": "streams",
+      "scenario": "UP-002-tcp",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-003",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend connect deadline",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 124,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 407,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-003": {
+      "profile": "core",
+      "scenario": "UP-003",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-004",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend untrusted certificate",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2550,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2970,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1024,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1028,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1208,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1209,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams",
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "streams:UP-004-tcps": {
+      "profile": "streams",
+      "scenario": "UP-004-tcps",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:UP-004": {
+      "profile": "tls",
+      "scenario": "UP-004",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:UP-004.expired": {
+      "profile": "tls",
+      "scenario": "UP-004.expired",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-005",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend certificate name mismatch",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1032,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1210,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:UP-005": {
+      "profile": "tls",
+      "scenario": "UP-005",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-006",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend mTLS missing identity",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1067,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1071,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1211,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1212,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:UP-006": {
+      "profile": "tls",
+      "scenario": "UP-006",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:UP-006.tls12": {
+      "profile": "tls",
+      "scenario": "UP-006.tls12",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-007",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend TLS stall",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1075,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1213,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:UP-007": {
+      "profile": "tls",
+      "scenario": "UP-007",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-008",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend HTTP to HTTPS mismatch",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1090,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1117,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1214,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1215,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:UP-008.http-to-tls": {
+      "profile": "tls",
+      "scenario": "UP-008.http-to-tls",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:UP-008": {
+      "profile": "tls",
+      "scenario": "UP-008",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-009",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend upload stall",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 143,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 408,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-009": {
+      "profile": "core",
+      "scenario": "UP-009",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-010",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend first-header stall",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 182,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 409,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1482,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2913,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core",
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "core:UP-010": {
+      "profile": "core",
+      "scenario": "UP-010",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:UP-010-grpc": {
+      "profile": "streams",
+      "scenario": "UP-010-grpc",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-011",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend body idle stall",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 202,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 410,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 321,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-011": {
+      "profile": "core",
+      "scenario": "UP-011",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-012",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend mid-body reset",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 217,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 411,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 346,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-012": {
+      "profile": "core",
+      "scenario": "UP-012",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-013",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend short Content-Length body",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 232,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 412,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 333,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-013": {
+      "profile": "core",
+      "scenario": "UP-013",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-014",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend oversized response",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 248,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 413,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-014": {
+      "profile": "core",
+      "scenario": "UP-014",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-015",
+   "category": "Gateway-to-upstream failures",
+   "title": "Gateway retained-buffer exhaustion",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 128,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 419,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055355Z-admission"
+    ],
+    "variants": {
+     "admission:UP-015": {
+      "profile": "admission",
+      "scenario": "UP-015",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-016",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend pool cancellation",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1136,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1216,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:UP-016": {
+      "profile": "tls",
+      "scenario": "UP-016",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-017",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend ephemeral-port exhaustion",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 4,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 138,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 146,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 180,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 183,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": "Live reproduction blocked: Ferrum Edge 0.9.5 assigns port_exhaustion only to EADDRNOTAVAIL at connect (src/retry.rs) and the release binary has no lab dial-admission hook, while draining the lab host's real ephemeral ports would be unsafe. Covered instead by the public-signal contract test up_017_port_exhaustion_signal_is_coarse_and_hook_free (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the catalog's shared 502 connection_failure 'Backend unavailable' signal keeps the connection-failure family ambiguous, names port exhaustion only as an unknown-confidence candidate, never states port exhaustion or host resources at likely or above, and makes no TLS/DNS claim. It is neither a live nor a hook-based test."
+  },
+  {
+   "id": "UP-018",
+   "category": "Gateway-to-upstream failures",
+   "title": "Backend connection ceiling",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 10,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 12,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 218,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 224,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 235,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 241,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 243,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 247,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 326,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 421,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055355Z-admission"
+    ],
+    "variants": {
+     "admission:UP-018": {
+      "profile": "admission",
+      "scenario": "UP-018",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "admission:UP-018-H2": {
+      "profile": "admission",
+      "scenario": "UP-018-H2",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "Not reachable with a single-destination lab on Ferrum Edge 0.9.7: the direct-H2 pool multiplexes, so a maxConnections=1 ceiling is never re-dialled. Observed live on 0.9.5: with SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s behind the first on the one connection (200, one backend connection), and a backend that GOAWAYs each connection made the pool reuse the draining connection (502 connection_failure, operator error_class connection_pool_error = pool cancellation, not the ceiling). The pooled-lane public signal (502 connection_failure \"Backend unavailable\") is covered by the contract test up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family (crates/anvil-diagnostics/tests/upstream_setup_contract.rs)."
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "UP-019",
+   "category": "Gateway-to-upstream failures",
+   "title": "Trust withdrawn",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 7,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 190,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 197,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": "Live reproduction blocked: upstream.trust_withdrawn is mesh-only in 0.9.5 and 0.9.7 (an accepted gateway trust publication withdraws an authority while an HBONE / sidecar-mTLS transport is established or reused). The mesh lab profile runs HBONE with SPIFFE identities and reproduces the unauthenticated-peer refusal, but it has no control plane publishing trust, so no withdrawal on a live tunnel is reproduced. Covered instead by the public-signal contract test up_019_trust_withdrawn_signal_makes_no_certificate_claim (crates/anvil-diagnostics/tests/upstream_setup_contract.rs): the shared 502 connection_failure signal stays ambiguous, lists trust withdrawal only as an unknown-confidence candidate, and yields no confirmed or likely certificate/TLS claim and no blame on the caller's certificate."
+  },
+  {
+   "id": "UP-020",
+   "category": "Gateway-to-upstream failures",
+   "title": "Generic post-dispatch failure",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 261,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 414,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:UP-020": {
+      "profile": "core",
+      "scenario": "UP-020",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-001",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Open circuit breaker",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 275,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 415,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 737,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 964,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core",
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "core:GW-001": {
+      "profile": "core",
+      "scenario": "GW-001",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-001-HALFOPEN": {
+      "profile": "policy",
+      "scenario": "GW-001-HALFOPEN",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-002",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Overload refusal",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 202,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/admission.rs",
+     "line": 420,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055355Z-admission"
+    ],
+    "variants": {
+     "admission:GW-002": {
+      "profile": "admission",
+      "scenario": "GW-002",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-003",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Drain refusal",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/drain.rs",
+     "line": 112,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/drain.rs",
+     "line": 271,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055410Z-drain"
+    ],
+    "variants": {
+     "drain:GW-003": {
+      "profile": "drain",
+      "scenario": "GW-003",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-004",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Adaptive concurrency limit",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 526,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 958,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-004": {
+      "profile": "policy",
+      "scenario": "GW-004",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-005",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Stale DP fence",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/cpdp.rs",
+     "line": 551,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/cpdp.rs",
+     "line": 552,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/cpdp.rs",
+     "line": 553,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/cpdp.rs",
+     "line": 554,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055355Z-admission",
+     "results/lab/20260926T055545Z-cpdp"
+    ],
+    "variants": {
+     "admission:GW-005": {
+      "profile": "admission",
+      "scenario": "GW-005",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "Needs a real CP + DP pair (a file-mode gateway never installs the DP freshness fence, src/modes/data_plane.rs:44); it is owned by the cpdp profile (ports 187xx/197xx), not this file-mode admission instance."
+       }
+      }
+     },
+     "cpdp:GW-005-orphan": {
+      "profile": "cpdp",
+      "scenario": "GW-005-orphan",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "cpdp:GW-005-lookalike": {
+      "profile": "cpdp",
+      "scenario": "GW-005-lookalike",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "cpdp:GW-005-partition": {
+      "profile": "cpdp",
+      "scenario": "GW-005-partition",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "cpdp:GW-005": {
+      "profile": "cpdp",
+      "scenario": "GW-005",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-006",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "No matched route",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 298,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 416,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:GW-006": {
+      "profile": "core",
+      "scenario": "GW-006",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-007",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Method not allowed",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 318,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 417,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:GW-007": {
+      "profile": "core",
+      "scenario": "GW-007",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-008",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Request size ceiling",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 331,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 418,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:GW-008": {
+      "profile": "core",
+      "scenario": "GW-008",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-009",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Response transformer ceiling",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 469,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 957,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-009": {
+      "profile": "policy",
+      "scenario": "GW-009",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-010",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "WAF block",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 140,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 174,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 197,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 223,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 943,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 944,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 945,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 947,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-010": {
+      "profile": "policy",
+      "scenario": "GW-010",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-010-BOT": {
+      "profile": "policy",
+      "scenario": "GW-010-BOT",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-010-BODY": {
+      "profile": "policy",
+      "scenario": "GW-010-BODY",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-010-BOT.allow-edge": {
+      "profile": "policy",
+      "scenario": "GW-010-BOT.allow-edge",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-011",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "ACL denial",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1163,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1751,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:GW-011": {
+      "profile": "auth",
+      "scenario": "GW-011",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-012",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "OPA explicit denial",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 246,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 951,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-012": {
+      "profile": "policy",
+      "scenario": "GW-012",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-013",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "OPA unavailable",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 311,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 340,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 370,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 952,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 953,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 954,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-013-REFUSED": {
+      "profile": "policy",
+      "scenario": "GW-013-REFUSED",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-013-TIMEOUT": {
+      "profile": "policy",
+      "scenario": "GW-013-TIMEOUT",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-013-ERROR": {
+      "profile": "policy",
+      "scenario": "GW-013-ERROR",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-014",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "IP or geo restriction",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 391,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 955,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-014-GEO": {
+      "profile": "policy",
+      "scenario": "GW-014-GEO",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "geo_restriction needs a readable MaxMind country .mmdb: `ferrum-edge validate` rejects a missing db_path ('not accessible before open'), no database is vendored in the repo and the lab may not download one, so neither the country-deny nor the database-unavailable path is reachable with Ferrum Edge 0.9.7 file mode here."
+       }
+      }
+     },
+     "policy:GW-014": {
+      "profile": "policy",
+      "scenario": "GW-014",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-015",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "OpenAPI validation rejection",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 424,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 956,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-015": {
+      "profile": "policy",
+      "scenario": "GW-015",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-016",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Application 403 lookalike",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 121,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 349,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 419,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:GW-016": {
+      "profile": "core",
+      "scenario": "GW-016",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-017",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Application 5xx",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 364,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 420,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:GW-017": {
+      "profile": "core",
+      "scenario": "GW-017",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-018",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Degraded but successful routing",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 138,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 376,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/core.rs",
+     "line": 421,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055300Z-core"
+    ],
+    "variants": {
+     "core:GW-018": {
+      "profile": "core",
+      "scenario": "GW-018",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-019",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "Header mutation after error",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 788,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 820,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 832,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 878,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 910,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 965,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 966,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 967,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 968,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 969,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-019-REJECT-UNKNOWN": {
+      "profile": "policy",
+      "scenario": "GW-019-REJECT-UNKNOWN",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-019-REJECT-KNOWN": {
+      "profile": "policy",
+      "scenario": "GW-019-REJECT-KNOWN",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-019-FORGED": {
+      "profile": "policy",
+      "scenario": "GW-019-FORGED",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-019-OK": {
+      "profile": "policy",
+      "scenario": "GW-019-OK",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-019-ERROR": {
+      "profile": "policy",
+      "scenario": "GW-019-ERROR",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "GW-020",
+   "category": "Gateway admission, policy and response ownership",
+   "title": "AI policy or provider failure",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 599,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 631,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 674,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 700,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 960,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 961,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 962,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/policy.rs",
+     "line": 963,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055315Z-policy"
+    ],
+    "variants": {
+     "policy:GW-020-GUARD": {
+      "profile": "policy",
+      "scenario": "GW-020-GUARD",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-020-CONTENT": {
+      "profile": "policy",
+      "scenario": "GW-020-CONTENT",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-020-PROVIDER": {
+      "profile": "policy",
+      "scenario": "GW-020-PROVIDER",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "policy:GW-020-BUDGET": {
+      "profile": "policy",
+      "scenario": "GW-020-BUDGET",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-001",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "API key header name",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 201,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 319,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1722,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-001": {
+      "profile": "auth",
+      "scenario": "AUTH-001",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-002",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "API key query redaction",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/src/redact.rs",
+     "line": 205,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 224,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 350,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1723,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-002": {
+      "profile": "auth",
+      "scenario": "AUTH-002",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-003",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "Basic invalid credentials",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 380,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1724,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-003": {
+      "profile": "auth",
+      "scenario": "AUTH-003",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-004",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "JWT expired",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 407,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1725,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-004": {
+      "profile": "auth",
+      "scenario": "AUTH-004",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-005",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "JWT future nbf",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 432,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1726,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-005": {
+      "profile": "auth",
+      "scenario": "AUTH-005",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-006",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "JWT wrong signature",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 450,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1727,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-006": {
+      "profile": "auth",
+      "scenario": "AUTH-006",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-007",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "JWT wrong consumer claim",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 466,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1728,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-007": {
+      "profile": "auth",
+      "scenario": "AUTH-007",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-008",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "JWKS unknown key",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 482,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1729,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-008": {
+      "profile": "auth",
+      "scenario": "AUTH-008",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-009",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "JWKS issuer or audience mismatch",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 500,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 539,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1730,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1731,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-009.iss-array": {
+      "profile": "auth",
+      "scenario": "AUTH-009.iss-array",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "auth:AUTH-009": {
+      "profile": "auth",
+      "scenario": "AUTH-009",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-010",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "JWT algorithm confusion",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 574,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1732,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-010": {
+      "profile": "auth",
+      "scenario": "AUTH-010",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-011",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "OAuth PKCE round trip",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 107,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-011": {
+      "profile": "auth",
+      "scenario": "AUTH-011",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests (tests/api_oauth.rs), not a live-gateway scenario"
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-012",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "OAuth state mismatch",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-auth/src/oauth.rs",
+     "line": 535,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 171,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-012": {
+      "profile": "auth",
+      "scenario": "AUTH-012",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests (tests/api_oauth.rs), not a live-gateway scenario"
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-013",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "OAuth redirect spoof",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 190,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-013": {
+      "profile": "auth",
+      "scenario": "AUTH-013",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests (tests/api_oauth.rs), not a live-gateway scenario"
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-014",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "OAuth refresh race",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-auth/src/oauth.rs",
+     "line": 453,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 289,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-014": {
+      "profile": "auth",
+      "scenario": "AUTH-014",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests (tests/api_oauth.rs), not a live-gateway scenario"
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-015",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "OAuth issuer outage",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-auth/src/oauth.rs",
+     "line": 511,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-identity/tests/api_oauth.rs",
+     "line": 335,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 685,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1734,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-015": {
+      "profile": "auth",
+      "scenario": "AUTH-015",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-016",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "OAuth client credentials",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 705,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1735,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-016": {
+      "profile": "auth",
+      "scenario": "AUTH-016",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-017",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "OIDC browser session",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 88,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 115,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 125,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 141,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1632,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1701,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1759,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1761,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-017": {
+      "profile": "auth",
+      "scenario": "AUTH-017",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "auth:AUTH-017.lookalike": {
+      "profile": "auth",
+      "scenario": "AUTH-017.lookalike",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-018",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "HMAC v2 happy path",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-auth/tests/hmac_vectors.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 838,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 856,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1739,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1740,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-018": {
+      "profile": "auth",
+      "scenario": "AUTH-018",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "auth:AUTH-018.skew": {
+      "profile": "auth",
+      "scenario": "AUTH-018.skew",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-019",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "HMAC body mutation",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-auth/tests/hmac_vectors.rs",
+     "line": 117,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 870,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1741,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-019": {
+      "profile": "auth",
+      "scenario": "AUTH-019",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-020",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "HMAC replay",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-auth/tests/hmac_vectors.rs",
+     "line": 108,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 888,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1742,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-020": {
+      "profile": "auth",
+      "scenario": "AUTH-020",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-021",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "HMAC raw path/query",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 917,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1743,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-021": {
+      "profile": "auth",
+      "scenario": "AUTH-021",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-022",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "HMAC duplicate digest fields",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 935,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1744,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-022": {
+      "profile": "auth",
+      "scenario": "AUTH-022",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-023",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "HMAC legacy profile",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 966,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1745,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-023": {
+      "profile": "auth",
+      "scenario": "AUTH-023",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-024",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "DPoP binding",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 996,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1746,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-024": {
+      "profile": "auth",
+      "scenario": "AUTH-024",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-025",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "DPoP replay or nonce",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1043,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1747,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-025.nonce": {
+      "profile": "auth",
+      "scenario": "AUTH-025.nonce",
+      "passes": {
+       "trusted": {
+        "status": "skipped",
+        "skip_reason": "infeasible on Ferrum Edge 0.9.7: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit \u00a75.4, re-checked in the 0.9.7 source); AUTH-025 covers the replay half live"
+       }
+      }
+     },
+     "auth:AUTH-025": {
+      "profile": "auth",
+      "scenario": "AUTH-025",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-026",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "Certificate-bound token",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 743,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1200,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "tls:AUTH-026": {
+      "profile": "tls",
+      "scenario": "AUTH-026",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-027",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "LDAP wrong credentials",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1081,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1748,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-027": {
+      "profile": "auth",
+      "scenario": "AUTH-027",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-028",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "LDAP unavailable",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1104,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1749,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-028": {
+      "profile": "auth",
+      "scenario": "AUTH-028",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-029",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "SOAP UsernameToken",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1317,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1380,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1407,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1754,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1755,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1756,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_wsse.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_wsse.rs",
+     "line": 87,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-029.text": {
+      "profile": "auth",
+      "scenario": "AUTH-029.text",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "auth:AUTH-029.expired": {
+      "profile": "auth",
+      "scenario": "AUTH-029.expired",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "auth:AUTH-029": {
+      "profile": "auth",
+      "scenario": "AUTH-029",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-030",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "SOAP XML signature",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1436,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1757,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-030": {
+      "profile": "auth",
+      "scenario": "AUTH-030",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-031",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "SOAP SAML assertion",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1500,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1758,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-031": {
+      "profile": "auth",
+      "scenario": "AUTH-031",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "AUTH-032",
+   "category": "Authentication generation, binding and identity dependencies",
+   "title": "Multi-auth identity selection",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1126,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1750,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055453Z-auth"
+    ],
+    "variants": {
+     "auth:AUTH-032": {
+      "profile": "auth",
+      "scenario": "AUTH-032",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-001",
+   "category": "Protocol completion and semantics",
+   "title": "HTTP1 keepalive reuse",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 428,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2898,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 94,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-001": {
+      "profile": "streams",
+      "scenario": "PROTO-001",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-002",
+   "category": "Protocol completion and semantics",
+   "title": "HTTP2 trailers",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 467,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2899,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 405,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-002": {
+      "profile": "streams",
+      "scenario": "PROTO-002",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-003",
+   "category": "Protocol completion and semantics",
+   "title": "HTTP2 stream reset",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 419,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "PROTO-004",
+   "category": "Protocol completion and semantics",
+   "title": "HTTP2 GOAWAY",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 320,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 324,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet."
+  },
+  {
+   "id": "PROTO-005",
+   "category": "Protocol completion and semantics",
+   "title": "h2c mismatch",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 538,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2900,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 438,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-transport/tests/http_evidence.rs",
+     "line": 462,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-005": {
+      "profile": "streams",
+      "scenario": "PROTO-005",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-006",
+   "category": "Protocol completion and semantics",
+   "title": "H3 forced success",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 2,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 145,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 603,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2901,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-006": {
+      "profile": "streams",
+      "scenario": "PROTO-006",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-007",
+   "category": "Protocol completion and semantics",
+   "title": "H3 UDP unavailable",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 174,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 633,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2902,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-007": {
+      "profile": "streams",
+      "scenario": "PROTO-007",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-008",
+   "category": "Protocol completion and semantics",
+   "title": "H3 automatic fallback",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 198,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 661,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2903,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-008": {
+      "profile": "streams",
+      "scenario": "PROTO-008",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-009",
+   "category": "Protocol completion and semantics",
+   "title": "WS normal close",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 243,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 720,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 753,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2904,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2905,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-009-client-close": {
+      "profile": "streams",
+      "scenario": "PROTO-009-client-close",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-009": {
+      "profile": "streams",
+      "scenario": "PROTO-009",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-010",
+   "category": "Protocol completion and semantics",
+   "title": "WS abnormal close",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 274,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 777,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2906,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-010": {
+      "profile": "streams",
+      "scenario": "PROTO-010",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-011",
+   "category": "Protocol completion and semantics",
+   "title": "WS oversized message",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 301,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "PROTO-012",
+   "category": "Protocol completion and semantics",
+   "title": "WS H2 extended CONNECT",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 348,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 865,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2907,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-012": {
+      "profile": "streams",
+      "scenario": "PROTO-012",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-013",
+   "category": "Protocol completion and semantics",
+   "title": "WS H3 extended CONNECT",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 394,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 892,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 943,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2944,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2945,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-013-blocked": {
+      "profile": "streams",
+      "scenario": "PROTO-013-blocked",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-013": {
+      "profile": "streams",
+      "scenario": "PROTO-013",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-014",
+   "category": "Protocol completion and semantics",
+   "title": "gRPC HTTP200 error",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 669,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 887,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1267,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1300,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1620,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1657,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2908,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2909,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2915,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2917,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-014": {
+      "profile": "streams",
+      "scenario": "PROTO-014",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-014-h3": {
+      "profile": "streams",
+      "scenario": "PROTO-014-h3",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-014-h3-down": {
+      "profile": "streams",
+      "scenario": "PROTO-014-h3-down",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-014-down": {
+      "profile": "streams",
+      "scenario": "PROTO-014-down",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-015",
+   "category": "Protocol completion and semantics",
+   "title": "gRPC missing terminal status",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 690,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 918,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1340,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2910,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-015": {
+      "profile": "streams",
+      "scenario": "PROTO-015",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-016",
+   "category": "Protocol completion and semantics",
+   "title": "gRPC four modes",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 706,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 754,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 774,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 798,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 852,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1372,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1421,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1545,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1732,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 1775,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2911,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2912,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-016-h3-fallback": {
+      "profile": "streams",
+      "scenario": "PROTO-016-h3-fallback",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-016-deadline": {
+      "profile": "streams",
+      "scenario": "PROTO-016-deadline",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-016-h3": {
+      "profile": "streams",
+      "scenario": "PROTO-016-h3",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-016": {
+      "profile": "streams",
+      "scenario": "PROTO-016",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-016-h3-blocked": {
+      "profile": "streams",
+      "scenario": "PROTO-016-h3-blocked",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-017",
+   "category": "Protocol completion and semantics",
+   "title": "gRPC reflection denied",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 820,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "PROTO-018",
+   "category": "Protocol completion and semantics",
+   "title": "SSE cancellation",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/h3_sse_masque.rs",
+     "line": 115,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1275,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 395,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 442,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 462,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 532,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 586,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 1207,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 1208,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 1209,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 1212,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 1216,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055631Z-h3x",
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "h3x:PROTO-018-h3-blocked": {
+      "profile": "h3x",
+      "scenario": "PROTO-018-h3-blocked",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "h3x:PROTO-018-h3-reconnect": {
+      "profile": "h3x",
+      "scenario": "PROTO-018-h3-reconnect",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "h3x:PROTO-018-h3-idle": {
+      "profile": "h3x",
+      "scenario": "PROTO-018-h3-idle",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "h3x:PROTO-018-h3": {
+      "profile": "h3x",
+      "scenario": "PROTO-018-h3",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "h3x:PROTO-018-h3-cancel": {
+      "profile": "h3x",
+      "scenario": "PROTO-018-h3-cancel",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-018-idle": {
+      "profile": "streams",
+      "scenario": "PROTO-018-idle",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-018": {
+      "profile": "streams",
+      "scenario": "PROTO-018",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-019",
+   "category": "Protocol completion and semantics",
+   "title": "TCP half-close",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1332,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2448,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2480,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2498,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2966,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2967,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2968,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-019-tls": {
+      "profile": "streams",
+      "scenario": "PROTO-019-tls",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-019": {
+      "profile": "streams",
+      "scenario": "PROTO-019",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-019-echo": {
+      "profile": "streams",
+      "scenario": "PROTO-019-echo",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-020",
+   "category": "Protocol completion and semantics",
+   "title": "UDP silent peer",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1462,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2587,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2971,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-transport/tests/sessions_streams.rs",
+     "line": 164,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-020": {
+      "profile": "streams",
+      "scenario": "PROTO-020",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-021",
+   "category": "Protocol completion and semantics",
+   "title": "UDP loss/reorder",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1485,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2621,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2972,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:PROTO-021": {
+      "profile": "streams",
+      "scenario": "PROTO-021",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-022",
+   "category": "Protocol completion and semantics",
+   "title": "DTLS handshake/mTLS",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_dtls_close.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_dtls_close.rs",
+     "line": 51,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_dtls_close.rs",
+     "line": 56,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/lab_dtls_close.rs",
+     "line": 77,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1575,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1596,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1621,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2648,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2677,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2973,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2974,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 858,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams",
+     "results/lab/20260926T055432Z-tls"
+    ],
+    "variants": {
+     "streams:PROTO-022": {
+      "profile": "streams",
+      "scenario": "PROTO-022",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:PROTO-022-wrong-root": {
+      "profile": "streams",
+      "scenario": "PROTO-022-wrong-root",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:PROTO-022.rogue": {
+      "profile": "tls",
+      "scenario": "PROTO-022.rogue",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:PROTO-022": {
+      "profile": "tls",
+      "scenario": "PROTO-022",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:PROTO-022.root": {
+      "profile": "tls",
+      "scenario": "PROTO-022.root",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "tls:PROTO-022.nocert": {
+      "profile": "tls",
+      "scenario": "PROTO-022.nocert",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "PROTO-023",
+   "category": "Protocol completion and semantics",
+   "title": "SOAP fault HTTP200",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 174,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "PROTO-024",
+   "category": "Protocol completion and semantics",
+   "title": "GraphQL errors HTTP200",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 174,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "PROTO-025",
+   "category": "Protocol completion and semantics",
+   "title": "Compressed/binary body",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 250,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-001",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Forged marker from ordinary API",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 64,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-002",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Stripped marker",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 284,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-003",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Unknown future token",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 108,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-004",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Conflicting duplicate headers",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 96,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-005",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Coarse-equivalent causes",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 77,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-006",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "403 indistinguishable origins",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 121,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-007",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Post-header failure",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 151,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/h3_sse_masque.rs",
+     "line": 134,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 494,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/h3x.rs",
+     "line": 1210,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2402,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2943,
+     "kind": "lab"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055631Z-h3x",
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "h3x:TRUST-007-sse-h3": {
+      "profile": "h3x",
+      "scenario": "TRUST-007-sse-h3",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:TRUST-007-sse": {
+      "profile": "streams",
+      "scenario": "TRUST-007-sse",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "TRUST-008",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Multi-attempt provenance",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
+     "line": 304,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "TRUST-009",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Cross-tenant lookup",
+   "status": "blocked",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md; proposed upstream as ferrum-edge/ferrum-edge#5767); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
+  },
+  {
+   "id": "TRUST-010",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Diagnostic retention expired",
+   "status": "blocked",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "Depends on G01 detail retention; not available in any gateway release."
+  },
+  {
+   "id": "TRUST-011",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Gateway detail spoofing",
+   "status": "blocked",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass)."
+  },
+  {
+   "id": "TRUST-012",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Uncertain log correlation",
+   "status": "not_applicable",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."
+  },
+  {
+   "id": "TRUST-013",
+   "category": "Diagnostic trust and uncertainty",
+   "title": "Response prompt injection",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 163,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-001",
+   "category": "Persistence, import, settings and protection",
+   "title": "Workspace round trip",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/roundtrip.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-app/tests/roundtrip.rs",
+     "line": 99,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-import/tests/postman.rs",
+     "line": 35,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 145,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-002",
+   "category": "Persistence, import, settings and protection",
+   "title": "Whole-app round trip",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/roundtrip.rs",
+     "line": 25,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-003",
+   "category": "Persistence, import, settings and protection",
+   "title": "Encrypted secret transfer",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 170,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-004",
+   "category": "Persistence, import, settings and protection",
+   "title": "Wrong export password",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 187,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-005",
+   "category": "Persistence, import, settings and protection",
+   "title": "Corrupt/interrupted import",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 195,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-006",
+   "category": "Persistence, import, settings and protection",
+   "title": "ID merge collisions",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 344,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-007",
+   "category": "Persistence, import, settings and protection",
+   "title": "Archive traversal/bomb",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 229,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-008",
+   "category": "Persistence, import, settings and protection",
+   "title": "Untrusted import auto-run",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 248,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-portability/tests/bundles.rs",
+     "line": 303,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-009",
+   "category": "Persistence, import, settings and protection",
+   "title": "External spec ref",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 163,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-010",
+   "category": "Persistence, import, settings and protection",
+   "title": "OpenAPI blank/sample mode",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 268,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-011",
+   "category": "Persistence, import, settings and protection",
+   "title": "OpenAPI dialect handling",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 15,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-import/tests/openapi.rs",
+     "line": 26,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-012",
+   "category": "Persistence, import, settings and protection",
+   "title": "OpenAPI reimport",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/specs_load.rs",
+     "line": 96,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-import/tests/reimport.rs",
+     "line": 62,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-013",
+   "category": "Persistence, import, settings and protection",
+   "title": "XML entity expansion",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/src/lint.rs",
+     "line": 87,
+     "kind": "unit_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-014",
+   "category": "Persistence, import, settings and protection",
+   "title": "HTML response execution",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "renderer_test"
+   ],
+   "references": [
+    {
+     "path": "apps/desktop/src/security.test.tsx",
+     "line": 1,
+     "kind": "renderer_test"
+    },
+    {
+     "path": "apps/desktop/src/security.test.tsx",
+     "line": 66,
+     "kind": "renderer_test"
+    },
+    {
+     "path": "apps/desktop/src/security.test.tsx",
+     "line": 78,
+     "kind": "renderer_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-015",
+   "category": "Persistence, import, settings and protection",
+   "title": "Lock backend enforcement",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/roundtrip.rs",
+     "line": 123,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-storage/tests/store_security.rs",
+     "line": 61,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-016",
+   "category": "Persistence, import, settings and protection",
+   "title": "OS lock active load",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 774,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 778,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-017",
+   "category": "Persistence, import, settings and protection",
+   "title": "Lost vault key recovery",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-storage/src/vault.rs",
+     "line": 272,
+     "kind": "unit_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-018",
+   "category": "Persistence, import, settings and protection",
+   "title": "Social identity versus vault",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/identity.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-app/tests/identity.rs",
+     "line": 99,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-019",
+   "category": "Persistence, import, settings and protection",
+   "title": "Provider outage/offline start",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/identity.rs",
+     "line": 133,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "DATA-020",
+   "category": "Persistence, import, settings and protection",
+   "title": "Redaction across artifacts",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/src/redact.rs",
+     "line": 215,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/engine_scenarios.rs",
+     "line": 224,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-001",
+   "category": "Load correctness and report durability",
+   "title": "Fixed arrival scheduling",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 113,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-002",
+   "category": "Load correctness and report durability",
+   "title": "Closed virtual users",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 142,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-003",
+   "category": "Load correctness and report durability",
+   "title": "Worker histogram merge",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/src/metrics.rs",
+     "line": 1095,
+     "kind": "unit_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-004",
+   "category": "Load correctness and report durability",
+   "title": "Timeout censoring",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/src/metrics.rs",
+     "line": 1160,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 162,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-005",
+   "category": "Load correctness and report durability",
+   "title": "Dynamic unique auth",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 194,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-006",
+   "category": "Load correctness and report durability",
+   "title": "Token refresh under load",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 247,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-007",
+   "category": "Load correctness and report durability",
+   "title": "Generator saturation",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/src/report.rs",
+     "line": 882,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 289,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-008",
+   "category": "Load correctness and report durability",
+   "title": "Request semantic parity",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 307,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-009",
+   "category": "Load correctness and report durability",
+   "title": "Cancel and worker crash",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 406,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 435,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 463,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-010",
+   "category": "Load correctness and report durability",
+   "title": "Bounded error sampling",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/src/metrics.rs",
+     "line": 1192,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 511,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-011",
+   "category": "Load correctness and report durability",
+   "title": "Report export/reimport",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/src/html.rs",
+     "line": 790,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-load/src/report.rs",
+     "line": 901,
+     "kind": "unit_test"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_scenarios.rs",
+     "line": 537,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "LOAD-012",
+   "category": "Load correctness and report durability",
+   "title": "JMeter parity gate",
+   "status": "not_applicable",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md."
+  },
+  {
+   "id": "LOAD-013",
+   "category": "Load correctness and report durability",
+   "title": "Datagram accounting",
+   "status": "verified_live",
+   "evidence_kinds": [
+    "integration_test",
+    "lab",
+    "renderer_test"
+   ],
+   "references": [
+    {
+     "path": "apps/desktop/src/LoadView.test.tsx",
+     "line": 1,
+     "kind": "renderer_test"
+    },
+    {
+     "path": "crates/anvil-app/tests/specs_load.rs",
+     "line": 178,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-app/tests/specs_load.rs",
+     "line": 209,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-cli/tests/cli_load.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-cli/tests/cli_load.rs",
+     "line": 116,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2753,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2803,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2861,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2975,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2976,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2977,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_protocols.rs",
+     "line": 1,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": {
+    "runs": [
+     "results/lab/20260926T055513Z-streams"
+    ],
+    "variants": {
+     "streams:LOAD-013-grpc": {
+      "profile": "streams",
+      "scenario": "LOAD-013-grpc",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:LOAD-013-udp": {
+      "profile": "streams",
+      "scenario": "LOAD-013-udp",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:LOAD-013-ws": {
+      "profile": "streams",
+      "scenario": "LOAD-013-ws",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
+   "note": null
+  },
+  {
+   "id": "LOAD-014",
+   "category": "Load correctness and report durability",
+   "title": "Warmup and run comparison",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "unit_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-load/src/compare.rs",
+     "line": 316,
+     "kind": "unit_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "REL-001",
+   "category": "Installer, updater and website release",
+   "title": "Clean native installs",
+   "status": "blocked",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. Owner steps: ferrum-edge/ferrum-anvil#2."
+  },
+  {
+   "id": "REL-002",
+   "category": "Installer, updater and website release",
+   "title": "Production driver absence",
+   "status": "verified_check",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "2026-09-25, macOS arm64, commit cf3a61c: `npx tauri build --ci --bundles app,dmg` and `cargo build --release --locked -p anvil-cli`, then `scripts/release-check.sh --runtime-probe --probe-seconds 15` over the .app, the .dmg, the raw anvil-desktop binary and the anvil CLI \u2192 pass (graph: no tauri-plugin-wdio-webdriver / e2e feature; 0 of 11 hook strings; runtime probe: no WebDriver listener on TAURI_WEBDRIVER_PORT, no env-driven profile unlock). Negative control: the e2e debug build fails with all 11 strings. The release workflow runs the same check on every installer and archive."
+  },
+  {
+   "id": "REL-003",
+   "category": "Installer, updater and website release",
+   "title": "Signed update integrity",
+   "status": "blocked",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build. Owner steps: ferrum-edge/ferrum-anvil#2."
+  },
+  {
+   "id": "REL-004",
+   "category": "Installer, updater and website release",
+   "title": "Update/migration rollback",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-storage/tests/store_security.rs",
+     "line": 93,
+     "kind": "integration_test"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "REL-005",
+   "category": "Installer, updater and website release",
+   "title": "Offline no-account smoke",
+   "status": "verified_test",
+   "evidence_kinds": [
+    "native_e2e"
+   ],
+   "references": [
+    {
+     "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
+     "line": 1,
+     "kind": "native_e2e"
+    },
+    {
+     "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
+     "line": 100,
+     "kind": "native_e2e"
+    },
+    {
+     "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
+     "line": 208,
+     "kind": "native_e2e"
+    }
+   ],
+   "lab": null,
+   "note": null
+  },
+  {
+   "id": "REL-006",
+   "category": "Installer, updater and website release",
+   "title": "Download manifest match",
+   "status": "blocked",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
+  },
+  {
+   "id": "REL-007",
+   "category": "Installer, updater and website release",
+   "title": "Website navigation",
+   "status": "partial",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "Staged in draft PR ferrum-edge/ferrumedge#54: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests pass; link checker OK incl. external). Partial because it must not be published before an Anvil release."
+  },
+  {
+   "id": "REL-008",
+   "category": "Installer, updater and website release",
+   "title": "Website feature truth",
+   "status": "partial",
+   "evidence_kinds": [],
+   "references": [],
+   "lab": null,
+   "note": "Staged in draft PR ferrum-edge/ferrumedge#54: copy limited to built and tested capabilities with limitations, real E2E screenshots, and a test that fails on 'available now', Anvil release/asset links or a missing pre-release notice. Publication is gated on release evidence (signed artifacts)."
+  }
+ ]
+}

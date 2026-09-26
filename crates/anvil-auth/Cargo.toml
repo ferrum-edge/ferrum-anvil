@@ -1,0 +1,38 @@
+[package]
+name = "anvil-auth"
+description = "Credential generation applied after final request serialization: API key, Basic, Bearer, JWT, OAuth2, Ferrum HMAC v2, DPoP, WS-Security UsernameToken"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anvil-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+hmac.workspace = true
+hex.workspace = true
+rand.workspace = true
+chrono.workspace = true
+httpdate.workspace = true
+jsonwebtoken.workspace = true
+p256.workspace = true
+zeroize.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+uuid.workspace = true
+
+roxmltree.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

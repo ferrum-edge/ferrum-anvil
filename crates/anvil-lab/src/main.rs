@@ -1,0 +1,127 @@
+//! `anvil-lab` — run failure-matrix scenarios against the real, pinned
+//! Ferrum Edge release binary and controllable fixtures.
+//!
+//! ```text
+//! lab/scripts/fetch-gateway.sh            # download + verify the pinned binary
+//! cargo run -p anvil-lab -- run core      # start fixtures + gateway, run scenarios, stop
+//! cargo run -p anvil-lab -- run core --scenario UP-002
+//! cargo run -p anvil-lab -- --release v0.9.5 run all   # an earlier supported release
+//! ```
+//! The release defaults to `lab/gateway/RELEASE.lock`; `--release` (or
+//! `$ANVIL_LAB_RELEASE`) selects `lab/gateway/releases/<release>.lock`.
+//! Results: `results/lab/<timestamp>-<profile>/{summary.json, <ID>.json}`.
+
+mod admission;
+mod auth;
+mod core;
+mod cpdp;
+mod drain;
+mod early;
+mod fixtures;
+mod fixtures_admission_mesh;
+mod fixtures_auth;
+mod fixtures_auth_soap;
+mod fixtures_cpdp;
+mod fixtures_h3x;
+mod fixtures_policy;
+mod fixtures_proxyproto;
+mod fixtures_streams;
+mod fixtures_tls;
+mod gateway;
+mod h3x;
+mod harness;
+mod mesh;
+mod mesh_dtls;
+mod mesh_udp;
+mod policy;
+mod profiles;
+mod proxyproto;
+mod scenario;
+mod streams;
+mod tls;
+mod workload;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "anvil-lab", about = "Ferrum Anvil local failure laboratory")]
+struct Cli {
+    /// Gateway release to run against (e.g. `v0.9.5`): reads
+    /// `lab/gateway/releases/<release>.lock`. Default: `$ANVIL_LAB_RELEASE`,
+    /// else `lab/gateway/RELEASE.lock`.
+    #[arg(long, global = true)]
+    release: Option<String>,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// List profiles, or the scenarios of one profile.
+    List { profile: Option<String> },
+    /// Start fixtures and the gateway, run scenarios, write results, stop.
+    /// `all` runs every profile in turn.
+    Run {
+        profile: String,
+        #[arg(long)]
+        scenario: Vec<String>,
+        /// Also run every scenario with the destination NOT configured as a
+        /// trusted Ferrum profile (checks that no gateway attribution occurs).
+        #[arg(long)]
+        untrusted_pass: bool,
+    },
+    /// Verify the pinned gateway binary and print its identity.
+    Verify,
+    /// Start fixtures + gateway for a profile and keep them running until Ctrl-C
+    /// (for manual desktop/CLI sessions and screenshots).
+    Up { profile: String },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let cli = Cli::parse();
+    gateway::select_release(cli.release.clone());
+    match cli.cmd {
+        Cmd::Verify => {
+            let (bin, lock) = gateway::binary()?;
+            println!(
+                "ferrum-edge {} ({}) at {} sha256 {} [{}; catalog {}]",
+                lock.release,
+                gateway::asset_name(),
+                bin.display(),
+                lock.sha256,
+                lock.file,
+                lock.compatibility_id()
+            );
+        }
+        Cmd::Up { profile } => (profiles::find(&profile)?.up)().await?,
+        Cmd::List { profile: None } => {
+            for p in profiles::all() {
+                println!("{:10} {:3} scenarios  {}", p.name, (p.scenarios)().len(), p.about);
+            }
+        }
+        Cmd::List { profile: Some(profile) } => {
+            for (id, title) in (profiles::find(&profile)?.scenarios)() {
+                println!("{id:10} {title}");
+            }
+        }
+        Cmd::Run { profile, scenario, untrusted_pass } => {
+            let selected = if profile == "all" { profiles::all() } else { vec![profiles::find(&profile)?] };
+            let (mut passed, mut failed, mut skipped) = (0, 0, 0);
+            for p in selected {
+                let results = (p.run)(profiles::RunArgs { only: scenario.clone(), untrusted_pass }).await?;
+                passed += results.iter().filter(|r| r.status == "passed").count();
+                failed += results.iter().filter(|r| r.status == "failed").count();
+                skipped += results.iter().filter(|r| r.status == "skipped").count();
+            }
+            eprintln!("total ({}): {passed} passed, {failed} failed, {skipped} skipped", gateway::release_label());
+            if failed > 0 {
+                std::process::exit(1);
+            }
+        }
+    }
+    Ok(())
+}

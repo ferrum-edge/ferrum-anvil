@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProxyProfile",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ProxyKind"
+    },
+    "address": {
+      "description": "`host:port` of the proxy.",
+      "type": "string"
+    },
+    "username": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "password": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "no_proxy": {
+      "description": "`NO_PROXY` semantics: comma-separated hosts/suffixes/CIDRs, `*` for all.",
+      "type": "string",
+      "default": ""
+    },
+    "tls_profile_id": {
+      "description": "TLS profile for the connection to the proxy itself: trust anchors,\nclient identity (the client SVID for HBONE) and server identity\n(e.g. the endpoint's SPIFFE ID). Required for `hbone`; optional for\n`https` (default: system roots with strict verification).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hbone": {
+      "description": "HBONE `CONNECT` options (kind `hbone` only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HboneOptions"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "workspace_id",
+    "name",
+    "kind",
+    "address",
+    "created_at",
+    "updated_at"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "ProxyKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "socks5"
+          ]
+        },
+        {
+          "description": "HTTP forward proxy (absolute-form for http://, CONNECT for https://).",
+          "type": "string",
+          "const": "http"
+        },
+        {
+          "description": "HTTPS connection to the proxy itself, then CONNECT.",
+          "type": "string",
+          "const": "https"
+        },
+        {
+          "description": "Mesh HBONE endpoint (Ferrum Mesh / Istio ambient): HTTP/2 `CONNECT`\nover mutual TLS. Anvil presents the client SVID of the proxy's TLS\nprofile, verifies the endpoint's server identity, then runs the inner\nconnection over the tunnel stream.",
+          "type": "string",
+          "const": "hbone"
+        }
+      ]
+    },
+    "SensitiveValue": {
+      "description": "A field that may carry sensitive material (password, token, key).\n\n* `Template` — text that may contain `{{variable}}` references. A literal\n  (non-variable) template in a sensitive field is itself treated as\n  sensitive: it is masked in the UI, redacted in history, and replaced by a\n  placeholder in safe-share exports.\n* `Secret` — a vault reference.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "template"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "secret"
+            }
+          },
+          "required": [
+            "kind",
+            "secret"
+          ]
+        }
+      ]
+    },
+    "SecretRef": {
+      "description": "Reference to a value held in the encrypted vault. The value itself never\nappears in ordinary object graphs, logs or safe-share exports.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "description": "Human label shown in the UI and in export previews (\"prod API key\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "HboneOptions": {
+      "type": "object",
+      "properties": {
+        "marker": {
+          "$ref": "#/$defs/HboneMarker",
+          "default": "none"
+        },
+        "baggage": {
+          "description": "W3C `baggage` header value for the `CONNECT`, e.g.\n`source.principal=spiffe://cluster.local/ns/a/sa/b`. The endpoint honors\nidentity baggage only from trusted assertors that match the client SVID.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extra_headers": {
+          "description": "Additional `CONNECT` request headers (sent verbatim, in order).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyValue"
+          },
+          "default": []
+        }
+      }
+    },
+    "HboneMarker": {
+      "description": "Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;\nFerrum accepts either marker (value `hbone`) or none. A marker is a wire\nshape hint only and never authenticates the peer.\n\nA UDP request (`udp://`) through the profile always sends a marker with\nthe value `udp` (Ferrum Mesh datagram-over-HBONE): `x-istio-protocol:\nudp` for [`HboneMarker::IstioProtocol`], `x-ferrum-mesh-protocol: udp`\notherwise.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "description": "`x-ferrum-mesh-protocol: hbone`",
+          "type": "string",
+          "const": "ferrum_mesh_protocol"
+        },
+        {
+          "description": "`x-istio-protocol: hbone`",
+          "type": "string",
+          "const": "istio_protocol"
+        }
+      ]
+    },
+    "KeyValue": {
+      "description": "Enabled/disabled name-value entry. Repeated names are legal and preserved\nin order (headers and query parameters may repeat).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "sensitive": {
+          "description": "Marks the value as sensitive for masking/redaction/export.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    }
+  }
+}

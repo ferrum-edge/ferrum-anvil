@@ -1,0 +1,147 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/anvil-domain",
+    "crates/anvil-transport",
+    "crates/anvil-diagnostics",
+    "crates/anvil-storage",
+    "crates/anvil-auth",
+    "crates/anvil-portability",
+    "crates/anvil-engine",
+    "crates/anvil-runner",
+    "crates/anvil-load",
+    "crates/anvil-cli",
+    "crates/anvil-lab",
+    "crates/anvil-fixtures",
+    "crates/anvil-app",
+    "apps/desktop/src-tauri",
+    "crates/anvil-import",
+    "crates/anvil-identity",
+]
+# Vendored third-party crates are patched in below, not Anvil workspace members.
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license-file = "LICENSE"
+repository = "https://github.com/ferrum-edge/ferrum-anvil"
+publish = false
+
+[workspace.dependencies]
+anvil-domain = { path = "crates/anvil-domain" }
+anvil-transport = { path = "crates/anvil-transport" }
+anvil-diagnostics = { path = "crates/anvil-diagnostics" }
+anvil-storage = { path = "crates/anvil-storage" }
+anvil-auth = { path = "crates/anvil-auth" }
+anvil-portability = { path = "crates/anvil-portability" }
+anvil-engine = { path = "crates/anvil-engine" }
+anvil-runner = { path = "crates/anvil-runner" }
+anvil-load = { path = "crates/anvil-load" }
+anvil-app = { path = "crates/anvil-app" }
+anvil-import = { path = "crates/anvil-import" }
+anvil-identity = { path = "crates/anvil-identity" }
+
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+schemars = { version = "1.2.2", features = ["uuid1", "chrono04"] }
+uuid = { version = "1.26.1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+futures = "0.3.34"
+bytes = "1.12.1"
+http = "1.5.0"
+hyper = { version = "1.11.1", features = ["client", "http1", "http2", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "server-auto", "http1", "http2"] }
+http-body-util = "0.1.5"
+url = "2.5.8"
+percent-encoding = "2.3.2"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12", "logging", "early-data"] }
+rustls-pki-types = "1.15.1"
+rustls-native-certs = "0.8.4"
+x509-parser = "0.18.1"
+rcgen = "0.14.10"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+# The feature only re-exports h3 internals (no code or dependency change). Anvil
+# uses it for `ConnectionState::settings()`: RFC 9220 forbids sending
+# `:protocol` until the server's SETTINGS enable extended CONNECT. Safe because
+# h3 is pinned to the vendored copy (vendor/README.md).
+h3 = { version = "0.0.8", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
+h3-quinn = "0.0.10"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+# The vendored tungstenite's `deflate` feature: the RFC 7692 permessage-deflate
+# codec (vendor/README.md). Negotiation stays in anvil-transport (ws.rs).
+tungstenite = { version = "0.30.0", default-features = false, features = ["deflate"] }
+prost = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+protox = "0.9.1"
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
+dns-lookup = "4.0.1"
+socket2 = "0.6.5"
+sha2 = "0.11.0"
+sha1 = "0.11.0"
+hmac = "0.13.0"
+base64 = "0.23.1"
+rand = "0.10.3"
+hex = "0.4.3"
+chacha20poly1305 = "0.11.0"
+argon2 = "0.6.0"
+zeroize = { version = "1.9.0", features = ["derive"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+keyring = { version = "4.2.0" }
+# Per-entry options for the OS store (Windows credential persistence).
+keyring-core = { version = "1.0.0" }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "rust_crypto"] }
+p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
+serde_norway = "0.9.42"
+roxmltree = "0.21.1"
+quick-xml = "0.42.0"
+jsonschema = { version = "0.57.0", default-features = false }
+serde_json_path = "0.7.2"
+csv = "1.4.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+hdrhistogram = { version = "7.6.0", default-features = false, features = ["serialization"] }
+flate2 = "1.1.10"
+brotli = "9.0.0"
+zstd = "0.14.0"
+regex = "1.13.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tempfile = "3.27.0"
+proptest = "1.11.0"
+httpdate = "1.0.3"
+dimpl = { version = "0.6", default-features = false, features = ["rust-crypto"] }
+parking_lot = "0.12.5"
+libc = "0.2.189"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "symbols"
+panic = "unwind"
+
+[profile.dev.package."*"]
+opt-level = 1
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Transport failures are typed evidence records (phase, kind, TLS alert, H2/QUIC
+# codes, deadline) that flow into ExecutionRecord unchanged. They are returned
+# once per failed attempt, never on a hot path, so boxing them buys nothing.
+result_large_err = "allow"
+
+# h3 0.0.8 plus the upstream RFC 9220 `Protocol::WEBSOCKET` commit
+# (hyperium/h3#236), unreleased as of 0.0.8; tungstenite 0.30.0 plus an RFC
+# 7692 permessage-deflate codec, which no tungstenite release has. See
+# vendor/README.md for the provenance and when to remove these.
+[patch.crates-io]
+h3 = { path = "vendor/h3-0.0.8-rfc9220" }
+tungstenite = { path = "vendor/tungstenite-0.30.0-deflate" }

@@ -1,0 +1,118 @@
+openapi: 3.2.0
+$self: https://specs.example.com/search/openapi.yaml
+info:
+  title: Search
+  version: 3.2.0-fixture
+servers:
+  - url: https://search.example.com
+    name: prod
+    description: Production search
+tags:
+  - name: catalog
+    summary: Catalog operations
+    kind: nav
+  - name: items
+    parent: catalog
+    description: Item search
+paths:
+  /items:
+    query:
+      tags: [items]
+      operationId: queryItems
+      summary: Search items with a QUERY request
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string }
+            examples:
+              simple:
+                dataValue: { text: lamp }
+      responses:
+        '200': { description: ok }
+    additionalOperations:
+      LINK:
+        tags: [items]
+        operationId: linkItems
+        responses:
+          '204': { description: linked }
+    get:
+      tags: [items]
+      operationId: getItems
+      parameters:
+        - name: q
+          in: querystring
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                type: object
+                required: [term, page]
+                properties:
+                  term: { type: string, example: desk }
+                  page: { type: integer, example: 2 }
+        - name: prefs
+          in: cookie
+          style: cookie
+          required: true
+          schema: { type: string, example: compact }
+      security:
+        - device: []
+      responses:
+        '200': { description: ok }
+  /items/stream:
+    post:
+      tags: [items]
+      operationId: streamItems
+      requestBody:
+        content:
+          application/jsonl:
+            itemSchema:
+              type: object
+              required: [sku]
+              properties:
+                sku: { type: string, example: A-1 }
+      responses:
+        '200': { description: ok }
+  /items/xml:
+    post:
+      tags: [items]
+      operationId: xmlItem
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              xml: { name: item }
+              required: [id, name, note]
+              properties:
+                id: { type: integer, example: 7, xml: { nodeType: attribute } }
+                name: { type: string, example: Desk }
+                note: { type: string, example: 'a < b', xml: { nodeType: cdata } }
+      responses:
+        '200': { description: ok }
+  /items/{id}:
+    get:
+      tags: [items]
+      operationId: getItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          style: matrix
+          explode: true
+          schema: { type: array, items: { type: integer }, example: [1, 2] }
+      responses:
+        '200': { description: ok }
+components:
+  securitySchemes:
+    device:
+      type: oauth2
+      oauth2MetadataUrl: https://auth.example.com/.well-known/oauth-authorization-server
+      flows:
+        deviceAuthorization:
+          deviceAuthorizationUrl: https://auth.example.com/device
+          tokenUrl: https://auth.example.com/token
+          scopes: {}

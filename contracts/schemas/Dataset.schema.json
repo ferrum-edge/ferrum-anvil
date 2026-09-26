@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dataset",
+  "description": "Iteration data (CSV rows / JSON array of objects).",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "format": {
+      "$ref": "#/$defs/DatasetFormat"
+    },
+    "attachment": {
+      "$ref": "#/$defs/AttachmentRef"
+    },
+    "sensitive_columns": {
+      "description": "Columns that hold secrets (masked and redacted in reports).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    }
+  },
+  "required": [
+    "id",
+    "schema_version",
+    "created_at",
+    "updated_at",
+    "workspace_id",
+    "name",
+    "format",
+    "attachment"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "DatasetFormat": {
+      "type": "string",
+      "enum": [
+        "csv",
+        "json"
+      ]
+    },
+    "AttachmentRef": {
+      "description": "Reference to a content-addressed attachment (binary body, multipart file,\nproto file, dataset). The bytes live in encrypted attachment storage or,\nfor linked files, at a path the user selected on this machine.",
+      "oneOf": [
+        {
+          "description": "Stored inside Anvil (portable; included in exports).",
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "file_name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "stored"
+            }
+          },
+          "required": [
+            "kind",
+            "sha256",
+            "size",
+            "file_name"
+          ]
+        },
+        {
+          "description": "Linked local file (device-specific; exports report it as a rebinding\nrequirement rather than copying an absolute machine path silently).",
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "linked_file"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        }
+      ]
+    }
+  }
+}

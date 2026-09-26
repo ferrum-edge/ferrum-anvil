@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Environment",
+  "description": "Common persistent metadata.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "variables": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Variable"
+      },
+      "default": []
+    }
+  },
+  "required": [
+    "id",
+    "schema_version",
+    "created_at",
+    "updated_at",
+    "workspace_id",
+    "name"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "Variable": {
+      "description": "Variable in a workspace base set, an environment, a folder or a request.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        "secret": {
+          "description": "Secret variables are masked, redacted from history/reports and replaced\nby placeholders in safe-share exports.",
+          "type": "boolean",
+          "default": false
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "SensitiveValue": {
+      "description": "A field that may carry sensitive material (password, token, key).\n\n* `Template` — text that may contain `{{variable}}` references. A literal\n  (non-variable) template in a sensitive field is itself treated as\n  sensitive: it is masked in the UI, redacted in history, and replaced by a\n  placeholder in safe-share exports.\n* `Secret` — a vault reference.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "template"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "secret"
+            }
+          },
+          "required": [
+            "kind",
+            "secret"
+          ]
+        }
+      ]
+    },
+    "SecretRef": {
+      "description": "Reference to a value held in the encrypted vault. The value itself never\nappears in ordinary object graphs, logs or safe-share exports.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "description": "Human label shown in the UI and in export previews (\"prod API key\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    }
+  }
+}

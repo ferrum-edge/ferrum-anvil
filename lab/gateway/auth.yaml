@@ -1,0 +1,600 @@
+# Ferrum Anvil failure lab - profile "auth" (ferrum-edge v0.9.7 and v0.9.5, file mode)
+#
+# Scenarios: AUTH-001..010, 015..025, 027..032, GW-011 and lab extensions
+#            AUTH-X01..X05 (see docs/lab/auth-tls.md).
+# Settings:  auth.conf (proxy HTTP 127.0.0.1:18180, admin 127.0.0.1:18190).
+# Fixtures:  echo 127.0.0.1:19101; identity provider 127.0.0.1:19102 (JWKS, RFC 7662
+#            introspection, client-credentials token endpoint); second IdP (JWKS only,
+#            switched off mid-run) 127.0.0.1:19103; LDAP 127.0.0.1:19106;
+#            19104 and 19107 unbound (dependency outages).
+# Tokens:    every credential below is generated per run by the lab runner and rendered
+#            into lab/.run/auth/ (never committed):
+#            {{ALICE_API_KEY}}, {{BOB_API_KEY}}, {{ALICE_JWT_SECRET}}, {{ALICE_HMAC_SECRET}},
+#            {{BASIC_AUTH_ALICE_HASH}} = "hmac_sha256:" + hex(HMAC-SHA256(key=FERRUM_BASIC_AUTH_HMAC_SECRET,
+#            msg=<alice password>)) (types.rs:9009-9031). File mode rejects plaintext `password`
+#            (src/config/file_loader.rs:288-306).
+#            {{SOAP_ALICE_PASSWORD}} (soap_ws_security keeps credentials inline; PasswordDigest
+#            needs the plaintext), {{OIDC_SESSION_SECRET}} (>= 32 chars), and {{LAB_SOAP}}: the
+#            directory holding the per-run SOAP signer and SAML IdP certificates (throwaway
+#            RSA keys generated with openssl at lab start; never trusted outside the lab).
+# Credential values must be ARRAYS of objects (types.rs:8563-8596); jwt / hmac_auth secrets
+# need >= 32 characters (types.rs:8617-8664).
+version: "1"
+
+resource_counts:
+  proxies: 21
+  consumers: 2
+  plugin_configs: 23
+  upstreams: 0
+
+proxies:
+  # AUTH-001: key expected in X-Lab-Api-Key. Sending the right key under X-API-Key (the
+  # default name) is treated as "no credential" -> 401 Authentication required.
+  # AUTH-X04/X05: the same authenticated route relays the backend's own 401 lookalikes.
+  - id: auth001-key-auth
+    listen_path: /auth/key
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth001-key-auth
+
+  # AUTH-002: the key travels in the query string (?api_key=...).
+  - id: auth002-key-query
+    listen_path: /auth/key-query
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth002-key-query
+
+  # AUTH-003: Basic auth for consumer alice.
+  - id: auth003-basic-auth
+    listen_path: /auth/basic
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth003-basic-auth
+
+  # AUTH-004..007, AUTH-010: HS256 JWT; identity is read from the non-default claim
+  # `anvil_consumer`.
+  - id: auth007-jwt
+    listen_path: /auth/jwt
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth007-jwt
+
+  # AUTH-008/009/010: JWKS-validated ES256 tokens from the lab identity provider.
+  - id: auth008-jwks
+    listen_path: /auth/jwks
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth008-jwks
+
+  # AUTH-X03: identity-provider outage. A second IdP fixture (19103) serves the same JWKS;
+  # the lab turns it off mid-run and waits past jwks_max_stale_seconds, after which the
+  # cached keys expire (src/plugins/utils/jwks_store.rs). (An endpoint that is down from
+  # the start would keep /health at ready:false, so the outage must begin after startup.)
+  - id: authx03-jwks-outage
+    listen_path: /auth/jwks-outage
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: authx03-jwks-outage
+
+  # AUTH-018..022: HMAC v2 (ferrum-hmac-v2) with in-process replay store (no Redis).
+  - id: auth018-hmac
+    listen_path: /auth/hmac
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth018-hmac
+
+  # AUTH-024/025: JWKS-validated access token bound to a DPoP proof (cnf.jkt).
+  # strip_listen_path is false so the path the proof signs is the path the gateway checks;
+  # backend_path routes the request onto the echo fixture.
+  - id: auth024-dpop
+    listen_path: /auth/dpop
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    backend_path: /echo
+    strip_listen_path: false
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth024-jwks-dpop
+
+  # AUTH-016/AUTH-X01: opaque tokens validated by RFC 7662 introspection at the lab IdP.
+  - id: authx01-introspect
+    listen_path: /auth/introspect
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: authx01-introspect
+
+  # AUTH-X02: introspection endpoint unreachable (nothing listens on 19104).
+  - id: authx02-introspect-down
+    listen_path: /auth/introspect-down
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: authx02-introspect-down
+
+  # AUTH-027: LDAP direct bind against the lab directory fixture.
+  - id: auth027-ldap
+    listen_path: /auth/ldap
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth027-ldap
+
+  # AUTH-028: directory unreachable (nothing listens on 19107).
+  - id: auth028-ldap-down
+    listen_path: /auth/ldap-down
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth028-ldap-down
+
+  # AUTH-032: multi-auth (jwt_auth priority 1100 before key_auth 1200; first success wins)
+  # followed by access_control (lab-admins only): a principal is one identity, never a union.
+  - id: auth032-multi
+    listen_path: /auth/multi
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    auth_mode: multi
+    plugins:
+      - plugin_config_id: auth032-jwt
+      - plugin_config_id: auth032-key
+      - plugin_config_id: auth032-acl
+
+  # GW-011: key_auth identifies the consumer, access_control requires group lab-admins.
+  # alice (engineering) -> 403, bob (lab-admins) -> 200.
+  - id: gw011-acl
+    listen_path: /gw/acl
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw011-key-auth
+      - plugin_config_id: gw011-acl
+
+  # AUTH-X05: no auth plugin at all; the backend itself answers a gateway-shaped 401.
+  - id: authx05-open
+    listen_path: /auth/open
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # ---- SOAP WS-Security (soap_ws_security) --------------------------------
+  # One identity-establishing soap_ws_security instance per proxy and no other
+  # auth plugin on it (0.9.5 / 0.9.7 composition rule). Credentials are inline in the
+  # plugin (no consumer credential type); the password is generated per run.
+  # AUTH-029: UsernameToken PasswordText; the credential is removed before the
+  # backend (remove_credential needs PasswordText and allow_mtom: false).
+  - id: auth029-soap-text
+    listen_path: /soap/text
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth029-soap-text
+
+  # AUTH-029: UsernameToken PasswordDigest with in-process nonce replay protection.
+  - id: auth029-soap-digest
+    listen_path: /soap/digest
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth029-soap-digest
+
+  # AUTH-030: X.509 XML signature over Body and Timestamp; trusts only the lab signer.
+  - id: auth030-soap-x509
+    listen_path: /soap/x509
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth030-soap-x509
+
+  # AUTH-031: signed SAML 2.0 bearer assertion from the lab IdP, alongside a
+  # PasswordDigest UsernameToken (Anvil's WS-Security header always carries one).
+  - id: auth031-soap-saml
+    listen_path: /soap/saml
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth031-soap-saml
+
+  # AUTH-017: OIDC relying party (browser session) against the lab IdP on 19102.
+  - id: auth017-oidc
+    listen_path: /auth/oidc
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: auth017-oidc
+
+  # Positive control for the backend path without credentials.
+  - id: auth-ctrl-open
+    listen_path: /ok
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+
+consumers:
+  - id: consumer-alice
+    username: alice
+    custom_id: alice-001
+    credentials:
+      keyauth:
+        - key: "{{ALICE_API_KEY}}"
+      basicauth:
+        - password_hash: "{{BASIC_AUTH_ALICE_HASH}}"
+      jwt:
+        - secret: "{{ALICE_JWT_SECRET}}"
+      hmac_auth:
+        - secret: "{{ALICE_HMAC_SECRET}}"
+    acl_groups:
+      - engineering
+
+  - id: consumer-bob
+    username: bob
+    custom_id: bob-002
+    credentials:
+      keyauth:
+        - key: "{{BOB_API_KEY}}"
+    acl_groups:
+      - lab-admins
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}
+
+  - id: auth001-key-auth
+    plugin_name: key_auth
+    scope: proxy
+    proxy_id: auth001-key-auth
+    enabled: true
+    config:
+      key_location: "header:X-Lab-Api-Key"
+      hide_credentials: true
+
+  - id: auth002-key-query
+    plugin_name: key_auth
+    scope: proxy
+    proxy_id: auth002-key-query
+    enabled: true
+    config:
+      key_location: "query:api_key"
+      hide_credentials: true
+
+  - id: auth003-basic-auth
+    plugin_name: basic_auth
+    scope: proxy
+    proxy_id: auth003-basic-auth
+    enabled: true
+    config:
+      hide_credentials: true
+
+  - id: auth007-jwt
+    plugin_name: jwt_auth
+    scope: proxy
+    proxy_id: auth007-jwt
+    enabled: true
+    config:
+      token_lookup: "header:Authorization"
+      consumer_claim_field: anvil_consumer
+      require_exp: true
+
+  - id: auth008-jwks
+    plugin_name: jwks_auth
+    scope: proxy
+    proxy_id: auth008-jwks
+    enabled: true
+    config:
+      providers:
+        - jwks_uri: "http://127.0.0.1:19102/.well-known/jwks.json"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+
+  - id: authx03-jwks-outage
+    plugin_name: jwks_auth
+    scope: proxy
+    proxy_id: authx03-jwks-outage
+    enabled: true
+    config:
+      jwks_refresh_interval_secs: 1
+      jwks_max_stale_seconds: 2
+      providers:
+        - jwks_uri: "http://127.0.0.1:19103/.well-known/jwks.json"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+
+  - id: auth018-hmac
+    plugin_name: hmac_auth
+    scope: proxy
+    proxy_id: auth018-hmac
+    enabled: true
+    config:
+      signing_profile: ferrum-hmac-v2
+      replay_scope: process
+      clock_skew_seconds: 300
+
+  - id: auth024-jwks-dpop
+    plugin_name: jwks_auth
+    scope: proxy
+    proxy_id: auth024-dpop
+    enabled: true
+    config:
+      providers:
+        - jwks_uri: "http://127.0.0.1:19102/.well-known/jwks.json"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+          require_dpop: true
+          dpop_replay_scope: process
+          dpop_clock_skew_secs: 30
+
+  # Keyless introspection client (`none` is accepted only for loopback endpoints).
+  # Caches are off so every request is introspected (deterministic ground truth).
+  - id: authx01-introspect
+    plugin_name: oauth2_introspection
+    scope: proxy
+    proxy_id: authx01-introspect
+    enabled: true
+    config:
+      providers:
+        - introspection_endpoint: "http://127.0.0.1:19102/introspect"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+          client_auth:
+            method: none
+          positive_cache_ttl_secs: 0
+          negative_cache_ttl_secs: 0
+          request_timeout_ms: 2000
+
+  - id: authx02-introspect-down
+    plugin_name: oauth2_introspection
+    scope: proxy
+    proxy_id: authx02-introspect-down
+    enabled: true
+    config:
+      providers:
+        - introspection_endpoint: "http://127.0.0.1:19104/introspect"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+          client_auth:
+            method: none
+          positive_cache_ttl_secs: 0
+          negative_cache_ttl_secs: 0
+          request_timeout_ms: 1000
+
+  - id: auth027-ldap
+    plugin_name: ldap_auth
+    scope: proxy
+    proxy_id: auth027-ldap
+    enabled: true
+    config:
+      ldap_url: "ldap://127.0.0.1:19106"
+      bind_dn_template: "uid={username},ou=people,dc=anvil,dc=lab"
+      canonical_identity_attribute: uid
+      connect_timeout_seconds: 2
+      request_timeout_seconds: 3
+
+  - id: auth028-ldap-down
+    plugin_name: ldap_auth
+    scope: proxy
+    proxy_id: auth028-ldap-down
+    enabled: true
+    config:
+      ldap_url: "ldap://127.0.0.1:19107"
+      bind_dn_template: "uid={username},ou=people,dc=anvil,dc=lab"
+      canonical_identity_attribute: uid
+      connect_timeout_seconds: 2
+      request_timeout_seconds: 3
+
+  - id: auth032-jwt
+    plugin_name: jwt_auth
+    scope: proxy
+    proxy_id: auth032-multi
+    enabled: true
+    config:
+      token_lookup: "header:Authorization"
+      consumer_claim_field: anvil_consumer
+      require_exp: true
+
+  - id: auth032-key
+    plugin_name: key_auth
+    scope: proxy
+    proxy_id: auth032-multi
+    enabled: true
+    config:
+      key_location: "header:X-Lab-Api-Key"
+
+  - id: auth032-acl
+    plugin_name: access_control
+    scope: proxy
+    proxy_id: auth032-multi
+    enabled: true
+    config:
+      allowed_groups:
+        - lab-admins
+
+  - id: gw011-key-auth
+    plugin_name: key_auth
+    scope: proxy
+    proxy_id: gw011-acl
+    enabled: true
+    config:
+      key_location: "header:X-Lab-Api-Key"
+
+  - id: gw011-acl
+    plugin_name: access_control
+    scope: proxy
+    proxy_id: gw011-acl
+    enabled: true
+    config:
+      allowed_groups:
+        - lab-admins
+
+  - id: auth029-soap-text
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth029-soap-text
+    enabled: true
+    config:
+      content_type:
+        allow_mtom: false
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      username_token:
+        enabled: true
+        password_type: PasswordText
+        remove_credential: true
+        credentials:
+          - username: alice
+            password: "{{SOAP_ALICE_PASSWORD}}"
+
+  - id: auth029-soap-digest
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth029-soap-digest
+    enabled: true
+    config:
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      username_token:
+        enabled: true
+        password_type: PasswordDigest
+        credentials:
+          - username: alice
+            password: "{{SOAP_ALICE_PASSWORD}}"
+      nonce:
+        replay_scope: process
+
+  - id: auth030-soap-x509
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth030-soap-x509
+    enabled: true
+    config:
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      x509_signature:
+        enabled: true
+        trusted_certs:
+          - "{{LAB_SOAP}}/soap-signer.pem"
+
+  - id: auth031-soap-saml
+    plugin_name: soap_ws_security
+    scope: proxy
+    proxy_id: auth031-soap-saml
+    enabled: true
+    config:
+      timestamp:
+        require: true
+        max_age_seconds: 300
+        clock_skew_seconds: 2
+      username_token:
+        enabled: true
+        password_type: PasswordDigest
+        credentials:
+          - username: alice
+            password: "{{SOAP_ALICE_PASSWORD}}"
+      nonce:
+        replay_scope: process
+      saml:
+        enabled: true
+        trusted_issuers:
+          - "https://saml-idp.anvil-lab.invalid"
+        trusted_signing_certs:
+          - "{{LAB_SOAP}}/saml-idp.pem"
+        audience: "urn:anvil:lab:soap-service"
+        recipient: "http://127.0.0.1:18180/soap/saml"
+        clock_skew_seconds: 5
+
+  # Keyless client (loopback token endpoint). Discovery is fetched in the
+  # background after startup; the session secret is generated per run.
+  - id: auth017-oidc
+    plugin_name: oidc_relying_party
+    scope: proxy
+    proxy_id: auth017-oidc
+    enabled: true
+    config:
+      providers:
+        - issuer: "https://idp.anvil-lab.invalid"
+          discovery_url: "http://127.0.0.1:19102/.well-known/openid-configuration"
+          client_id: anvil-lab-oidc-rp
+          client_auth:
+            method: none
+          scopes: [openid]
+          redirect_uri: "http://127.0.0.1:18180/auth/oidc/callback"
+          callback_path: /auth/oidc/callback
+          logout_path: /auth/oidc/logout
+      session:
+        store: cookie
+        encryption_secret: "{{OIDC_SESSION_SECRET}}"
+        secure: false

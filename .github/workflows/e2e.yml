@@ -1,0 +1,116 @@
+# Native desktop E2E on macOS, Windows and Linux: the real app built with the
+# test-only `e2e` feature (embedded WebDriver via tauri-plugin-wdio-webdriver)
+# driven by WebdriverIO through the real Rust engine — no command mocks.
+# The same job proves the release check detects that build (negative control).
+name: Desktop E2E
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "crates/**"
+      - "catalog/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/release-check.sh"
+      - "lab/**"
+      - ".github/workflows/e2e.yml"
+      - ".github/actions/setup/**"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  e2e:
+    name: E2E · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            exe: target/debug/anvil-desktop
+          - os: windows-2025
+            exe: target/debug/anvil-desktop.exe
+          - os: ubuntu-24.04
+            exe: target/debug/anvil-desktop
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          xvfb: "true"
+          cache-key: e2e
+      - name: Build the E2E app (debug, --features e2e)
+        working-directory: apps/desktop
+        run: npm run e2e:build
+      # The gateway spec (06) needs the real Ferrum Edge lab gateway. The lab
+      # runs on Linux and macOS only, so on Windows that spec is skipped (and
+      # reported as skipped, never as passed).
+      - name: Start the core lab gateway (pinned Ferrum Edge release)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          lab/scripts/fetch-gateway.sh
+          cargo build --locked -p anvil-lab
+          ulimit -n 4096 2>/dev/null || true
+          nohup target/debug/anvil-lab up core > "$RUNNER_TEMP/lab-up-core.log" 2>&1 &
+          for _ in $(seq 1 120); do
+            curl -s -o /dev/null -m 1 http://127.0.0.1:18080/ && break
+            sleep 1
+          done
+          if ! curl -s -o /dev/null -m 2 http://127.0.0.1:18080/; then
+            cat "$RUNNER_TEMP/lab-up-core.log"
+            echo "::error::the core lab gateway did not come up"
+            exit 1
+          fi
+          echo "ANVIL_E2E_GATEWAY=http://127.0.0.1:18080" >> "$GITHUB_ENV"
+      - name: Run native E2E (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: xvfb-run -a --server-args="-screen 0 1600x1000x24" npm run e2e
+      - name: Run native E2E
+        if: runner.os != 'Linux'
+        working-directory: apps/desktop
+        run: npm run e2e
+      - name: Negative control — release check must reject the E2E build
+        shell: bash
+        env:
+          EXE: ${{ matrix.exe }}
+        run: |
+          set +e
+          scripts/release-check.sh --no-graph "$EXE"
+          code=$?
+          set -e
+          if [ "$code" != 1 ]; then
+            echo "::error::release-check returned $code for an e2e build; expected 1 (test hooks found)"
+            exit 1
+          fi
+          echo "release-check correctly rejected the e2e build"
+      - name: Stop the lab gateway
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: pkill -TERM -f "anvil-lab up core" || true
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-screenshots-${{ matrix.os }}-${{ github.run_id }}
+          path: apps/desktop/e2e/screenshots/*.png
+          if-no-files-found: warn
+          retention-days: 30

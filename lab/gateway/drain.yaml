@@ -1,0 +1,38 @@
+# Ferrum Anvil failure lab - profile "drain" (ferrum-edge v0.9.7 and v0.9.5, file mode)
+#
+# Scenario:  GW-003 (drain refusal). Settings: drain.conf (proxy HTTP 127.0.0.1:18680,
+#            admin 127.0.0.1:18690). Fixtures: 127.0.0.1:19600-19699.
+#   19601  HTTP/1.1 echo (fast)
+#   19602  HTTP/1.1 staller: answers 200 after 6 s (must finish inside the 10 s drain window)
+version: "1"
+
+resource_counts:
+  proxies: 2
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  - id: gw003-fast
+    listen_path: /gw/fast
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19601
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  - id: gw003-slow
+    listen_path: /gw/slow
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19602
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_read_timeout_ms: 20000
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}

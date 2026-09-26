@@ -1,0 +1,275 @@
+# Ferrum Anvil failure lab - profile "core" (ferrum-edge v0.9.7 and v0.9.5, file mode)
+#
+# Scenarios: UP-001..003, UP-009..014, UP-020, GW-001, GW-006, GW-007, GW-008,
+#            GW-016, GW-017, GW-018 (+ positive control).
+# Settings:  core.conf (proxy HTTP 127.0.0.1:18080, admin 127.0.0.1:18090).
+# Fixtures:  127.0.0.1:19000-19099 (DNS fixture 19053 udp+tcp) (see docs/audit/gateway-lab-config.md, port plan).
+#
+# Schema notes (v0.9.5, src/config/types.rs):
+# - GatewayConfig requires `version`, `proxies`, `plugin_configs` (types.rs:3200-3207).
+# - Proxy / Consumer / PluginConfig / Upstream reject unknown keys (deny_unknown_fields),
+#   but nested circuit_breaker / retry / health_checks / targets DO NOT: a typo there is
+#   silently ignored by `ferrum-edge validate`. Run lab/gateway/lint-profiles.rb.
+# - A proxy-scoped plugin runs only when BOTH `proxy_id` matches AND the proxy lists it
+#   under `plugins: [{plugin_config_id}]` (src/plugin_cache.rs:2689-2705).
+# - No `retry` block => no retries (deterministic single attempt).
+# - `backend_scheme` defaults to https when omitted, so every plain fixture sets `http`.
+# - No environment-variable substitution exists in file mode (src/config/file_loader.rs:135-230).
+version: "1"
+
+resource_counts:
+  proxies: 19
+  consumers: 0
+  plugin_configs: 4
+  upstreams: 1
+
+proxies:
+  # ---- positive control -------------------------------------------------
+  - id: core-ok
+    listen_path: /ok
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19001
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # ---- gateway-to-upstream setup failures --------------------------------
+  # UP-001: name resolves NXDOMAIN via the DNS fixture (core.conf FERRUM_DNS_RESOLVER_ADDRESS).
+  - id: up001-dns
+    listen_path: /up/dns
+    backend_scheme: http
+    backend_host: anvil-lab-nxdomain.invalid
+    backend_port: 19001
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_connect_timeout_ms: 2000
+
+  # UP-002: nothing listens on 19002 (fixture must NOT bind it).
+  - id: up002-refused
+    listen_path: /up/refused
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19002
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # UP-003: TEST-NET-1 (RFC 5737) blackhole address: SYNs get no answer, so the
+  # gateway's connect deadline fires. (A saturated-backlog loopback listener does
+  # not stall connects on macOS; see docs/lab.md.) Network-dependent: a host with
+  # no default route reports EHOSTUNREACH instead, which the scenario also accepts.
+  - id: up003-connect-stall
+    listen_path: /up/connect-stall
+    backend_scheme: http
+    backend_host: 192.0.2.1
+    backend_port: 19003
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_connect_timeout_ms: 1000
+
+  # ---- post-dispatch / body failures -------------------------------------
+  # UP-009: fixture accepts, reads the head, then never reads the body.
+  - id: up009-upload-stall
+    listen_path: /up/upload-stall
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19009
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_write_timeout_ms: 1000
+    backend_read_timeout_ms: 10000
+
+  # UP-010: fixture reads the request, then withholds response headers.
+  - id: up010-header-stall
+    listen_path: /up/header-stall
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19010
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_read_timeout_ms: 1000
+
+  # UP-011: headers + first body bytes, then stall. Path selects size/framing.
+  - id: up011-body-stall
+    listen_path: /up/body-stall
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19011
+    strip_listen_path: true
+    pool_enable_http2: false
+    backend_read_timeout_ms: 1000
+
+  # UP-012: headers + partial body, then TCP RST (SO_LINGER 0).
+  - id: up012-reset
+    listen_path: /up/reset
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19012
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # UP-013: Content-Length larger than the bytes sent, then FIN.
+  - id: up013-short-body
+    listen_path: /up/short-body
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19013
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # UP-014: response larger than the route ceiling (response_size_limiting 65536).
+  - id: up014-oversize
+    listen_path: /up/oversize
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19014
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: up014-limit
+
+  # UP-014 variant: same fixture, response_body_mode buffer (502 instead of truncated 200
+  # for unknown-length bodies).
+  - id: up014-oversize-buffered
+    listen_path: /up/oversize-buffered
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19014
+    strip_listen_path: true
+    pool_enable_http2: false
+    response_body_mode: buffer
+    plugins:
+      - plugin_config_id: up014b-limit
+
+  # UP-020: fixture reads the request then closes without a response (/close) or
+  # writes a non-HTTP status line (/garbage).
+  - id: up020-post-dispatch
+    listen_path: /up/post-dispatch
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19020
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # ---- gateway admission / response ownership -----------------------------
+  # GW-001: fixture returns 500 while its "fail" toggle is on.
+  - id: gw001-breaker
+    listen_path: /gw/breaker
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19021
+    strip_listen_path: true
+    pool_enable_http2: false
+    circuit_breaker:
+      failure_threshold: 3
+      success_threshold: 1
+      timeout_seconds: 5
+      failure_status_codes: [500, 502, 503, 504]
+      half_open_max_requests: 1
+      trip_on_connection_errors: true
+
+  # GW-006 needs no proxy: request /gw/no-such-route (or any unmatched path).
+
+  # GW-007: only GET and POST are allowed.
+  - id: gw007-methods
+    listen_path: /gw/methods
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19001
+    strip_listen_path: true
+    pool_enable_http2: false
+    allowed_methods: [GET, POST]
+
+  # GW-008: request body ceiling 1024 bytes.
+  - id: gw008-request-size
+    listen_path: /gw/request-size
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19001
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: gw008-limit
+
+  # GW-016: backend itself answers 403 with a WAF-looking body (lookalike control).
+  - id: gw016-app-403
+    listen_path: /gw/app-403
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19022
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # GW-017: backend returns a complete, valid 500 (and /504 for the timeout lookalike).
+  - id: gw017-app-500
+    listen_path: /gw/app-500
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19023
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # GW-018: upstream whose only target fails its active health probe but serves 200.
+  - id: gw018-degraded
+    listen_path: /gw/degraded
+    backend_scheme: http
+    upstream_id: ups-degraded
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # Positive control for GW-018 (same fixture, direct, no health checking).
+  - id: gw018-direct
+    listen_path: /gw/degraded-direct
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19024
+    strip_listen_path: true
+    pool_enable_http2: false
+
+upstreams:
+  - id: ups-degraded
+    algorithm: round_robin
+    targets:
+      - host: 127.0.0.1
+        port: 19024
+        weight: 1
+    health_checks:
+      active:
+        http_path: /lab-health
+        interval_seconds: 1
+        timeout_ms: 500
+        healthy_threshold: 1
+        unhealthy_threshold: 1
+        healthy_status_codes: [200]
+
+plugin_configs:
+  # Operator-side ground truth: one JSON transaction line per request on stdout,
+  # including error_class (src/plugins/stdout_logging.rs).
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}
+
+  - id: up014-limit
+    plugin_name: response_size_limiting
+    scope: proxy
+    proxy_id: up014-oversize
+    enabled: true
+    config:
+      max_bytes: 65536
+
+  - id: up014b-limit
+    plugin_name: response_size_limiting
+    scope: proxy
+    proxy_id: up014-oversize-buffered
+    enabled: true
+    config:
+      max_bytes: 65536
+
+  - id: gw008-limit
+    plugin_name: request_size_limiting
+    scope: proxy
+    proxy_id: gw008-request-size
+    enabled: true
+    config:
+      max_bytes: 1024

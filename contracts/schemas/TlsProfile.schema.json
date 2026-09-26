@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TlsProfile",
+  "description": "Trust + identity settings for TLS/DTLS connections.\n\n`verify = false` means encryption stays on but the peer is not\nauthenticated. That is distinct from choosing plaintext (`http://`). A\nbypass is scoped to the requests that select this profile, shows a\npersistent warning, and is never activated by import.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "verify": {
+      "type": "boolean",
+      "default": true
+    },
+    "use_system_roots": {
+      "type": "boolean",
+      "default": true
+    },
+    "extra_roots_pem": {
+      "description": "Additional trusted CA certificates (PEM). Scoped to this profile only;\nnever installed into the OS store.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "client_identity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClientIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bindings": {
+      "description": "Destinations where this profile's client identity may be presented.\nEmpty = any destination that selects the profile (UI warns).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HostBinding"
+      },
+      "default": []
+    },
+    "min_version": {
+      "$ref": "#/$defs/TlsMinVersion",
+      "default": "tls12"
+    },
+    "server_name_override": {
+      "description": "Override the SNI / verification name (advanced). The HTTP authority is\nunchanged. The certificate is verified against this name, or against\nthe SPIFFE identity when [`TlsProfile::server_spiffe`] is set. East-west\nSNI passthrough uses names like `outbound_.8080_._.svc.ns.svc.cluster.local`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "server_spiffe": {
+      "description": "SPIFFE X.509-SVID server identity (mesh). When set, the peer chain is\nverified against this profile's trust anchors (its trust bundle) and\nthe certificate's single `spiffe://` URI SAN is matched instead of the\nDNS host name. Unset (the default) keeps ordinary host-name verification.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ServerSpiffeIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "workspace_id",
+    "name",
+    "created_at",
+    "updated_at"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "ClientIdentity": {
+      "description": "Client identity presented to a peer (identity #2 in the plan's three\nidentities). Never the gateway's own backend identity.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "cert_chain_pem": {
+              "description": "Certificate chain PEM (not secret).",
+              "type": "string"
+            },
+            "private_key_pem": {
+              "description": "Private key PEM (PKCS#8, PKCS#1 or SEC1) — sensitive.",
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "format": {
+              "type": "string",
+              "const": "pem"
+            }
+          },
+          "required": [
+            "format",
+            "cert_chain_pem",
+            "private_key_pem"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bundle_b64": {
+              "description": "Base64 PKCS#12 bundle — sensitive.",
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "password": {
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "format": {
+              "type": "string",
+              "const": "pkcs12"
+            }
+          },
+          "required": [
+            "format",
+            "bundle_b64",
+            "password"
+          ]
+        },
+        {
+          "description": "X.509-SVID from the SPIFFE Workload API (`FetchX509SVID`), fetched\nwhen a request needs it and re-fetched at half its lifetime (SVID\nrotation). The private key stays in memory and is cleared on lock.",
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "description": "`unix:///path/to/socket` (or `npipe:name` on Windows). Empty: the\n`SPIFFE_ENDPOINT_SOCKET` environment variable.",
+              "type": "string"
+            },
+            "spiffe_id": {
+              "description": "Pick the SVID with this SPIFFE ID when the workload holds several.\nEmpty: the first (default) SVID.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trust_bundle": {
+              "description": "Also trust the SVID's trust-domain bundle from the Workload API\n(for verifying mesh peers by SPIFFE ID), in addition to the\nprofile's CA certificates.",
+              "type": "boolean",
+              "default": false
+            },
+            "format": {
+              "type": "string",
+              "const": "workload_api"
+            }
+          },
+          "required": [
+            "format"
+          ]
+        }
+      ]
+    },
+    "SensitiveValue": {
+      "description": "A field that may carry sensitive material (password, token, key).\n\n* `Template` — text that may contain `{{variable}}` references. A literal\n  (non-variable) template in a sensitive field is itself treated as\n  sensitive: it is masked in the UI, redacted in history, and replaced by a\n  placeholder in safe-share exports.\n* `Secret` — a vault reference.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "template"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
+            },
+            "kind": {
+              "type": "string",
+              "const": "secret"
+            }
+          },
+          "required": [
+            "kind",
+            "secret"
+          ]
+        }
+      ]
+    },
+    "SecretRef": {
+      "description": "Reference to a value held in the encrypted vault. The value itself never\nappears in ordinary object graphs, logs or safe-share exports.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "description": "Human label shown in the UI and in export previews (\"prod API key\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "HostBinding": {
+      "description": "Host/port pattern a TLS profile or client identity is bound to. Wildcards\nare allowed only as a leading `*.` label and produce a UI warning.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "host"
+      ]
+    },
+    "TlsMinVersion": {
+      "type": "string",
+      "enum": [
+        "tls12",
+        "tls13"
+      ]
+    },
+    "ServerSpiffeIdentity": {
+      "description": "Expected SPIFFE identity of a TLS server (X.509-SVID). At least one field\nmust be set; when both are, the ID must belong to the trust domain.",
+      "type": "object",
+      "properties": {
+        "expected_server_spiffe_id": {
+          "description": "Exact SPIFFE ID the server must present, e.g.\n`spiffe://cluster.local/ns/ferrum/sa/svc`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trust_domain": {
+          "description": "Trust domain the server's SPIFFE ID must belong to, e.g. `cluster.local`\n(any workload of that trust domain is accepted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

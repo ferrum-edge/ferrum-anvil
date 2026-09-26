@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiagnosticFinding",
+  "description": "A single diagnostic claim with its evidence and confidence.",
+  "type": "object",
+  "properties": {
+    "code": {
+      "description": "Stable finding code, e.g. `client.tls.untrusted_issuer`.",
+      "type": "string"
+    },
+    "rule_id": {
+      "type": "string"
+    },
+    "rule_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "title": {
+      "type": "string"
+    },
+    "explanation": {
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/SourceScope"
+    },
+    "confidence": {
+      "$ref": "#/$defs/Confidence"
+    },
+    "severity": {
+      "$ref": "#/$defs/Severity"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      }
+    },
+    "alternatives": {
+      "description": "Other explanations consistent with the same evidence.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "does_not_prove": {
+      "description": "Statements this evidence does NOT establish (shown explicitly).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "remediation": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Remediation"
+      }
+    },
+    "owner": {
+      "$ref": "#/$defs/Owner"
+    },
+    "confirm_with": {
+      "description": "What additional evidence would confirm or refute the claim.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "code",
+    "rule_id",
+    "rule_version",
+    "title",
+    "explanation",
+    "scope",
+    "confidence",
+    "severity",
+    "evidence",
+    "alternatives",
+    "does_not_prove",
+    "remediation",
+    "owner",
+    "confirm_with"
+  ],
+  "$defs": {
+    "SourceScope": {
+      "description": "Which leg / owner of the path a claim is about.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "forward_proxy",
+            "upstream_application",
+            "unknown"
+          ]
+        },
+        {
+          "description": "Anvil itself, before any network activity.",
+          "type": "string",
+          "const": "local_client"
+        },
+        {
+          "description": "Anvil ↔ the peer it connected to (gateway or ordinary destination).",
+          "type": "string",
+          "const": "client_to_peer"
+        },
+        {
+          "description": "The gateway's own admission/configuration/policy decisions.",
+          "type": "string",
+          "const": "gateway_admission"
+        },
+        {
+          "description": "The gateway ↔ its upstream backend.",
+          "type": "string",
+          "const": "gateway_to_upstream"
+        },
+        {
+          "description": "Delivery of an already-started response.",
+          "type": "string",
+          "const": "response_delivery"
+        }
+      ]
+    },
+    "Confidence": {
+      "description": "Qualitative confidence. Anvil never invents probability percentages.\n`Unknown` is a correct answer when evidence is insufficient.",
+      "type": "string",
+      "enum": [
+        "conflicting_evidence",
+        "unknown",
+        "likely",
+        "confirmed"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/EvidenceSource"
+        },
+        "key": {
+          "description": "Machine key, e.g. `failure.kind`, `header.x-gateway-error`, `tls.alert`.",
+          "type": "string"
+        },
+        "value": {
+          "description": "Redacted value as observed.",
+          "type": "string"
+        },
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "source",
+        "key",
+        "value"
+      ]
+    },
+    "EvidenceSource": {
+      "description": "Where a piece of evidence came from. Rules weight native measurements and\ntrusted gateway fields above generic status meanings and body heuristics.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "local_validation",
+            "native_transport",
+            "tls_verifier",
+            "http_status",
+            "http_header",
+            "http_trailer",
+            "grpc_status",
+            "web_socket_close",
+            "body_completion",
+            "configuration",
+            "assertion"
+          ]
+        },
+        {
+          "description": "Parsed body structure (SOAP fault, GraphQL errors). Weak evidence of origin.",
+          "type": "string",
+          "const": "body_content"
+        },
+        {
+          "description": "Ferrum marker from a destination the user explicitly trusts as Ferrum.",
+          "type": "string",
+          "const": "ferrum_marker_trusted"
+        },
+        {
+          "description": "Ferrum-like marker from an unverified destination.",
+          "type": "string",
+          "const": "ferrum_marker_unverified"
+        },
+        {
+          "description": "Authenticated gateway diagnostic detail (versioned contract).",
+          "type": "string",
+          "const": "gateway_detail"
+        }
+      ]
+    },
+    "Remediation": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/Owner"
+        }
+      },
+      "required": [
+        "text",
+        "owner"
+      ]
+    },
+    "Owner": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "gateway_operator",
+            "api_owner",
+            "network_administrator",
+            "identity_provider",
+            "unknown"
+          ]
+        },
+        {
+          "description": "The person using Anvil (request, credentials, local settings).",
+          "type": "string",
+          "const": "caller"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="Workspace" tests="6" failures="5" errors="0" skipped="0" time="0.010" timestamp="2026-09-25T16:14:37">
+  <testsuite name="Workspace · iteration 1" id="0" tests="6" failures="5" errors="0" skipped="0" time="0.010" timestamp="2026-09-25T16:14:37">
+    <properties>
+      <property name="anvil.run_id" value="01a0d958-e7b3-7254-8ac9-f61cef28f38e"/>
+      <property name="anvil.completion" value="completed"/>
+      <property name="anvil.partial" value="false"/>
+      <property name="anvil.runner_version" value="anvil-runner/0.1.0+anvil-transport/0.1.0"/>
+      <property name="anvil.iteration" value="0"/>
+      <property name="anvil.iteration_status" value="failed"/>
+      <property name="anvil.steps_omitted" value="0"/>
+    </properties>
+    <testcase name="01 OK" classname="anvil.Workspace" time="0.008">
+      <system-out>GET http://127.0.0.1:18080/ok/echo
+HTTP 200 OK — transport completed, application success
+transport=Completed application=Success assertions=NotRun dispatch=Sent
+execution record: 01a0d958-e7bb-7651-9816-ac5c98b6fb39
+</system-out>
+    </testcase>
+    <testcase name="02 Backend refuses connections" classname="anvil.Workspace" time="0.000">
+      <failure type="application" message="application failure: HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)">GET http://127.0.0.1:18080/up/refused/
+HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)
+transport=Completed application=Failure assertions=NotRun dispatch=Sent
+finding http.bad_gateway [Error/Confirmed]: Bad gateway (502)
+finding ferrum.marker.unverified [Info/Confirmed]: Ferrum-like header from an unverified destination
+execution record: 01a0d958-e7bb-7651-9816-ac5db70ab601
+</failure>
+    </testcase>
+    <testcase name="03 Backend name does not resolve" classname="anvil.Workspace" time="0.000">
+      <failure type="application" message="application failure: HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)">GET http://127.0.0.1:18080/up/dns/
+HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)
+transport=Completed application=Failure assertions=NotRun dispatch=Sent
+finding http.bad_gateway [Error/Confirmed]: Bad gateway (502)
+finding ferrum.marker.unverified [Info/Confirmed]: Ferrum-like header from an unverified destination
+execution record: 01a0d958-e7bc-72d5-97a0-cd0a3441f5a2
+</failure>
+    </testcase>
+    <testcase name="04 Backend ends the body early" classname="anvil.Workspace" time="0.000">
+      <failure type="application" message="application failure: HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)">GET http://127.0.0.1:18080/up/short-body/
+HTTP 502 Bad Gateway — transport completed, application failure: Bad gateway (502)
+transport=Completed application=Failure assertions=NotRun dispatch=Sent
+finding http.bad_gateway [Error/Confirmed]: Bad gateway (502)
+finding ferrum.marker.unverified [Info/Confirmed]: Ferrum-like header from an unverified destination
+execution record: 01a0d958-e7bc-72d5-97a0-cd0b58e23bd3
+</failure>
+    </testcase>
+    <testcase name="05 Application 500 (not the gateway)" classname="anvil.Workspace" time="0.000">
+      <failure type="application" message="application failure: HTTP 500 Internal Server Error — transport completed, application failure: Server error (500)">GET http://127.0.0.1:18080/gw/app-500/status/500
+HTTP 500 Internal Server Error — transport completed, application failure: Server error (500)
+transport=Completed application=Failure assertions=NotRun dispatch=Sent
+finding http.server_error [Error/Confirmed]: Server error (500)
+finding ferrum.marker.unverified [Info/Confirmed]: Ferrum-like header from an unverified destination
+execution record: 01a0d958-e7bc-72d5-97a0-cd0c56fae30a
+</failure>
+    </testcase>
+    <testcase name="06 Application 403 (not a WAF)" classname="anvil.Workspace" time="0.000">
+      <failure type="application" message="application failure: HTTP 403 Forbidden — transport completed, application failure: The request was refused (403)">GET http://127.0.0.1:18080/gw/app-403/status/403
+HTTP 403 Forbidden — transport completed, application failure: The request was refused (403)
+transport=Completed application=Failure assertions=NotRun dispatch=Sent
+finding http.forbidden [Error/Confirmed]: The request was refused (403)
+execution record: 01a0d958-e7bd-76cc-9a66-a15e5874f5ef
+</failure>
+    </testcase>
+  </testsuite>
+</testsuites>

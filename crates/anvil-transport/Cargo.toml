@@ -1,0 +1,61 @@
+[package]
+name = "anvil-transport"
+description = "Instrumented protocol adapters: typed phase evidence for DNS, TCP, proxy, TLS, HTTP/1.1, HTTP/2, HTTP/3, WebSocket, gRPC framing, SSE, TCP/TLS and UDP/DTLS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anvil-domain.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+bytes.workspace = true
+http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+h2 = "0.4"
+url.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-native-certs.workspace = true
+x509-parser.workspace = true
+quinn.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
+tokio-tungstenite.workspace = true
+tungstenite.workspace = true
+hickory-resolver.workspace = true
+dns-lookup.workspace = true
+socket2.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+base64.workspace = true
+hex.workspace = true
+flate2.workspace = true
+brotli.workspace = true
+zstd.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+dimpl.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+protox.workspace = true
+rcgen.workspace = true
+
+[dev-dependencies]
+anvil-fixtures = { path = "../anvil-fixtures" }
+anvil-auth.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

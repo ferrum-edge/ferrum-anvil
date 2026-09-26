@@ -1,0 +1,70 @@
+{
+  "source": "src/plugins/hmac_auth.rs:1902@20e76030a05dc49c3804e969516c94ab101110b9",
+  "gateway_release": "v0.9.5",
+  "gateway_commit": "20e76030a05dc49c3804e969516c94ab101110b9",
+  "notes": [
+    "Legacy ferrum-hmac-v1 (no nonce). Only accepted when the plugin config has signing_profile='ferrum-hmac-v1' AND allow_unsafe_replayable_v1=true (src/plugins/hmac_auth.rs:957-995).",
+    "Auditor-computed; formula copied from test helper tests/unit/plugins/hmac_auth_tests.rs:136-148."
+  ],
+  "vectors": [
+    {
+      "name": "v1_get_empty_body_legacy_digest",
+      "inputs": {
+        "profile": "ferrum-hmac-v1",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username": "hmacuser",
+        "authority": "api.example.com",
+        "method": "GET",
+        "raw_path": "/test",
+        "raw_query": "",
+        "request_target": "/test",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "",
+        "body_len": 0,
+        "digest_header_name": "Digest",
+        "digest_header_value": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+        "nonce": null,
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v1\nferrum\nhmacuser\napi.example.com\nGET\n/test\n\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+        "signing_string_escaped": "\"ferrum-hmac-v1\\nferrum\\nhmacuser\\napi.example.com\\nGET\\n/test\\n\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\"",
+        "signature_base64": "eMVBUMsRsB/+B90biAXNYnKGOyRS/VQ9qYMDECNC1Ds=",
+        "authorization_header": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", signature=\"eMVBUMsRsB/+B90biAXNYnKGOyRS/VQ9qYMDECNC1Ds=\"",
+        "headers_on_wire": {
+          "Authorization": "hmac username=\"hmacuser\", algorithm=\"hmac-sha256\", signature=\"eMVBUMsRsB/+B90biAXNYnKGOyRS/VQ9qYMDECNC1Ds=\"",
+          "Date": "Fri, 25 Sep 2026 12:00:00 GMT",
+          "Digest": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+          "Host": "api.example.com"
+        }
+      },
+      "provenance": "auditor-computed with python3; legacy profile. Formula copied from tests/unit/plugins/hmac_auth_tests.rs:136-148 (build_signing_string, v1) and tests/common/hmac_helpers.rs:93-109. Requires plugin config signing_profile='ferrum-hmac-v1' + allow_unsafe_replayable_v1=true (src/plugins/hmac_auth.rs:957-995). No nonce parameter may be sent (src/plugins/hmac_auth.rs:658-662). Mirrors test_valid_hmac_sha256 (:461-486) with a fixed Date."
+    },
+    {
+      "name": "v1_quoted_username_with_escapes",
+      "inputs": {
+        "profile": "ferrum-hmac-v1",
+        "secret": "my-hmac-secret-key-at-least-32-bytes",
+        "namespace": "ferrum",
+        "username_decoded": "ops,\"blue\\team",
+        "authority": "api.example.com",
+        "method": "GET",
+        "raw_path": "/quoted",
+        "raw_query": "",
+        "date": "Fri, 25 Sep 2026 12:00:00 GMT",
+        "body_utf8": "",
+        "digest_header_name": "Digest",
+        "digest_header_value": "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+        "algorithm": "hmac-sha256"
+      },
+      "expected": {
+        "signing_string": "ferrum-hmac-v1\nferrum\nops,\"blue\\team\napi.example.com\nGET\n/quoted\n\nFri, 25 Sep 2026 12:00:00 GMT\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+        "signing_string_escaped": "\"ferrum-hmac-v1\\nferrum\\nops,\\\"blue\\\\team\\napi.example.com\\nGET\\n/quoted\\n\\nFri, 25 Sep 2026 12:00:00 GMT\\nsha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\"",
+        "signature_base64": "3DBmfOCdLkPyjqK2H0oy9Cvu2l6VoQidHTukYU9fp9w=",
+        "authorization_header": "hmac UserName=\"ops,\\\"blue\\\\team\", ALGORITHM=\"hmac-sha256\", Signature=\"3DBmfOCdLkPyjqK2H0oy9Cvu2l6VoQidHTukYU9fp9w=\""
+      },
+      "provenance": "auditor-computed with python3; legacy profile. Formula copied from tests/unit/plugins/hmac_auth_tests.rs:136-148 (build_signing_string, v1) and tests/common/hmac_helpers.rs:93-109. Requires plugin config signing_profile='ferrum-hmac-v1' + allow_unsafe_replayable_v1=true (src/plugins/hmac_auth.rs:957-995). No nonce parameter may be sent (src/plugins/hmac_auth.rs:658-662). Username 'ops,\"blue\\team' and the mixed-case, backslash-escaped header spelling are copied from tests/unit/plugins/hmac_auth_tests.rs:489-523; the signing string uses the UNESCAPED username (parse_auth_param_value, src/plugins/hmac_auth.rs:508-550). Date fixed by auditor."
+    }
+  ]
+}

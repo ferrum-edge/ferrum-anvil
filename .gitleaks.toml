@@ -1,0 +1,28 @@
+# Secret scanning for Ferrum Anvil (gitleaks >= 8.25; CI pins 8.30.1).
+#
+# Default rules apply everywhere. The allowlists below are deliberately
+# narrow: they cover test vectors and fixtures whose "secrets" are published,
+# fake, or intentionally planted canaries used to prove redaction. Anything
+# else that matches a rule fails CI. Do not widen these to whole crates or to
+# src/ — add a narrowly scoped entry with a reason instead.
+
+title = "Ferrum Anvil"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Auth interop vectors: HMAC/SOAP digests computed from documented fake inputs (fixtures/auth-vectors/README-style provenance in each file)"
+paths = ['''^fixtures/auth-vectors/[^/]+\.json$''']
+
+[[allowlists]]
+description = "Import fixtures: sample cURL/Postman/Insomnia/HAR/OpenAPI/WSDL documents with placeholder credentials (example.com hosts)"
+paths = ['''^crates/anvil-import/tests/fixtures/''']
+
+[[allowlists]]
+description = "Canary secrets planted by leak/redaction tests; the tests assert these never reach logs, reports or exports"
+regexes = ['''(sk-live-(TOPSECRET|LEAKME)|tok-SENSITIVE-)[A-Za-z0-9-]*''']
+
+[[allowlists]]
+description = "RFC 6455 §1.3 sample Sec-WebSocket-Key (base64 of \"the sample nonce\"), used by WebSocket handshake tests including the vendored tungstenite's"
+regexes = ['''dGhlIHNhbXBsZSBub25jZQ==''']

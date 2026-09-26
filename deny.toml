@@ -1,0 +1,102 @@
+# cargo-deny policy for Ferrum Anvil (cargo-deny 0.20.x; CI pins 0.20.2).
+#
+#   cargo deny check                 # advisories, bans, licenses, sources
+#   cargo deny check licenses        # one check
+#
+# Ferrum Anvil is PolyForm Noncommercial 1.0.0 + a separate commercial
+# license (LICENSE, LICENSE-COMMERCIAL.md). Dependencies must be permissive so
+# that both the noncommercial and the commercial distribution remain possible:
+# copyleft (GPL/LGPL/AGPL/EUPL/SSPL/...) is not on the allowlist and fails the
+# check. Weak (file-level) copyleft is accepted only as a reviewed per-crate
+# exception. scripts/licenses.mjs reads [licenses] below and applies the same
+# policy to npm packages bundled into the desktop UI.
+
+[graph]
+# Check the graph that is actually built for every supported release target.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# Release feature set: default features only. The `e2e` feature (embedded
+# WebDriver) must never be in a release graph; see [bans] below.
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+# RustSec advisory database (fetched by cargo-deny).
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "workspace"
+unsound = "all"
+# Every entry needs a reason and an exit condition. Reviewed 2026-09-25;
+# these are also listed as open items in docs/release.md.
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side channel, via jsonwebtoken's rust_crypto backend (anvil-auth RS256 signing). Anvil only signs caller-built JWTs locally; it performs no RSA decryption and exposes no network-observable private-key oracle. No patched rsa release exists. Exit: RustCrypto/RSA#626 fixed, or jsonwebtoken switched to a constant-time backend." },
+    { id = "RUSTSEC-2024-0429", reason = "glib 0.18 VariantStrIter unsoundness, via Tauri's Linux GTK stack (gtk-rs 0.18 is pinned by tauri/wry/tao/muda/webkit2gtk 2.0). Neither Anvil nor those crates (nor rfd) call VariantStrIter. Exit: Tauri moves to gtk-rs >= 0.20." },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+]
+confidence-threshold = 0.93
+exceptions = [
+    # MPL-2.0 is file-level copyleft: compatible with distributing Anvil under
+    # its own terms as long as these crates' files stay available under
+    # MPL-2.0. They are used unmodified from crates.io (Tauri's HTML/CSS
+    # tooling and the `dirs` family). Listed in THIRD_PARTY_LICENSES.md.
+    { allow = ["MPL-2.0"], crate = "cssparser" }, # Tauri (html5ever/kuchikiki CSS selectors); unmodified
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" }, # Tauri (cssparser proc macros); unmodified
+    { allow = ["MPL-2.0"], crate = "dtoa-short" }, # Tauri (cssparser number formatting); unmodified
+    { allow = ["MPL-2.0"], crate = "selectors" }, # Tauri (CSS selector matching for asset injection); unmodified
+    { allow = ["MPL-2.0"], crate = "option-ext" }, # dirs-sys (platform data directories); unmodified
+]
+
+[licenses.private]
+# Anvil's own workspace crates are `publish = false` and carry the project
+# license (LICENSE); they are not third-party dependencies.
+ignore = true
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies carry no version; that is fine for private crates.
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+deny = [
+    # Test-only embedded WebDriver server. It is an optional dependency behind
+    # the non-default `e2e` feature of anvil-desktop; if it ever enters the
+    # default (release) graph this check fails. scripts/release-check.sh
+    # additionally inspects the built binaries.
+    { crate = "tauri-plugin-wdio-webdriver", reason = "test-only WebDriver server must never ship" },
+]
+skip = []
+skip-tree = []
+
+[sources]
+# crates.io only: no git or alternative registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

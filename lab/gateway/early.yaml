@@ -1,0 +1,34 @@
+# Ferrum Anvil failure lab - profile "early" (ferrum-edge v0.9.7 / v0.9.5, file mode)
+#
+# Scenarios (crates/anvil-lab/src/early.rs, docs/lab/early.md): TLS 1.3 / QUIC 0-RTT early
+# data through the gateway's HTTP/3 listener (GET admitted as early data, PUT answered 425
+# Too Early, POST never sent early), the same with early data off, and resumption without
+# early data on the HTTPS (TCP) listener.
+# Settings:  early.conf (early data for GET: HTTP 17280, HTTPS+QUIC 17243, admin 17290) and
+#            early-off.conf (no early data: 17281 / 17244 / 17291) share this file.
+# Fixtures:  127.0.0.1:17300-17399. 17301 is the HTTP/1.1 echo backend whose request log is
+#            the ground truth for `Early-Data: 1`.
+version: "1"
+
+resource_counts:
+  proxies: 1
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  - id: early-echo
+    listen_path: /early/echo
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 17301
+    strip_listen_path: true
+    pool_enable_http2: false
+    allowed_methods: [GET, HEAD, PUT, POST, DELETE]
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}

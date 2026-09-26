@@ -1,0 +1,31 @@
+[package]
+name = "anvil-runner"
+description = "Collection runner: ordered request chains with datasets, extraction and assertions over the shared execution engine; JSON, JUnit XML and offline HTML reports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anvil-domain.workspace = true
+anvil-engine.workspace = true
+anvil-transport.workspace = true
+# Dataset parsing (CSV / JSON array of objects) and the HTML escaper are
+# shared with the load engine rather than duplicated.
+anvil-load.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+anvil-fixtures = { path = "../anvil-fixtures" }
+roxmltree.workspace = true
+parking_lot.workspace = true
+
+[lints]
+workspace = true
