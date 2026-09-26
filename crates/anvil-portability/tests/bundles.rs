@@ -712,12 +712,14 @@ fn plan_lists_stored_workspaces_the_bundle_claims_and_objects_stored_in_another_
         ..Default::default()
     };
     assert!(plan::plan(&g, &stored("folder", Some(ws)), ConflictPolicy::Replace).foreign_objects.is_empty());
-    // Stored in another workspace, or in none: listed for every policy.
+    // Stored in another workspace, or in none: listed for Merge and Replace.
+    // A Duplicate copy gets a fresh id, so it lands on nothing stored.
     let listed = format!("folder 'Orders' ({})", folder.meta.id);
     for owner in [Some(Id::new()), None] {
-        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
             assert_eq!(plan::plan(&g, &stored("folder", owner), policy).foreign_objects, vec![listed.clone()], "{policy:?}");
         }
+        assert!(plan::plan(&g, &stored("folder", owner), ConflictPolicy::Duplicate).foreign_objects.is_empty());
     }
     // The same id under another kind is a different stored object.
     assert!(plan::plan(&g, &stored("request", Some(Id::new())), ConflictPolicy::Replace).foreign_objects.is_empty());
@@ -807,7 +809,7 @@ fn validation_refuses_objects_and_references_outside_their_workspace() {
     let ws = base.workspaces[0].meta.id;
     let request = base.requests[0].meta.id;
     // A second workspace in the same bundle: references may not cross into it.
-    let mut two = sample();
+    let mut two = base.clone();
     let mut other = two.workspaces[0].clone();
     other.meta = Meta::new();
     other.name = "Other".into();

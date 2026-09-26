@@ -33,7 +33,8 @@ pub struct ImportPlan {
     /// Objects stored here under the same kind and id as a bundle object but
     /// in a different workspace than the bundle gives it. Replace never moves
     /// an object out of its workspace, so a Replace import is refused while
-    /// any is listed; Merge keeps the stored object.
+    /// any is listed; Merge keeps the stored object. Empty for Duplicate,
+    /// which gives every object a fresh id.
     pub foreign_objects: Vec<String>,
     /// Workspaces stored here that the bundle claims by id (Merge and
     /// Replace; a Duplicate copy never claims one). The import writes into
@@ -89,10 +90,11 @@ pub fn plan(g: &PortableGraph, existing: &Existing, policy: ConflictPolicy) -> I
         .map(|(k, id, n)| format!("{k} '{n}' ({id})"))
         .collect();
     let foreign_secrets = foreign_secrets(g, existing);
-    let foreign_objects = foreign_objects(g, existing);
-    let existing_workspaces = match policy {
-        ConflictPolicy::Duplicate => vec![],
-        ConflictPolicy::Merge | ConflictPolicy::Replace => existing_workspaces(g, existing),
+    // A Duplicate copy gives every object a fresh id: none lands on a stored
+    // object, and none claims a stored workspace.
+    let (foreign_objects, existing_workspaces) = match policy {
+        ConflictPolicy::Duplicate => (vec![], vec![]),
+        ConflictPolicy::Merge | ConflictPolicy::Replace => (foreign_objects(g, existing), existing_workspaces(g, existing)),
     };
     let n = ids.len();
     let c = conflicts.len();

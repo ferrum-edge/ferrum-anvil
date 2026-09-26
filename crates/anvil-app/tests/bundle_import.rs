@@ -5,12 +5,13 @@
 use anvil_app::exec::SendOptions;
 use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
+use anvil_app::runner::RunSettings;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::{SecretRef, SensitiveValue};
-use anvil_domain::workspace::{Meta, RequestDefinition, Variable, Workspace};
+use anvil_domain::workspace::{Dataset, DatasetFormat, Meta, RequestDefinition, RequestRevision, Scenario, Variable, Workspace};
 use anvil_portability::bundle::{self, BundleError, BundleKind, ExportOptions};
 use anvil_portability::plan::{ConflictPolicy, ExistingWorkspace};
 use anvil_portability::{ExportMode, PortableGraph, SecretValue};
@@ -490,4 +491,109 @@ fn a_secret_needs_a_stored_workspace() {
     let e = a.set_secret(&Id::new(), "bearer", TOKEN).unwrap_err();
     assert!(matches!(e, AppError::NotFound(_)), "{e}");
     assert!(a.store.list_secret_ids(None).unwrap().is_empty(), "nothing was stored");
+}
+
+#[test]
+fn every_stored_workspace_a_bundle_claims_needs_approval() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let payments = a.create_workspace("Payments").unwrap();
+    let billing = a.create_workspace("Billing").unwrap();
+
+    // A bundle that claims both stored workspaces and adds a request to one.
+    let request = request_in(billing.meta.id, "Probe", RequestSpec::http("GET", "https://elsewhere.example.test/"));
+    let g = PortableGraph { workspaces: vec![payments.clone(), billing.clone()], requests: vec![request], ..Default::default() };
+    let bytes = encrypted(&g);
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        let preview = a.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap();
+        assert_eq!(preview.plan.existing_workspaces.len(), 2, "{policy:?}");
+        // Approving only one of them refuses the whole import, naming the other.
+        let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&payments.meta.id)).unwrap_err();
+        assert!(
+            matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Billing'") && !m.contains("'Payments'")),
+            "{policy:?}: {e}"
+        );
+    }
+    assert!(a.requests(&billing.meta.id).unwrap().is_empty(), "nothing was imported");
+    assert!(a.requests(&payments.meta.id).unwrap().is_empty(), "nothing was imported");
+
+    // Approving both, Merge writes into them.
+    let both = ImportApproval { existing_workspaces: vec![payments.meta.id, billing.meta.id] };
+    a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &both).unwrap();
+    assert_eq!(a.requests(&billing.meta.id).unwrap().len(), 1);
+}
+
+#[test]
+fn replace_never_overwrites_a_revision_of_another_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let request = a.create_request(&ws.meta.id, None, "Charge", RequestSpec::http("POST", "https://api.example.test/charge")).unwrap();
+    let rid = request.revision_id.expect("a saved request has a revision");
+    let revision = a.revision(&rid).unwrap();
+
+    // A bundle with a workspace and a request of its own whose revision
+    // reuses the stored revision's id, with a spec of its own.
+    let incoming = Workspace { meta: Meta::new(), name: "Incoming".into(), ..ws.clone() };
+    let mut look_alike = request_in(incoming.meta.id, "Look-alike", RequestSpec::http("GET", "https://elsewhere.example.test/"));
+    look_alike.revision_id = Some(rid);
+    let rev = RequestRevision { request_id: look_alike.meta.id, spec: look_alike.spec.clone(), ..revision.clone() };
+    let g = PortableGraph { workspaces: vec![incoming], requests: vec![look_alike], revisions: vec![rev], ..Default::default() };
+    let bytes = encrypted(&g);
+    let listed = format!("revision 'Look-alike' ({rid})");
+
+    let preview = a.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(preview.plan.foreign_objects, vec![listed.clone()]);
+    let e = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains(&listed)), "{e}");
+    assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
+    assert_eq!(a.revision(&rid).unwrap(), revision, "the revision stays with its request, unchanged");
+    assert_eq!(a.request(&request.meta.id).unwrap(), request);
+}
+
+#[tokio::test]
+async fn a_scenario_never_runs_with_a_dataset_of_another_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let rows = a.create_dataset(&ws.meta.id, "customers", DatasetFormat::Csv, b"card\nplaceholder-card\n", vec![]).unwrap();
+
+    // A bundle with a workspace of its own whose dataset reuses the stored
+    // dataset's id, and a scenario there that uses it.
+    let incoming = Workspace { meta: Meta::new(), name: "Incoming".into(), ..ws.clone() };
+    let look_alike = Dataset { workspace_id: incoming.meta.id, ..rows.clone() };
+    let scenario = Scenario {
+        meta: Meta::new(),
+        workspace_id: incoming.meta.id,
+        name: "Smoke".into(),
+        description: String::new(),
+        steps: vec![],
+        dataset_id: Some(rows.meta.id),
+        iterations: 0,
+        stop_on_failure: false,
+        trusted: false,
+    };
+    let g = PortableGraph {
+        workspaces: vec![incoming.clone()],
+        datasets: vec![look_alike],
+        scenarios: vec![scenario.clone()],
+        ..Default::default()
+    };
+    let rep = a.import(&encrypted(&g), Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert_eq!(rep.plan.foreign_objects, vec![format!("dataset 'customers' ({})", rows.meta.id)]);
+    // Merge keeps the stored dataset in its own workspace and adds the scenario.
+    assert_eq!(a.dataset(&rows.meta.id).unwrap(), rows);
+    assert_eq!(a.scenario(&scenario.meta.id).unwrap().workspace_id, incoming.meta.id);
+
+    // Even allowed to run, the imported scenario never reads the stored rows.
+    let settings = RunSettings { allow_untrusted: true, record_history: false, persist_report: false, ..Default::default() };
+    let Err(e) = a.run_scenario(&scenario.meta.id, settings, CancellationToken::new()).await else {
+        panic!("a scenario ran with a dataset of another workspace")
+    };
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains("the dataset belongs to another workspace")), "{e}");
+    // Nor can it be saved with it.
+    let Err(e) = a.update_scenario(a.scenario(&scenario.meta.id).unwrap()) else {
+        panic!("a scenario was saved with a dataset of another workspace")
+    };
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains("the dataset belongs to another workspace")), "{e}");
 }

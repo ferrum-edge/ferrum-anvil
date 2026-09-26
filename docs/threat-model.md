@@ -148,7 +148,9 @@ against it).
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
   request is prepared only in its own workspace and with folders of that
-  workspace, and a load plan runs only requests of its own workspace. This
+  workspace, and a scenario or load plan runs only requests and a dataset of
+  its own workspace. A Merge import keeps a stored object whose id a bundle
+  reuses in another workspace, and imported items never use it. This
   scope is the workspace boundary: it does not separate items inside one
   workspace, so anything imported into a workspace (see above) can use its
   secrets.

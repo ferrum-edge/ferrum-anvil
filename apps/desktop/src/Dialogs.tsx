@@ -483,20 +483,24 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
   );
 }
 
-function P12Picker(props: { workspaceId: string; onSecret: (v: { kind: "secret"; secret: { id: string; label: string } }) => void; current: string | null }) {
+function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "secret"; secret: { id: string; label: string } }) => void; current: string | null }) {
   const [err, setErr] = useState<string | null>(null);
   return (
     <div className="row">
       {props.current && <span className="badge accent">🔒 {props.current}</span>}
       <button
         className="btn small"
+        disabled={!props.workspaceId}
+        title={props.workspaceId ? undefined : "Open a workspace to keep values in its vault"}
         onClick={async () => {
+          const workspaceId = props.workspaceId;
+          if (!workspaceId) return;
           setErr(null);
           try {
             const file = await api.chooseFile("pkcs12_file", { filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
             if (!file) return;
             // The bundle goes straight into the vault as base64; only a reference returns.
-            const r = await api.readTextFile(file.token, props.workspaceId, file.file_name || "client.p12", true);
+            const r = await api.readTextFile(file.token, workspaceId, file.file_name || "client.p12", true);
             if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
           } catch (e) {
             setErr(String((e as Error).message));
@@ -943,7 +947,7 @@ export function ImportDialog(props: {
             <div className="bad-box">Replace can't overwrite objects that belong to another workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}. Import as copies instead.</div>
           )}
           {preview.plan.foreign_objects.length > 0 && preview.plan.policy === "merge" && (
-            <div className="warn-box">These objects already exist here in another workspace and are kept; imported items that point at them won't use them: {preview.plan.foreign_objects.slice(0, 8).join(", ")}</div>
+            <div className="warn-box">These objects already exist here in another workspace and stay there, unchanged. Imported items never use an object of another workspace, so those that refer to these won't find them until you point them at objects of their own workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}</div>
           )}
           {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "replace" && (
             <div className="bad-box">Replace can't overwrite secrets that belong to a workspace outside this bundle: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}. Import as copies instead.</div>

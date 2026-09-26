@@ -298,15 +298,15 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
                 s.stop_on_failure
             );
             if let Some(d) = s.dataset_id {
-                match app.dataset(&d) {
+                match app.workspace_dataset(&s.workspace_id, &d) {
                     Ok(d) => println!("  dataset: {} ({:?}; sensitive columns: {})", d.name, d.format, d.sensitive_columns.join(", ")),
                     Err(_) => println!("  dataset: {d} (missing)"),
                 }
             }
             for (i, st) in s.steps.iter().enumerate() {
                 let desc = match app.request(&st.request_id) {
-                    Ok(r) => format!("{} {} {}", r.name, r.spec.method, r.spec.url),
-                    Err(_) => format!("missing request {}", st.request_id),
+                    Ok(r) if r.workspace_id == s.workspace_id => format!("{} {} {}", r.name, r.spec.method, r.spec.url),
+                    _ => format!("missing request {}", st.request_id),
                 };
                 println!(
                     "  {:>2}. {desc}{}{}",

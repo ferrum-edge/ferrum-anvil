@@ -110,7 +110,7 @@ impl App {
         let s = self.scenario(scenario_id)?;
         let dataset = match (&settings.dataset, s.dataset_id) {
             (Some(d), _) => Some(d.clone()),
-            (None, Some(did)) => Some(self.run_dataset(&self.dataset(&did)?)?),
+            (None, Some(did)) => Some(self.run_dataset(&self.workspace_dataset(&s.workspace_id, &did)?)?),
             (None, None) => None,
         };
         let names = self.request_names(&s.workspace_id)?;
@@ -357,10 +357,8 @@ impl App {
                 return Err(AppError::Invalid(format!("step {}: think time is limited to {} ms", i + 1, anvil_runner::MAX_DELAY_MS)));
             }
         }
-        if let Some(d) = s.dataset_id
-            && self.dataset(&d)?.workspace_id != s.workspace_id
-        {
-            return Err(AppError::Invalid("the dataset belongs to another workspace".into()));
+        if let Some(d) = s.dataset_id {
+            self.workspace_dataset(&s.workspace_id, &d)?;
         }
         s.meta.updated_at = chrono::Utc::now();
         self.save_scenario(s)
@@ -383,6 +381,17 @@ impl App {
 
     pub fn dataset(&self, id: &Id) -> Result<Dataset> {
         self.store.get(kind::DATASET, id)?.ok_or_else(|| AppError::NotFound("dataset".into()))
+    }
+
+    /// A dataset of workspace `ws`. One stored in another workspace is
+    /// refused, never read: a scenario of an imported workspace can name
+    /// the id of a dataset that an import kept in place (Merge).
+    pub fn workspace_dataset(&self, ws: &Id, id: &Id) -> Result<Dataset> {
+        let d = self.dataset(id)?;
+        if d.workspace_id != *ws {
+            return Err(AppError::Invalid("the dataset belongs to another workspace".into()));
+        }
+        Ok(d)
     }
 
     /// Validate (parse with the runner's bounds), store the bytes as a
