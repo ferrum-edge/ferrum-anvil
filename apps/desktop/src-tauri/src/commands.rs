@@ -23,7 +23,6 @@ use anvil_transport::recorder::EventCtx;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio_util::sync::CancellationToken;
 
 pub(crate) type R<T> = Result<T, String>;
 
@@ -475,8 +474,8 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
-    let cancel = CancellationToken::new();
-    st.running.lock().insert(exec_id, cancel.clone());
+    // Retired when dropped, also if the send panics.
+    let pending = crate::state::PendingEntry::register(&st.running, exec_id);
     let h2 = handle.clone();
     let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
@@ -497,8 +496,8 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
         record_history: true,
         ..Default::default()
     };
-    let res = app.send(rid, &ws, input.spec, opts, events, cancel).await;
-    st.running.lock().remove(&exec_id);
+    let res = app.send(rid, &ws, input.spec, opts, events, pending.token().clone()).await;
+    drop(pending);
     let out = res.map_err(e)?;
     let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
     let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());

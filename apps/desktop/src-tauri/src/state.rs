@@ -11,11 +11,14 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
+/// Cancellation tokens of running executions, by execution id.
+pub type Running = Mutex<HashMap<Id, CancellationToken>>;
+
 pub struct DesktopState {
     pub profiles: ProfileManager,
     pub app: RwLock<Option<Arc<App>>>,
     /// Running executions (for cancel and lock-time stop).
-    pub running: Mutex<HashMap<Id, CancellationToken>>,
+    pub running: Running,
     /// Load runs in worker processes, by run key: (user cancel, lock stop).
     pub load_runs: Mutex<HashMap<String, (CancellationToken, CancellationToken)>>,
     /// Load reports that finished while the vault was locked (stop-on-lock);
@@ -110,5 +113,144 @@ impl DesktopState {
         if let Some(a) = self.app.read().as_ref() {
             a.lock();
         }
+    }
+}
+
+/// An execution's entry in [`DesktopState::running`], removed when this is
+/// dropped: on success, on an early return and on a panic alike.
+pub struct PendingEntry<'a> {
+    running: &'a Running,
+    id: Id,
+    token: CancellationToken,
+}
+
+impl<'a> PendingEntry<'a> {
+    /// Register a fresh token for `id`, so a cancel (or a lock) can reach the
+    /// execution from now on.
+    pub fn register(running: &'a Running, id: Id) -> Self {
+        let token = CancellationToken::new();
+        running.lock().insert(id, token.clone());
+        PendingEntry { running, id, token }
+    }
+
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    /// The open/cancel handshake. Runs `open` unless the entry is canceled
+    /// first (then `None`, and `publish` is never called). Otherwise `publish`
+    /// makes the result reachable elsewhere *before* the entry is retired, so a
+    /// concurrent cancel always finds one of the two. The flag says a cancel
+    /// landed after `open` completed: the caller must then stop what it published.
+    pub async fn open<T, P>(self, open: impl Future<Output = T>, publish: impl FnOnce(T) -> P) -> Option<(P, bool)> {
+        let token = self.token.clone();
+        let opened = tokio::select! {
+            v = open => v,
+            _ = token.cancelled() => return None,
+        };
+        let published = publish(opened);
+        drop(self);
+        // Checked only after retiring: a cancel from now on finds the published value.
+        Some((published, token.is_cancelled()))
+    }
+}
+
+impl Drop for PendingEntry<'_> {
+    fn drop(&mut self) {
+        self.running.lock().remove(&self.id);
+    }
+}
+
+/// Cancel the running execution `id`. Returns whether it was registered.
+pub fn cancel_pending(running: &Running, id: &Id) -> bool {
+    match running.lock().get(id) {
+        Some(t) => {
+            t.cancel();
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn cancel_before_the_open_completes_abandons_it() {
+        let running = Running::default();
+        let id = Id::new();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (_done_tx, done_rx) = oneshot::channel::<()>();
+        let pending = PendingEntry::register(&running, id);
+        let open = async move {
+            started_tx.send(()).unwrap();
+            done_rx.await
+        };
+        let cancel = async {
+            started_rx.await.unwrap();
+            assert!(cancel_pending(&running, &id));
+        };
+        let (opened, ()) = tokio::join!(pending.open(open, |_| panic!("an abandoned open is never published")), cancel);
+        assert!(opened.is_none());
+        assert!(running.lock().is_empty());
+        assert!(!cancel_pending(&running, &id));
+    }
+
+    #[tokio::test]
+    async fn cancel_between_publish_and_retire_is_reported() {
+        let running = Running::default();
+        let id = Id::new();
+        let pending = PendingEntry::register(&running, id);
+        let publish = |s| {
+            // The entry is still registered while the result is published.
+            assert!(cancel_pending(&running, &id));
+            s
+        };
+        let opened = pending.open(async { "session" }, publish).await;
+        assert_eq!(opened, Some(("session", true)));
+        assert!(running.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_without_cancel_retires_the_entry() {
+        let running = Running::default();
+        let id = Id::new();
+        let (tx, rx) = oneshot::channel();
+        let pending = PendingEntry::register(&running, id);
+        assert!(running.lock().contains_key(&id));
+        tx.send("session").unwrap();
+        let opened = pending.open(async { rx.await.unwrap() }, |s| s).await;
+        assert_eq!(opened, Some(("session", false)));
+        assert!(running.lock().is_empty());
+        // A cancel from now on no longer finds the entry: it goes to the published value.
+        assert!(!cancel_pending(&running, &id));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_open_removes_the_entry() {
+        let running = std::sync::Arc::new(Running::default());
+        let id = Id::new();
+        let shared = running.clone();
+        let task = tokio::spawn(async move {
+            let pending = PendingEntry::register(&shared, id);
+            pending.open(async { panic!("open failed") }, |()| ()).await
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(running.lock().is_empty());
+    }
+
+    #[test]
+    fn an_early_return_removes_the_entry() {
+        let running = Running::default();
+        let id = Id::new();
+        let fails = || -> Result<(), String> {
+            let _pending = PendingEntry::register(&running, id);
+            assert!(running.lock().contains_key(&id));
+            Err("LOCKED".into())
+        };
+        assert!(fails().is_err());
+        assert!(running.lock().is_empty());
     }
 }
