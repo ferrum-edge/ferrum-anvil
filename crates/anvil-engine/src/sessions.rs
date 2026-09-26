@@ -29,7 +29,7 @@ use anvil_transport::dns::DnsConfig;
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::session::{CommandRx, RedactFn, SessionFacts, SessionOutput, TranscriptLimits};
 use anvil_transport::tls::{ClientIdentityMaterial, PreparedTls};
-use anvil_transport::{dtls, grpc, rawtcp, sse, udp, ws};
+use anvil_transport::{dtls, grpc, masque, rawtcp, sse, udp, ws};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use http::{HeaderName, HeaderValue};
@@ -51,6 +51,7 @@ enum Plan {
     Tcp(rawtcp::TcpPlan),
     Udp(udp::UdpPlan),
     Dtls(dtls::DtlsPlan),
+    Masque(masque::MasquePlan),
 }
 
 /// Everything a session run needs, frozen before any traffic.
@@ -282,7 +283,7 @@ async fn prepare_session(
         Protocol::Grpc => prepare_grpc(engine, ctx, r, interactive).await,
         Protocol::Sse => prepare_sse(engine, ctx, r).await,
         Protocol::Tcp => prepare_tcp(engine, ctx, r),
-        Protocol::Udp => prepare_udp(engine, ctx, r),
+        Protocol::Udp => prepare_udp(engine, ctx, r).await,
         Protocol::Http => Err(unsupported("HTTP is request/response; use execute() rather than a session", "protocol")),
     }
 }
@@ -362,7 +363,7 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
 async fn prepare_sse(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.sse.clone().unwrap_or(SseSpec { max_events: 0, idle_timeout_ms: 30_000, last_event_id: None, reconnect: false });
     let mut b = base(engine, ctx, r, &["https", "http"])?;
-    if let Some(f) = sse::version_unsupported(b.prep.settings.http_version) {
+    if let Some(f) = sse::version_unsupported(b.prep.settings.http_version, b.prep.http.target.scheme == "https", b.prep.proxy.is_some()) {
         return Err(f);
     }
     let target = b.prep.http.target.clone();
@@ -628,20 +629,39 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     Ok(p)
 }
 
-fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
-    let spec = ctx.spec.udp.clone().unwrap_or(UdpSpec { dtls: false, datagrams: vec![], response_window_ms: 1_000, max_datagrams: 1_000 });
+async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
+    let spec = ctx.spec.udp.clone().unwrap_or(UdpSpec {
+        dtls: false,
+        datagrams: vec![],
+        response_window_ms: 1_000,
+        max_datagrams: 1_000,
+        masque: None,
+    });
     let mut b = base(engine, ctx, r, &["udp", "dtls"])?;
-    no_auth(&b.prep, "UDP")?;
+    if spec.masque.is_none() {
+        no_auth(&b.prep, "UDP")?;
+    }
     if let Some(p) = &b.prep.proxy {
-        return Err(unsupported(
-            format!("UDP/DTLS cannot be sent through the proxy '{}' (HTTP CONNECT and SOCKS5 CONNECT carry TCP only)", p.label),
-            "settings.proxy",
-        ));
+        let why = if spec.masque.is_some() {
+            "the MASQUE proxy is reached over QUIC, which HTTP CONNECT and SOCKS5 proxies do not carry"
+        } else {
+            "HTTP CONNECT and SOCKS5 CONNECT carry TCP only"
+        };
+        return Err(unsupported(format!("UDP/DTLS cannot be sent through the proxy '{}' ({why})", p.label), "settings.proxy"));
     }
     let target = b.prep.http.target.clone();
     let use_dtls = target.scheme == "dtls" || spec.dtls;
     let datagrams = decode_payloads(r, &spec.datagrams, "udp.datagrams")?;
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
+    if let Some(m) = &spec.masque {
+        if use_dtls {
+            return Err(unsupported(
+                "DTLS inside a CONNECT-UDP tunnel is not implemented: the MASQUE proxy relays UDP payloads, and Anvil does not run a DTLS handshake through it. Use udp:// through the proxy, or dtls:// without it",
+                "udp.masque",
+            ));
+        }
+        return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams).await;
+    }
     let scheme = if use_dtls { "dtls" } else { "udp" };
     let url = format!("{scheme}://{}", target.authority);
     let display_url = b.redactor.url(&url);
@@ -685,6 +705,178 @@ fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     let body = concat(&datagrams);
     let mut p = finish_prep(b, plan, scheme.to_ascii_uppercase(), url, vec![], body, vec![]);
     p.content_type = None;
+    Ok(p)
+}
+
+/// RFC 6570 simple-string expansion of one value: everything except the
+/// unreserved characters is percent-encoded (so IPv6 colons become `%3A`,
+/// as RFC 9298 §2 requires).
+fn template_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for b in v.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Expand an RFC 9298 §2 URI Template path with `{target_host}` and
+/// `{target_port}` (simple expansion) and the form-style query expressions
+/// `{?…}` / `{&…}` over the same two variables. The template must be a path
+/// (`/…`) and must use both variables.
+fn expand_masque_template(template: &str, host: &str, port: u16) -> Result<String, String> {
+    if !template.starts_with('/') {
+        return Err(format!("the URI template '{template}' must be a path on the proxy (starting with /)"));
+    }
+    let value = |name: &str| match name {
+        "target_host" => Ok(template_value(host)),
+        "target_port" => Ok(port.to_string()),
+        other => Err(format!("the URI template uses '{other}'; only target_host and target_port are defined for CONNECT-UDP")),
+    };
+    let mut out = String::with_capacity(template.len() + host.len());
+    let mut used = (false, false);
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let close = rest[open..].find('}').ok_or_else(|| "the URI template has an unclosed '{'".to_string())? + open;
+        let expr = &rest[open + 1..close];
+        let (op, names) = match expr.chars().next() {
+            Some(c @ ('?' | '&')) => (Some(c), &expr[1..]),
+            _ => (None, expr),
+        };
+        for (i, name) in names.split(',').enumerate() {
+            let v = value(name)?;
+            used.0 |= name == "target_host";
+            used.1 |= name == "target_port";
+            match op {
+                None => out.push_str(&v),
+                Some(o) => {
+                    out.push(if i == 0 { o } else { '&' });
+                    out.push_str(&format!("{name}={v}"));
+                }
+            }
+        }
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    if !(used.0 && used.1) {
+        return Err("the URI template must contain both {target_host} and {target_port} (RFC 9298 §2)".into());
+    }
+    Ok(out)
+}
+
+/// UDP through an RFC 9298 CONNECT-UDP proxy: the proxy's origin and the
+/// expanded URI Template become the HTTP/3 extended CONNECT; TLS, trust and
+/// auth apply to the proxy (the only HTTP peer). The UDP target stays the
+/// request URL.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_masque(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    mut b: Base,
+    spec: &UdpSpec,
+    m: &MasqueSpec,
+    target: &Target,
+    datagrams: Vec<Bytes>,
+) -> Result<SessionPrep, TransportFailure> {
+    for (i, d) in datagrams.iter().enumerate() {
+        if d.len() > masque::MAX_UDP_PAYLOAD {
+            return Err(local(
+                FailureKind::RequestTooLargeLocal,
+                format!(
+                    "a {}-byte datagram exceeds the {} bytes an HTTP Datagram may carry (RFC 9298 §5)",
+                    d.len(),
+                    masque::MAX_UDP_PAYLOAD
+                ),
+                &format!("udp.datagrams[{i}]"),
+            ));
+        }
+    }
+    let proxy_url = r.resolve(&m.proxy_url, "udp.masque.proxy_url")?;
+    let mut notes = Vec::new();
+    let pt = prepare::parse_target(&proxy_url, &["https", "http"], &mut notes).map_err(|mut f| {
+        f.field = Some("udp.masque.proxy_url".into());
+        f
+    })?;
+    if pt.scheme != "https" {
+        return Err(unsupported(
+            "the MASQUE proxy URL must be https:// — CONNECT-UDP runs over HTTP/3, and QUIC is always encrypted",
+            "udp.masque.proxy_url",
+        ));
+    }
+    if pt.path != "/" || !pt.query.is_empty() {
+        return Err(local(
+            FailureKind::InvalidUrl,
+            "the MASQUE proxy URL is the proxy's origin (https://host:port); put the path in the URI template",
+            "udp.masque.proxy_url",
+        ));
+    }
+    let template = r.resolve(&m.uri_template, "udp.masque.uri_template")?;
+    let expanded = expand_masque_template(&template, &target.host, target.port)
+        .map_err(|e| local(FailureKind::InvalidUrl, e, "udp.masque.uri_template"))?;
+    let (path, query) = match expanded.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (expanded.clone(), String::new()),
+    };
+    let proxy_target = Target { path, query, ..pt };
+    b.inferred.extend(notes);
+    let settings = b.prep.settings.clone();
+    let (tls, name, _) = http_exec::tls_for(engine, ctx, &settings, &proxy_target, &mut b.inferred)?;
+    b.prep.tls_profile_name = name;
+    b.prep.tls = Some(tls.clone());
+    // The proxy is the only HTTP peer, so gateway trust follows the proxy.
+    let (trust, require_verified_tls) = http_exec::trust_for(ctx, &proxy_target);
+    b.prep.trust = trust;
+    b.prep.require_verified_tls = require_verified_tls;
+    // The request's own headers and a User-Agent; none of the HTTP body defaults.
+    let headers: Vec<(String, String)> = b
+        .prep
+        .http
+        .headers
+        .iter()
+        .filter(|(n, _)| has_explicit_header(&ctx.spec, n) || n.eq_ignore_ascii_case("user-agent"))
+        .cloned()
+        .collect();
+    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "CONNECT", &proxy_target, headers, &[]).await?;
+    let t = Target { query, ..proxy_target };
+    let connect_url = t.url();
+    let display_url = b.redactor.url(&connect_url);
+    b.inferred.push(format!(
+        "sent through the MASQUE proxy {display_url} (RFC 9298 CONNECT-UDP over HTTP/3; datagrams: {})",
+        match m.datagrams {
+            MasqueDatagramMode::Auto => "QUIC DATAGRAM frames when offered, otherwise capsules",
+            MasqueDatagramMode::QuicDatagrams => "QUIC DATAGRAM frames required",
+            MasqueDatagramMode::Capsules => "DATAGRAM capsules",
+        }
+    ));
+    let plan = masque::MasquePlan {
+        proxy_host: t.host.clone(),
+        proxy_port: t.port,
+        proxy_authority: t.authority.clone(),
+        request_target: t.request_target(),
+        target: target.authority.clone(),
+        headers: header_pairs(&headers),
+        mode: m.datagrams,
+        tls,
+        dns: dns_config(&settings),
+        timeouts: settings.timeouts,
+        limits: settings.limits,
+        datagrams: datagrams.clone(),
+        response_window_ms: spec.response_window_ms,
+        max_datagrams: spec.max_datagrams,
+        display_url,
+        transcript: TranscriptLimits::default(),
+        redact: Some(redact_fn(&b.redactor)),
+    };
+    let url = format!("udp://{}", target.authority);
+    let body = concat(&datagrams);
+    let mut p = finish_prep(b, Plan::Masque(plan), "UDP".into(), url, headers, body, facts);
+    p.content_type = None;
+    p.proxy = Some(format!("MASQUE CONNECT-UDP proxy {}", t.authority));
     Ok(p)
 }
 
@@ -771,6 +963,7 @@ async fn run_plan(plan: &Plan, events: &EventCtx, cancel: &CancellationToken, co
         Plan::Tcp(p) => rawtcp::run(p, events, cancel, commands).await,
         Plan::Udp(p) => udp::run(p, events, cancel, commands).await,
         Plan::Dtls(p) => dtls::run(p, events, cancel, commands).await,
+        Plan::Masque(p) => masque::run(p, events, cancel, commands).await,
     }
 }
 
@@ -817,6 +1010,11 @@ async fn run_prepared(
     }
     let mut extra = prep.extra_findings;
     extra.extend(fact_findings(&out.facts, ctx.spec.protocol));
+    // An automatic HTTP/3 → TCP fallback (SSE) is reported, never hidden.
+    let protocol_fallback_from = observations.iter().find_map(|a| match &a.reason {
+        AttemptReason::ProtocolFallback { from } => Some(from.clone()),
+        _ => None,
+    });
     let assembly = Assembly {
         ctx,
         started_at,
@@ -837,7 +1035,7 @@ async fn run_prepared(
         last,
         trust,
         credentials_stripped: false,
-        protocol_fallback_from: None,
+        protocol_fallback_from,
         redactor: &redactor,
         extra_findings: extra,
         stream: out.transcript,
@@ -963,5 +1161,27 @@ impl Engine {
                 SessionHandle { execution_id, protocol, commands: None, cancel, task, fallback }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_masque_template;
+
+    #[test]
+    fn masque_uri_templates_expand_rfc_9298_variables() {
+        let t = anvil_domain::request::MASQUE_DEFAULT_TEMPLATE;
+        assert_eq!(expand_masque_template(t, "192.0.2.6", 443).unwrap(), "/.well-known/masque/udp/192.0.2.6/443/");
+        // IPv6 literals are not bracketed; their colons are percent-encoded (RFC 9298 §2).
+        assert_eq!(expand_masque_template(t, "2001:db8::42", 53).unwrap(), "/.well-known/masque/udp/2001%3Adb8%3A%3A42/53/");
+        assert_eq!(
+            expand_masque_template("/masque{?target_host,target_port}", "example.com", 8443).unwrap(),
+            "/masque?target_host=example.com&target_port=8443"
+        );
+        assert_eq!(expand_masque_template("/m?x=1{&target_host}&p={target_port}", "h", 1).unwrap(), "/m?x=1&target_host=h&p=1");
+        assert!(expand_masque_template("/udp/{target_host}/", "h", 1).is_err(), "both variables are required");
+        assert!(expand_masque_template("udp/{target_host}/{target_port}/", "h", 1).is_err(), "a path is required");
+        assert!(expand_masque_template("/udp/{target_host}/{target_port", "h", 1).is_err());
+        assert!(expand_masque_template("/{x}/{target_host}/{target_port}/", "h", 1).is_err());
     }
 }

@@ -429,7 +429,9 @@ async fn proto_013_ws_over_h3_extended_connect_echoes_over_quic() {
 #[tokio::test]
 async fn ws_over_h3_without_extended_connect_sends_nothing() {
     init();
-    let f = h3server::serve_with("127.0.0.1:0", server_tls(), h3server::H3Options { extended_connect: false }).await.unwrap();
+    let f = h3server::serve_with("127.0.0.1:0", server_tls(), h3server::H3Options { extended_connect: false, ..Default::default() })
+        .await
+        .unwrap();
     let e = Engine::new();
     let o = run(&e, &ws_h3_ctx(&format!("wss://127.0.0.1:{}/ws", f.addr.port()), vec![text("never sent")])).await;
     let fl = last(&o).failure.as_ref().unwrap();
@@ -974,6 +976,7 @@ fn udp_spec(datagrams: &[&str], window_ms: u64) -> UdpSpec {
         datagrams: datagrams.iter().map(|d| StreamPayload { data: d.to_string(), encoding: PayloadEncoding::Text }).collect(),
         response_window_ms: window_ms,
         max_datagrams: 100,
+        masque: None,
     }
 }
 
@@ -987,7 +990,10 @@ async fn proto_020_udp_silence_is_only_no_response_observed() {
     let o = run(&e, &ctx(s)).await;
     // Independent ground truth: the fixture did receive it — Anvil must not claim either way.
     assert!(f.log.entries().iter().any(|e| matches!(e.event, GroundTruth::DatagramReceived { .. })));
-    assert!(matches!(o.record.outcome.protocol_status, ProtocolStatus::Udp { datagrams_sent: 1, datagrams_received: 0, window_ms: 300 }));
+    assert!(matches!(
+        o.record.outcome.protocol_status,
+        ProtocolStatus::Udp { datagrams_sent: 1, datagrams_received: 0, window_ms: 300, masque: None }
+    ));
     let n = finding(&o, "udp.no_response");
     assert!(n.does_not_prove.iter().any(|d| d.contains("delivered")));
     assert!(n.does_not_prove.iter().any(|d| d.contains("down")));
@@ -1076,6 +1082,7 @@ fn dtls_ctx(url: &str, p: TlsProfile) -> ExecutionContext {
         datagrams: vec![StreamPayload { data: "secure hello".into(), encoding: PayloadEncoding::Text }],
         response_window_ms: 500,
         max_datagrams: 10,
+        masque: None,
     });
     let mut c = ctx(s);
     with_profile(&mut c, p);

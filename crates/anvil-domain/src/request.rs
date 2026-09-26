@@ -331,6 +331,53 @@ pub struct UdpSpec {
     pub response_window_ms: u64,
     #[serde(default = "default_udp_max")]
     pub max_datagrams: u32,
+    /// Send the datagrams through an HTTP/3 MASQUE proxy (RFC 9298
+    /// CONNECT-UDP) instead of directly. The request URL stays the UDP
+    /// target (`udp://host:port`); the proxy only relays. `None` = direct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masque: Option<MasqueSpec>,
+}
+
+/// RFC 9298 UDP proxying over HTTP/3 ("MASQUE" CONNECT-UDP). Belongs to
+/// the UDP request rather than to a proxy profile: the proxy is addressed by
+/// a URI Template (not `host:port`), carries only UDP, and its datagram
+/// encoding is part of the exchange's evidence (docs/protocols.md).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MasqueSpec {
+    /// The proxy's `https://host:port` origin (variables allowed). HTTP/3
+    /// needs TLS, so any other scheme is refused before traffic; the TLS
+    /// profile setting applies to the QUIC handshake with the proxy.
+    pub proxy_url: String,
+    /// RFC 9298 §2 URI Template path (and optional query) on the proxy.
+    /// `{target_host}` and `{target_port}` are expanded from the request URL.
+    #[serde(default = "default_masque_template")]
+    pub uri_template: String,
+    #[serde(default)]
+    pub datagrams: MasqueDatagramMode,
+}
+
+/// How HTTP Datagrams (RFC 9297) are carried through the tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MasqueDatagramMode {
+    /// QUIC DATAGRAM frames when the proxy's SETTINGS enable HTTP/3
+    /// datagrams (`SETTINGS_H3_DATAGRAM`) and QUIC negotiated DATAGRAM
+    /// frames; otherwise DATAGRAM capsules on the CONNECT stream (RFC 9297
+    /// §3.5). The encoding used is recorded.
+    #[default]
+    Auto,
+    /// Require QUIC DATAGRAM frames; fail before traffic when the proxy does
+    /// not offer HTTP/3 datagrams.
+    QuicDatagrams,
+    /// Always DATAGRAM capsules on the CONNECT stream.
+    Capsules,
+}
+
+/// RFC 9298 §2 default URI Template path.
+pub const MASQUE_DEFAULT_TEMPLATE: &str = "/.well-known/masque/udp/{target_host}/{target_port}/";
+
+fn default_masque_template() -> String {
+    MASQUE_DEFAULT_TEMPLATE.to_string()
 }
 
 fn default_stream_idle() -> u64 {

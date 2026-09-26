@@ -41,7 +41,7 @@ impl Default for H3Transport {
     }
 }
 
-fn quic_failure(e: &quinn::ConnectionError, during_handshake: bool, deadline: Option<u64>) -> TransportFailure {
+pub(crate) fn quic_failure(e: &quinn::ConnectionError, during_handshake: bool, deadline: Option<u64>) -> TransportFailure {
     use quinn::ConnectionError as C;
     let phase = if during_handshake { Phase::QuicHandshake } else { Phase::AwaitResponseHeaders };
     let mut f = TransportFailure::new(phase, FailureKind::QuicOther, display_chain(e));
@@ -84,6 +84,21 @@ fn quic_failure(e: &quinn::ConnectionError, during_handshake: bool, deadline: Op
     f
 }
 
+/// A typed failure for an h3 stream error, keeping the peer's HTTP/3
+/// application error code (e.g. `H3_INTERNAL_ERROR` on a reset) as evidence.
+pub(crate) fn stream_failure(e: &h3::error::StreamError, phase: Phase, kind: FailureKind, what: &str) -> TransportFailure {
+    use h3::error::StreamError as S;
+    let mut f = TransportFailure::new(phase, kind, format!("{what}: {e}"));
+    match e {
+        S::RemoteTerminate { code } | S::StreamError { code, .. } => f.quic_error_code = Some(code.value()),
+        _ => {}
+    }
+    f
+}
+
+/// `H3_NO_ERROR` (RFC 9114 §8.1): the code Anvil closes its QUIC connections with.
+pub(crate) const H3_NO_ERROR: u32 = 0x100;
+
 /// A fresh client-side QUIC endpoint (one UDP socket).
 pub(crate) fn client_endpoint(v6: bool) -> Result<quinn::Endpoint, TransportFailure> {
     let bind: SocketAddr = if v6 { "[::]:0".parse().unwrap() } else { "0.0.0.0:0".parse().unwrap() };
@@ -97,6 +112,46 @@ pub(crate) struct QuicConnected {
     pub quic: quinn::Connection,
     pub send: SendReq,
     pub observation: ConnectionObservation,
+}
+
+/// HTTP/3 client options beyond the defaults.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct H3ClientOptions {
+    /// Advertise `SETTINGS_H3_DATAGRAM = 1` (RFC 9297 §2.1.1), so the peer
+    /// may send HTTP/3 datagrams in QUIC DATAGRAM frames. quinn advertises
+    /// the QUIC `max_datagram_frame_size` transport parameter by default.
+    pub h3_datagrams: bool,
+}
+
+/// What the peer's HTTP/3 SETTINGS frame allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PeerSettings {
+    /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 9220 §3).
+    pub extended_connect: bool,
+    /// `SETTINGS_H3_DATAGRAM` (RFC 9297 §2.1.1).
+    pub h3_datagram: bool,
+}
+
+/// Wait up to `ms` for the peer's SETTINGS frame. `Err("timeout")` when it
+/// did not arrive in time (nothing can be concluded), `Err("canceled")` on
+/// cancel.
+pub(crate) async fn await_peer_settings(send: &SendReq, ms: u64, cancel: &CancellationToken) -> Result<PeerSettings, &'static str> {
+    use h3::ConnectionState;
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    loop {
+        // Borrowed once the peer's SETTINGS frame has arrived; before that h3
+        // hands out RFC 9114 defaults, which say nothing about the peer.
+        if let std::borrow::Cow::Borrowed(s) = send.settings() {
+            return Ok(PeerSettings { extended_connect: s.enable_extended_connect(), h3_datagram: s.enable_datagram() });
+        }
+        if Instant::now() >= deadline {
+            return Err("timeout");
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+            _ = cancel.cancelled() => return Err("canceled"),
+        }
+    }
 }
 
 /// DNS, QUIC handshake (TLS 1.3 inside) and HTTP/3 connection setup, each
@@ -113,6 +168,22 @@ pub(crate) async fn quic_connect(
     prepared: &Arc<tls::PreparedTls>,
     endpoint: impl FnOnce(bool) -> Result<quinn::Endpoint, TransportFailure>,
     cancel: &CancellationToken,
+) -> Result<QuicConnected, (TransportFailure, Option<ConnectionObservation>)> {
+    quic_connect_with(rec, host, port, dns_cfg, timeouts, prepared, endpoint, cancel, H3ClientOptions::default()).await
+}
+
+/// [`quic_connect`] with explicit HTTP/3 client options.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn quic_connect_with(
+    rec: &mut Recorder,
+    host: &str,
+    port: u16,
+    dns_cfg: &dns::DnsConfig,
+    timeouts: &anvil_domain::settings::Timeouts,
+    prepared: &Arc<tls::PreparedTls>,
+    endpoint: impl FnOnce(bool) -> Result<quinn::Endpoint, TransportFailure>,
+    cancel: &CancellationToken,
+    options: H3ClientOptions,
 ) -> Result<QuicConnected, (TransportFailure, Option<ConnectionObservation>)> {
     let mut cobs = crate::connector::blank_observation(crate::connector::next_connection_id());
     rec.mark(Phase::Connect, PhaseStatus::NotApplicable, Some("QUIC has no TCP connect"));
@@ -191,7 +262,8 @@ pub(crate) async fn quic_connect(
     cobs.protocol = Some("h3".into());
     cobs.local_address = ep.local_addr().ok().map(|a| a.to_string());
     let ph = rec.start(Phase::ProtocolHandshake);
-    let (mut driver, send) = match h3::client::new(h3_quinn::Connection::new(quic.clone())).await {
+    let built = h3::client::builder().enable_datagram(options.h3_datagrams).build(h3_quinn::Connection::new(quic.clone())).await;
+    let (mut driver, send) = match built {
         Ok(x) => x,
         Err(e) => {
             rec.finish(ph, PhaseStatus::Failed);

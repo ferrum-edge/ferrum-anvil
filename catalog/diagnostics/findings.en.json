@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-7",
+  "version": "2026.09.25-8",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2197,6 +2197,119 @@
         }
       ],
       "confirm_with": []
+    },
+    "masque.proxy_refused": {
+      "title": "The MASQUE proxy refused the UDP tunnel",
+      "explanation": "The proxy {proxy} answered the CONNECT-UDP request for {target} with HTTP {status}. No tunnel was opened and no datagram was sent. The refusal is the proxy's answer; the status alone does not say whether the proxy ever tried to reach {target}.",
+      "alternatives": [
+        "The proxy's policy does not allow this destination (for example a 403 for a target that is not configured on the route).",
+        "CONNECT-UDP is disabled on the proxy, or this route does not allow CONNECT (501, 405 or 404).",
+        "The request was malformed for the proxy, such as a URI Template the proxy does not accept (400).",
+        "The proxy could not resolve or reach the destination on its side (502 or 504, often with a Proxy-Status header)."
+      ],
+      "does_not_prove": [
+        "That {target} is down, unreachable or not listening — the refusal came from the proxy, and no datagram reached the target through this tunnel.",
+        "Which component behind the proxy's address wrote the answer, unless the proxy is configured as a trusted gateway."
+      ],
+      "remediation": [
+        {
+          "text": "Read the response body and any Proxy-Status header, then check the URI Template, the target host and port, and the credentials sent on the CONNECT request.",
+          "owner": "caller"
+        },
+        {
+          "text": "Check that the proxy enables CONNECT-UDP for this route and allows this destination.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The proxy's access log for this CONNECT-UDP request."
+      ]
+    },
+    "masque.extended_connect_unavailable": {
+      "title": "The proxy does not offer extended CONNECT over HTTP/3",
+      "explanation": "The HTTP/3 SETTINGS of {proxy} do not enable extended CONNECT (SETTINGS_ENABLE_CONNECT_PROTOCOL), which RFC 9298 CONNECT-UDP requires. Anvil sent no request and no datagram to {target}.",
+      "alternatives": [
+        "The proxy supports neither WebSocket over HTTP/3 nor CONNECT-UDP on this listener.",
+        "The address is an ordinary HTTP/3 server rather than a MASQUE proxy."
+      ],
+      "does_not_prove": [
+        "Anything about {target} — nothing was sent toward it.",
+        "That the proxy would refuse CONNECT-UDP over another protocol version; only this HTTP/3 connection was examined."
+      ],
+      "remediation": [
+        {
+          "text": "Check the proxy address and port, or enable CONNECT-UDP (extended CONNECT) on the proxy's HTTP/3 listener.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The proxy's HTTP/3 configuration for extended CONNECT."
+      ]
+    },
+    "masque.settings_not_received": {
+      "title": "The proxy's HTTP/3 settings did not arrive",
+      "explanation": "The QUIC connection to {proxy} was established, but its HTTP/3 SETTINGS frame did not arrive in time, so it is unknown whether the proxy allows extended CONNECT. Anvil sent no CONNECT-UDP request and no datagram to {target}.",
+      "alternatives": [
+        "The proxy is slow to open its HTTP/3 control stream.",
+        "Packets from the proxy are being lost after the handshake."
+      ],
+      "does_not_prove": [
+        "That the proxy does not support CONNECT-UDP.",
+        "Anything about {target} — nothing was sent toward it."
+      ],
+      "remediation": [
+        {
+          "text": "Retry, or raise the response-header timeout if the path is slow.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "A packet capture of the QUIC connection to the proxy."
+      ]
+    },
+    "masque.no_datagram_support": {
+      "title": "The proxy does not offer HTTP/3 datagrams",
+      "explanation": "This request required UDP payloads in QUIC DATAGRAM frames, but {proxy} did not offer them: its HTTP/3 SETTINGS do not enable SETTINGS_H3_DATAGRAM, or QUIC did not negotiate DATAGRAM frames. Anvil sent no request and no datagram to {target}.",
+      "alternatives": [
+        "The proxy carries HTTP Datagrams as DATAGRAM capsules on the CONNECT stream only (RFC 9297 §3.5), which the automatic mode uses."
+      ],
+      "does_not_prove": [
+        "That the proxy cannot relay UDP — it may do so with capsules.",
+        "Anything about {target} — nothing was sent toward it."
+      ],
+      "remediation": [
+        {
+          "text": "Use the automatic or capsule datagram mode for this proxy.",
+          "owner": "caller"
+        },
+        {
+          "text": "Enable HTTP/3 datagrams on the proxy if QUIC DATAGRAM frames are required.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": []
+    },
+    "masque.tunnel_ended_abnormally": {
+      "title": "The UDP tunnel ended abnormally",
+      "explanation": "The proxy {proxy} opened the CONNECT-UDP tunnel to {target}, but the tunnel then ended without a clean close: the proxy reset the CONNECT stream, the QUIC connection was lost, or the stream ended in the middle of a capsule. Datagrams exchanged before the end are kept; the exchange is incomplete.",
+      "alternatives": [
+        "The proxy ended the tunnel (idle limit, policy or configuration change, drain, or an authorization lifetime).",
+        "The proxy's UDP socket toward the target failed.",
+        "The network path to the proxy failed."
+      ],
+      "does_not_prove": [
+        "That {target} stopped responding or is down.",
+        "Which datagrams, if any, reached {target}."
+      ],
+      "remediation": [
+        {
+          "text": "Check the proxy's log for why this tunnel ended.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The proxy's log entry for this tunnel."
+      ]
     }
   }
 }

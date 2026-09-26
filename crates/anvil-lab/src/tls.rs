@@ -275,6 +275,7 @@ fn dtls(env: &Env, client: &Client<'_>, payload: &str) -> ExecutionContext {
         datagrams: vec![StreamPayload { data: payload.into(), encoding: PayloadEncoding::Text }],
         response_window_ms: 1_000,
         max_datagrams: 10,
+        masque: None,
     });
     base(env, s, Some(client), "lab-tls")
 }

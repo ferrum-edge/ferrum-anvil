@@ -203,6 +203,13 @@ pub enum FailureKind {
     WsHandshakeRejected,
     WsProtocolError,
     WsMessageTooLarge,
+    /// The HTTP/3 MASQUE proxy's SETTINGS do not offer what the CONNECT-UDP
+    /// tunnel needs (extended CONNECT, or HTTP/3 datagrams when required),
+    /// or never arrived. No request was sent.
+    MasqueUnsupported,
+    /// The MASQUE proxy answered the CONNECT-UDP request with a non-2xx
+    /// status; no tunnel was opened.
+    MasqueRefused,
     // ---- whole-attempt ----
     TotalTimeout,
     Canceled,

@@ -25,7 +25,7 @@ fn message(direction: Direction, kind: &str, size: u64) -> StreamMessage {
 }
 
 fn udp(stream: &StreamTranscript, sent: u64, received: u64) -> Diagnosis {
-    let status = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: 1000 };
+    let status = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: 1000, masque: None };
     let trust = FerrumTrust::NotConfigured;
     diagnose(&DiagnosticInput {
         protocol: Protocol::Udp,

@@ -165,6 +165,12 @@ pub const RULES: &[RuleMeta] = &[
         fixtures: &["PROTO-018", "PROTO-019", "PROTO-020", "PROTO-021", "PROTO-022"],
     },
     RuleMeta {
+        id: "protocol.masque",
+        version: 1,
+        summary: "RFC 9298 CONNECT-UDP through an HTTP/3 proxy: refusals, missing capabilities, abnormal tunnel ends",
+        fixtures: &["MASQUE-003", "MASQUE-004", "MASQUE-005", "MASQUE-006", "MASQUE-007"],
+    },
+    RuleMeta {
         id: "protocol.http3",
         version: 1,
         summary: "HTTP/3 forced mode and fallback reporting",

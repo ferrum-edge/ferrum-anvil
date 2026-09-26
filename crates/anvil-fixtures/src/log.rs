@@ -7,6 +7,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+/// `DatagramRelayed`: a CONNECT-UDP proxy fixture relayed a client HTTP
+/// Datagram to its UDP target; `via` is `capsule` or `quic_datagram`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GroundTruth {
@@ -18,6 +20,7 @@ pub enum GroundTruth {
     FaultApplied { fault: String },
     DatagramReceived { bytes: u64 },
     MessageReceived { bytes: u64 },
+    DatagramRelayed { bytes: u64, via: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
