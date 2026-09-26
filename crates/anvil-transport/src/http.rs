@@ -248,6 +248,8 @@ impl Pooled {
 const MAX_IDLE_PER_KEY: usize = 8;
 const MAX_IDLE_TOTAL: usize = 64;
 const IDLE_TTL: Duration = Duration::from_secs(90);
+/// Maximum time to keep a connection that answered `425 Too Early` for its retry.
+const TOO_EARLY_TTL: Duration = Duration::from_secs(10);
 
 /// Bounds of the idle connection pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,11 +407,19 @@ impl Pool {
     /// The connection kept for the retry after `425 Too Early`, if it is
     /// still usable.
     fn take_too_early(&self, key: &str) -> Option<(Pooled, Option<StreamLease>)> {
-        let mut state = self.shared.state.lock();
-        let p = state.too_early.remove(key)?;
-        let lease = p.is_usable().then(|| p.lease());
-        drop(state);
-        lease.map(|lease| (p, lease))
+        let ttl = self.shared.limits.idle_ttl.min(TOO_EARLY_TTL);
+        let (found, expired) = {
+            let mut state = self.shared.state.lock();
+            let p = state.too_early.remove(key)?;
+            if p.expired(Instant::now(), ttl) {
+                (None, Some(p))
+            } else {
+                let lease = p.lease();
+                (Some((p, lease)), None)
+            }
+        };
+        drop(expired);
+        found
     }
 
     fn keep_too_early(&self, key: &str, mut p: Pooled) {
@@ -431,7 +441,7 @@ impl Pool {
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         let weak = Arc::downgrade(&self.shared);
-        let every = sweep_interval(self.shared.limits.idle_ttl);
+        let every = sweep_interval(self.shared.limits.idle_ttl.min(TOO_EARLY_TTL));
         state.sweeper = Some(rt.spawn(async move {
             loop {
                 tokio::time::sleep(every).await;
@@ -479,7 +489,12 @@ impl PoolShared {
     /// Close dead, expired and over-cap idle connections. Returns whether
     /// the pool still holds any; the sweeper stops otherwise.
     fn sweep(&self, now: Instant) -> bool {
+        self.sweep_at(now, true)
+    }
+
+    fn sweep_at(&self, now: Instant, forget_sweeper_when_empty: bool) -> bool {
         let ttl = self.limits.idle_ttl;
+        let too_early_ttl = ttl.min(TOO_EARLY_TTL);
         let mut dropped = Vec::new();
         let more = {
             let mut state = self.state.lock();
@@ -488,9 +503,9 @@ impl PoolShared {
                 !list.is_empty()
             });
             evict_over_cap(&mut state.idle, self.limits.max_idle_total, &mut dropped);
-            dropped.extend(state.too_early.extract_if(|_, p| p.expired(now, ttl)).map(|(_, p)| p));
+            dropped.extend(state.too_early.extract_if(|_, p| p.expired(now, too_early_ttl)).map(|(_, p)| p));
             let more = !state.idle.is_empty() || !state.too_early.is_empty();
-            if !more {
+            if !more && forget_sweeper_when_empty {
                 state.sweeper = None;
             }
             more
@@ -580,6 +595,12 @@ impl HttpTransport {
     /// A transport whose connection pool uses `limits` instead of the defaults.
     pub fn with_pool_limits(limits: PoolLimits) -> Self {
         HttpTransport { pool: Pool::with_limits(limits), ..HttpTransport::default() }
+    }
+
+    /// Run one pool sweep as if the clock read `now`; not part of the API.
+    #[doc(hidden)]
+    pub fn sweep_pool_at(&self, now: Instant) {
+        self.pool.shared.sweep_at(now, false);
     }
 
     /// Execute one logical attempt. Returns one output, or two when a pooled

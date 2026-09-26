@@ -310,15 +310,16 @@ async fn answer_425(t: &HttpTransport, p: &HttpPlan) -> AttemptOutput {
 #[tokio::test]
 async fn the_connection_kept_for_the_retry_after_425_expires() {
     init();
-    let ttl = Duration::from_secs(2);
+    let ttl = Duration::from_secs(30);
     let t = HttpTransport::with_pool_limits(PoolLimits { idle_ttl: ttl, ..PoolLimits::default() });
     let o = origin(None).await;
     let mut p = plan(&format!("{}too-early", o.url));
     p.keepalive = false;
     p.early_data = EarlyDataIntent::Send;
 
-    // The retry, sent before the TTL, goes out on the kept connection.
+    // A sweep 9 s later keeps it: the retry goes out on the kept connection.
     let first = answer_425(&t, &p).await;
+    t.sweep_pool_at(Instant::now() + Duration::from_secs(9));
     let mut retry = p.clone();
     retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
     let again = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await.pop().unwrap();
@@ -329,12 +330,15 @@ async fn the_connection_kept_for_the_retry_after_425_expires() {
     // Connection reuse is off: it is closed once the retry is done.
     assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the connection was left open after the retry");
 
-    // No retry is sent this time: the sweep alone closes the connection kept
-    // for it, once it was idle for the TTL.
-    let sent = Instant::now();
-    answer_425(&t, &p).await;
-    assert_eq!(o.accepted(), 2);
-    assert!(eventually(Duration::from_secs(10), || o.closed() == 2).await, "the connection kept for the retry was left open");
-    let after = sent.elapsed();
-    assert!(after >= ttl, "closed after {after:?}, before the TTL was up");
+    // No retry is sent this time: a sweep 11 s later expires it even though
+    // the normal idle TTL is 30 s. A subsequent retry must use a new socket.
+    let second = answer_425(&t, &p).await;
+    t.sweep_pool_at(Instant::now() + Duration::from_secs(11));
+    retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
+    let after_expiry = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await.pop().unwrap();
+    assert!(after_expiry.observation.failure.is_none(), "{:?}", after_expiry.observation.failure);
+    assert_eq!(after_expiry.observation.response_status, Some(425));
+    assert!(!reused(&after_expiry), "the retry reused a connection kept beyond 10 seconds");
+    assert_ne!(conn_id(&after_expiry), conn_id(&second));
+    assert_eq!(o.accepted(), 3);
 }

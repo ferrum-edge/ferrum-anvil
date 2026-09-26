@@ -316,7 +316,8 @@ const SLOT_MAX_IDLE: usize = 64;
 /// one pool key at a time, so a persistent chain or mix touching up to 64
 /// requests finds each one's connection still pooled on the next iteration
 /// instead of the global cap closing it just before its reuse. Requests
-/// beyond that (or redirects to other destinations) share the cap.
+/// beyond that (or redirects or dataset rows that template other
+/// destinations) share the cap.
 fn slot_idle_cap(ids: &[Id]) -> usize {
     let distinct: std::collections::HashSet<&Id> = ids.iter().collect();
     distinct.len().clamp(SLOT_MIN_IDLE, SLOT_MAX_IDLE)
