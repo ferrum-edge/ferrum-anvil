@@ -17,7 +17,7 @@ use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
-use anvil_domain::settings::Theme;
+use anvil_domain::settings::{DnsOverride, EarlyDataPolicy, RedirectPolicy, Theme};
 use anvil_domain::workspace::{DatasetFormat, Meta, ProtectionMode, Scenario, ScenarioStep, UserProfile, Variable};
 use anvil_import::ImportOptions;
 use anvil_portability::ExportMode;
@@ -722,4 +722,133 @@ fn linked_file_bindings_stay_on_their_device_and_a_replace_drops_overwritten_one
     assert_eq!(a.linked_file_bindings().unwrap().len(), 1);
     a.restore_approved(&bytes, Some(PASS), ConflictPolicy::Replace, &into(&ws.meta.id)).unwrap();
     assert!(a.linked_file_bindings().unwrap().is_empty());
+}
+
+#[test]
+fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_does_not_claim() {
+    let root = tempfile::tempdir().unwrap();
+    let a = small(root.path(), "a");
+    let mut settings = a.settings().unwrap();
+    settings.theme = Theme::Light;
+    settings.defaults.dns_overrides.push(DnsOverride { host: "api.example.invalid".into(), addresses: vec!["192.0.2.10".into()] });
+    settings.defaults.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    settings.defaults.early_data = Some(EarlyDataPolicy { enabled: true, extra_methods: vec![] });
+    a.save_settings(&settings).unwrap();
+    let bytes = export(&a);
+    let kept = "Replace keeps this profile's app settings";
+
+    // App settings apply to every workspace's requests. A profile with a
+    // workspace the backup does not claim needs nothing approved, and keeps
+    // its own app settings.
+    let b = new_app(root.path(), "b");
+    b.create_workspace("Local").unwrap();
+    let before = b.settings().unwrap();
+    let dry = b.restore_preview(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(dry.plan.existing_workspaces.is_empty(), "{:?}", dry.plan);
+    assert!(dry.warnings.iter().any(|w| w.starts_with(kept)), "{:?}", dry.warnings);
+    assert_eq!((dry.plan.to_replace, dry.plan.skipped_existing), (0, 1), "the settings are counted as kept: {:?}", dry.plan);
+    let rep = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.starts_with(kept)), "{:?}", rep.warnings);
+    assert_eq!(b.settings().unwrap(), before, "the backup's app settings never reach a workspace it does not claim");
+    b.find_workspace("W").expect("the rest of the backup is restored");
+
+    // Into a profile holding only the backup's own workspaces, Replace
+    // restores them, normalised like workspace, folder and request settings.
+    let c = new_app(root.path(), "c");
+    let rep = c.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(!rep.warnings.iter().any(|w| w.starts_with(kept)), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("forwarded credentials to other origins")), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("0-RTT early data")), "{:?}", rep.warnings);
+    let restored = c.settings().unwrap();
+    assert_eq!(restored.theme, Theme::Light);
+    assert_eq!(restored.defaults.dns_overrides, settings.defaults.dns_overrides);
+    assert!(restored.defaults.redirects.is_some_and(|r| !r.forward_credentials_cross_origin), "{:?}", restored.defaults.redirects);
+    assert!(restored.defaults.early_data.as_ref().is_some_and(|e| !e.enabled), "{:?}", restored.defaults.early_data);
+}
+
+#[test]
+fn an_attachment_whose_stored_content_is_gone_is_left_out_with_a_warning() {
+    let root = tempfile::tempdir().unwrap();
+    let a = small(root.path(), "a");
+    // An attachment index entry whose stored content no longer exists.
+    let sha = "ab".repeat(32);
+    a.store.put(kind::IMPORT_SOURCE, &Id::new(), None, None, 0.0, &json!({"attachment": sha, "blob": "missing-blob"})).unwrap();
+    let (bytes, preview) = a.export_backup_with(PASS, KdfParams::testing()).unwrap();
+    let note = format!("attachment {sha} (its stored content is missing)");
+    assert_eq!(preview.manifest.excluded, vec![note.clone()]);
+
+    let b = new_app(root.path(), "b");
+    let rep = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(rep.warnings.contains(&format!("Not in the backup: {note}")), "{:?}", rep.warnings);
+    assert!(b.get_attachment(&sha).unwrap().is_none(), "nothing stands in for the missing content");
+    assert!(b.backup_contents().unwrap().attachments.is_empty());
+    b.find_workspace("W").expect("the rest of the backup is restored");
+}
+
+#[tokio::test]
+async fn replace_never_overwrites_records_or_reports_of_another_workspace() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let token = files.path().join("jwt_svid.token");
+    std::fs::write(&token, "token-file-content").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = populated(root.path(), &fx.url(""), &token).await;
+    let contents = a.backup_contents().unwrap();
+    let bytes = export(&a);
+
+    // A profile storing, in a workspace of its own, a spec import, a run
+    // report, a history record and a load report under the backup's ids.
+    let b = new_app(root.path(), "b");
+    let payments = b.create_workspace("Payments").unwrap();
+    let mut reused = Vec::new();
+    for k in [kind::SPEC_SOURCE, kind::RUN_REPORT] {
+        let o = contents.objects.iter().find(|o| o.kind == k).unwrap();
+        let mut v = o.value.clone();
+        v["workspace_id"] = json!(payments.meta.id);
+        b.store.put(k, &o.id.parse::<Id>().unwrap(), Some(&payments.meta.id), None, 0.0, &v).unwrap();
+        reused.push((k.to_string(), o.id.clone()));
+    }
+    let h = &contents.history[0];
+    let mut rec: ExecutionRecord = serde_json::from_value(h.record.clone()).unwrap();
+    rec.workspace_id = Some(payments.meta.id);
+    b.store.add_history(&rec.id, rec.workspace_id.as_ref(), None, h.started_at, &rec, None).unwrap();
+    reused.push(("history".to_string(), h.id.clone()));
+    let report = &contents.load_reports[0];
+    let run_id: Id = serde_json::from_value(report["run_id"].clone()).unwrap();
+    b.store.put_load_report(&run_id, Some(&payments.meta.id), 0, report).unwrap();
+    reused.push(("load_report".to_string(), run_id.to_string()));
+
+    // Each is listed, and Replace is refused before anything is written.
+    let preview = b.restore_preview(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    let foreign = &preview.plan.foreign_objects;
+    assert_eq!(foreign.len(), reused.len(), "{foreign:?}");
+    for (label, id) in &reused {
+        assert!(foreign.iter().any(|f| f.starts_with(label.as_str()) && f.ends_with(&format!("({id})"))), "{label} {id}: {foreign:?}");
+    }
+    let before = b.backup_contents().unwrap();
+    let e = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains("belong to another workspace")), "{e}");
+    assert!(b.backup_contents().unwrap() == before, "a refused restore changed the profile");
+
+    // Merge keeps them where they are.
+    b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+    let history = b.store.list_history(Some(&payments.meta.id), None, 10).unwrap();
+    assert!(history.iter().any(|x| x.id == h.id), "the stored history record stays in its workspace");
+    assert_eq!(b.store.list_load_reports::<serde_json::Value>(Some(&payments.meta.id)).unwrap().len(), 1);
+
+    // A history record of a workspace that is not in the backup (deleted
+    // since) is left out with a warning, never written.
+    let outside = contents.history[1].id.clone();
+    let edited = resealed(&bytes, |_, c| {
+        let row = c.history.iter_mut().find(|x| x.id == outside).unwrap();
+        row.record["workspace_id"] = json!(Id::new());
+    });
+    let fresh = new_app(root.path(), "fresh");
+    let rep = fresh.restore(&edited, Some(PASS), ConflictPolicy::Replace).unwrap();
+    let warning = "1 history record(s) of workspaces that are not in the backup were left out.";
+    assert!(rep.warnings.iter().any(|w| w == warning), "{:?}", rep.warnings);
+    let restored = fresh.backup_contents().unwrap();
+    assert!(restored.history.iter().all(|x| x.id != outside), "the record is not restored");
+    assert_eq!(restored.history.len(), contents.history.len() - 1);
 }

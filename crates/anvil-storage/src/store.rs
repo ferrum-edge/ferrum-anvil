@@ -785,12 +785,12 @@ impl StoreRead<'_> {
         self.records()?.list_load_reports(workspace_id)
     }
 
-    /// Ids of every stored load report.
-    pub fn load_report_ids(&self) -> Result<Vec<String>> {
+    /// Id and workspace of every stored load report.
+    pub fn load_report_entries(&self) -> Result<Vec<(String, Option<String>)>> {
         let _ = self.store.key()?;
-        let mut st = self.conn.prepare("SELECT id FROM load_reports")?;
-        let ids = st.query_map([], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
-        Ok(ids)
+        let mut st = self.conn.prepare("SELECT id,workspace_id FROM load_reports")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<Vec<(String, Option<String>)>, _>>()?;
+        Ok(rows)
     }
 }
 

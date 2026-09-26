@@ -24,10 +24,12 @@
 //! `tests/backup.rs` fails when the store gains one that is in neither.
 //!
 //! A restore validates every item against its type, applies the same safety
-//! normalisation as bundle imports, and writes everything in one transaction
-//! after taking a checkpoint. Like a bundle import, it writes into a
-//! workspace stored here only once the user approves it: a backup's
-//! passphrase says nothing about who made it.
+//! normalisation as bundle imports (app settings included), and writes
+//! everything in one transaction after taking a checkpoint. Like a bundle
+//! import, it writes into a workspace stored here only once the user approves
+//! it: a backup's passphrase says nothing about who made it. App settings
+//! apply to every workspace's requests, so Replace also keeps this profile's
+//! app settings while it holds a workspace the backup does not claim.
 
 use crate::linked_files::LinkedFileBinding;
 use crate::port::{self, ImportApproval, ImportReport};
@@ -123,6 +125,8 @@ const LINKED_FILES_NOTE: &str =
     "Some items reference linked local files; attach them to the workspace or relink them on the target machine.";
 const MERGE_NOTE: &str =
     "Merge keeps this profile's settings and every item that already exists here; Replace restores the backup's versions.";
+const KEPT_SETTINGS_NOTE: &str =
+    "Replace keeps this profile's app settings: they apply to every workspace here, and some are not in the backup.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
@@ -422,10 +426,19 @@ struct Decoded {
     uncarried: Vec<UncarriedAttachment>,
 }
 
+impl Decoded {
+    fn workspace_ids(&self) -> HashSet<Id> {
+        self.graph.workspaces.iter().map(|w| w.meta.id).collect()
+    }
+}
+
 /// What the profile holds, as far as a restore can collide with it.
 struct Local {
     /// (plan label, id) of every stored item.
     items: HashSet<(String, String)>,
+    /// (plan label, id) of every stored history record and load report, with
+    /// the workspace that owns it.
+    records: HashMap<(String, String), Option<String>>,
     /// Stored objects and secrets with their owners, and stored workspaces.
     existing: Existing,
     /// The content hashes among the backup's uncarried attachments whose
@@ -472,7 +485,7 @@ impl App {
     pub fn restore_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         let local = self.store.read_consistently(|r| local(r, &d))?;
-        let notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
+        let notes = restore_notes(&d, &local, policy)?;
         let plan = restore_plan(&d, &local, policy);
         Ok(report(plan, &manifest, &d, notes, None))
     }
@@ -487,7 +500,9 @@ impl App {
     /// authenticates under `passphrase` and every item in it is valid. Then a
     /// checkpoint is taken and every item is written in one transaction:
     /// `Replace` overwrites items with the same id, `Merge` keeps them
-    /// (including this profile's settings). Nothing else is deleted.
+    /// (including this profile's settings). Nothing else is deleted. App
+    /// settings apply to every workspace's requests, so `Replace` keeps this
+    /// profile's too while it holds a workspace the backup does not claim.
     ///
     /// The whole restore is refused, before anything is written, when:
     /// - a request or dataset names a stored attachment by content hash that
@@ -497,10 +512,10 @@ impl App {
     /// - the backup claims a workspace stored here that `approval` does not
     ///   name (the preview's `plan.existing_workspaces`): what it writes there
     ///   could use that workspace's vault secrets;
-    /// - under Replace, a backup object's kind and id are stored here in
-    ///   another workspace, or a backup secret's id is stored here under
-    ///   another owner: an object or secret is never overwritten or moved out
-    ///   of its workspace.
+    /// - under Replace, a backup object's, history record's or load report's
+    ///   kind and id are stored here in another workspace, or a backup
+    ///   secret's id is stored here under another owner: nothing is ever
+    ///   overwritten or moved out of its workspace.
     pub fn restore_approved(
         &self,
         bytes: &[u8],
@@ -520,7 +535,8 @@ impl App {
                 Ok(checked) => checked,
                 Err(e) => return Ok(Err(e)),
             };
-            write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge }, &d)?;
+            let keep_settings = keeps_local_settings(&d, &local, policy);
+            write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
             Ok(Ok((plan, notes)))
         })??;
         Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string())))
@@ -768,12 +784,20 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
         d.graph.attachments.insert(a.sha256.clone(), bytes);
     }
     let mut history_ids = HashSet::new();
+    let mut outside_history = 0;
     for h in &c.history {
         check_record_schema(&h.record, "history record", &h.id)?;
         let rec: ExecutionRecord =
             serde_json::from_value(h.record.clone()).map_err(|e| invalid(format!("history record {}: {e}", h.id)))?;
         if rec.id.to_string() != h.id || !history_ids.insert(rec.id) {
             return Err(invalid(format!("history record {} is not unique or holds another record", h.id)));
+        }
+        // A record is written under the workspace it names; one outside the
+        // backup (its workspace was deleted) would land in an unrelated
+        // local workspace.
+        if rec.workspace_id.is_some_and(|w| !ws.contains(&w)) {
+            outside_history += 1;
+            continue;
         }
         let body = match &h.body_b64 {
             Some(b) => Some(B64.decode(b).map_err(|_| invalid(format!("history body {} is not base64", h.id)))?),
@@ -811,6 +835,9 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     // data, legacy HMAC and scenario/plan trust. Revisions of requests that
     // are not in the backup (their request was deleted) are left out.
     d.warnings = anvil_portability::validate::validate_and_normalize(&mut d.graph).map_err(|e| invalid(e.to_string()))?;
+    if outside_history > 0 {
+        d.warnings.push(format!("{outside_history} history record(s) of workspaces that are not in the backup were left out."));
+    }
     // Stored attachments named without their bytes, as after the loss of a
     // blob: checked against this device's attachments before writing.
     d.uncarried = anvil_portability::validate::uncarried_attachments(&d.graph).map_err(|e| invalid(e.to_string()))?;
@@ -848,21 +875,51 @@ fn secret_refs(v: &Value, out: &mut Vec<(String, String)>) {
     }
 }
 
-/// (plan label, id) of every item stored in the profile.
+/// (plan label, id) of every object and secret stored in the profile.
 fn existing_items(r: &StoreRead<'_>) -> anvil_storage::store::Result<HashSet<(String, String)>> {
     let mut out = HashSet::new();
     for k in OBJECT_KINDS {
         out.extend(r.object_meta(k)?.into_iter().map(|m| ((*k).to_string(), m.id)));
     }
     out.extend(r.secrets()?.into_iter().map(|s| (SECRET.to_string(), s.id)));
-    out.extend(r.history_entries()?.into_iter().map(|h| (HISTORY.to_string(), h.id)));
-    out.extend(r.load_report_ids()?.into_iter().map(|id| (LOAD_REPORT.to_string(), id)));
     Ok(out)
+}
+
+/// (plan label, id) of every history record and load report stored in the
+/// profile, with the workspace that owns it.
+fn existing_records(r: &StoreRead<'_>) -> anvil_storage::store::Result<HashMap<(String, String), Option<String>>> {
+    let history = r.history_entries()?.into_iter().map(|h| ((HISTORY.to_string(), h.id), h.workspace_id));
+    let reports = r.load_report_entries()?.into_iter().map(|(id, ws)| ((LOAD_REPORT.to_string(), id), ws));
+    Ok(history.chain(reports).collect())
 }
 
 /// What the profile holds, read through `r`.
 fn local(r: &StoreRead<'_>, d: &Decoded) -> anvil_storage::store::Result<Local> {
-    Ok(Local { items: existing_items(r)?, existing: port::existing(r)?, stored: port::stored_among(r, &d.uncarried)? })
+    let records = existing_records(r)?;
+    let mut items = existing_items(r)?;
+    items.extend(records.keys().cloned());
+    Ok(Local { items, records, existing: port::existing(r)?, stored: port::stored_among(r, &d.uncarried)? })
+}
+
+/// Whether a restore keeps this profile's app settings although the backup
+/// carries its own: always under Merge (they are stored here), and under
+/// Replace while the profile holds a workspace the backup does not claim.
+/// App settings are the lowest settings layer of every workspace's requests,
+/// so the backup's would reach workspaces it never names; a workspace it does
+/// claim is written only once the user approves it.
+fn keeps_local_settings(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bool {
+    let ws = d.workspace_ids();
+    d.graph.app_settings.is_some() && (policy == ConflictPolicy::Merge || local.existing.workspaces.keys().any(|w| !ws.contains(w)))
+}
+
+/// Warnings a restore reports before writing: each item that names a stored
+/// file the backup does not include, and app settings kept under Replace.
+fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<Vec<String>> {
+    let mut notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
+    if policy == ConflictPolicy::Replace && keeps_local_settings(d, local, policy) {
+        notes.push(KEPT_SETTINGS_NOTE.into());
+    }
+    Ok(notes)
 }
 
 fn restore_plan(d: &Decoded, local: &Local, policy: ConflictPolicy) -> ImportPlan {
@@ -872,28 +929,48 @@ fn restore_plan(d: &Decoded, local: &Local, policy: ConflictPolicy) -> ImportPla
     if c > MAX_LISTED_CONFLICTS {
         conflicts.push(format!("and {} more", c - MAX_LISTED_CONFLICTS));
     }
-    let (to_replace, skipped_existing) = if policy == ConflictPolicy::Merge { (0, c) } else { (c, 0) };
+    // App settings Replace keeps are counted as kept, not replaced.
+    let settings = (kind::APP_SETTINGS.to_string(), settings_id().to_string());
+    let kept_settings = policy == ConflictPolicy::Replace && keeps_local_settings(d, local, policy);
+    let (to_create, to_replace, skipped_existing) = match policy {
+        ConflictPolicy::Merge => (n - c, 0, c),
+        _ if kept_settings && local.items.contains(&settings) => (n - c, c - 1, 1),
+        _ if kept_settings => (n - c - 1, c, 1),
+        _ => (n - c, c, 0),
+    };
     ImportPlan {
         policy,
-        to_create: n - c,
+        to_create,
         to_replace,
         skipped_existing,
         conflicts,
         foreign_secrets: foreign_secrets(d, &local.existing),
-        foreign_objects: foreign_objects(d, &local.existing),
+        foreign_objects: foreign_objects(d, local),
         existing_workspaces: plan::existing_workspaces(&d.graph, &local.existing),
     }
 }
 
 /// Backup objects whose kind and id are stored here in a different workspace
-/// than the backup gives them, as `folder 'name' (id)`.
-fn foreign_objects(d: &Decoded, existing: &Existing) -> Vec<String> {
+/// than the backup gives them, as `folder 'name' (id)`, and backup history
+/// records and load reports whose id is stored here under another workspace
+/// (or none), as `history (id)`.
+fn foreign_objects(d: &Decoded, local: &Local) -> Vec<String> {
+    let existing = &local.existing;
     let mut out = plan::foreign_objects(&d.graph, existing);
     let specs = d.spec_sources.iter().map(|x| (kind::SPEC_SOURCE, x.source.import_id, &x.file_name, x.workspace_id));
     let runs = d.run_reports.iter().map(|x| (kind::RUN_REPORT, x.run_id, &x.name, x.workspace_id));
     for (k, id, name, ws) in specs.chain(runs) {
         if existing.owners.get(&(k.to_string(), id)).is_some_and(|stored| *stored != Some(ws)) {
             out.push(format!("{k} '{name}' ({id})"));
+        }
+    }
+    // INSERT OR REPLACE writes these by id alone, so a record stored under
+    // another owner would be overwritten and moved.
+    let history = d.history.iter().map(|(rec, _)| (HISTORY, rec.id, rec.workspace_id));
+    let reports = d.load_reports.iter().map(|r| (LOAD_REPORT, r.run_id, Some(r.plan.workspace_id)));
+    for (label, id, ws) in history.chain(reports) {
+        if local.records.get(&(label.to_string(), id.to_string())).is_some_and(|stored| *stored != ws.map(|w| w.to_string())) {
+            out.push(format!("{label} ({id})"));
         }
     }
     out
@@ -912,7 +989,7 @@ fn foreign_secrets(d: &Decoded, existing: &Existing) -> Vec<String> {
 /// Every check a restore makes before writing: its plan, and a warning for
 /// each item that names a stored file the backup does not include.
 fn checked_plan(d: &Decoded, local: &Local, policy: ConflictPolicy, approval: &ImportApproval) -> Result<(ImportPlan, Vec<String>)> {
-    let notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
+    let notes = restore_notes(d, local, policy)?;
     let plan = restore_plan(d, local, policy);
     refuse_unapproved(&plan, approval)?;
     Ok((plan, notes))
@@ -971,11 +1048,12 @@ fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, notes: Vec<S
 }
 
 /// Writes rows inside a restore's transaction, keeping existing items under
-/// `Merge`.
+/// `Merge` and this profile's app settings when `keep_settings`.
 struct Writer<'a, 't> {
     tx: &'a StoreTx<'t>,
     existing: &'a HashSet<(String, String)>,
     merge: bool,
+    keep_settings: bool,
 }
 
 impl Writer<'_, '_> {
@@ -1037,7 +1115,9 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     for x in &g.load_plans {
         w.put(kind::LOAD_PLAN, &x.id, Some(&x.workspace_id), None, 0.0, x)?;
     }
-    if let Some(x) = &g.app_settings {
+    if let Some(x) = &g.app_settings
+        && !w.keep_settings
+    {
         w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, x)?;
     }
     for x in &d.user_profiles {

@@ -13,9 +13,11 @@
 //!   listed by [`uncarried_attachments`]; the importer checks them against
 //!   what its device stores.
 //! * Safety: imports never activate a TLS verification bypass, never mark
-//!   scenarios or load plans as trusted, never enable legacy HMAC, and never
-//!   open an imported collection's root folder to its workspace. Linked
-//!   local files are listed: they need choosing on this device.
+//!   scenarios or load plans as trusted, never enable legacy HMAC, never
+//!   turn on cross-origin credential forwarding or 0-RTT early data in
+//!   workspace, folder, request or app settings, and never open an imported
+//!   collection's root folder to its workspace. Linked local files are
+//!   listed: they need choosing on this device.
 
 use crate::bundle::BundleError;
 use crate::graph::PortableGraph;
@@ -189,6 +191,8 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
             ));
         }
     }
+    // App settings (carried only by a full backup) are the lowest settings
+    // layer of every workspace's requests, so they are normalised the same way.
     let mut forwarding = 0;
     let mut early_data = 0;
     for s in g
@@ -197,6 +201,7 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         .map(|w| &mut w.settings)
         .chain(g.folders.iter_mut().map(|f| &mut f.settings))
         .chain(g.requests.iter_mut().map(|r| &mut r.spec.settings))
+        .chain(g.app_settings.iter_mut().map(|a| &mut a.defaults))
     {
         if let Some(r) = s.redirects.as_mut()
             && r.forward_credentials_cross_origin

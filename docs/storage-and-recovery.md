@@ -223,14 +223,24 @@ Restore is preview-then-apply. Every item is checked against its schema
 version, its type and the rest of the backup (ids, owning workspaces and
 attachment hashes), stored attachments named without their bytes are handled
 as for bundles (above), the import trust normalisation above applies (an
-imported collection opened to its workspace is closed again), and everything
-is written in one transaction after a checkpoint. A request revision is
-restored under its request, in that request's workspace: revisions whose
-request is not in the backup (it was deleted) are left out with a warning, and
-one stored under another request or workspace is refused. Replace overwrites
-items that have the same id; Merge keeps them, including this profile's
-settings; Duplicate is refused, because a backup restores items under their
-own ids. Nothing else in the profile is deleted.
+imported collection opened to its workspace is closed again; the backup's app
+settings are normalised like workspace, folder and request settings), and
+everything is written in one transaction after a checkpoint. A request
+revision is restored under its request, in that request's workspace:
+revisions whose request is not in the backup (it was deleted) are left out
+with a warning, and one stored under another request or workspace is refused.
+History records of a workspace that is not in the backup (it was deleted) are
+left out with a warning. Replace overwrites items that have the same id; Merge
+keeps them, including this profile's settings; Duplicate is refused, because a
+backup restores items under their own ids. Nothing else in the profile is
+deleted.
+
+App settings are the lowest settings layer of every workspace's requests, so
+Replace restores the backup's app settings only when every workspace stored
+here is one the backup claims: into an empty profile, or over the backup's
+own workspaces once they are approved (below). While the profile holds any
+other workspace, Replace keeps this profile's app settings; the preview and
+the report say so, and the plan counts them as kept.
 
 Restore only a full backup that is your own or that you otherwise trust. Like
 a bundle, a backup can claim a workspace already stored here, and what it
@@ -238,9 +248,10 @@ writes there can use that workspace's vault secrets. The preview lists every
 such workspace, and the restore is refused, changing nothing, unless the user
 confirms each one after the preview (the desktop's checkbox;
 `anvil import --into-existing <WORKSPACE_ID>`). Replace is also refused when it
-would overwrite an object stored in a different workspace from the one the
-backup gives it, or a secret stored here under a different owner; Merge keeps
-those. A restore into an empty profile needs no confirmation.
+would overwrite an object, history record or load report stored in a
+different workspace from the one the backup gives it, or a secret stored here
+under a different owner; Merge keeps those. A restore into an empty profile
+needs no confirmation.
 
 ## Schema versions and migration
 

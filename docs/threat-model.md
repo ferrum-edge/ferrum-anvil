@@ -172,9 +172,23 @@ against it).
   reveals nothing and any change to it is refused before anything is restored.
   Only the header (at most 4 KiB of JSON) is parsed before authentication, to
   bound its key-derivation costs before derivation. Authentic contents are
-  still type-checked, confined to the backup's own workspaces (revisions to
-  their request's), checked for stored attachments named without their bytes
-  as above, and trust-normalised like any import.
+  still type-checked; every workspace-scoped object, workspace secret and
+  load report must belong to one of the backup's own workspaces (revisions to
+  their request's), and history records of any other workspace are left out
+  with a warning; stored attachments named without their bytes are checked as
+  above.
+  The import trust normalisation applies to the backup's app settings as to
+  workspace, folder and request settings: cross-origin credential forwarding
+  and 0-RTT early data are turned off, like TLS bypasses, plain-HTTP marker
+  trust, legacy HMAC and scenario and load plan trust.
+- **App settings from a backup:** app settings are the lowest settings layer
+  of every workspace's requests, and their DNS overrides, resolver and other
+  defaults are not something normalisation can judge. Replace therefore
+  restores the backup's app settings only when every workspace stored here
+  is one the backup claims (each of which the user must approve); while the
+  profile holds any other workspace, Replace keeps this profile's app
+  settings and says so in the preview and the report. Merge always keeps
+  them.
 - **Restoring into existing workspaces:** a full backup must be your own or
   otherwise trusted. Its passphrase proves only that the file was not
   altered, not who made it, and a restore writes every item under its own
@@ -182,8 +196,9 @@ against it).
   refused unless the user approves each such workspace after the preview,
   as for bundles (desktop checkbox, `anvil import --into-existing`), because
   what it writes there can use that workspace's vault secrets. Replace also
-  refuses a backup that would overwrite an object stored in another
-  workspace, or a secret stored here under another owner.
+  refuses a backup that would overwrite an object, history record or load
+  report stored in another workspace, or a secret stored here under another
+  owner.
 - **Legacy full backups:** full backups written as zip bundles, whose vault
   authenticated nothing else in the archive, are refused on import (manifest
   kind `backup`, mode `full_backup`, or app settings in the archive), so

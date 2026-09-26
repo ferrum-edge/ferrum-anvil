@@ -301,6 +301,28 @@ fn data_008_imports_never_activate_bypass_or_trust() {
     assert!(opened.warnings.iter().any(|w| w.contains("0-RTT early data")));
 }
 
+/// App settings travel only in a full backup, whose restore runs the same
+/// normalisation: they are the lowest settings layer of every workspace's
+/// requests, so they are normalised like workspace, folder and request
+/// settings.
+#[test]
+fn data_008_app_settings_are_normalised_like_other_settings() {
+    use anvil_domain::settings::{AppSettings, EarlyDataPolicy, RedirectPolicy, SettingsOverrides};
+    let mut g = sample();
+    let defaults = SettingsOverrides {
+        redirects: Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true }),
+        early_data: Some(EarlyDataPolicy { enabled: true, extra_methods: vec![] }),
+        ..Default::default()
+    };
+    g.app_settings = Some(AppSettings { defaults, ..Default::default() });
+    let warnings = validate::validate_and_normalize(&mut g).unwrap();
+    let defaults = g.app_settings.unwrap().defaults;
+    assert!(defaults.redirects.is_some_and(|r| !r.forward_credentials_cross_origin), "{:?}", defaults.redirects);
+    assert!(defaults.early_data.as_ref().is_some_and(|e| !e.enabled), "{:?}", defaults.early_data);
+    assert!(warnings.iter().any(|w| w.contains("other origins")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("0-RTT early data")), "{warnings:?}");
+}
+
 /// SPIFFE Workload API sources need no secret, so an import draws on the
 /// importing machine's identity: "send a failing JWT-SVID" is never
 /// imported, and the profiles that use the identity are named. A JWT-SVID
