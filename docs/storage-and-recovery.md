@@ -287,8 +287,10 @@ in it can be read or changed without the export passphrase:
   stored response bodies, and every load report.
 - It does not carry OS keychain entries, local data keys, provider sessions,
   token-file bindings or linked-file bindings (they name files on this
-  device), or device-identity seals (this device's own choice); the preview
-  lists them. A restore seals every workspace in the backup, in the same
+  device); the preview lists them. Nor does it carry device-identity seals
+  (this device's own choice): the preview does not list the seals held where
+  the backup was taken, because a restore seals every workspace it writes
+  anyway. A restore seals every workspace in the backup, in the same
   transaction, from this device's workload identity (a JWT-SVID from the
   Workload API or a token file, and a TLS profile presenting an X.509-SVID
   from the Workload API) until the user lifts the seal on this device
@@ -313,8 +315,12 @@ everything is written in one transaction after a checkpoint. A request
 revision is restored under its request, in that request's workspace:
 revisions whose request is not in the backup (it was deleted) are left out
 with a warning, and one stored under another request or workspace is refused.
-History records of a workspace that is not in the backup (it was deleted) are
-left out with a warning. Replace overwrites items that have the same id; Merge
+History records and load reports of a workspace that is not in the backup are
+left out with a warning (deleting a workspace deletes both, so only an edited
+backup holds one). A restored history record is never dated after the restore,
+so age-based retention always reaches it, as after a bundle import. User
+profiles are restored as carried: nothing reads them yet, so they affect no
+request. Replace overwrites items that have the same id; Merge
 keeps them, including this profile's settings; Duplicate is refused, because a
 backup restores items under their own ids. Nothing else in the profile is
 deleted.
@@ -324,7 +330,12 @@ Replace restores the backup's app settings only when every workspace stored
 here is one the backup claims: into an empty profile, or over the backup's
 own workspaces once they are approved (below). While the profile holds any
 other workspace, Replace keeps this profile's app settings; the preview and
-the report say so, and the plan counts them as kept.
+the report say so, and the plan counts them as kept. When Replace does restore
+them, the preview and the report say that too: they then apply to every
+workspace here, including ones created later. App settings also carry the
+lock, history retention and redaction policies. A restore normalises only
+their default request settings (DNS overrides, resolver, proxy and TLS
+defaults and the like) and restores these policies as the backup has them.
 
 Restore only a full backup that is your own or that you otherwise trust. Like
 a bundle, a backup can claim a workspace already stored here, and what it

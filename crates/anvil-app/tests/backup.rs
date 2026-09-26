@@ -744,6 +744,7 @@ fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_doe
     a.save_settings(&settings).unwrap();
     let bytes = export(&a);
     let kept = "Replace keeps this profile's app settings";
+    let replaced = "Replace restores the backup's app settings";
 
     // App settings apply to every workspace's requests. A profile with a
     // workspace the backup does not claim needs nothing approved, and keeps
@@ -755,16 +756,20 @@ fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_doe
     assert!(dry.plan.existing_workspaces.is_empty(), "{:?}", dry.plan);
     assert!(dry.warnings.iter().any(|w| w.starts_with(kept)), "{:?}", dry.warnings);
     assert_eq!((dry.plan.to_replace, dry.plan.skipped_existing), (0, 1), "the settings are counted as kept: {:?}", dry.plan);
+    assert!(!dry.warnings.iter().any(|w| w.starts_with(replaced)), "{:?}", dry.warnings);
     let rep = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
     assert!(rep.warnings.iter().any(|w| w.starts_with(kept)), "{:?}", rep.warnings);
     assert_eq!(b.settings().unwrap(), before, "the backup's app settings never reach a workspace it does not claim");
     b.find_workspace("W").expect("the rest of the backup is restored");
 
-    // Into a profile holding only the backup's own workspaces, Replace
-    // restores them, normalised like workspace, folder and request settings.
+    // Into an empty profile, Replace restores them, normalised like
+    // workspace, folder and request settings, and the preview says so.
     let c = new_app(root.path(), "c");
+    let dry = c.restore_preview(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(dry.warnings.iter().any(|w| w.starts_with(replaced)), "{:?}", dry.warnings);
     let rep = c.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
     assert!(!rep.warnings.iter().any(|w| w.starts_with(kept)), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.starts_with(replaced)), "{:?}", rep.warnings);
     assert!(rep.warnings.iter().any(|w| w.contains("forwarded credentials to other origins")), "{:?}", rep.warnings);
     assert!(rep.warnings.iter().any(|w| w.contains("0-RTT early data")), "{:?}", rep.warnings);
     let restored = c.settings().unwrap();
@@ -772,6 +777,23 @@ fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_doe
     assert_eq!(restored.defaults.dns_overrides, settings.defaults.dns_overrides);
     assert!(restored.defaults.redirects.is_some_and(|r| !r.forward_credentials_cross_origin), "{:?}", restored.defaults.redirects);
     assert!(restored.defaults.early_data.as_ref().is_some_and(|e| !e.enabled), "{:?}", restored.defaults.early_data);
+
+    // Over a profile holding only the backup's own workspace, approved after
+    // the preview, Replace restores them too.
+    let ws = c.find_workspace("W").unwrap().meta.id;
+    let mut local = c.settings().unwrap();
+    local.theme = Theme::Dark;
+    local.defaults.dns_overrides.clear();
+    c.save_settings(&local).unwrap();
+    let dry = c.restore_preview(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(dry.plan.existing_workspaces, vec![ExistingWorkspace { id: ws, name: "W".into() }]);
+    assert!(dry.warnings.iter().any(|w| w.starts_with(replaced)), "{:?}", dry.warnings);
+    assert!(!dry.warnings.iter().any(|w| w.starts_with(kept)), "{:?}", dry.warnings);
+    let rep = c.restore_approved(&bytes, Some(PASS), ConflictPolicy::Replace, &into(&ws, &bytes)).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.starts_with(replaced)), "{:?}", rep.warnings);
+    let restored = c.settings().unwrap();
+    assert_eq!(restored.theme, Theme::Light);
+    assert_eq!(restored.defaults.dns_overrides, settings.defaults.dns_overrides);
 }
 
 #[test]
@@ -845,18 +867,59 @@ async fn replace_never_overwrites_records_or_reports_of_another_workspace() {
     assert!(history.iter().any(|x| x.id == h.id), "the stored history record stays in its workspace");
     assert_eq!(b.store.list_load_reports::<serde_json::Value>(Some(&payments.meta.id)).unwrap().len(), 1);
 
-    // A history record of a workspace that is not in the backup (deleted
-    // since) is left out with a warning, never written.
+    // A history record or load report of a workspace that is not in the
+    // backup is left out with a warning, never written. Deleting a workspace
+    // deletes both, so only an edited backup holds one.
     let outside = contents.history[1].id.clone();
     let edited = resealed(&bytes, |_, c| {
         let row = c.history.iter_mut().find(|x| x.id == outside).unwrap();
         row.record["workspace_id"] = json!(Id::new());
+        c.load_reports[0]["plan"]["workspace_id"] = json!(Id::new());
     });
     let fresh = new_app(root.path(), "fresh");
+    let dry = fresh.restore_preview(&edited, Some(PASS), ConflictPolicy::Replace).unwrap();
     let rep = fresh.restore(&edited, Some(PASS), ConflictPolicy::Replace).unwrap();
-    let warning = "1 history record(s) of workspaces that are not in the backup were left out.";
-    assert!(rep.warnings.iter().any(|w| w == warning), "{:?}", rep.warnings);
+    for warning in [
+        "1 history record(s) of workspaces that are not in the backup were left out.",
+        "1 load report(s) of workspaces that are not in the backup were left out.",
+    ] {
+        assert!(dry.warnings.iter().any(|w| w == warning), "{:?}", dry.warnings);
+        assert!(rep.warnings.iter().any(|w| w == warning), "{:?}", rep.warnings);
+    }
     let restored = fresh.backup_contents().unwrap();
     assert!(restored.history.iter().all(|x| x.id != outside), "the record is not restored");
     assert_eq!(restored.history.len(), contents.history.len() - 1);
+    assert!(restored.load_reports.is_empty(), "the load report is not restored");
+    fresh.find_workspace(MARKERS[0]).expect("the rest of the backup is restored");
+}
+
+#[tokio::test]
+async fn a_restored_history_record_is_never_dated_after_its_restore() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("W").unwrap();
+    let request = a.create_request(&ws.meta.id, None, "Echo", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
+    let opts = SendOptions { record_history: true, ..Default::default() };
+    a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
+    // A backup whose only record is dated far in the future, where age-based
+    // retention would never reach it.
+    let future = chrono::DateTime::parse_from_rfc3339("2999-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+    let bytes = resealed(&export(&a), |_, c| {
+        assert_eq!(c.history.len(), 1);
+        c.history[0].started_at = future.timestamp_millis();
+        c.history[0].record["started_at"] = json!(future);
+    });
+
+    let b = new_app(root.path(), "b");
+    let before = chrono::Utc::now();
+    b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    let after = chrono::Utc::now();
+    let stored = b.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
+    assert_eq!(stored.len(), 1);
+    let at = stored[0].started_at;
+    assert!(before.timestamp_millis() <= at && at <= after.timestamp_millis(), "stored at {at}");
+    let (record, _) = b.store.get_history::<ExecutionRecord>(&stored[0].id).unwrap().unwrap();
+    assert_eq!(record.started_at.timestamp_millis(), at);
 }
