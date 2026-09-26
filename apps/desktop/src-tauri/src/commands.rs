@@ -55,7 +55,9 @@ pub fn app_status(st: State<'_, DesktopState>) -> Status {
         Some(a) => Status {
             state: if a.is_locked() { "locked" } else { "unlocked" },
             profile: Some(a.header.display_name.clone()),
-            protection: Some(a.header.protection),
+            // From disk: a keychain profile converted to a passphrase
+            // changes mode while it is open.
+            protection: Some(anvil_storage::vault::read_header(&a.dir).map(|h| h.protection).unwrap_or(a.header.protection)),
             version: env!("CARGO_PKG_VERSION"),
         },
         None => Status { state: "no_profile", profile: None, protection: None, version: env!("CARGO_PKG_VERSION") },
@@ -119,10 +121,28 @@ pub fn profile_unlock(st: State<'_, DesktopState>, profile_id: String, passphras
     Ok(())
 }
 
-/// Re-wrap the data key under a new passphrase (the app must be unlocked).
+/// Re-wrap the data key under a new passphrase (the app must be unlocked;
+/// passphrase profiles only).
 #[tauri::command]
 pub fn profile_change_passphrase(st: State<'_, DesktopState>, new_passphrase: String) -> R<()> {
     st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)
+}
+
+#[derive(Serialize)]
+pub struct Converted {
+    /// Shown once; never stored.
+    pub recovery_key: String,
+    /// False if the OS credential store kept the old entry; it no longer
+    /// unlocks the profile and removal is retried at the next unlock.
+    pub keychain_entry_removed: bool,
+}
+
+/// Protect an OS-keychain profile with a passphrase instead (the app must be
+/// unlocked). Afterwards the keychain no longer opens it.
+#[tauri::command]
+pub fn profile_convert_to_passphrase(st: State<'_, DesktopState>, new_passphrase: String) -> R<Converted> {
+    let c = st.app()?.convert_to_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)?;
+    Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
 }
 
 #[tauri::command]

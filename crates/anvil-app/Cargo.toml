@@ -46,6 +46,8 @@ anvil-fixtures = { path = "../anvil-fixtures" }
 anvil-identity = { workspace = true, features = ["mock-provider"] }
 # Re-packs bundles in the import tests.
 zip.workspace = true
+# In-memory mock credential store for the keychain conversion tests.
+keyring-core.workspace = true
 
 [lints]
 workspace = true
