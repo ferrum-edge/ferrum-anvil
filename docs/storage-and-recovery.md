@@ -82,7 +82,8 @@ not changed, so nothing is re-encrypted. In order:
 
 1. A header written by an earlier build gets its MAC, and the keychain entry
    is tagged if it is not yet. If the credential store refuses, the
-   conversion stops and nothing has changed.
+   conversion stops; nothing has changed beyond the MAC, which any unlock on
+   this build also writes.
 2. The header is rewritten atomically with the passphrase wrap, a wrap for a
    **new recovery key** (shown once) and the passphrase mode with its MAC.
    The header rewritten is the one on disk, read under an advisory lock on
@@ -100,9 +101,9 @@ not changed, so nothing is re-encrypted. In order:
    If the credential store refuses the delete, the header keeps the account
    name and the entry is overwritten with a marker that holds no key; if the
    app stops between the two steps, the header keeps the account name too.
-   Until the old entry is
-   removed, the removal is retried after each successful unlock until the
-   entry is gone. The retry edits the header as it is on disk at that moment,
+   Until the old entry is removed, the removal is retried after each
+   successful unlock until the entry is gone.
+   The retry edits the header as it is on disk at that moment,
    under the same lock, so a passphrase changed meanwhile by another process
    is kept. An entry that holds a different key is left alone. Settings lists
    such a leftover entry (service `com.ferrumedge.anvil`, account

@@ -64,7 +64,9 @@
   header without a MAC that carries passphrase or recovery wraps is refused.
   An old entry left by a conversion done in an earlier build stays usable
   by a header edited back to keychain mode (MAC and wraps removed) only if
-  the store refuses both to delete and to overwrite it. Keychain entries
+  the store refuses both to delete and to overwrite it, and a copy of the
+  header saved before a conversion opens from that entry until it is removed
+  or overwritten. Keychain entries
   written by this build are not readable by earlier development builds.
   Header writes use a temporary file per writer under an advisory lock
   (`profile.lock`), and a writer holding the lock removes temporary files
