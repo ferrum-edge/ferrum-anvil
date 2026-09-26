@@ -56,12 +56,15 @@ against it).
   longer applied. The workspace cookie jar is separate: on each hop it sends
   the stored cookies that match that hop's target under cookie rules, which
   do not separate ports (nor schemes, for cookies without `Secure`). A
-  307/308 that would resend a body to another origin is not followed when
+  redirect that would resend a body to another origin is not followed when
   preparing the body substituted a secret variable, whatever the body type
   and its encoding (form fields are percent-encoded, GraphQL variables are
   re-serialized), or when the body holds a resolved secret value byte for
-  byte (an attachment, say). The TLS client identity is never presented to another
-  origin unless a TLS profile is bound to it, whatever the redirect policy.
+  byte (an attachment, say). This also covers 301/302 redirects that retain
+  the body, such as for PUT, PATCH and DELETE. Setting
+  `redirects.forward_credentials_cross_origin` lifts this refusal. The TLS
+  client identity is never presented to another origin unless a TLS profile
+  is bound to it, whatever the redirect policy.
   The TLS settings are prepared for each hop's target; a hop whose route or
   TLS settings cannot be prepared is not followed.
 - **Redirects and NO_PROXY:** the proxy route is decided for each hop's host

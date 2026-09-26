@@ -782,10 +782,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                             // stays without them. The new target's query comes
                             // from `Location` only.
                             let secrets = resolver.used_secrets.lock().clone();
-                            // A 307/308 resends the body; one built from a
-                            // secret variable (whatever its encoding) or
-                            // holding a secret value is not sent to another
-                            // origin.
+                            // A redirect that resends the body (including
+                            // 307/308 and body-retaining 301/302) does not
+                            // send it to another origin if it contains a
+                            // secret. This refusal is lifted when the policy
+                            // allows forwarding credentials cross-origin.
                             if !body.is_empty() && (prep.http.body_uses_secret || body_carries_secret(&body, &secrets)) {
                                 let why = format!("a {status} redirect would resend a body holding a secret to another origin");
                                 redirect_refused(&mut prep.inferred, &t, &why);
