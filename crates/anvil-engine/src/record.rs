@@ -127,7 +127,9 @@ fn capture_gap(body: &BodyCapture, session: bool) -> Option<String> {
         _ if session => {}
         BodyCompleteness::Incomplete => return Some(format!("the response ended before its framing completed after {received} bytes")),
         BodyCompleteness::Canceled => return Some(format!("reading the response body was canceled after {received} bytes")),
-        BodyCompleteness::StoppedAtLocalLimit => return Some(format!("reading stopped at the local response limit after {received} bytes")),
+        BodyCompleteness::StoppedAtLocalLimit => {
+            return Some(format!("reading stopped at the local response limit after {received} bytes"));
+        }
     }
     let captured = body.captured_bytes;
     body.display_truncated.then(|| format!("only {captured} of {received} received body bytes were captured (capture limit)"))
