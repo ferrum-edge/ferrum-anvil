@@ -43,6 +43,9 @@ pub struct PreparedHttp {
     pub method: String,
     pub target: Target,
     pub headers: Vec<(String, String)>,
+    /// Lowercased names of the configured headers marked sensitive. They are
+    /// credentials of the request's own origin, like `Authorization`.
+    pub sensitive_headers: Vec<String>,
     pub body: Bytes,
     pub content_type: Option<String>,
     pub inferred: Vec<String>,
@@ -177,6 +180,7 @@ pub fn prepare_http(
     }
 
     let mut headers: Vec<(String, String)> = Vec::new();
+    let mut sensitive_headers: Vec<String> = Vec::new();
     for (i, h) in spec.headers.iter().enumerate().filter(|(_, h)| h.enabled) {
         let n = r.resolve(h.name.trim(), &format!("headers[{i}].name"))?;
         let v = r.resolve(&h.value, &format!("headers[{i}].value"))?;
@@ -196,6 +200,9 @@ pub fn prepare_http(
                 format!("the value of '{n}' contains characters not allowed in a header"),
                 &format!("headers[{i}].value"),
             ));
+        }
+        if h.sensitive {
+            sensitive_headers.push(n.to_ascii_lowercase());
         }
         headers.push((n, v));
     }
@@ -385,7 +392,7 @@ pub fn prepare_http(
         headers.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
         inferred.push("Accept-Encoding: gzip, deflate, br, zstd (automatic decompression is on)".into());
     }
-    Ok(PreparedHttp { method, target, headers, body: Bytes::from(body), content_type, inferred, lint_bypassed })
+    Ok(PreparedHttp { method, target, headers, sensitive_headers, body: Bytes::from(body), content_type, inferred, lint_bypassed })
 }
 
 #[cfg(test)]

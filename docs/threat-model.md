@@ -32,9 +32,21 @@ against it).
 
 - **Spoofed gateway markers** (a backend injects `X-Gateway-Error`): markers only
   count for declared gateways, capped at *likely*; lookalike tests in the lab.
+  After redirects, attribution comes from the origin that produced the final
+  response (its own profile and TLS requirement), never the original request's.
 - **Credential leakage via redirects or logs:** cross-origin credential stripping;
   redaction by name and by exact secret value across records, history, reports,
   exports and support bundles; query-string key warning.
+- **Redirect hops:** every hop is evaluated for its own target. Once a redirect
+  leaves the request's origin (scheme, host or port), unless
+  `redirects.forward_credentials_cross_origin` is on, configured headers that
+  carry credentials are dropped for the rest of the chain: known credential
+  names (`Authorization`, `Cookie`, `X-API-Key`, names containing `token`,
+  `secret`, `auth`, ...), headers marked sensitive, and headers whose value
+  holds a secret variable; auth (headers, API-key query parameters and cookies)
+  is no longer applied. The proxy route and NO_PROXY are decided for each
+  hop's host, and the TLS settings for each hop's target; a hop whose route or
+  TLS settings cannot be prepared is not followed.
 - **Replay by the client itself:** HMAC nonce, DPoP proof and JWT regenerated per
   send; no automatic retry of possibly-processed non-idempotent requests.
 - **Replay of 0-RTT early data by the network:** data sent before a TLS 1.3 / QUIC
