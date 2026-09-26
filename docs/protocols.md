@@ -19,8 +19,8 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 | gRPC unary / server streaming (`grpc://`, `grpcs://`, `http(s)://`) | No, by design. Use `execute`. `open_session` returns `unsupported_combination`. | **Yes** | Not built (one connection per call, no channel reuse) | HTTP status and gRPC status reported separately. Trailers vs trailers-only vs missing. `grpc-message` is percent-decoded. `grpc-status-details-bin` is decoded. Message boundaries are kept, each shown as JSON. |
 | gRPC client streaming / bidirectional | **Yes.** `SendText` sends a JSON message, `SendBinaryHex` sends pre-encoded protobuf. `HalfClose` or `Close` ends the client stream. | **Yes.** Scripted messages, then a half-close. | Not built | As above. The half-close is recorded in the transcript. |
 | SSE (`http(s)://`) | **Receive-only.** Close or cancel. Other commands are rejected. | **Yes.** Stops on `max_events`, idle, the deadline, cancel or the peer's end. Optional reconnect. | Not built | Every event is recorded with its id, type and data. `closed_by` is Client, Timeout, Peer or Abnormal. The raw stream is kept up to the capture limit. |
-| Raw TCP (`tcp://`) / TCP+TLS (`tls://`) | **Yes.** Send text or hex frames. `HalfClose` (FIN). `Close`. | **Yes.** Stops on expected frames, max bytes, read-idle, the peer's close or the deadline. | Not built | The same connector phases and TLS/mTLS evidence as HTTP. Framing presets. Half-close semantics. Bytes sent and received. Partial trailing frames. |
-| UDP (`udp://`) | **Yes.** Send datagrams. `Close`. | **Yes.** Sends datagrams, then waits out the response window. | Not built | A per-datagram transcript. Sent and received counts. ICMP port-unreachable when the OS reports it. A count of repeated payloads. It never infers delivery. |
+| Raw TCP (`tcp://`) / TCP+TLS (`tls://`) | **Yes.** Send text or hex frames. `HalfClose` (FIN). `Close`. | **Yes.** Stops on expected frames, max bytes, read-idle, the peer's close or the deadline. | Not built | The same connector phases and TLS/mTLS evidence as HTTP. Framing presets. Half-close semantics. Bytes sent and received. Partial trailing frames. Optional PROXY v1/v2 header in its own `proxy_protocol_header` phase (§3.8). |
+| UDP (`udp://`) | **Yes.** Send datagrams. `Close`. | **Yes.** Sends datagrams, then waits out the response window. | Not built | A per-datagram transcript. Sent and received counts. ICMP port-unreachable when the OS reports it. A count of repeated payloads. It never infers delivery. Optional PROXY v2 `DGRAM` envelope on every datagram, also for DTLS (§3.8). |
 | DTLS 1.2/1.3 (`dtls://`) | **Yes**, like UDP | **Yes** | Not built | A separate `dtls_handshake` phase. Peer leaf verified against the TLS profile. Client identity, and whether a CertificateRequest was seen (DTLS 1.2). The alert name when a peer rejects the handshake. |
 | HTTP/3 forced / automatic fallback | n/a (request/response) | **Yes.** From the existing H3 transport, now covered by tests. | Load runs use the same HTTP engine path, so a forced-H3 request is accepted, but H3 has not been exercised under load (see load.md). | Measured QUIC phases, and no TCP phase. Forced H3 never falls back. Automatic fallback records both attempts and the `client.h3.fallback_used` finding. |
 
@@ -118,7 +118,8 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 - **Framing presets.** None, newline-delimited (`\r\n` accepted on receive), or a big-endian u16 or u32 length prefix. A payload the preset cannot represent fails locally with `body_serialization`, for example more than 65,535 bytes with a u16 prefix. Incoming frames above the read limit stop with `response_too_large_local`. Without a preset, each read is recorded as a chunk and `expect_frames` is ignored with a note, because TCP has no message boundaries.
 - **Half-close.** `shutdown(Write)`, with a TLS `close_notify` first, keeps the read side open. A reply that arrives afterwards is preserved and gets the `tcp.reply_after_half_close` finding.
 - **Stop conditions.** `expect_frames`, `max_read_bytes`, `read_idle_ms` (`closed_by = timeout`), the peer's FIN (`closed_by = peer`), a reset (`closed_by = abnormal` plus a `body_reset` failure), the total deadline, or cancel.
-- **Not implemented.** Application codecs (only arbitrary bytes are supported), PROXY-protocol headers, and Unix sockets.
+- **PROXY protocol.** An optional v1/v2 header written before any TLS; see §3.8.
+- **Not implemented.** Application codecs (only arbitrary bytes are supported) and Unix sockets.
 
 ### 3.5 UDP
 
@@ -156,6 +157,30 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 - **PROTO-007, no UDP listener.** The result is `quic_handshake_timeout`, with a single attempt, and the TCP fixture on the same port sees no connection.
 - **PROTO-008, automatic fallback.** Two attempts are recorded, the second with reason `protocol_fallback{from: h3}`. The response is not HTTP/3, and there is a `client.h3.fallback_used` finding plus a `protocol_fallback` warning. The fallback finding previously never fired, because the engine did not pass `protocol_fallback_from`. That is fixed.
 
+### 3.8 PROXY protocol (TCP header, datagram envelope)
+
+Anvil can play the load balancer in front of a stream listener that requires the HAProxy PROXY protocol, for example a Ferrum Edge `tcp`, `tcp_tls`, `udp` or `dtls` proxy with `stream_proxy_protocol: true`. The byte formats are transcribed from Ferrum Edge v0.9.7 (`src/proxy/proxy_protocol.rs`, `src/proxy/datagram_client_address.rs`); unit tests pin the gateway's own test vectors, and an HMAC tag vector computed independently.
+
+- **TCP / TCP+TLS header** (`tcp.proxy_protocol`).
+  - `version`: `v1` (text: `PROXY TCP4|TCP6|UNKNOWN …\r\n`), `v2` (binary), or `raw` (exact hex bytes, for deliberately malformed headers). Off when absent.
+  - v2 `command`: `proxy` or `local` (no addresses; the receiver keeps the socket peer). `family`: `auto` (`AF_INET`, or `AF_INET6` with IPv4 promoted to its mapped form, as the gateway's encoder does) or `unspec` (v1 `UNKNOWN`, v2 `AF_UNSPEC`).
+  - `source` / `destination` (`ip:port`, variables allowed) default to the connection's **real** local and remote socket addresses. Through a forward proxy those describe the proxy hop, so the request is refused before any traffic unless both are set.
+  - v2 TLVs: `authority` (`PP2_TYPE_AUTHORITY`, 0x02) and any further `tlvs` (type + hex value).
+  - Written after TCP connect (and after an HTTP CONNECT/SOCKS tunnel) and **before the TLS ClientHello**, in its own `proxy_protocol_header` phase whose detail summarizes the header. The connection evidence (`connection.proxy_header`) records the format, command, family, source and destination with their origin (socket or configured), the exact bytes as hex, the v1 line, TLV summaries, the length, and whether the bytes are well-formed by the gateway parser's rules (v1 up to CRLF within 109 bytes; v2 version 2, LOCAL/PROXY, address block ≤ 512 bytes). Header bytes that contain a redacted value are replaced as a whole. The transcript starts with a `proxy_protocol_header` control entry. Payload byte counts exclude the header.
+  - Refused before traffic (typed `unsupported_combination` / `body_serialization`): v1 LOCAL, v1 with TLVs or mixed families, an address that is not `ip:port`, an empty raw header, a v1 line over 107 bytes, a TLV over 65,535 bytes.
+- **UDP / DTLS envelope** (`udp.proxy_protocol`).
+  - A PROXY v2 header with the `DGRAM` transport prepended to **every** datagram (`0x21 0x12`/`0x22`, or `LOCAL` `0x20 0x00`, or `AF_UNSPEC` `0x21 0x02`). With DTLS it wraps each UDP datagram **outside** the DTLS records, handshake flights, retransmissions and `close_notify` included, because the gateway strips it before its DTLS demux. Replies are never wrapped.
+  - Optional `authentication`: the shared secret (`FERRUM_DATAGRAM_PROXY_PROTOCOL_SECRET`) comes from the vault or a `{{variable}}`, is used verbatim, must be at least 32 bytes (refused before traffic otherwise; the value and its length are never reported), is added to the redactor, and is never recorded. Each datagram carries the freshness TLV `0xE1` (version 1, `sender_id`, `epoch`, `sequence`, `timestamp_ms`) and the HMAC-SHA-256 tag TLV `0xE0` over the listener's canonical identity plus the whole datagram with the 32 tag bytes elided.
+  - **Listener identity the user must give**: the receive boundary (`udp`, or `dtls` when the listener terminates DTLS; the default follows the URL scheme), the listener's **bind address exactly as bound** (Ferrum: `FERRUM_STREAM_PROXY_BIND_ADDRESS`, default `0.0.0.0`; IPv4-mapped forms are folded to IPv4; a wildcard and a specific address are different identities), and the port (default: the destination port). The domain bytes are `"ferrum-datagram-proxy-v1" | 0x01 | 0x01 udp / 0x02 dtls | 0x04 + 4 bytes or 0x06 + 16 bytes | port`.
+  - `epoch` defaults to Unix milliseconds at the start of the run (a fresh epoch per run); pin it with `first_sequence` to replay a sequence on purpose. `timestamp_offset_ms` shifts the timestamp to test the receiver's 30-second horizon. The sequence increases by one per datagram sent.
+  - Evidence: the first datagram's envelope as hex with the tag replaced by `‹tag›`, the TLV summaries, the listener binding, sender, epoch, first and last sequence, and the number of datagrams wrapped.
+- **Diagnostics.** A listener that requires PROXY protocol closes a TCP connection without data or reason, and drops a datagram silently. Anvil never turns that into a confirmed claim:
+  - no header sent and the peer closed without data (`tcp.closed_without_data`, or `client.tls.connection_closed` for TLS): "the listener may require a PROXY protocol header" is added as one more alternative;
+  - a header sent and the peer closed without data: `tcp.proxy_header_maybe_rejected`, confidence **unknown** (untrusted source, format, or something after the header), or **likely** only when Anvil's own check found the bytes it sent malformed;
+  - an envelope sent and nothing came back: `udp.no_response` (or `client.dtls.handshake_timeout`) with "the listener may have dropped the envelope" as an alternative. Silence stays "no response observed".
+- **Not implemented.** PROXY headers on HTTP-family requests (Ferrum reads them only on stream listeners), the v2 `AF_UNIX` family, computed CRC32C (0x03) or SSL (0x20) TLVs (any TLV can still be sent as type + hex), and receiving (Anvil only sends).
+- **Live verification.** The `proxyproto` lab profile runs all of this against the real gateway ([lab/proxyproto.md](lab/proxyproto.md)).
+
 ## 4. Failure-matrix coverage
 
 | Case | Test (real sockets) |
@@ -178,6 +203,8 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 | PROTO-021 | `…::proto_021_udp_loss_and_repeats_are_counted_not_explained` |
 | PROTO-022 | `…::proto_022_dtls_handshake_with_verified_peer`, `…_wrong_root_is_a_typed_client_side_verification_failure`, `…_mutual_tls_positive_and_negative`; `sessions_streams.rs::proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline` |
 
+PROXY protocol (no matrix IDs; lab `PP-*`): `anvil-transport/src/proxy_protocol.rs` unit tests (gateway test vectors, the envelope layout, an independently computed tag), `anvil-diagnostics/src/rules/proxy_header.rs` rule tests, and `anvil-engine/tests/proxy_protocol.rs` against independent receivers in `anvil-fixtures/src/proxy_protocol.rs` (v1/v2/LOCAL/UNKNOWN, TLS after the header, missing/malformed/untrusted, refusals before traffic, unauthenticated and authenticated envelopes with replay/stale/wrong-secret/wrong-listener drops, DTLS through an envelope-stripping relay).
+
 Other tests cover SSE reconnect with `Last-Event-ID`, WebSocket handshake rejection, WSS auth with secret redaction, interactive WebSocket/TCP/UDP/gRPC sessions, TCP framing with mTLS, and refusal before traffic for UDP through a proxy and for auth on raw TCP.
 
 New fixtures, all lab-only in `anvil-fixtures`:
@@ -197,4 +224,5 @@ The HTTP fixture's WebSocket route now flushes its Close reply, so a client-init
 5. **SSE.** No reconnect after a clean end of stream, which differs from browser behavior. Compressed streams are not supported.
 6. **UDP.** Connected-socket mode only. Replies from a different address or port are not accepted.
 7. **Connections.** Session adapters open a fresh connection per execution or session. Unlike HTTP/1.1, HTTP/2 and HTTP/3, they do not use the pool.
-8. **Diagnostic wording.** Three findings (`grpc.reflection_unavailable`, `udp.icmp_port_unreachable`, `udp.repeated_payloads`) carry their wording inline in the engine, not in `catalog/diagnostics/findings.en.json`. They should move into the catalog once the catalog owners agree.
+8. **PROXY protocol.** Sending only, on TCP/TLS and UDP/DTLS sessions; not on HTTP-family requests. The authenticated envelope follows Ferrum Edge's (application-reserved) TLVs 0xE0/0xE1; other receivers need the same definition.
+9. **Diagnostic wording.** Three findings (`grpc.reflection_unavailable`, `udp.icmp_port_unreachable`, `udp.repeated_payloads`) carry their wording inline in the engine, not in `catalog/diagnostics/findings.en.json`. They should move into the catalog once the catalog owners agree.

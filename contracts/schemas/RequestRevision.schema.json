@@ -2236,6 +2236,17 @@
           "format": "uint32",
           "minimum": 0,
           "default": 0
+        },
+        "proxy_protocol": {
+          "description": "PROXY protocol header written after TCP connect, before any TLS.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyHeaderSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2275,6 +2286,131 @@
         "base64"
       ]
     },
+    "ProxyHeaderSpec": {
+      "description": "PROXY protocol connection header for a TCP / TCP+TLS session.",
+      "type": "object",
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/ProxyHeaderVersion",
+          "default": "v2"
+        },
+        "command": {
+          "description": "v2 only (v1 has no LOCAL command).",
+          "$ref": "#/$defs/ProxyCommand",
+          "default": "proxy"
+        },
+        "family": {
+          "$ref": "#/$defs/ProxyAddressFamily",
+          "default": "auto"
+        },
+        "source": {
+          "description": "Declared source `ip:port` (the \"original client\"). Default: the real\nlocal socket address of this connection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination": {
+          "description": "Declared destination `ip:port`. Default: the real remote socket address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authority": {
+          "description": "v2 `PP2_TYPE_AUTHORITY` (0x02) TLV, e.g. the SNI host name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tlvs": {
+          "description": "Further v2 TLVs, written in order after `authority`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProxyTlv"
+          }
+        },
+        "raw_hex": {
+          "description": "`version: raw` only: the exact header bytes as hex.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ProxyHeaderVersion": {
+      "description": "Which connection header Anvil writes.",
+      "oneOf": [
+        {
+          "description": "Text header: `PROXY TCP4|TCP6|UNKNOWN … \\r\\n`.",
+          "type": "string",
+          "const": "v1"
+        },
+        {
+          "description": "Binary header (12-byte signature, command, family/transport, address block, TLVs).",
+          "type": "string",
+          "const": "v2"
+        },
+        {
+          "description": "The exact bytes of `raw_hex`, for deliberately malformed headers. Anvil\nstill checks them against the specification and records the result.",
+          "type": "string",
+          "const": "raw"
+        }
+      ]
+    },
+    "ProxyCommand": {
+      "description": "PROXY v2 command.",
+      "oneOf": [
+        {
+          "description": "A relayed connection: the address block names the original client.",
+          "type": "string",
+          "const": "proxy"
+        },
+        {
+          "description": "The balancer speaking for itself (health checks): no addresses are\nsent and the receiver keeps the socket peer as the client.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    },
+    "ProxyAddressFamily": {
+      "description": "Address family of the header.",
+      "oneOf": [
+        {
+          "description": "IPv4 or IPv6 from the addresses (`TCP4`/`TCP6`, `AF_INET`/`AF_INET6`).",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "No addresses: v1 `UNKNOWN`, v2 `AF_UNSPEC`. The receiver keeps the socket peer.",
+          "type": "string",
+          "const": "unspec"
+        }
+      ]
+    },
+    "ProxyTlv": {
+      "description": "One PROXY v2 TLV (type-length-value) after the address block.",
+      "type": "object",
+      "properties": {
+        "tlv_type": {
+          "description": "TLV type code (for example `0x02` authority, `0x05` unique id).",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "value_hex": {
+          "description": "Value bytes as hex.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tlv_type",
+        "value_hex"
+      ]
+    },
     "UdpSpec": {
       "type": "object",
       "properties": {
@@ -2301,10 +2437,143 @@
           "format": "uint32",
           "minimum": 0,
           "default": 1000
+        },
+        "proxy_protocol": {
+          "description": "PROXY v2 `DGRAM` envelope prepended to every datagram (DTLS: outside\nthe DTLS records, handshake included).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatagramEnvelopeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "datagrams"
+      ]
+    },
+    "DatagramEnvelopeSpec": {
+      "description": "PROXY v2 `DGRAM` envelope prepended to every UDP/DTLS datagram.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/ProxyCommand",
+          "default": "proxy"
+        },
+        "family": {
+          "$ref": "#/$defs/ProxyAddressFamily",
+          "default": "auto"
+        },
+        "source": {
+          "description": "Declared source `ip:port`. Default: the real local socket address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination": {
+          "description": "Declared destination `ip:port`. Default: the real remote socket address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authentication": {
+          "description": "Authenticated envelope (tag + freshness). `None` = the unauthenticated\naddress-trust posture.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatagramAuthSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DatagramAuthSpec": {
+      "description": "Authentication and freshness for the PROXY v2 `DGRAM` envelope.\n\nThe tag is HMAC-SHA-256 keyed with the shared secret over the receiving\nlistener's canonical identity plus the whole datagram (tag elided). The\nlistener identity is **(receive protocol, bind address, port)** exactly as\nthe gateway bound it: a wildcard bind (`0.0.0.0`, `::`) and a specific\naddress are different identities.",
+      "type": "object",
+      "properties": {
+        "secret": {
+          "description": "Shared secret (`FERRUM_DATAGRAM_PROXY_PROTOCOL_SECRET`, at least 32\nbytes, used verbatim). Never recorded.",
+          "$ref": "#/$defs/SensitiveValue"
+        },
+        "listener_protocol": {
+          "description": "Default: `dtls` when Anvil speaks DTLS, otherwise `udp`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatagramListenerProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "listener_bind_address": {
+          "description": "The listener's bind address (Ferrum: `FERRUM_STREAM_PROXY_BIND_ADDRESS`, default `0.0.0.0`).",
+          "type": "string",
+          "default": "0.0.0.0"
+        },
+        "listener_port": {
+          "description": "The listener's port. Default: the destination port.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "sender_id": {
+          "description": "Stable sender id (the balancer's own identity).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        },
+        "epoch": {
+          "description": "Sender epoch. Default: Unix milliseconds when the run starts, so every\nrun is a new epoch. Pin it to replay a sequence on purpose.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "first_sequence": {
+          "description": "Sequence of the first datagram; each further datagram adds one.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "timestamp_offset_ms": {
+          "description": "Added to the send-time timestamp (negative = in the past), to test the\nreceiver's freshness horizon.",
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        }
+      },
+      "required": [
+        "secret"
+      ]
+    },
+    "DatagramListenerProtocol": {
+      "description": "The receive boundary a datagram listener authenticates envelopes at. Part\nof the listener identity bound into every authentication tag.",
+      "oneOf": [
+        {
+          "description": "Plain UDP receive boundary (a `udp` listener, or DTLS passthrough).",
+          "type": "string",
+          "const": "udp"
+        },
+        {
+          "description": "A listener that terminates DTLS (`frontend_tls: true`).",
+          "type": "string",
+          "const": "dtls"
+        }
       ]
     },
     "ImportSource": {

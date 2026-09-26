@@ -1,5 +1,5 @@
-//! Fixtures for the `proxyproto` profile (ports 19901–19914, see
-//! lab/gateway/proxyproto.yaml and proxyproto-auth.yaml).
+//! Fixtures for the `proxyproto` profile (ports 19901–19923, see
+//! lab/gateway/proxyproto{,-auth,-v6}.yaml).
 //!
 //! The TCP backends require a PROXY v2 header themselves: the gateway's
 //! `backend_proxy_protocol: v2` re-advertises the client identity it resolved
@@ -29,6 +29,9 @@ pub struct ProxyProtoFixtures {
     pub udp_auth_backend: ProxyFixture,
     /// Backend of `pp-dtls-auth` (18912).
     pub dtls_auth_backend: ProxyFixture,
+    /// Backends of the untrusted-peer instance (`pp-v6-tcp`, `pp-v6-udp`): must stay silent.
+    pub v6_tcp_backend: ProxyFixture,
+    pub v6_udp_backend: ProxyFixture,
 }
 
 impl ProxyProtoFixtures {
@@ -44,15 +47,24 @@ impl ProxyProtoFixtures {
             dtls_backend: pp::udp_plain_echo("127.0.0.1:19904").await?,
             udp_auth_backend: pp::udp_plain_echo("127.0.0.1:19913").await?,
             dtls_auth_backend: pp::udp_plain_echo("127.0.0.1:19914").await?,
+            v6_tcp_backend: pp::tcp_echo("127.0.0.1:19921", vec!["127.0.0.1".parse()?], None).await?,
+            v6_udp_backend: pp::udp_plain_echo("127.0.0.1:19923").await?,
             certs_dir: certs_dir.to_path_buf(),
             pki,
         })
     }
 
     pub fn clear_logs(&self) {
-        for f in
-            [&self.tcp_backend, &self.tls_backend, &self.udp_backend, &self.dtls_backend, &self.udp_auth_backend, &self.dtls_auth_backend]
-        {
+        for f in [
+            &self.tcp_backend,
+            &self.tls_backend,
+            &self.udp_backend,
+            &self.dtls_backend,
+            &self.udp_auth_backend,
+            &self.dtls_auth_backend,
+            &self.v6_tcp_backend,
+            &self.v6_udp_backend,
+        ] {
             f.log.clear();
         }
     }

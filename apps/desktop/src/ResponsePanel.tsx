@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ExecutionView } from "./api";
 import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation } from "./generated/contracts";
 import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
+import { ProxyHeaderEvidence } from "./ProxyProtocolEditor";
 
 type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
 
@@ -361,6 +362,7 @@ function Connection({ attempt }: { attempt?: AttemptObservation }) {
         </tbody>
       </table>
       {c.tls && <TlsView t={c.tls} />}
+      {c.proxy_header && <ProxyHeaderEvidence h={c.proxy_header} />}
     </div>
   );
 }

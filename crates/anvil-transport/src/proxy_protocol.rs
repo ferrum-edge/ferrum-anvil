@@ -76,6 +76,8 @@ fn to_v6(ip: IpAddr) -> Ipv6Addr {
 
 /// Exact-value scrubber supplied by the engine.
 pub type Redact<'a> = Option<&'a (dyn Fn(&str) -> String + Send + Sync)>;
+/// Owned form of the scrubber (the session adapters' `RedactFn`).
+pub type SharedRedact = std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 /// Replace bytes that carry a redacted value as a whole (never partially).
 fn scrub(bytes: &[u8], redact: Redact<'_>) -> (String, bool) {
@@ -86,6 +88,31 @@ fn scrub(bytes: &[u8], redact: Redact<'_>) -> (String, bool) {
             if r(&lossy) != lossy { (REDACTED.to_string(), true) } else { (hex, false) }
         }
         None => (hex, false),
+    }
+}
+
+/// Scrub the text fields of an observation. A declared address that carries
+/// a redacted value is also encoded in the header bytes (in binary for v2),
+/// so the recorded hex is replaced as a whole too.
+pub fn scrub_observation(o: &mut ProxyHeaderObservation, redact: Redact<'_>) {
+    let Some(r) = redact else { return };
+    let mut hit = false;
+    for f in [&mut o.source, &mut o.destination, &mut o.text] {
+        if let Some(v) = f.as_mut()
+            && r(v) != *v
+        {
+            *v = REDACTED.to_string();
+            hit = true;
+        }
+    }
+    for t in o.tlvs.iter_mut() {
+        if r(t) != *t {
+            *t = REDACTED.to_string();
+            hit = true;
+        }
+    }
+    if hit {
+        o.hex = REDACTED.to_string();
     }
 }
 
@@ -152,11 +179,13 @@ impl HeaderPlan {
     /// `local` → `remote` (`None` when they are not the addresses the header
     /// should describe, e.g. behind a forward-proxy tunnel).
     pub fn build(&self, local: Option<SocketAddr>, remote: Option<SocketAddr>, redact: Redact<'_>) -> Result<BuiltHeader, String> {
-        match self.version {
+        let mut built = match self.version {
             ProxyHeaderVersion::Raw => Ok(self.build_raw(redact)),
             ProxyHeaderVersion::V1 => self.build_v1(local, remote, redact),
             ProxyHeaderVersion::V2 => self.build_v2(local, remote, redact),
-        }
+        }?;
+        scrub_observation(&mut built.observation, redact);
+        Ok(built)
     }
 
     fn build_raw(&self, redact: Redact<'_>) -> BuiltHeader {
@@ -655,6 +684,7 @@ pub struct Enveloper {
     form: EnvelopeForm,
     minting: Option<Minting>,
     observation: ProxyHeaderObservation,
+    redact: Option<SharedRedact>,
 }
 
 impl EnvelopePlan {
@@ -715,7 +745,7 @@ impl EnvelopePlan {
                 })
             }
         };
-        Ok(Enveloper { form, minting, observation: o })
+        Ok(Enveloper { form, minting, observation: o, redact: None })
     }
 }
 
@@ -764,13 +794,22 @@ impl Enveloper {
         datagram
     }
 
+    /// Scrub recorded text with the engine's exact-value redactor.
+    pub fn with_redact(mut self, redact: Option<SharedRedact>) -> Self {
+        self.redact = redact;
+        self
+    }
+
+    /// The evidence so far (scrubbed).
     pub fn observation(&self) -> ProxyHeaderObservation {
-        self.observation.clone()
+        let mut o = self.observation.clone();
+        scrub_observation(&mut o, self.redact.as_deref());
+        o
     }
 
     /// One-line summary for transcripts and notes.
     pub fn summary(&self) -> String {
-        let o = &self.observation;
+        let o = &self.observation();
         let addrs = match (&o.source, &o.destination) {
             (Some(s), Some(d)) => format!(" {s} → {d}"),
             _ => String::new(),
@@ -977,6 +1016,14 @@ mod tests {
         assert_eq!(h.observation.hex, REDACTED);
         assert!(!format!("{:?}", h.observation).contains("sekret"));
         assert!(h.bytes.ends_with(b"tok-sekret"), "the wire still carries the configured value");
+        // An address that is itself a redacted value is encoded in binary in
+        // v2; the text field and the hex are both replaced.
+        let mut a = plan(ProxyHeaderVersion::V2);
+        a.source = Some(sa("198.51.100.77:7"));
+        let r2 = |s: &str| s.replace("198.51.100.77", REDACTED);
+        let h2 = a.build(None, Some(sa("10.0.0.2:2")), Some(&r2)).unwrap();
+        assert_eq!(h2.observation.source.as_deref(), Some(REDACTED));
+        assert_eq!(h2.observation.hex, REDACTED);
     }
 
     // Datagram envelope: Ferrum tests/unit/gateway_core/datagram_client_address_tests.rs

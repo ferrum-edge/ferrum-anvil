@@ -272,6 +272,7 @@ Rule: **profile N uses gateway ports 18N00–18N99 and fixture ports 19N00–19N
 | 5 | admission (`admission.*`) | HTTP 18580; admin 18590 | 19500 control; 19501 sized responder; 19502 staller |
 | 6 | drain (`drain.*`) | HTTP 18680; admin 18690 | 19600 control; 19601 echo; 19602 6 s staller |
 | 7 | cpdp (`cpdp-*.conf`, `cpdp-seed-proxy.json`) | CP: admin 18790, gRPC 18795. DP: HTTP 18780, admin 18791. Orphan DP: HTTP 18770, admin 18771 (its CP URL 18799 is unbound) | 19700 control; 19701 echo |
+| 9 | proxyproto (`proxyproto{,-auth,-v6}.*`, see `docs/lab/proxyproto.md`) | Main: HTTP 18980, HTTPS 18981, admin 18990, streams 18901–18904. Auth: HTTP 18982, HTTPS 18983, admin 18991, streams 18911–18912. Untrusted-peer: HTTP 18984, admin 18992, streams `[::1]`:18921, 18923 | 19901–19904, 19913–19914, 19921/19923 (must stay silent) |
 
 All profiles can run at the same time. Profiles 5 and 6 each change process-wide behavior, so they are separate instances. Profile 6 is destroyed by its own test.
 

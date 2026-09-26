@@ -20,6 +20,7 @@ import type {
   TlsProfile,
 } from "./generated/contracts";
 import { AuthEditor } from "./AuthEditor";
+import { DatagramEnvelopeEditor, ProxyHeaderEditor } from "./ProxyProtocolEditor";
 import { KeyValueEditor, Tabs, fmtBytes, humanize, useDebounced } from "./ui";
 
 export interface Profiles {
@@ -134,7 +135,7 @@ export function RequestEditor(props: {
           </div>
         )}
         {activeSub === "body" && <BodyEditor spec={spec} set={set} />}
-        {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} />}
+        {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} workspaceId={props.workspaceId} />}
         {activeSub === "auth" && (
           <AuthEditor
             value={(spec.auth as AuthConfig) ?? { type: "inherit" }}
@@ -432,7 +433,7 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
 
 // -------------------------------------------------------------- protocols
 
-function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void }) {
+function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; workspaceId: string }) {
   const p = spec.protocol ?? "http";
   if (p === "web_socket") {
     const ws = spec.websocket ?? {};
@@ -566,6 +567,7 @@ function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Req
           <input type="checkbox" checked={!!t.half_close_after_send} onChange={(e) => set({ tcp: { ...t, half_close_after_send: e.target.checked } })} />
           Half-close (shutdown write) after sending
         </label>
+        <ProxyHeaderEditor value={t.proxy_protocol} onChange={(proxy_protocol) => set({ tcp: { ...t, proxy_protocol } })} />
       </div>
     );
   }
@@ -579,6 +581,12 @@ function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Req
           <NumField label="Max datagrams" value={u.max_datagrams} onChange={(v) => set({ udp: { ...u, max_datagrams: v ?? undefined } })} />
         </div>
         <p className="hint">UDP has no delivery signal: silence means no reply arrived within the window, not that the datagram was lost or dropped by a specific hop.</p>
+        <DatagramEnvelopeEditor
+          value={u.proxy_protocol}
+          onChange={(proxy_protocol) => set({ udp: { ...u, proxy_protocol } })}
+          workspaceId={workspaceId}
+          dtls={!!u.dtls || spec.url.trim().toLowerCase().startsWith("dtls://")}
+        />
       </div>
     );
   }

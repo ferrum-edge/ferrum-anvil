@@ -3,10 +3,12 @@
 //! `stream_proxy_protocol: true` (PROXY v1/v2 on tcp / tcp+TLS, the v2
 //! `DGRAM` envelope on udp / dtls, and the authenticated envelope).
 //!
-//! Two gateway instances run side by side because the datagram secret is
-//! process-global: `proxyproto` (address-trust posture, streams on `[::]`)
-//! and `proxyproto-auth` (`FERRUM_DATAGRAM_PROXY_PROTOCOL_SECRET`, streams on
-//! 127.0.0.1). Ground truth is the gateway's operator log (the stream
+//! Three gateway instances run side by side, all bound to loopback:
+//! `proxyproto` (address-trust posture), `proxyproto-auth`
+//! (`FERRUM_DATAGRAM_PROXY_PROTOCOL_SECRET` — the secret is process-global)
+//! and `proxyproto-v6` (the same trust list, 127.0.0.1/32, with its stream
+//! listeners on `::1`, so a `::1` client is an untrusted loopback peer).
+//! Ground truth is the gateway's operator log (the stream
 //! transaction summary's `client_ip`, the PROXY warnings and datagram drop
 //! reasons) and the fixtures behind the gateway; neither is ever given to the
 //! engine. A close or silence alone never yields a confirmed PROXY claim.
@@ -40,13 +42,14 @@ use zeroize::Zeroizing;
 
 const ADMIN_PORT: u16 = 18990;
 const AUTH_ADMIN_PORT: u16 = 18991;
+const V6_ADMIN_PORT: u16 = 18992;
 const TCP: &str = "127.0.0.1:18901";
 const TCP_TLS: &str = "127.0.0.1:18902";
 const UDP: &str = "127.0.0.1:18903";
 const DTLS: &str = "127.0.0.1:18904";
 const UDP_AUTH: &str = "127.0.0.1:18911";
 const DTLS_AUTH: &str = "127.0.0.1:18912";
-const GATEWAY_PORTS: &[u16] = &[18980, 18981, 18901, 18902, 18903, 18904, 18982, 18983, 18911, 18912];
+const GATEWAY_PORTS: &[u16] = &[18980, 18981, 18901, 18902, 18903, 18904, 18982, 18983, 18911, 18912, 18984, 18921, 18923];
 /// Ferrum rate-limits datagram-drop warnings to one per second per listener;
 /// drop scenarios wait this long first so their own reason is logged.
 const DROP_LOG_GAP: Duration = Duration::from_millis(1_100);
@@ -56,6 +59,9 @@ pub struct Env {
     pub fx: ProxyProtoFixtures,
     pub gateway: Gateway,
     pub auth_gateway: Gateway,
+    /// Untrusted-peer instance (streams on ::1); `None` when it could not start.
+    pub v6_gateway: Option<Gateway>,
+    v6_unavailable: Option<String>,
     pub trusted: bool,
     /// The datagram secret, known only to the gateway process and to Anvil's in-memory vault.
     secret: Zeroizing<String>,
@@ -67,7 +73,9 @@ impl LabEnv for Env {
         self.trusted = trusted;
     }
     fn operator_logs(&self) -> Vec<std::path::PathBuf> {
-        vec![self.gateway.log_path.clone(), self.auth_gateway.log_path.clone()]
+        let mut v = vec![self.gateway.log_path.clone(), self.auth_gateway.log_path.clone()];
+        v.extend(self.v6_gateway.as_ref().map(|g| g.log_path.clone()));
+        v
     }
 }
 
@@ -637,10 +645,11 @@ fn pp005_unknown(env: &Env) -> Fut<'_> {
 fn pp006(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
-        let from = op_from(&env.gateway);
-        let before = env.fx.tcp_backend.log.events().len();
+        let g = env.v6_gateway.as_ref().expect("scenario filtered when the ::1 instance is unavailable");
+        let from = op_from(g);
+        let before = env.fx.v6_tcp_backend.log.events().len();
         let o =
-            send(env, &tcp_ctx(env, "tcp://[::1]:18901", "untrusted", Some(header(ProxyHeaderVersion::V2, Some("203.0.113.66:40006")))))
+            send(env, &tcp_ctx(env, "tcp://[::1]:18921", "untrusted", Some(header(ProxyHeaderVersion::V2, Some("203.0.113.66:40006")))))
                 .await;
         c.add(
             CheckKind::Diagnosis,
@@ -661,15 +670,15 @@ fn pp006(env: &Env) -> Fut<'_> {
         no_proxy_confirmed(&mut c, &o);
         let lines = op_check(
             &mut c,
-            &env.gateway,
+            g,
             from,
-            "pp-tcp",
+            "pp-v6-tcp",
             &["not in FERRUM_TRUSTED_PROXIES", "[::1]"],
             "untrusted peer [::1] closed",
             Duration::from_secs(2),
         )
         .await;
-        c.add(CheckKind::GroundTruth, "the backend saw no connection", env.fx.tcp_backend.log.events().len() == before, "");
+        c.add(CheckKind::GroundTruth, "the backend saw no connection", env.fx.v6_tcp_backend.log.events().len() == before, "");
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
     })
 }
@@ -881,6 +890,12 @@ fn pp011(env: &Env) -> Fut<'_> {
         );
         let json = serde_json::to_string(&o.record).unwrap_or_default();
         c.add(CheckKind::Diagnosis, "the secret appears nowhere in the record", !json.contains(env.secret.as_str()), "");
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway never logged the secret",
+            !env.auth_gateway.log_lines().iter().any(|l| l.contains(env.secret.as_str())),
+            "",
+        );
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
     })
 }
@@ -1031,14 +1046,15 @@ fn pp018(env: &Env) -> Fut<'_> {
 
 fn pp019(env: &Env) -> Fut<'_> {
     Box::pin(async move {
+        let g = env.v6_gateway.as_ref().expect("scenario filtered when the ::1 instance is unavailable");
         dgram_dropped(
             env,
-            &env.gateway,
-            "udp://[::1]:18903",
-            "pp-udp",
+            g,
+            "udp://[::1]:18923",
+            "pp-v6-udp",
             Some(envelope(Some("203.0.113.119:5119"), None)),
             "untrusted_peer",
-            &env.fx.udp_backend,
+            &env.fx.v6_udp_backend,
         )
         .await
     })
@@ -1046,8 +1062,8 @@ fn pp019(env: &Env) -> Fut<'_> {
 
 // ----------------------------------------------------------------- wiring ---
 
-/// Scenarios that need the gateway's dual-stack `[::]` bind (a `::1` peer).
-const NEEDS_DUAL_STACK: &[&str] = &["PP-006", "PP-019"];
+/// Scenarios that need the `::1` instance (an untrusted loopback peer).
+const NEEDS_V6: &[&str] = &["PP-006", "PP-019"];
 
 pub fn all() -> Vec<Def> {
     vec![
@@ -1058,7 +1074,7 @@ pub fn all() -> Vec<Def> {
         Def { id: "PP-004", title: "Malformed (raw) header closed: possibly rejected, likely at most", run: pp004 },
         Def { id: "PP-005", title: "PROXY v2 LOCAL: the balancer's socket peer is the client", run: pp005 },
         Def { id: "PP-005-unknown", title: "PROXY v1 UNKNOWN: the balancer's socket peer is the client", run: pp005_unknown },
-        Def { id: "PP-006", title: "Untrusted peer (::1): closed; untrusted source only an alternative", run: pp006 },
+        Def { id: "PP-006", title: "Untrusted loopback peer (::1): closed; untrusted source only an alternative", run: pp006 },
         Def { id: "PP-007", title: "TCP+TLS: PROXY v2 before the ClientHello, TLS terminated by the gateway", run: pp007 },
         Def { id: "PP-008", title: "TCP+TLS without header: closed during the handshake; PROXY only as an alternative", run: pp008 },
         Def { id: "PP-009", title: "UDP PROXY v2 DGRAM envelope accepted", run: pp009 },
@@ -1078,7 +1094,7 @@ pub fn all() -> Vec<Def> {
 pub fn profile() -> Profile {
     Profile {
         name: "proxyproto",
-        about: "PROXY protocol v1/v2 and the datagram envelope into stream listeners (streams 18901-18912)",
+        about: "PROXY protocol v1/v2 and the datagram envelope into stream listeners (streams 18901-18923)",
         scenarios: || all().into_iter().map(|d| (d.id, d.title)).collect(),
         run: |args| Box::pin(run(args)) as BoxFut<_>,
         up: || Box::pin(up()) as BoxFut<_>,
@@ -1107,6 +1123,26 @@ async fn start() -> anyhow::Result<Env> {
             return Err(e);
         }
     };
+    // The untrusted-peer instance needs IPv6 loopback; without it the two
+    // scenarios that use it are reported as skipped (never as passed).
+    let (v6_gateway, v6_unavailable) = match Gateway::start(
+        "proxyproto-v6",
+        "proxyproto-v6.conf",
+        "proxyproto-v6.yaml",
+        &vars,
+        V6_ADMIN_PORT,
+        &[],
+    )
+    .await
+    {
+        Ok(g) => (Some(g), None),
+        Err(e) => (
+            None,
+            Some(format!(
+                "the ::1 instance did not start ({e}); an untrusted loopback peer needs IPv6 loopback (127.0.0.2 needs an alias on macOS)"
+            )),
+        ),
+    };
     tokio::time::sleep(Duration::from_millis(500)).await;
     fx.clear_logs();
     Ok(Env {
@@ -1114,28 +1150,24 @@ async fn start() -> anyhow::Result<Env> {
         fx,
         gateway,
         auth_gateway,
+        v6_gateway,
+        v6_unavailable,
         trusted: true,
         secret,
         secret_ref: SecretRef { id: Id::new(), label: "lab datagram secret".into() },
     })
 }
 
-/// Whether the TCP listener accepts an IPv6 loopback peer (dual-stack `[::]` bind).
-fn dual_stack() -> bool {
-    std::net::TcpStream::connect_timeout(&"[::1]:18901".parse().expect("addr"), Duration::from_secs(1)).is_ok()
-}
-
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let ctx = RunCtx::new("proxyproto")?;
     let mut env = start().await?;
-    let dual = dual_stack();
     let mut skipped = Vec::new();
     let defs: Vec<Def> = all()
         .into_iter()
         .filter(|d| {
-            let keep = dual || !NEEDS_DUAL_STACK.contains(&d.id);
+            let keep = env.v6_unavailable.is_none() || !NEEDS_V6.contains(&d.id);
             if !keep && (args.only.is_empty() || args.only.iter().any(|s| s.eq_ignore_ascii_case(d.id))) {
-                skipped.push(ctx.skipped(d.id, d.title, "the gateway's stream listener did not accept an IPv6 loopback (::1) peer, so no untrusted peer can be arranged on this host (127.0.0.2 needs a loopback alias)"));
+                skipped.push(ctx.skipped(d.id, d.title, env.v6_unavailable.as_deref().unwrap_or_default()));
             }
             keep
         })
@@ -1149,13 +1181,16 @@ async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     };
     env.gateway.stop().await;
     env.auth_gateway.stop().await;
+    if let Some(g) = env.v6_gateway {
+        g.stop().await;
+    }
     results
 }
 
 async fn up() -> anyhow::Result<()> {
     let env = start().await?;
     println!(
-        "proxyproto lab running: tcp {TCP} (PROXY required), tls {TCP_TLS}, udp {UDP}, dtls {DTLS} (envelope, address trust; streams bound to [::]); \
+        "proxyproto lab running: tcp {TCP} (PROXY required), tls {TCP_TLS}, udp {UDP}, dtls {DTLS} (envelope, address trust); untrusted-peer tcp [::1]:18921 / udp [::1]:18923; \
          authenticated udp {UDP_AUTH} / dtls {DTLS_AUTH} (listener identities 'udp 127.0.0.1:18911' / 'dtls 127.0.0.1:18912'); trusted proxies 127.0.0.1/32; \
          lab CA {}; operator logs {} and {}",
         env.fx.certs_dir.join("ca.crt").display(),
@@ -1168,5 +1203,8 @@ async fn up() -> anyhow::Result<()> {
     harness::wait_for_shutdown().await?;
     env.gateway.stop().await;
     env.auth_gateway.stop().await;
+    if let Some(g) = env.v6_gateway {
+        g.stop().await;
+    }
     Ok(())
 }

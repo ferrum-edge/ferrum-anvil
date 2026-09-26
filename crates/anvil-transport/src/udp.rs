@@ -52,10 +52,11 @@ pub(crate) fn start_envelope(
     plan: Option<&crate::proxy_protocol::EnvelopePlan>,
     sock: &UdpSocket,
     remote: SocketAddr,
+    redact: Option<RedactFn>,
 ) -> Result<Option<crate::proxy_protocol::Enveloper>, TransportFailure> {
     let Some(p) = plan else { return Ok(None) };
     p.start(sock.local_addr().ok(), Some(remote))
-        .map(Some)
+        .map(|e| Some(e.with_redact(redact)))
         .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::BodySerialization, e).with_field("udp.proxy_protocol"))
 }
 
@@ -150,7 +151,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
         }
     };
     obs.connection = Some(cobs);
-    let mut env = match start_envelope(plan.envelope.as_ref(), &sock, addr) {
+    let mut env = match start_envelope(plan.envelope.as_ref(), &sock, addr, plan.redact.clone()) {
         Ok(e) => e,
         Err(f) => {
             return SessionOutput::single(

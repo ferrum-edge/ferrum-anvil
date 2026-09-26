@@ -1,7 +1,7 @@
 # Ferrum Anvil failure lab - profile "proxyproto" (ferrum-edge v0.9.7, file mode)
 #
 # Scenarios: crates/anvil-lab/src/proxyproto.rs, docs/lab/proxyproto.md.
-# Gateway:   HTTP 127.0.0.1:18980, HTTPS 18981 (unused), admin 18990, streams [::]:18901-18904.
+# Gateway:   HTTP 127.0.0.1:18980, HTTPS 18981 (unused), admin 18990, streams 127.0.0.1:18901-18904.
 # Fixtures:  127.0.0.1:19901-19904.
 #
 # The TCP backends require PROXY v2 themselves: backend_proxy_protocol: v2 makes the gateway

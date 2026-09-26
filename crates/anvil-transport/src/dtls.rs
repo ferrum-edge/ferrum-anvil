@@ -365,7 +365,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
             );
         }
     };
-    let mut env = match crate::udp::start_envelope(plan.envelope.as_ref(), &sock, addr) {
+    let mut env = match crate::udp::start_envelope(plan.envelope.as_ref(), &sock, addr, plan.redact.clone()) {
         Ok(e) => e,
         Err(f) => {
             obs.connection = Some(cobs);
