@@ -923,3 +923,43 @@ async fn a_restored_history_record_is_never_dated_after_its_restore() {
     let (record, _) = b.store.get_history::<ExecutionRecord>(&stored[0].id).unwrap().unwrap();
     assert_eq!(record.started_at.timestamp_millis(), at);
 }
+
+#[test]
+fn a_restore_declined_once_its_backup_is_open_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let a = small(root.path(), "a");
+    let bytes = export(&a);
+    let b = new_app(root.path(), "b");
+    let none = ImportApproval::default();
+    let before = b.backup_contents().unwrap();
+    let asked = std::cell::Cell::new(0);
+    let decline = || {
+        asked.set(asked.get() + 1);
+        false
+    };
+    // A backup that does not open fails before the restore is asked.
+    let e = b.restore_approved_if(&bytes, Some("another passphrase"), ConflictPolicy::Merge, &none, &decline).unwrap_err();
+    assert!(!matches!(e, AppError::Canceled), "{e}");
+    assert_eq!(asked.get(), 0);
+    // Declined once the key is derived: nothing is written, not even a checkpoint.
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        let e = b.restore_approved_if(&bytes, Some(PASS), policy, &none, &decline).unwrap_err();
+        assert!(matches!(e, AppError::Canceled), "{policy:?}: {e}");
+    }
+    assert_eq!(asked.get(), 2);
+    assert!(b.backup_contents().unwrap() == before, "a declined restore changed the profile");
+    assert!(b.workspaces().unwrap().is_empty());
+    assert!(!b.dir.join("checkpoints").exists(), "no checkpoint was taken");
+
+    // Allowed: the restore is written, and asks exactly once.
+    let allow = || {
+        asked.set(asked.get() + 1);
+        true
+    };
+    let rep = b.restore_approved_if(&bytes, Some(PASS), ConflictPolicy::Merge, &none, &allow).unwrap();
+    assert_eq!(asked.get(), 3);
+    let ws = a.workspaces().unwrap().remove(0);
+    assert_eq!(rep.workspace_ids, vec![ws.meta.id.to_string()]);
+    assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1);
+    assert!(rep.checkpoint.is_some());
+}

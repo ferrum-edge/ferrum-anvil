@@ -258,8 +258,9 @@ supplies:
   `browser_open_failed`, `callback_ignored`, `callback_accepted`,
   `exchanging_code`, `verifying_identity`, `completed`,
   `failed { kind, message }`.
-- **Cancellation**: a `CancellationToken` per attempt, kept like running
-  executions so that a Cancel button and app lock can cancel it.
+- **Cancellation**: a `CancellationToken` per attempt, kept in a registry of
+  its own, apart from running executions and imports, so that a Cancel
+  button and app lock can cancel it and an execution's cancel never does.
 
 Target-API sign-in (identity 2):
 

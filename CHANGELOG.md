@@ -64,10 +64,11 @@
   desktop reads an imported bundle or backup and derives its key on a worker
   thread, one import at a time, and a preview or import can be canceled while
   the key is derived (`import_apply` and `import_preview` take an optional
-  `attempt` id for `import_cancel`); a canceled import writes nothing. For
-  now cancellation is backend-only (the UI does not pass `attempt` yet), and
-  a full-backup restore can be canceled only before it starts. The key a
-  preview derives is not kept for the import that follows.
+  `attempt` id for `import_cancel`); a canceled import writes nothing. The
+  import dialog passes one and shows Cancel while a preview or import runs,
+  and a full-backup restore can be canceled until its key is derived and its
+  contents checked, as a bundle import can. The key a preview derives is not
+  kept for the import that follows.
 - Full-backup restore: the preview now says when Replace restores the
   backup's app settings, which then apply to every workspace in the profile.
   A load report of a workspace that is not in the backup is left out with a
@@ -134,7 +135,9 @@
   whose preparation overlaps a lock is not handed to a worker.
 - History records are indexed by their response body, so releasing a
   replaced body and history retention no longer scan whole tables. The index
-  is created when a profile is opened or unlocked; it changes no stored data,
+  is created, as a best effort, when a profile is opened or unlocked (one
+  that cannot be created is logged and only slows those lookups, and never
+  keeps the profile from opening); it changes no stored data,
   so the database schema version stays 2, and earlier builds still read the
   database and its full backups. Restoring a checkpoint whose recorded
   version was set back below schema 2 after its secrets were re-sealed is
@@ -144,3 +147,19 @@
   written in one transaction. Deletes, blob pins and releases, and history
   and load-report clean-up check the lock only once they hold the database,
   so one that raced a failed checkpoint restore fails as locked.
+- Desktop: canceling an import or a full-backup restore now works from the
+  import dialog (Cancel while it runs; closing the dialog cancels it too),
+  and a restore can be canceled until its key is derived and its contents
+  checked instead of only before it starts; a canceled one writes nothing,
+  not even its checkpoint. A lock or a profile switch during an import's key
+  derivation ends it without writing even when it was started without an
+  `attempt` id and the profile is unlocked again before the derivation ends,
+  and a preview that a lock overlaps returns `LOCKED`. A preview or import
+  refused because an earlier one is still finishing returns `IMPORT_BUSY`,
+  which the dialog explains, instead of a sentence.
+- Desktop: OAuth sign-in attempts are canceled from their own registry, so
+  `oauth_cancel` never cancels a request execution with the same id, nor
+  `cancel_execution` a sign-in; a lock still cancels both.
+- An unlock refused by its gate (a lock that landed during the key
+  derivation) no longer locks the store itself: the lock already did, and
+  locking again could undo a newer unlock that completed meanwhile.

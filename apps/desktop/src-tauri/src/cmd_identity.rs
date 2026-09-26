@@ -37,8 +37,9 @@ pub async fn oauth_sign_in(
     attempt: String,
 ) -> R<anvil_identity::api_oauth::ApiAuthorization> {
     // Registered before the app is read (see `DesktopState::lock`); retired
-    // when dropped, on every path.
-    let pending = PendingEntry::register(&st.running, id(&attempt)?)?;
+    // when dropped, on every path. Apart from executions, so `oauth_cancel`
+    // never cancels an execution, nor `cancel_execution` a sign-in.
+    let pending = PendingEntry::register(&st.sign_ins, id(&attempt)?)?;
     let app = st.app()?;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
@@ -54,9 +55,11 @@ pub async fn oauth_sign_in(
     res.map_err(e)
 }
 
+/// Cancel the sign-in started with `attempt`; never an execution or an
+/// import. Returns whether it was still running.
 #[tauri::command]
 pub fn oauth_cancel(st: State<'_, DesktopState>, attempt: String) -> R<bool> {
-    Ok(cancel_pending(&st.running, &id(&attempt)?))
+    Ok(cancel_pending(&st.sign_ins, &id(&attempt)?))
 }
 
 #[tauri::command]

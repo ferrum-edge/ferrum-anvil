@@ -32,7 +32,8 @@ pub(crate) const CANCELED: &str = "CANCELED";
 
 /// What an import or preview returns while an earlier one's worker is still
 /// running, including one that was canceled and is still deriving its key.
-pub(crate) const IMPORT_BUSY: &str = "an earlier import or preview is still finishing; try again once it has ended";
+/// A code, like `LOCKED` and `CANCELED`: the import dialog words it.
+pub(crate) const IMPORT_BUSY: &str = "IMPORT_BUSY";
 
 pub(crate) fn e(err: AppError) -> String {
     match err {
@@ -119,10 +120,10 @@ pub struct Created {
 }
 
 /// The key derivation, and opening and migrating the store, run on a
-/// blocking thread (see [`blocking`]), as for every command below that
-/// derives a key. A lock that lands meanwhile leaves the new profile closed;
-/// it is still created, and its recovery key is still returned, since it is
-/// shown only here.
+/// blocking thread (see [`blocking_unchecked`]), as for every command below
+/// that derives a key. A lock that lands meanwhile leaves the new profile
+/// closed; it is still created, and its recovery key is still returned, since
+/// it is shown only here.
 #[tauri::command]
 pub async fn profile_create(handle: AppHandle, name: String, passphrase: Option<String>, keychain: bool) -> R<Created> {
     // Taken before the key derivation: a lock from now on wins over this.
@@ -832,8 +833,37 @@ async fn import_work<T: Send + 'static>(
     work.await.map_err(|x| x.to_string())?
 }
 
+/// Import `bytes` as a bundle, or restore it when it is a full backup.
+/// `proceed` is asked once the file is open (its key derived and its
+/// contents checked) and before anything is written; `false` ends the
+/// import with `CANCELED`, and nothing is written (see
+/// [`App::import_approved_if`] and [`App::restore_approved_if`]).
+fn apply(
+    app: &App,
+    bytes: &[u8],
+    passphrase: Option<&str>,
+    policy: ConflictPolicy,
+    approval: &anvil_app::port::ImportApproval,
+    proceed: &dyn Fn() -> bool,
+) -> R<anvil_app::port::ImportReport> {
+    if anvil_app::backup::is_backup(bytes) {
+        return app.restore_approved_if(bytes, passphrase, policy, approval, proceed).map_err(e);
+    }
+    app.import_approved_if(bytes, passphrase, policy, approval, proceed).map_err(e)
+}
+
+/// Whether an import's writes may begin, and if so claim them (see
+/// [`ImportGate`]): not once the import was abandoned, nor once a lock or a
+/// profile switch has landed since the epoch `seen` was taken, even if the
+/// profile was unlocked again meanwhile.
+fn writes_may_begin(st: &DesktopState, seen: u64, gate: &ImportGate) -> bool {
+    st.epoch() == seen && gate.begin_writes()
+}
+
 /// A full backup is restored; anything else is imported as a bundle. With
-/// an `attempt` id, `import_cancel` (or a lock) ends the preview at once.
+/// an `attempt` id, `import_cancel` (or a lock) ends the preview at once. A
+/// preview that a lock or a profile switch overlaps returns `LOCKED`: it
+/// reports what it read from the store.
 #[tauri::command]
 pub async fn import_preview(
     st: State<'_, DesktopState>,
@@ -844,11 +874,12 @@ pub async fn import_preview(
 ) -> R<anvil_app::port::ImportReport> {
     let worker = claim_import_worker(&st.import_worker)?;
     let pending = register_import(&st, attempt.as_deref())?;
+    let seen = st.epoch();
     let app = st.app()?;
     let policy = policy(&conflict_policy)?;
     let grants = st.file_grants.clone();
     // A preview writes nothing, so it needs no gate.
-    import_work(worker, pending, None, move || {
+    let report = import_work(worker, pending, None, move || {
         let bytes = read_bundle(&grants, &grant)?;
         if anvil_app::backup::is_backup(&bytes) {
             // A full backup restores every item under its own id, so "copies" is
@@ -858,15 +889,21 @@ pub async fn import_preview(
         }
         app.import_preview(&bytes, passphrase.as_deref(), policy).map_err(e)
     })
-    .await
+    .await?;
+    if st.epoch() != seen {
+        return Err("LOCKED".into());
+    }
+    Ok(report)
 }
 
 /// With an `attempt` id, `import_cancel` (or a lock) ends the import at once
 /// unless it has begun writing; a canceled import writes nothing. A bundle
-/// import can be canceled until its key is derived and its contents checked,
-/// a full-backup restore only until it starts.
+/// import, and a full-backup restore, can be canceled until its key is
+/// derived and its contents checked. A lock or a profile switch that lands
+/// before then also ends it without writing, with or without an `attempt` id.
 #[tauri::command]
 pub async fn import_apply(
+    handle: AppHandle,
     st: State<'_, DesktopState>,
     grant: String,
     passphrase: Option<String>,
@@ -876,6 +913,9 @@ pub async fn import_apply(
 ) -> R<anvil_app::port::ImportReport> {
     let worker = claim_import_worker(&st.import_worker)?;
     let pending = register_import(&st, attempt.as_deref())?;
+    // Taken before the app is read: a lock from now on ends the import
+    // before it writes (see `writes_may_begin`).
+    let seen = st.epoch();
     let app = st.app()?;
     let policy = policy(&conflict_policy)?;
     // Only the workspaces the user confirmed after the preview's warning,
@@ -886,21 +926,16 @@ pub async fn import_apply(
     let worker_gate = gate.clone();
     import_work(worker, pending, Some(&*gate), move || {
         let bytes = read_bundle(&grants, &grant)?;
-        if anvil_app::backup::is_backup(&bytes) {
-            if !worker_gate.begin_writes() {
-                return Err(CANCELED.into());
-            }
-            return app.restore_approved(&bytes, passphrase.as_deref(), policy, &approval).map_err(e);
-        }
-        let proceed = || worker_gate.begin_writes();
-        app.import_approved_if(&bytes, passphrase.as_deref(), policy, &approval, &proceed).map_err(e)
+        let proceed = || writes_may_begin(&handle.state::<DesktopState>(), seen, &worker_gate);
+        apply(&app, &bytes, passphrase.as_deref(), policy, &approval, &proceed)
     })
     .await
 }
 
-/// Cancel the bundle import or preview started with `attempt`; never an
-/// execution. Returns whether it was still running; the import itself
-/// reports whether it was canceled or had already begun writing.
+/// Cancel the bundle import, backup restore or preview started with
+/// `attempt`; never an execution or a sign-in. Returns whether it was still
+/// running; the import itself reports whether it was canceled or had already
+/// begun writing.
 #[tauri::command]
 pub fn import_cancel(st: State<'_, DesktopState>, attempt: String) -> R<bool> {
     Ok(cancel_pending(&st.imports, &id(&attempt)?))
@@ -972,6 +1007,7 @@ pub struct TextFile {
 mod tests {
     use super::*;
     use crate::state::Running;
+    use crate::state::tests::{PASSPHRASE, TempRoot, create};
     use std::sync::mpsc;
     use tokio::sync::oneshot;
 
@@ -1054,5 +1090,120 @@ mod tests {
         assert!(!gate.abandon());
         assert!(imports.lock().is_empty());
         assert!(claim_import_worker(&slot).is_ok());
+    }
+
+    const BACKUP_PASS: &str = "backup passphrase 1";
+
+    /// A desktop state whose open profile is empty, and a full backup of
+    /// another profile that holds one workspace.
+    fn with_backup() -> (TempRoot, Arc<DesktopState>, Vec<u8>) {
+        let root = TempRoot::new();
+        let st = Arc::new(DesktopState::new(root.0.clone()));
+        let (source, _) = create(&st, "source");
+        source.create_workspace("W").unwrap();
+        let bytes = source.export_backup_with(BACKUP_PASS, KdfParams::testing()).unwrap().0;
+        let (target, _) = create(&st, "target");
+        st.set_app_since(target, st.epoch()).unwrap();
+        (root, st, bytes)
+    }
+
+    /// Nothing was restored into `app`, not even a checkpoint.
+    fn assert_untouched(app: &App) {
+        assert!(app.workspaces().unwrap().is_empty());
+        assert!(!app.dir.join("checkpoints").exists(), "no checkpoint was taken");
+    }
+
+    #[tokio::test]
+    async fn a_restore_canceled_before_its_writes_begin_writes_nothing() {
+        let (_root, st, bytes) = with_backup();
+        let slot = Arc::new(Semaphore::new(1));
+        let attempt = Id::new();
+        let pending = PendingEntry::register(&st.imports, attempt).unwrap();
+        let gate = Arc::new(ImportGate::default());
+        let seen = st.epoch();
+        let app = st.app().unwrap();
+        let (opened_tx, mut opened_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = oneshot::channel();
+        let (worker_st, worker_gate, worker_app) = (st.clone(), gate.clone(), app.clone());
+        let worker = claim_import_worker(&slot).unwrap();
+        let work = import_work(worker, Some(pending), Some(&*gate), move || {
+            // Asked once the backup is open; waiting here stands in for a
+            // longer key derivation.
+            let proceed = || {
+                opened_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                writes_may_begin(&worker_st, seen, &worker_gate)
+            };
+            let r = apply(&worker_app, &bytes, Some(BACKUP_PASS), ConflictPolicy::Merge, &Default::default(), &proceed);
+            done_tx.send(r.as_ref().map(|_| ()).map_err(String::clone)).unwrap();
+            r
+        });
+        let cancel = async {
+            opened_rx.recv().await.unwrap();
+            assert!(cancel_pending(&st.imports, &attempt));
+        };
+        let (r, ()) = tokio::join!(work, cancel);
+        assert_eq!(r.map(|_| ()), Err(CANCELED.to_string()));
+        release_tx.send(()).unwrap();
+        assert_eq!(done_rx.await.unwrap(), Err(CANCELED.to_string()), "an abandoned restore never begins its writes");
+        assert_untouched(&app);
+        assert!(st.imports.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_restore_canceled_after_its_writes_begin_is_written() {
+        let (_root, st, bytes) = with_backup();
+        let slot = Arc::new(Semaphore::new(1));
+        let attempt = Id::new();
+        let pending = PendingEntry::register(&st.imports, attempt).unwrap();
+        let gate = Arc::new(ImportGate::default());
+        let seen = st.epoch();
+        let app = st.app().unwrap();
+        let (writing_tx, mut writing_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (worker_st, worker_gate, worker_app) = (st.clone(), gate.clone(), app.clone());
+        let worker = claim_import_worker(&slot).unwrap();
+        let work = import_work(worker, Some(pending), Some(&*gate), move || {
+            let proceed = || {
+                let claimed = writes_may_begin(&worker_st, seen, &worker_gate);
+                writing_tx.send(claimed).unwrap();
+                release_rx.recv().unwrap();
+                claimed
+            };
+            apply(&worker_app, &bytes, Some(BACKUP_PASS), ConflictPolicy::Merge, &Default::default(), &proceed)
+        });
+        let cancel = async {
+            assert!(writing_rx.recv().await.unwrap(), "the writes were claimed");
+            assert!(cancel_pending(&st.imports, &attempt));
+            release_tx.send(()).unwrap();
+        };
+        let (r, ()) = tokio::join!(work, cancel);
+        let report = r.expect("a restore whose writes began reports their result");
+        assert_eq!(report.workspace_ids.len(), 1);
+        assert_eq!(app.workspaces().unwrap().len(), 1);
+        assert!(report.checkpoint.is_some());
+        assert!(st.imports.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lock_during_a_restores_key_derivation_ends_it_even_once_unlocked_again() {
+        let (_root, st, bytes) = with_backup();
+        let gate = ImportGate::default();
+        // No attempt id: the lock is seen through the epoch alone.
+        let seen = st.epoch();
+        let app = st.app().unwrap();
+        let proceed = || {
+            // A lock, and an unlock of the same profile, land while the key is derived.
+            st.lock();
+            let (_, key) = anvil_app::profiles::ProfileManager::unlock(&app.dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+            st.unlock_since(&app, key, st.epoch()).unwrap();
+            writes_may_begin(&st, seen, &gate)
+        };
+        let r = apply(&app, &bytes, Some(BACKUP_PASS), ConflictPolicy::Merge, &Default::default(), &proceed);
+        assert_eq!(r.map(|_| ()), Err(CANCELED.to_string()));
+        assert!(st.app().is_ok(), "the profile is unlocked again");
+        assert_untouched(&app);
+        assert!(gate.abandon(), "the writes were never claimed");
     }
 }

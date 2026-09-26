@@ -18,7 +18,7 @@ import type {
 } from "./generated/contracts";
 import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
-import { Modal, SecretField, Tabs, humanize } from "./ui";
+import { Modal, SecretField, Tabs, humanize, uid } from "./ui";
 import { Icon, type IconName } from "./icons";
 import { WorkloadIdentityFields } from "./WorkloadApi";
 
@@ -866,6 +866,10 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
   );
 }
 
+/** What the import dialog shows when the backend refuses a preview or import as busy (`IMPORT_BUSY`). */
+export const IMPORT_BUSY_TEXT =
+  "An earlier import or preview is still finishing: a canceled one keeps deriving its key until that ends, and then writes nothing. Try again in a moment.";
+
 export function ImportDialog(props: {
   onClose: () => void;
   onImported: (workspaces: string[]) => void;
@@ -881,7 +885,12 @@ export function ImportDialog(props: {
   // Set only after the preview named the existing workspaces the bundle or backup writes into.
   const [intoExisting, setIntoExisting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  // Why the last preview or import ended without a result: canceled, or refused as busy.
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"preview" | "import" | null>(null);
+  // The running preview's or import's attempt id, for Cancel.
+  const [attempt, setAttempt] = useState<string | null>(null);
+  const [canceling, setCanceling] = useState(false);
   const existing = preview?.plan.existing_workspaces ?? [];
   // A full backup restores every item under its own id, so it has no copies to fall back on.
   const backup = preview?.full_backup ?? false;
@@ -895,61 +904,101 @@ export function ImportDialog(props: {
         setFile(f);
         setPreview(null);
         setIntoExisting(false);
+        setNotice(null);
       }
     } catch (e) {
       setErr(String((e as Error).message));
     }
   };
+  /** Start a preview or import under a fresh attempt id, so Cancel can end it while its key is derived. */
+  const begin = (what: "preview" | "import") => {
+    const a = uid();
+    setErr(null);
+    setNotice(null);
+    setCanceling(false);
+    setAttempt(a);
+    setBusy(what);
+    return a;
+  };
+  const end = () => {
+    setAttempt(null);
+    setCanceling(false);
+    setBusy(null);
+  };
+  /** Show why a preview or import failed. A canceled one wrote nothing; a busy refusal is worded here. */
+  const failed = (e: unknown, what: "preview" | "import") => {
+    const msg = String((e as Error).message);
+    if (msg === "CANCELED") setNotice(what === "import" ? "Import canceled; nothing was imported." : "Preview canceled.");
+    else if (msg === "IMPORT_BUSY") setNotice(IMPORT_BUSY_TEXT);
+    else setErr(msg);
+  };
   const doPreview = async () => {
     if (!file) return;
-    setErr(null);
-    setBusy(true);
+    const a = begin("preview");
     setIntoExisting(false);
     try {
-      const r = await api.importPreview(file.token, pass || null, policy);
+      const r = await api.importPreview(file.token, pass || null, policy, a);
       // A full backup cannot be imported as copies; its preview comes back as
       // Merge, and Import then uses that.
       setPolicy(r.plan.policy);
       setPreview(r);
     } catch (e) {
       setPreview(null);
-      setErr(String((e as Error).message));
+      failed(e, "preview");
     } finally {
-      setBusy(false);
+      end();
     }
   };
   const apply = async () => {
-    if (!file) return;
-    setBusy(true);
-    setErr(null);
+    if (!file || !preview) return;
+    const a = begin("import");
     try {
-      if (!preview) return;
       // Apply exactly what was previewed; the backend refuses any existing workspace not approved here,
       // and a file that is no longer the one previewed.
       const approved = intoExisting ? existing.map((w) => w.id) : [];
-      const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved, preview.bundle_sha256);
+      const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved, preview.bundle_sha256, a);
       props.onImported(r.workspace_ids);
       props.onClose();
     } catch (e) {
-      setErr(String((e as Error).message));
+      failed(e, "import");
     } finally {
-      setBusy(false);
+      end();
     }
+  };
+  // Ends the running preview or import unless it has begun writing; one that has
+  // reports its own result.
+  const cancel = async () => {
+    if (!attempt) return;
+    setCanceling(true);
+    try {
+      await api.importCancel(attempt);
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
+  const close = () => {
+    if (attempt) void api.importCancel(attempt).catch(() => {});
+    props.onClose();
   };
   return (
     <Modal
       title="Import"
       wide
-      onClose={props.onClose}
+      onClose={close}
       footer={
         tab === "bundle" ? (
           <>
-            <button className="btn" disabled={!file || busy} onClick={doPreview}>
-              Preview
+            {attempt && (
+              <button className="btn" disabled={canceling} onClick={cancel}>
+                {canceling ? "Canceling…" : "Cancel"}
+              </button>
+            )}
+            <button className="btn" disabled={!file || busy !== null} onClick={doPreview}>
+              {busy === "preview" ? "Previewing…" : "Preview"}
             </button>
-            <button className="btn primary" disabled={!preview || busy || (existing.length > 0 && !intoExisting)} onClick={apply}>
+            <button className="btn primary" disabled={!preview || busy !== null || (existing.length > 0 && !intoExisting)} onClick={apply}>
               <Icon name="download" size={14} />
-              Import
+              {busy === "import" ? "Importing…" : "Import"}
             </button>
           </>
         ) : undefined
@@ -971,7 +1020,7 @@ export function ImportDialog(props: {
     return (
       <>
       <div className="row nowrap">
-        <button className="btn" data-autofocus onClick={choose}>
+        <button className="btn" data-autofocus disabled={busy !== null} onClick={choose}>
           <Icon name="file" size={14} />
           Choose bundle…
         </button>
@@ -1002,6 +1051,13 @@ export function ImportDialog(props: {
         </label>
       </div>
       <p className="hint">Nothing is changed until you press Import. Imports never run requests, scripts or load plans, and never enable a TLS bypass. Objects are written in one transaction; a checkpoint copy is kept on disk.</p>
+      {busy && (
+        <p className="hint" role="status">
+          {canceling
+            ? "Canceling… An import that has already begun writing finishes instead."
+            : `Reading the file${pass ? " and deriving its key" : ""}. You can cancel until ${busy === "import" ? "the import begins writing" : "the preview is ready"}.`}
+        </p>
+      )}
       {preview && (
         <div className="col">
           <table className="grid">
@@ -1046,6 +1102,11 @@ export function ImportDialog(props: {
               {w}
             </div>
           ))}
+        </div>
+      )}
+      {notice && (
+        <div className="warn-box" role="status">
+          {notice}
         </div>
       )}
       {err && <div className="bad-box">{err}</div>}

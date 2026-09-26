@@ -535,8 +535,28 @@ impl App {
         policy: ConflictPolicy,
         approval: &ImportApproval,
     ) -> Result<ImportReport> {
+        self.restore_approved_if(bytes, passphrase, policy, approval, &|| true)
+    }
+
+    /// [`App::restore_approved`] that asks `proceed` once the backup is open
+    /// (its key derived and its contents authenticated and checked) and
+    /// before anything is written, the restore checkpoint included. `false`
+    /// ends the restore there with [`AppError::Canceled`], and nothing is
+    /// written: the desktop cancels a restore this way, since the key
+    /// derivation itself cannot be interrupted.
+    pub fn restore_approved_if(
+        &self,
+        bytes: &[u8],
+        passphrase: Option<&str>,
+        policy: ConflictPolicy,
+        approval: &ImportApproval,
+        proceed: &dyn Fn() -> bool,
+    ) -> Result<ImportReport> {
         approval.check_file(bytes, "restored")?;
         let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
+        if !proceed() {
+            return Err(AppError::Canceled);
+        }
         let checkpoint = self.store.checkpoint("before-restore")?;
         // A refusal returns before anything is written; the transaction then
         // commits no change.

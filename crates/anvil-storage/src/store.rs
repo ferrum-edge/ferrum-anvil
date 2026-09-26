@@ -472,7 +472,6 @@ impl Store {
         self.key.read().is_none()
     }
 
-    /// Drop the in-memory key. Every subsequent data call returns `Locked`.
     /// Run `f` with the unlocked data key (for re-wrapping it under a new
     /// passphrase). Fails while locked; the key never leaves the backend.
     pub fn with_key<R>(&self, f: impl FnOnce(&Key) -> R) -> Result<R> {
@@ -480,6 +479,7 @@ impl Store {
         Ok(f(&k))
     }
 
+    /// Drop the in-memory key. Every subsequent data call returns `Locked`.
     pub fn lock(&self) {
         *self.key.write() = None;
     }
@@ -496,26 +496,34 @@ impl Store {
     /// [`Store::unlock`], keeping `key` only if `gate` still allows it:
     /// `gate` runs under the write lock of the key, right before the key is
     /// set, so no other call can use the store unlocked before it has
-    /// passed. When it refuses, the store stays locked and the error is
-    /// `Locked`. A caller whose lock takes effect before it calls
-    /// [`Store::lock`] (such as bumping a counter `gate` reads) thereby
-    /// either fails the gate or finds the key set and clears it.
+    /// passed. When it refuses, `key` is not kept and the error is `Locked`.
+    /// A caller whose lock takes effect before it calls [`Store::lock`]
+    /// (such as bumping a counter `gate` reads) thereby either fails the gate
+    /// or finds the key set and clears it.
+    ///
+    /// A refusal leaves the key as it is: the lock that made `gate` refuse
+    /// clears it itself, and clearing it here could undo a newer unlock that
+    /// `gate` allowed meanwhile. Any other failure leaves the store locked.
     pub fn unlock_if(&self, key: Key, gate: impl FnOnce() -> bool) -> Result<()> {
         let r = self.conn().and_then(|mut conn| {
             verify_key_on(&conn, &key)?;
             migrate_on(&mut conn, &key)?;
             let mut k = self.key.write();
             if !gate() {
-                return Err(StoreError::Locked);
+                return Ok(false);
             }
             *k = Some(key);
-            Ok(())
+            Ok(true)
         });
         // The write guard is released with the closure, before this locks.
-        if r.is_err() {
-            self.lock();
+        match r {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StoreError::Locked),
+            Err(e) => {
+                self.lock();
+                Err(e)
+            }
         }
-        r
     }
 
     // ------------------------------------------------------------ objects

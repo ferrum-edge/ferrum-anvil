@@ -553,10 +553,14 @@ export const api = {
   removeTokenFile: (bindingId: string) => call<void>("token_file_remove", { bindingId }),
   exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
     call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
-  importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),
+  /** `attempt`: a fresh id that `importCancel` ends the preview with (it then fails with `CANCELED`). */
+  importPreview: (grant: string, passphrase: string | null, conflictPolicy: string, attempt: string | null = null) =>
+    call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy, attempt }),
   /**
    * `existingWorkspaces`: ids from the preview's `plan.existing_workspaces` the user confirmed writing into.
    * `bundleSha256`: the preview's `bundle_sha256`; the import is refused if the file changed since.
+   * `attempt`: a fresh id that `importCancel` ends the import or restore with until it begins writing
+   * (it then fails with `CANCELED` and writes nothing).
    */
   importApply: (
     grant: string,
@@ -564,13 +568,17 @@ export const api = {
     conflictPolicy: string,
     existingWorkspaces: string[] = [],
     bundleSha256: string | null = null,
+    attempt: string | null = null,
   ) =>
     call<ImportReport>("import_apply", {
       grant,
       passphrase,
       conflictPolicy,
       approval: { existing_workspaces: existingWorkspaces, bundle_sha256: bundleSha256 },
+      attempt,
     }),
+  /** Cancel the import, restore or preview started with `attempt`; whether it was still running. */
+  importCancel: (attempt: string) => call<boolean>("import_cancel", { attempt }),
   attachmentAdd: (grant: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { grant, mediaType }),
 
   loadPlans: (workspaceId: string) => call<LoadPlan[]>("load_plans", { workspaceId }),

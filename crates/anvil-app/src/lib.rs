@@ -117,7 +117,7 @@ impl App {
     }
 
     /// Unlock with `key` only if `gate` still allows it once the key is
-    /// checked (see [`Store::unlock_if`]); otherwise the app stays locked and
+    /// checked (see [`Store::unlock_if`]); otherwise `key` is not kept and
     /// the error is `Locked`.
     pub fn unlock_if(&self, key: Key, gate: impl FnOnce() -> bool) -> Result<()> {
         self.store.unlock_if(key, gate)?;

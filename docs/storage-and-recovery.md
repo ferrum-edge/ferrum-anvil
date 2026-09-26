@@ -280,13 +280,18 @@ The desktop reads the file and derives the key on a worker thread. A preview
 or import started with an `attempt` id can be canceled with `import_cancel`
 (a lock cancels it too): the command returns `CANCELED` at once, and the
 worker, which cannot interrupt the derivation, drops what it derived and
-writes nothing. A bundle import can be canceled until its key is derived and
-its contents checked; a full-backup restore only until it starts. One import
-or preview worker runs at a time: while one is still running, including one
-canceled and still finishing its derivation, a new preview or import is
-refused as busy. `import_cancel` cancels only imports and previews, never an
-execution. The desktop UI does not pass an `attempt` id yet, so for now a
-preview or import can be canceled only through the backend command. The key a
+writes nothing, not even the restore checkpoint. A bundle import, and a
+full-backup restore, can be canceled until its key is derived and its
+contents checked; one that has begun writing finishes and reports its
+result. A lock or a profile switch that lands before then also ends an
+import without writing, with or without an `attempt` id, even if the profile
+is unlocked again meanwhile. One import or preview worker runs at a time:
+while one is still running, including one canceled and still finishing its
+derivation, a new preview or import is refused with `IMPORT_BUSY`.
+`import_cancel` cancels only imports, restores and previews, never an
+execution or a sign-in. The import dialog passes an `attempt` id, shows
+Cancel while a preview or import runs (closing the dialog cancels it too),
+and explains a busy refusal. The key a
 preview derives is not kept for the import that follows, so the import
 derives it again: a preview can stay open indefinitely, and keeping the key
 would keep material that opens the bundle in memory for that long.
