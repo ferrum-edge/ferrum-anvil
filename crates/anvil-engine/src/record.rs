@@ -115,6 +115,26 @@ fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64) -> BodyDecoding {
     }
 }
 
+/// Why the captured body is not the whole response body, or `None` when it
+/// is. A transport that read to the end can still have kept only a prefix
+/// (the capture limit), and a prefix is not evidence of what the rest says. A
+/// session (WebSocket, gRPC stream, SSE, TCP, UDP) ends on its own terms, so
+/// only a capture cut short by the capture limit counts there.
+fn capture_gap(body: &BodyCapture, session: bool) -> Option<String> {
+    let received = body.wire_bytes;
+    match body.completeness {
+        BodyCompleteness::Complete | BodyCompleteness::NoBody => {}
+        _ if session => {}
+        BodyCompleteness::Incomplete => return Some(format!("the response ended before its framing completed after {received} bytes")),
+        BodyCompleteness::Canceled => return Some(format!("reading the response body was canceled after {received} bytes")),
+        BodyCompleteness::StoppedAtLocalLimit => {
+            return Some(format!("reading stopped at the local response limit after {received} bytes"));
+        }
+    }
+    let captured = body.captured_bytes;
+    body.display_truncated.then(|| format!("only {captured} of {received} received body bytes were captured (capture limit)"))
+}
+
 pub fn protocol_status_http(resp: Option<&ResponseRecord>) -> ProtocolStatus {
     match resp {
         Some(r) => ProtocolStatus::Http { status: r.status, reason: r.reason.clone() },
@@ -132,12 +152,18 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         _ => BodyDecoding::default(),
     };
     let body_for_eval: &[u8] = decoded.as_deref().unwrap_or(&raw_body);
-    // A body whose decoding did not complete is not evaluated as if it were
-    // the content: body assertions and extractions report why instead.
-    let body_unavailable: Option<String> = match decoding_status {
+    let decoding_gap: Option<String> = match decoding_status {
         Some(status) if !status.is_complete() => Some(decoding_detail.clone().unwrap_or_else(|| "decoding did not complete".into())),
         _ => None,
     };
+    // A body that is only partly captured or whose decoding did not complete
+    // is not evaluated as if it were the content: body assertions and
+    // extractions report why instead. Transport completion is a separate
+    // dimension, and status, header and transport assertions still run. The
+    // capture gap comes first: it also explains a decoder that failed on a
+    // prefix.
+    let body_unavailable: Option<String> =
+        response.as_ref().and_then(|r| capture_gap(&r.body, a.stream.is_some())).or_else(|| decoding_gap.clone());
     let mut response = response;
     if let Some(r) = response.as_mut() {
         r.body.decoded_bytes = decoded.as_ref().map(|d| d.len() as u64);
@@ -194,7 +220,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let body_complete =
         response.as_ref().map(|r| matches!(r.body.completeness, BodyCompleteness::Complete | BodyCompleteness::NoBody)).unwrap_or(false);
     // A partial or undecodable body cannot show an application-level fault.
-    let body_complete = body_complete && body_unavailable.is_none();
+    let body_complete = body_complete && decoding_gap.is_none();
     // A redirect into an interactive login (AUTH-017) never evaluated the API,
     // even when the login page itself answered 200.
     let application = if diagnosis.stopped_at_login {
@@ -206,8 +232,12 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(l) = &a.lint_bypassed {
         warnings.push(OutcomeWarning { code: WarningCode::LintBypassed, message: format!("Sent despite a lint error: {l}") });
     }
-    if let Some(reason) = &body_unavailable {
-        let message = format!("The response body was not fully decoded ({reason}); body assertions and extractions were not evaluated");
+    // A capture cut short is routine for a large body; it is worth a warning
+    // only when a check would have read the body. Incomplete decoding always
+    // warns.
+    let has_checks = ctx.spec.assertions.iter().any(|x| x.enabled) || !ctx.spec.extractions.is_empty();
+    if let Some(reason) = body_unavailable.as_ref().filter(|_| has_checks || decoding_gap.is_some()) {
+        let message = format!("The complete response body is not available ({reason}); body assertions and extractions were not evaluated");
         warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
     }
 

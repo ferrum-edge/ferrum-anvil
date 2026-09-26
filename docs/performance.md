@@ -39,7 +39,26 @@ not included and are not yet measured.
 | Load worker peak RSS (small run) | 64 MiB | 21 MiB (up to 37 MiB in the heavier runs in load.md) |
 | CLI start | 50 ms | 10 ms |
 | CLI unlock + one local request | 400 ms | 115 ms |
-| In-memory response capture per send | 1 MiB (hard bound, enforced in code) | — |
+| Response bytes captured per send | `limits.capture_bytes`: 8 MiB by default; load runs clamp it to 1 MiB by default | — |
+
+The capture row is a configurable setting, not a universal bound on memory
+per send. Three byte counts are separate:
+
+- **Captured bytes** (`limits.capture_bytes`): the prefix of the response body
+  kept for display, history, assertions and extractions. The default for a
+  normal send is 8 MiB. A request or settings layer can set it higher or
+  lower. A load run adds a `run:load` layer that lowers it to
+  `min(request setting, 1 MiB)` by default (the load executor's
+  `response_capture_bytes` option; see [load.md](load.md)). A body larger
+  than the capture is still read to the end and counted, but it is marked
+  display-truncated, and body assertions and extractions are not evaluated
+  against the prefix.
+- **Wire-read bytes** (`limits.max_response_bytes`, 256 MiB by default): how
+  much of the body is read from the network before reading stops with a local
+  `response_too_large` outcome. Bytes past the capture are counted, not kept.
+- **Decoded bytes** (`limits.max_decoded_bytes`, 64 MiB by default): the
+  ceiling on a content-decoded (gzip, deflate, br, zstd) body, which is
+  decoded from the captured bytes and held in memory alongside them.
 
 ## Not measured yet
 
