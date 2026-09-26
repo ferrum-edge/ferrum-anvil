@@ -1,9 +1,11 @@
 # ADR 0007: Failure lab against the real gateway
 
 ## Decision
-- Scenarios run against the pinned Ferrum Edge release binary (v0.9.5;
-  sha256 in `lab/gateway/RELEASE.lock`) in file mode, with generated PKI,
-  loopback-only ports and controllable fixtures.
+- Scenarios run against a pinned Ferrum Edge release binary in file mode
+  (mesh mode for the mesh profile), with generated PKI, loopback-only ports
+  and controllable fixtures. The default pin is `lab/gateway/RELEASE.lock`
+  (v0.9.7, first v0.9.5); every supported release keeps its own lock in
+  `lab/gateway/releases/` and is selected with `--release`.
 - Ground truth comes from fixture logs and the gateway's operator
   `error_class` log lines. It is used only by checks and never fed to the
   engine.

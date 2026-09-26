@@ -35,7 +35,7 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 - **Auth.** Auth is applied per send, as headers or query parameters, for WebSocket, gRPC and SSE. OAuth tokens come from the shared token cache. A few combinations fail before any traffic with `unsupported_combination`:
   - an auth profile that rewrites the body (WS-Security);
   - query-parameter auth on gRPC;
-  - any auth profile on raw TCP/UDP, because payloads are sent verbatim. Client certificates come from the TLS profile instead. UDP through a MASQUE proxy is the exception: auth and the request's headers go on the CONNECT-UDP request to the proxy (§3.10).
+  - any auth profile on raw TCP/UDP, because payloads are sent verbatim. Client certificates come from the TLS profile instead. UDP through a MASQUE proxy is the exception: auth and the request's headers go on the CONNECT-UDP request to the proxy (§3.8).
 - **Combinations refused before traffic** (`unsupported_combination`, `phase = prepare`, `dispatch = not_dispatched`):
   - a proxy with UDP/DTLS (HTTP CONNECT, SOCKS5 and HBONE tunnels carry only TCP), including UDP through a MASQUE proxy, whose QUIC connection they cannot carry either;
   - WebSocket over HTTP/3 with `ws://` (QUIC is always encrypted) or through a proxy;
@@ -43,9 +43,9 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
   - gRPC or gRPC-Web over HTTP/3 (both HTTP/3 policies) with a cleartext URL (QUIC is always encrypted) or through a proxy;
   - gRPC-Web with a client-streaming or bidirectional method, or with server reflection as the schema source (reflection is itself a bidirectional-streaming RPC); gRPC-Web with h2c and a TLS URL, or HTTP/2-only and a cleartext URL;
   - SSE with the forced HTTP/3 policy and an `http://` URL or a proxy (the automatic HTTP/3 policy records the refused HTTP/3 attempt and falls back to TCP instead);
-  - a MASQUE proxy URL that is not `https://`, or not an origin; a URI Template without both `{target_host}` and `{target_port}`; DTLS inside the tunnel (§3.10);
+  - a MASQUE proxy URL that is not `https://`, or not an origin; a URI Template without both `{target_host}` and `{target_port}`; DTLS inside the tunnel (§3.8);
   - a gRPC call mode that does not match the method descriptor. Unary alone never proves streaming.
-- **Proxies.** TCP-based sessions go through the configured HTTP or SOCKS5 proxy as a CONNECT tunnel. This includes `ws://` and cleartext SSE. A mesh HBONE proxy works the same way (§3.10): WebSocket, raw TCP/TLS, SSE and gRPC run over the HTTP/2 CONNECT stream.
+- **Proxies.** TCP-based sessions go through the configured HTTP or SOCKS5 proxy as a CONNECT tunnel. This includes `ws://` and cleartext SSE. A mesh HBONE proxy works the same way (§3.9): WebSocket, raw TCP/TLS, SSE and gRPC run over the HTTP/2 CONNECT stream.
 - **Transcripts.** Every message, event, frame or datagram becomes a `StreamMessage` and is also emitted live as `ExecutionEvent::Message`. The transcript is bounded:
   - The defaults are 2,000 entries and a 2 KiB preview per entry.
   - It keeps the first half and the most recent half. Entries in between are counted in `dropped_messages`.
@@ -153,7 +153,7 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 - **Framing presets.** None, newline-delimited (`\r\n` accepted on receive), or a big-endian u16 or u32 length prefix. A payload the preset cannot represent fails locally with `body_serialization`, for example more than 65,535 bytes with a u16 prefix. Incoming frames above the read limit stop with `response_too_large_local`. Without a preset, each read is recorded as a chunk and `expect_frames` is ignored with a note, because TCP has no message boundaries.
 - **Half-close.** `shutdown(Write)`, with a TLS `close_notify` first, keeps the read side open. A reply that arrives afterwards is preserved and gets the `tcp.reply_after_half_close` finding.
 - **Stop conditions.** `expect_frames`, `max_read_bytes`, `read_idle_ms` (`closed_by = timeout`), the peer's FIN (`closed_by = peer`), a reset (`closed_by = abnormal` plus a `body_reset` failure), the total deadline, or cancel.
-- **PROXY protocol.** An optional v1/v2 header written before any TLS; see §3.8.
+- **PROXY protocol.** An optional v1/v2 header written before any TLS; see §3.10.
 - **Not implemented.** Application codecs (only arbitrary bytes are supported) and Unix sockets.
 
 ### 3.5 UDP

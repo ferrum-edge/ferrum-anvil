@@ -195,8 +195,11 @@ arm64): streams 62 passed, 0 failed, 0 skipped and cpdp 10 passed, 0 failed on *
 (`f3bd0027…`) and on **v0.9.5** (`6a531f2c…`). One earlier v0.9.7 run failed UP-002-tcp's
 ground-truth check only: the operator log was read before the gateway wrote the TCP session's
 transaction line (it appears at teardown, just after the client sees the close; the archived log
-had the expected `connection_refused`). UP-002-tcp and UP-004-tcps now wait up to 2 s for that
+had the expected `connection_refused`). UP-002-tcp and UP-004-tcps now wait up to 3 s for that
 line.
+
+After every protocol branch was merged (2026-09-26), `run all` gave streams **84/0/0** and cpdp
+**10/0/0 on both v0.9.7 and v0.9.5**.
 
 Earlier consecutive runs with `--untrusted-pass` on 2026-09-25 (macOS arm64, Ferrum Edge v0.9.5,
 sha256 `6a531f2c…`). The counts are harness totals: the trusted pass, the untrusted pass,

@@ -6,7 +6,7 @@ Every stream proxy sets `stream_proxy_protocol: true`: `tcp` and `tcp_tls` liste
 PROXY v1/v2 header at the head of each connection, and `udp` / `dtls` listeners require the
 PROXY v2 `DGRAM` envelope on every datagram. There are no gateway mocks.
 
-What Anvil sends is described in [protocols.md §3.8](../protocols.md). The gateway behaviour
+What Anvil sends is described in [protocols.md §3.10](../protocols.md). The gateway behaviour
 under test is Ferrum Edge `docs/tcp_udp_proxy.md` ("Inbound PROXY Protocol", "Datagram
 Client-Address Metadata (UDP / DTLS)") and its source: `src/proxy/proxy_protocol.rs`,
 `src/proxy/datagram_client_address.rs`, `src/proxy/tcp_proxy.rs` (trust gating),
@@ -101,6 +101,10 @@ second per listener, so each drop scenario waits 1.1 s before sending.
 Ferrum Edge v0.9.7: **42 passed, 0 failed, 0 skipped** each time (21 scenarios × trusted and
 untrusted destination passes). The untrusted pass (destination not declared as a Ferrum
 gateway) produces no `ferrum.token.*` / `ferrum.outcome` finding.
+
+After merging into the main branch (2026-09-26), `anvil-lab run all --untrusted-pass` and
+`anvil-lab --release v0.9.5 run all --untrusted-pass` gave proxyproto **42/0/0 on both v0.9.7 and
+v0.9.5**.
 
 ## 5. Observations
 

@@ -8,7 +8,7 @@ file-based SVIDs (`FERRUM_GATEWAY_SVID_*`, "File-Based SVIDs: Two-Process Local 
 dials the mesh listeners directly. Anvil verifies every listener by **SPIFFE ID** (no verification
 bypass) and presents the lab client SVID.
 
-The profile exercises the three client features added for mesh testing (`docs/protocols.md` §3.8):
+The profile exercises the three client features added for mesh testing (`docs/protocols.md` §3.9):
 the HBONE proxy profile, SPIFFE server-identity verification and the SNI override.
 
 **Independent ground truth**, never passed to the engine: the echo fixture's request log (did the
@@ -127,6 +127,8 @@ Three consecutive `anvil-lab run mesh --untrusted-pass` runs on 2026-09-26 on th
 | 1 (`results/lab/20260926T023532Z-mesh`) | 30 passed, 0 failed, 2 skipped |
 | 2 (`results/lab/20260926T023540Z-mesh`) | 30 passed, 0 failed, 2 skipped |
 | 3 (`results/lab/20260926T023547Z-mesh`) | 30 passed, 0 failed, 2 skipped |
+| after the merge, `run all` on v0.9.7 | 30 passed, 0 failed, 2 skipped |
+| after the merge, `--release v0.9.5 run all` (v0.9.5 in mesh mode) | 30 passed, 0 failed, 2 skipped |
 
 30 = 15 scenarios × (trusted + untrusted pass). No untrusted run produced a `ferrum.token.*` or
 `ferrum.outcome*` finding. The lost-alert shapes appeared in every run (MESH-006 in run 1, MESH-013 in

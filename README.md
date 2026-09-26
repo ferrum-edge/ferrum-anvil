@@ -16,8 +16,15 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
 - **Build and send**: workspaces with nested folders, saved requests with
   immutable revisions, environments and variables, history. Requests can
   use HTTP/1.1, HTTP/2 (TLS or h2c) and HTTP/3; WebSocket (HTTP/1.1 Upgrade,
-  or HTTP/2 or HTTP/3 extended CONNECT); gRPC in all four modes; SSE; TCP/TLS;
-  UDP/DTLS. Interactive sessions let you send and receive messages live.
+  or HTTP/2 or HTTP/3 extended CONNECT); gRPC in all four modes over HTTP/2
+  or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or
+  HTTP/3; TCP/TLS; UDP/DTLS, direct or through an HTTP/3 CONNECT-UDP (MASQUE)
+  proxy. Interactive sessions let you send and receive messages live.
+- **Mesh and edge features**: HBONE tunnels (HTTP/2 CONNECT over mTLS) for
+  HTTP, WebSocket, gRPC, SSE and raw TCP; SPIFFE ID or trust-domain server
+  verification with X.509-SVID client identities; SNI override; PROXY
+  protocol v1/v2 headers on TCP/TLS and signed datagram envelopes on
+  UDP/DTLS. See `docs/protocols.md`.
 - **Auth and TLS**:
   - Auth types: API key, Basic, Bearer, JWT signing, OAuth 2.0, Ferrum HMAC
     v2, DPoP, WS-Security, and multi-auth.

@@ -27,7 +27,8 @@ pass.
   - Effective-request preview.
   - Live lint.
   - Timing and sizes.
-  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3); gRPC in four modes; SSE; TCP/TLS; UDP; DTLS.
+  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3); gRPC in four modes over HTTP/2 or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or HTTP/3; TCP/TLS; UDP, direct or through an HTTP/3 CONNECT-UDP (MASQUE) proxy; DTLS.
+  - Mesh and edge features: HBONE tunnels (HTTP/2 CONNECT over mTLS), SPIFFE ID or trust-domain server verification with X.509-SVID client identities, SNI override, and PROXY protocol v1/v2 headers (TCP/TLS) and datagram envelopes (UDP/DTLS).
   - Interactive sessions for the session protocols.
   - See `docs/protocols.md`.
 - **Auth and TLS.**
@@ -56,7 +57,7 @@ pass.
   - Locking the app stops the run and keeps a partial report.
   - See `docs/load.md`.
 - **Real-gateway failure lab.**
-  - 8 profiles (core, policy, admission, drain, tls, auth, streams, cpdp) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`.
+  - 11 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`. The mesh profile runs the gateway in mesh mode (HBONE, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP; proxyproto covers PROXY protocol listeners.
   - Ground truth is independent of the diagnosis.
   - Every scenario runs twice: trusted, and with the gateway untrusted.
   - See `docs/lab/`.
@@ -74,14 +75,14 @@ Exact commands are in `docs/release.md` → "Local verification record".
 | Check | Result |
 |---|---|
 | `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` | clean |
-| `cargo test --workspace --exclude anvil-desktop` | 66 test binaries, 433 passed, 0 failed, 0 ignored |
-| Renderer (`tsc`, `vitest`) | clean; 24 passed |
-| Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway) | 9 spec files, 18 tests passed, on both the debug and release-profile e2e builds |
-| `anvil-lab [--release v0.9.5] run all --untrusted-pass` | v0.9.7 and v0.9.5 each: 314 passed, 0 failed, 15 skipped with stated reasons |
+| `cargo test --workspace --exclude anvil-desktop` | 73 test binaries, 560 passed, 0 failed, 1 ignored (the real OS keychain round trip, run by CI on each OS) |
+| Renderer (`tsc`, `vitest`) | clean; 38 passed |
+| Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway on Ferrum Edge 0.9.7) | 9 spec files, 18 tests passed (earlier also on the release-profile e2e build) |
+| `anvil-lab [--release v0.9.5] run all --untrusted-pass` (11 profiles) | v0.9.7 and v0.9.5 each: 442 passed, 0 failed, 17 skipped with stated reasons |
 | Release check on the production `.app`, `.dmg`, raw binary and CLI, with runtime probe | pass. The e2e build fails as required. |
 | Plaintext-at-rest audit (profile files, WAL/SHM side files, temp files) | no leak |
 | `cargo deny`, license inventory, `gitleaks` over the branch | clean |
-| CI (PR #1) | Linux: Rust, E2E and lab lanes pass. macOS: all lanes pass. Windows: first runs failed on platform-specific test issues. Fixes are pushed; see the PR checks for the current state. |
+| CI (PR #1) | Linux and macOS: all lanes pass, including the OS credential store round trip. Windows: E2E passes; the Rust lane's last failure was a test that assumed an immediate loopback refusal (Windows retries the SYN for about 2 s), now fixed; see the PR checks for the current state. |
 
 ### Failure matrix (182 seed cases)
 
@@ -99,7 +100,7 @@ results and reasoned statuses.
   - TRUST-012: Anvil does not correlate gateway logs.
   - LOAD-012: the optional JMeter adapter was not built.
 - **2 are partial:** REL-007/008, website navigation and feature truth. They are staged in the website PR and cannot be published before a release.
-- **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. Live reproduction needs a gateway dial hook or a mesh/HBONE lab.
+- **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. UP-017 needs a gateway dial hook. UP-019 is mesh-only; the mesh lab now reproduces the unauthenticated-peer refusal, but not a trust withdrawal on a live tunnel.
 
 ## Defects found and fixed during verification (selection)
 
@@ -111,6 +112,9 @@ results and reasoned statuses.
 - WebSocket closes started by Anvil were blamed on the peer.
 - The release check could not open license-agreement DMGs.
 - Lab expectations that claimed a leg for `backend_error` were corrected.
+- On Windows, `anvil run` overflowed the 1 MiB main-thread stack in deep engine futures. The CLI, the load worker and the desktop runtime now run on large-stack threads.
+- A first address that never answers (for example `::1` on a Windows host) used up the whole connect budget. Connects now use Happy Eyeballs (RFC 8305) and record superseded attempts as canceled.
+- The lab's operator-log checks read a stream session's transaction line before the gateway had written it (it is written at teardown); they now wait for it.
 
 ## Known limitations and unimplemented features
 

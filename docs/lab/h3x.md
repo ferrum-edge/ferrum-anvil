@@ -106,7 +106,8 @@ MASQUE-006 yields `ferrum.marker.absent` (**unknown**). No CONNECT-UDP refusal c
 
 Three consecutive runs of `anvil-lab run h3x --untrusted-pass` on macOS aarch64 with
 v0.9.7 (sha256 `f3bd0027…`): **34 passed, 0 failed, 0 skipped** each time (17 scenarios
-× trusted and untrusted passes).
+× trusted and untrusted passes). After the merge into the main branch (2026-09-26), `run all`
+gave h3x **34/0/0 on both v0.9.7 and v0.9.5**.
 
 Observations about v0.9.7 that the scenarios rely on, each confirmed by the operator log
 or the wire:

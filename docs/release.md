@@ -261,32 +261,34 @@ E2E build and requires it to fail.
 
 ## Local verification record
 
-Recorded 2026-09-25 on macOS 26 (Darwin 25.6), Apple M4, Rust 1.98.1,
+Recorded 2026-09-26 on macOS 26 (Darwin 25.6), Apple M4, Rust 1.98.1,
 Node 23.11, branch `claude/anvil-desktop-client-3f372d` (draft PR
-ferrum-edge/ferrum-anvil#1), after the last functional merge.
+ferrum-edge/ferrum-anvil#1), after the last functional merge (gRPC over
+HTTP/3 and gRPC-Web, SSE over HTTP/3 and CONNECT-UDP, the mesh client, PROXY
+protocol, Ferrum Edge 0.9.7).
 
 | Check | Command | Result |
 | --- | --- | --- |
 | Format and lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings` | clean |
-| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 66 test binaries: 443 passed, 0 failed, 0 ignored |
+| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 73 test binaries: 560 passed, 0 failed, 1 ignored (the real OS keychain round trip, which CI runs with `--ignored` on each OS) |
 | Contract drift | `cargo run -p anvil-cli -- schema --out contracts/schemas` + `npm run contracts` | no drift |
-| Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 24 passed (3 files) |
-| Native E2E through the gateway | `npm run e2e:build`, `anvil-lab up core`, `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` | 9 spec files, 18 tests passed (boot, success, refusal diagnosis, effective request, gateway diagnosis, untrusted TLS, load report, offline/no-account, lock) |
-| Native E2E, release-profile build | `npx tauri build --no-bundle --features e2e` (release profile), same suite | 9 spec files passed; app peak RSS 236 MiB, load worker 21 MiB (see `docs/performance.md`) |
-| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.7 release binary, the default pin) and `anvil-lab --release v0.9.5 run all --untrusted-pass` (v0.9.5 release binary) | each release: 314 passed, 0 failed, 15 skipped with stated reasons: core 36/0/0, policy 48/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 80/0/5, streams 62/0/0, cpdp 10/0/0; `AUTH-009.iss-array`, `AUTH-X01.nbf` and `GW-010-BOT.allow-edge` pass with release-dependent expectations |
-| Lab profile lint | `ruby lab/gateway/lint-profiles.rb` | 8 profiles OK; a mistyped nested plugin key is caught |
+| Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 38 passed |
+| Native E2E through the gateway | `npm run e2e:build`, `anvil-lab up core` (Ferrum Edge v0.9.7), `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` | 9 spec files, 18 tests passed (boot, success, refusal diagnosis, effective request, gateway diagnosis, untrusted TLS, load report, offline/no-account, lock) |
+| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.7 release binary, the default pin) and `anvil-lab --release v0.9.5 run all --untrusted-pass` (v0.9.5 release binary) | each release: 442 passed, 0 failed, 17 skipped with stated reasons: core 36/0/0, policy 48/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 80/0/5, streams 84/0/0, cpdp 10/0/0, h3x 34/0/0, mesh 30/0/2, proxyproto 42/0/0; `AUTH-009.iss-array`, `AUTH-X01.nbf` and `GW-010-BOT.allow-edge` pass with release-dependent expectations |
+| Lab profile lint | `ruby lab/gateway/lint-profiles.rb` | 12 gateway configurations OK; a mistyped nested plugin key is caught |
 | Release check, production artifacts | `npx tauri build --ci --bundles app,dmg`; `cargo build --release --locked -p anvil-cli`; `scripts/release-check.sh --runtime-probe` over the `.app`, `.dmg`, raw `anvil-desktop` and `anvil` | **pass**: graph without the WebDriver plugin or `e2e`, 0 of 11 hook strings in each, no WebDriver listener and no env-driven unlock at runtime |
 | Release check, negative control | `scripts/release-check.sh --no-graph target/debug/anvil-desktop` (e2e build) | **fail (exit 1)** as required: all 11 strings found |
 | cargo-deny | `cargo deny --locked check` | advisories, bans, licenses, sources ok |
 | License inventory | `node scripts/licenses.mjs --check` | up to date: 782 crates, 5 npm packages |
-| Secret scan | `gitleaks git --log-opts origin/main..HEAD` with `.gitleaks.toml`; `gitleaks dir .` | no leaks in the branch history; the directory scan's findings are all in git-ignored lab output, build output and throwaway lab keys (`results/`, `target/`, `lab/.run/`), none in tracked files |
+| Secret scan | `gitleaks git --log-opts origin/main..HEAD` with `.gitleaks.toml` | no leaks in the branch history (146 commits). An earlier `gitleaks dir .` found only git-ignored lab output, build output and throwaway lab keys (`results/`, `target/`, `lab/.run/`), nothing in tracked files |
 | Plaintext at rest | `cargo test -p anvil-app --test at_rest` | no planted marker in profile files, WAL/SHM side files or new temp files |
-| Failure matrix | `python3 scripts/matrix-coverage.py` | 172 of 182 with executed evidence (96 live, 75 automated, 1 release check); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
+| Failure matrix | `python3 scripts/matrix-coverage.py` (lab evidence from the v0.9.7 runs) | 172 of 182 with executed evidence (96 live, 75 automated, 1 release check); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
 
 Earlier on this branch (still valid; the scripts and workflows they exercise are unchanged in substance):
 
 | Check | Command | Result |
 | --- | --- | --- |
+| Native E2E, release-profile build | `npx tauri build --no-bundle --features e2e` (release profile), same suite | 9 spec files passed; app peak RSS 236 MiB, load worker 21 MiB (see `docs/performance.md`) |
 | cargo-deny ban guard | `cargo deny --locked --features e2e check bans` | fails as intended: `tauri-plugin-wdio-webdriver` is banned |
 | Release check, e2e build | `cargo build -p anvil-desktop --release --features e2e`, then `scripts/release-check.sh --features e2e --runtime-probe <binary>` | **fail (exit 1)** as required — graph contains the plugin, 10 of 11 hook strings found (the `e2e_unlock` symbol is stripped), WebDriver answered HTTP 200 on the probe port |
 | Release check, inconclusive input | `/bin/ls`, `README.md` | exit 2 (no Anvil marker / unsupported type) — never a pass |

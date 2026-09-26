@@ -388,6 +388,11 @@ mod happy_eyeballs_tests {
         assert_eq!(r.attempts[1].failure, None);
     }
 
+    /// Where a refusal is immediate (Linux, macOS) the next address is tried at
+    /// once, without waiting out the stagger. Windows retransmits the SYN to a
+    /// closed loopback port for about 2 s before reporting the refusal, so there
+    /// the attempt is still pending when the stagger starts the next address and
+    /// is recorded as superseded.
     #[tokio::test]
     async fn a_refused_first_address_moves_on_immediately() {
         let closed = {
@@ -396,9 +401,18 @@ mod happy_eyeballs_tests {
         };
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let live = l.local_addr().unwrap();
+        let t = Instant::now();
         let r = connect_tcp(&[closed, live], Some(Duration::from_secs(5))).await.map_err(|(f, _)| f).unwrap();
         assert_eq!(r.remote, live);
-        assert_eq!(r.attempts[0].failure, Some(FailureKind::ConnectRefused), "{:?}", r.attempts);
+        assert_eq!(r.attempts.len(), 2);
+        assert_eq!(r.attempts[1].failure, None);
+        if cfg!(windows) {
+            assert_eq!(r.attempts[0].failure, Some(FailureKind::Canceled), "{:?}", r.attempts);
+            assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
+        } else {
+            assert_eq!(r.attempts[0].failure, Some(FailureKind::ConnectRefused), "{:?}", r.attempts);
+            assert!(t.elapsed() < ATTEMPT_DELAY, "moved on before the stagger: {:?}", t.elapsed());
+        }
     }
 
     #[tokio::test]
