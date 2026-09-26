@@ -1,7 +1,7 @@
 //! Build frozen execution contexts from storage and run them through the
 //! shared engine, recording redacted history.
 
-use crate::device_identity::uses_device_identity;
+use crate::device_identity::{selected_tls_profiles, uses_device_identity};
 use crate::file_grants::FilePurpose;
 use crate::linked_files::{LinkedFileReferrer, read_bound_file};
 use crate::{App, AppError, Result};
@@ -408,15 +408,11 @@ fn refuse_device_identity(auth: &AuthConfig) -> Result<()> {
 /// Refuse a TLS profile with a client identity (a certificate or this
 /// device's X.509-SVID) and no host bindings, which would present it to any
 /// destination, for a request under an import root that the user has not
-/// opened to the workspace. A bound profile presents it only to the hosts
-/// it names.
+/// opened to the workspace. Both selected profiles count: the request's own
+/// and its proxy's (an HTTPS or HBONE proxy's handshake). A bound profile
+/// presents it only to the hosts it names.
 fn refuse_unbound_client_identity(ctx: &ExecutionContext) -> Result<()> {
-    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
-    let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
-    if let Some(p) = profile
-        && p.client_identity.is_some()
-        && p.bindings.is_empty()
-    {
+    if let Some(p) = selected_tls_profiles(ctx).find(|p| p.client_identity.is_some() && p.bindings.is_empty()) {
         return Err(AppError::Invalid(format!(
             "an imported collection does not use TLS profile '{}' (a client identity bound to no host) until opened to the workspace",
             p.name

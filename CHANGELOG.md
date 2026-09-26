@@ -144,3 +144,8 @@
   written in one transaction. Deletes, blob pins and releases, and history
   and load-report clean-up check the lock only once they hold the database,
   so one that raced a failed checkpoint restore fails as locked.
+- A request under an import root that is not opened to its workspace is now
+  also refused when the selected proxy's own TLS profile (an HTTPS or HBONE
+  proxy's handshake) has a client identity bound to no host, as it already
+  was for the request's own TLS profile. This applies to a send, a session,
+  a collection run and a load run.

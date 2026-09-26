@@ -102,9 +102,14 @@ pub(crate) fn uses_device_identity(auth: &AuthConfig) -> bool {
 /// selection alone, whatever the scheme, host bindings or `no_proxy`, so a
 /// sealed workspace fails closed.
 fn presents_device_svid(ctx: &ExecutionContext) -> bool {
+    selected_tls_profiles(ctx).any(|p| matches!(p.client_identity, Some(ClientIdentity::WorkloadApi { .. })))
+}
+
+/// The TLS profiles a context's effective settings select: the request's own
+/// and the selected proxy's (an HTTPS or HBONE proxy's handshake), each once.
+pub(crate) fn selected_tls_profiles(ctx: &ExecutionContext) -> impl Iterator<Item = &TlsProfile> {
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
     let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
     let selected = [settings.tls_profile_id, proxy.and_then(|p| p.tls_profile_id)];
-    let svid = |p: &TlsProfile| matches!(p.client_identity, Some(ClientIdentity::WorkloadApi { .. }));
-    ctx.tls_profiles.iter().any(|p| selected.contains(&Some(p.id)) && svid(p))
+    ctx.tls_profiles.iter().filter(move |p| selected.contains(&Some(p.id)))
 }
