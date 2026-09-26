@@ -8,9 +8,11 @@
 
 use anvil_domain::load::Stage;
 
-/// Total schedule length in seconds.
-pub fn total_secs(stages: &[Stage]) -> u64 {
-    stages.iter().map(|s| s.duration_secs).sum()
+/// Total schedule length in seconds, or `None` when the stage durations
+/// overflow `u64`. Callers validate through this before doing any deadline
+/// arithmetic.
+pub fn total_secs(stages: &[Stage]) -> Option<u64> {
+    stages.iter().try_fold(0u64, |acc, s| acc.checked_add(s.duration_secs))
 }
 
 /// Target (arrivals/s or virtual users) at `t` seconds after start.
@@ -186,7 +188,7 @@ mod tests {
         let a: Vec<f64> = Arrivals::new(&stages).collect();
         assert_eq!(a.len(), 30);
         assert!(a.iter().all(|t| *t < 4.0));
-        assert_eq!(total_secs(&stages), 4);
+        assert_eq!(total_secs(&stages), Some(4));
     }
 
     #[test]
@@ -196,6 +198,13 @@ mod tests {
         assert_eq!(vus_at(&stages, 3.5), 3);
         assert_eq!(vus_at(&stages, 12.0), 10);
         assert_eq!(vus_at(&stages, 16.0), 2);
+    }
+
+    #[test]
+    fn total_secs_uses_checked_addition() {
+        assert_eq!(total_secs(&[st(u64::MAX, 1), st(2, 1)]), None, "overflow is refused, not wrapped");
+        assert_eq!(total_secs(&[st(u64::MAX, 1), st(1, 1)]), Some(u64::MAX), "the last in-range value is kept");
+        assert_eq!(total_secs(&[]), Some(0));
     }
 
     #[test]
