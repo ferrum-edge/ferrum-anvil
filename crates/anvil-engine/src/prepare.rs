@@ -47,6 +47,10 @@ pub struct PreparedHttp {
     /// credentials of the request's own origin, like `Authorization`.
     pub sensitive_headers: Vec<String>,
     pub body: Bytes,
+    /// Whether resolving the body substituted a secret variable. Decided
+    /// structurally, before encoding: a form-urlencoded or re-serialized
+    /// GraphQL body holds the secret in a form a byte scan does not find.
+    pub body_uses_secret: bool,
     pub content_type: Option<String>,
     pub inferred: Vec<String>,
     pub lint_bypassed: Option<String>,
@@ -208,6 +212,7 @@ pub fn prepare_http(
     }
 
     // ---- body ----
+    let secrets_before_body = r.used_secrets.lock().len();
     let (body, inferred_ct, lint_target): (Vec<u8>, Option<String>, Option<(&str, String)>) = match &spec.body {
         Body::None => (vec![], None, None),
         Body::Raw { text, content_type } => {
@@ -344,6 +349,7 @@ pub fn prepare_http(
             (t.clone().into_bytes(), Some(ct), Some(("xml", t)))
         }
     };
+    let body_uses_secret = r.used_secrets.lock().len() > secrets_before_body;
 
     // ---- lint ----
     let mut lint_bypassed = None;
@@ -392,7 +398,17 @@ pub fn prepare_http(
         headers.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
         inferred.push("Accept-Encoding: gzip, deflate, br, zstd (automatic decompression is on)".into());
     }
-    Ok(PreparedHttp { method, target, headers, sensitive_headers, body: Bytes::from(body), content_type, inferred, lint_bypassed })
+    Ok(PreparedHttp {
+        method,
+        target,
+        headers,
+        sensitive_headers,
+        body: Bytes::from(body),
+        body_uses_secret,
+        content_type,
+        inferred,
+        lint_bypassed,
+    })
 }
 
 #[cfg(test)]
@@ -417,6 +433,50 @@ mod tests {
             assert!(matches!(e.kind, FailureKind::InvalidUrl | FailureKind::UnsupportedScheme), "{bad}: {:?}", e);
             assert_eq!(e.phase, Phase::Prepare);
         }
+    }
+
+    fn prepared(spec: &RequestSpec) -> PreparedHttp {
+        let vars = vec![
+            crate::vars::VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true },
+            crate::vars::VarEntry {
+                name: "credentials".into(),
+                value: r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#.into(),
+                secret: true,
+            },
+            crate::vars::VarEntry { name: "user".into(), value: "alice".into(), secret: false },
+        ];
+        let r = Resolver::new(vec![crate::vars::VarLayer { label: "environment:test".into(), vars }], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        prepare_http(spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap()
+    }
+
+    fn holds(body: &[u8], s: &str) -> bool {
+        body.windows(s.len()).any(|w| w == s.as_bytes())
+    }
+
+    #[test]
+    fn body_uses_secret_is_decided_before_the_body_is_encoded() {
+        use anvil_domain::request::KeyValue;
+        let mut spec = RequestSpec::http("POST", "https://api.example.com/login");
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "{{user}}"), KeyValue::new("password", "{{password}}")] };
+        let form = prepared(&spec);
+        assert!(form.body_uses_secret);
+        assert!(!holds(&form.body, "tok-SENSITIVE-p@ss w/rd+="), "the encoded form does not hold the secret byte for byte");
+
+        spec.body = Body::GraphQl {
+            query: "mutation Login($input: LoginInput!) { login(input: $input) { ok } }".into(),
+            variables: r#"{"input": {{credentials}}}"#.into(),
+            operation_name: None,
+        };
+        let graphql = prepared(&spec);
+        assert!(graphql.body_uses_secret);
+        let secret = r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#;
+        assert!(!holds(&graphql.body, secret), "the re-serialized variables do not hold the secret byte for byte");
+
+        // A secret used outside the body does not mark the body.
+        spec.headers.push(KeyValue::new("Authorization", "Basic {{password}}"));
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "{{user}}")] };
+        assert!(!prepared(&spec).body_uses_secret);
     }
 
     #[test]

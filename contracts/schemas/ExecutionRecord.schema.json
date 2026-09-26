@@ -145,7 +145,7 @@
       "format": "uuid"
     },
     "PreparedSummary": {
-      "description": "Summary of the prepared request as it was actually sent (redacted).",
+      "description": "Summary of the prepared request as it was actually sent (redacted).\n\n`method`, `url`, `headers`, the body fields, `content_type` and\n`auth_label` describe the original request as prepared; each attempt\nrecords what it sent to its own target. `tls_profile`, `proxy` and\n`tls_verification_enabled` describe the connection that produced the\nfinal response (the last redirect hop when redirects were followed).",
       "type": "object",
       "properties": {
         "protocol": {
@@ -199,7 +199,7 @@
           ]
         },
         "tls_verification_enabled": {
-          "description": "Whether TLS verification was on for the connection that produced the\nfinal response (the last redirect hop when redirects were followed).",
+          "description": "Whether TLS verification was on for the connection that produced the\nfinal response (the last redirect hop when redirects were followed).\n`true` when that connection was plain HTTP: verification was not\nturned off, there was no TLS to verify.",
           "type": "boolean"
         },
         "settings": {

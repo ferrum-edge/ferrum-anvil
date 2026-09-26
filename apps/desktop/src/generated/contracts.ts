@@ -1918,6 +1918,12 @@ export interface ExecutionRecord {
 /**
  * Summary of the prepared request as it was actually sent (redacted).
  *
+ * `method`, `url`, `headers`, the body fields, `content_type` and
+ * `auth_label` describe the original request as prepared; each attempt
+ * records what it sent to its own target. `tls_profile`, `proxy` and
+ * `tls_verification_enabled` describe the connection that produced the
+ * final response (the last redirect hop when redirects were followed).
+ *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "PreparedSummary".
  */
@@ -1946,6 +1952,8 @@ export interface PreparedSummary {
   /**
    * Whether TLS verification was on for the connection that produced the
    * final response (the last redirect hop when redirects were followed).
+   * `true` when that connection was plain HTTP: verification was not
+   * turned off, there was no TLS to verify.
    */
   tls_verification_enabled: boolean;
   settings: EffectiveSettings;

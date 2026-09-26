@@ -459,8 +459,10 @@ fn carries_credential(name: &str, value: &str, marked: &[String], extra_names: &
         || secrets.iter().any(|s| !s.is_empty() && (value == s.as_str() || (s.len() >= 4 && value.contains(s.as_str()))))
 }
 
-/// Whether a request body holds a resolved secret value (at least 4 bytes,
-/// as for redaction).
+/// Whether a request body holds a resolved secret value byte for byte (at
+/// least 4 bytes, as for redaction). A backstop only: an encoded body (form
+/// fields, re-serialized GraphQL variables) is covered by
+/// `PreparedHttp::body_uses_secret`.
 fn body_carries_secret(body: &[u8], secrets: &[String]) -> bool {
     secrets.iter().filter(|s| s.len() >= 4).any(|s| body.windows(s.len()).any(|w| w == s.as_bytes()))
 }
@@ -509,7 +511,6 @@ fn early_intent(
     }
 }
 
-#[derive(Clone)]
 struct AttemptTarget {
     method: String,
     target: Target,
@@ -521,6 +522,21 @@ struct AttemptTarget {
     tls_profile: Option<String>,
     /// The proxy route for this target (its own NO_PROXY decision).
     proxy: Option<ProxyPlan>,
+}
+
+/// The connection side of a hop: what the record's TLS and proxy summary and
+/// the Ferrum attribution of its response are decided from.
+struct Hop {
+    target: Target,
+    tls: Option<Arc<PreparedTls>>,
+    tls_profile: Option<String>,
+    proxy: Option<ProxyPlan>,
+}
+
+impl AttemptTarget {
+    fn hop(&self) -> Hop {
+        Hop { target: self.target.clone(), tls: self.tls.clone(), tls_profile: self.tls_profile.clone(), proxy: self.proxy.clone() }
+    }
 }
 
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
@@ -575,7 +591,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     let original_origin = current.target.origin();
     // The hop behind `last`: its origin decides the Ferrum attribution of the
     // final response, and the record's TLS and proxy summary describe it.
-    let mut last_hop = current.clone();
+    let mut last_hop = current.hop();
     let mut redirects = 0u8;
     let mut retries = 0u8;
     let mut dpop_challenge_used = false;
@@ -713,7 +729,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         }
         let out = out.expect("transport returns at least one attempt");
         attempts.push(out.observation.clone());
-        last_hop = current.clone();
+        last_hop = current.hop();
 
         // Store cookies from the response.
         if prep.settings.cookies
@@ -766,9 +782,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                             // stays without them. The new target's query comes
                             // from `Location` only.
                             let secrets = resolver.used_secrets.lock().clone();
-                            // A 307/308 resends the body; one holding a secret
-                            // is not sent to another origin.
-                            if body_carries_secret(&body, &secrets) {
+                            // A 307/308 resends the body; one built from a
+                            // secret variable (whatever its encoding) or
+                            // holding a secret value is not sent to another
+                            // origin.
+                            if !body.is_empty() && (prep.http.body_uses_secret || body_carries_secret(&body, &secrets)) {
                                 let why = format!("a {status} redirect would resend a body holding a secret to another origin");
                                 redirect_refused(&mut prep.inferred, &t, &why);
                                 last = Some(out);

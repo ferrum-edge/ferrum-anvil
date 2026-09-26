@@ -330,6 +330,48 @@ async fn redirect_that_would_resend_a_secret_body_to_another_origin_is_not_follo
     assert!(stripped_warning(&o));
 }
 
+/// A secret in a form field or in GraphQL variables is encoded in the body, so
+/// its bytes do not appear there as such; the body still stays at its origin.
+#[tokio::test]
+async fn redirect_that_would_resend_an_encoded_secret_body_to_another_origin_is_not_followed() {
+    init();
+    let a = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let b = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let form = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", "{{password}}")] };
+    let graphql = Body::GraphQl {
+        query: "mutation Login($input: LoginInput!) { login(input: $input) { ok } }".into(),
+        variables: r#"{"input": {{credentials}}}"#.into(),
+        operation_name: None,
+    };
+    for (kind, body) in [("form", form), ("graphql", graphql)] {
+        for status in [307u16, 308] {
+            a.log.clear();
+            let mut ctx = ctx_for(&a.url(&format!("/redirect?to={}&status={status}", url_encode(&b.url("/echo")))));
+            ctx.var_layers = vec![VarLayer {
+                label: "environment:lab".into(),
+                vars: vec![
+                    VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true },
+                    VarEntry {
+                        name: "credentials".into(),
+                        value: r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#.into(),
+                        secret: true,
+                    },
+                ],
+            }];
+            ctx.spec.method = "POST".into();
+            ctx.spec.body = body.clone();
+            let o = run(&e, &ctx).await;
+            assert_eq!(o.record.attempts.len(), 1, "{kind} {status}");
+            assert_eq!(o.record.response.as_ref().unwrap().status, status, "{kind}: the redirect response stays the final response");
+            assert_eq!(a.log.count_requests(), 1, "{kind} {status}");
+            assert_eq!(b.log.count_requests(), 0, "{kind} {status}: ground truth: the body never reached the other origin");
+            let note = inferred(&o).iter().any(|i| i.contains("not followed") && i.contains("body holding a secret"));
+            assert!(note, "{kind} {status}: {:?}", inferred(&o));
+        }
+    }
+}
+
 #[tokio::test]
 async fn secret_body_follows_a_same_origin_redirect() {
     init();
