@@ -150,8 +150,15 @@ small, strictly parsed subset of XPath 1.0 over a DTD-free XML parse:
 Names match **local names**: a namespace prefix in the path (`s:Body`,
 `@xml:lang`) is ignored rather than resolved, so `/Envelope/Body` and
 `/soap:Envelope/soap:Body` select the same elements whatever namespace the
-document uses. The value is that of the first selected node in document
-order: an element's full text content, an attribute value or one text node.
+document uses. A name in the path starts with a Unicode letter or `_` and
+continues with Unicode letters, digits, `_`, `-` and `.` (`/données/é[1]`
+works). Some characters XML allows in names, such as `·` (U+00B7) and
+combining marks, are not accepted: a path that uses them is an error, never
+a different selection. `//` selects below the context, never the context
+itself (`/b//b` skips the outer `b`), and each node is selected at most once
+(`//a//b` with nested `a` elements). The value is that of the first selected
+node in document order: an element's full text content, an attribute value
+or one text node (`//text()` on `<r><b>y</b>z</r>` is `y`).
 An empty selection is "no value" (`exists` fails, `not_exists` passes, an
 extraction matches nothing).
 
@@ -160,9 +167,12 @@ assertion fails whatever its comparison) or as a failed extraction, never a
 step that silently selects other nodes: predicates other than a single
 positive position (`[@id='x']`, `[last()]`, `[1][2]`), `[0]`, unbalanced
 brackets, empty steps (`/a//`, `/a/`), axes (`child::`, `..`, `.`), node
-tests and functions (`node()`, `@*`), unions (`|`), a relative path, and a
-step after `@attr` or `text()`. The path is checked before the body is
-parsed.
+tests and functions (`node()`, `@*`), a prefixed wildcard (`p:*`), unions
+(`|`), a relative path, `/@attr` or `/text()` as the first step (use
+`//@attr` or `//text()`), a step after `@attr` or `text()`, and whitespace
+between path parts (`/a / b`, `b [1]`; spaces inside a position, `[ 1 ]`,
+are allowed). The path is checked before the body is parsed. A failed
+extraction names its variable (`extraction for 'id': …`).
 
 ## Cancellation, lock and abort
 
@@ -259,6 +269,9 @@ which first appear in the response of the step that extracts them, before
 any variable carries them. Before a step is recorded in history, its record
 (URLs, headers, trailers, failure messages, assertion values, findings,
 warnings, stream previews) is scrubbed, and so is the captured response body.
+URL values are redacted as URLs, so an encoded run value is caught too: the
+DPoP `htu` target among the prepared request's notes, and URL-valued finding
+evidence (with its copy in the finding's explanation).
 Compressed bytes cannot be scrubbed in place, so while the run holds any such
 value a content-encoded body is kept in history only when it was decoded
 completely and the decoded content does not contain one; a body whose

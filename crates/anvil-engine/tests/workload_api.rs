@@ -182,9 +182,9 @@ async fn x509_svid_from_the_workload_api_is_the_tls_client_identity_and_its_bund
 async fn a_short_lived_svid_is_refetched_after_half_its_lifetime() {
     init();
     let w = wl::serve(&sock("rotate")).await.unwrap();
-    // Valid from 60 s ago (the fixture backdates) to 62 s from now: the
-    // half-life is 1 s from now.
-    w.set_x509_ttl(Duration::from_secs(62));
+    // Valid from 60 s ago (the fixture backdates) to 66 s from now: the
+    // half-life is about 3 s from now.
+    w.set_x509_ttl(Duration::from_secs(66));
     let api = mtls_server(&w).await;
     let e = Engine::new();
     let c = with_tls(&api.url("/echo"), workload_tls(&w.uri(), true, vec![]));
@@ -192,7 +192,7 @@ async fn a_short_lived_svid_is_refetched_after_half_its_lifetime() {
     assert_eq!(first.record.response.as_ref().map(|r| r.status), Some(200));
     let cached = run(&e, &c).await;
     assert!(evidence(&cached).calls[0].cached, "reused before half-life");
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
     let second = run(&e, &c).await;
     assert_eq!(second.record.response.as_ref().map(|r| r.status), Some(200));
     assert!(!evidence(&second).calls[0].cached, "re-fetched after half-life");

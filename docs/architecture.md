@@ -145,12 +145,17 @@ CLI (`anvil`) = same anvil-app services without a webview.
    dimensions: transport completion, application status and assertions.
    Content decoding is recorded separately from wire completeness
    (`response.body.decoding`). Decoding does not complete when it stops at
-   `max_decoded_bytes`, when the bytes do not decode, or when the coding is
-   unsupported, including bogus codings such as `Content-Encoding: none`.
+   `max_decoded_bytes`, when the bytes do not decode, when data follows the
+   end of the compressed stream (a gzip body may still hold several members,
+   and a zstd body several frames), or when the coding is unsupported,
+   including bogus codings such as `Content-Encoding: none`. Encoded bytes
+   that are only a prefix of the body are never recorded as `complete`, even
+   when they decode cleanly: a prefix cut by a local limit is
+   `truncated_at_limit`, one the peer or a cancel cut short is `failed`.
    Then a `partial_visibility` warning says so, body assertions fail with
-   "could not evaluate" (the body was not fully decoded), body extractions
-   are not run, and a response below HTTP 400 gets the application status
-   `not_evaluated`. A collection run keeps a content-encoded body in history
+   "could not evaluate" (the complete response body is not available), body
+   extractions are not run, and a response below HTTP 400 gets the
+   application status `not_evaluated`. A collection run keeps a content-encoded body in history
    only when it was fully decoded and holds no sensitive run value.
    Complete transport consumption is also distinct from complete body
    evidence. When only a prefix of the body is available (the body exceeded
@@ -162,7 +167,11 @@ CLI (`anvil`) = same anvil-app services without a webview.
    `partial_visibility` warning names the gap when the request has
    assertions or extractions. For a streaming session (WebSocket, gRPC
    stream, SSE, TCP, UDP), which ends on its own terms, only the capture
-   limit counts.
+   limit counts. A SOAP or GraphQL request reports its fault or errors in a
+   2xx body, so when only a prefix of that body was captured its application
+   status is `not_evaluated` (not determined from the body), never `success`,
+   and a `partial_visibility` warning says why. Other requests are judged by
+   their status, which a prefix does not hide.
 5. **Diagnose.** `anvil-diagnostics` turns the typed evidence into
    findings. It uses Ferrum markers only for destinations declared as Ferrum
    gateways, caps their confidence (see `docs/diagnostics.md`), and orders

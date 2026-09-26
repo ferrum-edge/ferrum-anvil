@@ -25,7 +25,7 @@
 
 use anvil_domain::Id;
 use anvil_domain::load::{ConnectionMode, LoadUnitKind, UnitSemantics};
-use anvil_domain::request::{GrpcMode, GrpcSchemaSource, Protocol, TcpFraming};
+use anvil_domain::request::{Body, GrpcMode, GrpcSchemaSource, Protocol, TcpFraming};
 use anvil_domain::tls::ProxyKind;
 use anvil_engine::ExecutionContext;
 use serde::{Deserialize, Serialize};
@@ -80,11 +80,14 @@ pub struct StepUnit {
     pub tcp_expect_frames: Option<u32>,
     /// WebSocket: `expect_messages` (> 0 defines round-trip pairing).
     pub ws_expect_messages: u32,
+    /// HTTP: the request is SOAP or GraphQL, whose application outcome is
+    /// read from the response body (a fault or error arrives with a 2xx).
+    pub application_from_body: bool,
 }
 
 impl StepUnit {
     fn of(kind: LoadUnitKind) -> Self {
-        StepUnit { kind, tcp_expect_frames: None, ws_expect_messages: 0 }
+        StepUnit { kind, tcp_expect_frames: None, ws_expect_messages: 0, application_from_body: false }
     }
 }
 
@@ -141,7 +144,8 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             if hbone_persistent {
                 return refuse(RefusalCode::HbonePersistent, hbone_msg("HTTP requests"));
             }
-            Ok(StepUnit::of(LoadUnitKind::HttpRequest))
+            let application_from_body = matches!(ctx.spec.body, Body::Soap { .. } | Body::GraphQl { .. });
+            Ok(StepUnit { application_from_body, ..StepUnit::of(LoadUnitKind::HttpRequest) })
         }
         Protocol::Grpc => {
             let Some(g) = &ctx.spec.grpc else {
@@ -185,14 +189,13 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             Ok(StepUnit::of(LoadUnitKind::SseStream))
         }
         Protocol::WebSocket => Ok(StepUnit {
-            kind: LoadUnitKind::WebsocketSession,
-            tcp_expect_frames: None,
             ws_expect_messages: ctx.spec.websocket.as_ref().map(|w| w.expect_messages).unwrap_or(0),
+            ..StepUnit::of(LoadUnitKind::WebsocketSession)
         }),
         Protocol::Tcp => {
             let tcp = ctx.spec.tcp.as_ref();
             let expect = tcp.filter(|t| t.framing != TcpFraming::None && t.expect_frames > 0).map(|t| t.expect_frames);
-            Ok(StepUnit { kind: LoadUnitKind::TcpExchange, tcp_expect_frames: expect, ws_expect_messages: 0 })
+            Ok(StepUnit { tcp_expect_frames: expect, ..StepUnit::of(LoadUnitKind::TcpExchange) })
         }
         Protocol::Udp => {
             if ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some()) {
@@ -264,7 +267,7 @@ pub fn semantics(kind: LoadUnitKind, mode: ConnectionMode) -> UnitSemantics {
             "request",
             "requests",
             "A complete HTTP response was received (any status). Redirects, retries and an HTTP/3 → TCP fallback are attempts inside the request, not extra requests.",
-            "Completed with an application success (status below 400, no SOAP fault or GraphQL error) and every assertion passing.",
+            "Completed with an application success (status below 400; for SOAP and GraphQL, no fault or error in the complete response body) and every assertion passing.",
             "Sum of the request's attempt durations (connect … last body byte), fallback attempts included.",
             if persistent {
                 "Persistent: each virtual user keeps pooled connections (HTTP/1.1 keep-alive, one multiplexed HTTP/2 or HTTP/3 connection per origin).".into()

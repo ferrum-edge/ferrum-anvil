@@ -79,6 +79,12 @@ fn syntax_outside_the_subset_is_an_error() {
         "/root/a:b:c",
         "/root/1item",
         "/child::root",
+        // Whitespace between path parts.
+        "/root / item",
+        "/root/ item",
+        "/root /item",
+        "/root/item [1]",
+        "/root/@ id",
     ] {
         let r = xpath(ONE_ITEM, path);
         assert!(r.is_err(), "{path:?} must not evaluate, got {r:?}");
@@ -114,6 +120,25 @@ fn text_selects_text_node_children() {
     assert_eq!(xpath(xml, "/r/b/text()").unwrap().as_deref(), Some("y"));
     assert_eq!(xpath(xml, "/r//text()").unwrap().as_deref(), Some("x"));
     assert_eq!(xpath(br#"<r><b>y</b></r>"#, "/r/text()").unwrap(), None);
+    // The first text node in document order, not the first child of the outer element.
+    assert_eq!(xpath(br#"<r><b>y</b>z</r>"#, "//text()").unwrap().as_deref(), Some("y"));
+    assert_eq!(xpath(br#"<r><b>y</b>z</r>"#, "/r//text()").unwrap().as_deref(), Some("y"));
+}
+
+#[test]
+fn a_descendant_step_excludes_its_context_element() {
+    let xml = br#"<b id="outer">o<b id="inner">i</b></b>"#;
+    assert_eq!(xpath(xml, "/b//b").unwrap().as_deref(), Some("i"));
+    assert_eq!(xpath(xml, "/b//b/@id").unwrap().as_deref(), Some("inner"));
+    assert_eq!(xpath(xml, "/b//b[2]").unwrap(), None, "positions count children of one parent");
+}
+
+#[test]
+fn names_may_use_unicode_letters() {
+    let xml = "<données><é n=\"1\">un</é><é>deux</é></données>".as_bytes();
+    assert_eq!(xpath(xml, "/données/é[1]").unwrap().as_deref(), Some("un"));
+    assert_eq!(xpath(xml, "/données/é[2]").unwrap().as_deref(), Some("deux"));
+    assert_eq!(xpath(xml, "//é/@n").unwrap().as_deref(), Some("1"));
 }
 
 #[test]
@@ -152,4 +177,14 @@ fn extractions_on_an_unsupported_path_fail() {
         assert!(r.is_err(), "{r:?}");
     }
     assert_eq!(out[3], Ok(("id".to_string(), "first".to_string(), false)));
+}
+
+#[test]
+fn extraction_errors_name_the_variable() {
+    let out = extract(&[xpath_extraction("/root/item[0]")], None, ONE_ITEM, None);
+    let e = out[0].as_ref().unwrap_err();
+    assert!(e.starts_with("extraction for 'id': XPath positions start at 1"), "{e}");
+    let out = extract(&[xpath_extraction("/root/item")], None, b"not xml", None);
+    let e = out[0].as_ref().unwrap_err();
+    assert!(e.starts_with("extraction for 'id': body is not XML"), "{e}");
 }
