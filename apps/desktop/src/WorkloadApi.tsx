@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { api, type TokenFileBinding, type WorkloadProbe } from "./api";
 import type { CheckResult, ClientIdentity, JwtSvidConfig, JwtSvidSource, JwtSvidSummary, WorkloadApiCall, WorkloadApiEvidence } from "./generated/contracts";
 import { SecretField, humanize } from "./ui";
+import { Icon } from "./icons";
 
 const ENDPOINT_PLACEHOLDER = "unix:///run/spire/sockets/agent.sock";
 
@@ -72,7 +73,7 @@ export function JwtSvidChecks({ j }: { j: JwtSvidSummary }) {
 export function WorkloadEvidenceView({ w }: { w: WorkloadApiEvidence }) {
   return (
     <div className="col" data-testid="workload-evidence">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>SPIFFE Workload API</h4>
+      <h4 className="section-title">SPIFFE Workload API</h4>
       <table className="grid">
         <tbody>
           {w.calls.map((c, i) => (
@@ -109,8 +110,7 @@ export function WorkloadProbeButton(props: { endpoint: string; audience?: string
   return (
     <div className="col">
       <button
-        className="btn small"
-        style={{ alignSelf: "start" }}
+        className="btn small start"
         disabled={busy}
         onClick={async () => {
           setBusy(true);
@@ -125,6 +125,7 @@ export function WorkloadProbeButton(props: { endpoint: string; audience?: string
           }
         }}
       >
+        <Icon name="activity" size={13} />
         Test the Workload API
       </button>
       {err && <div className="bad-box">{err}</div>}
@@ -187,7 +188,7 @@ export function TokenFileList({ current, version }: { current: string; version: 
   if (files.length === 0 && !err) return null;
   return (
     <div className="col" data-testid="token-files">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>Token files chosen on this device</h4>
+      <h4 className="section-title">Token files chosen on this device</h4>
       {err && <div className="bad-box">{err}</div>}
       <table className="grid" aria-label="Token files chosen on this device">
         <tbody>
@@ -198,7 +199,8 @@ export function TokenFileList({ current, version }: { current: string; version: 
                 {f.path === current.trim() ? " (this setting)" : ""}
               </td>
               <td className="v">
-                <button className="btn small" aria-label={`Remove ${f.path}`} onClick={() => void remove(f)}>
+                <button className="btn small ghost danger" aria-label={`Remove ${f.path}`} onClick={() => void remove(f)}>
+                  <Icon name="trash" size={13} />
                   Remove
                 </button>
               </td>
@@ -238,14 +240,13 @@ export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; 
         <SecretField label="JWT-SVID" value={src.token} workspaceId={workspaceId} onChange={(token) => onChange({ ...c, source: { kind: "value", token } })} />
       )}
       {src.kind === "file" && (
-        <div className="row">
+        <div className="fields">
           <label className="lbl grow">
             Token file
             <input className="field mono" value={src.path} placeholder="Choose the token file" readOnly />
           </label>
           <button
-            className="btn small"
-            style={{ alignSelf: "end" }}
+            className="btn"
             onClick={async () => {
               // The backend shows the dialog and binds the chosen file; only a bound file is read at send time.
               const g = await api.chooseFile("jwt_svid_file");
@@ -282,7 +283,7 @@ export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; 
           <input className="field mono" value={c.endpoint ?? ""} placeholder={ENDPOINT_PLACEHOLDER} onChange={(e) => onChange({ ...c, endpoint: e.target.value })} />
         </label>
       )}
-      <div className="row">
+      <div className="fields">
         <label className="lbl grow">
           Header
           <input className="field mono" value={c.header_name ?? "Authorization"} onChange={(e) => onChange({ ...c, header_name: e.target.value })} />
@@ -310,7 +311,7 @@ type WorkloadIdentity = Extract<ClientIdentity, { format: "workload_api" }>;
 /** Workload API client identity of a TLS profile. */
 export function WorkloadIdentityFields({ id, onChange }: { id: WorkloadIdentity; onChange: (id: WorkloadIdentity) => void }) {
   return (
-    <div className="col" style={{ marginTop: 8 }}>
+    <div className="col">
       <label className="lbl">
         Workload API endpoint (empty = SPIFFE_ENDPOINT_SOCKET)
         <input className="field mono" value={id.endpoint ?? ""} placeholder={ENDPOINT_PLACEHOLDER} onChange={(e) => onChange({ ...id, endpoint: e.target.value })} />

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, type ProfileSummary } from "./api";
 import logo from "./assets/ferrum-anvil-logo.webp";
+import { Icon } from "./icons";
 
 export function LockScreen(props: { onUnlocked: () => void; reason?: string | null }) {
   const [profiles, setProfiles] = useState<ProfileSummary[] | null>(null);
@@ -110,8 +111,13 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
             }
           }}
         >
-          <h1>Set a new passphrase</h1>
-          <p className="muted">You unlocked with the recovery key. Choose a new passphrase; your recovery key keeps working.</p>
+          <div className="lock-head">
+            <span className="lock-icon">
+              <Icon name="key" size={18} />
+            </span>
+            <h1>Set a new passphrase</h1>
+          </div>
+          <p className="lock-sub">You unlocked with the recovery key. Choose a new passphrase; your recovery key keeps working.</p>
           <label className="lbl">
             New passphrase
             <input className="field" type="password" autoFocus value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" />
@@ -124,7 +130,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
           <button className="btn primary" type="submit">
             Save passphrase
           </button>
-          <button type="button" className="btn ghost small" onClick={() => props.onUnlocked()}>
+          <button type="button" className="btn ghost" onClick={() => props.onUnlocked()}>
             Not now
           </button>
         </form>
@@ -136,8 +142,13 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
     return (
       <div className="lock">
         <div className="lock-card">
-          <h1>Save your recovery key</h1>
-          <p className="muted">
+          <div className="lock-head">
+            <span className="lock-icon">
+              <Icon name="key" size={18} />
+            </span>
+            <h1>Save your recovery key</h1>
+          </div>
+          <p className="lock-sub">
             This key is the only way to open this profile if you forget the passphrase. It is shown once and is not stored anywhere. Keep it offline.
           </p>
           <div className="recovery" aria-label="Recovery key">
@@ -156,7 +167,10 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
       <div className="lock">
         <div className="lock-card" aria-busy="true">
           <img className="brand-logo" src={logo} alt="Ferrum Anvil — Put your APIs to the test." />
-          <p className="muted">Opening your local profile…</p>
+          <div className="lock-opening">
+            <span className="spinner" />
+            <span className="lock-sub">Opening your local profile…</span>
+          </div>
         </div>
       </div>
     );
@@ -173,7 +187,9 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
       >
         <h1 className="sr-only">Ferrum Anvil — Put your APIs to the test.</h1>
         <img className="brand-logo" src={logo} alt="" />
-        {props.reason && <div className="warn-box">Locked ({props.reason === "idle" ? "inactivity" : props.reason === "suspend" ? "the system went to sleep" : "manually"}). Active runs were stopped.</div>}
+        {props.reason && (
+          <div className="warn-box">Locked ({props.reason === "idle" ? "inactivity" : props.reason === "suspend" ? "the system went to sleep" : "manually"}). Active runs were stopped.</div>
+        )}
 
         {mode !== "create" && profiles && profiles.length > 0 && (
           <>
@@ -197,16 +213,20 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
             )}
             {error && <div className="bad-box" role="alert">{error}</div>}
             <button className="btn primary" type="submit" disabled={busy}>
+              {!busy && <Icon name="lock" size={14} />}
               {busy ? "Unlocking…" : "Unlock"}
             </button>
-            <div className="row">
-              {current?.protection !== "os_keychain" && (
+            <div className="lock-links">
+              {current?.protection !== "os_keychain" ? (
                 <button type="button" className="btn ghost small" onClick={() => { setMode(mode === "recovery" ? "unlock" : "recovery"); setSecret(""); }}>
+                  <Icon name="key" size={13} />
                   {mode === "recovery" ? "Use passphrase" : "Use recovery key"}
                 </button>
+              ) : (
+                <span />
               )}
-              <span className="spacer" />
               <button type="button" className="btn ghost small" onClick={() => { setMode("create"); setSecret(""); setError(null); }}>
+                <Icon name="plus" size={13} />
                 New profile
               </button>
             </div>
@@ -215,9 +235,10 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
 
         {mode === "create" && (
           <>
-            <p className="muted" style={{ margin: 0 }}>
-              No account, no sign-up and no network needed. What you save stays on this computer, encrypted.
-            </p>
+            <div className="lock-intro">
+              <h2>Create a local profile</h2>
+              <p className="lock-sub">No account, no sign-up and no network needed. What you save stays on this computer, encrypted.</p>
+            </div>
             <label className="lbl">
               Profile name
               <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. work" />
@@ -258,7 +279,8 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
               {busy ? "Creating…" : useKeychain ? "Start working" : "Create profile"}
             </button>
             {profiles && profiles.length > 0 && (
-              <button type="button" className="btn ghost small" onClick={() => setMode("unlock")}>
+              <button type="button" className="btn ghost" onClick={() => setMode("unlock")}>
+                <Icon name="chevronLeft" size={14} />
                 Back to unlock
               </button>
             )}
