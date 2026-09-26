@@ -219,9 +219,13 @@ sensitive dataset values and by values extracted with `sensitive: true` —
 which first appear in the response of the step that extracts them, before
 any variable carries them. Before a step is recorded in history, its record
 (URLs, headers, trailers, failure messages, assertion values, findings,
-warnings, stream previews) is scrubbed, and so is the captured response body
-(a content-encoded body that contains such a value when decoded is not kept
-in history instead). Every report string is scrubbed again. The redactor
+warnings, stream previews) is scrubbed, and so is the captured response body.
+Compressed bytes cannot be scrubbed in place, so while the run holds any such
+value a content-encoded body is kept in history only when it was decoded
+completely and the decoded content does not contain one; a body whose
+decoding was truncated, failed or unsupported, or that was not decoded
+because decompression is off, is dropped (raw and decoded) and a run note
+says so. Every report string is scrubbed again. The redactor
 remembers at most 4 096 values (oldest first out; the current iteration's
 values are always present).
 

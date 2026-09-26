@@ -65,6 +65,8 @@ fn response(status: u16, body: &[u8]) -> ResponseRecord {
             content_type: Some("application/json".into()),
             content_encoding: None,
             decoded_bytes: None,
+            decoding: None,
+            decoding_detail: None,
             blob_sha256: None,
         },
     }

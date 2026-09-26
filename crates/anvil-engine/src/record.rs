@@ -67,6 +67,54 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     }
 }
 
+/// An inferred note with its values redacted. An auth fact's `htu` (the DPoP
+/// target URI) is a URL whose path can carry a secret.
+fn redact_inferred(line: &str, r: &Redactor) -> String {
+    match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
+        Some((k, v)) if k.ends_with(".htu") => format!("auth {k}: {}", r.url(v)),
+        _ => r.text(line),
+    }
+}
+
+/// The decoded representation of a response body and how decoding went.
+#[derive(Default)]
+struct BodyDecoding {
+    /// Decoded bytes (a prefix when decoding stopped at the limit).
+    bytes: Option<Bytes>,
+    /// Absent when the body has no content-coding.
+    status: Option<ContentDecoding>,
+    detail: Option<String>,
+}
+
+fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64) -> BodyDecoding {
+    match decode::decode(r.body.content_encoding.as_deref(), raw, limit) {
+        DecodeOutcome::Identity => BodyDecoding::default(),
+        DecodeOutcome::Decoded { bytes, truncated_at_limit: false } => {
+            BodyDecoding { bytes: Some(Bytes::from(bytes)), status: Some(ContentDecoding::Complete), detail: None }
+        }
+        DecodeOutcome::Decoded { bytes, truncated_at_limit: true } => BodyDecoding {
+            bytes: Some(Bytes::from(bytes)),
+            status: Some(ContentDecoding::TruncatedAtLimit),
+            detail: Some(format!("decoding stopped at the local limit of {limit} decoded bytes")),
+        },
+        DecodeOutcome::Unsupported { coding } => BodyDecoding {
+            bytes: None,
+            status: Some(ContentDecoding::Unsupported),
+            detail: Some(format!("content-coding '{coding}' is not supported")),
+        },
+        DecodeOutcome::Failed { coding, message } => {
+            // A capture cut short explains a decoder error on its own.
+            let partial = r.body.display_truncated || r.body.completeness != BodyCompleteness::Complete;
+            let note = if partial { format!("; only {} bytes of the body were captured", raw.len()) } else { String::new() };
+            BodyDecoding {
+                bytes: None,
+                status: Some(ContentDecoding::Failed),
+                detail: Some(format!("{coding} decoding failed: {message}{note}")),
+            }
+        }
+    }
+}
+
 pub fn protocol_status_http(resp: Option<&ResponseRecord>) -> ProtocolStatus {
     match resp {
         Some(r) => ProtocolStatus::Http { status: r.status, reason: r.reason.clone() },
@@ -79,19 +127,22 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let response = last.response.clone();
     let raw_body = last.body.clone();
     // Decode for display/assertions; the raw captured bytes stay the evidence.
-    let decoded: Option<Bytes> = match &response {
-        Some(r) if a.settings.decompress => {
-            match decode::decode(r.body.content_encoding.as_deref(), &raw_body, a.settings.limits.max_decoded_bytes) {
-                DecodeOutcome::Decoded { bytes, .. } => Some(Bytes::from(bytes)),
-                _ => None,
-            }
-        }
-        _ => None,
+    let BodyDecoding { bytes: decoded, status: decoding_status, detail: decoding_detail } = match &response {
+        Some(r) if a.settings.decompress && !raw_body.is_empty() => decode_body(r, &raw_body, a.settings.limits.max_decoded_bytes),
+        _ => BodyDecoding::default(),
     };
     let body_for_eval: &[u8] = decoded.as_deref().unwrap_or(&raw_body);
+    // A body whose decoding did not complete is not evaluated as if it were
+    // the content: body assertions and extractions report why instead.
+    let body_unavailable: Option<String> = match decoding_status {
+        Some(status) if !status.is_complete() => Some(decoding_detail.clone().unwrap_or_else(|| "decoding did not complete".into())),
+        _ => None,
+    };
     let mut response = response;
-    if let (Some(r), Some(d)) = (response.as_mut(), decoded.as_ref()) {
-        r.body.decoded_bytes = Some(d.len() as u64);
+    if let Some(r) = response.as_mut() {
+        r.body.decoded_bytes = decoded.as_ref().map(|d| d.len() as u64);
+        r.body.decoding = decoding_status;
+        r.body.decoding_detail = decoding_detail.as_deref().map(|d| redactor.text(d));
     }
 
     let protocol_status = a.protocol_status_override.clone().unwrap_or_else(|| protocol_status_http(response.as_ref()));
@@ -142,6 +193,8 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     }
     let body_complete =
         response.as_ref().map(|r| matches!(r.body.completeness, BodyCompleteness::Complete | BodyCompleteness::NoBody)).unwrap_or(false);
+    // A partial or undecodable body cannot show an application-level fault.
+    let body_complete = body_complete && body_unavailable.is_none();
     // A redirect into an interactive login (AUTH-017) never evaluated the API,
     // even when the login page itself answered 200.
     let application = if diagnosis.stopped_at_login {
@@ -153,6 +206,10 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(l) = &a.lint_bypassed {
         warnings.push(OutcomeWarning { code: WarningCode::LintBypassed, message: format!("Sent despite a lint error: {l}") });
     }
+    if let Some(reason) = &body_unavailable {
+        let message = format!("The response body was not fully decoded ({reason}); body assertions and extractions were not evaluated");
+        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+    }
 
     let latency_ms = final_attempt.map(|x| x.duration_us / 1000);
     let assertion_results = assertions::evaluate(
@@ -160,6 +217,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         &Observed {
             response: response.as_ref(),
             body: body_for_eval,
+            body_unavailable: body_unavailable.as_deref(),
             latency_ms,
             protocol_status: &protocol_status,
             stream: a.stream.as_ref(),
@@ -178,7 +236,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
 
     let mut extracted = Vec::new();
     let mut extracted_values = Vec::new();
-    for r in assertions::extract(&ctx.spec.extractions, response.as_ref(), body_for_eval) {
+    for r in assertions::extract(&ctx.spec.extractions, response.as_ref(), body_for_eval, body_unavailable.as_deref()) {
         match r {
             Ok((name, value, sensitive)) => {
                 extracted.push(name.clone());
@@ -204,9 +262,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     }
     let prepared_headers: Vec<HeaderEntry> =
         a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect();
-    let mut inferred = a.inferred.clone();
+    let mut inferred: Vec<String> = a.inferred.iter().map(|i| redact_inferred(i, redactor)).collect();
     for (k, v) in &a.auth_facts {
-        inferred.push(format!("auth {k}: {v}"));
+        inferred.push(redact_inferred(&format!("auth {k}: {v}"), redactor));
     }
     let record = ExecutionRecord {
         id: Id::new(),
@@ -333,7 +391,7 @@ pub fn local_failure_with(
     f: TransportFailure,
     workload: Option<WorkloadApiEvidence>,
 ) -> ExecutionOutput {
-    let redactor = Redactor::new(resolver.used_secrets.lock().clone(), ctx.redaction_names.clone());
+    let redactor = Redactor::for_execution(resolver, &ctx.redaction_names);
     let workload = workload.filter(|w| !w.is_empty()).map(|w| redact_workload(w, &redactor));
     let mut f = f;
     f.message = redactor.text(&f.message);
@@ -422,4 +480,20 @@ pub fn local_failure_with(
         findings: diag.findings,
     };
     ExecutionOutput { record, body: Bytes::new(), decoded_body: None, extracted: vec![], session_facts: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anvil_domain::secret::REDACTED;
+
+    #[test]
+    fn inferred_auth_facts_are_redacted_and_the_htu_as_a_url() {
+        let r = Redactor::new(vec!["path-secret-7f3a".into()], vec![]);
+        // `%2D` is not a canonical encoding, so only URL redaction finds it.
+        let htu = redact_inferred("auth dpop.htu: https://h/u/path%2Dsecret-7f3a/x", &r);
+        assert_eq!(htu, format!("auth dpop.htu: https://h/u/{REDACTED}/x"));
+        assert_eq!(redact_inferred("auth hmac.nonce: n-path-secret-7f3a", &r), format!("auth hmac.nonce: n-{REDACTED}"));
+        assert_eq!(redact_inferred("Accept-Encoding: gzip, br", &r), "Accept-Encoding: gzip, br");
+    }
 }

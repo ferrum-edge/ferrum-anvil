@@ -511,7 +511,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         Ok(p) => p,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, workload),
     };
-    let mut redactor = Redactor::new(resolver.used_secrets.lock().clone(), ctx.redaction_names.clone());
+    let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
     let mut extra_findings: Vec<anvil_diagnostics::Draft> = Vec::new();
 
     // OAuth: acquire/refresh through the same transport before sending.

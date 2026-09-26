@@ -519,6 +519,8 @@ mod tests {
                 content_type: Some(content_type.into()),
                 content_encoding: None,
                 decoded_bytes: None,
+                decoding: None,
+                decoding_detail: None,
                 blob_sha256: None,
             },
         }
