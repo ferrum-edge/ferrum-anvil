@@ -14,7 +14,7 @@
 
 use crate::protocol::StepUnit;
 use anvil_domain::diagnostics::Severity;
-use anvil_domain::execution::{AttemptReason, Direction, ExecutionRecord, FailureKind, Phase, PhaseStatus};
+use anvil_domain::execution::{AttemptReason, Direction, ExecutionRecord, FailureKind, Phase, PhaseStatus, exchange_duration_us};
 use anvil_domain::load::*;
 use anvil_domain::outcome::{ApplicationState, AssertionState, ClosedBy, GrpcStatusSource, ProtocolStatus, TransportState};
 use anvil_engine::ExecutionOutput;
@@ -297,7 +297,7 @@ pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
     };
     let application_failure = terminal == Terminal::Completed && rec.outcome.application == ApplicationState::Failure;
     let assertion_failure = terminal == Terminal::Completed && rec.outcome.assertions == AssertionState::Fail;
-    let latency_us: u64 = rec.attempts.iter().map(|a| a.duration_us).sum();
+    let latency_us = exchange_duration_us(&rec.attempts).unwrap_or(0);
     let mut obs = SendObservation {
         terminal,
         application_failure,

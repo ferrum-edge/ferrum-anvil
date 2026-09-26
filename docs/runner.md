@@ -172,7 +172,9 @@ Per step: position, request id, **revision id**, name, protocol, method,
 redacted URL, status, `failed_dimensions`, **execution record id** (the
 history entry), transport/application/assertion states, dispatch state,
 HTTP (or handshake) status, gRPC status, redacted summary and message,
-wall-clock `duration_ms`, `exchange_ms` (sum of attempt durations),
+wall-clock `duration_ms`, `exchange_ms` (sum of attempt durations, including
+redirect hops, retries and protocol fallback; a `latency_ms` assertion
+evaluates this same exchange time),
 `delay_ms`, assertion results (redacted, ≤ 50), top findings (code, title,
 confidence, severity; highest severity first, ≤ 5) and the names of
 extracted variables. Never response bodies or extracted values.
