@@ -7,6 +7,11 @@ use anvil_app::file_grants::{Access, FileGrants, FilePurpose, GrantError, MAX_GR
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(unix)]
+mod fifo;
+#[cfg(unix)]
+use fifo::{mkfifo, within_seconds};
+
 fn file(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
     let p = dir.join(name);
     std::fs::write(&p, contents).unwrap();
@@ -340,22 +345,6 @@ mod unix {
         grants.write(&g.token, FilePurpose::BundleExport, b"bundle").unwrap();
         assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600);
     }
-}
-
-/// Runs `f` on its own thread, failing the test instead of hanging if it blocks.
-#[cfg(unix)]
-fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    rx.recv_timeout(Duration::from_secs(30)).expect("the open blocked")
-}
-
-#[cfg(unix)]
-fn mkfifo(path: &Path) {
-    let status = std::process::Command::new("mkfifo").arg(path).status().unwrap();
-    assert!(status.success(), "mkfifo {}", path.display());
 }
 
 #[cfg(unix)]

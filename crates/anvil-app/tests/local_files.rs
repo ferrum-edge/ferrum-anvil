@@ -26,6 +26,11 @@ use anvil_transport::recorder::EventCtx;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+mod fifo;
+#[cfg(unix)]
+use fifo::{mkfifo, within_seconds};
+
 const CANARY: &str = "anvil-local-file-canary";
 const URL: &str = "http://127.0.0.1:9/x";
 
@@ -514,16 +519,6 @@ fn only_a_regular_file_is_bound_as_a_linked_file() {
     assert!(app.linked_file_bindings().unwrap().is_empty());
 }
 
-/// Runs `f` on its own thread, failing the test instead of hanging if it blocks.
-#[cfg(unix)]
-fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the read blocked")
-}
-
 #[cfg(unix)]
 #[test]
 fn a_linked_dataset_swapped_for_a_fifo_is_refused_without_blocking() {
@@ -540,8 +535,7 @@ fn a_linked_dataset_swapped_for_a_fifo_is_refused_without_blocking() {
     // The same path, now a FIFO with no writer: opening it for reading would
     // wait for one.
     std::fs::remove_file(&rows).unwrap();
-    let status = std::process::Command::new("mkfifo").arg(&rows).status().unwrap();
-    assert!(status.success(), "mkfifo");
+    mkfifo(&rows);
     let err = within_seconds(move || app.run_dataset(&d).map(|_| ()).map_err(|e| e.to_string())).unwrap_err();
     assert!(err.contains("not a regular file"), "{err}");
 }

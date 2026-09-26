@@ -400,13 +400,15 @@ impl FileGrants {
 }
 
 /// Open `path` for reading if it is a regular file; `None` when it is not.
-/// A FIFO or device found at the path never blocks the open, even one swapped
-/// in just before it: on Unix the file is opened non-blocking (which does not
-/// change how a regular file reads) and the opened handle is checked.
-/// Elsewhere the path is checked first, as a folder cannot be opened there.
+/// `path` is canonical, so it ends in no link. A FIFO or device found at the
+/// path never blocks the open, even one swapped in just before it: on Unix the
+/// file is opened non-blocking (which does not change how a regular file
+/// reads), never as a controlling terminal and without following a link swapped
+/// in for the last component, and the opened handle is checked. The path is
+/// checked first as a cheap filter; elsewhere that check is also what keeps a
+/// folder out, as one cannot be opened there.
 pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadata)>> {
-    #[cfg(not(unix))]
-    if !std::fs::metadata(path)?.is_file() {
+    if !std::fs::symlink_metadata(path)?.is_file() {
         return Ok(None);
     }
     let mut options = OpenOptions::new();
@@ -414,7 +416,7 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadat
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
     // The check that counts is on the opened handle, not on the path.
@@ -476,4 +478,21 @@ fn display_name(name: Option<&std::ffi::OsStr>) -> String {
 fn size_label(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     if bytes.is_multiple_of(GIB) { format!("{} GiB", bytes / GIB) } else { format!("{} MiB", bytes >> 20) }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::open_regular;
+
+    #[test]
+    fn a_link_at_the_last_component_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("rows.csv");
+        std::fs::write(&target, "id\n1\n").unwrap();
+        let (_, meta) = open_regular(&target).unwrap().unwrap();
+        assert_eq!(meta.len(), 5);
+        let link = dir.path().join("link.csv");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_regular(&link).unwrap().is_none());
+    }
 }

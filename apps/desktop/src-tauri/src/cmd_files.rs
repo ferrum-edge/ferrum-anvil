@@ -13,6 +13,7 @@ use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
 use anvil_app::linked_files::LinkedFileReferrer;
 use anvil_app::token_files::TokenFileBinding;
 use serde::Deserialize;
+use std::sync::Arc;
 use tauri::{State, Window};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
@@ -53,7 +54,8 @@ pub async fn file_choose(
     // Read before the lock check, so a lock after it always moves the
     // generation past this value.
     let generation = st.file_grants.generation();
-    st.app()?;
+    // The profile the dialog is shown for.
+    let shown_for = st.app()?;
     let options = options.unwrap_or_default();
     match purpose.access() {
         Access::Write if options.multiple => return Err("a save dialog chooses one file".into()),
@@ -98,6 +100,12 @@ pub async fn file_choose(
     }
     // The app may have locked while the dialog was open: grant nothing then.
     let app = st.app()?;
+    // Another profile may have opened while the dialog was open. Its swap
+    // precedes the grant revocation, so the generation alone may not show it
+    // yet: grant and bind nothing unless the profile is still the one shown for.
+    if !Arc::ptr_eq(&shown_for, &app) {
+        return Err(GrantError::Revoked.to_string());
+    }
     let mut grants = Vec::with_capacity(picked.len());
     for file in picked {
         let path = file.into_path().map_err(|x| x.to_string())?;

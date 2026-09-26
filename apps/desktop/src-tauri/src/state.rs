@@ -12,8 +12,10 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
-/// Cancellation tokens of running executions, by execution id.
-pub type Running = Mutex<HashMap<Id, CancellationToken>>;
+/// Cancellation tokens of running executions, by execution id. Each
+/// registration has its own `Arc`, which identifies it: an entry is removed
+/// only by the registration that inserted it.
+pub type Running = Mutex<HashMap<Id, Arc<CancellationToken>>>;
 
 pub struct DesktopState {
     pub profiles: ProfileManager,
@@ -131,7 +133,7 @@ impl DesktopState {
 pub struct PendingEntry {
     running: Arc<Running>,
     id: Id,
-    token: CancellationToken,
+    token: Arc<CancellationToken>,
 }
 
 impl PendingEntry {
@@ -140,7 +142,7 @@ impl PendingEntry {
     /// running execution keeps its token, and its entry is not removed by
     /// anyone else.
     pub fn register(running: &Arc<Running>, id: Id) -> Result<Self, String> {
-        let token = CancellationToken::new();
+        let token = Arc::new(CancellationToken::new());
         match running.lock().entry(id) {
             Entry::Occupied(_) => return Err(format!("execution {id} is already running")),
             Entry::Vacant(v) => {
@@ -160,7 +162,7 @@ impl PendingEntry {
     /// concurrent cancel always finds one of the two. The flag says a cancel
     /// landed after `open` completed: the caller must then stop what it published.
     pub async fn open<T, P>(self, open: impl Future<Output = T>, publish: impl FnOnce(T) -> P) -> Option<(P, bool)> {
-        let token = self.token.clone();
+        let token = CancellationToken::clone(&self.token);
         let opened = tokio::select! {
             v = open => v,
             _ = token.cancelled() => return None,
@@ -174,7 +176,12 @@ impl PendingEntry {
 
 impl Drop for PendingEntry {
     fn drop(&mut self) {
-        self.running.lock().remove(&self.id);
+        // A lock drains the registry, after which the id can be registered
+        // again: that newer entry is not this one's to remove.
+        let mut running = self.running.lock();
+        if running.get(&self.id).is_some_and(|t| Arc::ptr_eq(t, &self.token)) {
+            running.remove(&self.id);
+        }
     }
 }
 
@@ -286,6 +293,25 @@ mod tests {
         // Once retired, the id can be registered again.
         let again = PendingEntry::register(&running, id).unwrap();
         assert!(!again.token().is_cancelled());
+    }
+
+    #[test]
+    fn a_drained_guard_leaves_a_newer_registration_in_place() {
+        let running = Arc::new(Running::default());
+        let id = Id::new();
+        let old = PendingEntry::register(&running, id).unwrap();
+        // A lock drains the registry while the old execution still holds its guard.
+        for (_, t) in running.lock().drain() {
+            t.cancel();
+        }
+        let new = PendingEntry::register(&running, id).unwrap();
+        drop(old);
+        // The old guard does not remove the newer entry, which stays cancelable.
+        assert!(running.lock().contains_key(&id));
+        assert!(cancel_pending(&running, &id));
+        assert!(new.token().is_cancelled());
+        drop(new);
+        assert!(running.lock().is_empty());
     }
 
     #[tokio::test]
