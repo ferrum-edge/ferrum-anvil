@@ -9,7 +9,7 @@ use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SecretRef;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::*;
-use anvil_storage::kind;
+use anvil_storage::{StoreTx, kind};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -440,25 +440,15 @@ impl App {
         Ok(d)
     }
 
-    /// Store an attachment (content-addressed by sha256).
+    /// Store an attachment (content-addressed by sha256). The blob, its pin
+    /// and its index entry are written together or not at all.
     pub fn put_attachment(
         &self,
         file_name: &str,
         bytes: &[u8],
         media_type: Option<String>,
     ) -> Result<anvil_domain::request::AttachmentRef> {
-        let sha = hex::encode(Sha256::digest(bytes));
-        let blob = self.store.put_blob(bytes)?;
-        self.store.pin_blob(&blob)?;
-        self.store.put(
-            kind::IMPORT_SOURCE,
-            &attachment_index_id(&sha),
-            None,
-            None,
-            0.0,
-            &serde_json::json!({"attachment": sha, "blob": blob}),
-        )?;
-        Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+        Ok(self.store.atomically(|s| put_attachment_in(s, file_name, bytes, media_type))?)
     }
 
     /// Pin the blob of every stored attachment (idempotent). Profiles created
@@ -501,6 +491,21 @@ impl App {
         let blob = idx.get("blob").and_then(|b| b.as_str()).unwrap_or_default().to_string();
         Ok(self.store.get_blob(&blob)?.map(|z| z.to_vec()))
     }
+}
+
+/// [`App::put_attachment`] inside the caller's transaction, so the stored
+/// attachment is rolled back with everything else the caller writes.
+pub(crate) fn put_attachment_in(
+    s: &StoreTx<'_>,
+    file_name: &str,
+    bytes: &[u8],
+    media_type: Option<String>,
+) -> anvil_storage::store::Result<anvil_domain::request::AttachmentRef> {
+    let sha = hex::encode(Sha256::digest(bytes));
+    let blob = s.put_blob(bytes)?;
+    s.pin_blob(&blob)?;
+    s.put(kind::IMPORT_SOURCE, &attachment_index_id(&sha), None, None, 0.0, &serde_json::json!({"attachment": sha, "blob": blob}))?;
+    Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
 }
 
 /// Deterministic object id for the attachment index entry of a content hash.

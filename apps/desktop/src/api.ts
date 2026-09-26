@@ -214,12 +214,13 @@ export type FilePurpose =
   | "bundle_export"
   | "load_report_export"
   | "run_report_export"
-  | "jwt_svid_file";
+  | "jwt_svid_file"
+  | "linked_file";
 export interface FileGrant {
   token: string;
   /** The chosen file's name without its folder, for display. */
   file_name: string;
-  /** Only for `jwt_svid_file`: the path the backend bound in the vault, for the auth setting. */
+  /** Only for `jwt_svid_file` and `linked_file`: the path the backend bound in the vault. */
   path?: string;
 }
 export interface FileDialogOptions {

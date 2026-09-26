@@ -97,6 +97,10 @@ pub mod kind {
     /// (`anvil_app::token_files`). Device-specific: not in [`ALL`], never
     /// exported or imported.
     pub const TOKEN_FILE: &str = "token_file";
+    /// Linked local files the user bound in the desktop's native open dialog
+    /// (`anvil_app::linked_files`). Device-specific: not in [`ALL`], never
+    /// exported or imported.
+    pub const LINKED_FILE: &str = "linked_file";
     pub const ALL: &[&str] = &[
         WORKSPACE,
         FOLDER,
@@ -382,23 +386,10 @@ impl Store {
     /// revealing a plain hash of the content).
     pub fn put_blob(&self, bytes: &[u8]) -> Result<String> {
         let key = self.key()?;
-        use hmac::{KeyInit, Mac};
-        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()).expect("key");
-        m.update(b"anvil-blob-id-v1");
-        m.update(bytes);
-        let id = hex::encode(&m.finalize().into_bytes()[..20]);
         // One lock for check and insert: a concurrent put of the same bytes
         // cannot slip in between and trip the primary key.
         let conn = self.conn()?;
-        let exists: Option<i64> = conn.query_row("SELECT 1 FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
-        if exists.is_none() {
-            let env = crypto::seal(&key, &aad("blobs", "blob", &id), bytes);
-            conn.execute(
-                "INSERT INTO blobs(id,size,created_at,payload) VALUES(?1,?2,?3,?4)",
-                params![id, bytes.len() as i64, chrono::Utc::now().timestamp_millis(), env],
-            )?;
-        }
-        Ok(id)
+        Records { key, conn: &conn }.put_blob(bytes)
     }
 
     /// Keep a blob out of history retention. Attachments (binary bodies,
@@ -406,10 +397,9 @@ impl Store {
     /// encrypted objects that `prune_history` cannot see. The pin row holds
     /// only the keyed blob id, never content.
     pub fn pin_blob(&self, id: &str) -> Result<()> {
-        let _ = self.key()?;
+        let key = self.key()?;
         let conn = self.conn()?;
-        conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
-        Ok(())
+        Records { key, conn: &conn }.pin_blob(id)
     }
 
     /// Drop a blob's pin and delete it unless a history body still uses it.
@@ -720,6 +710,16 @@ impl StoreTx<'_> {
     pub fn delete_secret(&self, id: &Id) -> Result<()> {
         self.records()?.delete_secret(id)
     }
+
+    /// [`Store::put_blob`] inside this transaction: rolled back with it.
+    pub fn put_blob(&self, bytes: &[u8]) -> Result<String> {
+        self.records()?.put_blob(bytes)
+    }
+
+    /// [`Store::pin_blob`] inside this transaction: rolled back with it.
+    pub fn pin_blob(&self, id: &str) -> Result<()> {
+        self.records()?.pin_blob(id)
+    }
 }
 
 /// Read-only access to an open transaction: from [`Store::read_consistently`]
@@ -860,6 +860,28 @@ impl Records<'_> {
 
     fn delete_secret(&self, id: &Id) -> Result<()> {
         self.conn.execute("DELETE FROM secrets WHERE id=?1", params![id.to_string()])?;
+        Ok(())
+    }
+
+    fn put_blob(&self, bytes: &[u8]) -> Result<String> {
+        use hmac::{KeyInit, Mac};
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(self.key.as_bytes()).expect("key");
+        m.update(b"anvil-blob-id-v1");
+        m.update(bytes);
+        let id = hex::encode(&m.finalize().into_bytes()[..20]);
+        let exists: Option<i64> = self.conn.query_row("SELECT 1 FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        if exists.is_none() {
+            let env = crypto::seal(&self.key, &aad("blobs", "blob", &id), bytes);
+            self.conn.execute(
+                "INSERT INTO blobs(id,size,created_at,payload) VALUES(?1,?2,?3,?4)",
+                params![id, bytes.len() as i64, chrono::Utc::now().timestamp_millis(), env],
+            )?;
+        }
+        Ok(id)
+    }
+
+    fn pin_blob(&self, id: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
         Ok(())
     }
 }

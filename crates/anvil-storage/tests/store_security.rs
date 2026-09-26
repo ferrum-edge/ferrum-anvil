@@ -117,6 +117,32 @@ fn atomic_sections_roll_back_on_error() {
 }
 
 #[test]
+fn blobs_written_in_a_transaction_roll_back_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let mut blob = String::new();
+    let r: Result<(), StoreError> = store.atomically(|s| {
+        blob = s.put_blob(b"rolled back")?;
+        s.pin_blob(&blob)?;
+        Err(StoreError::NotFound("simulated failure mid-import".into()))
+    });
+    assert!(r.is_err());
+    assert!(store.get_blob(&blob).unwrap().is_none(), "the blob was rolled back");
+
+    let kept = store
+        .atomically(|s| {
+            let id = s.put_blob(b"committed")?;
+            s.pin_blob(&id)?;
+            Ok(id)
+        })
+        .unwrap();
+    assert_eq!(store.get_blob(&kept).unwrap().unwrap().as_slice(), b"committed");
+    // Same content, same id, inside or outside a transaction.
+    assert_eq!(store.put_blob(b"committed").unwrap(), kept);
+}
+
+#[test]
 fn history_retention_prunes_by_size() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();

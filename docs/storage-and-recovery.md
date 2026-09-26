@@ -52,9 +52,10 @@ commands return `LOCKED` until unlock.
   is inside it:
   - A bundle import writes its objects and secrets in the transaction; its
     attachments are stored after the commit and stay if storing one fails.
-  - A spec import writes its folders, requests, environments and source record
-    in the transaction; the new workspace or root folder and the stored
-    original file are written before it and stay if the transaction fails.
+  - A spec import writes everything in the transaction: the new workspace or
+    root folder, the stored original file, its folders, requests,
+    environments and source record. A failure, including one taking the
+    checkpoint, leaves the profile as it was.
 
   Changes saved meanwhile by other commands are kept, so the checkpoint is not
   restored automatically; it stays on disk for a manual restore.

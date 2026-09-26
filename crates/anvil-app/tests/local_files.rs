@@ -1,8 +1,9 @@
 //! Files on this machine reach a request only in the ways the user chose: a
 //! draft spec (what the desktop webview sends) never names a linked local
-//! file, and once the desktop confines token files, a JWT-SVID token file is
-//! read only if it was bound in the native dialog. Bindings stay on the
-//! device.
+//! file, a saved request, gRPC schema or dataset reads a linked file only
+//! once it was chosen in the native dialog on this device, and once the
+//! desktop confines token files, a JWT-SVID token file is read only if it
+//! was bound in the native dialog. Bindings stay on the device.
 
 use anvil_app::App;
 use anvil_app::exec::{SendOptions, refuse_linked_files};
@@ -10,9 +11,12 @@ use anvil_app::profiles::ProfileManager;
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::load::{LoadPlan, Workload};
-use anvil_domain::request::{AttachmentRef, Body, MultipartContent, MultipartPart, RequestSpec};
+use anvil_domain::request::{
+    AttachmentRef, Body, GrpcMode, GrpcSchemaSource, GrpcSpec, GrpcWire, MultipartContent, MultipartPart, Protocol, RequestSpec,
+};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
 use anvil_domain::workspace::{Dataset, DatasetFormat, Meta};
+use anvil_engine::context::AttachmentResolver;
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
@@ -59,6 +63,45 @@ fn linked_specs(path: &Path) -> Vec<(&'static str, RequestSpec)> {
         ("multipart part", with_body(Body::Multipart { parts: vec![part(stored), part(linked(path))] })),
         ("disabled multipart part", with_body(Body::Multipart { parts: vec![MultipartPart { enabled: false, ..part(linked(path)) }] })),
     ]
+}
+
+fn grpc_with_proto(proto: AttachmentRef) -> RequestSpec {
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9");
+    spec.protocol = Protocol::Grpc;
+    spec.grpc = Some(GrpcSpec {
+        service: "lab.Echo".into(),
+        method: "Say".into(),
+        mode: GrpcMode::Unary,
+        schema: GrpcSchemaSource::ProtoFiles { files: vec![proto] },
+        messages: vec!["{}".into()],
+        metadata: vec![],
+        deadline_ms: None,
+        plaintext: true,
+        wire: GrpcWire::Grpc,
+    });
+    spec
+}
+
+/// Every place a saved request can name a linked file.
+fn saved_linked_specs(path: &Path) -> Vec<(&'static str, RequestSpec)> {
+    let mut specs = linked_specs(path);
+    specs.push(("gRPC proto file", grpc_with_proto(linked(path))));
+    specs
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap()
+}
+
+fn linked_dataset(ws: Id, path: &Path) -> Dataset {
+    Dataset {
+        meta: Meta::new(),
+        workspace_id: ws,
+        name: "rows".into(),
+        format: DatasetFormat::Csv,
+        attachment: linked(path),
+        sensitive_columns: vec![],
+    }
 }
 
 fn jwt_svid_file(path: &str) -> AuthConfig {
@@ -213,15 +256,7 @@ fn a_linked_dataset_is_read_with_the_dataset_bound() {
     let app = new_app(root.path(), "dataset");
     let ws = app.create_workspace("W").unwrap();
     let req = app.create_request(&ws.meta.id, None, "r", RequestSpec::http("GET", URL)).unwrap();
-    let dataset = Dataset {
-        meta: Meta::new(),
-        workspace_id: ws.meta.id,
-        name: "big".into(),
-        format: DatasetFormat::Csv,
-        attachment: linked(&big),
-        sensitive_columns: vec![],
-    };
-    let d = app.save_dataset(dataset).unwrap();
+    let d = app.save_dataset(linked_dataset(ws.meta.id, &canonical(&big))).unwrap();
     let plan = LoadPlan {
         id: Id::new(),
         workspace_id: ws.meta.id,
@@ -239,6 +274,103 @@ fn a_linked_dataset_is_read_with_the_dataset_bound() {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
+    let err = app.load_plan_check(&plan).expect_err("not chosen").to_string();
+    assert!(err.contains("not chosen on this device"), "{err}");
+    app.bind_linked_file(&big).unwrap();
     let err = app.load_plan_check(&plan).expect_err("too large").to_string();
     assert!(err.contains("larger than 64 MiB"), "{err}");
+}
+
+#[tokio::test]
+async fn a_saved_linked_file_is_inert_until_it_is_chosen_on_this_device() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let path = canonical(&canary_file(files.path(), "secret.txt"));
+    let app = new_app(root.path(), "saved");
+    let ws = app.create_workspace("W").unwrap();
+    let mut saved = Vec::new();
+    for (label, spec) in saved_linked_specs(&path) {
+        let r = app.create_request(&ws.meta.id, None, label, spec).unwrap();
+        let err = app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).err().expect(label).to_string();
+        assert!(err.contains("not chosen on this device") && !err.contains(CANARY), "{label}: {err}");
+        let opts = SendOptions { record_history: true, ..Default::default() };
+        let sent = app.send(Some(r.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await;
+        assert!(sent.is_err(), "{label}: a request naming an unchosen linked file is never sent");
+        saved.push((label, r));
+    }
+    assert!(app.store.list_history(Some(&ws.meta.id), None, 10).unwrap().is_empty(), "nothing was executed");
+
+    // Choosing the file in the native dialog binds it on this device.
+    let binding = app.bind_linked_file(&path).unwrap();
+    assert_eq!(Path::new(&binding.path), path);
+    assert_eq!(app.bind_linked_file(&path).unwrap().id, binding.id, "binding the same file again keeps one binding");
+    let other = canonical(&canary_file(files.path(), "other.txt"));
+    for (label, r) in &saved {
+        let ctx = app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).expect(label);
+        assert_eq!(ctx.attachments.load(&linked(&path)).unwrap().as_ref(), CANARY.as_bytes(), "{label}");
+        // The resolver reads only the bound files this request names.
+        assert!(ctx.attachments.load(&linked(&other)).is_err(), "{label}");
+    }
+    // Only the exact bound path counts.
+    let spec = with_body(Body::Binary { attachment: linked(&files.path().join("other.txt")), content_type: None });
+    let r = app.create_request(&ws.meta.id, None, "other", spec).unwrap();
+    assert!(app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).is_err());
+}
+
+#[test]
+fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let path = canonical(&canary_file(files.path(), "secret.txt"));
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("W").unwrap();
+    for (label, spec) in saved_linked_specs(&path) {
+        a.create_request(&ws.meta.id, None, label, spec).unwrap();
+    }
+    let rows = files.path().join("rows.csv");
+    std::fs::write(&rows, "id\n1\n").unwrap();
+    let rows = canonical(&rows);
+    a.save_dataset(linked_dataset(ws.meta.id, &rows)).unwrap();
+    // A binding on the exporting device does not travel with the bundle.
+    a.bind_linked_file(&path).unwrap();
+    a.bind_linked_file(&rows).unwrap();
+    let (bytes, _) = a.export(None, ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+
+    let b = new_app(root.path(), "b");
+    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    assert!(b.linked_file_bindings().unwrap().is_empty(), "an import never binds a linked file");
+    let ws_b = b.workspaces().unwrap().into_iter().find(|w| w.name == "W").unwrap();
+    let requests = b.requests(&ws_b.meta.id).unwrap();
+    assert_eq!(requests.len(), saved_linked_specs(&path).len());
+    for r in &requests {
+        let err = b.build_context(Some(r.meta.id), &ws_b.meta.id, None, &SendOptions::default()).err().expect(&r.name).to_string();
+        assert!(err.contains("not chosen on this device") && !err.contains(CANARY), "{}: {err}", r.name);
+    }
+    let dataset = b.datasets(&ws_b.meta.id).unwrap().pop().unwrap();
+    let err = b.run_dataset(&dataset).err().expect("dataset").to_string();
+    assert!(err.contains("not chosen on this device"), "{err}");
+
+    // Choosing the same files on the receiving device makes the references usable.
+    b.bind_linked_file(&path).unwrap();
+    for r in &requests {
+        b.build_context(Some(r.meta.id), &ws_b.meta.id, None, &SendOptions::default()).expect(&r.name);
+    }
+    assert!(b.run_dataset(&dataset).is_err(), "the dataset's own file is still not chosen");
+    b.bind_linked_file(&rows).unwrap();
+    assert_eq!(b.run_dataset(&dataset).unwrap().rows.len(), 1);
+}
+
+#[test]
+fn only_a_regular_file_is_bound_as_a_linked_file() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "bind-linked");
+    assert!(app.bind_linked_file(Path::new("secret.txt")).is_err());
+    assert!(app.bind_linked_file(files.path()).is_err());
+    assert!(app.bind_linked_file(&files.path().join("missing.txt")).is_err());
+    assert!(app.linked_file_bindings().unwrap().is_empty());
+    // Token-file and linked-file bindings are separate.
+    let token = canary_file(files.path(), "jwt_svid.token");
+    app.bind_token_file(&token).unwrap();
+    assert!(app.linked_file_bindings().unwrap().is_empty());
 }

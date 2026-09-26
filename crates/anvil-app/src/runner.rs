@@ -12,7 +12,6 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::runner::{FailOn, RunReport};
 use anvil_domain::workspace::{Dataset, DatasetFormat, Meta, Scenario, ScenarioStep};
-use anvil_engine::context::AttachmentResolver;
 use anvil_engine::{ExecutionContext, ExecutionOutput};
 use anvil_runner::{ProvidedStep, RunDataset, RunEventSink, RunOptions, RunPlan, StepError, StepProvider};
 use anvil_storage::kind;
@@ -429,10 +428,10 @@ impl App {
             anvil_domain::request::AttachmentRef::Stored { sha256, .. } => {
                 self.get_attachment(sha256)?.ok_or_else(|| AppError::NotFound(format!("the data of dataset '{}'", d.name)))?
             }
-            linked => anvil_engine::context::MemoryAttachments::default()
-                .load(linked)
-                .map_err(|e| AppError::Invalid(format!("dataset '{}': {e}", d.name)))?
-                .to_vec(),
+            anvil_domain::request::AttachmentRef::LinkedFile { path } => {
+                let max = crate::file_grants::FilePurpose::Dataset.max_read_bytes();
+                self.read_linked_file(path, max, "dataset").map_err(|e| AppError::Invalid(format!("dataset '{}': {e}", d.name)))?
+            }
         };
         RunDataset::parse(&d.name, d.format, &bytes, &d.sensitive_columns).map_err(|e| AppError::Invalid(e.to_string()))
     }

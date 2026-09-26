@@ -21,8 +21,8 @@ against it).
 | Boundary | Untrusted side | Controls |
 |---|---|---|
 | Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; no response can call IPC or change settings |
-| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR | Size/node/ref limits, no external `$ref`/DTD fetching, XXE disabled, zip traversal/symlink/bomb checks, checksums, preview before apply, trust normalisation, nothing executes on import, scripts kept as inert notes |
-| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in backend; secrets returned only as references; file access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire, are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced); a request spec from the webview may not name a linked local file; a JWT-SVID token file is read only if it was bound in the vault through the dialog; capability allowlist (`capabilities/default.json`: no open or save dialog, no filesystem plugin). Linked files already stored in a workspace (for example from an imported bundle) are still read when that saved request runs without an edited draft, and datasets linked to a local file are still read by the load plans and scenarios that use them |
+| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR | Size/node/ref limits, no external `$ref`/DTD fetching, XXE disabled, zip traversal/symlink/bomb checks, checksums, preview before apply, trust normalisation, nothing executes on import, scripts kept as inert notes; a spec import into an existing workspace keeps the source's own auth (explicitly none when it has none), variables and settings on its root folder, so its requests never inherit the destination workspace's auth; imported linked local files stay inert until chosen on this device |
+| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in backend; secrets returned only as references; file access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire, are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced); a request spec from the webview may not name a linked local file; a JWT-SVID token file is read only if it was bound in the vault through the dialog; capability allowlist (`capabilities/default.json`: no open or save dialog, no filesystem plugin). A linked local file that a saved request, gRPC schema or dataset names (for example one from an imported bundle) is read only once that exact file was bound on this device through the dialog (purpose `linked_file`) |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
 | Worker process | — | Job over stdin (not argv/env), only referenced secrets, killed with the parent, no inherited UI state |
@@ -89,6 +89,18 @@ against it).
 - **Malicious bundle trying to enable insecure settings:** import normalisation
   (TLS bypass, plain-HTTP marker trust, credential forwarding, legacy HMAC,
   scenario/plan trust) with warnings in the preview.
+- **Imported reference to a local file:** a linked local file
+  (`AttachmentRef::LinkedFile`) names a path on the machine that made it. On
+  any other device, and on this one until the user picks that exact file in
+  the native dialog, a request, gRPC schema or dataset naming it is refused
+  before anything is read or sent. Bindings (`anvil_app::linked_files`) live
+  in the vault, are never exported and cannot be created by an import; the
+  CLI, which has no dialog, never reads a linked file.
+- **Imported collection inheriting the destination's credentials:** a spec
+  import into an existing workspace lands under a new root folder that carries
+  the source's own auth, variables and settings. A source without auth of its
+  own gets an explicit "no auth" there, so none of its requests picks up the
+  auth configured on the destination workspace.
 - **Lock bypass:** backend refuses privileged commands while locked; key dropped;
   sessions/executions/load runs stopped.
 - **Test backdoors shipped:** E2E WebDriver and env unlock only under the `e2e`

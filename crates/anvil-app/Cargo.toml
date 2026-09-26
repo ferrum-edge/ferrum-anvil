@@ -37,6 +37,8 @@ winapi-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Fault injection in the import atomicity tests (a trigger that fails a write).
+rusqlite.workspace = true
 tokio-util.workspace = true
 anvil-fixtures = { path = "../anvil-fixtures" }
 # CI-only provider for the linked-identity tests (never in release builds).

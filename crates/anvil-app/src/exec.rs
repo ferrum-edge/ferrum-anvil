@@ -1,6 +1,8 @@
 //! Build frozen execution contexts from storage and run them through the
 //! shared engine, recording redacted history.
 
+use crate::file_grants::FilePurpose;
+use crate::linked_files::read_bound_file;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -35,6 +37,9 @@ impl SecretResolver for StoreSecrets {
 pub struct StoreAttachments {
     pub app_store: Arc<Store>,
     pub index: std::collections::HashMap<String, Vec<u8>>,
+    /// Linked files chosen on this device (see `anvil_app::linked_files`);
+    /// any other linked file is refused, never read.
+    pub linked: Vec<String>,
 }
 
 impl AttachmentResolver for StoreAttachments {
@@ -45,7 +50,10 @@ impl AttachmentResolver for StoreAttachments {
                 .get(sha256)
                 .map(|b| Bytes::from(b.clone()))
                 .ok_or_else(|| format!("attachment '{file_name}' is missing from this workspace")),
-            AttachmentRef::LinkedFile { .. } => anvil_engine::context::MemoryAttachments::default().load(a),
+            AttachmentRef::LinkedFile { path } if self.linked.contains(path) => {
+                read_bound_file(path, FilePurpose::Attachment.max_read_bytes(), "file").map(Bytes::from).map_err(|e| e.to_string())
+            }
+            AttachmentRef::LinkedFile { path } => Err(format!("the linked local file '{path}' was not chosen on this device")),
         }
     }
 }
@@ -80,8 +88,9 @@ impl App {
     /// Build the frozen context for a saved request (optionally with an
     /// unsaved draft spec) — settings, auth and variable layers resolved
     /// from workspace → folders → request. A draft never names a linked
-    /// local file, and (when confined) a JWT-SVID token file is read only if
-    /// it was bound in the native dialog.
+    /// local file, a saved request only ones chosen in the native dialog on
+    /// this device, and (when confined) a JWT-SVID token file is read only
+    /// if it was bound in the native dialog.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -103,6 +112,7 @@ impl App {
             (None, Some(d)) => (None, d),
             (None, None) => return Err(AppError::Invalid("nothing to send".into())),
         };
+        let linked = self.bound_linked_files(&spec)?;
         let chain = self.folder_chain(req.as_ref().and_then(|r| r.folder_id))?;
         let settings = self.settings()?;
         let secrets = StoreSecrets(self.store.clone());
@@ -163,7 +173,7 @@ impl App {
             proxy_profiles: self.proxy_profiles(ws_id)?,
             integrations: self.integrations(ws_id)?,
             secrets: Arc::new(StoreSecrets(self.store.clone())),
-            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index }),
+            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,
             seed: opts.seed,

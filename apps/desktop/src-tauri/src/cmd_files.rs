@@ -2,8 +2,9 @@
 //! path; the webview receives only an opaque grant bound to one purpose (see
 //! `anvil_app::file_grants`), which the file commands accept in place of a
 //! path. No command takes a file path from the webview. A JWT-SVID token
-//! file is bound in the vault instead (`anvil_app::token_files`), and only a
-//! bound path is read at send time.
+//! file or a linked local file is bound in the vault instead
+//! (`anvil_app::token_files`, `anvil_app::linked_files`), and only a bound
+//! path is read at send time.
 
 use crate::commands::{R, e};
 use crate::state::DesktopState;
@@ -97,7 +98,11 @@ pub async fn file_choose(
                 if st.file_grants.generation() != generation {
                     return Err(GrantError::Revoked.to_string());
                 }
-                let b = app.bind_token_file(&path).map_err(e)?;
+                let (id, bound) = match purpose {
+                    FilePurpose::LinkedFile => app.bind_linked_file(&path).map(|b| (b.id, b.path)),
+                    _ => app.bind_token_file(&path).map(|b| (b.id, b.path)),
+                }
+                .map_err(e)?;
                 // A lock during the bind returns nothing to the webview. The
                 // binding is kept: it names only a file the user chose in the
                 // native dialog, lets nothing read it without a request that
@@ -106,8 +111,8 @@ pub async fn file_choose(
                 if st.file_grants.generation() != generation {
                     return Err(GrantError::Revoked.to_string());
                 }
-                let file_name = std::path::Path::new(&b.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                Ok(FileGrant { token: b.id.to_string(), file_name, path: Some(b.path) })
+                let file_name = std::path::Path::new(&bound).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Ok(FileGrant { token: id.to_string(), file_name, path: Some(bound) })
             }
         };
         grants.push(grant.map_err(|x| x.to_string())?);
@@ -127,5 +132,6 @@ fn title(purpose: FilePurpose) -> &'static str {
         FilePurpose::LoadReportExport => "Export the load report",
         FilePurpose::RunReportExport => "Export the run report",
         FilePurpose::JwtSvidFile => "Choose the JWT-SVID token file",
+        FilePurpose::LinkedFile => "Choose the linked file on this device",
     }
 }

@@ -68,6 +68,30 @@ Codes are stable strings (for example `recursive_schema`,
   keys, no whitespace) of the generated `RequestSpec` with `source` removed
   (`anvil_import::spec_hash`).
 
+## Persisting an import (`anvil-app`)
+
+`App::spec_import` gives every import its own fresh `id_namespace` (any
+namespace in the caller's options is ignored) and keeps it in the stored
+source record; only a reimport of that import (`spec_reimport_plan`/`_apply`)
+reuses it. Importing the same source again, into the same or another
+workspace, therefore creates an independent copy and never moves or
+overwrites an earlier import's requests. An import that would still overwrite
+a stored object is refused.
+
+The import is atomic: a restore checkpoint is taken first, then the new
+workspace or root folder, the original bytes (a stored attachment), folders,
+requests, environments and the source record are written in one
+transaction. If anything fails, including taking the checkpoint, nothing is
+written.
+
+Imported into an existing workspace, the objects go under a new top-level
+folder that carries the source's workspace-level scope: description,
+settings, variables and auth. A source without auth of its own gets an
+explicit `none` there, so imported requests resolve auth exactly as they
+would in a workspace of their own and never inherit the destination
+workspace's credentials. Imported environments are added to the destination
+workspace.
+
 ## Reimport (DATA-012)
 
 `reimport_diff(previous, fresh)` links requests by operation key and
