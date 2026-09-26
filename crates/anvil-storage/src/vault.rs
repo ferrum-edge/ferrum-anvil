@@ -10,8 +10,8 @@
 //!   unlocked OS session is the only barrier; this is stated in the UI.
 //! * An OS-keychain profile can be converted to passphrase mode. The new
 //!   header is published first; from then on only the passphrase or the new
-//!   recovery key unlocks, and the keychain entry is removed (retried at the
-//!   next unlock if the credential store refuses).
+//!   recovery key unlocks, and the keychain entry is removed (retried at
+//!   each unlock until it is gone if the credential store refuses).
 //! * A linked provider identity (Google/GitHub/Facebook) is never a key.
 
 use crate::crypto::{self, CryptoError, KdfParams, Key};
@@ -143,7 +143,11 @@ pub fn read_header(dir: &Path) -> Result<ProfileHeader, VaultError> {
 }
 
 /// Atomically replace the header: write a synced temporary file, rename it
-/// over the old one and (on Unix) sync the directory so the rename persists.
+/// over the old one and sync the directory so the rename persists.
+///
+/// Once the rename has succeeded the new header is live, so the directory
+/// sync is best effort: some file systems (FUSE, SMB) refuse it, and failing
+/// there would report an error for a header that was in fact written.
 pub fn write_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
@@ -153,8 +157,29 @@ pub fn write_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
     f.sync_all()?;
     drop(f);
     std::fs::rename(tmp, header_path(dir))?;
-    #[cfg(unix)]
-    std::fs::File::open(dir)?.sync_all()?;
+    if let Err(e) = sync_dir(dir) {
+        tracing::warn!(dir = %dir.display(), error = %e, "profile directory sync failed after the header was replaced");
+    }
+    Ok(())
+}
+
+/// Flush a directory so a rename inside it survives a power loss.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Flush a directory so a rename inside it survives a power loss. A directory
+/// handle needs backup semantics, and FlushFileBuffers needs write access.
+#[cfg(windows)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new().write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(dir)?.sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -285,6 +310,10 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
         Ok(secret) => {
             let secret = Zeroizing::new(secret);
             if Key::from_bytes(&secret).is_ok_and(|k| key_check(&k) == h.key_check) {
+                #[cfg(test)]
+                if let Some(hook) = BEFORE_DELETE.get() {
+                    hook(&entry);
+                }
                 match entry.delete_credential() {
                     Ok(()) | Err(keyring_core::Error::NoEntry) => {}
                     Err(e) => return Err(unavailable(e)),
@@ -294,11 +323,26 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
         Err(keyring_core::Error::NoEntry) => {}
         Err(e) => return Err(unavailable(e)),
     }
-    let mut next = h.clone();
+    // `h` may have been read long before (an unlock runs the KDF first), so
+    // edit the header on disk now rather than write `h` back: a passphrase
+    // changed meanwhile by another process must not be undone. If the header
+    // no longer names this account in passphrase mode, leave it alone.
+    let mut next = read_header(dir)?;
+    let same_profile = next.protection == ProtectionMode::Passphrase && next.key_check == h.key_check;
+    if !same_profile || next.keychain_account.as_deref() != Some(account) {
+        return Ok(());
+    }
     next.keychain_account = None;
     write_header(dir, &next)?;
     *h = next;
     Ok(())
+}
+
+#[cfg(all(test, feature = "os-keychain"))]
+thread_local! {
+    /// Runs just before a retired entry is deleted, so a test can make the
+    /// mock store refuse the delete after the read succeeded.
+    static BEFORE_DELETE: std::cell::Cell<Option<fn(&keyring_core::Entry)>> = const { std::cell::Cell::new(None) };
 }
 
 /// The OS credential store entry holding a keychain profile's data key: the
@@ -403,5 +447,42 @@ mod tests {
         let h2 = read_header(dir.path()).unwrap();
         assert!(unlock_with_passphrase(&h2, "pw2").is_ok());
         assert!(unlock_with_passphrase(&h2, "pw1").is_err());
+    }
+
+    #[cfg(feature = "os-keychain")]
+    #[test]
+    fn keychain_delete_refused_after_a_successful_read_is_retried() {
+        fn refuse_delete(entry: &keyring_core::Entry) {
+            let cred = entry.as_any().downcast_ref::<keyring_core::mock::Cred>().unwrap();
+            cred.set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
+        }
+
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap()));
+        let store = keyring_core::get_default_store().expect("a default store is installed");
+        assert!(store.as_any().is::<keyring_core::mock::Store>(), "tests must only use the mock credential store");
+
+        let dir = tempfile::tempdir().unwrap();
+        let created = create_keychain_profile(dir.path(), "local").unwrap();
+        let account = created.header.keychain_account.clone().unwrap();
+        let mut h = read_header(dir.path()).unwrap();
+
+        BEFORE_DELETE.set(Some(refuse_delete));
+        let conv = convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, "pw", KdfParams::testing());
+        BEFORE_DELETE.set(None);
+        let conv = conv.unwrap();
+        assert!(!conv.keychain_entry_removed);
+
+        let mut h = read_header(dir.path()).unwrap();
+        assert_eq!(h.protection, ProtectionMode::Passphrase);
+        assert_eq!(h.keychain_account.as_deref(), Some(account.as_str()), "kept so removal can be retried");
+        let entry = keychain_entry(&account).unwrap();
+        assert!(entry.get_secret().is_ok(), "the delete was refused, so the entry is still there");
+        assert!(matches!(unlock_with_keychain(&h), Err(VaultError::WrongProtection(_))));
+        assert!(unlock_with_recovery(&h, &conv.recovery_key).is_ok());
+
+        retire_keychain_entry(dir.path(), &mut h).unwrap();
+        assert!(matches!(entry.get_secret(), Err(keyring_core::Error::NoEntry)));
+        assert!(read_header(dir.path()).unwrap().keychain_account.is_none());
     }
 }

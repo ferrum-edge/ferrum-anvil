@@ -139,3 +139,35 @@ fn retiring_never_deletes_another_profiles_entry() {
     let other_h = vault::read_header(other_dir.path()).unwrap();
     assert_eq!(vault::unlock_with_keychain(&other_h).unwrap().as_bytes(), other.dek.as_bytes());
 }
+
+#[test]
+fn retry_with_a_stale_header_keeps_a_newer_passphrase() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+    fail_next(&account);
+    let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    assert!(!conv.keychain_entry_removed);
+
+    // An unlock read this header, then another process changed the passphrase
+    // before the unlock retried the removal.
+    let mut stale = vault::read_header(dir.path()).unwrap();
+    let mut other = stale.clone();
+    vault::change_passphrase(dir.path(), &mut other, &created.dek, "changed elsewhere 1", KdfParams::testing()).unwrap();
+
+    vault::retire_keychain_entry(dir.path(), &mut stale).unwrap();
+    assert!(matches!(entry(&account).get_secret(), Err(keyring_core::Error::NoEntry)));
+    let h = vault::read_header(dir.path()).unwrap();
+    assert!(h.keychain_account.is_none());
+    assert!(vault::unlock_with_passphrase(&h, "changed elsewhere 1").is_ok(), "the newer passphrase is kept");
+    assert!(matches!(vault::unlock_with_passphrase(&h, PASS), Err(VaultError::WrongSecret)));
+
+    // A header that no longer names the account is left untouched.
+    let mut named = h.clone();
+    named.keychain_account = Some(account.clone());
+    let before = std::fs::read(vault::header_path(dir.path())).unwrap();
+    vault::retire_keychain_entry(dir.path(), &mut named).unwrap();
+    assert_eq!(std::fs::read(vault::header_path(dir.path())).unwrap(), before);
+}

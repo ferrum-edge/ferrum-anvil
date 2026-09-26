@@ -29,7 +29,7 @@ journal, and blobs for known secret and body values.
 | Protection | How the data key is obtained |
 |---|---|
 | Passphrase | Argon2id(passphrase, salt, parameters in the header) unwraps the data key |
-| Recovery key | A random recovery key (shown once at creation of a passphrase profile) unwraps a second copy of the data key |
+| Recovery key | A random recovery key (shown once at creation of a passphrase profile, or when a keychain profile is converted to a passphrase) unwraps a second copy of the data key |
 | OS keychain | The data key is stored in the platform credential store: the macOS Keychain, the Windows Credential Manager (per user, "local machine" persistence, so it does not roam with domain profiles), or the freedesktop Secret Service on Linux and the BSDs (GNOME Keyring, KWallet). There is no in-memory fallback. `crates/anvil-storage/tests/os_keychain.rs` round-trips a real entry on all three in CI. This is the first-run default ("Start now — no password"): at launch a single keychain profile opens without any input, but never after a manual, idle or sleep lock. Where no credential store exists (e.g. Linux without a Secret Service) the app falls back to a passphrase; it never stores data unencrypted. A keychain profile has no recovery key: if the keychain item is lost, only a portable backup restores the data |
 
 The backend accepts only the unlock methods of the profile's protection mode
@@ -41,14 +41,20 @@ passphrase* converts an unlocked keychain profile to passphrase protection
 (*Change unlock passphrase* is for passphrase profiles only). The data key is
 not changed, so nothing is re-encrypted. In order:
 
-1. The header is rewritten atomically (synced temporary file, rename, synced
-   directory) with the passphrase wrap, a wrap for a **new recovery key**
-   (shown once) and the passphrase mode. From here on the keychain no longer
-   opens the profile.
+1. The header is rewritten atomically with the passphrase wrap, a wrap for a
+   **new recovery key** (shown once) and the passphrase mode: a synced
+   temporary file is renamed over the header, then the directory is flushed
+   (`fsync` on macOS, Linux and the BSDs; `FlushFileBuffers` on a directory
+   handle on Windows). The directory flush is best effort: a file system that
+   refuses it (some FUSE and SMB mounts) is logged, not treated as a failure,
+   because the new header is already in place. From here on the keychain no
+   longer opens the profile.
 2. The keychain entry is removed and its account name dropped from the header.
    If the credential store refuses, or the app stops between the two steps,
-   the header keeps the account name and removal is retried after the next
-   successful unlock. An entry that holds a different key is left alone.
+   the header keeps the account name, and until the old entry is removed the
+   removal is retried after each successful unlock. The retry edits the
+   header as it is on disk at that moment, so a passphrase changed meanwhile
+   is kept. An entry that holds a different key is left alone.
 
 `crates/anvil-storage/tests/keychain_conversion.rs` and
 `crates/anvil-app/tests/keychain_conversion.rs` cover this with keyring-core's
