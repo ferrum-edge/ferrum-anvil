@@ -10,6 +10,10 @@ use anvil_domain::outcome::{ProtocolStatus, TransportState};
 pub struct Observed<'a> {
     pub response: Option<&'a ResponseRecord>,
     pub body: &'a [u8],
+    /// Why the body is not the complete decoded content (a truncated or
+    /// failed content decoding). Assertions that read the body are then not
+    /// evaluated rather than judged against a prefix or still-encoded bytes.
+    pub body_unavailable: Option<&'a str>,
     pub latency_ms: Option<u64>,
     pub protocol_status: &'a ProtocolStatus,
     pub stream: Option<&'a StreamTranscript>,
@@ -106,11 +110,25 @@ pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
     Ok(nodes.first().map(|n| n.descendants().filter(|d| d.is_text()).map(|d| d.text().unwrap_or("")).collect::<String>()))
 }
 
+fn reads_body(k: &AssertionKind) -> bool {
+    use AssertionKind as K;
+    matches!(k, K::JsonPath { .. } | K::XPath { .. } | K::JsonSchema { .. } | K::Body { .. })
+}
+
+fn not_fully_decoded(reason: &str) -> String {
+    format!("the response body was not fully decoded ({reason})")
+}
+
 pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor) -> Vec<AssertionResult> {
     let mut out = Vec::new();
     for a in assertions.iter().filter(|a| a.enabled) {
         let label = if a.label.is_empty() { default_label(&a.kind) } else { a.label.clone() };
         let res: Result<(bool, Option<String>), String> = (|| {
+            if let Some(reason) = o.body_unavailable
+                && reads_body(&a.kind)
+            {
+                return Err(not_fully_decoded(reason));
+            }
             Ok(match &a.kind {
                 AssertionKind::Status { comparison, value } => {
                     let s = o.response.map(|r| r.status.to_string());
@@ -200,11 +218,23 @@ fn default_label(k: &AssertionKind) -> String {
     }
 }
 
-/// Run extractions; returns (variable, value, sensitive).
-pub fn extract(extractions: &[Extraction], response: Option<&ResponseRecord>, body: &[u8]) -> Vec<Result<(String, String, bool), String>> {
+/// Run extractions; returns (variable, value, sensitive). With
+/// `body_unavailable` set, extractions that read the body fail instead of
+/// matching against a prefix or still-encoded bytes.
+pub fn extract(
+    extractions: &[Extraction],
+    response: Option<&ResponseRecord>,
+    body: &[u8],
+    body_unavailable: Option<&str>,
+) -> Vec<Result<(String, String, bool), String>> {
     extractions
         .iter()
         .map(|e| {
+            if let Some(reason) = body_unavailable
+                && matches!(e.source, ExtractionSource::JsonPath { .. } | ExtractionSource::XPath { .. } | ExtractionSource::Regex { .. })
+            {
+                return Err(format!("extraction for '{}' was not run: {}", e.variable, not_fully_decoded(reason)));
+            }
             let v = match &e.source {
                 ExtractionSource::JsonPath { path } => json_path(body, path)?,
                 ExtractionSource::XPath { path } => xpath(body, path)?,

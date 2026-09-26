@@ -122,6 +122,9 @@ impl RunSecrets {
             if let Some(reason) = &mut resp.reason {
                 *reason = red.text(reason);
             }
+            if let Some(d) = &mut resp.body.decoding_detail {
+                *d = red.text(d);
+            }
         }
         if let Some(st) = &mut r.stream {
             for m in &mut st.messages {

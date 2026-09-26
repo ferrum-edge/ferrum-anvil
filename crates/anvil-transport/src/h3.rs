@@ -1331,6 +1331,8 @@ impl H3Transport {
                 content_type,
                 content_encoding,
                 decoded_bytes: None,
+                decoding: None,
+                decoding_detail: None,
                 blob_sha256: if captured.is_empty() { None } else { Some(crate::certs::sha256_hex(&captured)) },
             },
         };

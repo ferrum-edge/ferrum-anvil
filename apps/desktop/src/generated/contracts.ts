@@ -543,6 +543,15 @@ export type EarlyDataNotUsed =
  */
 export type BodyCompleteness = "complete" | "incomplete" | "canceled" | "stopped_at_local_limit" | "no_body";
 /**
+ * Outcome of removing the response's content-coding for display,
+ * assertions and extraction. Independent of the body completeness, which
+ * describes the raw bytes on the wire.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ContentDecoding".
+ */
+export type ContentDecoding = "complete" | "truncated_at_limit" | "unsupported" | "failed";
+/**
  * Transport completion, independent of HTTP/RPC status.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -2536,6 +2545,15 @@ export interface BodyCapture {
   content_type?: string | null;
   content_encoding?: string | null;
   decoded_bytes?: number | null;
+  /**
+   * Outcome of content decoding. Absent when the body has no content-coding
+   * or automatic decompression is off.
+   */
+  decoding?: ContentDecoding | null;
+  /**
+   * Why content decoding did not complete.
+   */
+  decoding_detail?: string | null;
   /**
    * Content-addressed id of the stored raw (captured) bytes.
    */

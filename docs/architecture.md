@@ -76,6 +76,11 @@ CLI (`anvil`) = same anvil-app services without a webview.
 4. **Assemble the record.** The engine combines attempts (redirects and safe
    retries) into one redacted `ExecutionRecord` with three separate
    dimensions: transport completion, application status and assertions.
+   Content decoding is recorded separately from wire completeness
+   (`response.body.decoding`): when it stops at `max_decoded_bytes`, the
+   coding is unsupported or the bytes do not decode, a `partial_visibility`
+   warning says so, body assertions and extractions are not evaluated, and
+   a response below HTTP 400 gets the application status `not_evaluated`.
 5. **Diagnose.** `anvil-diagnostics` turns the typed evidence into
    findings. It uses Ferrum markers only for destinations declared as Ferrum
    gateways, caps their confidence (see `docs/diagnostics.md`), and orders

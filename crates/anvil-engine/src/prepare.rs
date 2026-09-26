@@ -169,6 +169,9 @@ pub fn prepare_http(
     for (i, p) in spec.params.iter().enumerate().filter(|(_, p)| p.enabled) {
         let k = r.resolve(&p.name, &format!("params[{i}].name"))?;
         let v = r.resolve(&p.value, &format!("params[{i}].value"))?;
+        if p.sensitive {
+            r.mark_sensitive(&k, &v);
+        }
         extra_query.push(format!("{}={}", encode_component(&k), encode_component(&v)));
     }
     if !extra_query.is_empty() {
@@ -180,6 +183,9 @@ pub fn prepare_http(
     for (i, h) in spec.headers.iter().enumerate().filter(|(_, h)| h.enabled) {
         let n = r.resolve(h.name.trim(), &format!("headers[{i}].name"))?;
         let v = r.resolve(&h.value, &format!("headers[{i}].value"))?;
+        if h.sensitive {
+            r.mark_sensitive(&n, &v);
+        }
         if http::HeaderName::from_bytes(n.as_bytes()).is_err() {
             return Err(local(FailureKind::InvalidHeader, format!("'{n}' is not a valid header name"), &format!("headers[{i}].name")));
         }
@@ -220,6 +226,9 @@ pub fn prepare_http(
             for (i, f) in fields.iter().enumerate().filter(|(_, f)| f.enabled) {
                 let k = r.resolve(&f.name, &format!("body.fields[{i}].name"))?;
                 let v = r.resolve(&f.value, &format!("body.fields[{i}].value"))?;
+                if f.sensitive {
+                    r.mark_sensitive(&k, &v);
+                }
                 parts.push(format!(
                     "{}={}",
                     url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(),
