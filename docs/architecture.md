@@ -31,6 +31,13 @@ CLI (`anvil`) = same anvil-app services without a webview.
   key, clears token caches, pooled connections and TLS/QUIC session tickets,
   cancels executions and sessions, and stops load workers. The lock screen is
   only a view of that state.
+- **A session open is cancelable from its first moment.** `session_open`
+  registers its cancellation token before it reads the profile or builds the
+  request, so a cancel or lock that lands while it connects stops it. A session is published to the open sessions
+  before its pending token is retired, so a concurrent cancel always finds one
+  of the two; a cancel that lands in between aborts the new session. The
+  pending token is removed on every path, a panic included
+  (`state::PendingEntry`, also used by `send_request`).
 - **File commands never take a path from the webview.** The backend shows
   the native open or save dialog itself (`file_choose`), keeps the chosen
   path and returns an opaque grant bound to one purpose (bundle import or
