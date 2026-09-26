@@ -1,7 +1,6 @@
 // Request editor. Edits a draft RequestDefinition; nothing here performs I/O
 // except explicit lint/preview calls to the Rust backend.
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api, type EffectiveRequest, type LintResult } from "./api";
 import type {
   Assertion,
@@ -271,9 +270,9 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
   const b = (spec.body ?? { type: "none" }) as Body;
   const setBody = (body: Body) => set({ body });
   const pickBinary = async () => {
-    const path = await open({ multiple: false, directory: false });
-    if (typeof path !== "string") return;
-    const attachment = await api.attachmentAdd(path, null);
+    const file = await api.chooseFile("attachment");
+    if (!file) return;
+    const attachment = await api.attachmentAdd(file.token, null);
     setBody({ type: "binary", attachment, content_type: "application/octet-stream" });
   };
   return (
@@ -461,9 +460,9 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
         <button
           className="btn small"
           onClick={async () => {
-            const path = await open({ multiple: false, directory: false });
-            if (typeof path !== "string") return;
-            const attachment = await api.attachmentAdd(path, null);
+            const file = await api.chooseFile("attachment");
+            if (!file) return;
+            const attachment = await api.attachmentAdd(file.token, null);
             const name = attachment.kind === "stored" ? attachment.file_name : "file";
             onChange([...parts, { name: "file", part_kind: "file", attachment, file_name: name, enabled: true }]);
           }}
@@ -588,10 +587,9 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
             onChange={async (e) => {
               if (e.target.value === "reflection") set({ grpc: { ...g, schema: { kind: "reflection" } } });
               else {
-                const path = await open({ multiple: e.target.value === "proto_files", directory: false });
-                const paths = typeof path === "string" ? [path] : Array.isArray(path) ? path : [];
-                if (paths.length === 0) return;
-                const refs = await Promise.all(paths.map((x) => api.attachmentAdd(x, null)));
+                const files = await api.chooseFiles("attachment", { multiple: e.target.value === "proto_files" });
+                if (files.length === 0) return;
+                const refs = await Promise.all(files.map((f) => api.attachmentAdd(f.token, null)));
                 set({ grpc: { ...g, schema: e.target.value === "proto_files" ? { kind: "proto_files", files: refs } : { kind: "descriptor_set", attachment: refs[0] } } });
               }
             }}
@@ -762,6 +760,10 @@ const ASSERTION_TYPES: { id: Assertion["type"]; label: string }[] = [
   { id: "diagnostic", label: "Diagnostic finding" },
   { id: "transport", label: "Transport state" },
 ];
+
+/** Tooltip for XPath fields; the engine rejects anything outside this subset. */
+const XPATH_HELP = "XPath subset: /a/b (child), //b (descendant), * (any element), [n] (n-th matching child, from 1), final @attr or text() (//@attr and //text() search the whole document). Names match local names; namespace prefixes are ignored. Other predicates, axes, functions and spaces between steps are errors. See docs/runner.md.";
+
 const COMPARISONS: Comparison[] = ["equals", "not_equals", "contains", "not_contains", "matches", "exists", "not_exists", "less_than", "greater_than"];
 
 function assertionDefault(t: Assertion["type"]): Assertion {
@@ -845,7 +847,7 @@ function TestsEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Reques
               <option value="regex">Regex</option>
               <option value="status">Status</option>
             </select>
-            {(x.from === "json_path" || x.from === "x_path") && <input className="field mono grow" value={x.path} onChange={(e) => setE(i, { ...x, path: e.target.value })} />}
+            {(x.from === "json_path" || x.from === "x_path") && <input className="field mono grow" title={x.from === "x_path" ? XPATH_HELP : undefined} value={x.path} onChange={(e) => setE(i, { ...x, path: e.target.value })} />}
             {x.from === "header" && <input className="field mono grow" value={x.name} onChange={(e) => setE(i, { ...x, name: e.target.value })} />}
             {x.from === "regex" && <input className="field mono grow" value={x.pattern} onChange={(e) => setE(i, { ...x, pattern: e.target.value })} />}
             <label className="check">
@@ -876,7 +878,7 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
       ))}
     </select>
   );
-  const val = (v: string | undefined, cb: (v: string) => void, ph = "value") => <input className="field mono grow" placeholder={ph} value={v ?? ""} onChange={(e) => cb(e.target.value)} />;
+  const val = (v: string | undefined, cb: (v: string) => void, ph = "value", title?: string) => <input className="field mono grow" placeholder={ph} title={title} value={v ?? ""} onChange={(e) => cb(e.target.value)} />;
   switch (a.type) {
     case "status":
       return (
@@ -900,7 +902,7 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
     case "x_path":
       return (
         <>
-          {val(a.path, (path) => onChange({ ...a, path }), "path")}
+          {val(a.path, (path) => onChange({ ...a, path }), "path", a.type === "x_path" ? XPATH_HELP : undefined)}
           {cmp(a.comparison, (comparison) => onChange({ ...a, comparison }))}
           {val(a.value, (value) => onChange({ ...a, value }))}
         </>

@@ -10,6 +10,11 @@ use anvil_domain::outcome::{ProtocolStatus, TransportState};
 pub struct Observed<'a> {
     pub response: Option<&'a ResponseRecord>,
     pub body: &'a [u8],
+    /// Why the body is not the complete decoded content (a capture cut short,
+    /// or a truncated or failed content decoding). Assertions that read the
+    /// body are then not evaluated rather than judged against a prefix or
+    /// still-encoded bytes.
+    pub body_unavailable: Option<&'a str>,
     pub latency_ms: Option<u64>,
     pub protocol_status: &'a ProtocolStatus,
     pub stream: Option<&'a StreamTranscript>,
@@ -52,65 +57,201 @@ pub fn json_path(body: &[u8], path: &str) -> Result<Option<String>, String> {
     })
 }
 
-/// XPath subset over a DTD-free parse: `/a/b`, `//b`, `/a/b[2]`, `/a/@attr`,
-/// `.../text()`. Names match local names (namespace prefixes ignored).
-pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
-    let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8".to_string())?;
-    let doc = roxmltree::Document::parse_with_options(text, roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() })
-        .map_err(|e| format!("body is not XML: {e}"))?;
-    let mut nodes: Vec<roxmltree::Node> = vec![doc.root()];
+/// One location step of the supported XPath subset. `descendant` is true
+/// after `//` (descendant-or-self of the context, then the step).
+#[derive(Debug)]
+enum XStep<'a> {
+    /// Child elements by local name (`*` for any), optionally only the n-th
+    /// matching child of each parent (1-based).
+    Element { descendant: bool, name: &'a str, position: Option<usize> },
+    /// `@name`: the attribute of the selected elements. Last step only.
+    Attribute { descendant: bool, name: &'a str },
+    /// `text()`: the text-node children of the selected elements. Last step only.
+    Text { descendant: bool },
+}
+
+/// Parse the whole path up front: anything outside the subset is an error,
+/// never a step that silently selects more (or other) nodes.
+fn parse_xpath(path: &str) -> Result<Vec<XStep<'_>>, String> {
     let mut rest = path.trim();
     if !rest.starts_with('/') {
         return Err("XPath must start with / or //".into());
     }
+    let mut steps = Vec::new();
     while !rest.is_empty() {
+        if matches!(steps.last(), Some(XStep::Attribute { .. } | XStep::Text { .. })) {
+            return Err("XPath: @attribute and text() must be the last step".into());
+        }
         let descendant = rest.starts_with("//");
-        rest = rest.trim_start_matches('/');
-        let end = rest.find('/').unwrap_or(rest.len());
-        let step = &rest[..end];
-        rest = &rest[end..];
-        if step == "text()" {
-            let t: Vec<String> =
-                nodes.iter().map(|n| n.descendants().filter(|d| d.is_text()).map(|d| d.text().unwrap_or("")).collect::<String>()).collect();
-            return Ok(t.into_iter().next());
+        rest = &rest[if descendant { 2 } else { 1 }..];
+        let (step, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        rest = tail;
+        if step.is_empty() {
+            return Err(format!("XPath has an empty step in '{path}'"));
         }
-        if let Some(attr) = step.strip_prefix('@') {
-            return Ok(nodes.iter().find_map(|n| n.attributes().find(|a| a.name() == attr).map(|a| a.value().to_string())));
+        if step == "text()" || step.starts_with('@') {
+            if steps.is_empty() && !descendant {
+                return Err(format!("XPath step '/{step}' must follow an element step"));
+            }
+            steps.push(match step.strip_prefix('@') {
+                Some(attr) => XStep::Attribute { descendant, name: xpath_name(attr)? },
+                None => XStep::Text { descendant },
+            });
+            continue;
         }
-        let (name, index) = match step.split_once('[') {
-            Some((n, i)) => (n, i.trim_end_matches(']').parse::<usize>().ok()),
+        let (name, position) = match step.split_once('[') {
+            None if step.contains(']') => return Err(format!("XPath step '{step}' has an unbalanced ']'")),
             None => (step, None),
-        };
-        let mut next = Vec::new();
-        for n in &nodes {
-            let candidates: Vec<roxmltree::Node> = if descendant {
-                n.descendants().filter(|d| d.is_element()).collect()
-            } else {
-                n.children().filter(|d| d.is_element()).collect()
-            };
-            let matched: Vec<roxmltree::Node> = candidates.into_iter().filter(|c| name == "*" || c.tag_name().name() == name).collect();
-            match index {
-                Some(i) if i >= 1 => {
-                    if let Some(x) = matched.get(i - 1) {
-                        next.push(*x);
-                    }
+            Some((name, predicate)) => {
+                let Some(inner) = predicate.strip_suffix(']') else {
+                    return Err(format!("XPath step '{step}' has a malformed predicate (expected it to end with ']')"));
+                };
+                if inner.contains(['[', ']']) {
+                    return Err(format!("XPath step '{step}': only one predicate per step is supported"));
                 }
-                _ => next.extend(matched),
+                let inner = inner.trim();
+                if inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(format!("XPath predicate '[{inner}]' is not supported; only a position such as [1] or [2] is"));
+                }
+                let n: usize = inner.parse().map_err(|_| format!("XPath position [{inner}] is too large"))?;
+                if n == 0 {
+                    return Err("XPath positions start at 1; [0] never selects anything".into());
+                }
+                (name, Some(n))
+            }
+        };
+        let name = if name == "*" { name } else { xpath_name(name)? };
+        steps.push(XStep::Element { descendant, name, position });
+    }
+    Ok(steps)
+}
+
+/// A (possibly prefixed) XML name reduced to its local name; prefixes are
+/// ignored because the subset matches local names only.
+fn xpath_name(name: &str) -> Result<&str, String> {
+    let is_name = |s: &str| {
+        let mut chars = s.chars();
+        chars.next().is_some_and(|c| c.is_alphabetic() || c == '_') && chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    };
+    let local = match name.split_once(':') {
+        Some((prefix, local)) if is_name(prefix) => local,
+        Some(_) => "",
+        None => name,
+    };
+    if is_name(local) { Ok(local) } else { Err(format!("XPath step '{name}' is not supported")) }
+}
+
+/// The nodes a step starts from: the context itself, or after `//` every
+/// node below it too. `nodes` is in document order without duplicates, and
+/// so is the result.
+fn xpath_axis<'a, 'i>(nodes: &[roxmltree::Node<'a, 'i>], descendant: bool) -> Vec<roxmltree::Node<'a, 'i>> {
+    if !descendant {
+        return nodes.to_vec();
+    }
+    // A context inside an earlier context's subtree adds nothing; skipping it
+    // keeps nested contexts linear, and the disjoint subtrees stay in order.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for n in nodes {
+        if !seen.contains(n) {
+            for d in n.descendants() {
+                seen.insert(d);
+                out.push(d);
             }
         }
-        nodes = next;
-        if nodes.is_empty() {
-            return Ok(None);
+    }
+    out
+}
+
+/// The elements an element step selects below `nodes`, in document order
+/// without duplicates: each node has one parent, and the axis lists every
+/// parent once.
+fn xpath_elements<'a, 'i>(
+    nodes: &[roxmltree::Node<'a, 'i>],
+    descendant: bool,
+    name: &str,
+    position: Option<usize>,
+) -> Vec<roxmltree::Node<'a, 'i>> {
+    let mut next = Vec::new();
+    for parent in xpath_axis(nodes, descendant) {
+        let mut matched = parent.children().filter(|c| c.is_element() && (name == "*" || c.tag_name().name() == name));
+        match position {
+            Some(i) => next.extend(matched.nth(i - 1)),
+            None => next.extend(matched),
+        }
+    }
+    // Children of nested parents interleave.
+    next.sort();
+    next
+}
+
+/// XPath subset over a DTD-free parse, validated before the body is read:
+/// `/a/b`, `//b`, `/a/b[2]`, `/a/*`, `/a/@attr`, `//@attr`, `/a/text()`.
+/// Names match local names (namespace prefixes ignored). The result is the
+/// first selected node in document order: an element's full text, an
+/// attribute value or a text node. Any other syntax is an error.
+pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
+    let steps = parse_xpath(path)?;
+    let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8".to_string())?;
+    let doc = roxmltree::Document::parse_with_options(text, roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() })
+        .map_err(|e| format!("body is not XML: {e}"))?;
+    let mut nodes: Vec<roxmltree::Node> = vec![doc.root()];
+    for step in steps {
+        match step {
+            XStep::Text { descendant } => {
+                let first = xpath_axis(&nodes, descendant).into_iter().flat_map(|n| n.children()).filter(|c| c.is_text()).min();
+                return Ok(first.map(|t| t.text().unwrap_or("").to_string()));
+            }
+            XStep::Attribute { descendant, name } => {
+                let mut owners = xpath_axis(&nodes, descendant).into_iter();
+                return Ok(owners.find_map(|n| n.attributes().find(|a| a.name() == name).map(|a| a.value().to_string())));
+            }
+            XStep::Element { descendant, name, position } => {
+                nodes = xpath_elements(&nodes, descendant, name, position);
+                if nodes.is_empty() {
+                    return Ok(None);
+                }
+            }
         }
     }
     Ok(nodes.first().map(|n| n.descendants().filter(|d| d.is_text()).map(|d| d.text().unwrap_or("")).collect::<String>()))
 }
 
+/// Exhaustive so a new assertion kind has to decide whether it reads the body.
+fn reads_body(k: &AssertionKind) -> bool {
+    use AssertionKind as K;
+    match k {
+        K::JsonPath { .. } | K::XPath { .. } | K::JsonSchema { .. } | K::Body { .. } => true,
+        K::Status { .. }
+        | K::StatusIn { .. }
+        | K::Header { .. }
+        | K::Trailer { .. }
+        | K::LatencyMs { .. }
+        | K::GrpcStatus { .. }
+        | K::MessageCount { .. }
+        | K::Diagnostic { .. }
+        | K::Transport { .. } => false,
+    }
+}
+
+fn body_not_available(reason: &str) -> String {
+    format!("the complete response body is not available ({reason})")
+}
+
+/// Comparisons and validation use the original values; only the evidence a
+/// result carries (label, actual value, messages) is redacted, since results
+/// are persisted in the execution record and printed by the CLI.
 pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor) -> Vec<AssertionResult> {
     let mut out = Vec::new();
     for a in assertions.iter().filter(|a| a.enabled) {
         let label = if a.label.is_empty() { default_label(&a.kind) } else { a.label.clone() };
+        let label = redactor.text(&label);
         let res: Result<(bool, Option<String>), String> = (|| {
+            if let Some(reason) = o.body_unavailable
+                && reads_body(&a.kind)
+            {
+                return Err(body_not_available(reason));
+            }
             Ok(match &a.kind {
                 AssertionKind::Status { comparison, value } => {
                     let s = o.response.map(|r| r.status.to_string());
@@ -126,7 +267,7 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                 }
                 AssertionKind::Trailer { name, comparison, value } => {
                     let v = o.response.and_then(|r| r.trailer_values(name).first().map(|s| s.to_string()));
-                    (compare(*comparison, v.as_deref(), value)?, v)
+                    (compare(*comparison, v.as_deref(), value)?, v.map(|x| redactor.header(name, &x)))
                 }
                 AssertionKind::JsonPath { path, comparison, value } => {
                     let v = json_path(o.body, path)?;
@@ -142,7 +283,8 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                     let validator = jsonschema::validator_for(&schema).map_err(|e| format!("invalid schema: {e}"))?;
                     let errors: Vec<String> =
                         validator.iter_errors(&instance).take(5).map(|e| format!("{} at {}", e, e.instance_path())).collect();
-                    (errors.is_empty(), if errors.is_empty() { None } else { Some(errors.join("; ")) })
+                    // Validator messages quote the offending instance values.
+                    (errors.is_empty(), if errors.is_empty() { None } else { Some(redactor.text(&errors.join("; "))) })
                 }
                 AssertionKind::Body { comparison, value } => {
                     let text = String::from_utf8_lossy(o.body);
@@ -169,6 +311,8 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                 }
             })
         })();
+        // Evaluation errors can quote the body or the assertion's own values.
+        let res = res.map_err(|e| redactor.text(&e));
         match res {
             Ok((passed, actual)) => out.push(AssertionResult {
                 label: label.clone(),
@@ -200,22 +344,39 @@ fn default_label(k: &AssertionKind) -> String {
     }
 }
 
-/// Run extractions; returns (variable, value, sensitive).
-pub fn extract(extractions: &[Extraction], response: Option<&ResponseRecord>, body: &[u8]) -> Vec<Result<(String, String, bool), String>> {
+fn extraction_value(source: &ExtractionSource, response: Option<&ResponseRecord>, body: &[u8]) -> Result<Option<String>, String> {
+    Ok(match source {
+        ExtractionSource::JsonPath { path } => json_path(body, path)?,
+        ExtractionSource::XPath { path } => xpath(body, path)?,
+        ExtractionSource::Header { name } => response.and_then(|r| r.header_values(name).first().map(|s| s.to_string())),
+        ExtractionSource::Regex { pattern, group } => {
+            let re = regex::RegexBuilder::new(pattern).size_limit(1 << 20).build().map_err(|x| format!("invalid pattern: {x}"))?;
+            let text = String::from_utf8_lossy(body);
+            re.captures(&text).and_then(|c| c.get(*group)).map(|m| m.as_str().to_string())
+        }
+        ExtractionSource::Status => response.map(|r| r.status.to_string()),
+    })
+}
+
+/// Run extractions; returns (variable, value, sensitive). With
+/// `body_unavailable` set, extractions that read the body fail instead of
+/// matching against a prefix or still-encoded bytes.
+pub fn extract(
+    extractions: &[Extraction],
+    response: Option<&ResponseRecord>,
+    body: &[u8],
+    body_unavailable: Option<&str>,
+) -> Vec<Result<(String, String, bool), String>> {
     extractions
         .iter()
         .map(|e| {
-            let v = match &e.source {
-                ExtractionSource::JsonPath { path } => json_path(body, path)?,
-                ExtractionSource::XPath { path } => xpath(body, path)?,
-                ExtractionSource::Header { name } => response.and_then(|r| r.header_values(name).first().map(|s| s.to_string())),
-                ExtractionSource::Regex { pattern, group } => {
-                    let re = regex::RegexBuilder::new(pattern).size_limit(1 << 20).build().map_err(|x| format!("invalid pattern: {x}"))?;
-                    let text = String::from_utf8_lossy(body);
-                    re.captures(&text).and_then(|c| c.get(*group)).map(|m| m.as_str().to_string())
-                }
-                ExtractionSource::Status => response.map(|r| r.status.to_string()),
-            };
+            if let Some(reason) = body_unavailable
+                && matches!(e.source, ExtractionSource::JsonPath { .. } | ExtractionSource::XPath { .. } | ExtractionSource::Regex { .. })
+            {
+                return Err(format!("extraction for '{}' was not run: {}", e.variable, body_not_available(reason)));
+            }
+            // Name the variable: a run reports several extractions' errors together.
+            let v = extraction_value(&e.source, response, body).map_err(|x| format!("extraction for '{}': {x}", e.variable))?;
             v.map(|v| (e.variable.clone(), v, e.sensitive)).ok_or_else(|| format!("extraction for '{}' matched nothing", e.variable))
         })
         .collect()
@@ -234,5 +395,26 @@ mod tests {
         let xml = br#"<s:Envelope xmlns:s="x"><s:Body><r a="1"><v>one</v><v>two</v></r></s:Body></s:Envelope>"#;
         assert_eq!(xpath(xml, "//v[2]").unwrap().as_deref(), Some("two"));
         assert_eq!(xpath(xml, "/Envelope/Body/r/@a").unwrap().as_deref(), Some("1"));
+    }
+
+    /// The `id` attributes of the elements `path` (element steps only) selects.
+    fn selected_ids(xml: &str, path: &str) -> Vec<String> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut nodes = vec![doc.root()];
+        for step in parse_xpath(path).unwrap() {
+            let XStep::Element { descendant, name, position } = step else { panic!("{path}: element steps only") };
+            nodes = xpath_elements(&nodes, descendant, name, position);
+        }
+        nodes.iter().map(|n| n.attribute("id").unwrap_or("?").to_string()).collect()
+    }
+
+    #[test]
+    fn descendant_steps_select_each_element_once_in_document_order() {
+        let xml = r#"<r id="r"><a id="a1"><a id="a2"><b id="b1"/></a><b id="b2"><b id="b3"/></b></a><b id="b4"/></r>"#;
+        assert_eq!(selected_ids(xml, "//a//b"), ["b1", "b2", "b3"], "no element twice although a2 is inside a1");
+        assert_eq!(selected_ids(xml, "//a"), ["a1", "a2"]);
+        assert_eq!(selected_ids(xml, "//b"), ["b1", "b2", "b3", "b4"]);
+        // `//` below an element selects its descendants, never the element itself.
+        assert_eq!(selected_ids(r#"<b id="outer"><b id="inner"><b id="deepest"/></b></b>"#, "/b//b"), ["inner", "deepest"]);
     }
 }

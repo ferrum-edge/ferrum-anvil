@@ -38,6 +38,10 @@ cookie_store = "0.22.1"
 p12-keystore = "0.3.2"
 tracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# O_NONBLOCK and O_NOCTTY, so opening a token file never blocks or takes a controlling terminal.
+libc.workspace = true
+
 [dev-dependencies]
 anvil-fixtures = { path = "../anvil-fixtures" }
 chrono.workspace = true

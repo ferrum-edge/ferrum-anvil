@@ -1,8 +1,7 @@
 // Management dialogs: environments, connection profiles, export/import and
 // app settings. All persistence happens in Rust.
 import { useEffect, useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { api, type ExportPreview, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
+import { api, type ExportPreview, type FileGrant, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
 import type {
   AppSettings,
   ClientIdentity,
@@ -391,9 +390,9 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
       <button
         className="btn small start"
         onClick={async () => {
-          const path = await open({ multiple: false });
-          if (typeof path !== "string") return;
-          const r = await api.readTextFile(path, p.workspace_id, null);
+          const file = await api.chooseFile("pem_file");
+          if (!file) return;
+          const r = await api.readTextFile(file.token, p.workspace_id, null);
           if (r.text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), r.text] });
         }}
       >
@@ -499,9 +498,9 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
             <button
               className="btn small start"
               onClick={async () => {
-                const path = await open({ multiple: false });
-                if (typeof path !== "string") return;
-                const r = await api.readTextFile(path, p.workspace_id, null);
+                const file = await api.chooseFile("pem_file");
+                if (!file) return;
+                const r = await api.readTextFile(file.token, p.workspace_id, null);
                 if (r.text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: r.text } });
               }}
             >
@@ -532,7 +531,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
   );
 }
 
-function P12Picker(props: { workspaceId: string; onSecret: (v: { kind: "secret"; secret: { id: string; label: string } }) => void; current: string | null }) {
+function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "secret"; secret: { id: string; label: string } }) => void; current: string | null }) {
   const [err, setErr] = useState<string | null>(null);
   return (
     <div className="row">
@@ -544,14 +543,17 @@ function P12Picker(props: { workspaceId: string; onSecret: (v: { kind: "secret";
       )}
       <button
         className="btn small"
+        disabled={!props.workspaceId}
+        title={props.workspaceId ? undefined : "Open a workspace to keep values in its vault"}
         onClick={async () => {
+          const workspaceId = props.workspaceId;
+          if (!workspaceId) return;
           setErr(null);
-          const path = await open({ multiple: false, filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
-          if (typeof path !== "string") return;
           try {
+            const file = await api.chooseFile("pkcs12_file", { filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
+            if (!file) return;
             // The bundle goes straight into the vault as base64; only a reference returns.
-            const label = path.split(/[\\/]/).pop() ?? "client.p12";
-            const r = await api.readTextFile(path, props.workspaceId, label, true);
+            const r = await api.readTextFile(file.token, workspaceId, file.file_name || "client.p12", true);
             if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
           } catch (e) {
             setErr(String((e as Error).message));
@@ -746,12 +748,15 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
     setErr(null);
     if (encrypted && (pass.length < 8 || pass !== pass2)) return setErr("Enter the same passphrase twice (at least 8 characters).");
     const stamp = new Date().toISOString().slice(0, 10);
-    const path = await save({ defaultPath: `${scope === "all" ? "anvil-backup" : props.workspace!.name.replace(/[^\w.-]+/g, "_")}-${stamp}.anvil`, filters: [{ name: "Anvil bundle", extensions: ["anvil"] }] });
-    if (!path) return;
     setBusy(true);
     try {
-      const n = await api.exportToPath(wsId, effMode, encrypted ? pass : null, path);
-      props.notify(`Exported ${(n / 1024).toFixed(1)} KB to ${path}`);
+      const file = await api.chooseFile("bundle_export", {
+        file_name: `${scope === "all" ? "anvil-backup" : props.workspace!.name.replace(/[^\w.-]+/g, "_")}-${stamp}.anvil`,
+        filters: [{ name: "Anvil bundle", extensions: ["anvil"] }],
+      });
+      if (!file) return;
+      const n = await api.exportToPath(wsId, effMode, encrypted ? pass : null, file.token);
+      props.notify(`Exported ${(n / 1024).toFixed(1)} KB to ${file.file_name}`);
       props.onClose();
     } catch (e) {
       setErr(String((e as Error).message));
@@ -861,25 +866,43 @@ export function ImportDialog(props: {
   onSpecImported: (r: SpecImported) => void;
 }) {
   const [tab, setTab] = useState<"spec" | "bundle">("spec");
-  const [path, setPath] = useState<string | null>(null);
+  const [file, setFile] = useState<FileGrant | null>(null);
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
   const [preview, setPreview] = useState<ImportReport | null>(null);
+  // Set only after the preview named the existing workspaces the bundle or backup writes into.
+  const [intoExisting, setIntoExisting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const existing = preview?.plan.existing_workspaces ?? [];
+  // A full backup restores every item under its own id, so it has no copies to fall back on.
+  const backup = preview?.full_backup ?? false;
+  const noun = backup ? "backup" : "bundle";
+  const instead = backup ? "Use Merge instead." : "Import as copies instead.";
   const choose = async () => {
-    const p = await open({ multiple: false, filters: [{ name: "Anvil bundle", extensions: ["anvil", "zip"] }] });
-    if (typeof p === "string") {
-      setPath(p);
-      setPreview(null);
+    setErr(null);
+    try {
+      const f = await api.chooseFile("bundle_import", { filters: [{ name: "Anvil bundle", extensions: ["anvil", "zip"] }] });
+      if (f) {
+        setFile(f);
+        setPreview(null);
+        setIntoExisting(false);
+      }
+    } catch (e) {
+      setErr(String((e as Error).message));
     }
   };
   const doPreview = async () => {
-    if (!path) return;
+    if (!file) return;
     setErr(null);
     setBusy(true);
+    setIntoExisting(false);
     try {
-      setPreview(await api.importPreview(path, pass || null, policy));
+      const r = await api.importPreview(file.token, pass || null, policy);
+      // A full backup cannot be imported as copies; its preview comes back as
+      // Merge, and Import then uses that.
+      setPolicy(r.plan.policy);
+      setPreview(r);
     } catch (e) {
       setPreview(null);
       setErr(String((e as Error).message));
@@ -888,11 +911,14 @@ export function ImportDialog(props: {
     }
   };
   const apply = async () => {
-    if (!path) return;
+    if (!file) return;
     setBusy(true);
     setErr(null);
     try {
-      const r = await api.importApply(path, pass || null, policy);
+      if (!preview) return;
+      // Apply exactly what was previewed; the backend refuses any existing workspace not approved here.
+      const approved = intoExisting ? existing.map((w) => w.id) : [];
+      const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved);
       props.onImported(r.workspace_ids);
       props.onClose();
     } catch (e) {
@@ -909,10 +935,10 @@ export function ImportDialog(props: {
       footer={
         tab === "bundle" ? (
           <>
-            <button className="btn" disabled={!path || busy} onClick={doPreview}>
+            <button className="btn" disabled={!file || busy} onClick={doPreview}>
               Preview
             </button>
-            <button className="btn primary" disabled={!preview || busy} onClick={apply}>
+            <button className="btn primary" disabled={!preview || busy || (existing.length > 0 && !intoExisting)} onClick={apply}>
               <Icon name="download" size={14} />
               Import
             </button>
@@ -940,8 +966,8 @@ export function ImportDialog(props: {
           <Icon name="file" size={14} />
           Choose bundle…
         </button>
-        <span className={`path-chip grow${path ? "" : " none"}`} title={path ?? undefined}>
-          {path ?? "No file selected"}
+        <span className={`path-chip grow${file ? "" : " none"}`} title={file?.file_name}>
+          {file?.file_name ?? "No file selected"}
         </span>
       </div>
       <div className="fields">
@@ -951,14 +977,22 @@ export function ImportDialog(props: {
         </label>
         <label className="lbl grow">
           If objects already exist
-          <select className="field" value={policy} onChange={(e) => setPolicy(e.target.value)}>
+          <select
+            className="field"
+            value={policy}
+            onChange={(e) => {
+              setPolicy(e.target.value);
+              setPreview(null);
+              setIntoExisting(false);
+            }}
+          >
             <option value="duplicate">Import as copies (new ids)</option>
             <option value="merge">Merge (keep existing, add new)</option>
             <option value="replace">Replace existing</option>
           </select>
         </label>
       </div>
-      <p className="hint">Nothing is changed until you press Import. Imports never run requests, scripts or load plans, and never enable a TLS bypass. A checkpoint is taken first so the import can be rolled back.</p>
+      <p className="hint">Nothing is changed until you press Import. Imports never run requests, scripts or load plans, and never enable a TLS bypass. Objects are written in one transaction; a checkpoint copy is kept on disk.</p>
       {preview && (
         <div className="col">
           <table className="grid">
@@ -966,10 +1000,38 @@ export function ImportDialog(props: {
               <tr><td className="k">To create</td><td className="v">{preview.plan.to_create}</td></tr>
               <tr><td className="k">To replace</td><td className="v">{preview.plan.to_replace}</td></tr>
               <tr><td className="k">Skipped (already present)</td><td className="v">{preview.plan.skipped_existing}</td></tr>
-              <tr><td className="k">Secrets</td><td className="v">{preview.secrets_restored ? "restored from the encrypted bundle" : "not included"}</td></tr>
+              <tr><td className="k">Secrets</td><td className="v">{preview.secrets_restored ? `restored from the encrypted ${noun}` : "not included"}</td></tr>
             </tbody>
           </table>
           {preview.missing_secrets.length > 0 && <div className="warn-box">You'll need to fill in {preview.missing_secrets.length} placeholder(s): {preview.missing_secrets.slice(0, 8).join(", ")}</div>}
+          {existing.length > 0 && (
+            <div className="bad-box col">
+              <span>
+                This {noun} writes into your existing workspace{existing.length > 1 ? "s" : ""} {existing.map((w) => `'${w.name}'`).join(", ")}; {backup ? "restored" : "imported"} items can use
+                {existing.length > 1 ? " their" : " its"} vault secrets and send them wherever they point.{" "}
+                {preview.secrets_restored
+                  ? `Its passphrase only proves the ${noun} was not altered, not who made it.`
+                  : `This ${noun} is not encrypted, so nothing shows it was not altered or who made it.`}{" "}
+                {backup ? "Continue only if this backup is your own or you otherwise trust it." : "Import as copies unless you trust where this bundle came from."}
+              </span>
+              <label className="check">
+                <input type="checkbox" checked={intoExisting} onChange={(e) => setIntoExisting(e.target.checked)} />
+                I trust this {noun}: write into {existing.length > 1 ? "these workspaces" : "this workspace"}
+              </label>
+            </div>
+          )}
+          {preview.plan.foreign_objects.length > 0 && preview.plan.policy === "replace" && (
+            <div className="bad-box">Replace can't overwrite objects that belong to another workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}. {instead}</div>
+          )}
+          {preview.plan.foreign_objects.length > 0 && preview.plan.policy === "merge" && (
+            <div className="warn-box">These objects already exist here in another workspace and stay there, unchanged. {backup ? "Restored" : "Imported"} items never use an object of another workspace, so those that refer to these won't find them until you point them at objects of their own workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}</div>
+          )}
+          {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "replace" && (
+            <div className="bad-box">Replace can't overwrite secrets that belong to {backup ? "another workspace, or to none" : "a workspace outside this bundle"}: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}. {instead}</div>
+          )}
+          {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "merge" && (
+            <div className="warn-box">These secrets already exist here in another workspace and are kept; the {backup ? "restored" : "imported"} items that use them won't resolve them: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}</div>
+          )}
           {preview.warnings.map((w, i) => (
             <div key={i} className="warn-box">
               {w}
@@ -1109,19 +1171,30 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
 
 function ChangePassphrase() {
   const [open, setOpen] = useState(false);
+  const [keychain, setKeychain] = useState(false);
   const [a, setA] = useState("");
   const [b, setB] = useState("");
+  const [recovery, setRecovery] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    api.status().then((st) => setKeychain(st.protection === "os_keychain")).catch(() => {});
+  }, []);
+  const title = keychain ? "Require an unlock passphrase" : "Change unlock passphrase";
   if (!open)
     return (
       <button className="btn small start" onClick={() => setOpen(true)}>
         <Icon name="key" size={14} />
-        Change unlock passphrase…
+        {title}…
       </button>
     );
   return (
     <fieldset className="box">
-      <legend>Change unlock passphrase</legend>
+      <legend>{title}</legend>
+      {keychain && (
+        <p className="hint">
+          This profile is opened by the OS keychain. With a passphrase, only the passphrase or a new recovery key opens it, and its key is removed from the OS keychain.
+        </p>
+      )}
       <div className="row nowrap">
         <input className="field grow" type="password" aria-label="New passphrase" placeholder="new passphrase" value={a} onChange={(e) => setA(e.target.value)} autoComplete="new-password" />
         <input className="field grow" type="password" aria-label="Repeat passphrase" placeholder="repeat" value={b} onChange={(e) => setB(e.target.value)} autoComplete="new-password" />
@@ -1130,10 +1203,21 @@ function ChangePassphrase() {
           onClick={async () => {
             if (a.length < 8 || a !== b) return setMsg("Enter the same passphrase twice (at least 8 characters).");
             try {
-              await api.changePassphrase(a);
+              if (keychain) {
+                const r = await api.convertToPassphrase(a);
+                setKeychain(false);
+                setRecovery(r.recovery_key);
+                setMsg(
+                  r.keychain_entry_removed
+                    ? "Passphrase set. The OS keychain no longer opens this profile."
+                    : "Passphrase set. The OS keychain no longer opens this profile; its old entry could not be removed yet and will be removed at the next unlock.",
+                );
+              } else {
+                await api.changePassphrase(a);
+                setMsg("Passphrase changed. The recovery key still works.");
+              }
               setA("");
               setB("");
-              setMsg("Passphrase changed. The recovery key still works.");
             } catch (e) {
               setMsg(String((e as Error).message));
             }
@@ -1142,6 +1226,17 @@ function ChangePassphrase() {
           Save
         </button>
       </div>
+      {recovery && (
+        <>
+          <p className="hint">Your recovery key opens this profile if you forget the passphrase. It is shown once and is not stored anywhere. Keep it offline.</p>
+          <div className="recovery" aria-label="Recovery key">
+            {recovery}
+          </div>
+          <button className="btn small start" onClick={() => setRecovery(null)}>
+            I stored it safely
+          </button>
+        </>
+      )}
       {msg && <div className="hint">{msg}</div>}
     </fieldset>
   );

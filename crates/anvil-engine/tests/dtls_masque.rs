@@ -392,7 +392,7 @@ async fn a_tunnel_ending_during_the_handshake_fails_the_handshake_typed() {
     let p = proxy(H3Options::default()).await;
     let echo = dtls_echo(&pki().server, false).await;
     let e = Engine::new();
-    // The proxy resets the stream as soon as the tunnel is open.
+    // The proxy resets the stream as soon as the ClientHello is through the tunnel.
     let reset = "/.well-known/masque/udp/{target_host}/{target_port}/?reset_after_ms=0";
     let o = run(&e, &ctx(&echo.url(), &p, reset, MasqueDatagramMode::Auto, None)).await;
     let f = last(&o).failure.as_ref().unwrap();
@@ -401,7 +401,7 @@ async fn a_tunnel_ending_during_the_handshake_fails_the_handshake_typed() {
     finding(&o, "masque.tunnel_ended_abnormally");
     assert!(o.record.stream.is_none());
     assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
-    // A clean FIN as soon as the tunnel is open: the handshake cannot finish.
+    // A clean FIN right after the ClientHello: the handshake cannot finish.
     let fin = "/.well-known/masque/udp/{target_host}/{target_port}/?fin_after_ms=0";
     let o = run(&e, &ctx(&echo.url(), &p, fin, MasqueDatagramMode::Auto, None)).await;
     let f = last(&o).failure.as_ref().unwrap();

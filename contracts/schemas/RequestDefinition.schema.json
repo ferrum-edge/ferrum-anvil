@@ -961,7 +961,7 @@
           "default": "basic_header"
         },
         "token_cache_id": {
-          "description": "Where the acquired access token is cached (vault) — id of the token\ncache entry, managed by the engine.",
+          "description": "Token-cache identity: profiles with different ids never share a\ncached token. When unset, the app uses the id of the workspace,\nfolder or request that defines the profile.",
           "anyOf": [
             {
               "$ref": "#/$defs/Id"
@@ -1507,7 +1507,7 @@
           "maximum": 255
         },
         "forward_credentials_cross_origin": {
-          "description": "Forward `Authorization`/cookies/client identity to a different origin.\nOff by default; the target's own configuration applies otherwise.",
+          "description": "Forward the request's credentials to a different origin: auth, a manual\n`Cookie` header, credential or sensitive headers, headers holding a secret,\nand a 307/308 body holding a secret. Off by default. The TLS client\nidentity is never forwarded: only a TLS profile bound to the new origin\npresents one.",
           "type": "boolean"
         }
       },

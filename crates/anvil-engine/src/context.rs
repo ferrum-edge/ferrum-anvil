@@ -61,6 +61,11 @@ pub fn resolve_sensitive(v: &SensitiveValue, secrets: &dyn SecretResolver) -> Re
     }
 }
 
+/// Run and load-test note for a dataset whose rows a step under a sealed
+/// import root (`ExecutionContext::scope`) did not receive.
+pub const DATASET_SKIPPED_UNDER_IMPORT_ROOT: &str =
+    "Dataset rows were not applied to steps of an imported collection not opened to this workspace; open its import root to use them.";
+
 #[derive(Clone)]
 pub struct ExecutionContext {
     pub workspace_id: Option<Id>,
@@ -85,6 +90,12 @@ pub struct ExecutionContext {
     pub seed: Option<u64>,
     /// Extra names always treated as secrets by the redactor.
     pub redaction_names: Vec<String>,
+    /// The sealed import root this context was built under (an imported
+    /// collection's root folder not opened to its workspace), `None` for the
+    /// workspace's own scope. A run or load chain hands a step only the
+    /// run-local values of the same scope: values extracted by steps of that
+    /// scope and, for the workspace scope only, the dataset row.
+    pub scope: Option<Id>,
 }
 
 impl ExecutionContext {
@@ -110,6 +121,7 @@ impl ExecutionContext {
             send_anyway: false,
             seed: None,
             redaction_names: vec![],
+            scope: None,
         }
     }
 

@@ -758,6 +758,14 @@ impl AttemptObservation {
     }
 }
 
+/// Exchange time of a send: the sum of every attempt's duration (redirect
+/// hops, protocol fallback and retries included), or `None` when nothing was
+/// attempted. Latency assertions, the runner's `exchange_ms` and load latency
+/// all use this one definition.
+pub fn exchange_duration_us(attempts: &[AttemptObservation]) -> Option<u64> {
+    if attempts.is_empty() { None } else { Some(attempts.iter().map(|a| a.duration_us).sum()) }
+}
+
 /// Header entry (order and duplicates preserved).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HeaderEntry {
@@ -780,6 +788,29 @@ pub enum BodyCompleteness {
     NoBody,
 }
 
+/// Outcome of removing the response's content-coding for display,
+/// assertions and extraction. Independent of the body completeness, which
+/// describes the raw bytes on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentDecoding {
+    /// The whole body was decoded.
+    Complete,
+    /// Decoding stopped at the local `max_decoded_bytes` ceiling; the decoded body is only a prefix.
+    TruncatedAtLimit,
+    /// The content-coding is not supported; the body stays encoded.
+    Unsupported,
+    /// The encoded bytes could not be decoded; the body stays encoded.
+    Failed,
+}
+
+impl ContentDecoding {
+    /// True when the decoded body is the complete content.
+    pub fn is_complete(self) -> bool {
+        self == ContentDecoding::Complete
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BodyCapture {
     pub completeness: BodyCompleteness,
@@ -798,6 +829,13 @@ pub struct BodyCapture {
     pub content_encoding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoded_bytes: Option<u64>,
+    /// Outcome of content decoding. Absent when the body has no content-coding
+    /// or automatic decompression is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoding: Option<ContentDecoding>,
+    /// Why content decoding did not complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoding_detail: Option<String>,
     /// Content-addressed id of the stored raw (captured) bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_sha256: Option<String>,
@@ -863,6 +901,12 @@ pub struct StreamTranscript {
 }
 
 /// Summary of the prepared request as it was actually sent (redacted).
+///
+/// `method`, `url`, `headers`, the body fields, `content_type` and
+/// `auth_label` describe the original request as prepared; each attempt
+/// records what it sent to its own target. `tls_profile`, `proxy` and
+/// `tls_verification_enabled` describe the connection that produced the
+/// final response (the last redirect hop when redirects were followed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PreparedSummary {
     pub protocol: Protocol,
@@ -876,10 +920,18 @@ pub struct PreparedSummary {
     pub content_type: Option<String>,
     /// `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.
     pub auth_label: String,
+    /// TLS profile of the connection that produced the final response (the last redirect
+    /// hop when redirects were followed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_profile: Option<String>,
+    /// Proxy route of the connection that produced the final response (the last redirect
+    /// hop when redirects were followed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Whether TLS verification was on for the connection that produced the
+    /// final response (the last redirect hop when redirects were followed).
+    /// `true` when that connection was plain HTTP: verification was not
+    /// turned off, there was no TLS to verify.
     pub tls_verification_enabled: bool,
     pub settings: EffectiveSettings,
     /// Headers Anvil added or inferred, and why.

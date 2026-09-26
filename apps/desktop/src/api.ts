@@ -167,13 +167,28 @@ export interface ExportPreview {
   literals_moved: number;
 }
 export interface ImportReport {
-  plan: { policy: string; to_create: number; to_replace: number; skipped_existing: number; conflicts: string[] };
+  plan: {
+    policy: string;
+    to_create: number;
+    to_replace: number;
+    skipped_existing: number;
+    conflicts: string[];
+    foreign_secrets: string[];
+    /** Objects stored here in another workspace under the same id; Replace refuses the bundle while any is listed. */
+    foreign_objects: string[];
+    /** Workspaces stored here that the bundle or full backup writes into (Merge/Replace); applying needs each one approved. */
+    existing_workspaces: { id: string; name: string }[];
+  };
   warnings: string[];
   secrets_restored: boolean;
   missing_secrets: string[];
+  /** Linked local files the bundle names (`request 'Upload': /path`); each needs choosing on this device. */
+  linked_files: string[];
   checkpoint?: string | null;
   workspaces: string[];
   workspace_ids: string[];
+  /** A full backup (restored) rather than a bundle. */
+  full_backup: boolean;
 }
 export interface JwtInspection {
   header: unknown;
@@ -201,6 +216,46 @@ export class ApiError extends Error {
     super(message);
     this.locked = message === "LOCKED" || message === "NO_PROFILE";
   }
+}
+
+// ----------------------------------------------------------- native file dialogs
+// The backend shows the open/save dialog itself and keeps the chosen path; the
+// webview only gets an opaque grant for one purpose, which the file commands
+// accept instead of a path.
+export type FilePurpose =
+  | "bundle_import"
+  | "attachment"
+  | "pem_file"
+  | "pkcs12_file"
+  | "spec_source"
+  | "dataset"
+  | "bundle_export"
+  | "load_report_export"
+  | "run_report_export"
+  | "jwt_svid_file"
+  | "linked_file";
+export interface FileGrant {
+  token: string;
+  /** The chosen file's name without its folder, for display. */
+  file_name: string;
+  /** Only for `jwt_svid_file` and `linked_file`: the path the backend bound in the vault. */
+  path?: string;
+}
+/** A JWT-SVID token file bound on this device through the native dialog. */
+export interface TokenFileBinding {
+  id: string;
+  /** Canonical absolute path of the chosen file. */
+  path: string;
+  bound_at: string;
+}
+/** The saved request or dataset a linked local file is chosen for. */
+export type LinkedFileReferrer = { kind: "request"; id: string } | { kind: "dataset"; id: string };
+export interface FileDialogOptions {
+  /** Suggested name for a save dialog. */
+  file_name?: string;
+  filters?: { name: string; extensions: string[] }[];
+  /** Let the open dialog select several files (read purposes only). */
+  multiple?: boolean;
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -306,7 +361,7 @@ export interface LoadComparison {
 }
 
 // ----------------------------------------------------------- spec import
-export type SpecInput = { kind: "path"; path: string } | { kind: "text"; text: string; name: string };
+export type SpecInput = { kind: "file"; grant: string } | { kind: "text"; text: string; name: string };
 export interface ImportOptions {
   mode: "blank" | "sample";
   seed: number;
@@ -420,6 +475,8 @@ export const api = {
     call<void>("profile_unlock", { profileId, passphrase, recoveryKey }),
   lock: () => call<void>("app_lock"),
   changePassphrase: (newPassphrase: string) => call<void>("profile_change_passphrase", { newPassphrase }),
+  convertToPassphrase: (newPassphrase: string) =>
+    call<{ recovery_key: string; keychain_entry_removed: boolean }>("profile_convert_to_passphrase", { newPassphrase }),
   touch: () => call<void>("touch"),
 
   workspaces: () => call<Workspace[]>("workspaces_list"),
@@ -430,6 +487,8 @@ export const api = {
   createFolder: (workspaceId: string, parentId: string | null, name: string) => call<Folder>("folder_create", { workspaceId, parentId, name }),
   getFolder: (folderId: string) => call<Folder>("folder_get", { folderId }),
   saveFolder: (folder: Folder) => call<Folder>("folder_save", { folder }),
+  /** Let an imported collection's root folder also resolve the workspace's scope (an explicit user choice). */
+  setFolderWorkspaceScope: (folderId: string, allow: boolean) => call<Folder>("folder_set_workspace_scope", { folderId, allow }),
   moveFolder: (folderId: string, parentId: string | null, sortKey: number) => call<Folder>("folder_move", { folderId, parentId, sortKey }),
   deleteFolder: (folderId: string) => call<void>("folder_delete", { folderId }),
   createRequest: (workspaceId: string, folderId: string | null, name: string, spec?: RequestSpec) =>
@@ -444,9 +503,9 @@ export const api = {
   environments: (workspaceId: string) => call<Environment[]>("environments_list", { workspaceId }),
   saveEnvironment: (environment: Environment) => call<Environment>("environment_save", { environment }),
   deleteEnvironment: (environmentId: string) => call<void>("environment_delete", { environmentId }),
-  createSecret: (workspaceId: string | null, label: string, value: string) => call<SecretRef>("secret_create", { workspaceId, label, value }),
-  updateSecret: (secret: SecretRef, workspaceId: string | null, value: string) => call<void>("secret_update", { secret, workspaceId, value }),
-  generateDpopKey: (workspaceId: string | null, label: string) => call<{ secret: SecretRef; jkt: string }>("dpop_generate_key", { workspaceId, label }),
+  /** A secret always belongs to a workspace: only that workspace's requests resolve it. */
+  createSecret: (workspaceId: string, label: string, value: string) => call<SecretRef>("secret_create", { workspaceId, label, value }),
+  generateDpopKey: (workspaceId: string, label: string) => call<{ secret: SecretRef; jkt: string }>("dpop_generate_key", { workspaceId, label }),
 
   tlsProfiles: (workspaceId: string) => call<TlsProfile[]>("tls_profiles_list", { workspaceId }),
   saveTlsProfile: (profile: TlsProfile) => call<TlsProfile>("tls_profile_save", { profile }),
@@ -468,11 +527,25 @@ export const api = {
   workloadProbe: (endpoint: string, audience: string | null) => call<WorkloadProbe>("workload_probe", { endpoint, audience }),
 
   exportPreview: (workspaceId: string | null, exportMode: string) => call<ExportPreview>("export_preview", { workspaceId, exportMode }),
-  exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, path: string) =>
-    call<number>("export_to_path", { workspaceId, exportMode, passphrase, path }),
-  importPreview: (path: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { path, passphrase, conflictPolicy }),
-  importApply: (path: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_apply", { path, passphrase, conflictPolicy }),
-  attachmentAdd: (path: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { path, mediaType }),
+  /** Native open/save dialog for `purpose`; empty when the user cancels. */
+  chooseFiles: (purpose: FilePurpose, options: FileDialogOptions = {}) => call<FileGrant[]>("file_choose", { purpose, options }),
+  /** One file from the native open/save dialog for `purpose`; null when the user cancels. */
+  chooseFile: async (purpose: FilePurpose, options: FileDialogOptions = {}): Promise<FileGrant | null> =>
+    (await call<FileGrant[]>("file_choose", { purpose, options: { ...options, multiple: false } }))[0] ?? null,
+  /** Bind, in the native open dialog, the linked local file a saved request or dataset names; null when the user cancels. */
+  chooseLinkedFile: async (referrer: LinkedFileReferrer): Promise<FileGrant | null> =>
+    (await call<FileGrant[]>("file_choose", { purpose: "linked_file", options: { multiple: false }, referrer }))[0] ?? null,
+  /** JWT-SVID token files bound on this device, oldest first. */
+  tokenFiles: () => call<TokenFileBinding[]>("token_files_list"),
+  /** Stop reading a bound token file until it is chosen again. */
+  removeTokenFile: (bindingId: string) => call<void>("token_file_remove", { bindingId }),
+  exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
+    call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
+  importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),
+  /** `existingWorkspaces`: ids from the preview's `plan.existing_workspaces` the user confirmed writing into. */
+  importApply: (grant: string, passphrase: string | null, conflictPolicy: string, existingWorkspaces: string[] = []) =>
+    call<ImportReport>("import_apply", { grant, passphrase, conflictPolicy, approval: { existing_workspaces: existingWorkspaces } }),
+  attachmentAdd: (grant: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { grant, mediaType }),
 
   loadPlans: (workspaceId: string) => call<LoadPlan[]>("load_plans", { workspaceId }),
   saveLoadPlan: (plan: LoadPlan) => call<LoadPlan>("load_plan_save", { plan }),
@@ -484,11 +557,11 @@ export const api = {
   loadReports: (workspaceId: string) => call<LoadReportSummary[]>("load_reports", { workspaceId }),
   loadReport: (runId: string) => call<LoadReport>("load_report", { runId }),
   deleteLoadReport: (runId: string) => call<void>("load_report_delete", { runId }),
-  exportLoadReport: (runId: string, format: "json" | "csv" | "timeline_csv" | "html", path: string) => call<number>("load_report_export", { runId, format, path }),
+  exportLoadReport: (runId: string, format: "json" | "csv" | "timeline_csv" | "html", grant: string) => call<number>("load_report_export", { runId, format, grant }),
   compareLoadReports: (a: string, b: string) => call<LoadComparison>("load_compare", { a, b }),
   datasets: (workspaceId: string) => call<Dataset[]>("datasets_list", { workspaceId }),
-  addDataset: (workspaceId: string, path: string, name: string, sensitiveColumns: string[]) =>
-    call<Dataset>("dataset_add", { workspaceId, path, name, sensitiveColumns }),
+  addDataset: (workspaceId: string, grant: string, name: string, sensitiveColumns: string[]) =>
+    call<Dataset>("dataset_add", { workspaceId, grant, name, sensitiveColumns }),
 
   scenarios: (workspaceId: string) => call<Scenario[]>("scenarios_list", { workspaceId }),
   createScenario: (workspaceId: string, name: string, requestIds: string[]) => call<Scenario>("scenario_create", { workspaceId, name, requestIds }),
@@ -500,7 +573,7 @@ export const api = {
   runReports: (workspaceId: string) => call<RunReport[]>("run_reports", { workspaceId }),
   runReport: (runId: string) => call<RunReport>("run_report", { runId }),
   deleteRunReport: (runId: string) => call<void>("run_report_delete", { runId }),
-  exportRunReport: (runId: string, format: "json" | "junit" | "html", path: string) => call<number>("run_report_export", { runId, format, path }),
+  exportRunReport: (runId: string, format: "json" | "junit" | "html", grant: string) => call<number>("run_report_export", { runId, format, grant }),
 
   oauthSignIn: (input: SendInput, attempt: string) => call<ApiAuthorization>("oauth_sign_in", { input, attempt }),
   oauthCancel: (attempt: string) => call<boolean>("oauth_cancel", { attempt }),
@@ -514,8 +587,8 @@ export const api = {
 
   specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
   specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
-  readTextFile: (path: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
-    call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { path, workspaceId, storeAsSecret, base64 }),
+  readTextFile: (grant: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
+    call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { grant, workspaceId, storeAsSecret, base64 }),
 };
 
 export function onExecutionEvent(cb: (e: ExecutionEvent) => void): Promise<UnlistenFn> {

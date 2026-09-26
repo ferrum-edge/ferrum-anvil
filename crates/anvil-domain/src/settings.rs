@@ -66,8 +66,11 @@ impl Default for Timeouts {
 pub struct RedirectPolicy {
     pub follow: bool,
     pub max: u8,
-    /// Forward `Authorization`/cookies/client identity to a different origin.
-    /// Off by default; the target's own configuration applies otherwise.
+    /// Forward the request's credentials to a different origin: auth, a manual
+    /// `Cookie` header, credential or sensitive headers, headers holding a secret,
+    /// and a 307/308 body holding a secret. Off by default. The TLS client
+    /// identity is never forwarded: only a TLS profile bound to the new origin
+    /// presents one.
     pub forward_credentials_cross_origin: bool,
 }
 

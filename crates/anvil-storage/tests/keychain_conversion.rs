@@ -1,0 +1,173 @@
+//! Converting an OS-keychain profile to passphrase protection, against
+//! keyring-core's in-memory mock credential store. The mock is installed as
+//! the default store before any entry is created, so no real OS keychain is
+//! read or written.
+#![cfg(feature = "os-keychain")]
+
+use anvil_domain::workspace::ProtectionMode;
+use anvil_storage::KdfParams;
+use anvil_storage::vault::{self, VaultError};
+
+const SERVICE: &str = "com.ferrumedge.anvil";
+const PASS: &str = "new passphrase 123";
+
+fn mock_store() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap()));
+    let store = keyring_core::get_default_store().expect("a default store is installed");
+    assert!(store.as_any().is::<keyring_core::mock::Store>(), "tests must only use the mock credential store");
+}
+
+fn entry(account: &str) -> keyring_core::Entry {
+    keyring_core::Entry::new(SERVICE, account).unwrap()
+}
+
+/// Make the next operation on this mock entry fail, as a locked or
+/// unreachable credential store would.
+fn fail_next(account: &str) {
+    let e = entry(account);
+    let cred = e.as_any().downcast_ref::<keyring_core::mock::Cred>().unwrap();
+    cred.set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
+}
+
+#[test]
+fn converted_profile_unlocks_only_with_passphrase_or_recovery_key() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let old = created.header.clone();
+    let account = old.keychain_account.clone().unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+
+    let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    assert!(conv.keychain_entry_removed);
+
+    let h = vault::read_header(dir.path()).unwrap();
+    assert_eq!(h.protection, ProtectionMode::Passphrase);
+    assert!(h.keychain_account.is_none(), "the retired account name is forgotten");
+    assert!(h.recovery_wrap.is_some(), "a converted profile gets a recovery key");
+    assert_eq!(vault::unlock_with_passphrase(&h, PASS).unwrap().as_bytes(), created.dek.as_bytes());
+    assert_eq!(vault::unlock_with_recovery(&h, &conv.recovery_key).unwrap().as_bytes(), created.dek.as_bytes());
+    assert!(matches!(vault::unlock_with_passphrase(&h, "not the passphrase"), Err(VaultError::WrongSecret)));
+
+    // The keychain path is refused by mode, and the key is gone from the store.
+    assert!(matches!(vault::unlock_with_keychain(&h), Err(VaultError::WrongProtection(_))));
+    assert!(matches!(entry(&account).get_secret(), Err(keyring_core::Error::NoEntry)));
+    assert!(vault::unlock_with_keychain(&old).is_err(), "the pre-conversion header no longer unlocks either");
+
+    // Unlock methods follow the header's mode: a header claiming keychain
+    // mode does not accept the passphrase or recovery key.
+    let mut flipped = h.clone();
+    flipped.protection = ProtectionMode::OsKeychain;
+    assert!(matches!(vault::unlock_with_passphrase(&flipped, PASS), Err(VaultError::WrongProtection(_))));
+    assert!(matches!(vault::unlock_with_recovery(&flipped, &conv.recovery_key), Err(VaultError::WrongProtection(_))));
+}
+
+#[test]
+fn failed_entry_removal_still_refuses_keychain_unlock_and_is_retried() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+
+    fail_next(&account);
+    let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    assert!(!conv.keychain_entry_removed);
+
+    // The passphrase header was published before the store was touched.
+    let mut h = vault::read_header(dir.path()).unwrap();
+    assert_eq!(h.protection, ProtectionMode::Passphrase);
+    assert_eq!(h.keychain_account.as_deref(), Some(account.as_str()), "kept so removal can be retried");
+    assert!(entry(&account).get_secret().is_ok(), "the store refused, so the entry is still there");
+    assert!(matches!(vault::unlock_with_keychain(&h), Err(VaultError::WrongProtection(_))));
+    assert!(vault::unlock_with_passphrase(&h, PASS).is_ok());
+
+    vault::retire_keychain_entry(dir.path(), &mut h).unwrap();
+    assert!(matches!(entry(&account).get_secret(), Err(keyring_core::Error::NoEntry)));
+    assert!(vault::read_header(dir.path()).unwrap().keychain_account.is_none());
+    // Nothing left to do.
+    vault::retire_keychain_entry(dir.path(), &mut h).unwrap();
+}
+
+#[test]
+fn modes_are_not_crossed_by_passphrase_operations() {
+    mock_store();
+    let kc_dir = tempfile::tempdir().unwrap();
+    let kc = vault::create_keychain_profile(kc_dir.path(), "local").unwrap();
+    let mut h = vault::read_header(kc_dir.path()).unwrap();
+    let r = vault::change_passphrase(kc_dir.path(), &mut h, &kc.dek, PASS, KdfParams::testing());
+    assert!(matches!(r, Err(VaultError::WrongProtection(_))));
+    let h = vault::read_header(kc_dir.path()).unwrap();
+    assert_eq!(h.protection, ProtectionMode::OsKeychain);
+    assert!(h.passphrase_wrap.is_none());
+    assert_eq!(vault::unlock_with_keychain(&h).unwrap().as_bytes(), kc.dek.as_bytes());
+    // Keychain profiles never have their entry retired.
+    let mut still_keychain = h.clone();
+    assert!(vault::retire_keychain_entry(kc_dir.path(), &mut still_keychain).is_err());
+    assert!(vault::unlock_with_keychain(&h).is_ok());
+
+    let pw_dir = tempfile::tempdir().unwrap();
+    let pw = vault::create_passphrase_profile(pw_dir.path(), "pw", "old passphrase 1", KdfParams::testing()).unwrap();
+    let mut h = vault::read_header(pw_dir.path()).unwrap();
+    let r = vault::convert_keychain_to_passphrase(pw_dir.path(), &mut h, &pw.dek, PASS, KdfParams::testing());
+    assert!(matches!(r, Err(VaultError::WrongProtection(_))));
+    assert!(vault::unlock_with_passphrase(&vault::read_header(pw_dir.path()).unwrap(), "old passphrase 1").is_ok());
+
+    // A key that is not this profile's is never wrapped.
+    let mut h = vault::read_header(kc_dir.path()).unwrap();
+    let r = vault::convert_keychain_to_passphrase(kc_dir.path(), &mut h, &pw.dek, PASS, KdfParams::testing());
+    assert!(matches!(r, Err(VaultError::WrongSecret)));
+    assert_eq!(vault::read_header(kc_dir.path()).unwrap().protection, ProtectionMode::OsKeychain);
+}
+
+#[test]
+fn retiring_never_deletes_another_profiles_entry() {
+    mock_store();
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = vault::create_keychain_profile(other_dir.path(), "other").unwrap();
+    let other_account = other.header.keychain_account.clone().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    vault::create_passphrase_profile(dir.path(), "pw", PASS, KdfParams::testing()).unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+    h.keychain_account = Some(other_account.clone());
+    vault::write_header(dir.path(), &h).unwrap();
+
+    vault::retire_keychain_entry(dir.path(), &mut h).unwrap();
+    assert!(vault::read_header(dir.path()).unwrap().keychain_account.is_none());
+    let other_h = vault::read_header(other_dir.path()).unwrap();
+    assert_eq!(vault::unlock_with_keychain(&other_h).unwrap().as_bytes(), other.dek.as_bytes());
+}
+
+#[test]
+fn retry_with_a_stale_header_keeps_a_newer_passphrase() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+    fail_next(&account);
+    let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    assert!(!conv.keychain_entry_removed);
+
+    // An unlock read this header, then another process changed the passphrase
+    // before the unlock retried the removal.
+    let mut stale = vault::read_header(dir.path()).unwrap();
+    let mut other = stale.clone();
+    vault::change_passphrase(dir.path(), &mut other, &created.dek, "changed elsewhere 1", KdfParams::testing()).unwrap();
+
+    vault::retire_keychain_entry(dir.path(), &mut stale).unwrap();
+    assert!(matches!(entry(&account).get_secret(), Err(keyring_core::Error::NoEntry)));
+    let h = vault::read_header(dir.path()).unwrap();
+    assert!(h.keychain_account.is_none());
+    assert!(vault::unlock_with_passphrase(&h, "changed elsewhere 1").is_ok(), "the newer passphrase is kept");
+    assert!(matches!(vault::unlock_with_passphrase(&h, PASS), Err(VaultError::WrongSecret)));
+
+    // A header that no longer names the account is left untouched.
+    let mut named = h.clone();
+    named.keychain_account = Some(account.clone());
+    let before = std::fs::read(vault::header_path(dir.path())).unwrap();
+    vault::retire_keychain_entry(dir.path(), &mut named).unwrap();
+    assert_eq!(std::fs::read(vault::header_path(dir.path())).unwrap(), before);
+}

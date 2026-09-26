@@ -3,13 +3,13 @@
 // measures one load unit (HTTP requests, gRPC calls or streams, SSE streams,
 // WebSocket sessions, TCP or UDP/DTLS exchanges); the editor shows which one,
 // or the typed refusal, before anything can run (LOAD-013).
-import { useEffect, useMemo, useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   onLoadFinished,
   onLoadProgress,
   type Dataset,
+  type FileGrant,
   type LoadComparison,
   type LoadPlan,
   type LoadPlanCheck,
@@ -137,7 +137,18 @@ function newPlan(workspaceId: string): LoadPlan {
 
 type Sel = { kind: "plan"; id: string } | { kind: "report"; id: string } | null;
 
-export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environments: Environment[]; notify: (m: string) => void }) {
+/**
+ * Stays mounted (only hidden) while another view is shown: the worker keeps
+ * running, and this view holds its only live progress and Stop control.
+ */
+export function LoadView(props: {
+  workspaceId: string;
+  tree: TreeNode[];
+  environments: Environment[];
+  notify: (m: string) => void;
+  hidden?: boolean;
+  onLiveChange?: (live: boolean) => void;
+}) {
   const [plans, setPlans] = useState<LoadPlan[]>([]);
   const [reports, setReports] = useState<LoadReportSummary[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -146,15 +157,27 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
   const [live, setLive] = useState<{ runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] } | null>(null);
   const requests = useMemo(() => flatten(props.tree), [props.tree]);
 
+  const wsRef = useRef(props.workspaceId);
+  wsRef.current = props.workspaceId;
+  /** The workspace's reports, or null when the workspace changed meanwhile. */
   const reload = async () => {
-    const [p, r, d] = await Promise.all([api.loadPlans(props.workspaceId), api.loadReports(props.workspaceId), api.datasets(props.workspaceId)]);
+    const w = props.workspaceId;
+    const [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
+    if (w !== wsRef.current) return null;
     setPlans(p);
     setReports(r);
     setDatasets(d);
+    return r;
   };
+  // The run listeners outlive renders: read the current workspace and callbacks.
+  const current = useRef({ reload, notify: props.notify });
+  current.current = { reload, notify: props.notify };
   useEffect(() => {
     void reload();
   }, [props.workspaceId]);
+  useEffect(() => {
+    props.onLiveChange?.(!!live);
+  }, [!!live]);
 
   useEffect(() => {
     const a = onLoadProgress((e) =>
@@ -167,8 +190,9 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
     );
     const b = onLoadFinished((e) => {
       setLive((l) => (l && l.runKey === e.run_key ? null : l));
-      if (e.error) props.notify(`Load run ended without a saved report: ${e.error}`);
-      void reload().then(() => e.run_id && setSel({ kind: "report", id: e.run_id }));
+      if (e.error) current.current.notify(`Load run ended without a saved report: ${e.error}`);
+      // A run started in another workspace saves its report there: do not select it here.
+      void current.current.reload().then((r) => e.run_id && r?.some((x) => x.run_id === e.run_id) && setSel({ kind: "report", id: e.run_id }));
     });
     return () => {
       void a.then((f) => f());
@@ -182,7 +206,7 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
   }, [sel, plans]);
 
   return (
-    <div className="main">
+    <div className="main" style={props.hidden ? { display: "none" } : undefined}>
       <aside className="sidebar" aria-label="Load plans and reports">
         <div className="side-body">
           <div className="side-section-head">
@@ -722,7 +746,7 @@ function Num(props: { label: string; value: number; onChange: (v: number) => voi
 }
 
 function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdded: (d: Dataset) => void }) {
-  const [path, setPath] = useState<string | null>(null);
+  const [file, setFile] = useState<FileGrant | null>(null);
   const [name, setName] = useState("");
   const [sensitive, setSensitive] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -733,10 +757,10 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
       footer={
         <button
           className="btn primary"
-          disabled={!path || !name.trim()}
+          disabled={!file || !name.trim()}
           onClick={async () => {
             try {
-              props.onAdded(await api.addDataset(props.workspaceId, path!, name.trim(), sensitive.split(",").map((s) => s.trim()).filter(Boolean)));
+              props.onAdded(await api.addDataset(props.workspaceId, file!.token, name.trim(), sensitive.split(",").map((s) => s.trim()).filter(Boolean)));
             } catch (e) {
               setErr(String((e as Error).message));
             }
@@ -751,18 +775,22 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
           className="btn"
           data-autofocus
           onClick={async () => {
-            const p = await open({ multiple: false, filters: [{ name: "CSV or JSON", extensions: ["csv", "json"] }] });
-            if (typeof p === "string") {
-              setPath(p);
-              if (!name) setName(p.split(/[\\/]/).pop() ?? "dataset");
+            try {
+              const f = await api.chooseFile("dataset", { filters: [{ name: "CSV or JSON", extensions: ["csv", "json"] }] });
+              if (f) {
+                setFile(f);
+                if (!name) setName(f.file_name);
+              }
+            } catch (e) {
+              setErr(String((e as Error).message));
             }
           }}
         >
           <Icon name="file" size={14} />
           Choose CSV/JSON…
         </button>
-        <span className={`path-chip grow${path ? "" : " none"}`} title={path ?? undefined}>
-          {path ?? "No file selected"}
+        <span className={`path-chip grow${file ? "" : " none"}`} title={file?.file_name}>
+          {file?.file_name ?? "No file selected"}
         </span>
       </div>
       <label className="lbl">
@@ -906,10 +934,12 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
   const [, many] = unitWords(r.protocol_metrics);
   const exportAs = async (format: "json" | "csv" | "timeline_csv" | "html") => {
     const ext = format === "html" ? "html" : format === "json" ? "json" : "csv";
-    const path = await save({ defaultPath: `anvil-load-${r.plan.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}` });
-    if (!path) return;
-    const n = await api.exportLoadReport(r.run_id, format, path);
-    props.notify(`Exported ${fmtBytes(n)} to ${path}`);
+    const file = await api.chooseFile("load_report_export", {
+      file_name: `anvil-load-${r.plan.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
+    });
+    if (!file) return;
+    const n = await api.exportLoadReport(r.run_id, format, file.token);
+    props.notify(`Exported ${fmtBytes(n)} to ${file.file_name}`);
   };
   return (
     <div className="page">

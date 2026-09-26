@@ -598,6 +598,8 @@ pub fn body_capture(completeness: BodyCompleteness, wire: u64, captured: &[u8], 
         content_type,
         content_encoding: None,
         decoded_bytes: None,
+        decoding: None,
+        decoding_detail: None,
         blob_sha256: if captured.is_empty() { None } else { Some(crate::certs::sha256_hex(captured)) },
     }
 }

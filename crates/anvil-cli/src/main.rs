@@ -19,6 +19,7 @@ mod specs_load;
 
 use anvil_app::App;
 use anvil_app::exec::SendOptions;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::diagnostics::{Confidence, Severity};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
@@ -110,6 +111,12 @@ enum Cmd {
         policy: Policy,
         #[arg(long)]
         dry_run: bool,
+        /// Write into this workspace stored here (repeatable). Merge and
+        /// Replace refuse a bundle or full backup that claims a stored
+        /// workspace unless it is named here; `--dry-run` lists them under
+        /// `plan.existing_workspaces`. Only for files you trust.
+        #[arg(long = "into-existing", value_name = "WORKSPACE_ID")]
+        into_existing: Vec<String>,
     },
     /// Decode a JWT locally (never verifies it).
     Jwt { token: String },
@@ -900,6 +907,29 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 Mode::Encrypted => ExportMode::EncryptedTransfer,
                 Mode::Backup => ExportMode::FullBackup,
             };
+            if matches!(m, ExportMode::FullBackup) {
+                if ws.is_some() {
+                    bail!("a full backup covers every workspace; drop --workspace or choose another --mode");
+                }
+                if *preview {
+                    println!("{}", serde_json::to_string_pretty(&app.backup_preview()?)?);
+                    return Ok(0);
+                }
+                let Some(pass) = std::env::var("ANVIL_EXPORT_PASSPHRASE").ok().map(Zeroizing::new) else {
+                    bail!("encrypted exports need ANVIL_EXPORT_PASSPHRASE (the recipient needs it to restore)");
+                };
+                let (bytes, p) = app.export_backup(&pass)?;
+                std::fs::write(out, &bytes)?;
+                println!(
+                    "wrote {} ({} bytes, encrypted): {} items, {} secrets, {} excluded",
+                    out.display(),
+                    bytes.len(),
+                    p.manifest.counts.values().sum::<usize>(),
+                    p.secrets_included,
+                    p.manifest.excluded.len()
+                );
+                return Ok(0);
+            }
             if *preview {
                 let p = app.export_preview(ws.as_ref(), m, false)?;
                 println!("{}", serde_json::to_string_pretty(&p)?);
@@ -924,7 +954,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Cmd::Import { file, policy, dry_run } => {
+        Cmd::Import { file, policy, dry_run, into_existing } => {
             let bytes = std::fs::read(file)?;
             let pass = std::env::var("ANVIL_EXPORT_PASSPHRASE").ok();
             let pol = match policy {
@@ -932,7 +962,17 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 Policy::Replace => ConflictPolicy::Replace,
                 Policy::Duplicate => ConflictPolicy::Duplicate,
             };
-            let rep = if *dry_run { app.import_preview(&bytes, pass.as_deref(), pol)? } else { app.import(&bytes, pass.as_deref(), pol)? };
+            let mut approval = ImportApproval::default();
+            for w in into_existing {
+                approval.existing_workspaces.push(w.parse().with_context(|| format!("invalid workspace id '{w}'"))?);
+            }
+            // A full backup is restored; anything else is imported as a bundle.
+            let rep = match (anvil_app::backup::is_backup(&bytes), *dry_run) {
+                (true, true) => app.restore_preview(&bytes, pass.as_deref(), pol)?,
+                (true, false) => app.restore_approved(&bytes, pass.as_deref(), pol, &approval)?,
+                (false, true) => app.import_preview(&bytes, pass.as_deref(), pol)?,
+                (false, false) => app.import_approved(&bytes, pass.as_deref(), pol, &approval)?,
+            };
             println!("{}", serde_json::to_string_pretty(&rep)?);
             Ok(0)
         }

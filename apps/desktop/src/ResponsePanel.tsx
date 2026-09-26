@@ -322,10 +322,20 @@ function Body({ view }: { view: ExecutionView }) {
       </div>
       {resp.body.display_truncated && (
         <div className="warn-box">
-          Showing the first {fmtBytes(resp.body.captured_bytes)} (display/history limit). The response itself {resp.body.completeness === "complete" ? "completed normally" : "did not complete"}.
+          Showing the first {fmtBytes(resp.body.captured_bytes)} (display/history limit). The response itself {resp.body.completeness === "complete" ? "completed normally" : "did not complete"}. Body assertions and extractions were not evaluated against this prefix.
         </div>
       )}
       {resp.body.completeness === "incomplete" && <div className="bad-box">This body is incomplete: the stream ended before its framing finished. Do not treat it as a full response.</div>}
+      {resp.body.decoding === "truncated_at_limit" && (
+        <div className="bad-box">
+          Only the first {fmtBytes(resp.body.decoded_bytes)} of the decoded body are shown: {resp.body.decoding_detail ?? "decoding stopped at the local decoded-size limit"}. Body assertions and extractions were not evaluated.
+        </div>
+      )}
+      {(resp.body.decoding === "unsupported" || resp.body.decoding === "failed") && (
+        <div className="bad-box">
+          The body could not be decoded{resp.body.decoding_detail ? ` (${resp.body.decoding_detail})` : ""}; showing the encoded bytes. Body assertions and extractions were not evaluated.
+        </div>
+      )}
       <pre className="code" aria-label="Response body">{text ?? ""}</pre>
     </div>
   );

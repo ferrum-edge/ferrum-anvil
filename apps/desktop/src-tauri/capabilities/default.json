@@ -1,12 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal capabilities: core events/window basics and native open/save dialogs only. No shell, no filesystem plugin, no HTTP plugin — all I/O goes through audited Rust commands.",
+  "description": "Minimal capabilities: core events/window basics and message/confirm dialogs. No shell, no filesystem plugin, no HTTP plugin, no open or save dialog — file commands take grants from the backend's own native dialogs (file_choose), never a path from the webview.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "dialog:allow-open",
-    "dialog:allow-save",
     "dialog:allow-message",
     "dialog:allow-ask"
   ]

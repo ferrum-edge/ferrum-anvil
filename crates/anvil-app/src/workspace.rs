@@ -9,9 +9,10 @@ use anvil_domain::request::{Protocol, RequestSpec};
 use anvil_domain::secret::SecretRef;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::*;
-use anvil_storage::kind;
+use anvil_storage::{StoreTx, kind};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeNode {
@@ -111,12 +112,38 @@ impl App {
             variables: vec![],
             auth: AuthConfig::Inherit,
             tags: vec![],
+            import_root: false,
+            import_environment_ids: vec![],
+            use_workspace_scope: false,
         };
         self.store.put(kind::FOLDER, &f.meta.id, Some(ws), parent.as_ref(), f.sort_key, &f)?;
         Ok(f)
     }
 
+    /// Save a folder. Whether it is an import root, and whether that root is
+    /// open to the workspace, are kept as stored: only a spec import makes
+    /// an import root, and only [`App::set_import_root_workspace_scope`]
+    /// opens one.
     pub fn save_folder(&self, mut f: Folder) -> Result<Folder> {
+        let stored: Option<Folder> = self.store.get(kind::FOLDER, &f.meta.id)?;
+        f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
+        f.import_environment_ids = stored.as_ref().map(|s| s.import_environment_ids.clone()).unwrap_or_default();
+        f.use_workspace_scope = stored.as_ref().is_some_and(|s| s.use_workspace_scope);
+        f.meta.updated_at = chrono::Utc::now();
+        self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
+        Ok(f)
+    }
+
+    /// The user's explicit choice on this device to let requests under an
+    /// import root also resolve the workspace's variables, active
+    /// environment and auth, and this device's workload identity and token
+    /// files (`Folder::use_workspace_scope`). An import never sets this.
+    pub fn set_import_root_workspace_scope(&self, id: &Id, allow: bool) -> Result<Folder> {
+        let mut f = self.folder(id)?;
+        if !f.import_root {
+            return Err(AppError::Invalid("only the root folder of an imported collection has a scope of its own".into()));
+        }
+        f.use_workspace_scope = allow;
         f.meta.updated_at = chrono::Utc::now();
         self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
         Ok(f)
@@ -125,31 +152,50 @@ impl App {
     /// Move a folder under a new parent (None = root) at `sort_key`,
     /// refusing moves that would create an ancestry cycle.
     pub fn move_folder(&self, id: &Id, new_parent: Option<Id>, sort_key: f64) -> Result<Folder> {
-        let mut f = self.folder(id)?;
-        if let Some(p) = new_parent {
-            let mut cur = Some(p);
-            while let Some(c) = cur {
-                if c == *id {
-                    return Err(AppError::Invalid("a folder cannot be moved into itself or one of its subfolders".into()));
+        // Check the ancestry and save in one transaction, so two concurrent
+        // moves (a under b and b under a) cannot both pass the check.
+        self.store.atomically(|s| {
+            let Some(mut f) = s.get::<Folder>(kind::FOLDER, id)? else { return Ok(Err(AppError::NotFound("folder".into()))) };
+            if let Some(p) = new_parent {
+                // `seen` stops the walk at a parent cycle already in saved or
+                // imported data instead of looping forever.
+                let mut seen = HashSet::new();
+                let mut cur = Some(p);
+                while let Some(c) = cur {
+                    if c == *id {
+                        return Ok(Err(AppError::Invalid("a folder cannot be moved into itself or one of its subfolders".into())));
+                    }
+                    if !seen.insert(c) {
+                        return Ok(Err(AppError::Invalid("the target folder's ancestry is cyclic".into())));
+                    }
+                    let Some(a) = s.get::<Folder>(kind::FOLDER, &c)? else { return Ok(Err(AppError::NotFound("folder".into()))) };
+                    if c == p && a.workspace_id != f.workspace_id {
+                        return Ok(Err(AppError::Invalid("cannot move a folder to another workspace".into())));
+                    }
+                    cur = a.parent_id;
                 }
-                cur = self.folder(&c)?.parent_id;
             }
-            if self.folder(&p)?.workspace_id != f.workspace_id {
-                return Err(AppError::Invalid("cannot move a folder to another workspace".into()));
-            }
-        }
-        f.parent_id = new_parent;
-        f.sort_key = sort_key;
-        self.save_folder(f)
+            f.parent_id = new_parent;
+            f.sort_key = sort_key;
+            f.meta.updated_at = chrono::Utc::now();
+            s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
+            Ok(Ok(f))
+        })?
     }
 
-    /// Ancestor chain root → leaf (inclusive).
-    pub fn folder_chain(&self, id: Option<Id>) -> Result<Vec<Folder>> {
+    /// Ancestor chain root → leaf (inclusive); every folder must be in `ws`.
+    pub fn folder_chain(&self, ws: &Id, id: Option<Id>) -> Result<Vec<Folder>> {
         let mut chain = Vec::new();
         let mut cur = id;
         let mut guard = 0;
         while let Some(c) = cur {
             let f = self.folder(&c)?;
+            // Folder settings, auth and variables apply only inside their own
+            // workspace; a parent id that names another workspace's folder
+            // is refused rather than followed.
+            if f.workspace_id != *ws {
+                return Err(AppError::Invalid(format!("folder '{}' is not in this workspace", f.name)));
+            }
             cur = f.parent_id;
             chain.push(f);
             guard += 1;
@@ -163,25 +209,34 @@ impl App {
 
     /// Delete a folder, its subfolders and their requests.
     pub fn delete_folder(&self, id: &Id) -> Result<()> {
-        let f = self.folder(id)?;
-        let all = self.folders(&f.workspace_id)?;
-        let mut doomed = vec![*id];
-        let mut i = 0;
-        while i < doomed.len() {
-            let cur = doomed[i];
-            doomed.extend(all.iter().filter(|x| x.parent_id == Some(cur)).map(|x| x.meta.id));
-            i += 1;
-        }
-        let reqs = self.requests(&f.workspace_id)?;
-        self.store.atomically(|s| {
-            for r in reqs.iter().filter(|r| r.folder_id.map(|fid| doomed.contains(&fid)).unwrap_or(false)) {
+        // Read the folder and its tree inside the transaction, so a folder or
+        // request created under a doomed folder meanwhile is deleted with it,
+        // not orphaned.
+        let deleted = self.store.atomically(|s| {
+            let Some(f) = s.get::<Folder>(kind::FOLDER, id)? else { return Ok(false) };
+            let all: Vec<Folder> = s.list(kind::FOLDER, Some(&f.workspace_id))?;
+            // `seen` stops the walk at a parent cycle (possible in saved or
+            // imported data) instead of looping forever.
+            let mut seen = HashSet::from([*id]);
+            let mut doomed = vec![*id];
+            let mut i = 0;
+            while i < doomed.len() {
+                let cur = doomed[i];
+                doomed.extend(all.iter().filter(|x| x.parent_id == Some(cur) && seen.insert(x.meta.id)).map(|x| x.meta.id));
+                i += 1;
+            }
+            let reqs: Vec<RequestDefinition> = s.list(kind::REQUEST, Some(&f.workspace_id))?;
+            for r in reqs.iter().filter(|r| r.folder_id.is_some_and(|fid| seen.contains(&fid))) {
                 s.delete(kind::REQUEST, &r.meta.id)?;
             }
             for d in &doomed {
                 s.delete(kind::FOLDER, d)?;
             }
-            Ok(())
+            Ok(true)
         })?;
+        if !deleted {
+            return Err(AppError::NotFound("folder".into()));
+        }
         Ok(())
     }
 
@@ -278,7 +333,12 @@ impl App {
         let path_of = |r: &RequestDefinition| -> String {
             let mut parts = vec![r.name.clone()];
             let mut cur = r.folder_id;
-            while let Some(c) = cur {
+            // `seen` stops the walk at a parent cycle (possible in saved or
+            // imported data) instead of looping forever.
+            let mut seen = HashSet::new();
+            while let Some(c) = cur
+                && seen.insert(c)
+            {
                 match folders.iter().find(|f| f.meta.id == c) {
                     Some(f) => {
                         parts.push(f.name.clone());
@@ -374,15 +434,13 @@ impl App {
 
     // ------------------------------------------------------------ secrets
 
-    pub fn set_secret(&self, ws: Option<&Id>, label: &str, value: &str) -> Result<SecretRef> {
+    /// Store a new secret owned by workspace `ws`, which must exist: a
+    /// request resolves only secrets its own workspace owns.
+    pub fn set_secret(&self, ws: &Id, label: &str, value: &str) -> Result<SecretRef> {
+        self.workspace(ws)?;
         let id = Id::new();
-        self.store.put_secret(&id, ws, label, value)?;
+        self.store.put_secret(&id, Some(ws), label, value)?;
         Ok(SecretRef { id, label: label.into() })
-    }
-
-    pub fn update_secret(&self, r: &SecretRef, ws: Option<&Id>, value: &str) -> Result<()> {
-        self.store.put_secret(&r.id, ws, &r.label, value)?;
-        Ok(())
     }
 
     // ------------------------------------------------------------ profiles
@@ -435,25 +493,15 @@ impl App {
         Ok(d)
     }
 
-    /// Store an attachment (content-addressed by sha256).
+    /// Store an attachment (content-addressed by sha256). The blob, its pin
+    /// and its index entry are written together or not at all.
     pub fn put_attachment(
         &self,
         file_name: &str,
         bytes: &[u8],
         media_type: Option<String>,
     ) -> Result<anvil_domain::request::AttachmentRef> {
-        let sha = hex::encode(Sha256::digest(bytes));
-        let blob = self.store.put_blob(bytes)?;
-        self.store.pin_blob(&blob)?;
-        self.store.put(
-            kind::IMPORT_SOURCE,
-            &attachment_index_id(&sha),
-            None,
-            None,
-            0.0,
-            &serde_json::json!({"attachment": sha, "blob": blob}),
-        )?;
-        Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+        Ok(self.store.atomically(|s| put_attachment_in(s, file_name, bytes, media_type))?)
     }
 
     /// Pin the blob of every stored attachment (idempotent). Profiles created
@@ -498,8 +546,23 @@ impl App {
     }
 }
 
+/// [`App::put_attachment`] inside the caller's transaction, so the stored
+/// attachment is rolled back with everything else the caller writes.
+pub(crate) fn put_attachment_in(
+    s: &StoreTx<'_>,
+    file_name: &str,
+    bytes: &[u8],
+    media_type: Option<String>,
+) -> anvil_storage::store::Result<anvil_domain::request::AttachmentRef> {
+    let sha = hex::encode(Sha256::digest(bytes));
+    let blob = s.put_blob(bytes)?;
+    s.pin_blob(&blob)?;
+    s.put(kind::IMPORT_SOURCE, &attachment_index_id(&sha), None, None, 0.0, &serde_json::json!({"attachment": sha, "blob": blob}))?;
+    Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+}
+
 /// Deterministic object id for the attachment index entry of a content hash.
-fn attachment_index_id(sha: &str) -> Id {
+pub(crate) fn attachment_index_id(sha: &str) -> Id {
     let d = Sha256::digest(format!("anvil-attachment-index:{sha}").as_bytes());
     let mut b = [0u8; 16];
     b.copy_from_slice(&d[..16]);

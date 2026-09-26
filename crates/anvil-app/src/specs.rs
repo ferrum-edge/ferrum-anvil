@@ -3,11 +3,14 @@
 //! previews, persists with provenance, and plans reimports. Nothing imported
 //! is ever sent or run as part of importing.
 
+use crate::workspace::put_attachment_in;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
-use anvil_domain::workspace::{Folder, RequestDefinition};
+use anvil_domain::auth::AuthConfig;
+use anvil_domain::request::AttachmentRef;
+use anvil_domain::workspace::{Folder, Meta, RequestDefinition, Workspace};
 use anvil_import::{Detected, ImportOptions, ImportReport, ImportResult, ImportedSource, ReimportApproval, ReimportPlan};
-use anvil_storage::store::kind;
+use anvil_storage::store::{StoreRead, kind};
 use serde::{Deserialize, Serialize};
 
 /// Where an import lands.
@@ -80,50 +83,65 @@ impl App {
         })
     }
 
-    /// Persist an import atomically. Imported requests are ordinary saved
+    /// Persist an import as one operation. A restore checkpoint is taken
+    /// before anything is written; the new workspace or root folder, the
+    /// stored original file, folders, requests, environments and the source
+    /// record are then written in one transaction, so a failure leaves the
+    /// profile as it was.
+    ///
+    /// Every import gets a fresh id namespace (kept in the source record,
+    /// and reused only by a reimport of this import), so importing the same
+    /// source again, into this or another workspace, creates independent
+    /// objects and never takes over an earlier import's. Inside an existing
+    /// workspace, the source's own auth, variables and settings are kept on
+    /// a new import root folder, and imported requests resolve nothing from
+    /// the destination workspace. Imported requests are ordinary saved
     /// requests (with an import link for reimport diffs); nothing is sent.
     pub fn spec_import(&self, bytes: &[u8], file_name: &str, opts: &ImportOptions, target: SpecTarget) -> Result<SpecImported> {
-        let mut r = run(bytes, opts)?;
-        let (workspace_id, root_folder_id) = match target {
-            SpecTarget::NewWorkspace => {
-                let mut w = r.workspace.clone();
-                if self.workspaces()?.iter().any(|x| x.name == w.name) {
-                    w.name = format!("{} (imported)", w.name);
-                }
-                let id = w.meta.id;
-                self.store.put(kind::WORKSPACE, &id, None, None, 0.0, &w)?;
-                (id, None)
-            }
+        let opts = ImportOptions { id_namespace: Some(Id::new()), ..opts.clone() };
+        let mut r = run(bytes, &opts)?;
+        let root = match &target {
+            SpecTarget::NewWorkspace => None,
             SpecTarget::Workspace { workspace_id } => {
-                let ws = self.workspace(&workspace_id)?;
+                self.workspace(workspace_id)?;
                 let title = r.source.title.clone().unwrap_or_else(|| file_name.to_string());
-                let root = self.create_folder(&ws.meta.id, None, &title)?;
-                // Re-home everything; top-level folders and requests go under the new root.
-                for f in &mut r.folders {
-                    f.workspace_id = ws.meta.id;
-                    if f.parent_id.is_none() {
-                        f.parent_id = Some(root.meta.id);
-                    }
-                }
-                for q in &mut r.requests {
-                    q.workspace_id = ws.meta.id;
-                    if q.folder_id.is_none() {
-                        q.folder_id = Some(root.meta.id);
-                    }
-                }
-                for e in &mut r.environments {
-                    e.workspace_id = ws.meta.id;
-                }
-                (ws.meta.id, Some(root.meta.id))
+                let environments = r.environments.iter().map(|e| e.meta.id).collect();
+                let root = root_folder(&r.workspace, *workspace_id, &title, environments);
+                rehome(&mut r, *workspace_id, root.meta.id);
+                Some(root)
             }
         };
-        let original = self.put_attachment(file_name, bytes, None)?;
-        let original_sha256 = match original {
-            anvil_domain::request::AttachmentRef::Stored { sha256, .. } => sha256,
-            anvil_domain::request::AttachmentRef::LinkedFile { .. } => String::new(),
-        };
-        let checkpoint = self.store.checkpoint("before-spec-import")?;
-        let res = self.store.atomically(|s| {
+        // Kept for a manual restore only; see `App::import`.
+        self.store.checkpoint("before-spec-import")?;
+        let workspace_id = self.store.atomically(|s| {
+            if let Some(clash) = existing_object(&s.as_read(), &r, root.as_ref())? {
+                return Ok(Err(AppError::Invalid(format!("the import would overwrite an existing {clash}; nothing was imported"))));
+            }
+            let workspace_id = match &root {
+                None => {
+                    let mut w = r.workspace.clone();
+                    let local: Vec<Workspace> = s.list(kind::WORKSPACE, None)?;
+                    if local.iter().any(|x| x.name == w.name) {
+                        w.name = format!("{} (imported)", w.name);
+                    }
+                    s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, &w)?;
+                    w.meta.id
+                }
+                Some(root) => {
+                    if s.get::<Workspace>(kind::WORKSPACE, &root.workspace_id)?.is_none() {
+                        return Ok(Err(AppError::NotFound("workspace".into())));
+                    }
+                    let folders: Vec<Folder> = s.list(kind::FOLDER, Some(&root.workspace_id))?;
+                    let siblings = folders.iter().filter(|f| f.parent_id.is_none()).count();
+                    let root = Folder { sort_key: siblings as f64 + 1.0, ..root.clone() };
+                    s.put(kind::FOLDER, &root.meta.id, Some(&root.workspace_id), None, root.sort_key, &root)?;
+                    root.workspace_id
+                }
+            };
+            let original_sha256 = match put_attachment_in(s, file_name, bytes, None)? {
+                AttachmentRef::Stored { sha256, .. } => sha256,
+                AttachmentRef::LinkedFile { .. } => String::new(),
+            };
             for f in &r.folders {
                 s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, f)?;
             }
@@ -136,19 +154,21 @@ impl App {
             let rec = SpecSourceRecord {
                 source: r.source.clone(),
                 workspace_id,
-                root_folder_id,
-                original_sha256: original_sha256.clone(),
+                root_folder_id: root.as_ref().map(|f| f.meta.id),
+                original_sha256,
                 file_name: file_name.to_string(),
                 previous_import_ids: vec![],
             };
             s.put(kind::SPEC_SOURCE, &r.source.import_id, Some(&workspace_id), None, 0.0, &rec)?;
-            Ok(())
-        });
-        if let Err(e) = res {
-            let _ = self.store.restore_checkpoint(&checkpoint);
-            return Err(e.into());
-        }
-        Ok(SpecImported { workspace_id, root_folder_id, import_id: r.source.import_id, requests: r.requests.len(), report: r.report })
+            Ok(Ok(workspace_id))
+        })??;
+        Ok(SpecImported {
+            workspace_id,
+            root_folder_id: root.map(|f| f.meta.id),
+            import_id: r.source.import_id,
+            requests: r.requests.len(),
+            report: r.report,
+        })
     }
 
     pub fn spec_sources(&self, ws: &Id) -> Result<Vec<SpecSourceRecord>> {
@@ -206,8 +226,9 @@ impl App {
             .collect();
         let keep: Vec<Id> = next.iter().map(|q| q.meta.id).collect();
         let deleted: Vec<Id> = previous.iter().map(|q| q.meta.id).filter(|id| !keep.contains(id)).collect();
-        let checkpoint = self.store.checkpoint("before-spec-reimport")?;
-        let res = self.store.atomically(|s| {
+        // Kept for a manual restore only; see `App::import`.
+        self.store.checkpoint("before-spec-reimport")?;
+        self.store.atomically(|s| {
             for f in &new_folders {
                 s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, f)?;
             }
@@ -228,11 +249,74 @@ impl App {
             s.delete(kind::SPEC_SOURCE, &rec.previous_import_ids[rec.previous_import_ids.len() - 1])?;
             s.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec)?;
             Ok(())
-        });
-        if let Err(e) = res {
-            let _ = self.store.restore_checkpoint(&checkpoint);
-            return Err(e.into());
-        }
+        })?;
         Ok(next.len())
     }
+}
+
+/// The top-level folder an import into an existing workspace lands in. It
+/// keeps the source's workspace-level scope (description, settings,
+/// variables and auth), so the imported objects resolve as they would in a
+/// workspace of their own. A source without auth of its own gets an
+/// explicit "no auth" here. It is an import root: requests under it resolve
+/// nothing from the destination workspace (see `App::build_context`) until
+/// the user allows that on this device.
+fn root_folder(source: &Workspace, workspace_id: Id, name: &str, environments: Vec<Id>) -> Folder {
+    Folder {
+        meta: Meta::new(),
+        workspace_id,
+        parent_id: None,
+        name: name.trim().into(),
+        description: source.description.clone(),
+        sort_key: 0.0,
+        settings: source.settings.clone(),
+        variables: source.variables.clone(),
+        auth: match &source.auth {
+            AuthConfig::Inherit => AuthConfig::None,
+            auth => auth.clone(),
+        },
+        tags: vec![],
+        import_root: true,
+        import_environment_ids: environments,
+        use_workspace_scope: false,
+    }
+}
+
+/// Move imported objects into `workspace_id`; top-level folders and
+/// requests go under the root folder `root`.
+fn rehome(r: &mut ImportResult, workspace_id: Id, root: Id) {
+    for f in &mut r.folders {
+        f.workspace_id = workspace_id;
+        if f.parent_id.is_none() {
+            f.parent_id = Some(root);
+        }
+    }
+    for q in &mut r.requests {
+        q.workspace_id = workspace_id;
+        if q.folder_id.is_none() {
+            q.folder_id = Some(root);
+        }
+    }
+    for e in &mut r.environments {
+        e.workspace_id = workspace_id;
+    }
+}
+
+/// The kind of the first stored object an import would overwrite, if any.
+/// Ids come from a fresh namespace, so this only guards against a clash.
+fn existing_object(s: &StoreRead<'_>, r: &ImportResult, root: Option<&Folder>) -> anvil_storage::store::Result<Option<&'static str>> {
+    let mut ids = vec![(kind::SPEC_SOURCE, r.source.import_id)];
+    match root {
+        None => ids.push((kind::WORKSPACE, r.workspace.meta.id)),
+        Some(f) => ids.push((kind::FOLDER, f.meta.id)),
+    }
+    ids.extend(r.folders.iter().map(|f| (kind::FOLDER, f.meta.id)));
+    ids.extend(r.requests.iter().map(|q| (kind::REQUEST, q.meta.id)));
+    ids.extend(r.environments.iter().map(|e| (kind::ENVIRONMENT, e.meta.id)));
+    for (k, id) in ids {
+        if s.get::<serde_json::Value>(k, &id)?.is_some() {
+            return Ok(Some(k));
+        }
+    }
+    Ok(None)
 }

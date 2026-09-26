@@ -200,6 +200,8 @@ kbd { display: inline-flex; align-items: center; justify-content: center; min-wi
 .segmented > button[aria-pressed="true"], .segmented > button[aria-selected="true"], .viewswitch > button[aria-pressed="true"] { background: var(--bg-elevated); color: var(--text); box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border-strong); }
 .segmented.small > button { height: 22px; padding: 0 9px; font-size: 12px; }
 .col > .segmented, .modal > .content > .segmented, .form > .segmented { align-self: flex-start; max-width: 100%; }
+/* A view with a run in progress: an accent dot after its label. */
+.viewswitch .live-dot { width: 6px; height: 6px; background: var(--accent); }
 
 /* ---------- fields ---------- */
 input.field, select.field, textarea.field { background: var(--field); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); min-width: 0; color: var(--text); transition: border-color 0.12s, box-shadow 0.12s; }
@@ -367,6 +369,7 @@ body.dragging-y, body.dragging-y * { cursor: row-resize !important; user-select:
 .tab .tab-end .btn { position: absolute; inset: 0; opacity: 0; }
 .tab:hover .tab-end .btn, .tab[aria-selected="true"] .tab-end:not(.is-dirty) .btn, .tab .tab-end .btn:focus-visible { opacity: 1; }
 .tab:hover .tab-end .dirty { display: none; }
+.tab .tab-live { color: var(--ok); flex: none; }
 
 /* request editor + response split. Areas keep both layouts on one DOM. */
 .editor { display: grid; min-height: 0; min-width: 0; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(96px, min(var(--req-h, 42%), calc(100% - 300px))) 5px minmax(0, 1fr); grid-template-areas: "url" "tabs" "pane" "split" "resp"; }
@@ -733,7 +736,6 @@ input.field.small-field { height: var(--h-sm); padding: 0 8px; }
   .topbar .picker select.field { max-width: 150px; min-width: 96px; }
   .finding-body { padding-left: 18px; }
   .split-dialog { grid-template-columns: minmax(0, 1fr); }
-  .urlbar > .btn.save-btn .btn-label { display: none; }
 }
 @media (max-width: 860px) {
   .statusbar .catalog-wrap { display: none; }

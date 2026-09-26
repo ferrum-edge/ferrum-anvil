@@ -543,6 +543,15 @@ export type EarlyDataNotUsed =
  */
 export type BodyCompleteness = "complete" | "incomplete" | "canceled" | "stopped_at_local_limit" | "no_body";
 /**
+ * Outcome of removing the response's content-coding for display,
+ * assertions and extraction. Independent of the body completeness, which
+ * describes the raw bytes on the wire.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ContentDecoding".
+ */
+export type ContentDecoding = "complete" | "truncated_at_limit" | "unsupported" | "failed";
+/**
  * Transport completion, independent of HTTP/RPC status.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1544,8 +1553,11 @@ export interface RedirectPolicy {
   follow: boolean;
   max: number;
   /**
-   * Forward `Authorization`/cookies/client identity to a different origin.
-   * Off by default; the target's own configuration applies otherwise.
+   * Forward the request's credentials to a different origin: auth, a manual
+   * `Cookie` header, credential or sensitive headers, headers holding a secret,
+   * and a 307/308 body holding a secret. Off by default. The TLS client
+   * identity is never forwarded: only a TLS profile bound to the new origin
+   * presents one.
    */
   forward_credentials_cross_origin: boolean;
 }
@@ -1915,6 +1927,12 @@ export interface ExecutionRecord {
 /**
  * Summary of the prepared request as it was actually sent (redacted).
  *
+ * `method`, `url`, `headers`, the body fields, `content_type` and
+ * `auth_label` describe the original request as prepared; each attempt
+ * records what it sent to its own target. `tls_profile`, `proxy` and
+ * `tls_verification_enabled` describe the connection that produced the
+ * final response (the last redirect hop when redirects were followed).
+ *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "PreparedSummary".
  */
@@ -1930,8 +1948,22 @@ export interface PreparedSummary {
    * `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.
    */
   auth_label: string;
+  /**
+   * TLS profile of the connection that produced the final response (the last redirect
+   * hop when redirects were followed).
+   */
   tls_profile?: string | null;
+  /**
+   * Proxy route of the connection that produced the final response (the last redirect
+   * hop when redirects were followed).
+   */
   proxy?: string | null;
+  /**
+   * Whether TLS verification was on for the connection that produced the
+   * final response (the last redirect hop when redirects were followed).
+   * `true` when that connection was plain HTTP: verification was not
+   * turned off, there was no TLS to verify.
+   */
   tls_verification_enabled: boolean;
   settings: EffectiveSettings;
   /**
@@ -2537,6 +2569,15 @@ export interface BodyCapture {
   content_encoding?: string | null;
   decoded_bytes?: number | null;
   /**
+   * Outcome of content decoding. Absent when the body has no content-coding
+   * or automatic decompression is off.
+   */
+  decoding?: ContentDecoding | null;
+  /**
+   * Why content decoding did not complete.
+   */
+  decoding_detail?: string | null;
+  /**
    * Content-addressed id of the stored raw (captured) bytes.
    */
   blob_sha256?: string | null;
@@ -2868,6 +2909,24 @@ export interface Folder {
         type: "multi";
       };
   tags?: string[];
+  /**
+   * The top-level folder a spec import into an existing workspace creates.
+   * Requests under it resolve only the imported collection's own scope:
+   * no variables, environment or auth from outside it, and no workload
+   * identity or token file of this device.
+   */
+  import_root?: boolean;
+  /**
+   * Environments the import brought with it. They may resolve under the
+   * import root, as the collection's own.
+   */
+  import_environment_ids?: Id[];
+  /**
+   * Set only by the user on this device, never by an import: requests
+   * under this import root also resolve the workspace's variables, its
+   * active environment and auth, and this device's workload identity.
+   */
+  use_workspace_scope?: boolean;
 }
 /**
  * Non-secret request settings resolved deterministically:
@@ -2953,8 +3012,9 @@ export interface OAuth2Config {
    */
   client_auth?: "basic_header" | "request_body";
   /**
-   * Where the acquired access token is cached (vault) — id of the token
-   * cache entry, managed by the engine.
+   * Token-cache identity: profiles with different ids never share a
+   * cached token. When unset, the app uses the id of the workspace,
+   * folder or request that defines the profile.
    */
   token_cache_id?: Id | null;
   /**
@@ -4788,8 +4848,8 @@ export interface RunStep {
    */
   duration_ms?: number | null;
   /**
-   * Sum of the network attempt durations (what latency assertions see is
-   * the final attempt only).
+   * Sum of the network attempt durations (the same exchange time latency
+   * assertions evaluate).
    */
   exchange_ms?: number | null;
   /**

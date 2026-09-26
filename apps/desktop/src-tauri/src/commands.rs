@@ -3,7 +3,8 @@
 //! the user explicitly typed them (they are stored and only references return).
 
 use crate::state::DesktopState;
-use anvil_app::exec::SendOptions;
+use anvil_app::exec::{SendOptions, refuse_linked_files};
+use anvil_app::file_grants::FilePurpose;
 use anvil_app::profiles::Unlock;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
@@ -21,8 +22,7 @@ use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
-use tokio_util::sync::CancellationToken;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub(crate) type R<T> = Result<T, String>;
 
@@ -54,7 +54,9 @@ pub fn app_status(st: State<'_, DesktopState>) -> Status {
         Some(a) => Status {
             state: if a.is_locked() { "locked" } else { "unlocked" },
             profile: Some(a.header.display_name.clone()),
-            protection: Some(a.header.protection),
+            // From disk: a keychain profile converted to a passphrase
+            // changes mode while it is open.
+            protection: Some(anvil_storage::vault::read_header(&a.dir).map(|h| h.protection).unwrap_or(a.header.protection)),
             version: env!("CARGO_PKG_VERSION"),
         },
         None => Status { state: "no_profile", profile: None, protection: None, version: env!("CARGO_PKG_VERSION") },
@@ -85,7 +87,7 @@ pub fn profile_create(st: State<'_, DesktopState>, name: String, passphrase: Opt
     };
     let header = anvil_storage::vault::read_header(&summary.dir).map_err(|x| x.to_string())?;
     let app = App::open(summary.dir.clone(), header, key).map_err(e)?;
-    *st.app.write() = Some(Arc::new(app));
+    st.set_app(app);
     st.touch();
     Ok(Created { profile_id: summary.profile_id, recovery_key: recovery })
 }
@@ -112,16 +114,34 @@ pub fn profile_unlock(st: State<'_, DesktopState>, profile_id: String, passphras
         }
     }
     let app = App::open(p.dir, header, key).map_err(e)?;
-    *st.app.write() = Some(Arc::new(app));
+    st.set_app(app);
     st.touch();
     st.flush_pending_reports();
     Ok(())
 }
 
-/// Re-wrap the data key under a new passphrase (the app must be unlocked).
+/// Re-wrap the data key under a new passphrase (the app must be unlocked;
+/// passphrase profiles only).
 #[tauri::command]
 pub fn profile_change_passphrase(st: State<'_, DesktopState>, new_passphrase: String) -> R<()> {
     st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)
+}
+
+#[derive(Serialize)]
+pub struct Converted {
+    /// Shown once; never stored.
+    pub recovery_key: String,
+    /// False if the OS credential store kept the old entry; it no longer
+    /// unlocks the profile and removal is retried at the next unlock.
+    pub keychain_entry_removed: bool,
+}
+
+/// Protect an OS-keychain profile with a passphrase instead (the app must be
+/// unlocked). Afterwards the keychain no longer opens it.
+#[tauri::command]
+pub fn profile_convert_to_passphrase(st: State<'_, DesktopState>, new_passphrase: String) -> R<Converted> {
+    let c = st.app()?.convert_to_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)?;
+    Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
 }
 
 #[tauri::command]
@@ -201,6 +221,14 @@ pub fn folder_save(st: State<'_, DesktopState>, folder: Folder) -> R<Folder> {
     st.app()?.save_folder(folder).map_err(e)
 }
 
+/// The user's explicit choice to let an imported collection's requests also
+/// resolve the workspace's variables, active environment and auth, and this
+/// device's workload identity (see `App::build_context`).
+#[tauri::command]
+pub fn folder_set_workspace_scope(st: State<'_, DesktopState>, folder_id: String, allow: bool) -> R<Folder> {
+    st.app()?.set_import_root_workspace_scope(&id(&folder_id)?, allow).map_err(e)
+}
+
 #[tauri::command]
 pub fn folder_move(st: State<'_, DesktopState>, folder_id: String, parent_id: Option<String>, sort_key: f64) -> R<Folder> {
     let parent = parent_id.map(|p| id(&p)).transpose()?;
@@ -212,6 +240,8 @@ pub fn folder_delete(st: State<'_, DesktopState>, folder_id: String) -> R<()> {
     st.app()?.delete_folder(&id(&folder_id)?).map_err(e)
 }
 
+/// A spec from the webview references only stored attachments, never a
+/// linked local file (a path).
 #[tauri::command]
 pub fn request_create(
     st: State<'_, DesktopState>,
@@ -220,8 +250,11 @@ pub fn request_create(
     name: String,
     spec: Option<RequestSpec>,
 ) -> R<RequestDefinition> {
+    let app = st.app()?;
     let folder = folder_id.map(|p| id(&p)).transpose()?;
-    st.app()?.create_request(&id(&workspace_id)?, folder, &name, spec.unwrap_or_else(|| RequestSpec::http("GET", "https://"))).map_err(e)
+    let spec = spec.unwrap_or_else(|| RequestSpec::http("GET", "https://"));
+    refuse_linked_files(&spec).map_err(e)?;
+    app.create_request(&id(&workspace_id)?, folder, &name, spec).map_err(e)
 }
 
 #[tauri::command]
@@ -231,7 +264,9 @@ pub fn request_get(st: State<'_, DesktopState>, request_id: String) -> R<Request
 
 #[tauri::command]
 pub fn request_save(st: State<'_, DesktopState>, request: RequestDefinition) -> R<RequestDefinition> {
-    st.app()?.save_request(request).map_err(e)
+    let app = st.app()?;
+    refuse_linked_files(&request.spec).map_err(e)?;
+    app.save_request(request).map_err(e)
 }
 
 #[tauri::command]
@@ -274,15 +309,8 @@ pub fn environment_delete(st: State<'_, DesktopState>, environment_id: String) -
 
 /// Store a secret; only the reference comes back to the UI.
 #[tauri::command]
-pub fn secret_create(st: State<'_, DesktopState>, workspace_id: Option<String>, label: String, value: String) -> R<SecretRef> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.set_secret(ws.as_ref(), &label, &value).map_err(e)
-}
-
-#[tauri::command]
-pub fn secret_update(st: State<'_, DesktopState>, secret: SecretRef, workspace_id: Option<String>, value: String) -> R<()> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.update_secret(&secret, ws.as_ref(), &value).map_err(e)
+pub fn secret_create(st: State<'_, DesktopState>, workspace_id: String, label: String, value: String) -> R<SecretRef> {
+    st.app()?.set_secret(&id(&workspace_id)?, &label, &value).map_err(e)
 }
 
 /// Generate a DPoP P-256 key inside the vault; returns only its reference and public thumbprint.
@@ -293,11 +321,11 @@ pub struct GeneratedKey {
 }
 
 #[tauri::command]
-pub fn dpop_generate_key(st: State<'_, DesktopState>, workspace_id: Option<String>, label: String) -> R<GeneratedKey> {
+pub fn dpop_generate_key(st: State<'_, DesktopState>, workspace_id: String, label: String) -> R<GeneratedKey> {
+    let ws = id(&workspace_id)?;
     let pem = anvil_auth::dpop::generate_key_pem().map_err(|x| x.to_string())?;
     let (x, y) = anvil_auth::dpop::public_jwk(&pem).map_err(|x| x.to_string())?;
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    let secret = st.app()?.set_secret(ws.as_ref(), &label, &pem).map_err(e)?;
+    let secret = st.app()?.set_secret(&ws, &label, &pem).map_err(e)?;
     Ok(GeneratedKey { secret, jkt: anvil_auth::dpop::thumbprint(&x, &y) })
 }
 
@@ -434,16 +462,23 @@ pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) ->
 
 #[tauri::command]
 pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input: SendInput, execution_id: String) -> R<ExecutionView> {
-    let app = st.app()?;
     let exec_id = id(&execution_id)?;
+    // Registered before the app is read, so a lock from now on either refuses
+    // `app()` or cancels this token. Retired when dropped, also if the send
+    // fails early or panics.
+    let pending = crate::state::PendingEntry::register(&st.running, exec_id)?;
+    let app = st.app()?;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
-    let cancel = CancellationToken::new();
-    st.running.lock().insert(exec_id, cancel.clone());
     let h2 = handle.clone();
+    let owner = app.clone();
     let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
+        // Only to the window of the profile the send started under.
+        if !h2.state::<DesktopState>().is_current(&owner) {
+            return;
+        }
         if matches!(ev, ExecutionEvent::BodyProgress { .. }) {
             let mut l = last_progress.lock();
             if l.elapsed() < std::time::Duration::from_millis(100) {
@@ -461,8 +496,8 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
         record_history: true,
         ..Default::default()
     };
-    let res = app.send(rid, &ws, input.spec, opts, events, cancel).await;
-    st.running.lock().remove(&exec_id);
+    let res = app.send(rid, &ws, input.spec, opts, events, pending.token().clone()).await;
+    drop(pending);
     let out = res.map_err(e)?;
     let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
     let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
@@ -471,14 +506,7 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
 
 #[tauri::command]
 pub fn cancel_execution(st: State<'_, DesktopState>, execution_id: String) -> R<bool> {
-    let exec_id = id(&execution_id)?;
-    Ok(match st.running.lock().get(&exec_id) {
-        Some(t) => {
-            t.cancel();
-            true
-        }
-        None => false,
-    })
+    Ok(crate::state::cancel_pending(&st.running, &id(&execution_id)?))
 }
 
 #[derive(Serialize)]
@@ -522,7 +550,9 @@ pub fn history_get(st: State<'_, DesktopState>, history_id: String) -> R<Executi
     let raw = body.map(|b| b.to_vec()).unwrap_or_default();
     let ct = rec.response.as_ref().and_then(|r| r.body.content_type.clone());
     let enc = rec.response.as_ref().and_then(|r| r.body.content_encoding.clone());
-    let decoded = match anvil_transport::decode::decode(enc.as_deref(), &raw, 64 * 1024 * 1024) {
+    // The recorded limit, so the viewer shows what assertions saw.
+    let limit = rec.prepared.settings.limits.max_decoded_bytes;
+    let decoded = match anvil_transport::decode::decode(enc.as_deref(), &raw, limit) {
         anvil_transport::decode::DecodeOutcome::Decoded { bytes, .. } => Some(bytes),
         _ => None,
     };
@@ -582,108 +612,150 @@ fn policy(p: &str) -> R<ConflictPolicy> {
     })
 }
 
-#[tauri::command]
-pub fn export_preview(
-    st: State<'_, DesktopState>,
-    workspace_id: Option<String>,
-    export_mode: String,
-) -> R<anvil_portability::bundle::ExportPreview> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.export_preview(ws.as_ref(), mode(&export_mode)?, false).map_err(e)
+/// A bundle preview, or a full-backup preview (same shape for the renderer).
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ExportPreview {
+    Bundle(anvil_portability::bundle::ExportPreview),
+    Backup(anvil_app::backup::BackupPreview),
 }
 
-/// Write to a path the user picked in the native save dialog.
-#[tauri::command]
-pub fn export_to_path(
-    st: State<'_, DesktopState>,
-    workspace_id: Option<String>,
-    export_mode: String,
-    passphrase: Option<String>,
-    path: String,
-) -> R<usize> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    let (bytes, _) = st.app()?.export(ws.as_ref(), mode(&export_mode)?, passphrase.as_deref(), false).map_err(e)?;
-    let tmp = format!("{path}.partial");
-    std::fs::write(&tmp, &bytes).map_err(|x| x.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|x| x.to_string())?;
-    Ok(bytes.len())
-}
-
-fn read_bundle(path: &str) -> R<Vec<u8>> {
-    let meta = std::fs::metadata(path).map_err(|x| x.to_string())?;
-    if meta.len() > 2 * 1024 * 1024 * 1024 {
-        return Err("bundle is larger than 2 GiB".into());
+/// A full backup always covers the whole profile.
+fn full_backup(ws: Option<&Id>, m: ExportMode) -> R<bool> {
+    match (m, ws) {
+        (ExportMode::FullBackup, Some(_)) => Err("a full backup covers every workspace; export a workspace with another mode".into()),
+        (ExportMode::FullBackup, None) => Ok(true),
+        _ => Ok(false),
     }
-    std::fs::read(path).map_err(|x| x.to_string())
 }
 
 #[tauri::command]
-pub fn import_preview(
+pub fn export_preview(st: State<'_, DesktopState>, workspace_id: Option<String>, export_mode: String) -> R<ExportPreview> {
+    let ws = workspace_id.map(|w| id(&w)).transpose()?;
+    let m = mode(&export_mode)?;
+    let app = st.app()?;
+    if full_backup(ws.as_ref(), m)? {
+        return app.backup_preview().map(ExportPreview::Backup).map_err(e);
+    }
+    app.export_preview(ws.as_ref(), m, false).map(ExportPreview::Bundle).map_err(e)
+}
+
+/// Run `f` on a blocking worker thread. Writing or opening an encrypted
+/// bundle derives its vault key (Argon2id), which must not stall the UI
+/// thread that runs synchronous commands.
+async fn off_ui_thread<T: Send + 'static>(f: impl FnOnce() -> anvil_app::Result<T> + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|x| x.to_string())?.map_err(e)
+}
+
+/// Write to the destination the user picked in the native save dialog
+/// (`file_choose` with purpose `bundle_export`); `grant` is that selection.
+#[tauri::command]
+pub async fn export_to_path(
     st: State<'_, DesktopState>,
-    path: String,
+    workspace_id: Option<String>,
+    export_mode: String,
+    passphrase: Option<String>,
+    grant: String,
+) -> R<usize> {
+    let app = st.app()?;
+    let ws = workspace_id.map(|w| id(&w)).transpose()?;
+    let m = mode(&export_mode)?;
+    let bytes = if full_backup(ws.as_ref(), m)? {
+        let pass = passphrase.ok_or("a full backup needs a passphrase")?;
+        off_ui_thread(move || app.export_backup(&pass)).await?.0
+    } else {
+        off_ui_thread(move || app.export(ws.as_ref(), m, passphrase.as_deref(), false)).await?.0
+    };
+    st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
+}
+
+/// The bundle the user picked in the native open dialog (purpose
+/// `bundle_import`).
+fn read_bundle(st: &DesktopState, grant: &str) -> R<Vec<u8>> {
+    Ok(st.file_grants.read(grant, FilePurpose::BundleImport).map_err(|x| x.to_string())?.bytes)
+}
+
+/// A full backup is restored; anything else is imported as a bundle.
+#[tauri::command]
+pub async fn import_preview(
+    st: State<'_, DesktopState>,
+    grant: String,
     passphrase: Option<String>,
     conflict_policy: String,
 ) -> R<anvil_app::port::ImportReport> {
-    let bytes = read_bundle(&path)?;
-    st.app()?.import_preview(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let app = st.app()?;
+    let bytes = read_bundle(&st, &grant)?;
+    let policy = policy(&conflict_policy)?;
+    if anvil_app::backup::is_backup(&bytes) {
+        // A full backup restores every item under its own id, so "copies" is
+        // previewed as Merge; the report's policy tells the dialog to switch.
+        let policy = if policy == ConflictPolicy::Duplicate { ConflictPolicy::Merge } else { policy };
+        return off_ui_thread(move || app.restore_preview(&bytes, passphrase.as_deref(), policy)).await;
+    }
+    off_ui_thread(move || app.import_preview(&bytes, passphrase.as_deref(), policy)).await
 }
 
 #[tauri::command]
-pub fn import_apply(
+pub async fn import_apply(
     st: State<'_, DesktopState>,
-    path: String,
+    grant: String,
     passphrase: Option<String>,
     conflict_policy: String,
+    approval: Option<anvil_app::port::ImportApproval>,
 ) -> R<anvil_app::port::ImportReport> {
-    let bytes = read_bundle(&path)?;
-    st.app()?.import(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let app = st.app()?;
+    let bytes = read_bundle(&st, &grant)?;
+    let policy = policy(&conflict_policy)?;
+    // Only the workspaces the user confirmed after the preview's warning,
+    // for a full backup as for a bundle.
+    let approval = approval.unwrap_or_default();
+    if anvil_app::backup::is_backup(&bytes) {
+        return off_ui_thread(move || app.restore_approved(&bytes, passphrase.as_deref(), policy, &approval)).await;
+    }
+    off_ui_thread(move || app.import_approved(&bytes, passphrase.as_deref(), policy, &approval)).await
 }
 
 // ------------------------------------------------------------- attachments
 
-/// Store a file the user picked in the native open dialog as a portable,
-/// content-addressed attachment (bounded size).
+/// Store a file the user picked in the native open dialog (purpose
+/// `attachment`) as a portable, content-addressed attachment (bounded size).
 #[tauri::command]
-pub fn attachment_add(st: State<'_, DesktopState>, path: String, media_type: Option<String>) -> R<anvil_domain::request::AttachmentRef> {
-    const MAX: u64 = 256 * 1024 * 1024;
-    let meta = std::fs::metadata(&path).map_err(|x| x.to_string())?;
-    if !meta.is_file() {
-        return Err("not a regular file".into());
-    }
-    if meta.len() > MAX {
-        return Err("attachments are limited to 256 MiB".into());
-    }
-    let bytes = std::fs::read(&path).map_err(|x| x.to_string())?;
-    let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-    st.app()?.put_attachment(&name, &bytes, media_type).map_err(e)
+pub fn attachment_add(st: State<'_, DesktopState>, grant: String, media_type: Option<String>) -> R<anvil_domain::request::AttachmentRef> {
+    let app = st.app()?;
+    let file = st.file_grants.read(&grant, FilePurpose::Attachment).map_err(|x| x.to_string())?;
+    app.put_attachment(&file.file_name, &file.bytes, media_type).map_err(e)
 }
 
-/// Read a small text file the user picked (PEM certificates/keys). The
-/// content goes straight into the vault when `store_as_secret` is set, so a
-/// private key never round-trips through the webview.
+/// Read a small file the user picked in the native open dialog: a PEM
+/// certificate/key (purpose `pem_file`) or, with `base64`, a PKCS#12
+/// keystore (purpose `pkcs12_file`, which must be stored). The content goes
+/// straight into the vault when `store_as_secret` is set, so a private key
+/// never round-trips through the webview.
 #[tauri::command]
 pub fn read_text_file(
     st: State<'_, DesktopState>,
-    path: String,
+    grant: String,
     workspace_id: Option<String>,
     store_as_secret: Option<String>,
     base64: Option<bool>,
 ) -> R<TextFile> {
     use base64::Engine as _;
-    let meta = std::fs::metadata(&path).map_err(|x| x.to_string())?;
-    if meta.len() > 1024 * 1024 {
-        return Err("file is larger than 1 MiB".into());
-    }
-    // Binary keystores (PKCS#12) are carried as base64 text in the vault.
-    let text = if base64.unwrap_or(false) {
-        base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).map_err(|x| x.to_string())?)
-    } else {
-        std::fs::read_to_string(&path).map_err(|x| x.to_string())?
-    };
     let app = st.app()?;
+    let binary = base64.unwrap_or(false);
+    if binary && store_as_secret.is_none() {
+        return Err("a PKCS#12 keystore is only read into the vault; give it a label".into());
+    }
+    let purpose = if binary { FilePurpose::Pkcs12File } else { FilePurpose::PemFile };
+    let file = st.file_grants.read(&grant, purpose).map_err(|x| x.to_string())?;
+    // Binary keystores (PKCS#12) are carried as base64 text in the vault.
+    let text = if binary {
+        base64::engine::general_purpose::STANDARD.encode(&file.bytes)
+    } else {
+        String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())?
+    };
     if let Some(label) = store_as_secret {
-        let ws = workspace_id.map(|w| id(&w)).transpose()?;
-        let r = app.set_secret(ws.as_ref(), &label, &text).map_err(e)?;
+        let ws = workspace_id.ok_or_else(|| "a secret must belong to a workspace; open one first".to_string())?;
+        let r = app.set_secret(&id(&ws)?, &label, &text).map_err(e)?;
         return Ok(TextFile { text: None, secret: Some(r) });
     }
     Ok(TextFile { text: Some(text), secret: None })

@@ -44,7 +44,7 @@ pub struct JwtClaims {
     pub extra_json: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthGrant {
     #[default]
@@ -73,8 +73,9 @@ pub struct OAuth2Config {
     /// How client credentials are sent to the token endpoint.
     #[serde(default)]
     pub client_auth: OAuthClientAuth,
-    /// Where the acquired access token is cached (vault) — id of the token
-    /// cache entry, managed by the engine.
+    /// Token-cache identity: profiles with different ids never share a
+    /// cached token. When unset, the app uses the id of the workspace,
+    /// folder or request that defines the profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_cache_id: Option<Id>,
     /// Refresh this many seconds before expiry.
@@ -265,6 +266,20 @@ impl AuthConfig {
             AuthConfig::Wsse { .. } => "wsse",
             AuthConfig::JwtSvid { .. } => "jwt_svid",
             AuthConfig::Multi { .. } => "multi",
+        }
+    }
+
+    /// Give every OAuth 2 profile in this config that has no token-cache id
+    /// the id of `owner` (the workspace, folder or request that defines
+    /// it), so profiles defined in different places never share a cached
+    /// token. Explicit ids are kept.
+    pub fn bind_token_cache(&mut self, owner: Id) {
+        match self {
+            AuthConfig::OAuth2 { config } => {
+                config.token_cache_id.get_or_insert(owner);
+            }
+            AuthConfig::Multi { profiles } => profiles.iter_mut().for_each(|p| p.bind_token_cache(owner)),
+            _ => {}
         }
     }
 }

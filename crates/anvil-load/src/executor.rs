@@ -27,6 +27,7 @@ use crate::schedule;
 use anvil_domain::Id;
 use anvil_domain::load::*;
 use anvil_domain::settings::{Limits, SettingsOverrides};
+use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext};
 use anvil_transport::recorder::EventCtx;
@@ -272,6 +273,8 @@ struct Shared {
     warmup: Duration,
     bucket_width_secs: u64,
     engines: Vec<OnceLock<Arc<Engine>>>,
+    /// Idle connections each slot's engine keeps per pool ([`slot_idle_cap`]).
+    slot_idle: usize,
     tokens: Arc<anvil_auth::oauth::TokenCache>,
     ledger: Mutex<LedgerState>,
     shards: Vec<Mutex<Shard>>,
@@ -304,18 +307,53 @@ fn derive_seed(plan_seed: u64, ctx_seed: u64, iteration: u64, step: u64) -> u64 
     splitmix64(plan_seed ^ splitmix64(ctx_seed ^ splitmix64(iteration.wrapping_mul(1_000_003).wrapping_add(step))))
 }
 
+/// Bounds of the idle connections one slot's engine keeps in total, per
+/// pool.
+const SLOT_MIN_IDLE: usize = 4;
+const SLOT_MAX_IDLE: usize = 64;
+
+/// Idle connections one slot keeps in total: one per distinct request of the
+/// plan (chain steps or mix entries), within 4..=64. Each request sends to
+/// one pool key at a time, so a persistent chain or mix touching up to 64
+/// requests finds each one's connection still pooled on the next iteration
+/// instead of the global cap closing it just before its reuse. Requests
+/// beyond that (or redirects or dataset rows that template other
+/// destinations) share the cap.
+fn slot_idle_cap(ids: &[Id]) -> usize {
+    let distinct: std::collections::HashSet<&Id> = ids.iter().collect();
+    distinct.len().clamp(SLOT_MIN_IDLE, SLOT_MAX_IDLE)
+}
+
+/// Idle HTTP/1.1 and HTTP/2 connections one slot's engine keeps. A slot
+/// sends one request at a time, so it rarely has more than one connection
+/// per destination to return; the caps keep a run with many slots from
+/// holding slots × 64 idle sockets (the default cap of an engine) unless
+/// its plan touches that many destinations.
+fn slot_http_pool(idle_total: usize) -> anvil_transport::http::PoolLimits {
+    anvil_transport::http::PoolLimits { max_idle_per_key: 2, max_idle_total: idle_total, ..Default::default() }
+}
+
+/// Idle QUIC connections one slot's engine keeps (one per destination).
+fn slot_h3_pool(idle_total: usize) -> anvil_transport::h3::PoolLimits {
+    anvil_transport::h3::PoolLimits { max_idle_total: idle_total, ..Default::default() }
+}
+
+/// The engine of one slot: its own small connection pools and gRPC
+/// channels, and the run's shared token cache.
+fn slot_engine(tokens: Arc<anvil_auth::oauth::TokenCache>, idle_total: usize) -> Engine {
+    let mut e = Engine::new();
+    e.http = Arc::new(anvil_transport::http::HttpTransport::with_pool_limits(slot_http_pool(idle_total)));
+    e.h3 = anvil_transport::h3::H3Transport::with_pool_limits(slot_h3_pool(idle_total));
+    e.tokens = tokens;
+    // gRPC calls reuse this slot's channels while keep-alive is on (the
+    // persistent connection mode); fresh mode turns it off.
+    e.grpc_channels = Some(Arc::new(anvil_transport::grpc::Channels::new()));
+    e
+}
+
 impl Shared {
     fn engine(&self, slot: usize) -> Arc<Engine> {
-        self.engines[slot]
-            .get_or_init(|| {
-                let mut e = Engine::new();
-                e.tokens = self.tokens.clone();
-                // gRPC calls reuse this slot's channels while keep-alive is on
-                // (the persistent connection mode); fresh mode turns it off.
-                e.grpc_channels = Some(Arc::new(anvil_transport::grpc::Channels::new()));
-                Arc::new(e)
-            })
-            .clone()
+        self.engines[slot].get_or_init(|| Arc::new(slot_engine(self.tokens.clone(), self.slot_idle))).clone()
     }
 
     fn shard(&self, slot: usize) -> &Mutex<Shard> {
@@ -605,17 +643,17 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
     } else {
         vec![pick_weighted(sh.plan.seed, &sh.mix_cumulative, iter)]
     };
-    let mut extra = vec![VarLayer {
+    let load = VarLayer {
         label: "load".into(),
         vars: vec![
             VarEntry { name: "anvil.iteration".into(), value: iter.to_string(), secret: false },
             VarEntry { name: "anvil.vu".into(), value: slot.to_string(), secret: false },
         ],
-    }];
-    if let Some(d) = &sh.dataset {
-        extra.push(d.row_layer(iter));
-    }
-    let mut extracted: Vec<VarEntry> = Vec::new();
+    };
+    let row = sh.dataset.as_ref().map(|d| d.row_layer(iter));
+    // Values extracted this iteration, each with the scope of the step that
+    // extracted it (`ExecutionContext::scope`).
+    let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
     let (mut terminal, mut app, mut assertion) = (Terminal::Completed, false, false);
     for (pos, &si) in steps.iter().enumerate() {
         if pos > 0 && sh.halt.is_cancelled() {
@@ -624,9 +662,19 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
         }
         let base = &sh.steps[si];
         let mut ctx = ExecutionContext::clone(base);
-        ctx.var_layers.extend(extra.iter().cloned());
-        if !extracted.is_empty() {
-            ctx.var_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: extracted.clone() });
+        ctx.var_layers.push(load.clone());
+        // A step under a sealed import root sees only values extracted under
+        // that root, and no dataset row (the dataset is the workspace's); a
+        // step outside it never sees what it extracted.
+        let scope = base.scope;
+        if scope.is_none()
+            && let Some(l) = &row
+        {
+            ctx.var_layers.push(l.clone());
+        }
+        let visible: Vec<VarEntry> = extracted.iter().filter(|(s, _)| *s == scope).map(|(_, e)| e.clone()).collect();
+        if !visible.is_empty() {
+            ctx.var_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: visible });
         }
         ctx.seed = Some(derive_seed(sh.plan.seed, base.seed.unwrap_or(0), iter, pos as u64));
         sh.begin_send(slot, measured);
@@ -641,8 +689,8 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
             break;
         }
         for (name, value, secret) in out.extracted {
-            extracted.retain(|e| e.name != name);
-            extracted.push(VarEntry { name, value, secret });
+            extracted.retain(|(s, e)| *s != scope || e.name != name);
+            extracted.push((scope, VarEntry { name, value, secret }));
         }
     }
     sh.end_iteration(measured, terminal, app, assertion);
@@ -656,8 +704,8 @@ async fn sleep_or_stop(sh: &Shared, d: Duration) -> bool {
 }
 
 /// Returns (time scheduling stopped, still-running tasks).
-async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration) -> (Instant, JoinSet<()>) {
-    let end = sh.t0 + Duration::from_secs(schedule::total_secs(&stages));
+async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration, total_secs: u64) -> (Instant, JoinSet<()>) {
+    let end = sh.t0 + Duration::from_secs(total_secs);
     let max_vus = stages.iter().map(|s| s.target).max().unwrap_or(0) as usize;
     let stages = Arc::new(stages);
     let mut set = JoinSet::new();
@@ -698,8 +746,8 @@ async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration) -> (
     (at, set)
 }
 
-async fn drive_open(sh: Arc<Shared>, stages: Vec<Stage>, max_in_flight: usize) -> (Instant, JoinSet<()>) {
-    let end = sh.t0 + Duration::from_secs(schedule::total_secs(&stages));
+async fn drive_open(sh: Arc<Shared>, stages: Vec<Stage>, max_in_flight: usize, total_secs: u64) -> (Instant, JoinSet<()>) {
+    let end = sh.t0 + Duration::from_secs(total_secs);
     let free: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new((0..max_in_flight).rev().collect()));
     let mut set = JoinSet::new();
     for offset in schedule::Arrivals::new(&stages) {
@@ -804,25 +852,37 @@ pub struct LoadRun {
     mix_cumulative: Vec<u64>,
     dataset: Option<Dataset>,
     slots: usize,
+    /// Idle connections each slot's engine keeps per pool ([`slot_idle_cap`]).
+    slot_idle: usize,
+    /// Validated total schedule length in seconds; 0 for fixed-iteration runs.
+    /// Every deadline in [`LoadRun::execute_lockable`] derives from this value.
+    planned_secs: u64,
 }
 
-/// Workload, warmup and abort-rule checks (returns the slot count). Public
-/// so callers can reject a plan when it is saved, not only when it runs.
-fn validate_workload(plan: &LoadPlan) -> Result<usize, LoadError> {
-    let slots = match &plan.workload {
+/// Bounds resolved from a plan's workload: the slot count and, for
+/// stage-based workloads, the validated total schedule length.
+struct WorkloadLimits {
+    slots: usize,
+    planned_secs: u64,
+}
+
+/// Workload, warmup and abort-rule checks (returns the resolved limits).
+/// Public so callers can reject a plan when it is saved, not only when it runs.
+fn validate_workload(plan: &LoadPlan) -> Result<WorkloadLimits, LoadError> {
+    let (slots, planned_secs) = match &plan.workload {
         Workload::ClosedVirtualUsers { stages, think_time_ms } => {
-            validate_stages(stages, MAX_VUS, "virtual users")?;
+            let total = validate_stages(stages, MAX_VUS, "virtual users")?;
             if *think_time_ms > 3_600_000 {
                 return Err(LoadError::Invalid("think time exceeds one hour".into()));
             }
-            stages.iter().map(|s| s.target).max().unwrap_or(0)
+            (stages.iter().map(|s| s.target).max().unwrap_or(0), total)
         }
         Workload::OpenArrivalRate { stages, max_in_flight } => {
-            validate_stages(stages, MAX_RATE_PER_SEC, "arrivals/s")?;
+            let total = validate_stages(stages, MAX_RATE_PER_SEC, "arrivals/s")?;
             if *max_in_flight == 0 || *max_in_flight > MAX_IN_FLIGHT {
                 return Err(LoadError::Invalid(format!("max_in_flight must be 1..={MAX_IN_FLIGHT}")));
             }
-            *max_in_flight
+            (*max_in_flight, total)
         }
         Workload::Iterations { iterations, concurrency } => {
             if *iterations == 0 || *iterations > MAX_ITERATIONS {
@@ -831,13 +891,11 @@ fn validate_workload(plan: &LoadPlan) -> Result<usize, LoadError> {
             if *concurrency == 0 || *concurrency > MAX_CONCURRENCY {
                 return Err(LoadError::Invalid(format!("concurrency must be 1..={MAX_CONCURRENCY}")));
             }
-            (*concurrency).min(*iterations)
+            ((*concurrency).min(*iterations), 0)
         }
-    } as usize;
+    };
     match &plan.workload {
-        Workload::ClosedVirtualUsers { stages, .. } | Workload::OpenArrivalRate { stages, .. }
-            if plan.warmup_secs >= schedule::total_secs(stages) =>
-        {
+        Workload::ClosedVirtualUsers { .. } | Workload::OpenArrivalRate { .. } if plan.warmup_secs >= planned_secs => {
             return Err(LoadError::Invalid("the warmup covers the whole schedule; nothing would be measured".into()));
         }
         _ => {}
@@ -847,7 +905,7 @@ fn validate_workload(plan: &LoadPlan) -> Result<usize, LoadError> {
     {
         return Err(LoadError::Invalid("abort rule needs max_failure_permille ≤ 1000 and a 1–3600 s window".into()));
     }
-    Ok(slots)
+    Ok(WorkloadLimits { slots: slots as usize, planned_secs })
 }
 
 /// Validate a plan's shape without resolving its requests: a chain or mix is
@@ -862,11 +920,15 @@ pub fn validate_plan(plan: &LoadPlan) -> Result<(), LoadError> {
     validate_workload(plan).map(|_| ())
 }
 
-fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<(), LoadError> {
+/// Validate the stage shape and durations, returning the total schedule
+/// length. Overflow of the sum is refused with a typed validation error
+/// rather than panicking or wrapping.
+fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<u64, LoadError> {
     if stages.is_empty() {
         return Err(LoadError::Invalid("the workload has no stages".into()));
     }
-    let total = schedule::total_secs(stages);
+    let total =
+        schedule::total_secs(stages).ok_or_else(|| LoadError::Invalid("the stage durations overflow; shorten the schedule".into()))?;
     if total == 0 {
         return Err(LoadError::Invalid("the stages have zero total duration".into()));
     }
@@ -879,7 +941,7 @@ fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<(), LoadErr
     if stages.iter().all(|s| s.target == 0) {
         return Err(LoadError::Invalid("every stage target is zero; nothing would be sent".into()));
     }
-    Ok(())
+    Ok(total)
 }
 
 impl LoadRun {
@@ -912,7 +974,10 @@ impl LoadRun {
         if plan.mix.is_empty() && ids.len() > MAX_CHAIN_STEPS {
             return Err(LoadError::Invalid(format!("the chain has {} steps; the limit is {MAX_CHAIN_STEPS}", ids.len())));
         }
-        let slots = validate_workload(&plan)?;
+        let slot_idle = slot_idle_cap(&ids);
+        let limits = validate_workload(&plan)?;
+        let slots = limits.slots;
+        let planned_secs = limits.planned_secs;
         if plan.dataset_id.is_some() && job.dataset.is_none() {
             return Err(LoadError::Invalid("the plan references a dataset but none was provided".into()));
         }
@@ -963,7 +1028,7 @@ impl LoadRun {
             started_at: Utc::now(),
             unit,
         };
-        Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1) })
+        Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1), slot_idle, planned_secs })
     }
 
     pub fn meta(&self) -> &RunMeta {
@@ -980,12 +1045,8 @@ impl LoadRun {
     /// cancelling `lock` stops the run like a user cancel but records
     /// `stopped_by_lock`.
     pub async fn execute_lockable(self, cancel: CancellationToken, lock: CancellationToken, progress: Option<ProgressSink>) -> LoadReport {
-        let LoadRun { mut meta, opts, steps, units, mix_cumulative, dataset, slots } = self;
+        let LoadRun { mut meta, opts, steps, units, mix_cumulative, dataset, slots, slot_idle, planned_secs } = self;
         let plan = meta.plan.clone();
-        let planned_secs = match &plan.workload {
-            Workload::ClosedVirtualUsers { stages, .. } | Workload::OpenArrivalRate { stages, .. } => schedule::total_secs(stages),
-            Workload::Iterations { .. } => 0,
-        };
         let proto = Engine::new();
         let shard_count = slots.clamp(1, MAX_SHARDS);
         meta.started_at = Utc::now();
@@ -1000,6 +1061,7 @@ impl LoadRun {
             warmup: Duration::from_secs(plan.warmup_secs),
             bucket_width_secs: planned_secs.div_ceil(MAX_TIMELINE_BUCKETS).max(1),
             engines: (0..slots).map(|_| OnceLock::new()).collect(),
+            slot_idle,
             tokens: proto.tokens.clone(),
             ledger: Mutex::new(LedgerState::default()),
             shards: (0..shard_count).map(|_| Mutex::new(Shard { metrics: Metrics::new(), pending: BTreeMap::new() })).collect(),
@@ -1092,9 +1154,11 @@ impl LoadRun {
 
         let (ended_at, mut set) = match plan.workload.clone() {
             Workload::ClosedVirtualUsers { stages, think_time_ms } => {
-                drive_closed(sh.clone(), stages, Duration::from_millis(think_time_ms)).await
+                drive_closed(sh.clone(), stages, Duration::from_millis(think_time_ms), planned_secs).await
             }
-            Workload::OpenArrivalRate { stages, max_in_flight } => drive_open(sh.clone(), stages, max_in_flight as usize).await,
+            Workload::OpenArrivalRate { stages, max_in_flight } => {
+                drive_open(sh.clone(), stages, max_in_flight as usize, planned_secs).await
+            }
             Workload::Iterations { iterations, .. } => drive_iterations(sh.clone(), iterations, slots).await,
         };
         *sched_end.lock() = Some(ended_at);
@@ -1149,6 +1213,9 @@ impl LoadRun {
                 d.rows.len(),
                 &d.sha256[..16.min(d.sha256.len())]
             ));
+            if sh.steps.iter().any(|s| s.scope.is_some()) {
+                notes.push(DATASET_SKIPPED_UNDER_IMPORT_ROOT.into());
+            }
         }
         if health::sample().is_none() {
             snap.generator.notes.push("Generator CPU and memory measurement is unavailable on this platform.".into());
@@ -1165,6 +1232,30 @@ impl LoadRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_engines_keep_small_connection_pools() {
+        let e = slot_engine(Arc::new(anvil_auth::oauth::TokenCache::new()), 6);
+        let http = e.http.pool.limits();
+        assert_eq!((http.max_idle_per_key, http.max_idle_total), (2, 6));
+        assert_eq!(http.idle_ttl, anvil_transport::http::PoolLimits::default().idle_ttl);
+        assert_eq!(e.h3.pool_limits().max_idle_total, 6);
+        assert!(e.grpc_channels.is_some());
+    }
+
+    #[test]
+    fn slot_idle_cap_follows_the_distinct_requests_of_the_plan() {
+        let ids: Vec<Id> = (0..100).map(|_| Id::new()).collect();
+        assert_eq!(slot_idle_cap(&ids[..1]), SLOT_MIN_IDLE);
+        assert_eq!(slot_idle_cap(&ids[..6]), 6);
+        // A request used by several steps is one destination.
+        let repeated = [ids[0], ids[1], ids[0], ids[2], ids[1], ids[3], ids[4]];
+        assert_eq!(slot_idle_cap(&repeated), 5);
+        assert_eq!(slot_idle_cap(&ids[..MAX_CHAIN_STEPS]), MAX_CHAIN_STEPS);
+        assert_eq!(slot_idle_cap(&ids), SLOT_MAX_IDLE);
+        assert!(SLOT_MAX_IDLE <= anvil_transport::http::PoolLimits::default().max_idle_total);
+        assert!(SLOT_MAX_IDLE <= anvil_transport::h3::PoolLimits::default().max_idle_total);
+    }
 
     #[test]
     fn weighted_pick_is_seeded_and_proportional() {

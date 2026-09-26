@@ -1,6 +1,6 @@
 //! Import planning: conflict detection and id remapping per policy.
 
-use crate::graph::PortableGraph;
+use crate::graph::{PortableGraph, SecretValue};
 use anvil_domain::Id;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,13 +19,53 @@ pub enum ConflictPolicy {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ImportPlan {
     pub policy: ConflictPolicy,
+    /// Objects and secrets (counted together).
     pub to_create: usize,
     pub to_replace: usize,
     pub skipped_existing: usize,
+    /// Objects and secrets that share an id with one already stored.
     pub conflicts: Vec<String>,
+    /// Secrets that share an id with one stored here that a workspace outside
+    /// the bundle (or no workspace) owns. Replace never overwrites or
+    /// re-owns such a secret, so a Replace import is refused while any is
+    /// listed; Merge keeps the stored secret and Duplicate never touches it.
+    pub foreign_secrets: Vec<String>,
+    /// Objects stored here under the same kind and id as a bundle object but
+    /// in a different workspace than the bundle gives it. Replace never moves
+    /// an object out of its workspace, so a Replace import is refused while
+    /// any is listed; Merge keeps the stored object. Empty for Duplicate,
+    /// which gives every object a fresh id.
+    pub foreign_objects: Vec<String>,
+    /// Workspaces stored here that the bundle claims by id (Merge and
+    /// Replace; a Duplicate copy never claims one). The import writes into
+    /// them, and what it writes can use their vault secrets, so it is refused
+    /// unless the user approves each one after the preview.
+    pub existing_workspaces: Vec<ExistingWorkspace>,
 }
 
-fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
+/// A workspace stored here that a bundle claims by id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExistingWorkspace {
+    pub id: Id,
+    /// Its name here.
+    pub name: String,
+}
+
+/// What the store already holds, as far as an import can collide with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Existing {
+    /// Ids of every stored object.
+    pub objects: HashSet<Id>,
+    /// Every stored object by kind and id, with the workspace that owns it
+    /// (`None` for a workspace itself).
+    pub owners: HashMap<(String, Id), Option<Id>>,
+    /// Every stored workspace, with its name.
+    pub workspaces: HashMap<Id, String>,
+    /// Every stored secret, with the workspace that owns it (`None`: none does).
+    pub secrets: HashMap<Id, Option<Id>>,
+}
+
+pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
     let mut v = Vec::new();
     v.extend(g.workspaces.iter().map(|x| ("workspace".to_string(), x.meta.id, x.name.clone())));
     v.extend(g.folders.iter().map(|x| ("folder".to_string(), x.meta.id, x.name.clone())));
@@ -40,55 +80,193 @@ fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
     v
 }
 
-/// Compute what applying `g` would do given the ids that already exist.
-pub fn plan(g: &PortableGraph, existing: &HashSet<Id>, policy: ConflictPolicy) -> ImportPlan {
-    let ids = all_ids(g);
-    let conflicts: Vec<String> =
-        ids.iter().filter(|(_, id, _)| existing.contains(id)).map(|(k, id, n)| format!("{k} '{n}' ({id})")).collect();
+/// Compute what applying `g` would do given what already exists.
+pub fn plan(g: &PortableGraph, existing: &Existing, policy: ConflictPolicy) -> ImportPlan {
+    let mut ids = all_ids(g);
+    ids.extend(secret_ids(g).map(|(id, v)| ("secret".to_string(), id, v.label.clone())));
+    let conflicts: Vec<String> = ids
+        .iter()
+        .filter(|(_, id, _)| existing.objects.contains(id) || existing.secrets.contains_key(id))
+        .map(|(k, id, n)| format!("{k} '{n}' ({id})"))
+        .collect();
+    let foreign_secrets = foreign_secrets(g, existing);
+    // A Duplicate copy gives every object a fresh id: none lands on a stored
+    // object, and none claims a stored workspace.
+    let (foreign_objects, existing_workspaces) = match policy {
+        ConflictPolicy::Duplicate => (vec![], vec![]),
+        ConflictPolicy::Merge | ConflictPolicy::Replace => (foreign_objects(g, existing), existing_workspaces(g, existing)),
+    };
     let n = ids.len();
     let c = conflicts.len();
-    match policy {
-        ConflictPolicy::Merge => ImportPlan { policy, to_create: n - c, to_replace: 0, skipped_existing: c, conflicts },
-        ConflictPolicy::Replace => ImportPlan { policy, to_create: n - c, to_replace: c, skipped_existing: 0, conflicts },
-        ConflictPolicy::Duplicate => ImportPlan { policy, to_create: n, to_replace: 0, skipped_existing: 0, conflicts },
-    }
+    let (to_create, to_replace, skipped_existing) = match policy {
+        ConflictPolicy::Merge => (n - c, 0, c),
+        ConflictPolicy::Replace => (n - c, c, 0),
+        ConflictPolicy::Duplicate => (n, 0, 0),
+    };
+    ImportPlan { policy, to_create, to_replace, skipped_existing, conflicts, foreign_secrets, foreign_objects, existing_workspaces }
 }
 
-/// Give every object a fresh id and rewrite all references (Duplicate policy).
-/// Secret ids are remapped too, so duplicated workspaces never share vault entries.
-pub fn remap_all(g: &mut PortableGraph) -> HashMap<Id, Id> {
+/// Bundle workspaces whose id is a workspace stored here, with its name here.
+pub fn existing_workspaces(g: &PortableGraph, existing: &Existing) -> Vec<ExistingWorkspace> {
+    g.workspaces
+        .iter()
+        .filter_map(|w| existing.workspaces.get(&w.meta.id).map(|name| ExistingWorkspace { id: w.meta.id, name: name.clone() }))
+        .collect()
+}
+
+/// Every object an import writes, as (kind, id, name, owning workspace); a
+/// workspace has no owner, and a revision belongs to its request's.
+fn owned_ids(g: &PortableGraph) -> Vec<(&'static str, Id, String, Option<Id>)> {
+    let requests: HashMap<Id, (Id, &str)> = g.requests.iter().map(|r| (r.meta.id, (r.workspace_id, r.name.as_str()))).collect();
+    let mut v = Vec::new();
+    v.extend(g.workspaces.iter().map(|x| ("workspace", x.meta.id, x.name.clone(), None)));
+    v.extend(g.folders.iter().map(|x| ("folder", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.requests.iter().map(|x| ("request", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.revisions.iter().map(|x| {
+        let request = requests.get(&x.request_id);
+        ("revision", x.id, request.map(|r| r.1.to_string()).unwrap_or_default(), request.map(|r| r.0))
+    }));
+    v.extend(g.environments.iter().map(|x| ("environment", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.tls_profiles.iter().map(|x| ("tls_profile", x.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.proxy_profiles.iter().map(|x| ("proxy_profile", x.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.integrations.iter().map(|x| ("integration", x.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.datasets.iter().map(|x| ("dataset", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.scenarios.iter().map(|x| ("scenario", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.load_plans.iter().map(|x| ("load_plan", x.id, x.name.clone(), Some(x.workspace_id))));
+    v
+}
+
+/// Bundle objects whose kind and id are stored here in a different
+/// workspace than the bundle gives them, as `folder 'name' (id)`.
+pub fn foreign_objects(g: &PortableGraph, existing: &Existing) -> Vec<String> {
+    owned_ids(g)
+        .into_iter()
+        .filter(|(k, id, _, owner)| existing.owners.get(&(k.to_string(), *id)).is_some_and(|stored| stored != owner))
+        .map(|(k, id, n, _)| format!("{k} '{n}' ({id})"))
+        .collect()
+}
+
+/// The bundle's secrets, by id (validation refuses any other key).
+fn secret_ids(g: &PortableGraph) -> impl Iterator<Item = (Id, &SecretValue)> {
+    g.secrets.iter().filter_map(|(k, v)| Some((k.parse::<Id>().ok()?, v)))
+}
+
+/// Bundle secrets whose id is stored here under an owner that is not a
+/// workspace in the bundle, as `secret 'label' (id)`.
+pub fn foreign_secrets(g: &PortableGraph, existing: &Existing) -> Vec<String> {
+    let ws: HashSet<Id> = g.workspaces.iter().map(|w| w.meta.id).collect();
+    secret_ids(g)
+        .filter(|(id, _)| existing.secrets.get(id).is_some_and(|owner| owner.is_none_or(|w| !ws.contains(&w))))
+        .map(|(id, v)| format!("secret '{}' ({id})", v.label))
+        .collect()
+}
+
+/// Fields that hold the id of an object in the graph (a string, a list of
+/// strings, or an object such as a proxy selection whose own `id` is one).
+/// Domain types have no free-form maps, so every JSON key in a serialized
+/// graph is a field name from those types; user text is never a key.
+const REFERENCE_FIELDS: &[&str] = &[
+    "id",
+    "workspace_id",
+    "parent_id",
+    "folder_id",
+    "request_id",
+    "revision_id",
+    "dataset_id",
+    "environment_id",
+    "active_environment_id",
+    "tls_profile_id",
+    "proxy_profile_id",
+    "integration_profile_id",
+    "scenario_id",
+    "chain",
+    "import_environment_ids",
+];
+
+/// Give every object, revision and secret a fresh id and rewrite every
+/// reference to them (Duplicate policy). The copy shares no identity with the
+/// source: writing it can never overwrite a source object, and each copied
+/// secret is owned by the copied workspace.
+///
+/// Only reference fields are rewritten, and only when they name an object or
+/// secret in this graph; text that merely looks like an id is left alone.
+pub fn remap_all(g: &mut PortableGraph) -> Result<HashMap<Id, Id>, serde_json::Error> {
     let mut map: HashMap<Id, Id> = HashMap::new();
     for (_, id, _) in all_ids(g) {
         map.insert(id, Id::new());
     }
-    let mut secret_map: HashMap<String, String> = HashMap::new();
-    for k in g.secrets.keys() {
-        secret_map.insert(k.clone(), Id::new().to_string());
+    for r in &g.revisions {
+        map.insert(r.id, Id::new());
     }
-    // Rewrite via JSON so every reference field is covered uniformly.
-    let mut v = serde_json::to_value(&*g).expect("graph serializes");
+    let mut secret_map: HashMap<Id, Id> = HashMap::new();
+    for k in g.secrets.keys() {
+        if let Ok(id) = k.parse::<Id>() {
+            secret_map.insert(id, Id::new());
+        }
+    }
+    let mut v = serde_json::to_value(&*g)?;
     rewrite(&mut v, &map, &secret_map);
-    let mut ng: PortableGraph = serde_json::from_value(v).expect("remapped graph deserializes");
+    let mut ng: PortableGraph = serde_json::from_value(v)?;
     ng.attachments = std::mem::take(&mut g.attachments);
     ng.history = std::mem::take(&mut g.history);
-    ng.secrets = std::mem::take(&mut g.secrets).into_iter().map(|(k, v)| (secret_map.get(&k).cloned().unwrap_or(k), v)).collect();
+    // Execution records can hold captured user data, so only their own
+    // top-level links are followed.
+    for h in &mut ng.history {
+        for field in ["workspace_id", "request_id", "revision_id", "environment_id"] {
+            if let Some(serde_json::Value::String(s)) = h.get_mut(field) {
+                remap(s, &map);
+            }
+        }
+    }
+    ng.secrets = std::mem::take(&mut g.secrets)
+        .into_iter()
+        .map(|(k, mut secret)| {
+            // Owned by the copied workspace; validation rejects any other owner.
+            let owner = secret.workspace_id.as_deref().and_then(|w| w.parse::<Id>().ok()).and_then(|w| map.get(&w));
+            secret.workspace_id = owner.map(|w| w.to_string());
+            let id = k.parse::<Id>().ok().and_then(|id| secret_map.get(&id)).map(|id| id.to_string()).unwrap_or(k);
+            (id, secret)
+        })
+        .collect();
     *g = ng;
-    map
+    Ok(map)
 }
 
-fn rewrite(v: &mut serde_json::Value, map: &HashMap<Id, Id>, secrets: &HashMap<String, String>) {
+fn remap(s: &mut String, map: &HashMap<Id, Id>) {
+    if let Some(n) = s.parse::<Id>().ok().and_then(|id| map.get(&id)) {
+        *s = n.to_string();
+    }
+}
+
+fn rewrite(v: &mut serde_json::Value, ids: &HashMap<Id, Id>, secrets: &HashMap<Id, Id>) {
+    use serde_json::Value;
     match v {
-        serde_json::Value::String(s) => {
-            if let Ok(id) = s.parse::<Id>() {
-                if let Some(n) = map.get(&id) {
-                    *s = n.to_string();
-                } else if let Some(n) = secrets.get(s.as_str()) {
-                    *s = n.clone();
+        Value::Object(o) => {
+            // A vault reference: `{"kind":"secret","secret":{"id":…,"label":…}}`.
+            if o.get("kind").and_then(Value::as_str) == Some("secret")
+                && let Some(Value::Object(r)) = o.get_mut("secret")
+            {
+                if let Some(Value::String(s)) = r.get_mut("id") {
+                    remap(s, secrets);
+                }
+                return;
+            }
+            for (k, x) in o.iter_mut() {
+                match x {
+                    Value::String(s) if REFERENCE_FIELDS.contains(&k.as_str()) => remap(s, ids),
+                    Value::Array(a) if REFERENCE_FIELDS.contains(&k.as_str()) => {
+                        for e in a {
+                            match e {
+                                Value::String(s) => remap(s, ids),
+                                other => rewrite(other, ids, secrets),
+                            }
+                        }
+                    }
+                    other => rewrite(other, ids, secrets),
                 }
             }
         }
-        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| rewrite(x, map, secrets)),
-        serde_json::Value::Object(o) => o.values_mut().for_each(|x| rewrite(x, map, secrets)),
+        Value::Array(a) => a.iter_mut().for_each(|x| rewrite(x, ids, secrets)),
         _ => {}
     }
 }

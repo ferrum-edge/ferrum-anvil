@@ -43,7 +43,14 @@ pub struct PreparedHttp {
     pub method: String,
     pub target: Target,
     pub headers: Vec<(String, String)>,
+    /// Lowercased names of the configured headers marked sensitive. They are
+    /// credentials of the request's own origin, like `Authorization`.
+    pub sensitive_headers: Vec<String>,
     pub body: Bytes,
+    /// Whether resolving the body substituted a secret variable. Decided
+    /// structurally, before encoding: a form-urlencoded or re-serialized
+    /// GraphQL body holds the secret in a form a byte scan does not find.
+    pub body_uses_secret: bool,
     pub content_type: Option<String>,
     pub inferred: Vec<String>,
     pub lint_bypassed: Option<String>,
@@ -130,7 +137,18 @@ pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<Stri
         "https" | "wss" | "grpcs" => Some(443),
         _ => None,
     };
-    let port = match u.port().or(default_port) {
+    // `url` drops a port equal to the parse scheme's default, so an explicit `:80`/`:443` on a raw
+    // scheme (which has no implicit default) reads back as `None`. Re-parse under the other special
+    // scheme, whose default differs, to recover the port that was actually written.
+    let explicit_port = match u.port() {
+        Some(p) => Some(p),
+        None if default_port.is_none() => {
+            let alt_scheme = if parse_scheme == "https" { "http" } else { "https" };
+            url::Url::parse(&format!("{alt_scheme}://{authority}/")).ok().and_then(|alt| alt.port())
+        }
+        None => None,
+    };
+    let port = match explicit_port.or(default_port) {
         Some(p) => p,
         None => return Err(local(FailureKind::InvalidUrl, format!("{scheme}:// URLs need an explicit port"), "url")),
     };
@@ -169,6 +187,9 @@ pub fn prepare_http(
     for (i, p) in spec.params.iter().enumerate().filter(|(_, p)| p.enabled) {
         let k = r.resolve(&p.name, &format!("params[{i}].name"))?;
         let v = r.resolve(&p.value, &format!("params[{i}].value"))?;
+        if p.sensitive {
+            r.mark_sensitive(&k, &v);
+        }
         extra_query.push(format!("{}={}", encode_component(&k), encode_component(&v)));
     }
     if !extra_query.is_empty() {
@@ -177,9 +198,13 @@ pub fn prepare_http(
     }
 
     let mut headers: Vec<(String, String)> = Vec::new();
+    let mut sensitive_headers: Vec<String> = Vec::new();
     for (i, h) in spec.headers.iter().enumerate().filter(|(_, h)| h.enabled) {
         let n = r.resolve(h.name.trim(), &format!("headers[{i}].name"))?;
         let v = r.resolve(&h.value, &format!("headers[{i}].value"))?;
+        if h.sensitive {
+            r.mark_sensitive(&n, &v);
+        }
         if http::HeaderName::from_bytes(n.as_bytes()).is_err() {
             return Err(local(FailureKind::InvalidHeader, format!("'{n}' is not a valid header name"), &format!("headers[{i}].name")));
         }
@@ -197,10 +222,14 @@ pub fn prepare_http(
                 &format!("headers[{i}].value"),
             ));
         }
+        if h.sensitive {
+            sensitive_headers.push(n.to_ascii_lowercase());
+        }
         headers.push((n, v));
     }
 
     // ---- body ----
+    let secret_substitutions_before_body = r.secret_substitutions();
     let (body, inferred_ct, lint_target): (Vec<u8>, Option<String>, Option<(&str, String)>) = match &spec.body {
         Body::None => (vec![], None, None),
         Body::Raw { text, content_type } => {
@@ -220,6 +249,9 @@ pub fn prepare_http(
             for (i, f) in fields.iter().enumerate().filter(|(_, f)| f.enabled) {
                 let k = r.resolve(&f.name, &format!("body.fields[{i}].name"))?;
                 let v = r.resolve(&f.value, &format!("body.fields[{i}].value"))?;
+                if f.sensitive {
+                    r.mark_sensitive(&k, &v);
+                }
                 parts.push(format!(
                     "{}={}",
                     url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(),
@@ -337,6 +369,7 @@ pub fn prepare_http(
             (t.clone().into_bytes(), Some(ct), Some(("xml", t)))
         }
     };
+    let body_uses_secret = r.secret_substitutions() > secret_substitutions_before_body;
 
     // ---- lint ----
     let mut lint_bypassed = None;
@@ -385,7 +418,17 @@ pub fn prepare_http(
         headers.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
         inferred.push("Accept-Encoding: gzip, deflate, br, zstd (automatic decompression is on)".into());
     }
-    Ok(PreparedHttp { method, target, headers, body: Bytes::from(body), content_type, inferred, lint_bypassed })
+    Ok(PreparedHttp {
+        method,
+        target,
+        headers,
+        sensitive_headers,
+        body: Bytes::from(body),
+        body_uses_secret,
+        content_type,
+        inferred,
+        lint_bypassed,
+    })
 }
 
 #[cfg(test)]
@@ -412,11 +455,96 @@ mod tests {
         }
     }
 
+    fn prepared(spec: &RequestSpec) -> PreparedHttp {
+        let vars = vec![
+            crate::vars::VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true },
+            crate::vars::VarEntry { name: "password_ref".into(), value: "{{password}}".into(), secret: false },
+            crate::vars::VarEntry {
+                name: "credentials".into(),
+                value: r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#.into(),
+                secret: true,
+            },
+            crate::vars::VarEntry { name: "user".into(), value: "alice".into(), secret: false },
+        ];
+        let r = Resolver::new(vec![crate::vars::VarLayer { label: "environment:test".into(), vars }], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        prepare_http(spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap()
+    }
+
+    fn holds(body: &[u8], s: &str) -> bool {
+        body.windows(s.len()).any(|w| w == s.as_bytes())
+    }
+
+    #[test]
+    fn body_uses_secret_is_decided_before_the_body_is_encoded() {
+        use anvil_domain::request::KeyValue;
+        let mut spec = RequestSpec::http("POST", "https://api.example.com/login");
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "{{user}}"), KeyValue::new("password", "{{password}}")] };
+        let form = prepared(&spec);
+        assert!(form.body_uses_secret);
+        assert!(!holds(&form.body, "tok-SENSITIVE-p@ss w/rd+="), "the encoded form does not hold the secret byte for byte");
+
+        spec.body = Body::GraphQl {
+            query: "mutation Login($input: LoginInput!) { login(input: $input) { ok } }".into(),
+            variables: r#"{"input": {{credentials}}}"#.into(),
+            operation_name: None,
+        };
+        let graphql = prepared(&spec);
+        assert!(graphql.body_uses_secret);
+        let secret = r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#;
+        assert!(!holds(&graphql.body, secret), "the re-serialized variables do not hold the secret byte for byte");
+
+        // A secret used outside the body does not mark the body.
+        spec.headers.push(KeyValue::new("Authorization", "Basic {{password}}"));
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "{{user}}")] };
+        assert!(!prepared(&spec).body_uses_secret);
+
+        // Reusing a secret already resolved in a header still marks the body.
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("password", "{{password}}")] };
+        assert!(prepared(&spec).body_uses_secret);
+
+        // Indirect expansion resolves the secret variable in the body.
+        spec.body = Body::Raw { text: "{{password_ref}}".into(), content_type: None };
+        assert!(prepared(&spec).body_uses_secret);
+
+        // Multipart text parts are resolved before their bytes are assembled.
+        spec.body = Body::Multipart {
+            parts: vec![anvil_domain::request::MultipartPart {
+                name: "password".into(),
+                enabled: true,
+                content: MultipartContent::Text { value: "{{password}}".into() },
+                content_type: None,
+            }],
+        };
+        assert!(prepared(&spec).body_uses_secret);
+    }
+
     #[test]
     fn ipv6_literal() {
         let mut inf = vec![];
         let t = parse_target("http://[::1]:8080/x", &["http"], &mut inf).unwrap();
         assert_eq!(t.host, "::1");
         assert_eq!(t.authority, "[::1]:8080");
+    }
+
+    #[test]
+    fn default_preparation_lints_declaration_like_xml_as_text_not_a_dtd() {
+        let r = Resolver::new(vec![crate::vars::VarLayer { label: "environment:test".into(), vars: Vec::new() }], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+
+        let cdata = r#"<document><![CDATA[<!DOCTYPE html><html><body>Report</body></html>]]></document>"#;
+        let mut spec = RequestSpec::http("POST", "https://api.example.com/");
+        spec.body = Body::Xml { text: cdata.into() };
+        let form = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+        assert_eq!(&form.body[..], cdata.as_bytes());
+
+        let comment = r#"<document><!-- documentation example: <!ENTITY example 'value'> --><value>ok</value></document>"#;
+        spec.body = Body::Xml { text: comment.into() };
+        prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+
+        spec.body = Body::Xml { text: r#"<!DOCTYPE r [<!ENTITY a "b">]><r>&a;</r>"#.into() };
+        let err = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap_err();
+        assert_eq!(err.kind, FailureKind::LintBlocked);
+        assert_eq!(err.phase, Phase::Prepare);
     }
 }

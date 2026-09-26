@@ -89,3 +89,40 @@ fn grouping_and_skips() {
 fn deterministic() {
     assert_eq!(run(HAR, &opts()), run(HAR, &opts()));
 }
+
+fn har_post(headers: serde_json::Value, mime: &str, text: &str) -> anvil_import::ImportResult {
+    let doc = serde_json::json!({ "log": { "version": "1.2", "entries": [{ "request": {
+        "method": "POST",
+        "url": "https://example.test/x",
+        "headers": headers,
+        "postData": { "mimeType": mime, "text": text },
+    } }] } });
+    anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap()
+}
+
+fn content_types(r: &anvil_import::ImportResult) -> Vec<&str> {
+    r.requests[0].spec.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("content-type")).map(|h| h.value.as_str()).collect()
+}
+
+#[test]
+fn declared_post_data_media_type_is_kept() {
+    for (mime, text, json) in [
+        ("application/vnd.api+json", "{}", true),
+        ("application/json; charset=utf-8", r#"{"a":1}"#, true),
+        ("text/xml; charset=utf-8", "<root/>", false),
+        ("text/xml", "<root/>", false),
+        ("application/xml; charset=utf-8", "<root/>", false),
+    ] {
+        let r = har_post(serde_json::json!([]), mime, text);
+        let s = &r.requests[0].spec;
+        assert_eq!(matches!(s.body, Body::Json { .. }), json, "{mime}: {:?}", s.body);
+        assert_eq!(matches!(s.body, Body::Xml { .. }), !json, "{mime}: {:?}", s.body);
+        assert_eq!(content_types(&r), vec![mime]);
+    }
+    // Canonical types are inferred from the body variant.
+    assert!(content_types(&har_post(serde_json::json!([]), "application/json", "{}")).is_empty());
+    assert!(content_types(&har_post(serde_json::json!([]), "application/xml", "<root/>")).is_empty());
+    // A recorded header keeps precedence and is not duplicated.
+    let r = har_post(serde_json::json!([{ "name": "Content-Type", "value": "text/xml" }]), "text/xml; charset=utf-8", "<root/>");
+    assert_eq!(content_types(&r), vec!["text/xml"]);
+}

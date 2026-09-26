@@ -34,11 +34,15 @@ pub struct VarLayer {
 pub struct Resolver {
     layers: Vec<VarLayer>,
     counter: AtomicU64,
+    secret_substitutions: AtomicU64,
     rng: Mutex<rand::rngs::StdRng>,
     /// Secret values substituted so far (for exact-value redaction).
     pub used_secrets: Mutex<Vec<String>>,
     /// Names (and winning scope) of variables used.
     pub used: Mutex<Vec<(String, String)>>,
+    /// Names of request fields (headers, query parameters, form fields) the
+    /// user marked sensitive, for name-based redaction.
+    pub sensitive_names: Mutex<Vec<String>>,
 }
 
 impl Resolver {
@@ -47,7 +51,27 @@ impl Resolver {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
             None => rand::make_rng(),
         };
-        Resolver { layers, counter: AtomicU64::new(0), rng: Mutex::new(rng), used_secrets: Mutex::new(vec![]), used: Mutex::new(vec![]) }
+        Resolver {
+            layers,
+            counter: AtomicU64::new(0),
+            secret_substitutions: AtomicU64::new(0),
+            rng: Mutex::new(rng),
+            used_secrets: Mutex::new(vec![]),
+            used: Mutex::new(vec![]),
+            sensitive_names: Mutex::new(vec![]),
+        }
+    }
+
+    /// Record a request field the user marked sensitive: its resolved value
+    /// joins the exact-value secrets and its name the redacted names.
+    pub fn mark_sensitive(&self, name: &str, value: &str) {
+        if !value.is_empty() {
+            self.used_secrets.lock().push(value.to_string());
+        }
+        let mut names = self.sensitive_names.lock();
+        if !name.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            names.push(name.to_string());
+        }
     }
 
     pub fn with_counter_start(self, n: u64) -> Self {
@@ -66,6 +90,11 @@ impl Resolver {
 
     pub fn scopes_searched(&self) -> Vec<String> {
         self.layers.iter().map(|l| l.label.clone()).collect()
+    }
+
+    /// Number of secret variable substitutions performed so far.
+    pub(crate) fn secret_substitutions(&self) -> u64 {
+        self.secret_substitutions.load(Ordering::Relaxed)
     }
 
     /// Resolve all `{{…}}` references in `input`. `field` names the request
@@ -137,6 +166,7 @@ impl Resolver {
                 let value = self.resolve_inner(&entry.value, field, stack, depth + 1)?;
                 stack.pop();
                 if entry.secret && !value.is_empty() {
+                    self.secret_substitutions.fetch_add(1, Ordering::Relaxed);
                     self.used_secrets.lock().push(value.clone());
                 }
                 out.push_str(&value);
@@ -248,6 +278,16 @@ mod tests {
         let r = Resolver::new(vec![layer("env", &[("key", "s3cr3t-value", true), ("k2", "{{key}}", false)])], None);
         assert_eq!(r.resolve("x={{k2}}", "q").unwrap(), "x=s3cr3t-value");
         assert!(r.used_secrets.lock().contains(&"s3cr3t-value".to_string()));
+    }
+
+    #[test]
+    fn secret_substitutions_are_counted_independently_of_redaction_values() {
+        let r = Resolver::new(vec![layer("env", &[("key", "s3cr3t-value", true)])], None);
+        assert_eq!(r.resolve("{{key}}", "headers[0].value").unwrap(), "s3cr3t-value");
+        assert_eq!(r.resolve("{{key}}", "body").unwrap(), "s3cr3t-value");
+        r.used_secrets.lock().dedup();
+        assert_eq!(r.used_secrets.lock().len(), 1);
+        assert_eq!(r.secret_substitutions(), 2);
     }
 
     #[test]

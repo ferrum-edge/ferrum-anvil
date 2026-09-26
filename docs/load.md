@@ -16,14 +16,20 @@ send, and trust settings cannot drift (LOAD-005, LOAD-008).
 The load engine adds exactly one settings layer, `run:load`, on top of the
 request's own layers:
 
+The 1 MiB response capture limit cannot be raised from the app or CLI.
+
 | Field | Value | Why |
 |---|---|---|
 | `keepalive` | `true` for `persistent`, `false` for `fresh` | the plan's connection mode (HTTP pools and gRPC channels) |
-| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send; the full body is still read and counted |
+| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send; the full body is still read and counted, but body assertions and extractions are not evaluated when it exceeds the capture, nor is the application outcome of a SOAP or GraphQL request (see below) |
 
 It also appends iteration-scoped variable layers (lowest to highest
 precedence): `load` (`{{anvil.iteration}}`, `{{anvil.vu}}`), the dataset row,
-and values extracted by earlier chain steps. Each send gets a seed derived
+and values extracted by earlier chain steps. A request under an unopened
+import root (see [import.md](import.md#persisting-an-import-anvil-app)) gets no
+dataset row and only values extracted by chain steps under the same root;
+values it extracts reach only those steps (`ExecutionContext::scope`, carried
+to the worker). Each send gets a seed derived
 from the plan seed, the iteration and the step, so `{{$randomInt}}` /
 `{{$randomFrom}}` are reproducible per iteration.
 
@@ -35,7 +41,9 @@ pools, gRPC channels and cookie jars are per slot (like per-VU state in other
 tools), while all slots share **one** OAuth `TokenCache`. Token refresh is
 therefore single-flight across the whole run (LOAD-006). Open-workload slots
 are reused LIFO, so only as many engines exist as the peak concurrency
-actually needed.
+actually needed. A slot's pools keep as many idle connections as the plan has
+distinct requests (at least 4, at most 64), so a persistent chain reuses each
+step's connection across iterations (see `docs/architecture.md`).
 
 ## Load units per protocol (LOAD-013)
 
@@ -46,13 +54,30 @@ What a unit is depends on the request's protocol (`anvil_load::protocol`):
 
 | Unit (`LoadUnitKind`) | Requests | One unit is | Completed means | Success means | Latency (`latency_success`/`_failure`) | Protocol denominators |
 |---|---|---|---|---|---|---|
-| `http_request` | HTTP/1.1, HTTP/2, HTTP/3 (forced or automatic) | one request/response; redirects, retries and an HTTP/3 → TCP fallback are attempts inside it | complete response (any status) | status < 400, no SOAP fault / GraphQL error, assertions pass | sum of attempt durations, fallback attempt included | fallback attempts, requests with a fallback, requests over HTTP/3 |
+| `http_request` | HTTP/1.1, HTTP/2, HTTP/3 (forced or automatic) | one request/response; redirects, retries and an HTTP/3 → TCP fallback are attempts inside it | complete response (any status) | status < 400, assertions pass; for a SOAP or GraphQL request also no fault / errors in the complete response body (an outcome not determined from the body is an application failure) | sum of attempt durations, fallback attempt included | fallback attempts, requests with a fallback, requests over HTTP/3 |
 | `grpc_call` | unary gRPC (native over HTTP/2 or HTTP/3, gRPC-Web) | one call = one send | a terminal `grpc-status` with complete framing (any code) | status 0 and assertions pass; HTTP 200 alone never | sum of attempt durations (channel checkout … status) | status codes (code → count), OK, non-OK, **missing status**, fallback attempts |
 | `grpc_stream` | server-streaming gRPC / gRPC-Web | one stream | the server ended it with a terminal status and complete framing | status 0 and assertions pass | stream duration (call start … status) | streams opened, messages received, streams with messages, **time to first message**, plus the gRPC block |
 | `sse_stream` | SSE | one stream | the stream ended without a failure: the server ended it, or the request's `max_events` / idle timeout stopped it; an error status completes as an application failure | a 2xx event stream and assertions pass | stream duration | streams opened, events received, streams with events, **time to first event**, how streams ended (peer / client / timeout / abnormal) |
 | `websocket_session` | WebSocket (HTTP/1.1 Upgrade, HTTP/2 or HTTP/3 extended CONNECT) | one session: handshake, scripted messages, close | handshake answered and the session ended without a failure (close by either side, `expect_messages`, idle close); a rejected handshake completes as an application failure | accepted handshake, close 1000/1001/none, assertions pass | session duration (connect … close) | opened, handshake rejected, not opened, closed cleanly, messages sent/received, close codes by who closed, **round-trip time only when `expect_messages` is set** |
 | `tcp_exchange` | raw TCP / TLS | one connection carrying the request's frames | connected, frames sent, reading stopped on a stop condition (expected frames, max bytes, read-idle, peer close) without a failure | completed, the expected frames arrived (when `expect_frames` is set with a framing preset), assertions pass; fewer frames = application failure | exchange duration (connect … end of reading; includes the read-idle wait when the exchange ends on idle) | connections, frames sent/received, payload bytes, partial trailing frames, peer closes, expectation met/short |
 | `udp_exchange` / `dtls_exchange` | UDP / DTLS | the request's datagrams, then its response window (DTLS: after a handshake) | the window elapsed (or `max_datagrams` arrived) without a local failure — says nothing about delivery | at least one datagram received and assertions pass; **a completed exchange with nothing received is "no response observed": neither success nor failure, and it has no latency** | time to first response (first datagram sent → first received in the same exchange; not attributed to a specific datagram) | datagrams sent, datagrams received (separate counts), exchanges with a response / with no response observed, repeated payloads, echoed / other payloads, ICMP-unreachable exchanges, DTLS handshakes (attempted, completed, failed, timed out, duration) |
+
+**SOAP and GraphQL outcomes need the whole body.** A SOAP fault or a GraphQL
+`errors` array arrives with an HTTP 2xx, so the application outcome of a
+request with a SOAP or GraphQL body is judged from the response body. When
+only a prefix of that body is available (it exceeded the capture, which a load
+run lowers to at most 1 MiB, or it did not decode completely), a fault past
+the prefix would go unseen: the engine records the application status
+`not_evaluated` with a `partial_visibility` warning, never `success`. A load
+run counts such a completed request as an **application failure** in the
+category `application_failure: application.not_determined_from_body`, so it
+is in `application_failures` and the failure latency distribution, not in
+the successes. The same holds for any other `not_evaluated` outcome of a
+SOAP or GraphQL request (a login redirect, say). Other HTTP requests are
+judged by their status, which a prefix does not hide: a 2xx with a
+display-truncated body still counts as a success unless an assertion fails.
+A SOAP or GraphQL endpoint whose responses exceed the load capture therefore
+cannot show successes in a load run; its units read as "not determined".
 
 A plan has **exactly one unit kind**, so every count, rate and percentile in
 its report has one denominator. The editor (`load_plan_check`), the preflight
@@ -359,11 +384,22 @@ observed protocol set, connection mode (only a *caution* for units that open
 their own connection in either mode), dataset hash, request set. **Caution**
 (deltas shown): request revisions, load level, completeness/partial,
 generator saturation, report schema (LOAD-014). Comparable runs get
-success-latency deltas only when both have successful units, plus
+success-latency deltas only when both have successful units, the achieved
+rate, the **failed-unit ratio**, censored timeouts and dropped arrivals, plus
 per-protocol ratios (non-OK and missing-status ratios, messages per opened
 stream or session, time-to-first-message and round-trip percentiles, frames
 per exchange, the observed received/sent datagram ratio and the
 no-response ratio).
+
+The failed-unit ratio is failed units over finished units (completed,
+transport failures and timeouts; canceled and in-flight units are excluded).
+A unit counts once however many ways it failed: a completed unit with an
+application failure, a failed assertion or both is one failed unit, exactly
+as `SendObservation::is_failure` decides per unit. Because
+`application_failures` and `assertion_failures` may overlap, neither their
+maximum nor their sum is that count; the ratio uses the failure-latency
+distribution (one entry per failed non-timeout unit) plus the ledger's
+timeouts, kept within the bounds the two counters imply.
 
 ## Measured on this hardware (not product claims)
 
@@ -406,7 +442,7 @@ Observations that shaped the implementation:
 | Virtual users / concurrency / `max_in_flight` | ≤ 5,000 / ≤ 5,000 / ≤ 10,000 |
 | Arrival rate / duration / iterations | ≤ 100,000/s / ≤ 24 h / ≤ 100 M |
 | Chain length | ≤ 64 steps |
-| In-memory response capture per send | ≤ 1 MiB (never above the request's setting) |
+| Response bytes captured per send | ≤ 1 MiB by default (the executor's `response_capture_bytes`; never above the request's `limits.capture_bytes`, which is 8 MiB by default) |
 | Metric shards | ≤ 8 |
 | Timeline | ≤ 3,600 buckets |
 | Failure categories / examples / example length | 32 / 5 / 400 chars |

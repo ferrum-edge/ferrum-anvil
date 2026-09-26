@@ -635,7 +635,7 @@
           "minimum": 0
         },
         "exchange_ms": {
-          "description": "Sum of the network attempt durations (what latency assertions see is\nthe final attempt only).",
+          "description": "Sum of the network attempt durations (the same exchange time latency\nassertions evaluate).",
           "type": [
             "integer",
             "null"

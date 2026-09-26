@@ -63,6 +63,12 @@ jobs:
           ulimit -n 4096 2>/dev/null || true
           # Every failing test binary is reported in one run, not just the first.
           cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast
+      # The desktop shell's own unit tests (no window is created). Not on
+      # Windows: tauri-build embeds the common-controls manifest only in the app
+      # binary, and a test binary linking the dialog plugin fails to load without it.
+      - name: cargo test anvil-desktop (unit tests)
+        if: runner.os != 'Windows'
+        run: cargo test --locked -p anvil-desktop --lib
       # Keychain profiles ("Start now — no password") against the real OS
       # credential store on every platform. Linux needs a Secret Service: run
       # gnome-keyring, unlocked, inside a private D-Bus session.
@@ -177,7 +183,11 @@ jobs:
           echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
           tar -xzf gitleaks.tar.gz gitleaks
           rm gitleaks.tar.gz
-      - name: gitleaks (full history)
-        run: '"$RUNNER_TEMP/gitleaks" git --config .gitleaks.toml --redact --no-banner --verbose .'
+      # Scan only the ancestry of the checked-out commit (a PR's merge commit,
+      # or main on push), not every fetched branch: a fixture in another open
+      # PR must not fail this one. The options are gitleaks' default
+      # `git log` arguments with `--all` replaced by `HEAD`.
+      - name: gitleaks (full history of HEAD)
+        run: '"$RUNNER_TEMP/gitleaks" git --config .gitleaks.toml --log-opts="--full-history --diff-filter=tuxdb HEAD" --redact --no-banner --verbose .'
       - name: gitleaks (working tree, including untracked generated files)
         run: '"$RUNNER_TEMP/gitleaks" dir --config .gitleaks.toml --redact --no-banner --verbose .'

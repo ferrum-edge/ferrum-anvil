@@ -82,11 +82,25 @@ fn protocols(r: &LoadReport) -> String {
     if p.is_empty() { "none observed".into() } else { p.join(", ") }
 }
 
+/// Failed units over finished units (canceled and in-flight units excluded).
+/// A unit fails once however many ways it fails, so the count is the
+/// per-unit union (`SendObservation::is_failure`), never a sum or a maximum
+/// of the overlapping application and assertion counters. The failure
+/// distribution records exactly one entry per failed non-timeout unit and
+/// timeouts are counted by the ledger, so their sum is that union. The
+/// counters only bound it: at least the larger of the two overlapping
+/// subsets, at most their sum (and never more than `completed`).
 fn failure_ratio(r: &LoadReport) -> f64 {
     let q = &r.requests;
     let finished = q.completed + q.transport_failures + q.timeouts;
-    let failed = q.transport_failures + q.timeouts + q.application_failures.max(q.assertion_failures);
-    if finished == 0 { 0.0 } else { failed as f64 / finished as f64 }
+    if finished == 0 {
+        return 0.0;
+    }
+    let base = q.transport_failures + q.timeouts;
+    let lower = base + q.application_failures.max(q.assertion_failures);
+    let upper = base + q.completed.min(q.application_failures + q.assertion_failures);
+    let failed = (r.latency_failure.count + q.timeouts).min(upper).max(lower);
+    failed as f64 / finished as f64
 }
 
 fn unit(r: &LoadReport) -> LoadUnitKind {
@@ -309,8 +323,9 @@ pub fn compare(a: &LoadReport, b: &LoadReport) -> Comparison {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{Metrics, SendObservation, Terminal};
     use crate::report::tests::sample_report;
-    use anvil_domain::load::Stage;
+    use anvil_domain::load::{RequestCounts, Stage};
 
     #[test]
     fn load_014_incompatible_runs_withhold_latency_deltas() {
@@ -355,5 +370,115 @@ mod tests {
         let LatencyComparison::Comparable { deltas } = &c.latency else { panic!() };
         let p99 = deltas.iter().find(|x| x.metric.starts_with("success p99")).unwrap();
         assert_eq!(p99.delta_percent, Some(100.0));
+    }
+
+    fn obs(terminal: Terminal, application_failure: bool, assertion_failure: bool) -> SendObservation {
+        SendObservation { terminal, application_failure, assertion_failure, latency_us: 1_000, ..Default::default() }
+    }
+
+    /// `r` with its send ledger and failure distribution replaced by `units`,
+    /// accumulated the way the executor does (`end_send` + `Metrics::record`).
+    fn with_units(mut r: LoadReport, units: &[SendObservation]) -> LoadReport {
+        let mut m = Metrics::new();
+        let mut q = RequestCounts::default();
+        for o in units {
+            q.started += 1;
+            match o.terminal {
+                Terminal::Completed => q.completed += 1,
+                Terminal::TransportFailure => q.transport_failures += 1,
+                Terminal::Timeout => q.timeouts += 1,
+                Terminal::Canceled => q.canceled += 1,
+            }
+            q.application_failures += o.application_failure as u64;
+            q.assertion_failures += o.assertion_failure as u64;
+            m.record(o);
+        }
+        r.requests = q;
+        r.latency_failure = m.failure.summary();
+        r.timeouts_censored.count = m.censored.count();
+        r
+    }
+
+    /// The comparison ratio equals per-unit `is_failure()` accounting.
+    fn assert_failure_ratio(units: &[SendObservation], want: f64) {
+        let finished = units.iter().filter(|o| o.terminal != Terminal::Canceled).count();
+        let failed = units.iter().filter(|o| o.is_failure()).count();
+        let per_unit = if finished == 0 { 0.0 } else { failed as f64 / finished as f64 };
+        assert_eq!(per_unit, want, "fixture");
+        assert_eq!(failure_ratio(&with_units(sample_report(), units)), want);
+    }
+
+    #[test]
+    fn failure_ratio_counts_disjoint_failures_once_each() {
+        // HTTP 500 with passing assertions, HTTP 200 with a failed assertion.
+        assert_failure_ratio(&[obs(Terminal::Completed, true, false), obs(Terminal::Completed, false, true)], 1.0);
+    }
+
+    #[test]
+    fn failure_ratio_counts_overlapping_failures_once() {
+        // Same counters as the disjoint case, but one unit failed both ways.
+        assert_failure_ratio(&[obs(Terminal::Completed, true, true), obs(Terminal::Completed, false, false)], 0.5);
+        // Partial overlap: the union (3) is neither the maximum (2) nor the sum (4).
+        assert_failure_ratio(
+            &[
+                obs(Terminal::Completed, true, true),
+                obs(Terminal::Completed, true, false),
+                obs(Terminal::Completed, false, true),
+                obs(Terminal::Completed, false, false),
+            ],
+            0.75,
+        );
+    }
+
+    #[test]
+    fn failure_ratio_counts_identical_failure_sets_once() {
+        assert_failure_ratio(
+            &[
+                obs(Terminal::Completed, true, true),
+                obs(Terminal::Completed, true, true),
+                obs(Terminal::Completed, false, false),
+                obs(Terminal::Completed, false, false),
+            ],
+            0.5,
+        );
+    }
+
+    #[test]
+    fn failure_ratio_with_transport_failures_timeouts_and_cancellations() {
+        // Canceled units are not finished; transport failures and timeouts always fail.
+        assert_failure_ratio(
+            &[
+                obs(Terminal::TransportFailure, false, false),
+                obs(Terminal::Timeout, false, false),
+                obs(Terminal::Completed, true, false),
+                obs(Terminal::Completed, false, true),
+                obs(Terminal::Completed, false, false),
+                obs(Terminal::Canceled, false, false),
+            ],
+            0.8,
+        );
+        // A completed exchange with no response observed is neither success nor failure.
+        let silent = SendObservation { no_response: true, ..obs(Terminal::Completed, false, false) };
+        assert_failure_ratio(&[silent, obs(Terminal::Completed, false, true)], 0.5);
+    }
+
+    #[test]
+    fn failure_ratio_without_finished_units_is_zero() {
+        assert_failure_ratio(&[], 0.0);
+        assert_failure_ratio(&[obs(Terminal::Canceled, false, false)], 0.0);
+    }
+
+    #[test]
+    fn comparison_distinguishes_disjoint_from_overlapping_failures() {
+        let base = sample_report();
+        let a = with_units(base.clone(), &[obs(Terminal::Completed, true, true), obs(Terminal::Completed, false, false)]);
+        let mut b = with_units(base, &[obs(Terminal::Completed, true, false), obs(Terminal::Completed, false, true)]);
+        b.run_id = Id::new();
+        assert_eq!(a.requests, b.requests, "the counters alone cannot tell the runs apart");
+        let c = compare(&a, &b);
+        assert!(c.compatible, "{:?}", c.differences);
+        let LatencyComparison::Comparable { deltas } = &c.latency else { panic!() };
+        let failed = deltas.iter().find(|x| x.metric == "failed-unit ratio").unwrap();
+        assert_eq!((failed.a, failed.b, failed.delta), (0.5, 1.0, 0.5));
     }
 }

@@ -1,0 +1,94 @@
+//! `anvil import` of a full backup: the real binary and a real profile on
+//! disk. A backup that claims a workspace stored here is restored only when
+//! `--into-existing` names that workspace.
+
+use anvil_app::App;
+use anvil_app::profiles::{ProfileManager, Unlock};
+use anvil_domain::Id;
+use anvil_domain::request::RequestSpec;
+use anvil_storage::KdfParams;
+use std::path::Path;
+use std::process::{Command, Output};
+
+const PASS: &str = "cli-import-passphrase-1";
+const EXPORT_PASS: &str = "cli-backup-passphrase-1";
+
+/// A profile whose workspace `W` holds the request `Kept`, and a full backup
+/// of it written to `backup` while `W` also held `Restored` (deleted since).
+/// Returns the id of `W`.
+fn setup(root: &Path, backup: &Path) -> Id {
+    let pm = ProfileManager::new(root);
+    let (s, dek, _) = pm.create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
+    let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+    let app = App::open(s.dir, h, dek).unwrap();
+    let ws = app.create_workspace("W").unwrap();
+    app.create_request(&ws.meta.id, None, "Kept", RequestSpec::http("GET", "https://kept.example.invalid/")).unwrap();
+    let gone = app.create_request(&ws.meta.id, None, "Restored", RequestSpec::http("GET", "https://restored.example.invalid/")).unwrap();
+    let (bytes, _) = app.export_backup_with(EXPORT_PASS, KdfParams::testing()).unwrap();
+    std::fs::write(backup, bytes).unwrap();
+    app.delete_request(&gone.meta.id).unwrap();
+    ws.meta.id
+}
+
+fn anvil(data: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .arg("--data-dir")
+        .arg(data)
+        .args(args)
+        .env("ANVIL_PASSPHRASE", PASS)
+        .env("ANVIL_EXPORT_PASSPHRASE", EXPORT_PASS)
+        .env_remove("ANVIL_PROFILE")
+        .env_remove("ANVIL_DATA_DIR")
+        .output()
+        .unwrap()
+}
+
+fn text(o: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+}
+
+/// The names of the requests stored in `ws`, sorted.
+fn requests(root: &Path, ws: &Id) -> Vec<String> {
+    let s = ProfileManager::new(root).list().into_iter().next().unwrap();
+    let (h, key) = ProfileManager::unlock(&s.dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(s.dir, h, key).unwrap();
+    let mut names: Vec<String> = app.requests(ws).unwrap().into_iter().map(|r| r.name).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_backup_restores_into_a_stored_workspace_only_with_into_existing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let backup = dir.path().join("profile.anvilbak");
+    let ws = setup(&data, &backup);
+    let file = backup.to_str().unwrap();
+    let id = ws.to_string();
+
+    // The dry run names the stored workspace the backup claims.
+    let o = anvil(&data, &["import", file, "--dry-run"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let report: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(report["full_backup"], serde_json::json!(true), "{report}");
+    assert_eq!(report["plan"]["existing_workspaces"], serde_json::json!([{ "id": id, "name": "W" }]), "{report}");
+
+    // Without approving it, or approving another workspace, nothing is restored.
+    let other = Id::new().to_string();
+    for policy in ["merge", "replace"] {
+        let o = anvil(&data, &["import", file, "--policy", policy]);
+        assert_eq!(o.status.code(), Some(3), "{policy}: {}", text(&o));
+        assert!(text(&o).contains("existing workspace 'W'"), "{policy}: {}", text(&o));
+        let o = anvil(&data, &["import", file, "--policy", policy, "--into-existing", &other]);
+        assert_eq!(o.status.code(), Some(3), "{policy}: {}", text(&o));
+        assert!(text(&o).contains("existing workspace 'W'"), "{policy}: {}", text(&o));
+    }
+    assert_eq!(requests(&data, &ws), vec!["Kept"], "a refused restore writes nothing");
+
+    // Naming it restores the backup there.
+    let o = anvil(&data, &["import", file, "--policy", "merge", "--into-existing", &id]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let report: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(report["workspace_ids"], serde_json::json!([id]), "{report}");
+    assert_eq!(requests(&data, &ws), vec!["Kept", "Restored"]);
+}

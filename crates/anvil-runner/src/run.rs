@@ -6,10 +6,11 @@ use crate::provider::{StepError, StepProvider};
 use crate::redact::RunSecrets;
 use crate::{MAX_ASSERTIONS_PER_STEP, MAX_EXTRA_FAILED_STEPS, MAX_FINDINGS_PER_STEP, MAX_NOTES, MAX_REPORT_STEPS, RunError, clip};
 use anvil_domain::Id;
-use anvil_domain::execution::{DispatchState, ExecutionRecord};
+use anvil_domain::execution::{DispatchState, ExecutionRecord, exchange_duration_us};
 use anvil_domain::outcome::{ApplicationState, AssertionState, ProtocolStatus, TransportState};
 use anvil_domain::runner::*;
 use anvil_engine::Engine;
+use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_transport::recorder::EventCtx;
 use chrono::Utc;
@@ -170,7 +171,9 @@ impl Run {
         self.totals.iterations_started += 1;
         self.emitter.emit(RunEvent::IterationStarted { run_id: self.run_id, iteration: it, dataset_row }, Class::Normal);
 
-        let mut extracted: Vec<VarEntry> = Vec::new();
+        // Run-local values, each with the scope of the step that extracted
+        // it (`ExecutionContext::scope`).
+        let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
         let mut stopped_at: Option<u32> = None;
         let mut failed = false;
         let mut stop = false;
@@ -244,11 +247,20 @@ impl Run {
                     VarEntry { name: "anvil.step".into(), value: pos.to_string(), secret: false },
                 ],
             });
+            // A step under a sealed import root sees only values extracted
+            // under that root, and no dataset row (the dataset is the
+            // workspace's); a step outside it never sees what it extracted.
+            let scope = ctx.scope;
             if let Some(l) = &dataset_layer {
-                ctx.var_layers.push(l.clone());
+                if scope.is_none() {
+                    ctx.var_layers.push(l.clone());
+                } else {
+                    self.notes.push(&self.secrets, DATASET_SKIPPED_UNDER_IMPORT_ROOT);
+                }
             }
-            if !extracted.is_empty() {
-                ctx.var_layers.push(VarLayer { label: "extracted (this iteration)".into(), vars: extracted.clone() });
+            let visible: Vec<VarEntry> = extracted.iter().filter(|(s, _)| *s == scope).map(|(_, e)| e.clone()).collect();
+            if !visible.is_empty() {
+                ctx.var_layers.push(VarLayer { label: "extracted (this iteration)".into(), vars: visible });
             }
             for n in self.secrets.names() {
                 if !ctx.redaction_names.iter().any(|x| x.eq_ignore_ascii_case(n)) {
@@ -268,8 +280,8 @@ impl Run {
                     new_secrets.push(value.clone());
                     self.secrets.add_name(&var);
                 }
-                extracted.retain(|e| e.name != var);
-                extracted.push(VarEntry { name: var, value, secret: sensitive });
+                extracted.retain(|(s, e)| *s != scope || e.name != var);
+                extracted.push((scope, VarEntry { name: var, value, secret: sensitive }));
             }
             self.secrets.add_values(new_secrets);
             self.secrets.scrub_record(&mut out.record);
@@ -498,7 +510,7 @@ impl Run {
             summary: clip(&sec.text(&o.summary), MAX_SUMMARY),
             message,
             duration_ms: Some((rec.finished_at - rec.started_at).num_milliseconds().max(0) as u64),
-            exchange_ms: if rec.attempts.is_empty() { None } else { Some(rec.attempts.iter().map(|a| a.duration_us).sum::<u64>() / 1000) },
+            exchange_ms: exchange_duration_us(&rec.attempts).map(|us| us / 1000),
             delay_ms: step.delay_ms,
             assertion_results,
             assertion_results_omitted: rec.assertion_results.len().saturating_sub(MAX_ASSERTIONS_PER_STEP) as u32,

@@ -38,7 +38,7 @@ pub struct Prepared {
     pub proxy: Option<ProxyPlan>,
     pub trust: FerrumTrust,
     pub require_verified_tls: bool,
-    pub oauth_key: Option<(String, anvil_auth::oauth::OAuthResolved)>,
+    pub oauth_key: Option<(anvil_auth::oauth::TokenKey, anvil_auth::oauth::OAuthResolved)>,
     pub inferred: Vec<String>,
     /// The request's PROXY header (HTTP-family requests), for connections to
     /// the request's own `host:port`.
@@ -64,7 +64,7 @@ pub(crate) fn resolve_auth(
     auth: &AuthConfig,
     ctx: &ExecutionContext,
     r: &Resolver,
-    oauth_key: &mut Option<(String, anvil_auth::oauth::OAuthResolved)>,
+    oauth_key: &mut Option<(anvil_auth::oauth::TokenKey, anvil_auth::oauth::OAuthResolved)>,
 ) -> Result<ResolvedAuth, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     let sens = |v: &anvil_domain::secret::SensitiveValue, field: &str| -> Result<Zeroizing<String>, TransportFailure> {
@@ -447,6 +447,32 @@ fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
+/// Whether a configured header is a credential of the request's own origin:
+/// a known credential name (`Authorization`, `Cookie`, `X-API-Key`, names
+/// containing `token`, `secret`, ... or ending in `-key` / `_key`), a header
+/// marked sensitive, or a value holding a resolved secret variable. Such
+/// headers are not forwarded to another origin unless the redirect policy
+/// allows it.
+fn carries_credential(name: &str, value: &str, marked: &[String], extra_names: &[String], secrets: &[String]) -> bool {
+    crate::redact::is_credential_name(name, extra_names)
+        || marked.iter().any(|m| m.eq_ignore_ascii_case(name))
+        || secrets.iter().any(|s| !s.is_empty() && (value == s.as_str() || (s.len() >= 4 && value.contains(s.as_str()))))
+}
+
+/// Whether a request body holds a resolved secret value byte for byte (at
+/// least 4 bytes, as for redaction). A backstop only: an encoded body (form
+/// fields, re-serialized GraphQL variables) is covered by
+/// `PreparedHttp::body_uses_secret`.
+fn body_carries_secret(body: &[u8], secrets: &[String]) -> bool {
+    secrets.iter().filter(|s| s.len() >= 4).any(|s| body.windows(s.len()).any(|w| w == s.as_bytes()))
+}
+
+/// Records why a redirect was not followed; the redirect response stays the
+/// final response and nothing is sent to its target.
+fn redirect_refused(inferred: &mut Vec<String>, target: &Target, why: &str) {
+    inferred.push(format!("redirect to {} not followed: {why}", target.authority));
+}
+
 /// A policy that asks for replay of a non-idempotent method is refused
 /// before any traffic: early data can be replayed by anyone on the path.
 fn early_data_policy_check(p: &anvil_domain::settings::EarlyDataPolicy) -> Result<(), TransportFailure> {
@@ -492,6 +518,25 @@ struct AttemptTarget {
     body: Bytes,
     with_credentials: bool,
     tls: Option<Arc<PreparedTls>>,
+    /// The TLS profile selected for this target, if any.
+    tls_profile: Option<String>,
+    /// The proxy route for this target (its own NO_PROXY decision).
+    proxy: Option<ProxyPlan>,
+}
+
+/// The connection side of a hop: what the record's TLS and proxy summary and
+/// the Ferrum attribution of its response are decided from.
+struct Hop {
+    target: Target,
+    tls: Option<Arc<PreparedTls>>,
+    tls_profile: Option<String>,
+    proxy: Option<ProxyPlan>,
+}
+
+impl AttemptTarget {
+    fn hop(&self) -> Hop {
+        Hop { target: self.target.clone(), tls: self.tls.clone(), tls_profile: self.tls_profile.clone(), proxy: self.proxy.clone() }
+    }
 }
 
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
@@ -511,15 +556,15 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         Ok(p) => p,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, workload),
     };
-    let mut redactor = Redactor::new(resolver.used_secrets.lock().clone(), ctx.redaction_names.clone());
+    let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
     let mut extra_findings: Vec<anvil_diagnostics::Draft> = Vec::new();
 
     // OAuth: acquire/refresh through the same transport before sending.
     // Interactive grants without a usable token fail here, typed, before the
-    // API request exists on the wire.
+    // API request exists on the wire. Canceling the execution stops waiting
+    // for the token (see `oauth_http::acquire`).
     if let Some((key, cfg)) = &prep.oauth_key {
-        let http = crate::oauth_http::EngineTokenHttp { engine, ctx, settings: &prep.settings };
-        match engine.tokens.get_or_acquire(key, cfg, &http, Utc::now()).await {
+        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, &cancel).await {
             Ok(t) => {
                 replace_oauth(&mut prep.auth, &t);
             }
@@ -540,8 +585,13 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         body: prep.http.body.clone(),
         with_credentials: true,
         tls: prep.tls.clone(),
+        tls_profile: prep.tls_profile_name.clone(),
+        proxy: prep.proxy.clone(),
     };
     let original_origin = current.target.origin();
+    // The hop behind `last`: its origin decides the Ferrum attribution of the
+    // final response, and the record's TLS and proxy summary describe it.
+    let mut last_hop = current.hop();
     let mut redirects = 0u8;
     let mut retries = 0u8;
     let mut dpop_challenge_used = false;
@@ -653,7 +703,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                 overrides: prep.settings.dns_overrides.clone(),
                 ip_preference: prep.settings.ip_preference,
             },
-            proxy: prep.proxy.clone(),
+            proxy: current.proxy.clone(),
             tls: current.tls.clone(),
             isolation: ctx.isolation.clone(),
             display_url,
@@ -679,6 +729,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         }
         let out = out.expect("transport returns at least one attempt");
         attempts.push(out.observation.clone());
+        last_hop = current.hop();
 
         // Store cookies from the response.
         if prep.settings.cookies
@@ -709,6 +760,10 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                             301 | 302 if current.method == "POST" => ("GET".to_string(), Bytes::new()),
                             _ => (current.method.clone(), current.body.clone()),
                         };
+                        // Every hop is evaluated for its own target: the
+                        // credential policy against the original origin, the
+                        // proxy route (NO_PROXY) and TLS policy for the new
+                        // host. A hop that cannot be evaluated is not followed.
                         let cross_origin = t.origin() != original_origin;
                         let mut headers = current.headers.clone();
                         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("host"));
@@ -716,34 +771,87 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                             headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("content-length"));
                         }
                         let mut with_credentials = current.with_credentials;
-                        let tls;
                         if cross_origin && !prep.settings.redirects.forward_credentials_cross_origin {
-                            headers.retain(|(n, _)| {
-                                !matches!(n.to_ascii_lowercase().as_str(), "authorization" | "cookie" | "proxy-authorization")
+                            // Configured credential headers (including a manual
+                            // `Cookie` header) are removed, and auth (headers,
+                            // API-key query parameters and API-key cookies) is
+                            // no longer applied. The workspace cookie jar is
+                            // separate: it sends the stored cookies that match
+                            // the new target under cookie rules. Stripping is
+                            // sticky: a later hop back to the original origin
+                            // stays without them. The new target's query comes
+                            // from `Location` only.
+                            let secrets = resolver.used_secrets.lock().clone();
+                            // A redirect that resends the body (including
+                            // 307/308 and body-retaining 301/302) does not
+                            // send it to another origin if it contains a
+                            // secret. This refusal is lifted when the policy
+                            // allows forwarding credentials cross-origin.
+                            if !body.is_empty() && (prep.http.body_uses_secret || body_carries_secret(&body, &secrets)) {
+                                let why = format!("a {status} redirect would resend a body holding a secret to another origin");
+                                redirect_refused(&mut prep.inferred, &t, &why);
+                                last = Some(out);
+                                break;
+                            }
+                            let (marked, names) = (&prep.http.sensitive_headers, &ctx.redaction_names);
+                            let mut withheld: Vec<String> = vec![];
+                            headers.retain(|(n, v)| {
+                                let credential = carries_credential(n, v, marked, names, &secrets);
+                                if credential && !withheld.iter().any(|w| w.eq_ignore_ascii_case(n)) {
+                                    withheld.push(redactor.text(n));
+                                }
+                                !credential
                             });
+                            if !withheld.is_empty() {
+                                let list = withheld.join(", ");
+                                prep.inferred.push(format!("credential headers withheld on the redirect to {}: {list}", t.authority));
+                            }
                             with_credentials = false;
                             credentials_stripped = true;
                         }
-                        if t.scheme == "https" {
-                            let mut inf2 = vec![];
+                        let mut hop_notes = vec![];
+                        let proxy = match proxy_for(engine, ctx, &prep.settings, &t, &mut hop_notes) {
+                            Ok(p) => p,
+                            Err(f) => {
+                                let why = format!("its proxy route could not be prepared: {}", f.message);
+                                redirect_refused(&mut prep.inferred, &t, &why);
+                                last = Some(out);
+                                break;
+                            }
+                        };
+                        let (tls, tls_profile) = if t.scheme == "https" {
                             // The redirect target gets its own TLS policy; the
                             // client identity is presented only where bound.
                             let cross_bound = binding_matches(&prep.tls_profile_bindings, &t) && !prep.tls_profile_bindings.is_empty();
-                            if cross_origin && !cross_bound {
+                            let prepared = if cross_origin && !cross_bound {
                                 let mut strict_ctx = ctx.clone();
                                 strict_ctx.tls_profiles.iter_mut().for_each(|p| {
                                     if !binding_matches(&p.bindings, &t) || p.bindings.is_empty() {
                                         p.client_identity = None;
                                     }
                                 });
-                                tls = tls_for(engine, &strict_ctx, &prep.settings, &t, &mut inf2).ok().map(|x| x.0);
+                                tls_for(engine, &strict_ctx, &prep.settings, &t, &mut hop_notes)
                             } else {
-                                tls = tls_for(engine, ctx, &prep.settings, &t, &mut inf2).ok().map(|x| x.0);
+                                tls_for(engine, ctx, &prep.settings, &t, &mut hop_notes)
+                            };
+                            match prepared {
+                                Ok((tls, name, _)) => (Some(tls), name),
+                                Err(f) => {
+                                    let why = format!("its TLS settings could not be prepared: {}", f.message);
+                                    redirect_refused(&mut prep.inferred, &t, &why);
+                                    last = Some(out);
+                                    break;
+                                }
                             }
                         } else {
-                            tls = None;
+                            (None, None)
+                        };
+                        for n in hop_notes {
+                            if !prep.inferred.contains(&n) {
+                                prep.inferred.push(n);
+                            }
                         }
-                        current = AttemptTarget { method, target: t, headers, body, with_credentials, tls };
+                        current = AttemptTarget { method, target: t, headers, body, with_credentials, tls, tls_profile, proxy };
                         reason = AttemptReason::Redirect { status };
                         last = Some(out);
                         continue;
@@ -817,8 +925,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     }
 
     let last = last.expect("at least one attempt");
+    // Ferrum attribution belongs to the origin that produced the final
+    // response: after a redirect it is that target's integration profile (or
+    // none) and its TLS requirement, never the original request's.
+    let (mut trust, require_verified_tls) = trust_for(ctx, &last_hop.target);
     // Channel authentication for Ferrum trust: verified TLS on the final connection.
-    let mut trust = prep.trust.clone();
     if let FerrumTrust::Trusted { channel_authenticated, .. } = &mut trust {
         let verified = last
             .observation
@@ -828,7 +939,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             .map(|t| matches!(t.verification, TlsVerification::Verified))
             .unwrap_or(false);
         *channel_authenticated = verified;
-        if prep.require_verified_tls && !verified {
+        if require_verified_tls && !verified {
             // Profile requires verified TLS but the channel was not verified:
             // markers are treated as unverified.
             trust = FerrumTrust::NotConfigured;
@@ -854,9 +965,10 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         auth_label: prep.auth_label.clone(),
         auth_facts: final_auth_facts,
         settings: prep.settings.clone(),
-        tls_profile: prep.tls_profile_name.clone(),
-        proxy: prep.proxy.as_ref().map(|p| p.label.clone()),
-        tls_verification_enabled: prep.tls.as_ref().map(|t| t.verify).unwrap_or(true),
+        // The connection that produced the final response (the last hop).
+        tls_profile: last_hop.tls_profile.clone(),
+        proxy: last_hop.proxy.as_ref().map(|p| p.label.clone()),
+        tls_verification_enabled: last_hop.tls.as_ref().map(|t| t.verify).unwrap_or(true),
         inferred: prep.inferred.clone(),
         lint_bypassed: prep.http.lint_bypassed.clone(),
         attempts,

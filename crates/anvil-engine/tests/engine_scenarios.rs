@@ -2,14 +2,15 @@
 //! Ground truth from fixtures is used only to check conditions were reached;
 //! it is never passed to the diagnostic engine.
 
+use anvil_domain::assertions::{Assertion, AssertionKind, AssertionResult, Comparison, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::*;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::outcome::*;
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
-use anvil_domain::secret::SensitiveValue;
-use anvil_domain::settings::{RetryPolicy, SettingsOverrides};
+use anvil_domain::secret::{REDACTED, SensitiveValue};
+use anvil_domain::settings::{Limits, RedirectPolicy, RetryPolicy, SettingsOverrides};
 use anvil_domain::tls::HostBinding;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
@@ -184,6 +185,55 @@ async fn proto_023_soap_fault_and_proto_024_graphql_errors_on_200() {
     assert!(finding(&g, "app.graphql_errors").explanation.contains("Partial data"));
 }
 
+/// A SOAP or GraphQL request whose response body is captured only in part:
+/// the fault or error could lie past the prefix, so the application outcome
+/// is not determined (never "success"). With the whole body, it is judged.
+#[tokio::test]
+async fn soap_and_graphql_outcomes_are_not_judged_from_a_partial_capture() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let soap = Body::Soap {
+        version: anvil_domain::request::SoapVersion::Soap11,
+        envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+        action: None,
+    };
+    let graphql = Body::GraphQl { query: "{ user { id email } }".into(), variables: String::new(), operation_name: None };
+    for (path, body) in [("/soap-fault", soap.clone()), ("/graphql-errors", graphql)] {
+        let mut ctx = ExecutionContext::standalone(RequestSpec { body, ..RequestSpec::http("POST", &f.url(path)) });
+        with_limits(&mut ctx, Limits { capture_bytes: 16, ..Limits::default() });
+        let o = run(&e, &ctx).await;
+        let r = o.record.response.as_ref().unwrap();
+        assert!(r.body.display_truncated && r.body.completeness == BodyCompleteness::Complete, "{path}: {:?}", r.body);
+        assert_eq!(o.record.outcome.transport, TransportState::Completed, "{path}");
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{path}");
+        assert!(o.record.outcome.summary.contains("application not evaluated"), "{path}: {}", o.record.outcome.summary);
+        let warning = o.record.outcome.warnings.iter().find(|w| w.message.contains("application outcome was not determined"));
+        let warning = warning.unwrap_or_else(|| panic!("{path}: {:?}", o.record.outcome.warnings));
+        assert_eq!(warning.code, WarningCode::PartialVisibility, "{path}");
+        assert!(warning.message.contains("only 16 of"), "{path}: {}", warning.message);
+
+        let mut whole = ctx.clone();
+        with_limits(&mut whole, Limits { capture_bytes: 1 << 20, ..Limits::default() });
+        let o = run(&e, &whole).await;
+        assert!(!o.record.response.as_ref().unwrap().body.display_truncated, "{path}");
+        assert_eq!(o.record.outcome.application, ApplicationState::Failure, "{path}: the whole body shows the fault");
+    }
+
+    // A SOAP request whose whole body shows no fault succeeds.
+    let ok = format!("/status/200?ct=text/xml&body={}", url_encode("<Envelope><Body><ok/></Body></Envelope>"));
+    let o = run(&e, &ExecutionContext::standalone(RequestSpec { body: soap, ..RequestSpec::http("POST", &f.url(&ok)) })).await;
+    assert_eq!(o.record.outcome.application, ApplicationState::Success);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+
+    // Other requests are judged by their status: a prefix does not hide it.
+    let mut plain = ctx_for(&f.url("/soap-fault"));
+    with_limits(&mut plain, Limits { capture_bytes: 16, ..Limits::default() });
+    let o = run(&e, &plain).await;
+    assert!(o.record.response.as_ref().unwrap().body.display_truncated);
+    assert_eq!(o.record.outcome.application, ApplicationState::Success);
+}
+
 #[tokio::test]
 async fn local_002_unresolved_variable_never_sends() {
     init();
@@ -315,4 +365,365 @@ async fn gzip_body_is_decoded_for_assertions_but_raw_bytes_kept() {
     assert_eq!(r.body.content_encoding.as_deref(), Some("gzip"));
     assert!(o.decoded_body.as_ref().unwrap().starts_with(b"compressed fixture payload"));
     assert!(r.body.decoded_bytes.unwrap() > r.body.wire_bytes, "decoded and wire sizes are distinct");
+    assert_eq!(r.body.decoding, Some(ContentDecoding::Complete));
+    assert_eq!(r.body.decoding_detail, None);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+}
+
+fn labeled(label: &str, kind: AssertionKind) -> Assertion {
+    Assertion { enabled: true, label: label.into(), kind }
+}
+
+/// A body assertion, a status assertion and a body extraction, to show which
+/// ones an incompletely decoded body stops.
+fn body_checks(ctx: &mut ExecutionContext) {
+    ctx.spec.assertions = vec![
+        labeled("body", AssertionKind::Body { comparison: Comparison::Contains, value: "compressed".into() }),
+        labeled("status", AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() }),
+    ];
+    let word = ExtractionSource::Regex { pattern: "(\\w+)".into(), group: 1 };
+    ctx.spec.extractions = vec![Extraction { variable: "word".into(), source: word, sensitive: false }];
+}
+
+fn result<'a>(o: &'a ExecutionOutput, label: &str) -> &'a AssertionResult {
+    o.record.assertion_results.iter().find(|r| r.label == label).unwrap_or_else(|| panic!("no assertion result {label}"))
+}
+
+/// Raw transport evidence stays complete while the decoded representation
+/// is not: the record says so, and nothing reads the body as if it were whole.
+fn assert_body_not_evaluated(o: &ExecutionOutput, status: ContentDecoding) {
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.body.completeness, BodyCompleteness::Complete, "wire completeness is unchanged");
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+    assert_eq!(r.body.decoding, Some(status));
+    let detail = r.body.decoding_detail.as_deref().expect("decoding detail");
+    assert!(
+        o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility && w.message.contains(detail)),
+        "{:?}",
+        o.record.outcome.warnings
+    );
+    assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated);
+    let body = result(o, "body");
+    assert!(!body.passed && body.message.contains("the complete response body is not available"), "{body:?}");
+    assert!(result(o, "status").passed, "assertions that do not read the body still run");
+    assert_eq!(o.record.outcome.assertions, AssertionState::Fail);
+    assert!(o.extracted.is_empty() && o.record.extracted.is_empty(), "no extraction from an incompletely decoded body");
+    // The serialized record (history, reports, exports) carries the outcome.
+    let json = serde_json::to_value(&o.record).unwrap();
+    assert_eq!(json["response"]["body"]["decoding"], serde_json::to_value(status).unwrap());
+}
+
+#[tokio::test]
+async fn decoding_stopped_at_the_local_limit_is_recorded_and_not_evaluated() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url("/gzip"));
+    let limits = Limits { max_decoded_bytes: 5, ..Limits::default() };
+    ctx.settings_layers.push(("run".into(), SettingsOverrides { limits: Some(limits), ..Default::default() }));
+    body_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    assert_body_not_evaluated(&o, ContentDecoding::TruncatedAtLimit);
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.body.decoded_bytes, Some(5));
+    assert_eq!(o.decoded_body.as_deref(), Some(&b"compr"[..]), "the prefix stays viewable");
+}
+
+#[tokio::test]
+async fn malformed_compressed_body_is_recorded_as_a_decode_failure() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url("/status/200?header=Content-Encoding:gzip&body=compressed-but-not-gzip&ct=text/plain"));
+    body_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    assert_body_not_evaluated(&o, ContentDecoding::Failed);
+    assert!(o.decoded_body.is_none());
+    assert_eq!(o.record.response.as_ref().unwrap().body.decoded_bytes, None);
+}
+
+#[tokio::test]
+async fn unsupported_content_coding_is_recorded_and_not_evaluated() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url("/status/200?header=Content-Encoding:compress&body=compressed-payload&ct=text/plain"));
+    body_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    assert_body_not_evaluated(&o, ContentDecoding::Unsupported);
+    assert!(o.record.response.as_ref().unwrap().body.decoding_detail.as_deref().unwrap().contains("compress"));
+}
+
+fn with_limits(ctx: &mut ExecutionContext, limits: Limits) {
+    ctx.settings_layers.push(("run".into(), SettingsOverrides { limits: Some(limits), ..Default::default() }));
+}
+
+/// Whole-body checks a prefix would wrongly pass: the absence of a word that
+/// lies past the prefix, equality with the prefix itself, and a token that
+/// the prefix cuts short. The status check does not read the body.
+fn token_checks(ctx: &mut ExecutionContext) {
+    ctx.spec.assertions = vec![
+        labeled("absent", AssertionKind::Body { comparison: Comparison::NotContains, value: "FORBIDDEN".into() }),
+        labeled("equals", AssertionKind::Body { comparison: Comparison::Equals, value: "token=abc".into() }),
+        labeled("status", AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() }),
+    ];
+    let token = ExtractionSource::Regex { pattern: "token=(\\w+)".into(), group: 1 };
+    ctx.spec.extractions = vec![Extraction { variable: "token".into(), source: token, sensitive: false }];
+}
+
+/// A body that is only partly available: body assertions fail as not
+/// evaluated with `why` in their message, nothing is extracted, the status
+/// assertion still runs and a `partial_visibility` warning explains it.
+fn assert_partial_body_not_evaluated(o: &ExecutionOutput, body_labels: &[&str], why: &str) {
+    for label in body_labels {
+        let r = result(o, label);
+        assert!(!r.passed && r.message.contains(why), "{r:?}");
+    }
+    assert!(result(o, "status").passed, "assertions that do not read the body still run");
+    assert_eq!(o.record.outcome.assertions, AssertionState::Fail);
+    assert!(o.extracted.is_empty() && o.record.extracted.is_empty(), "no extraction from a partial body: {:?}", o.extracted);
+    assert!(
+        o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility && w.message.contains(why)),
+        "{:?}",
+        o.record.outcome.warnings
+    );
+}
+
+#[tokio::test]
+async fn capture_truncated_uncompressed_body_is_not_evaluated() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(&format!("/status/200?ct=text/plain&body={}", url_encode("token=abcDEF;FORBIDDEN"))));
+    with_limits(&mut ctx, Limits { capture_bytes: 9, ..Limits::default() });
+    token_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    // The transport read the whole body; only the retained evidence is partial.
+    assert_eq!(r.body.completeness, BodyCompleteness::Complete);
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+    assert_eq!((r.body.wire_bytes, r.body.captured_bytes, r.body.display_truncated), (22, 9, true));
+    assert_eq!(r.body.decoding, None, "no content-coding was involved");
+    assert_eq!(&o.body[..], b"token=abc", "the prefix stays viewable");
+    assert_partial_body_not_evaluated(&o, &["absent", "equals"], "only 9 of 22 received body bytes were captured");
+}
+
+#[tokio::test]
+async fn complete_capture_evaluates_the_whole_body() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(&format!("/status/200?ct=text/plain&body={}", url_encode("token=abcDEF;FORBIDDEN"))));
+    with_limits(&mut ctx, Limits { capture_bytes: 1024, ..Limits::default() });
+    token_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    assert!(!o.record.response.as_ref().unwrap().body.display_truncated);
+    assert!(!result(&o, "absent").passed && !result(&o, "absent").message.contains("captured"));
+    assert!(!result(&o, "equals").passed);
+    assert!(result(&o, "status").passed);
+    assert_eq!(o.extracted, vec![("token".to_string(), "abcDEF".to_string(), false)]);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+}
+
+#[tokio::test]
+async fn capture_truncation_without_checks_adds_no_warning() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(&format!("/status/200?ct=text/plain&body={}", url_encode("token=abcDEF;FORBIDDEN"))));
+    with_limits(&mut ctx, Limits { capture_bytes: 9, ..Limits::default() });
+    let o = run(&e, &ctx).await;
+    assert!(o.record.response.as_ref().unwrap().body.display_truncated);
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+}
+
+#[tokio::test]
+async fn interrupted_body_is_not_evaluated() {
+    init();
+    let f = raw::serve("127.0.0.1:0", RawMode::ShortBody { declared: 500, sent: 20 }, None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(false, "/"));
+    ctx.spec.assertions = vec![
+        labeled("absent", AssertionKind::Body { comparison: Comparison::NotContains, value: "z".into() }),
+        labeled("status", AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() }),
+    ];
+    let run_of_y = ExtractionSource::Regex { pattern: "(y+)".into(), group: 1 };
+    ctx.spec.extractions = vec![Extraction { variable: "ys".into(), source: run_of_y, sensitive: false }];
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.body.completeness, BodyCompleteness::Incomplete);
+    assert!(!r.body.display_truncated, "everything received was captured");
+    assert_eq!(o.record.outcome.transport, TransportState::Incomplete);
+    assert_partial_body_not_evaluated(&o, &["absent"], "the response ended before its framing completed after 20 bytes");
+}
+
+#[tokio::test]
+async fn capture_truncated_compressed_body_is_not_evaluated() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url("/gzip"));
+    with_limits(&mut ctx, Limits { capture_bytes: 12, ..Limits::default() });
+    body_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.body.content_encoding.as_deref(), Some("gzip"));
+    assert_eq!(r.body.completeness, BodyCompleteness::Complete);
+    assert!(r.body.display_truncated && r.body.captured_bytes == 12, "{:?}", r.body);
+    // Whatever a decoder makes of the prefix, the capture is what is missing.
+    assert_partial_body_not_evaluated(&o, &["body"], "only 12 of");
+}
+
+/// True when `secret` can be read from `text` directly or after undoing up
+/// to three layers of percent-encoding (with `+` read either way).
+fn reveals(text: &str, secret: &str) -> bool {
+    let mut layers = vec![text.to_string()];
+    for _ in 0..3 {
+        if layers.iter().any(|l| l.contains(secret)) {
+            return true;
+        }
+        layers = layers
+            .iter()
+            .flat_map(|l| {
+                [
+                    percent_encoding::percent_decode_str(l).decode_utf8_lossy().into_owned(),
+                    percent_encoding::percent_decode_str(&l.replace('+', " ")).decode_utf8_lossy().into_owned(),
+                ]
+            })
+            .collect();
+    }
+    layers.iter().any(|l| l.contains(secret))
+}
+
+#[tokio::test]
+async fn header_marked_sensitive_is_redacted_from_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url("/echo"));
+    let mut h = KeyValue::new("X-Custom", "FLAGGED-LITERAL-4c1d");
+    h.sensitive = true;
+    ctx.spec.headers.push(h);
+    let mut short = KeyValue::new("X-Pin", "913");
+    short.sensitive = true;
+    ctx.spec.headers.push(short);
+    let o = run(&e, &ctx).await;
+    assert_eq!(o.record.response.as_ref().unwrap().status, 200);
+    for name in ["X-Custom", "X-Pin"] {
+        let v = o.record.prepared.headers.iter().find(|x| x.name == name).map(|x| x.value.as_str());
+        assert_eq!(v, Some(REDACTED), "{name} is redacted by name, whatever its length");
+    }
+    let json = serde_json::to_string(&o.record).unwrap();
+    assert!(!json.contains("FLAGGED-LITERAL-4c1d"), "a header marked sensitive leaked into the execution record");
+    // Ground truth: the server really received both values.
+    let hdrs = f.log.last_request_headers().unwrap();
+    assert!(hdrs.iter().any(|(n, v)| n == "x-custom" && v == "FLAGGED-LITERAL-4c1d"));
+    assert!(hdrs.iter().any(|(n, v)| n == "x-pin" && v == "913"));
+}
+
+#[tokio::test]
+async fn encoded_secret_query_values_leave_no_reversible_trace_in_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = "PCT/secret+with=reserved&more";
+    let spaced = "open sesame é-7f3a";
+    // Raw in the URL (path and query), and through the params table.
+    let mut ctx = ctx_for(&f.url("/echo/{{spaced}}?raw={{credential}}"));
+    ctx.var_layers = vec![VarLayer {
+        label: "environment:lab".into(),
+        vars: vec![
+            VarEntry { name: "credential".into(), value: secret.into(), secret: true },
+            VarEntry { name: "spaced".into(), value: spaced.into(), secret: true },
+        ],
+    }];
+    ctx.spec.params.push(KeyValue::new("q", "{{credential}}"));
+    ctx.spec.params.push(KeyValue::new("s", "{{spaced}}"));
+    let mut pin = KeyValue::new("pin", "913");
+    pin.sensitive = true;
+    ctx.spec.params.push(pin);
+    ctx.spec.params.push(KeyValue::new("page", "2"));
+    let o = run(&e, &ctx).await;
+    assert_eq!(o.record.response.as_ref().unwrap().status, 200);
+    // Ground truth: the server received the encoded values.
+    let echoed = String::from_utf8_lossy(&o.body).into_owned();
+    assert!(echoed.contains("q=PCT%2Fsecret%2Bwith%3Dreserved%26more"), "{echoed}");
+    let json = serde_json::to_string(&o.record).unwrap();
+    for s in [secret, spaced] {
+        assert!(!reveals(&json, s), "{s} is recoverable from the execution record: {}", o.record.prepared.url);
+    }
+    let url = &o.record.prepared.url;
+    assert!(url.contains(&format!("q={REDACTED}")) && url.contains(&format!("s={REDACTED}")), "{url}");
+    assert!(url.contains(&format!("pin={REDACTED}")), "a parameter marked sensitive is redacted by name: {url}");
+    assert!(url.contains("page=2"), "ordinary parameters stay readable: {url}");
+}
+
+#[tokio::test]
+async fn form_fields_marked_sensitive_are_redacted_from_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = "FORM-OTP-51c7 x";
+    let mut ctx = ctx_for(&f.url("/echo"));
+    ctx.spec.method = "POST".into();
+    let mut otp = KeyValue::new("one_time_code", secret);
+    otp.sensitive = true;
+    ctx.spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), otp] };
+    // Fails, and its observed value is the echoed form body.
+    let kind = AssertionKind::JsonPath { path: "$.body".into(), comparison: Comparison::Equals, value: "x".into() };
+    ctx.spec.assertions.push(labeled("echo", kind));
+    let o = run(&e, &ctx).await;
+    assert_eq!(o.record.response.as_ref().unwrap().status, 200);
+    // Ground truth: the server received the form-encoded value.
+    let echoed = String::from_utf8_lossy(&o.body).into_owned();
+    assert!(echoed.contains("one_time_code=FORM-OTP-51c7+x"), "{echoed}");
+    let actual = result(&o, "echo").actual.clone().expect("observed value");
+    assert!(actual.contains("user=alice") && actual.contains(REDACTED), "{actual}");
+    let json = serde_json::to_string(&o.record).unwrap();
+    assert!(!reveals(&json, secret), "a form field marked sensitive is recoverable from the execution record");
+}
+
+/// A redirect whose `Location` carries a secret partly encoded, with the
+/// `/` inside it left raw: no single path segment holds the whole value.
+fn redirect_ctx(f: &fx::Fixture, secret: &str) -> ExecutionContext {
+    let location = "/echo/RDR/secret%2Bwith%3Dreserved?page=2";
+    let mut ctx = ctx_for(&f.url(&format!("/redirect?status=302&to={}", url_encode(location))));
+    ctx.var_layers = vec![VarLayer {
+        label: "environment:lab".into(),
+        vars: vec![VarEntry { name: "credential".into(), value: secret.into(), secret: true }],
+    }];
+    ctx.spec.headers.push(KeyValue::new("X-Credential", "{{credential}}"));
+    ctx
+}
+
+#[tokio::test]
+async fn a_secret_in_a_redirect_location_is_not_recoverable_from_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = "RDR/secret+with=reserved";
+
+    // Followed: the second attempt's URL is the Location.
+    let o = run(&e, &redirect_ctx(&f, secret)).await;
+    assert_eq!(o.record.attempts.len(), 2);
+    assert!(matches!(o.record.attempts[1].reason, AttemptReason::Redirect { status: 302 }));
+    let reqs = f.log.requests();
+    assert!(reqs.last().unwrap().1.contains("/echo/RDR/secret%2Bwith%3Dreserved"), "{reqs:?}");
+    let url = &o.record.attempts[1].url;
+    assert!(url.ends_with(&format!("/{REDACTED}")) && !reveals(url, secret), "{url}");
+    let json = serde_json::to_string(&o.record).unwrap();
+    assert!(!reveals(&json, secret), "the followed redirect target is recoverable from the execution record");
+
+    // Not followed: the Location header itself is in the record.
+    let mut ctx = redirect_ctx(&f, secret);
+    let redirects = RedirectPolicy { follow: false, ..RedirectPolicy::default() };
+    ctx.settings_layers.push(("run".into(), SettingsOverrides { redirects: Some(redirects), ..Default::default() }));
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.status, 302);
+    let location = r.headers.iter().find(|h| h.name.eq_ignore_ascii_case("location")).map(|h| h.value.as_str());
+    assert_eq!(location, Some(REDACTED));
+    let json = serde_json::to_string(&o.record).unwrap();
+    assert!(!reveals(&json, secret), "the Location header is recoverable from the execution record");
 }

@@ -52,6 +52,25 @@ fn fixture_command() {
 }
 
 #[test]
+fn literal_parity_fixtures() {
+    let data = run("curl/literal-data.sh", &opts());
+    match &data.requests[0].spec.body {
+        Body::Raw { text, .. } => assert_eq!(text, "line1\nline2\r\n"),
+        other => panic!("{other:?}"),
+    }
+
+    let form = run("curl/literal-form-string.sh", &opts());
+    match &form.requests[0].spec.body {
+        Body::Multipart { parts } => {
+            assert_eq!(parts[0].name, "x");
+            assert!(matches!(&parts[0].content, MultipartContent::Text { value } if value == "a;type=text/html"));
+            assert_eq!(parts[0].content_type, None);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn include_credentials_keeps_literals() {
     let r = import(&fixture("curl/create-order.sh"), &ImportOptions { include_credentials: true, ..opts() }).unwrap();
     let s = &r.requests[0].spec;
@@ -150,6 +169,98 @@ fn soap_via_curl() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn literal_data_keeps_line_breaks() {
+    // cURL strips CR/LF only when it reads `--data @file`; literal data is
+    // sent as given, like `--data-binary`.
+    for flag in ["-d", "--data", "--data-ascii", "--data-binary"] {
+        let r = curl(&format!(r"curl -H 'Content-Type: text/plain' {flag} $'line1\nline2\r\n' https://example.test"));
+        match &r.requests[0].spec.body {
+            Body::Raw { text, content_type } => {
+                assert_eq!(text, "line1\nline2\r\n", "{flag}");
+                assert_eq!(content_type.as_deref(), Some("text/plain"));
+            }
+            other => panic!("{flag}: {other:?}"),
+        }
+    }
+    // File references stay reported, never read.
+    let r = curl("curl --data-ascii @body.txt https://example.test");
+    assert!(has(&r, "curl_data_file"));
+    assert_eq!(r.requests[0].spec.body, Body::None);
+}
+
+#[test]
+fn form_string_value_is_literal() {
+    let r = curl("curl --form-string 'note=alpha;bravo;type=text/html' --form-string 'up=@/etc/passwd' https://example.test");
+    match &r.requests[0].spec.body {
+        Body::Multipart { parts } => {
+            assert_eq!(parts[0].name, "note");
+            assert!(matches!(&parts[0].content, MultipartContent::Text { value } if value == "alpha;bravo;type=text/html"));
+            assert_eq!(parts[0].content_type, None);
+            assert!(parts[1].enabled, "--form-string never reads a file");
+            assert!(matches!(&parts[1].content, MultipartContent::Text { value } if value == "@/etc/passwd"));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(r.report.external_refs.is_empty());
+    // -F keeps parsing `;type=` metadata.
+    let r = curl("curl -F 'note=alpha;type=text/html' https://example.test");
+    match &r.requests[0].spec.body {
+        Body::Multipart { parts } => {
+            assert!(matches!(&parts[0].content, MultipartContent::Text { value } if value == "alpha"));
+            assert_eq!(parts[0].content_type.as_deref(), Some("text/html"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+fn soap_body(r: &ImportResult) -> (SoapVersion, Option<String>) {
+    match &r.requests[0].spec.body {
+        Body::Soap { version, action, .. } => (*version, action.clone()),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn soap12_action_parameter_is_kept() {
+    // The engine derives exactly this Content-Type from the body, so the
+    // header is folded into the SOAP model.
+    let r = curl(r#"curl -H 'Content-Type: application/soap+xml; charset=utf-8; action="urn:lookup"' --data-binary '<E/>' https://e.test"#);
+    assert_eq!(soap_body(&r), (SoapVersion::Soap12, Some("urn:lookup".into())));
+    assert!(header(&r.requests[0].spec, "Content-Type").is_none());
+    // Quoted values may contain ';'; parameter names are case-insensitive.
+    let r = curl(r#"curl -H 'Content-Type: application/soap+xml;Action="urn:a;b";charset=UTF-8' -d '<Envelope/>' https://example.test"#);
+    assert_eq!(soap_body(&r), (SoapVersion::Soap12, Some("urn:a;b".into())));
+    assert!(header(&r.requests[0].spec, "Content-Type").is_none());
+    // Unquoted action.
+    let r = curl("curl -H 'Content-Type: application/soap+xml; charset=utf-8; action=urn:plain' -d '<Envelope/>' https://example.test");
+    assert_eq!(soap_body(&r).1.as_deref(), Some("urn:plain"));
+    // No action: control.
+    let r = curl("curl -H 'Content-Type: application/soap+xml; charset=utf-8' -d '<Envelope/>' https://example.test");
+    assert_eq!(soap_body(&r), (SoapVersion::Soap12, None));
+    assert!(header(&r.requests[0].spec, "Content-Type").is_none());
+    // Parameters the engine would not derive keep the explicit header, which
+    // takes precedence when sending.
+    for ct in [
+        r#"application/soap+xml; action="urn:lookup""#,
+        r#"application/soap+xml; charset=iso-8859-1; action="urn:lookup""#,
+        r#"application/soap+xml; charset=utf-8; action="urn:lookup"; profile=x"#,
+        r#"application/soap+xml; charset=utf-8; action="urn:first"; action="urn:second""#,
+    ] {
+        let r = curl(&format!("curl -H 'Content-Type: {ct}' -d '<Envelope/>' https://example.test"));
+        let expected_action = if ct.contains("urn:first") { "urn:first" } else { "urn:lookup" };
+        assert_eq!(soap_body(&r), (SoapVersion::Soap12, Some(expected_action.into())), "{ct}");
+        assert_eq!(header(&r.requests[0].spec, "Content-Type").map(|h| h.value.as_str()), Some(ct));
+    }
+    // A SOAPAction header does not turn a SOAP 1.2 media type into SOAP 1.1.
+    let r = curl(r#"curl -H 'Content-Type: application/soap+xml; charset=utf-8; action="urn:x"' -H 'SOAPAction: urn:x' -d '<E/>' e.test"#);
+    assert_eq!(soap_body(&r), (SoapVersion::Soap12, Some("urn:x".into())));
+    // SOAP 1.1 is unchanged: the action comes from the SOAPAction header.
+    let r = curl(r#"curl -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: "urn:x/Op"' -d '<E/>' https://example.test"#);
+    assert_eq!(soap_body(&r), (SoapVersion::Soap11, Some("urn:x/Op".into())));
+    assert!(header(&r.requests[0].spec, "SOAPAction").is_none());
 }
 
 #[test]

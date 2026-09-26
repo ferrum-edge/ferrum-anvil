@@ -8,8 +8,10 @@ use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction,
 use anvil_domain::outcome::{ApplicationState, AssertionState, TransportState};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::runner::*;
+use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_domain::workspace::DatasetFormat;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
+use anvil_fixtures::GroundTruth;
 use anvil_fixtures::http as fx;
 use anvil_runner::provider::MemoryProvider;
 use anvil_runner::{PlannedStep, ProvidedStep, RunDataset, RunError, RunOptions, RunPlan, StepError, StepProvider};
@@ -38,6 +40,25 @@ impl Recording {
         let id = Id::new();
         let mut ctx = ExecutionContext::standalone(spec);
         ctx.request_id = Some(id);
+        self.inner.insert(id, name, ctx);
+        id
+    }
+
+    /// A step prepared under a sealed import root (`ExecutionContext::scope`).
+    fn add_scoped(&mut self, name: &str, spec: RequestSpec, scope: Option<Id>) -> Id {
+        let id = Id::new();
+        let mut ctx = ExecutionContext::standalone(spec);
+        ctx.request_id = Some(id);
+        ctx.scope = scope;
+        self.inner.insert(id, name, ctx);
+        id
+    }
+
+    fn add_with(&mut self, name: &str, spec: RequestSpec, settings: SettingsOverrides) -> Id {
+        let id = Id::new();
+        let mut ctx = ExecutionContext::standalone(spec);
+        ctx.request_id = Some(id);
+        ctx.settings_layers.push(("request".into(), settings));
         self.inner.insert(id, name, ctx);
         id
     }
@@ -110,6 +131,76 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     assert_eq!(p.records.lock().len(), 2, "each executed step is handed over for history");
 }
 
+fn token_login(f: &fx::Fixture, token: &str) -> RequestSpec {
+    let mut s = RequestSpec::http("POST", &f.url("/status/200"));
+    s.params.push(KeyValue::new("body", format!(r#"{{"token":"{token}"}}"#)));
+    s.extractions.push(Extraction {
+        variable: "auth_token".into(),
+        source: ExtractionSource::JsonPath { path: "$.token".into() },
+        sensitive: true,
+    });
+    s
+}
+
+fn step_echo(f: &fx::Fixture, step: &str, headers: &[(&str, &str)]) -> RequestSpec {
+    let mut s = RequestSpec::http("GET", &f.url("/echo"));
+    s.headers.push(KeyValue::new("X-Step", step));
+    for (name, value) in headers {
+        s.headers.push(KeyValue::new(*name, *value));
+    }
+    s
+}
+
+/// `(X-Step, X-Token, X-Pass)` of every request the fixture received.
+fn received_steps(f: &fx::Fixture) -> Vec<(String, Option<String>, Option<String>)> {
+    f.log
+        .entries()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            GroundTruth::RequestReceived { headers, .. } => {
+                let get = |n: &str| header(&headers, n).map(str::to_string);
+                Some((get("x-step")?, get("x-token"), get("x-pass")))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn extracted_values_and_dataset_rows_stay_on_their_side_of_an_import_root() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let root = Some(Id::new());
+    let mut p = Recording::default();
+    let login = p.add("Login", token_login(&f, "tok-user-0001"));
+    // Under a sealed import root: a value extracted outside it and the run's
+    // dataset row are not there, so these two are never sent.
+    let leak = p.add_scoped("Leak", step_echo(&f, "leak", &[("X-Token", "{{auth_token}}")]), root);
+    let row = p.add_scoped("Row", step_echo(&f, "row", &[("X-Pass", "{{password}}")]), root);
+    // What the root's own steps extract stays under it.
+    let own = p.add_scoped("Own", token_login(&f, "tok-imported-0002"), root);
+    let imported = p.add_scoped("Imported", step_echo(&f, "imported", &[("X-Token", "{{auth_token}}")]), root);
+    let me = p.add("Me", step_echo(&f, "me", &[("X-Token", "{{auth_token}}"), ("X-Pass", "{{password}}")]));
+    let mut pl = plan(&[(login, "Login"), (leak, "Leak"), (row, "Row"), (own, "Own"), (imported, "Imported"), (me, "Me")]);
+    pl.dataset = Some(RunDataset::parse("users", DatasetFormat::Csv, b"password\npw-row-secret-1\n", &["password".into()]).unwrap());
+
+    let engine = Engine::new();
+    let r = anvil_runner::run(&engine, &p, pl, RunOptions::default(), CancellationToken::new()).await.unwrap();
+    let steps = &r.iterations[0].steps;
+    assert_ne!(steps[1].status, RunStepStatus::Passed);
+    assert_ne!(steps[2].status, RunStepStatus::Passed);
+    assert_eq!(steps[4].status, RunStepStatus::Passed, "{r:#?}");
+    assert_eq!(steps[5].status, RunStepStatus::Passed, "{r:#?}");
+    // Ground truth: what reached the peer.
+    let some = |s: &str| Some(s.to_string());
+    let expected =
+        [("imported".to_string(), some("tok-imported-0002"), None), ("me".to_string(), some("tok-user-0001"), some("pw-row-secret-1"))];
+    assert_eq!(received_steps(&f), expected);
+    // The report says why the root's steps got no dataset row.
+    let skipped = anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
+    assert_eq!(r.notes.iter().filter(|n| n.as_str() == skipped).count(), 1, "{:?}", r.notes);
+}
+
 #[tokio::test]
 async fn csv_and_json_datasets_drive_iterations_and_sensitive_columns_stay_out_of_reports() {
     init();
@@ -145,6 +236,7 @@ async fn csv_and_json_datasets_drive_iterations_and_sensitive_columns_stay_out_o
         assert_eq!(r.totals.transport_failures + r.totals.application_failures, 0);
         let ds = r.dataset.as_ref().unwrap();
         assert_eq!((ds.rows, ds.sensitive_columns.clone()), (2, vec!["password".to_string()]));
+        assert!(!r.notes.iter().any(|n| n.as_str() == anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT), "{:?}", r.notes);
 
         // Ground truth: each row reached the fixture with its real values.
         let reqs = f.log.requests();
@@ -513,4 +605,62 @@ async fn invalid_plans_are_rejected_before_any_traffic() {
     let mut slow = pl;
     slow.steps[0].delay_ms = anvil_runner::MAX_DELAY_MS + 1;
     assert!(anvil_runner::run(&engine, &p, slow, RunOptions::default(), CancellationToken::new()).await.is_err());
+}
+
+/// A run whose dataset makes `fixture payload` (text inside the fixture's
+/// gzip body) a sensitive run value, with one step: the response body kept
+/// for history and the report notes.
+async fn encoded_body_run(path: &str, settings: SettingsOverrides) -> (Vec<u8>, Vec<String>) {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let id = p.add_with("Encoded", RequestSpec::http("GET", &f.url(path)), settings);
+    let mut pl = plan(&[(id, "Encoded")]);
+    pl.dataset = Some(RunDataset::parse("rows", DatasetFormat::Csv, b"marker\nfixture payload\n", &["marker".into()]).unwrap());
+    let engine = Engine::new();
+    let r = anvil_runner::run(&engine, &p, pl, RunOptions::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!(r.totals.steps_executed, 1);
+    let records = p.records.lock();
+    assert_eq!(records.len(), 1);
+    (records[0].1.clone(), r.notes.clone())
+}
+
+fn assert_body_dropped(body: &[u8], notes: &[String]) {
+    assert!(body.is_empty(), "a content-encoded body that could not be checked was kept: {} bytes", body.len());
+    assert!(notes.iter().any(|n| n.contains("not kept in history")), "{notes:?}");
+}
+
+#[tokio::test]
+async fn encoded_body_with_a_secret_past_the_decode_limit_is_not_kept() {
+    // The decoded prefix ("compr") holds no secret, but the compressed bytes do.
+    let limits = Limits { max_decoded_bytes: 5, ..Limits::default() };
+    let (body, notes) = encoded_body_run("/gzip", SettingsOverrides { limits: Some(limits), ..Default::default() }).await;
+    assert_body_dropped(&body, &notes);
+}
+
+#[tokio::test]
+async fn malformed_compressed_body_is_not_kept() {
+    let path = "/status/200?header=Content-Encoding:gzip&body=not-gzip%20fixture%20payload&ct=text/plain";
+    let (body, notes) = encoded_body_run(path, SettingsOverrides::default()).await;
+    assert_body_dropped(&body, &notes);
+}
+
+#[tokio::test]
+async fn encoded_body_is_not_kept_when_decompression_is_off() {
+    let (body, notes) = encoded_body_run("/gzip", SettingsOverrides { decompress: Some(false), ..Default::default() }).await;
+    assert_body_dropped(&body, &notes);
+}
+
+#[tokio::test]
+async fn completely_decoded_body_without_a_run_secret_is_kept() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let id = p.add("Gzip", RequestSpec::http("GET", &f.url("/gzip")));
+    let mut pl = plan(&[(id, "Gzip")]);
+    pl.dataset = Some(RunDataset::parse("rows", DatasetFormat::Csv, b"marker\nnot-in-the-body\n", &["marker".into()]).unwrap());
+    let engine = Engine::new();
+    let r = anvil_runner::run(&engine, &p, pl, RunOptions::default(), CancellationToken::new()).await.unwrap();
+    assert!(!r.notes.iter().any(|n| n.contains("not kept in history")), "{:?}", r.notes);
+    assert!(!p.records.lock()[0].1.is_empty(), "the compressed body is kept");
 }

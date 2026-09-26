@@ -14,7 +14,7 @@
 
 use crate::protocol::StepUnit;
 use anvil_domain::diagnostics::Severity;
-use anvil_domain::execution::{AttemptReason, Direction, ExecutionRecord, FailureKind, Phase, PhaseStatus};
+use anvil_domain::execution::{AttemptReason, Direction, ExecutionRecord, FailureKind, Phase, PhaseStatus, exchange_duration_us};
 use anvil_domain::load::*;
 use anvil_domain::outcome::{ApplicationState, AssertionState, ClosedBy, GrpcStatusSource, ProtocolStatus, TransportState};
 use anvil_engine::ExecutionOutput;
@@ -265,6 +265,11 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
             LoadUnitKind::TcpExchange if obs.proto.tcp.as_ref().and_then(|t| t.expectation) == Some(false) => {
                 obs.application_failure = true;
             }
+            // A SOAP fault or GraphQL error arrives with a 2xx: an outcome the
+            // engine could not determine from the body (only part of it was
+            // captured, say) is not a success; it counts as an application
+            // failure.
+            LoadUnitKind::HttpRequest if not_determined_from_body(rec, step) => obs.application_failure = true,
             LoadUnitKind::UdpExchange | LoadUnitKind::DtlsExchange => match &obs.proto.dgram {
                 Some(d) if d.received == 0 => obs.no_response = true,
                 // The latency of an exchange is the observed time to first
@@ -279,6 +284,12 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
         describe_failure(&mut obs, rec, step);
     }
     obs
+}
+
+/// A SOAP or GraphQL request whose application outcome the engine did not
+/// determine from the response body.
+fn not_determined_from_body(rec: &ExecutionRecord, step: &StepUnit) -> bool {
+    step.application_from_body && rec.outcome.application == ApplicationState::NotEvaluated
 }
 
 /// The unit-independent part of [`observe`]: terminal class, application and
@@ -297,7 +308,7 @@ pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
     };
     let application_failure = terminal == Terminal::Completed && rec.outcome.application == ApplicationState::Failure;
     let assertion_failure = terminal == Terminal::Completed && rec.outcome.assertions == AssertionState::Fail;
-    let latency_us: u64 = rec.attempts.iter().map(|a| a.duration_us).sum();
+    let latency_us = exchange_duration_us(&rec.attempts).unwrap_or(0);
     let mut obs = SendObservation {
         terminal,
         application_failure,
@@ -355,6 +366,9 @@ fn describe_failure(obs: &mut SendObservation, rec: &ExecutionRecord, step: &Ste
     let detail = match terminal {
         Terminal::Timeout => kind.clone().unwrap_or_else(|| "deadline".into()),
         Terminal::Completed if expectation_short => "tcp.expected_frames_not_received".into(),
+        Terminal::Completed if not_determined_from_body(rec, step) => {
+            top.clone().unwrap_or_else(|| "application.not_determined_from_body".into())
+        }
         _ if assertion_failure && !application_failure => rec
             .assertion_results
             .iter()

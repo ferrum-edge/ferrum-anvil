@@ -8,9 +8,9 @@ use anvil_domain::Id;
 use anvil_domain::assertions::{Assertion, AssertionKind, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::load::*;
-use anvil_domain::request::{Body, KeyValue, PayloadEncoding, Protocol, RequestSpec, StreamPayload, UdpSpec};
+use anvil_domain::request::{Body, KeyValue, PayloadEncoding, Protocol, RequestSpec, SoapVersion, StreamPayload, UdpSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
-use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
+use anvil_domain::settings::{Limits, SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::TlsProfile;
 use anvil_engine::context::MemorySecrets;
 use anvil_engine::{Engine, ExecutionContext};
@@ -533,6 +533,63 @@ async fn load_010_bounded_samples_under_sustained_failures_and_large_bodies() {
     assert!(r.bytes_received >= 16 * n);
 }
 
+/// A SOAP or GraphQL response larger than the capture: a fault past the
+/// captured prefix would go unseen, so the unit is not a success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_soap_and_graphql_outcomes_not_determined_from_the_body_are_not_successes() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let small_capture = SettingsOverrides { limits: Some(Limits { capture_bytes: 16, ..Limits::default() }), ..Default::default() };
+    let soap = Body::Soap {
+        version: SoapVersion::Soap11,
+        envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+        action: None,
+    };
+    let graphql = Body::GraphQl { query: "{ user { id email } }".into(), variables: String::new(), operation_name: None };
+    for (path, body) in [("/soap-fault", soap), ("/graphql-errors", graphql)] {
+        let s = RequestSpec { body, settings: small_capture.clone(), ..RequestSpec::http("POST", &f.url(path)) };
+        let id = Id::new();
+        let r = run(plan(Workload::Iterations { iterations: 4, concurrency: 1 }, vec![id]), vec![(id, ctx(s))], None).await;
+        assert_eq!((r.requests.completed, r.requests.application_failures), (4, 4), "{path}");
+        assert_eq!(r.latency_success.count, 0, "{path}");
+        assert_eq!(r.failure_categories.len(), 1, "{path}: {:?}", r.failure_categories);
+        assert_eq!(r.failure_categories[0].category, "application_failure: application.not_determined_from_body", "{path}");
+    }
+
+    let authorization_redirect = RequestSpec {
+        body: Body::Soap {
+            version: SoapVersion::Soap11,
+            envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+            action: None,
+        },
+        settings: small_capture.clone(),
+        ..RequestSpec::http("POST", &f.url("/redirect?to=%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3Dfixture"))
+    };
+    let request = ctx(authorization_redirect);
+    let manual = Engine::new().execute(&request, EventCtx::none(), CancellationToken::new()).await;
+    let top = manual
+        .record
+        .findings
+        .iter()
+        .filter(|f| f.severity >= anvil_domain::diagnostics::Severity::Warning)
+        .max_by_key(|f| f.severity)
+        .or(manual.record.findings.first())
+        .expect("redirect produces a diagnostic finding")
+        .code
+        .clone();
+    let id = Id::new();
+    let r = run(plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]), vec![(id, request)], None).await;
+    assert_eq!(r.requests.application_failures, 1);
+    assert_eq!(r.failure_categories[0].category, format!("application_failure: {top}"));
+    assert_ne!(r.failure_categories[0].category, "application_failure: application.not_determined_from_body");
+
+    // A plain request is judged by its status, which a prefix does not hide.
+    let s = RequestSpec { settings: small_capture, ..RequestSpec::http("GET", &f.url("/soap-fault")) };
+    let id = Id::new();
+    let r = run(plan(Workload::Iterations { iterations: 4, concurrency: 1 }, vec![id]), vec![(id, ctx(s))], None).await;
+    assert_eq!((r.requests.completed, r.requests.application_failures, r.latency_success.count), (4, 0, 4));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn load_011_report_roundtrip_and_html_escape_response_content() {
     let _g = serial().await;
@@ -700,6 +757,77 @@ async fn chain_extraction_feeds_next_step_with_dataset_rows() {
         assert_eq!(counters.get(k), Some(&10), "{counters:?}");
     }
     assert_eq!(r.dataset_sha256, Some(sha));
+    assert!(!r.notes.iter().any(|n| n.as_str() == anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT), "{:?}", r.notes);
+}
+
+fn extracting_tok(url: &str) -> RequestSpec {
+    let mut s = RequestSpec::http("GET", url);
+    s.extractions =
+        vec![Extraction { variable: "tok".into(), source: ExtractionSource::JsonPath { path: "$.tok".into() }, sensitive: false }];
+    s
+}
+
+/// A request prepared under a sealed import root (`ExecutionContext::scope`).
+fn scoped(spec: RequestSpec, root: Id) -> ExecutionContext {
+    let mut c = ctx(spec);
+    c.scope = Some(root);
+    c
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chain_values_stay_on_their_side_of_an_import_root() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let root = Id::new();
+    let (a, b, c, d) = (Id::new(), Id::new(), Id::new(), Id::new());
+    let requests = HashMap::from([
+        (a, ctx(extracting_tok(&f.url(r#"/status/200?body={"tok":"user-{{k}}"}"#)))),
+        (b, scoped(extracting_tok(&f.url(r#"/status/200?body={"tok":"imported"}"#)), root)),
+        (c, scoped(RequestSpec::http("GET", &f.url("/count/sealed-{{tok}}")), root)),
+        (d, ctx(RequestSpec::http("GET", &f.url("/count/user-{{tok}}")))),
+    ]);
+    let data = Dataset::parse(DatasetFormat::Csv, b"k\nalpha\nbeta\ngamma\n".to_vec()).unwrap();
+    let mut p = plan(Workload::Iterations { iterations: 30, concurrency: 3 }, vec![a, b, c, d]);
+    p.dataset_id = Some(Id::new());
+    // Through the worker's wire format, as a worker run receives it.
+    let job = LoadJob { requests, dataset: Some(data) };
+    let wire = serde_json::to_vec(&WorkerJob::from_load_job(&p, &job, opts()).unwrap()).unwrap();
+    let (p, job, o) = serde_json::from_slice::<WorkerJob>(&wire).unwrap().into_load_job().unwrap();
+    assert_eq!((job.requests[&a].scope, job.requests[&b].scope), (None, Some(root)));
+    let r = LoadRun::prepare(p, job, o).expect("valid plan").execute(CancellationToken::new(), None).await;
+    assert_balanced(&r);
+    assert_eq!(r.counts.completed, 30);
+    // The root's steps saw only what the root extracted; the workspace's
+    // steps only what the workspace extracted.
+    let counters = f.state.counters.lock().clone();
+    let mut expected = HashMap::new();
+    for (k, n) in [("sealed-imported", 30), ("user-user-alpha", 10), ("user-user-beta", 10), ("user-user-gamma", 10)] {
+        expected.insert(k.to_string(), n);
+    }
+    assert_eq!(counters, expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_step_under_an_import_root_never_sends_a_workspace_value() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let root = Id::new();
+    let (login, leak, row) = (Id::new(), Id::new(), Id::new());
+    let requests = vec![
+        (login, ctx(extracting_tok(&f.url(r#"/status/200?body={"tok":"user-session"}"#)))),
+        (leak, scoped(RequestSpec::http("GET", &f.url("/count/leak-{{tok}}")), root)),
+        (row, scoped(RequestSpec::http("GET", &f.url("/count/row-{{k}}")), root)),
+    ];
+    for chain in [vec![login, leak], vec![row]] {
+        let data = Dataset::parse(DatasetFormat::Csv, b"k\nalpha\n".to_vec()).unwrap();
+        let mut p = plan(Workload::Iterations { iterations: 4, concurrency: 1 }, chain);
+        p.dataset_id = Some(Id::new());
+        let r = run(p, requests.clone(), Some(data)).await;
+        assert_eq!(r.counts.started, 4);
+        assert!(r.notes.iter().any(|n| n.as_str() == anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT), "{:?}", r.notes);
+    }
+    assert_eq!(received(&f, "/status/").len(), 4, "the workspace's own step ran");
+    assert!(received(&f, "/count/").is_empty(), "{:?}", f.state.counters.lock());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -731,6 +859,28 @@ async fn connection_modes_fresh_and_persistent() {
         assert_eq!(r.requests.connections_opened as usize, accepted, "engine evidence matches fixture ground truth");
         assert_eq!(r.requests.connections_opened + r.requests.connections_reused, 30);
     }
+}
+
+/// A persistent chain over more destinations than the smallest per-slot
+/// idle cap (4) reuses every step's connection on the next iteration: the
+/// cap follows the plan, so no step's connection is closed just before its
+/// reuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persistent_chain_over_six_destinations_reuses_every_connection() {
+    let _g = serial().await;
+    let mut fixtures = Vec::new();
+    for _ in 0..6 {
+        fixtures.push(fx::serve("127.0.0.1:0", None).await.unwrap());
+    }
+    let requests: Vec<(Id, ExecutionContext)> = fixtures.iter().map(|f| (Id::new(), get(&f.url("/")))).collect();
+    let chain = requests.iter().map(|(id, _)| *id).collect();
+    let r = run(plan(Workload::Iterations { iterations: 5, concurrency: 1 }, chain), requests, None).await;
+    assert_eq!((r.counts.started, r.counts.completed), (5, 5));
+    for (i, f) in fixtures.iter().enumerate() {
+        assert_eq!(f.log.count_requests(), 5, "destination {i}");
+        assert_eq!(connections(f), 1, "destination {i}: its connection was not reused across iterations");
+    }
+    assert_eq!((r.requests.connections_opened, r.requests.connections_reused), (6, 24));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

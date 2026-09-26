@@ -1,7 +1,6 @@
 // Collection runner: scenarios (ordered saved requests with chaining) and
 // folder runs, live progress, and saved reports with per-step outcomes.
-import { useEffect, useMemo, useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, onRunEvent, onRunFinished, type RunEvent, type RunReport, type Scenario, type TreeNode } from "./api";
 import type { Environment } from "./generated/contracts";
 import { Modal, SidebarResizer, fmtAgo, fmtUs, humanize } from "./ui";
@@ -18,7 +17,19 @@ function flatFolders(nodes: TreeNode[], path: string[] = []): { id: string; labe
   return nodes.flatMap((n) => (n.kind === "folder" ? [{ id: n.id, label: [...path, n.name].join(" / ") }, ...flatFolders(n.children, [...path, n.name])] : []));
 }
 
-export function RunnerView(props: { workspaceId: string; tree: TreeNode[]; environments: Environment[]; activeEnvironment: string | null; notify: (m: string) => void }) {
+/**
+ * Stays mounted (only hidden) while another view is shown: a run continues in
+ * the backend, and this view holds its only live progress and Stop control.
+ */
+export function RunnerView(props: {
+  workspaceId: string;
+  tree: TreeNode[];
+  environments: Environment[];
+  activeEnvironment: string | null;
+  notify: (m: string) => void;
+  hidden?: boolean;
+  onLiveChange?: (live: boolean) => void;
+}) {
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [reports, setReports] = useState<RunReport[]>([]);
   const [sel, setSel] = useState<Sel>(null);
@@ -28,20 +39,33 @@ export function RunnerView(props: { workspaceId: string; tree: TreeNode[]; envir
   const requests = useMemo(() => flatRequests(props.tree), [props.tree]);
   const folders = useMemo(() => flatFolders(props.tree), [props.tree]);
 
+  const wsRef = useRef(props.workspaceId);
+  wsRef.current = props.workspaceId;
+  /** The workspace's reports, or null when the workspace changed meanwhile. */
   const reload = async () => {
-    const [s, r] = await Promise.all([api.scenarios(props.workspaceId), api.runReports(props.workspaceId)]);
+    const w = props.workspaceId;
+    const [s, r] = await Promise.all([api.scenarios(w), api.runReports(w)]);
+    if (w !== wsRef.current) return null;
     setScenarios(s);
     setReports(r);
+    return r;
   };
+  // The run listeners outlive renders: read the current workspace and callbacks.
+  const current = useRef({ reload, notify: props.notify });
+  current.current = { reload, notify: props.notify };
   useEffect(() => {
     void reload();
   }, [props.workspaceId]);
   useEffect(() => {
+    props.onLiveChange?.(!!live);
+  }, [!!live]);
+  useEffect(() => {
     const a = onRunEvent((ev) => setLive((l) => (l && l.runId === ev.run_id ? { ...l, events: [...l.events, ev].slice(-500) } : l)));
     const b = onRunFinished((f) => {
       setLive((l) => (l && l.runId === f.run_id ? null : l));
-      if (f.error) props.notify(`Run did not complete: ${f.error}`);
-      void reload().then(() => setSel({ kind: "report", id: f.run_id }));
+      if (f.error) current.current.notify(`Run did not complete: ${f.error}`);
+      // A run started in another workspace saves its report there: do not select it here.
+      void current.current.reload().then((r) => r?.some((x) => x.run_id === f.run_id) && setSel({ kind: "report", id: f.run_id }));
     });
     return () => {
       void a.then((f) => f());
@@ -61,7 +85,7 @@ export function RunnerView(props: { workspaceId: string; tree: TreeNode[]; envir
   const runScenario = (s: Scenario) => (s.trusted === false ? setConfirmUntrusted(s) : void start({ kind: "scenario", scenario_id: s.id }, s.name));
 
   return (
-    <div className="main">
+    <div className="main" style={props.hidden ? { display: "none" } : undefined}>
       <aside className="sidebar" aria-label="Scenarios and run reports">
         <div className="side-body">
           <div className="side-section-head">
@@ -412,10 +436,10 @@ function ReportView(props: { runId: string; notify: (m: string) => void; onDelet
   const t = r.totals;
   const exportAs = async (format: "json" | "junit" | "html") => {
     const ext = format === "junit" ? "xml" : format;
-    const path = await save({ defaultPath: `anvil-run-${r.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
-    if (!path) return;
-    await api.exportRunReport(r.run_id, format, path);
-    props.notify(`Exported to ${path}`);
+    const file = await api.chooseFile("run_report_export", { file_name: `anvil-run-${r.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
+    if (!file) return;
+    await api.exportRunReport(r.run_id, format, file.token);
+    props.notify(`Exported to ${file.file_name}`);
   };
   return (
     <div className="page">

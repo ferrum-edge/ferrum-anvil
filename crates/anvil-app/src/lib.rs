@@ -2,13 +2,17 @@
 //! the CLI. All security-relevant state (vault key, lock) lives here and in
 //! `anvil-storage`; UI layers only call these services.
 
+pub mod backup;
 pub mod exec;
+pub mod file_grants;
 pub mod identity;
+pub mod linked_files;
 pub mod load;
 pub mod port;
 pub mod profiles;
 pub mod runner;
 pub mod specs;
+pub mod token_files;
 pub mod workspace;
 
 use anvil_engine::Engine;
@@ -16,6 +20,7 @@ use anvil_storage::vault::ProfileHeader;
 use anvil_storage::{Key, Store, StoreError};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -29,6 +34,8 @@ pub enum AppError {
     Vault(#[from] anvil_storage::VaultError),
     #[error("{0}")]
     Bundle(#[from] anvil_portability::BundleError),
+    #[error("{0}")]
+    Backup(#[from] backup::BackupError),
     #[error("storage: {0}")]
     Store(StoreError),
     #[error("io: {0}")]
@@ -60,12 +67,15 @@ pub struct App {
     pub dir: PathBuf,
     pub store: Arc<Store>,
     pub engine: Arc<Engine>,
+    /// Set by the desktop shell: a JWT-SVID token file is read only if the
+    /// user bound it in the native dialog (see [`App::confine_token_files`]).
+    confined_token_files: AtomicBool,
 }
 
 impl App {
     pub fn open(dir: PathBuf, header: ProfileHeader, key: Key) -> Result<App> {
         let store = Arc::new(Store::open(&dir, key)?);
-        let app = App { header, dir, store, engine: Arc::new(Engine::new()) };
+        let app = App { header, dir, store, engine: Arc::new(Engine::new()), confined_token_files: AtomicBool::new(false) };
         app.ensure_settings()?;
         app.pin_attachment_blobs()?;
         Ok(app)

@@ -61,6 +61,12 @@ run-local layers, which therefore always win:
    same iteration (a later extraction of the same name replaces the earlier
    one). Extracted values never cross iterations and are never persisted.
 
+A step under an imported collection's import root that the user has not
+opened to the workspace (see [import.md](import.md#persisting-an-import-anvil-app))
+gets neither the dataset row nor values extracted by steps outside that
+root, and values it extracts are handed only to later steps under the same
+root (`ExecutionContext::scope`). Runs without import roots are unchanged.
+
 Unresolved variables still fail preparation (`unresolved_variable`, nothing
 sent) — for example when an earlier extraction matched nothing. The step
 then fails on the transport dimension and its record says which variable
@@ -127,6 +133,47 @@ remaining steps of that iteration are `skipped` and the next iteration runs.
 An iteration is `passed`, `failed` (any failed/error step) or `incomplete`
 (the run was canceled or aborted during it).
 
+## XPath subset
+
+XPath assertions and extractions (in Send, collection runs and load) use a
+small, strictly parsed subset of XPath 1.0 over a DTD-free XML parse:
+
+| Syntax | Selects |
+|---|---|
+| `/a/b` | child elements named `b` of the `a` root element |
+| `//b` | elements named `b` anywhere below the context (descendant-or-self, then child) |
+| `*` | any element, e.g. `/a/*` |
+| `b[n]` | the n-th matching `b` child of each parent, counting from 1; a position past the last match selects nothing |
+| `.../@attr` | the attribute on the selected elements (`//@attr`: on any element below) |
+| `.../text()` | the text-node children of the selected elements (`//text()`: of any element below) |
+
+Names match **local names**: a namespace prefix in the path (`s:Body`,
+`@xml:lang`) is ignored rather than resolved, so `/Envelope/Body` and
+`/soap:Envelope/soap:Body` select the same elements whatever namespace the
+document uses. A name in the path starts with a Unicode letter or `_` and
+continues with Unicode letters, digits, `_`, `-` and `.` (`/données/é[1]`
+works). Some characters XML allows in names, such as `·` (U+00B7) and
+combining marks, are not accepted: a path that uses them is an error, never
+a different selection. `//` selects below the context, never the context
+itself (`/b//b` skips the outer `b`), and each node is selected at most once
+(`//a//b` with nested `a` elements). The value is that of the first selected
+node in document order: an element's full text content, an attribute value
+or one text node (`//text()` on `<r><b>y</b>z</r>` is `y`).
+An empty selection is "no value" (`exists` fails, `not_exists` passes, an
+extraction matches nothing).
+
+Anything else is an evaluation error, reported as "could not evaluate" (the
+assertion fails whatever its comparison) or as a failed extraction, never a
+step that silently selects other nodes: predicates other than a single
+positive position (`[@id='x']`, `[last()]`, `[1][2]`), `[0]`, unbalanced
+brackets, empty steps (`/a//`, `/a/`), axes (`child::`, `..`, `.`), node
+tests and functions (`node()`, `@*`), a prefixed wildcard (`p:*`), unions
+(`|`), a relative path, `/@attr` or `/text()` as the first step (use
+`//@attr` or `//text()`), a step after `@attr` or `text()`, and whitespace
+between path parts (`/a / b`, `b [1]`; spaces inside a position, `[ 1 ]`,
+are allowed). The path is checked before the body is parsed. A failed
+extraction names its variable (`extraction for 'id': …`).
+
 ## Cancellation, lock and abort
 
 The run's `CancellationToken` is passed to every engine execution and to the
@@ -172,7 +219,9 @@ Per step: position, request id, **revision id**, name, protocol, method,
 redacted URL, status, `failed_dimensions`, **execution record id** (the
 history entry), transport/application/assertion states, dispatch state,
 HTTP (or handshake) status, gRPC status, redacted summary and message,
-wall-clock `duration_ms`, `exchange_ms` (sum of attempt durations),
+wall-clock `duration_ms`, `exchange_ms` (sum of attempt durations, including
+redirect hops, retries and protocol fallback; a `latency_ms` assertion
+evaluates this same exchange time),
 `delay_ms`, assertion results (redacted, ≤ 50), top findings (code, title,
 confidence, severity; highest severity first, ≤ 5) and the names of
 extracted variables. Never response bodies or extracted values.
@@ -219,9 +268,16 @@ sensitive dataset values and by values extracted with `sensitive: true` —
 which first appear in the response of the step that extracts them, before
 any variable carries them. Before a step is recorded in history, its record
 (URLs, headers, trailers, failure messages, assertion values, findings,
-warnings, stream previews) is scrubbed, and so is the captured response body
-(a content-encoded body that contains such a value when decoded is not kept
-in history instead). Every report string is scrubbed again. The redactor
+warnings, stream previews) is scrubbed, and so is the captured response body.
+URL values are redacted as URLs, so an encoded run value is caught too: the
+DPoP `htu` target among the prepared request's notes, and URL-valued finding
+evidence (with its copy in the finding's explanation).
+Compressed bytes cannot be scrubbed in place, so while the run holds any such
+value a content-encoded body is kept in history only when it was decoded
+completely and the decoded content does not contain one; a body whose
+decoding was truncated, failed or unsupported, or that was not decoded
+because decompression is off, is dropped (raw and decoded) and a run note
+says so. Every report string is scrubbed again. The redactor
 remembers at most 4 096 values (oldest first out; the current iteration's
 values are always present).
 

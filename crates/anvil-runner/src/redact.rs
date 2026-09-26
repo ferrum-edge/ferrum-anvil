@@ -16,7 +16,7 @@
 //! shorter than 4 characters are not exact-value scrubbed (the engine's rule:
 //! they would shred ordinary text); name-based redaction still applies.
 
-use anvil_domain::execution::ExecutionRecord;
+use anvil_domain::execution::{ContentDecoding, ExecutionRecord};
 use anvil_domain::secret::REDACTED;
 use anvil_engine::ExecutionOutput;
 use anvil_engine::redact::Redactor;
@@ -103,7 +103,7 @@ impl RunSecrets {
         r.prepared.url = red.url(&r.prepared.url);
         r.prepared.headers = red.headers(&r.prepared.headers);
         for s in &mut r.prepared.inferred {
-            *s = red.text(s);
+            *s = red.inferred(s);
         }
         for a in &mut r.attempts {
             a.url = red.url(&a.url);
@@ -121,6 +121,9 @@ impl RunSecrets {
             resp.trailers = red.headers(&resp.trailers);
             if let Some(reason) = &mut resp.reason {
                 *reason = red.text(reason);
+            }
+            if let Some(d) = &mut resp.body.decoding_detail {
+                *d = red.text(d);
             }
         }
         if let Some(st) = &mut r.stream {
@@ -142,32 +145,34 @@ impl RunSecrets {
             }
         }
         for f in &mut r.findings {
-            f.title = red.text(&f.title);
-            f.explanation = red.text(&f.explanation);
-            for e in &mut f.evidence {
-                e.value = red.text(&e.value);
-            }
-            for a in &mut f.alternatives {
-                *a = red.text(a);
-            }
+            red.finding(f);
         }
     }
 
     /// Scrub run secrets from the captured body before it is recorded in
-    /// history. A content-encoded body that contains a secret once decoded
-    /// cannot be scrubbed in place, so it is not kept (returns a note).
+    /// history. A content-encoded body cannot be scrubbed in place: it is
+    /// kept only when it was decoded completely and the decoded content holds
+    /// no run secret. Otherwise (a secret found, decoding truncated, failed or
+    /// unsupported, or decompression off) neither the raw nor the decoded
+    /// body is kept, and the returned note says so.
     pub fn scrub_body(&self, out: &mut ExecutionOutput) -> Option<String> {
         if !self.has_values() || out.body.is_empty() {
             return None;
         }
         let secrets: Vec<&[u8]> = self.values.iter().map(|v| v.as_bytes()).collect();
-        if let Some(decoded) = &out.decoded_body {
-            if secrets.iter().any(|s| contains(decoded, s)) {
-                out.body = Bytes::new();
-                out.decoded_body = None;
-                return Some("a content-encoded response body contained a sensitive run value; it was not kept in history".into());
-            }
-            return None;
+        let capture = out.record.response.as_ref().map(|r| &r.body);
+        let coded = out.decoded_body.is_some() || capture.is_some_and(|b| has_content_coding(b.content_encoding.as_deref()));
+        if coded {
+            let complete = capture.and_then(|b| b.decoding) == Some(ContentDecoding::Complete);
+            let reason = match out.decoded_body.as_ref().filter(|_| complete) {
+                None => Some("it was not fully decoded, so it could not be checked for sensitive run values"),
+                Some(d) if secrets.iter().any(|s| contains(d, s) || contains(&out.body, s)) => Some("it contained a sensitive run value"),
+                Some(_) => None,
+            };
+            let reason = reason?;
+            out.body = Bytes::new();
+            out.decoded_body = None;
+            return Some(format!("A content-encoded response body was not kept in history: {reason}."));
         }
         let mut body = out.body.to_vec();
         let mut changed = false;
@@ -182,6 +187,12 @@ impl RunSecrets {
         }
         None
     }
+}
+
+/// True when a `Content-Encoding` value names any coding other than
+/// `identity`, including ones Anvil cannot decode (e.g. `none`).
+fn has_content_coding(ce: Option<&str>) -> bool {
+    ce.is_some_and(|ce| ce.split(',').map(str::trim).any(|c| !c.is_empty() && !c.eq_ignore_ascii_case("identity")))
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -218,8 +229,62 @@ mod tests {
     }
 
     #[test]
+    fn records_redact_url_values_as_urls() {
+        use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Evidence, EvidenceSource, Owner, Severity, SourceScope};
+        use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
+
+        let ctx = anvil_engine::ExecutionContext::standalone(anvil_domain::request::RequestSpec::http("GET", "https://example.test/"));
+        let resolver = anvil_engine::vars::Resolver::new(vec![], None);
+        let failure = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, "not sent");
+        let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+        // `%2D` is not a canonical encoding: exact-value scrubbing misses it,
+        // URL redaction does not.
+        record.prepared.inferred.push("auth dpop.htu: https://h/u/run%2Dvalue-5e6f/x".into());
+        let endpoint = "idp.test/t/run%2Dvalue-5e6f/authorize";
+        record.findings.push(DiagnosticFinding {
+            code: "auth.browser_session_required".into(),
+            rule_id: "auth.session".into(),
+            rule_version: 1,
+            title: "login".into(),
+            explanation: format!("example.test redirected this request ({endpoint})."),
+            scope: SourceScope::Unknown,
+            confidence: Confidence::Likely,
+            severity: Severity::Error,
+            evidence: vec![Evidence {
+                source: EvidenceSource::HttpHeader,
+                key: "redirect.authorization_endpoint".into(),
+                value: endpoint.into(),
+                attempt: Some(1),
+            }],
+            alternatives: vec![],
+            does_not_prove: vec![],
+            remediation: vec![],
+            owner: Owner::Caller,
+            confirm_with: vec![],
+        });
+
+        let mut s = RunSecrets::new(vec![]);
+        s.add_values(vec!["run-value-5e6f".to_string()]);
+        s.scrub_record(&mut record);
+        assert!(record.prepared.inferred.contains(&format!("auth dpop.htu: https://h/u/{REDACTED}/x")), "{:?}", record.prepared.inferred);
+        let f = record.findings.last().unwrap();
+        assert_eq!(f.evidence[0].value, format!("idp.test/t/{REDACTED}/authorize"));
+        assert_eq!(f.explanation, format!("example.test redirected this request (idp.test/t/{REDACTED}/authorize)."));
+    }
+
+    #[test]
     fn byte_replace() {
         assert_eq!(replace(b"a-tok-b-tok", b"tok", b"X"), b"a-X-b-X".to_vec());
         assert!(contains(b"hello world", b"o w"));
+    }
+
+    #[test]
+    fn content_coding_detection() {
+        for ce in [Some("gzip"), Some("identity, br"), Some("none"), Some(" GZIP ")] {
+            assert!(has_content_coding(ce), "{ce:?}");
+        }
+        for ce in [None, Some(""), Some("identity"), Some(" Identity , ")] {
+            assert!(!has_content_coding(ce), "{ce:?}");
+        }
     }
 }

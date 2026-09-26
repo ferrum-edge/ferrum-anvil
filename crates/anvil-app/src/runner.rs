@@ -12,7 +12,6 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::runner::{FailOn, RunReport};
 use anvil_domain::workspace::{Dataset, DatasetFormat, Meta, Scenario, ScenarioStep};
-use anvil_engine::context::AttachmentResolver;
 use anvil_engine::{ExecutionContext, ExecutionOutput};
 use anvil_runner::{ProvidedStep, RunDataset, RunEventSink, RunOptions, RunPlan, StepError, StepProvider};
 use anvil_storage::kind;
@@ -111,7 +110,7 @@ impl App {
         let s = self.scenario(scenario_id)?;
         let dataset = match (&settings.dataset, s.dataset_id) {
             (Some(d), _) => Some(d.clone()),
-            (None, Some(did)) => Some(self.run_dataset(&self.dataset(&did)?)?),
+            (None, Some(did)) => Some(self.run_dataset(&self.workspace_dataset(&s.workspace_id, &did)?)?),
             (None, None) => None,
         };
         let names = self.request_names(&s.workspace_id)?;
@@ -128,9 +127,9 @@ impl App {
         }
         let requests = self.folder_run_requests(ws, folder)?;
         if requests.is_empty() {
-            return Err(AppError::Invalid(format!("folder '{}' contains no requests", self.folder_path(folder)?)));
+            return Err(AppError::Invalid(format!("folder '{}' contains no requests", self.folder_path(ws, folder)?)));
         }
-        let mut plan = RunPlan::folder(*ws, folder, &self.folder_path(folder)?, requests);
+        let mut plan = RunPlan::folder(*ws, folder, &self.folder_path(ws, folder)?, requests);
         plan.dataset = settings.dataset.clone();
         self.run_plan(plan, settings, cancel).await
     }
@@ -225,11 +224,11 @@ impl App {
     }
 
     /// `Orders/Refunds` style path of a folder (`/` for the workspace root).
-    pub fn folder_path(&self, folder: Option<Id>) -> Result<String> {
+    pub fn folder_path(&self, ws: &Id, folder: Option<Id>) -> Result<String> {
         if folder.is_none() {
             return Ok("/".into());
         }
-        Ok(self.folder_chain(folder)?.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("/"))
+        Ok(self.folder_chain(ws, folder)?.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("/"))
     }
 
     /// Resolve a folder by id or `Parent/Child` path (`/` or empty = root).
@@ -358,10 +357,8 @@ impl App {
                 return Err(AppError::Invalid(format!("step {}: think time is limited to {} ms", i + 1, anvil_runner::MAX_DELAY_MS)));
             }
         }
-        if let Some(d) = s.dataset_id
-            && self.dataset(&d)?.workspace_id != s.workspace_id
-        {
-            return Err(AppError::Invalid("the dataset belongs to another workspace".into()));
+        if let Some(d) = s.dataset_id {
+            self.workspace_dataset(&s.workspace_id, &d)?;
         }
         s.meta.updated_at = chrono::Utc::now();
         self.save_scenario(s)
@@ -384,6 +381,17 @@ impl App {
 
     pub fn dataset(&self, id: &Id) -> Result<Dataset> {
         self.store.get(kind::DATASET, id)?.ok_or_else(|| AppError::NotFound("dataset".into()))
+    }
+
+    /// A dataset of workspace `ws`. One stored in another workspace is
+    /// refused, never read: a scenario of an imported workspace can name
+    /// the id of a dataset that an import kept in place (Merge).
+    pub fn workspace_dataset(&self, ws: &Id, id: &Id) -> Result<Dataset> {
+        let d = self.dataset(id)?;
+        if d.workspace_id != *ws {
+            return Err(AppError::Invalid("the dataset belongs to another workspace".into()));
+        }
+        Ok(d)
     }
 
     /// Validate (parse with the runner's bounds), store the bytes as a
@@ -429,10 +437,10 @@ impl App {
             anvil_domain::request::AttachmentRef::Stored { sha256, .. } => {
                 self.get_attachment(sha256)?.ok_or_else(|| AppError::NotFound(format!("the data of dataset '{}'", d.name)))?
             }
-            linked => anvil_engine::context::MemoryAttachments::default()
-                .load(linked)
-                .map_err(|e| AppError::Invalid(format!("dataset '{}': {e}", d.name)))?
-                .to_vec(),
+            anvil_domain::request::AttachmentRef::LinkedFile { path } => {
+                let max = crate::file_grants::FilePurpose::Dataset.max_read_bytes();
+                self.read_linked_dataset(d.meta.id, path, max).map_err(|e| AppError::Invalid(format!("dataset '{}': {e}", d.name)))?
+            }
         };
         RunDataset::parse(&d.name, d.format, &bytes, &d.sensitive_columns).map_err(|e| AppError::Invalid(e.to_string()))
     }

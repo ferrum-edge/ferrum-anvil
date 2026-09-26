@@ -2,13 +2,13 @@
 // preview what will be created and what was not representable, then import.
 // Nothing imported is sent or run.
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api, DEFAULT_IMPORT_OPTIONS, type ImportOptions, type SpecImported, type SpecInput, type SpecPreview } from "./api";
 import { humanize } from "./ui";
 import { Icon } from "./icons";
 
 export function SpecImport(props: { workspaceId: string | null; workspaceName: string | null; onImported: (r: SpecImported) => void }) {
   const [input, setInput] = useState<SpecInput | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
   const [paste, setPaste] = useState("");
   const [opts, setOpts] = useState<ImportOptions>(DEFAULT_IMPORT_OPTIONS);
   const [target, setTarget] = useState<"new" | "current">("new");
@@ -60,22 +60,27 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
           className="btn"
           data-autofocus
           onClick={async () => {
-            const p = await open({
-              multiple: false,
-              filters: [{ name: "API specs and collections", extensions: ["json", "yaml", "yml", "wsdl", "xml", "har", "txt", "sh"] }],
-            });
-            if (typeof p === "string") {
-              setInput({ kind: "path", path: p });
-              setPaste("");
-              setPreview(null);
+            setErr(null);
+            try {
+              const f = await api.chooseFile("spec_source", {
+                filters: [{ name: "API specs and collections", extensions: ["json", "yaml", "yml", "wsdl", "xml", "har", "txt", "sh"] }],
+              });
+              if (f) {
+                setInput({ kind: "file", grant: f.token });
+                setFileName(f.file_name);
+                setPaste("");
+                setPreview(null);
+              }
+            } catch (e) {
+              setErr(String((e as Error).message));
             }
           }}
         >
           <Icon name="file" size={14} />
           Choose file…
         </button>
-        <span className={`path-chip grow${input?.kind === "path" ? "" : " none"}`} title={input?.kind === "path" ? input.path : undefined}>
-          {input?.kind === "path" ? input.path : "OpenAPI 2.0–3.2, WSDL 1.1, Postman v2.x, Insomnia v4, HAR"}
+        <span className={`path-chip grow${input?.kind === "file" ? "" : " none"}`} title={input?.kind === "file" ? (fileName ?? undefined) : undefined}>
+          {input?.kind === "file" ? fileName : "OpenAPI 2.0–3.2, WSDL 1.1, Postman v2.x, Insomnia v4, HAR"}
         </span>
       </div>
       <label className="lbl">

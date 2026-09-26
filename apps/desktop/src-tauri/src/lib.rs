@@ -1,5 +1,6 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_files;
 mod cmd_identity;
 mod cmd_load;
 mod cmd_runner;
@@ -116,6 +117,7 @@ pub fn run() {
             commands::profile_unlock,
             commands::app_lock,
             commands::profile_change_passphrase,
+            commands::profile_convert_to_passphrase,
             commands::touch,
             commands::system_info,
             commands::workspaces_list,
@@ -126,6 +128,7 @@ pub fn run() {
             commands::folder_create,
             commands::folder_get,
             commands::folder_save,
+            commands::folder_set_workspace_scope,
             commands::folder_move,
             commands::folder_delete,
             commands::request_create,
@@ -139,7 +142,6 @@ pub fn run() {
             commands::environment_save,
             commands::environment_delete,
             commands::secret_create,
-            commands::secret_update,
             commands::dpop_generate_key,
             commands::tls_profiles_list,
             commands::tls_profile_save,
@@ -164,6 +166,9 @@ pub fn run() {
             commands::import_apply,
             commands::attachment_add,
             commands::read_text_file,
+            cmd_files::file_choose,
+            cmd_files::token_files_list,
+            cmd_files::token_file_remove,
             cmd_load::load_plans,
             cmd_load::load_plan_save,
             cmd_load::load_plan_delete,
@@ -225,7 +230,7 @@ fn e2e_unlock(st: &DesktopState) {
     };
     match anvil_app::profiles::ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(&pass)) {
         Ok((header, key)) => match anvil_app::App::open(dir, header, key) {
-            Ok(app) => *st.app.write() = Some(std::sync::Arc::new(app)),
+            Ok(app) => st.set_app(app),
             Err(e) => eprintln!("e2e: open failed: {e}"),
         },
         Err(e) => eprintln!("e2e: unlock failed: {e}"),
