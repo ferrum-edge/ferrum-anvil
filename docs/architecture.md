@@ -51,9 +51,10 @@ CLI (`anvil`) = same anvil-app services without a webview.
   (`anvil_app::token_files`, never exported or imported), and the desktop
   confines the app so a token-file path that is not bound is refused before
   anything is read. A linked file that a saved request, gRPC schema or
-  dataset names is bound the same way (`file_choose` with purpose
-  `linked_file`, `anvil_app::linked_files`); until then it is refused before
-  anything is read, in the desktop and the CLI alike.
+  dataset names is bound the same way, for that request or dataset
+  (`file_choose` with purpose `linked_file` and the referrer,
+  `anvil_app::linked_files`); until then it is refused before anything is
+  read, in the desktop and the CLI alike. The CLI cannot bind one itself.
 - **Pooled HTTP connections are bounded.** Each engine keeps at most 8 idle
   HTTP/1.1 or HTTP/2 connections per pool key (isolation, destination and
   security context) and 64 in total; one more closes the connection idle

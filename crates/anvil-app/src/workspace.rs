@@ -109,12 +109,38 @@ impl App {
             variables: vec![],
             auth: AuthConfig::Inherit,
             tags: vec![],
+            import_root: false,
+            import_environment_ids: vec![],
+            use_workspace_scope: false,
         };
         self.store.put(kind::FOLDER, &f.meta.id, Some(ws), parent.as_ref(), f.sort_key, &f)?;
         Ok(f)
     }
 
+    /// Save a folder. Whether it is an import root, and whether that root is
+    /// open to the workspace, are kept as stored: only a spec import makes
+    /// an import root, and only [`App::set_import_root_workspace_scope`]
+    /// opens one.
     pub fn save_folder(&self, mut f: Folder) -> Result<Folder> {
+        let stored: Option<Folder> = self.store.get(kind::FOLDER, &f.meta.id)?;
+        f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
+        f.import_environment_ids = stored.as_ref().map(|s| s.import_environment_ids.clone()).unwrap_or_default();
+        f.use_workspace_scope = stored.as_ref().is_some_and(|s| s.use_workspace_scope);
+        f.meta.updated_at = chrono::Utc::now();
+        self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
+        Ok(f)
+    }
+
+    /// The user's explicit choice on this device to let requests under an
+    /// import root also resolve the workspace's variables, active
+    /// environment and auth, and this device's workload identity and token
+    /// files (`Folder::use_workspace_scope`). An import never sets this.
+    pub fn set_import_root_workspace_scope(&self, id: &Id, allow: bool) -> Result<Folder> {
+        let mut f = self.folder(id)?;
+        if !f.import_root {
+            return Err(AppError::Invalid("only the root folder of an imported collection has a scope of its own".into()));
+        }
+        f.use_workspace_scope = allow;
         f.meta.updated_at = chrono::Utc::now();
         self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
         Ok(f)

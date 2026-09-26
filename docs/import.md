@@ -85,12 +85,49 @@ transaction. If anything fails, including taking the checkpoint, nothing is
 written.
 
 Imported into an existing workspace, the objects go under a new top-level
-folder that carries the source's workspace-level scope: description,
-settings, variables and auth. A source without auth of its own gets an
-explicit `none` there, so imported requests resolve auth exactly as they
-would in a workspace of their own and never inherit the destination
-workspace's credentials. Imported environments are added to the destination
-workspace.
+folder, the *import root* (`Folder::import_root`), that carries the source's
+workspace-level scope: description, settings, variables and auth. A source
+without auth of its own gets an explicit `none` there. Imported environments
+are added to the destination workspace and listed on the import root
+(`import_environment_ids`).
+
+The import root is a boundary. A request under it resolves only the imported
+collection's own scope (`App::build_context`):
+
+- variables of the import root and the folders under it, and of an
+  environment the import brought with it when that one is selected;
+- auth of the import root, the folders under it and the request.
+
+The destination workspace's variables and auth, folders above the import
+root, and every other environment (including the destination's active one,
+even when chosen for a send) are left out, whether or not their values are
+secret. A JWT-SVID drawn from this device's SPIFFE Workload API or from a
+token file is refused. So an imported `Bearer {{token}}` can never pick up
+the destination's `token`: it stays unresolved and the request is not sent.
+
+The user can open an import root to its workspace on this device
+(`use_workspace_scope`, set only by `App::set_import_root_workspace_scope`,
+the desktop command `folder_set_workspace_scope`; the folder settings control
+for it is still to come). Then the workspace's variables, active environment
+and auth, and this device's workload identity, apply under it as under any
+folder. An import never sets it: a spec import creates the root with it off,
+saving a folder keeps the stored value, and a bundle import turns it off with
+a warning (the import root itself is kept).
+
+Precedence. In a workspace of its own the source's collection variables are
+workspace variables, below the environment. Under an import root they rank
+the same way: workspace variables (only when opened), then folders above the
+import root (only when opened), then the import root's variables, then the
+environment, then the folders under the import root and the run's
+iteration values. An existing-workspace import therefore prepares
+exactly like a new-workspace import of the same source.
+
+Settings are not part of the boundary: TLS and proxy profiles, DNS
+overrides and gateway profiles selected by the destination workspace or an
+outer folder still apply under an import root. A TLS client identity is
+presented only to the hosts its profile is bound to, and a proxy only
+carries the connection, so neither hands a destination credential to a host
+the collection names.
 
 ## Reimport (DATA-012)
 

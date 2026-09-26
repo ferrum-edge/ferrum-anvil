@@ -119,7 +119,7 @@ impl App {
             AttachmentRef::Stored { sha256, .. } => {
                 self.get_attachment(sha256)?.ok_or_else(|| AppError::NotFound(format!("dataset attachment {sha256}")))?
             }
-            AttachmentRef::LinkedFile { path } => self.read_linked_file(path, FilePurpose::Dataset.max_read_bytes(), "dataset")?,
+            AttachmentRef::LinkedFile { path } => self.read_linked_dataset(d.meta.id, path, FilePurpose::Dataset.max_read_bytes())?,
         };
         let fmt = match d.format {
             DomainDatasetFormat::Csv => DatasetFormat::Csv,

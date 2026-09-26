@@ -2,13 +2,14 @@
 //! shared engine, recording redacted history.
 
 use crate::file_grants::FilePurpose;
-use crate::linked_files::read_bound_file;
+use crate::linked_files::{LinkedFileReferrer, read_bound_file};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
+use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::Variable;
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::{AttachmentResolver, ExecutionContext, SecretResolver};
@@ -88,9 +89,18 @@ impl App {
     /// Build the frozen context for a saved request (optionally with an
     /// unsaved draft spec) — settings, auth and variable layers resolved
     /// from workspace → folders → request. A draft never names a linked
-    /// local file, a saved request only ones chosen in the native dialog on
-    /// this device, and (when confined) a JWT-SVID token file is read only
-    /// if it was bound in the native dialog.
+    /// local file, a saved request only ones chosen for it in the native
+    /// dialog on this device, and (when confined) a JWT-SVID token file is
+    /// read only if it was bound in the native dialog.
+    ///
+    /// Under an import root (`Folder::import_root`) only the imported
+    /// collection's own scope resolves: the root and the folders under it,
+    /// and an environment the import brought. The workspace's variables and
+    /// auth, outer folders and any other environment are left out, and a
+    /// JWT-SVID from this device's Workload API or a token file is refused,
+    /// until the user opens the root to the workspace on this device
+    /// (`use_workspace_scope`). Settings still apply from the workspace
+    /// down: TLS and proxy profiles are bound to the hosts they name.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -112,8 +122,14 @@ impl App {
             (None, Some(d)) => (None, d),
             (None, None) => return Err(AppError::Invalid("nothing to send".into())),
         };
-        let linked = self.bound_linked_files(&spec)?;
+        let referrer = req.as_ref().map(|r| LinkedFileReferrer::Request { id: r.meta.id });
+        let linked = self.bound_linked_files(referrer, &spec)?;
         let chain = self.folder_chain(req.as_ref().and_then(|r| r.folder_id))?;
+        // The innermost import root; unless the user opened it to the
+        // workspace, nothing outside it resolves under it.
+        let root = chain.iter().rposition(|f| f.import_root);
+        let sealed = root.filter(|&i| !chain[i].use_workspace_scope);
+        let inner = &chain[sealed.unwrap_or(0)..];
         let settings = self.settings()?;
         let secrets = StoreSecrets(self.store.clone());
         let mut settings_layers = vec![("app".to_string(), settings.defaults.clone()), ("workspace".to_string(), ws.settings.clone())];
@@ -133,19 +149,33 @@ impl App {
             }
             auth
         };
-        let mut auth_layers = vec![("workspace".to_string(), owned(&ws.auth, Some(ws.meta.id)))];
-        for f in &chain {
+        let mut auth_layers = Vec::new();
+        if sealed.is_none() {
+            auth_layers.push(("workspace".to_string(), owned(&ws.auth, Some(ws.meta.id))));
+        }
+        for f in inner {
             auth_layers.push((format!("folder:{}", f.name), owned(&f.auth, Some(f.meta.id))));
         }
         auth_layers.push(("request".into(), owned(&spec.auth, req.as_ref().map(|r| r.meta.id))));
-        let mut var_layers = vec![layer("workspace".into(), &ws.variables, &secrets)?];
+        let mut var_layers = Vec::new();
+        if sealed.is_none() {
+            var_layers.push(layer("workspace".into(), &ws.variables, &secrets)?);
+        }
+        // An import root's variables were the source's workspace variables,
+        // so they rank where those would in a workspace of its own: below
+        // the environment.
+        let (base, nested) = inner.split_at(root.map_or(0, |i| i + 1) - sealed.unwrap_or(0));
+        for f in base {
+            var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
+        }
         let env_id = opts.environment.or(ws.active_environment_id);
+        let env_id = env_id.filter(|eid| sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid)));
         if let Some(eid) = env_id {
             let env =
                 self.environments(ws_id)?.into_iter().find(|e| e.meta.id == eid).ok_or_else(|| AppError::NotFound("environment".into()))?;
             var_layers.push(layer(format!("environment:{}", env.name), &env.variables, &secrets)?);
         }
-        for f in &chain {
+        for f in nested {
             var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
         }
         if !opts.iteration_vars.is_empty() {
@@ -179,6 +209,9 @@ impl App {
             seed: opts.seed,
             redaction_names: settings_app.redaction_names.clone(),
         };
+        if sealed.is_some() {
+            refuse_device_identity(&ctx.effective_auth().1)?;
+        }
         self.check_token_files(&ctx.effective_auth().1)?;
         Ok(ctx)
     }
@@ -221,6 +254,23 @@ impl App {
         self.store.prune_history(policy.max_age_days, policy.max_total_bytes)?;
         Ok(())
     }
+}
+
+/// Refuse auth that would present this device's own workload identity (a
+/// JWT-SVID from the Workload API or a token file) for a request under an
+/// import root that the user has not opened to the workspace.
+fn refuse_device_identity(auth: &AuthConfig) -> Result<()> {
+    let device = match auth {
+        AuthConfig::JwtSvid { config } => !matches!(config.source, JwtSvidSource::Value { .. }),
+        AuthConfig::Multi { profiles } => return profiles.iter().try_for_each(refuse_device_identity),
+        _ => false,
+    };
+    if device {
+        return Err(AppError::Invalid(
+            "an imported collection does not use this device's workload identity or token files until opened to the workspace".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a spec that names a linked local file (`AttachmentRef::LinkedFile`,

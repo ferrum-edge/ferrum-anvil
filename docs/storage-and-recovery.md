@@ -91,9 +91,12 @@ any passphrase is asked for or any derivation runs, unless they are within:
 Exports use 64 MiB, 3 passes and 1 lane.
 Imports never send requests, run scripts or load plans, and never activate TLS
 bypasses, plain-HTTP marker trust, cross-origin credential forwarding or the
-legacy HMAC opt-in; the preview lists what was normalised. Device-bound items
+legacy HMAC opt-in, and never open an imported collection's root folder to its
+workspace; the preview lists what was normalised. Device-bound items
 (keychain entries, provider sessions, linked local files) are reported as
-needing rebinding.
+needing rebinding, and the preview lists each linked local file with the
+request or dataset that names it. A bundle import drops this device's
+linked-file bindings for every request and dataset it overwrites.
 
 ## Schema versions and migration
 

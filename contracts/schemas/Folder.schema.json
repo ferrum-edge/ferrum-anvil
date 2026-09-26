@@ -69,6 +69,21 @@
         "type": "string"
       },
       "default": []
+    },
+    "import_root": {
+      "description": "The top-level folder a spec import into an existing workspace creates.\nRequests under it resolve only the imported collection's own scope:\nno variables, environment or auth from outside it, and no workload\nidentity or token file of this device.",
+      "type": "boolean"
+    },
+    "import_environment_ids": {
+      "description": "Environments the import brought with it. They may resolve under the\nimport root, as the collection's own.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      }
+    },
+    "use_workspace_scope": {
+      "description": "Set only by the user on this device, never by an import: requests\nunder this import root also resolve the workspace's variables, its\nactive environment and auth, and this device's workload identity.",
+      "type": "boolean"
     }
   },
   "required": [

@@ -9,6 +9,7 @@
 use crate::commands::{R, e};
 use crate::state::DesktopState;
 use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
+use anvil_app::linked_files::LinkedFileReferrer;
 use serde::Deserialize;
 use tauri::{State, Window};
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -37,13 +38,15 @@ pub struct DialogOptions {
 /// Show the native open dialog (read and bind purposes) or save dialog
 /// (write purposes) and return a grant for each chosen file; empty if the
 /// user cancelled. Refused while locked; a lock while the dialog is open
-/// grants nothing.
+/// grants nothing. A linked file is bound for the saved request or dataset
+/// `referrer` names, and only if that referrer names the chosen file.
 #[tauri::command]
 pub async fn file_choose(
     window: Window,
     st: State<'_, DesktopState>,
     purpose: FilePurpose,
     options: Option<DialogOptions>,
+    referrer: Option<LinkedFileReferrer>,
 ) -> R<Vec<FileGrant>> {
     // Read before the lock check, so a lock after it always moves the
     // generation past this value.
@@ -52,8 +55,13 @@ pub async fn file_choose(
     let options = options.unwrap_or_default();
     match purpose.access() {
         Access::Write if options.multiple => return Err("a save dialog chooses one file".into()),
-        Access::Bind if options.multiple => return Err("choose one token file".into()),
+        Access::Bind if options.multiple => return Err("choose one file".into()),
         _ => {}
+    }
+    match (purpose, referrer) {
+        (FilePurpose::LinkedFile, None) => return Err("choose the request or dataset the linked file is for".into()),
+        (FilePurpose::LinkedFile, Some(_)) | (_, None) => {}
+        (_, Some(_)) => return Err("only a linked file is chosen for a request or dataset".into()),
     }
     let mut dialog = window.dialog().file();
     #[cfg(any(windows, target_os = "macos"))]
@@ -98,8 +106,8 @@ pub async fn file_choose(
                 if st.file_grants.generation() != generation {
                     return Err(GrantError::Revoked.to_string());
                 }
-                let (id, bound) = match purpose {
-                    FilePurpose::LinkedFile => app.bind_linked_file(&path).map(|b| (b.id, b.path)),
+                let (id, bound) = match (purpose, referrer) {
+                    (FilePurpose::LinkedFile, Some(referrer)) => app.bind_linked_file(referrer, &path).map(|b| (b.id, b.path)),
                     _ => app.bind_token_file(&path).map(|b| (b.id, b.path)),
                 }
                 .map_err(e)?;

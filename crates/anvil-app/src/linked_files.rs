@@ -5,38 +5,87 @@
 //! way, for example in an imported bundle, was never chosen on this device,
 //! so it stays inert: a request, gRPC schema or dataset that names it is
 //! refused before anything is read or sent. It becomes usable only once the
-//! user picks that same file in the native dialog (`file_choose` with purpose
-//! `linked_file`), which binds its canonical path in the vault. Bindings are
-//! device-specific: they are not exported, and an import cannot create one.
-//! The CLI has no dialog, so it never reads a linked file.
+//! user picks that same file in the native dialog for that request or
+//! dataset (`file_choose` with purpose `linked_file` and the referrer),
+//! which binds the referrer and the file's canonical path in the vault. A
+//! binding made for one request or dataset never lets another one read the
+//! file, and a bundle import drops the bindings of every request and dataset
+//! it writes. Bindings are device-specific: they are not exported, and an
+//! import cannot create one. The CLI cannot bind a linked file (it has no
+//! dialog), but it reads one the desktop bound when it sends that saved
+//! request or uses that dataset from the same profile.
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
-use anvil_domain::request::RequestSpec;
+use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_storage::store::kind;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
 
-/// A linked file bound through the native dialog.
+/// What names a linked file: a saved request (its body or gRPC schema) or a
+/// dataset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LinkedFileReferrer {
+    Request { id: Id },
+    Dataset { id: Id },
+}
+
+impl LinkedFileReferrer {
+    /// The id of the request or dataset.
+    pub fn id(self) -> Id {
+        match self {
+            LinkedFileReferrer::Request { id } | LinkedFileReferrer::Dataset { id } => id,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            LinkedFileReferrer::Request { .. } => "request",
+            LinkedFileReferrer::Dataset { .. } => "dataset",
+        }
+    }
+}
+
+/// A linked file bound through the native dialog for one request or dataset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedFileBinding {
     pub id: Id,
+    pub referrer: LinkedFileReferrer,
     /// Canonical absolute path of the chosen file.
     pub path: String,
     pub bound_at: DateTime<Utc>,
 }
 
 impl App {
-    /// Bind the linked file the user picked in the native open dialog. Only
-    /// the desktop's `file_choose` calls this, with the dialog's result.
-    pub fn bind_linked_file(&self, picked: &Path) -> Result<LinkedFileBinding> {
+    /// Bind the linked file the user picked in the native open dialog for
+    /// `referrer`, which must name that file. Only the desktop's
+    /// `file_choose` calls this, with the dialog's result.
+    pub fn bind_linked_file(&self, referrer: LinkedFileReferrer, picked: &Path) -> Result<LinkedFileBinding> {
         let path = crate::token_files::chosen_path(picked, "linked file")?;
-        if let Some(b) = self.linked_file_bindings()?.into_iter().find(|b| b.path == path) {
+        let named = match referrer {
+            LinkedFileReferrer::Request { id } => {
+                let mut paths = Vec::new();
+                linked_paths(&serde_json::to_value(&self.request(&id)?.spec)?, &mut paths);
+                paths
+            }
+            LinkedFileReferrer::Dataset { id } => match self.dataset(&id)?.attachment {
+                AttachmentRef::LinkedFile { path } => vec![path],
+                AttachmentRef::Stored { .. } => vec![],
+            },
+        };
+        if !named.contains(&path) {
+            return Err(AppError::Invalid(format!(
+                "the chosen file '{path}' is not the linked file this {} names; attach the file instead",
+                referrer.noun()
+            )));
+        }
+        if let Some(b) = self.linked_file_bindings()?.into_iter().find(|b| b.referrer == referrer && b.path == path) {
             return Ok(b);
         }
-        let b = LinkedFileBinding { id: Id::new(), path, bound_at: Utc::now() };
+        let b = LinkedFileBinding { id: Id::new(), referrer, path, bound_at: Utc::now() };
         self.store.put(kind::LINKED_FILE, &b.id, None, None, 0.0, &b)?;
         Ok(b)
     }
@@ -46,34 +95,41 @@ impl App {
     }
 
     /// The linked files `spec` names, refusing any that was not chosen on
-    /// this device.
-    pub(crate) fn bound_linked_files(&self, spec: &RequestSpec) -> Result<Vec<String>> {
+    /// this device for `referrer` (always, without one).
+    pub(crate) fn bound_linked_files(&self, referrer: Option<LinkedFileReferrer>, spec: &RequestSpec) -> Result<Vec<String>> {
         let mut paths = Vec::new();
         linked_paths(&serde_json::to_value(spec)?, &mut paths);
-        if !paths.is_empty() {
+        if let Some(p) = paths.first() {
+            let Some(referrer) = referrer else {
+                return Err(unbound(p, "request"));
+            };
             let bound = self.linked_file_bindings()?;
             for p in &paths {
-                refuse_unbound(&bound, p)?;
+                refuse_unbound(&bound, referrer, p)?;
             }
         }
         Ok(paths)
     }
 
-    /// Read a linked file, refusing it unless it was chosen on this device.
-    /// `what` names it in errors ("dataset").
-    pub(crate) fn read_linked_file(&self, path: &str, max: u64, what: &str) -> Result<Vec<u8>> {
-        refuse_unbound(&self.linked_file_bindings()?, path)?;
-        read_bound_file(path, max, what)
+    /// Read the linked file of a dataset, refusing it unless it was chosen
+    /// on this device for that dataset.
+    pub(crate) fn read_linked_dataset(&self, id: Id, path: &str, max: u64) -> Result<Vec<u8>> {
+        refuse_unbound(&self.linked_file_bindings()?, LinkedFileReferrer::Dataset { id }, path)?;
+        read_bound_file(path, max, "dataset")
     }
 }
 
-fn refuse_unbound(bound: &[LinkedFileBinding], path: &str) -> Result<()> {
-    if bound.iter().any(|b| b.path == path) {
+fn refuse_unbound(bound: &[LinkedFileBinding], referrer: LinkedFileReferrer, path: &str) -> Result<()> {
+    if bound.iter().any(|b| b.referrer == referrer && b.path == path) {
         return Ok(());
     }
-    Err(AppError::Invalid(format!(
-        "the linked local file '{path}' was not chosen on this device; choose that file on this device, or attach it instead"
-    )))
+    Err(unbound(path, referrer.noun()))
+}
+
+fn unbound(path: &str, noun: &str) -> AppError {
+    AppError::Invalid(format!(
+        "the linked local file '{path}' was not chosen on this device for this {noun}; attach the file instead (Anvil stores a copy). Choosing a linked file in the desktop is not available yet"
+    ))
 }
 
 /// Read a bound linked file, bounded to `max` bytes. Only a regular file is

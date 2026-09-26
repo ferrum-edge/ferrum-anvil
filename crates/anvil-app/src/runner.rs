@@ -430,7 +430,7 @@ impl App {
             }
             anvil_domain::request::AttachmentRef::LinkedFile { path } => {
                 let max = crate::file_grants::FilePurpose::Dataset.max_read_bytes();
-                self.read_linked_file(path, max, "dataset").map_err(|e| AppError::Invalid(format!("dataset '{}': {e}", d.name)))?
+                self.read_linked_dataset(d.meta.id, path, max).map_err(|e| AppError::Invalid(format!("dataset '{}': {e}", d.name)))?
             }
         };
         RunDataset::parse(&d.name, d.format, &bytes, &d.sensitive_columns).map_err(|e| AppError::Invalid(e.to_string()))

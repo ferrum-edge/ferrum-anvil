@@ -168,6 +168,8 @@ export interface ImportReport {
   warnings: string[];
   secrets_restored: boolean;
   missing_secrets: string[];
+  /** Linked local files the bundle names (`request 'Upload': /path`); each needs choosing on this device. */
+  linked_files: string[];
   checkpoint?: string | null;
   workspaces: string[];
   workspace_ids: string[];
@@ -223,6 +225,8 @@ export interface FileGrant {
   /** Only for `jwt_svid_file` and `linked_file`: the path the backend bound in the vault. */
   path?: string;
 }
+/** The saved request or dataset a linked local file is chosen for. */
+export type LinkedFileReferrer = { kind: "request"; id: string } | { kind: "dataset"; id: string };
 export interface FileDialogOptions {
   /** Suggested name for a save dialog. */
   file_name?: string;
@@ -458,6 +462,8 @@ export const api = {
   createFolder: (workspaceId: string, parentId: string | null, name: string) => call<Folder>("folder_create", { workspaceId, parentId, name }),
   getFolder: (folderId: string) => call<Folder>("folder_get", { folderId }),
   saveFolder: (folder: Folder) => call<Folder>("folder_save", { folder }),
+  /** Let an imported collection's root folder also resolve the workspace's scope (an explicit user choice). */
+  setFolderWorkspaceScope: (folderId: string, allow: boolean) => call<Folder>("folder_set_workspace_scope", { folderId, allow }),
   moveFolder: (folderId: string, parentId: string | null, sortKey: number) => call<Folder>("folder_move", { folderId, parentId, sortKey }),
   deleteFolder: (folderId: string) => call<void>("folder_delete", { folderId }),
   createRequest: (workspaceId: string, folderId: string | null, name: string, spec?: RequestSpec) =>
@@ -501,6 +507,9 @@ export const api = {
   /** One file from the native open/save dialog for `purpose`; null when the user cancels. */
   chooseFile: async (purpose: FilePurpose, options: FileDialogOptions = {}): Promise<FileGrant | null> =>
     (await call<FileGrant[]>("file_choose", { purpose, options: { ...options, multiple: false } }))[0] ?? null,
+  /** Bind, in the native open dialog, the linked local file a saved request or dataset names; null when the user cancels. */
+  chooseLinkedFile: async (referrer: LinkedFileReferrer): Promise<FileGrant | null> =>
+    (await call<FileGrant[]>("file_choose", { purpose: "linked_file", options: { multiple: false }, referrer }))[0] ?? null,
   exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
     call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
   importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),

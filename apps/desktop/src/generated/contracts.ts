@@ -2909,6 +2909,24 @@ export interface Folder {
         type: "multi";
       };
   tags?: string[];
+  /**
+   * The top-level folder a spec import into an existing workspace creates.
+   * Requests under it resolve only the imported collection's own scope:
+   * no variables, environment or auth from outside it, and no workload
+   * identity or token file of this device.
+   */
+  import_root?: boolean;
+  /**
+   * Environments the import brought with it. They may resolve under the
+   * import root, as the collection's own.
+   */
+  import_environment_ids?: Id[];
+  /**
+   * Set only by the user on this device, never by an import: requests
+   * under this import root also resolve the workspace's variables, its
+   * active environment and auth, and this device's workload identity.
+   */
+  use_workspace_scope?: boolean;
 }
 /**
  * Non-secret request settings resolved deterministically:

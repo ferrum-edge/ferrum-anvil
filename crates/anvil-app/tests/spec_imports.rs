@@ -3,15 +3,20 @@
 //! import into an existing workspace keeps the source's own scope instead of
 //! picking up the destination workspace's auth.
 
-use anvil_app::App;
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::specs::SpecTarget;
+use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::{Variable, Workspace};
+use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
+use anvil_domain::workspace::{Environment, Variable, Workspace};
+use anvil_engine::ExecutionContext;
 use anvil_import::{ImportOptions, ReimportApproval};
+use anvil_portability::ExportMode;
+use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_storage::store::DB_FILE;
 use std::collections::HashSet;
@@ -288,19 +293,199 @@ fn a_source_without_auth_of_its_own_gets_no_auth_in_an_existing_workspace() {
     assert_eq!(ctx.effective_auth().1, AuthConfig::None);
 }
 
+const API_KEY_AUTH: &str = r#""auth": { "type": "apikey", "apikey": [
+  { "key": "key", "value": "X-Key" }, { "key": "value", "value": "{{api_key}}" }, { "key": "in", "value": "header" }
+] }"#;
+
+/// The collection with an API key taken from `{{api_key}}`.
+fn api_key_collection() -> String {
+    COLLECTION.replace(r#""auth": { "type": "noauth" }"#, API_KEY_AUTH)
+}
+
+/// A destination whose workspace and active environment hold vault-backed
+/// values, including an `api_key` the imported collection's auth names.
+fn destination_with_environment(app: &App) -> (Workspace, Environment) {
+    let mut ws = destination_with_credentials(app);
+    let secret = app.set_secret(Some(&ws.meta.id), "api key", "destination-secret").unwrap();
+    let from_vault = |name: &str| Variable {
+        name: name.into(),
+        value: SensitiveValue::Secret { secret: secret.clone() },
+        secret: true,
+        enabled: true,
+        description: String::new(),
+    };
+    ws.variables.push(from_vault("workspace_key"));
+    let vars = vec![from_vault("api_key"), Variable::plain("region", "destination-region")];
+    let env = app.create_environment(&ws.meta.id, "Production", vars).unwrap();
+    ws.active_environment_id = Some(env.meta.id);
+    (app.save_workspace(ws).unwrap(), env)
+}
+
+/// Every `name=value` an execution could resolve.
+fn resolvable(ctx: &ExecutionContext) -> Vec<String> {
+    ctx.var_layers.iter().flat_map(|l| l.vars.iter().map(|v| format!("{}={}", v.name, v.value))).collect()
+}
+
+fn nothing_from_the_destination(ctx: &ExecutionContext) {
+    let values = resolvable(ctx);
+    assert!(values.iter().all(|v| !v.contains("destination")), "{values:?}");
+}
+
+/// The error of a refused call (an `ExecutionContext` is not `Debug`).
+fn refused<T>(r: Result<T, AppError>, label: &str) -> String {
+    match r {
+        Ok(_) => panic!("{label}: expected a refusal"),
+        Err(e) => e.to_string(),
+    }
+}
+
 #[test]
-fn a_sources_own_auth_applies_instead_of_the_destinations() {
+fn a_sources_own_auth_applies_and_the_destinations_values_never_fill_it() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
-    let dest = destination_with_credentials(&app);
-    let api_key = r#""auth": { "type": "apikey", "apikey": [
-      { "key": "key", "value": "X-Key" }, { "key": "value", "value": "{{api_key}}" }, { "key": "in", "value": "header" }
-    ] }"#;
-    let collection = COLLECTION.replace(r#""auth": { "type": "noauth" }"#, api_key);
-    let done = import(&app, collection.as_bytes(), into(&dest.meta.id));
+    let (dest, env) = destination_with_environment(&app);
+    let done = import(&app, api_key_collection().as_bytes(), into(&dest.meta.id));
     let root_folder = app.folder(&done.root_folder_id.unwrap()).unwrap();
     assert!(matches!(root_folder.auth, AuthConfig::ApiKey { .. }), "{:?}", root_folder.auth);
+    assert!(root_folder.import_root && !root_folder.use_workspace_scope);
     let q = app.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
-    let ctx = app.build_context(Some(q.meta.id), &dest.meta.id, None, &SendOptions::default()).unwrap();
-    assert_eq!(ctx.effective_auth().1, root_folder.auth, "nested requests inherit the source's auth, not the destination's");
+    // Neither the destination's active environment nor one chosen for the send.
+    for opts in [SendOptions::default(), SendOptions { environment: Some(env.meta.id), ..Default::default() }] {
+        let ctx = app.build_context(Some(q.meta.id), &dest.meta.id, None, &opts).unwrap();
+        assert_eq!(ctx.effective_auth().1, root_folder.auth, "nested requests inherit the source's auth, not the destination's");
+        nothing_from_the_destination(&ctx);
+        assert_eq!(ctx.environment_id, None);
+        // `{{api_key}}` has nothing to resolve from, so nothing can be sent.
+        assert!(app.engine.preview(&ctx).is_err());
+    }
+}
+
+#[test]
+fn only_the_user_opens_an_import_root_to_the_destination_on_this_device() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let (dest, env) = destination_with_environment(&app);
+    let done = import(&app, api_key_collection().as_bytes(), into(&dest.meta.id));
+    let root_id = done.root_folder_id.unwrap();
+    let deep = app.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
+    let build = || app.build_context(Some(deep.meta.id), &dest.meta.id, None, &SendOptions::default()).unwrap();
+
+    // Saving the folder neither opens it nor stops it being an import root.
+    let mut edited = app.folder(&root_id).unwrap();
+    edited.use_workspace_scope = true;
+    edited.import_root = false;
+    let saved = app.save_folder(edited).unwrap();
+    assert!(saved.import_root && !saved.use_workspace_scope);
+    nothing_from_the_destination(&build());
+
+    // The explicit choice does.
+    app.set_import_root_workspace_scope(&root_id, true).unwrap();
+    let ctx = build();
+    let values = resolvable(&ctx);
+    assert!(values.contains(&"api_key=destination-secret".to_string()), "{values:?}");
+    assert!(values.contains(&"workspace_key=destination-secret".to_string()), "{values:?}");
+    assert_eq!(ctx.environment_id, Some(env.meta.id));
+    // The source's own auth and variables still take precedence.
+    assert!(matches!(ctx.effective_auth().1, AuthConfig::ApiKey { .. }));
+    let preview = app.engine.preview(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(preview.url.starts_with("https://api.example.invalid/"), "{}", preview.url);
+    // And it can be taken back.
+    app.set_import_root_workspace_scope(&root_id, false).unwrap();
+    nothing_from_the_destination(&build());
+    app.set_import_root_workspace_scope(&root_id, true).unwrap();
+
+    // Only an import root has a scope of its own.
+    let plain = app.create_folder(&dest.meta.id, None, "Mine").unwrap();
+    assert!(app.set_import_root_workspace_scope(&plain.meta.id, true).is_err());
+
+    // A bundle keeps the import root but never carries the choice.
+    let (bytes, _) = app.export(Some(&dest.meta.id), ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let b = new_app(other.path());
+    let report = b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate).unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("imported collection")), "{:?}", report.warnings);
+    let ws_b: Id = report.workspace_ids[0].parse().unwrap();
+    let root_b = b.folders(&ws_b).unwrap().into_iter().find(|f| f.import_root).expect("the import root is kept");
+    assert!(!root_b.use_workspace_scope);
+    let deep_b = b.requests(&ws_b).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
+    nothing_from_the_destination(&b.build_context(Some(deep_b.meta.id), &ws_b, None, &SendOptions::default()).unwrap());
+}
+
+#[test]
+fn an_import_roots_own_environment_resolves_and_the_destinations_does_not() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let (dest, env) = destination_with_environment(&app);
+    // A Postman environment export: its environment lands in the destination.
+    let staging = br#"{
+      "name": "Staging",
+      "_postman_variable_scope": "environment",
+      "values": [{ "key": "k", "value": "v", "enabled": true }]
+    }"#;
+    let done = import(&app, staging, into(&dest.meta.id));
+    let root_folder = app.folder(&done.root_folder_id.unwrap()).unwrap();
+    assert_eq!(root_folder.import_environment_ids.len(), 1);
+    let staging = root_folder.import_environment_ids[0];
+    assert!(app.environments(&dest.meta.id).unwrap().iter().any(|e| e.meta.id == staging));
+    let spec = RequestSpec::http("GET", "https://api.example.invalid/{{k}}");
+    let q = app.create_request(&dest.meta.id, Some(root_folder.meta.id), "mine", spec).unwrap();
+    let build = |environment| {
+        let opts = SendOptions { environment, ..Default::default() };
+        app.build_context(Some(q.meta.id), &dest.meta.id, None, &opts).unwrap()
+    };
+    for environment in [None, Some(env.meta.id)] {
+        let ctx = build(environment);
+        assert_eq!(ctx.environment_id, None);
+        nothing_from_the_destination(&ctx);
+    }
+    let ctx = build(Some(staging));
+    assert_eq!(ctx.environment_id, Some(staging));
+    assert!(resolvable(&ctx).contains(&"k=v".to_string()));
+}
+
+fn jwt_svid(source: JwtSvidSource) -> AuthConfig {
+    let config = JwtSvidConfig {
+        source,
+        audiences: vec!["spiffe://example.org/api".into()],
+        endpoint: String::new(),
+        spiffe_id: None,
+        verify_with_bundles: false,
+        send_despite_failed_checks: false,
+        header_name: "Authorization".into(),
+        prefix: "Bearer".into(),
+    };
+    AuthConfig::JwtSvid { config }
+}
+
+#[test]
+fn an_imported_collection_does_not_use_this_devices_workload_identity_by_default() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let token = files.path().join("jwt_svid.token");
+    std::fs::write(&token, "header.claims.signature").unwrap();
+    let app = new_app(root.path());
+    let dest = destination_with_credentials(&app);
+    let done = import(&app, COLLECTION.as_bytes(), into(&dest.meta.id));
+    let root_id = done.root_folder_id.unwrap();
+    let mut requests = Vec::new();
+    let sources = [JwtSvidSource::WorkloadApi, JwtSvidSource::File { path: token.display().to_string() }];
+    for (i, source) in sources.into_iter().enumerate() {
+        let mut spec = RequestSpec::http("GET", "https://api.example.invalid/svid");
+        spec.auth = jwt_svid(source);
+        requests.push(app.create_request(&dest.meta.id, Some(root_id), &format!("svid {i}"), spec).unwrap());
+    }
+    // Inherited from the root folder too, inside a multi-auth profile.
+    let mut root_folder = app.folder(&root_id).unwrap();
+    root_folder.auth = AuthConfig::Multi { profiles: vec![jwt_svid(JwtSvidSource::WorkloadApi)] };
+    app.save_folder(root_folder).unwrap();
+    requests.push(app.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap());
+
+    for q in &requests {
+        let err = refused(app.build_context(Some(q.meta.id), &dest.meta.id, None, &SendOptions::default()), &q.name);
+        assert!(err.contains("workload identity"), "{}: {err}", q.name);
+    }
+    app.set_import_root_workspace_scope(&root_id, true).unwrap();
+    for q in &requests {
+        app.build_context(Some(q.meta.id), &dest.meta.id, None, &SendOptions::default()).expect(&q.name);
+    }
 }

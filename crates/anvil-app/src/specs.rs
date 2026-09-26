@@ -94,8 +94,8 @@ impl App {
     /// source again, into this or another workspace, creates independent
     /// objects and never takes over an earlier import's. Inside an existing
     /// workspace, the source's own auth, variables and settings are kept on
-    /// the new root folder, so imported requests never pick up the
-    /// destination workspace's auth. Imported requests are ordinary saved
+    /// a new import root folder, and imported requests resolve nothing from
+    /// the destination workspace. Imported requests are ordinary saved
     /// requests (with an import link for reimport diffs); nothing is sent.
     pub fn spec_import(&self, bytes: &[u8], file_name: &str, opts: &ImportOptions, target: SpecTarget) -> Result<SpecImported> {
         let opts = ImportOptions { id_namespace: Some(Id::new()), ..opts.clone() };
@@ -105,7 +105,8 @@ impl App {
             SpecTarget::Workspace { workspace_id } => {
                 self.workspace(workspace_id)?;
                 let title = r.source.title.clone().unwrap_or_else(|| file_name.to_string());
-                let root = root_folder(&r.workspace, *workspace_id, &title);
+                let environments = r.environments.iter().map(|e| e.meta.id).collect();
+                let root = root_folder(&r.workspace, *workspace_id, &title, environments);
                 rehome(&mut r, *workspace_id, root.meta.id);
                 Some(root)
             }
@@ -257,9 +258,10 @@ impl App {
 /// keeps the source's workspace-level scope (description, settings,
 /// variables and auth), so the imported objects resolve as they would in a
 /// workspace of their own. A source without auth of its own gets an
-/// explicit "no auth" here: nothing above it was ever inherited, so the
-/// destination workspace's auth must not be either.
-fn root_folder(source: &Workspace, workspace_id: Id, name: &str) -> Folder {
+/// explicit "no auth" here. It is an import root: requests under it resolve
+/// nothing from the destination workspace (see `App::build_context`) until
+/// the user allows that on this device.
+fn root_folder(source: &Workspace, workspace_id: Id, name: &str, environments: Vec<Id>) -> Folder {
     Folder {
         meta: Meta::new(),
         workspace_id,
@@ -274,6 +276,9 @@ fn root_folder(source: &Workspace, workspace_id: Id, name: &str) -> Folder {
             auth => auth.clone(),
         },
         tags: vec![],
+        import_root: true,
+        import_environment_ids: environments,
+        use_workspace_scope: false,
     }
 }
 

@@ -104,6 +104,9 @@ impl<'o> Builder<'o> {
             variables: vec![],
             auth: AuthConfig::Inherit,
             tags: vec![],
+            import_root: false,
+            import_environment_ids: vec![],
+            use_workspace_scope: false,
         });
         self.folder_index.insert(key.to_string(), id);
         id
