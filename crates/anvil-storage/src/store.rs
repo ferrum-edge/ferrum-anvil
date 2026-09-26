@@ -14,6 +14,11 @@
 //! from, commit or roll back a transaction it does not own.
 //! [`Store::read_consistently`] does the same for reads only: its closure gets
 //! a [`StoreRead`] over one consistent state and never takes the write lock.
+//!
+//! Another `Store` opened on the same profile has its own connection and its
+//! own lock, so writes that must be seen together by it (a history body and
+//! the row that references it) share one SQLite transaction; a connection
+//! waits up to [`BUSY_TIMEOUT`] for another connection's write lock.
 
 use crate::crypto::{self, Key};
 use anvil_domain::Id;
@@ -23,11 +28,15 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use std::thread::ThreadId;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// A decrypted history record and its optional stored response body.
 pub type HistoryRecord<T> = (T, Option<Zeroizing<Vec<u8>>>);
 pub const DB_FILE: &str = "anvil.db";
+/// How long a statement waits for another connection's lock on the database
+/// before failing with `SQLITE_BUSY`.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Current on-disk schema version. Increase only with a migration below.
 pub const DB_SCHEMA_VERSION: i64 = 1;
 
@@ -199,6 +208,7 @@ impl Store {
     pub fn open(dir: &Path, key: Key) -> Result<Store> {
         std::fs::create_dir_all(dir)?;
         let conn = Connection::open(dir.join(DB_FILE))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;",
         )?;
@@ -452,6 +462,10 @@ impl Store {
 
     // ------------------------------------------------------------ history
 
+    /// Store a history record and its optional response body. The body blob
+    /// and the history row that references it commit in one write
+    /// transaction, so `prune_history` on any connection to this profile
+    /// never sees the body unreferenced and collects it.
     pub fn add_history<T: Serialize>(
         &self,
         id: &Id,
@@ -461,9 +475,7 @@ impl Store {
         record: &T,
         body: Option<&[u8]>,
     ) -> Result<()> {
-        let key = self.key()?;
-        let conn = self.conn()?;
-        Records { key, conn: &conn }.add_history(id, workspace_id, request_id, started_at_ms, record, body)
+        self.atomically(|tx| tx.add_history(id, workspace_id, request_id, started_at_ms, record, body))
     }
 
     pub fn list_history(&self, workspace_id: Option<&Id>, request_id: Option<&Id>, limit: usize) -> Result<Vec<HistoryEntry>> {
@@ -482,7 +494,10 @@ impl Store {
     pub fn prune_history(&self, max_age_days: u32, max_total_bytes: u64) -> Result<usize> {
         let _ = self.key()?;
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        // Take the write lock up front: blobs are collected against one state
+        // of `history` and the pins, never against a snapshot another
+        // connection has since written past.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let cutoff = chrono::Utc::now().timestamp_millis() - (max_age_days as i64) * 86_400_000;
         let mut removed = tx.execute("DELETE FROM history WHERE started_at < ?1", params![cutoff])?;
         // Keep the newest entries whose cumulative size fits the budget.
@@ -971,6 +986,8 @@ impl Records<'_> {
         record: &T,
         body: Option<&[u8]>,
     ) -> Result<()> {
+        // The blob is unreferenced until the history row below is written:
+        // callers run this inside one transaction (see `Store::add_history`).
         let body_blob = match body {
             Some(b) if !b.is_empty() => Some(self.put_blob(b)?),
             _ => None,
