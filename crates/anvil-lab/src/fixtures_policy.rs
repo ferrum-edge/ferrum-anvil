@@ -154,11 +154,7 @@ mod op_log_tests {
         let mut reads = 0;
         let lines = wait_for_op_log(|| {
             reads += 1;
-            if reads == 2 {
-                vec!["transaction".to_owned()]
-            } else {
-                vec![]
-            }
+            if reads == 2 { vec!["transaction".to_owned()] } else { vec![] }
         })
         .await;
 
