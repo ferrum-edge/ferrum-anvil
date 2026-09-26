@@ -52,6 +52,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [envs, setEnvs] = useState<Environment[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
+  // The workspace whose tree is shown: until the selected one's arrives, it is loading.
+  const [treeWs, setTreeWs] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -98,16 +100,46 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     setWorkspaces(list);
     setWs((cur) => list.find((w) => w.id === (selectId ?? cur?.id)) ?? list[0]);
   }, []);
-  const loadTree = useCallback(async () => ws && setTree(await api.tree(ws.id)), [ws]);
-  const loadHistory = useCallback(async () => ws && setHistory(await api.history(ws.id, null, 200)), [ws]);
+  // A workspace's lists (tree, history, profiles, environments) are shown only
+  // from their latest read, and only while that workspace is still selected:
+  // an earlier read that finishes late, or one from a workspace since left, is
+  // dropped with its result or error.
+  const reads = useRef(new Map<string, number>());
+  const readLatest = async <T,>(list: string, wsId: string, read: () => Promise<T>, show: (v: T) => void) => {
+    const key = `${list}:${wsId}`;
+    const n = (reads.current.get(key) ?? 0) + 1;
+    reads.current.set(key, n);
+    const current = () => reads.current.get(key) === n && wsRef.current?.id === wsId;
+    try {
+      const v = await read();
+      if (current()) show(v);
+    } catch (e) {
+      if (current()) throw e;
+    }
+  };
+  const loadTree = useCallback(async () => {
+    if (!ws) return;
+    await readLatest("tree", ws.id, () => api.tree(ws.id), (t) => {
+      setTree(t);
+      setTreeWs(ws.id);
+    });
+  }, [ws]);
+  const loadHistory = useCallback(async () => {
+    if (ws) await readLatest("history", ws.id, () => api.history(ws.id, null, 200), setHistory);
+  }, [ws]);
   const loadHistoryRef = useRef(loadHistory);
   loadHistoryRef.current = loadHistory;
   const loadProfiles = useCallback(async () => {
     if (!ws) return;
-    const [tls, proxy, integrations] = await Promise.all([api.tlsProfiles(ws.id), api.proxyProfiles(ws.id), api.integrations(ws.id)]);
-    setProfiles({ tls, proxy, integrations });
+    const read = async () => {
+      const [tls, proxy, integrations] = await Promise.all([api.tlsProfiles(ws.id), api.proxyProfiles(ws.id), api.integrations(ws.id)]);
+      return { tls, proxy, integrations };
+    };
+    await readLatest("profiles", ws.id, read, setProfiles);
   }, [ws]);
-  const loadEnvs = useCallback(async () => ws && setEnvs(await api.environments(ws.id)), [ws]);
+  const loadEnvs = useCallback(async () => {
+    if (ws) await readLatest("envs", ws.id, () => api.environments(ws.id), setEnvs);
+  }, [ws]);
 
   useEffect(() => {
     void loadWorkspaces().catch(fail);
@@ -120,6 +152,11 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     if (prevWs.current) activeByWs.current[prevWs.current] = activeRef.current;
     prevWs.current = ws.id;
     setActive(activeByWs.current[ws.id] ?? null);
+    // Nothing of the workspace left is shown while this one loads.
+    setTree([]);
+    setHistory([]);
+    setProfiles({ tls: [], proxy: [], integrations: [] });
+    setEnvs([]);
     void Promise.all([loadTree(), loadHistory(), loadProfiles(), loadEnvs()]).catch(fail);
   }, [ws?.id]);
 
@@ -178,14 +215,27 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     setDialog({ kind: "rename", id: f.id, isFolder: true, name: f.name });
   };
 
+  // The editor stays usable while a save is pending. Saves of one request run
+  // one at a time, in the order asked, so the last to finish wrote last; each
+  // moves the saved baseline to what it wrote and keeps edits made meanwhile,
+  // which stay unsaved.
+  const saving = useRef(new Map<string, Promise<unknown>>());
   const saveTab = async (t: OpenTab | null = tab) => {
     if (!t) return;
+    const submitted = t.req;
+    const id = submitted.id;
+    const run = (saving.current.get(id) ?? Promise.resolve()).catch(() => {}).then(() => api.saveRequest(submitted));
+    saving.current.set(id, run);
     try {
-      const saved = await api.saveRequest(t.req);
-      updateTab(t.req.id, { req: saved, saved: snap(saved) });
+      const saved = await run;
+      setTabs((ts) =>
+        ts.map((x) => (x.req.id !== id ? x : { ...x, req: x.req === submitted ? saved : { ...saved, name: x.req.name, spec: x.req.spec }, saved: snap(saved) })),
+      );
       await loadTree();
     } catch (e) {
       fail(e);
+    } finally {
+      if (saving.current.get(id) === run) saving.current.delete(id);
     }
   };
 
@@ -503,7 +553,11 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   + Folder
                 </button>
               </div>
-              {filtered.length === 0 && <div className="faint" style={{ padding: 8 }}>{filter ? "No matches." : "No requests yet. Create one, or import a bundle."}</div>}
+              {treeWs !== ws?.id ? (
+                <div className="faint" style={{ padding: 8 }}>Loading…</div>
+              ) : (
+                filtered.length === 0 && <div className="faint" style={{ padding: 8 }}>{filter ? "No matches." : "No requests yet. Create one, or import a bundle."}</div>
+              )}
               <Tree
                 nodes={filtered}
                 depth={0}

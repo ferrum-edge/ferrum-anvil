@@ -1,6 +1,7 @@
 // Renderer tests for Workbench state that must survive navigation (jsdom; the
 // Tauri backend is a scripted fake). Switching workspaces keeps unsaved drafts
-// and live sessions; Runner and Load tests keep a backend run's Stop control
+// and live sessions, and a workspace's late reads never replace the lists of the
+// one selected since; a save that finishes late keeps the edits made meanwhile; Runner and Load tests keep a backend run's Stop control
 // while another view is shown; closing or deleting a tab stops (after
 // confirmation) what only that tab controlled, and a tab whose work could not
 // be stopped stays open.
@@ -24,7 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: (...a: unknown[]) => ask(...a), open: vi.fn(), save: vi.fn() }));
 
 import type { TreeNode } from "./api";
-import type { LoadPlan, RequestDefinition, RequestSpec, Workspace } from "./generated/contracts";
+import type { Environment, LoadPlan, RequestDefinition, RequestSpec, TlsProfile, Workspace } from "./generated/contracts";
 import { newSpec } from "./RequestEditor";
 import { Workbench } from "./Workbench";
 
@@ -138,6 +139,16 @@ async function selectWorkspace(id: string, expectItem: string) {
 }
 
 const urlField = () => screen.getByLabelText("URL") as HTMLInputElement;
+
+// A backend reply the test completes by hand.
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+const environment = (id: string, wsId: string, name: string) => ({ id, workspace_id: wsId, name, schema_version: 1, created_at: now, updated_at: now }) as Environment;
+const tlsProfile = (id: string, wsId: string, name: string) => ({ id, workspace_id: wsId, name }) as TlsProfile;
+const historyItem = (id: string, url: string) => ({ id, started_at: 0, method: "GET", url, summary: "200 OK", status: 200 });
 
 afterEach(() => {
   cleanup();
@@ -384,5 +395,177 @@ describe("Runner and Load tests keep their runs across navigation", () => {
     await waitFor(() => expect(screen.queryByTestId("load-live")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Load tests" }));
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+  });
+});
+
+describe("workspace lists follow the selected workspace", () => {
+  // Every list read of workspace A is held until the test completes it; B's
+  // reads, and A's after the first, answer at once.
+  function heldFirstReadsOfA() {
+    const held = new Map<string, ReturnType<typeof deferred<unknown>>>();
+    const hold = (cmd: string, reply: (ws: string) => unknown) => (a: Record<string, unknown>) => {
+      if (a.workspaceId !== "A" || held.has(cmd)) return reply(a.workspaceId as string);
+      const d = deferred<unknown>();
+      held.set(cmd, d);
+      return d.promise;
+    };
+    backend({
+      tree_get: hold("tree_get", (ws) => Object.values(requests).filter((r) => r.workspace_id === ws).map(node)),
+      history_list: hold("history_list", (ws) => [historyItem(`h-${ws}`, `https://history-${ws}.test/`)]),
+      tls_profiles_list: hold("tls_profiles_list", (ws) => [tlsProfile(`t-${ws}`, ws, `TLS ${ws}`)]),
+      environments_list: hold("environments_list", (ws) => [environment(`e-${ws}`, ws, `Env ${ws}`)]),
+    });
+    return held;
+  }
+  // The stale replies: what A held before anything changed.
+  const staleA: Record<string, unknown> = {
+    tree_get: [node(request("old", "A", "Stale"))],
+    history_list: [historyItem("h-old", "https://history-stale.test/")],
+    tls_profiles_list: [tlsProfile("t-old", "A", "TLS stale")],
+    environments_list: [environment("e-old", "A", "Env stale")],
+  };
+  const completeHeld = (held: Map<string, ReturnType<typeof deferred<unknown>>>) =>
+    act(async () => {
+      for (const [cmd, d] of held) d.resolve(staleA[cmd]);
+    });
+
+  async function startInA() {
+    render(<Workbench onLock={() => {}} profileName="test" />);
+    await screen.findByRole("option", { name: "Two" });
+    await waitFor(() => expect(calls("environments_list")).toHaveLength(1));
+    // A's lists are still loading: nothing is shown for it yet.
+    expect(screen.getByText("Loading…")).toBeTruthy();
+  }
+
+  it("ignores A's late reads once B is selected", async () => {
+    const held = heldFirstReadsOfA();
+    await startInA();
+    await selectWorkspace("B", "Gamma");
+    await screen.findByRole("option", { name: "Env B" });
+    await completeHeld(held);
+
+    expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("B");
+    expect(screen.getByRole("treeitem", { name: /Gamma/ })).toBeTruthy();
+    expect(screen.queryByRole("treeitem", { name: /Stale|Alpha/ })).toBeNull();
+    expect(screen.getByRole("option", { name: "Env B" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Env stale" })).toBeNull();
+
+    await openTab("Gamma");
+    fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(screen.getByRole("option", { name: "TLS B" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "TLS stale" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "History" }));
+    expect(await screen.findByText("https://history-B.test/")).toBeTruthy();
+    expect(screen.queryByText("https://history-stale.test/")).toBeNull();
+  });
+
+  it("ignores A's first reads after A to B to A, keeping the newer ones", async () => {
+    const held = heldFirstReadsOfA();
+    await startInA();
+    await selectWorkspace("B", "Gamma");
+    await selectWorkspace("A", "Alpha");
+    await screen.findByRole("option", { name: "Env A" });
+    await completeHeld(held);
+
+    expect(screen.getByRole("treeitem", { name: /Alpha/ })).toBeTruthy();
+    expect(screen.queryByRole("treeitem", { name: /Stale/ })).toBeNull();
+    expect(screen.getByRole("option", { name: "Env A" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Env stale" })).toBeNull();
+
+    await openTab("Alpha");
+    fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(screen.getByRole("option", { name: "TLS A" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "TLS stale" })).toBeNull();
+  });
+
+  it("clears the lists of the workspace left while the next one loads", async () => {
+    const pendingB = deferred<unknown>();
+    backend({
+      tree_get: (a) => (a.workspaceId === "B" ? pendingB.promise : Object.values(requests).filter((r) => r.workspace_id === a.workspaceId).map(node)),
+    });
+    await boot();
+    fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "B" } });
+    expect(await screen.findByText("Loading…")).toBeTruthy();
+    expect(screen.queryByRole("treeitem", { name: /Alpha/ })).toBeNull();
+
+    await act(async () => pendingB.resolve([node(requests.r3)]));
+    expect(await screen.findByRole("treeitem", { name: /Gamma/ })).toBeTruthy();
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
+});
+
+describe("saving a request", () => {
+  it("marks the request saved (control)", async () => {
+    backend({ request_save: (a) => a.request });
+    await boot();
+    await openTab("Alpha");
+    fireEvent.change(urlField(), { target: { value: "https://submitted.test/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByLabelText("unsaved")).toBeNull());
+    expect(urlField().value).toBe("https://submitted.test/");
+    expect(calls("request_save")).toHaveLength(1);
+  });
+
+  it("keeps edits made while the save was pending, and they stay unsaved", async () => {
+    const saves: ReturnType<typeof deferred<RequestDefinition>>[] = [];
+    backend({
+      request_save: () => {
+        const d = deferred<RequestDefinition>();
+        saves.push(d);
+        return d.promise;
+      },
+    });
+    await boot();
+    await openTab("Alpha");
+    fireEvent.change(urlField(), { target: { value: "https://submitted.test/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    const submitted = calls("request_save")[0].request as RequestDefinition;
+    expect(submitted.spec.url).toBe("https://submitted.test/");
+
+    fireEvent.change(urlField(), { target: { value: "https://newer-draft.test/" } });
+    await act(async () => saves[0].resolve({ ...submitted, revision_id: "rev-1" }));
+
+    expect(urlField().value).toBe("https://newer-draft.test/");
+    expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+    // The baseline is what was written: returning to it is clean again.
+    fireEvent.change(urlField(), { target: { value: "https://submitted.test/" } });
+    expect(screen.queryByLabelText("unsaved")).toBeNull();
+  });
+
+  it("runs overlapping saves in order, ending saved as the last one wrote", async () => {
+    const saves: ReturnType<typeof deferred<RequestDefinition>>[] = [];
+    backend({
+      request_save: () => {
+        const d = deferred<RequestDefinition>();
+        saves.push(d);
+        return d.promise;
+      },
+    });
+    await boot();
+    await openTab("Alpha");
+    fireEvent.change(urlField(), { target: { value: "https://first.test/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    fireEvent.change(urlField(), { target: { value: "https://second.test/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.change(urlField(), { target: { value: "https://third.test/" } });
+
+    // The second save waits for the first to finish.
+    await act(async () => {});
+    expect(saves).toHaveLength(1);
+    const first = calls("request_save")[0].request as RequestDefinition;
+    await act(async () => saves[0].resolve(first));
+    await waitFor(() => expect(saves).toHaveLength(2));
+    const second = calls("request_save")[1].request as RequestDefinition;
+    expect(second.spec.url).toBe("https://second.test/");
+    expect(urlField().value).toBe("https://third.test/");
+
+    await act(async () => saves[1].resolve(second));
+    expect(urlField().value).toBe("https://third.test/");
+    expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+    fireEvent.change(urlField(), { target: { value: "https://second.test/" } });
+    expect(screen.queryByLabelText("unsaved")).toBeNull();
   });
 });
