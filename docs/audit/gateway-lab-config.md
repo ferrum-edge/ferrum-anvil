@@ -7,6 +7,11 @@ test, unless it is marked **inferred** or **verify live**.
 Configs: `lab/gateway/` (8 profiles, listed in section 4). Structural lint:
 `ruby lab/gateway/lint-profiles.rb`, which passes on all profiles today.
 
+Later status: the same configs validate and run unchanged against v0.9.7, the lab's default pin
+since then (the lint's field sets are identical in both releases; `anvil-lab --release v0.9.5`
+still runs v0.9.5). The citations below remain v0.9.5 citations; see
+[`gateway-0.9.7-delta.md`](gateway-0.9.7-delta.md) for what changed.
+
 ## 0. Provenance and citation convention
 
 | Item | Value |

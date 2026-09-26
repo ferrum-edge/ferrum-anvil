@@ -71,6 +71,8 @@ gitleaks git --config .gitleaks.toml --redact .   # gitleaks 8.30.1
 # Lab (fixed ports 18080/18090/19000-19099 — stop any other lab first)
 lab/scripts/fetch-gateway.sh             # needs `gh` (authenticated) and verifies RELEASE.lock
 ulimit -n 4096; cargo run -p anvil-lab -- run core --untrusted-pass
+lab/scripts/fetch-gateway.sh v0.9.5      # an earlier supported release (lab/gateway/releases/v0.9.5.lock)
+cargo run -p anvil-lab -- --release v0.9.5 run core --untrusted-pass
 
 # Native E2E
 cd apps/desktop && npm run e2e:build && npm run e2e
@@ -81,14 +83,18 @@ The E2E suite and its local-run notes are described in
 
 ## Lab gateway on CI
 
-`lab/scripts/fetch-gateway.sh` downloads the pinned Ferrum Edge release asset
-for the runner's OS/architecture with `gh release download` (authenticated by
-the workflow's `github.token`; `ferrum-edge/ferrum-edge` is public) and
-refuses to keep a binary whose SHA-256 differs from `lab/gateway/RELEASE.lock`.
-The lock already pins macOS (arm64, x86_64), Linux (x86_64, arm64) and Windows
-(x86_64) assets of v0.9.5, so no format change was needed for the Linux lane.
-`anvil-lab` re-verifies the checksum before every run. Results are uploaded
-from `results/lab/**`.
+`lab/scripts/fetch-gateway.sh [release]` downloads a pinned Ferrum Edge release
+asset for the runner's OS/architecture with `gh release download` (authenticated
+by the workflow's `github.token`; `ferrum-edge/ferrum-edge` is public) into
+`lab/bin/<release>/` and refuses to keep a binary whose SHA-256 differs from
+its lock: `lab/gateway/RELEASE.lock` (the default pin, v0.9.7) or
+`lab/gateway/releases/<release>.lock` (every supported release, v0.9.5 and
+v0.9.7). Each lock pins macOS (arm64, x86_64), Linux (x86_64, arm64) and
+Windows (x86_64) assets. The workflow passes the release through
+`ANVIL_LAB_RELEASE`: pull requests run the default pin, the nightly run adds
+v0.9.5, and a manual run takes a `release` input. `anvil-lab` re-verifies the
+checksum before every run. Results are uploaded from `results/lab/**`, one
+artifact per OS and release.
 
 ## Pinned versions
 

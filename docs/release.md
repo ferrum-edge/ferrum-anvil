@@ -69,8 +69,9 @@ evidence bundle, and — for tags only — `gh release create --draft --verify-t
 - licensing: project license and third-party report;
 - compatibility: diagnostics catalog version, every Ferrum compatibility
   catalog (`catalog/ferrum/*/outcomes.json`: compatibility id, gateway release
-  tag and source SHA, outcome count, public tokens) and the lab gateway pin
-  (`lab/gateway/RELEASE.lock`);
+  tag and source SHA, outcome count, public tokens), the lab gateway pin
+  (`lab/gateway/RELEASE.lock`) and every release the lab supports
+  (`lab/gateway/releases/*.lock`);
 - tests: the CI / Desktop E2E / Lab runs for the commit with their
   conclusions. A missing or skipped run is not a pass — check them.
 
@@ -268,12 +269,12 @@ ferrum-edge/ferrum-anvil#1), after the last functional merge.
 | Check | Command | Result |
 | --- | --- | --- |
 | Format and lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings` | clean |
-| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 66 test binaries: 433 passed, 0 failed, 0 ignored |
+| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 66 test binaries: 443 passed, 0 failed, 0 ignored |
 | Contract drift | `cargo run -p anvil-cli -- schema --out contracts/schemas` + `npm run contracts` | no drift |
 | Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 24 passed (3 files) |
 | Native E2E through the gateway | `npm run e2e:build`, `anvil-lab up core`, `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` | 9 spec files, 18 tests passed (boot, success, refusal diagnosis, effective request, gateway diagnosis, untrusted TLS, load report, offline/no-account, lock) |
 | Native E2E, release-profile build | `npx tauri build --no-bundle --features e2e` (release profile), same suite | 9 spec files passed; app peak RSS 236 MiB, load worker 21 MiB (see `docs/performance.md`) |
-| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.5 release binary) | 308 passed, 0 failed, 15 skipped with stated reasons: core 36/0/0, policy 46/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 76/0/5, streams 62/0/0, cpdp 10/0/0 |
+| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.7 release binary, the default pin) and `anvil-lab --release v0.9.5 run all --untrusted-pass` (v0.9.5 release binary) | each release: 314 passed, 0 failed, 15 skipped with stated reasons: core 36/0/0, policy 48/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 80/0/5, streams 62/0/0, cpdp 10/0/0; `AUTH-009.iss-array`, `AUTH-X01.nbf` and `GW-010-BOT.allow-edge` pass with release-dependent expectations |
 | Lab profile lint | `ruby lab/gateway/lint-profiles.rb` | 8 profiles OK; a mistyped nested plugin key is caught |
 | Release check, production artifacts | `npx tauri build --ci --bundles app,dmg`; `cargo build --release --locked -p anvil-cli`; `scripts/release-check.sh --runtime-probe` over the `.app`, `.dmg`, raw `anvil-desktop` and `anvil` | **pass**: graph without the WebDriver plugin or `e2e`, 0 of 11 hook strings in each, no WebDriver listener and no env-driven unlock at runtime |
 | Release check, negative control | `scripts/release-check.sh --no-graph target/debug/anvil-desktop` (e2e build) | **fail (exit 1)** as required: all 11 strings found |
@@ -292,8 +293,8 @@ Earlier on this branch (still valid; the scripts and workflows they exercise are
 | Release check, inconclusive input | `/bin/ls`, `README.md` | exit 2 (no Anvil marker / unsupported type) — never a pass |
 | Release bundle dry run (macOS arm64) | `npx tauri build --ci --bundles app,dmg`, `cargo build --release -p anvil-cli`, then the release workflow's collect, release-check (with probe), signature-verification, SBOM, license-report and evidence steps | release check **pass** on the `.dmg`, the `.app`, the CLI `.tar.gz` and the raw binary; signing recorded as `unsigned — owner credentials not configured (ad-hoc signature only, not a Developer ID)`; `release-evidence.json` with 7 artifacts, empty `problems`; `shasum -c SHA256SUMS` OK |
 | Release check, other formats | synthetic `.deb` (ar fallback) and `.zip` around the release/e2e binaries | clean → pass; `.deb` carrying the e2e binary → fail (exit 1) |
-| Catalog drift | `cargo test -p anvil-diagnostics --test catalog_drift` | 3 passed; renaming one catalog key makes it fail with the emitting file named |
-| Lab gateway pin | `lab/scripts/fetch-gateway.sh`; separately downloaded `ferrum-edge-linux-x86_64` (v0.9.5) and compared with `RELEASE.lock` | macOS asset downloaded and verified; Linux x86_64 asset SHA-256 matches the lock (`31573f0a…297c`) |
+| Catalog drift | `cargo test -p anvil-diagnostics --test catalog_drift` | 5 passed: wording for every code and every release's token vocabulary; both Ferrum catalogs (`ferrum-edge-0.9.5`, `ferrum-edge-0.9.7`) embedded and internally consistent; the desktop dialog offers exactly the embedded releases. Renaming one catalog key makes it fail with the emitting file named |
+| Lab gateway pin | `lab/scripts/fetch-gateway.sh [release]`; `anvil-lab [--release v0.9.5] verify`; separately downloaded `ferrum-edge-linux-x86_64` (v0.9.5) and compared with its lock | v0.9.7 (`RELEASE.lock` = `releases/v0.9.7.lock`): macOS asset verified (`f3bd0027…0dd03`). v0.9.5 (`releases/v0.9.5.lock`): macOS asset verified (`6a531f2c…ce5f`); Linux x86_64 asset SHA-256 matches the lock (`31573f0a…297c`). A binary of the other release is refused. |
 
 Not run locally: Windows and Linux builds and tests (they run in CI; see the
 PR checks), the x86_64 macOS cross build, `.msi`/NSIS/`.rpm`/`.AppImage`

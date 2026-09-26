@@ -1,7 +1,11 @@
 # Failure lab: `streams` and `cpdp` profiles
 
-These two profiles run Anvil's shared engine against the **real, pinned Ferrum Edge v0.9.5
-release binary**. They do not use mocks of the gateway.
+These two profiles run Anvil's shared engine against a **real, pinned Ferrum Edge release
+binary**: v0.9.7 by default (`lab/gateway/RELEASE.lock`), v0.9.5 with `--release v0.9.5`
+(`lab/gateway/releases/v0.9.5.lock`). The lab's trusted Ferrum profile declares the running
+release's compatibility id. They do not use mocks of the gateway. Every scenario passes on
+both releases with the same expectations; observations recorded below as "0.9.5" were
+re-observed on 0.9.7.
 
 - `streams` sends every protocol Anvil advertises *through* the gateway: HTTP/1.1, HTTP/2
   (TLS and h2c), HTTP/3 on the gateway's QUIC listener, WebSocket bootstraps, gRPC, SSE,
@@ -25,9 +29,11 @@ DTLS and PKI fixtures.
 
 ```sh
 export PATH=/opt/homebrew/opt/rustup/bin:$PATH
-# The pinned binary is verified against lab/gateway/RELEASE.lock before every run.
-export ANVIL_LAB_FERRUM_BIN=/path/to/lab-bin/ferrum-edge-macos-aarch64   # or lab/bin/, ../lab-bin/
+# The binary is verified against the release's lock before every run
+# (lab/gateway/RELEASE.lock, or lab/gateway/releases/<release>.lock with --release).
+export ANVIL_LAB_FERRUM_BIN=/path/to/lab-bin/v0.9.7/ferrum-edge-macos-aarch64   # or lab/bin/<release>/, ../lab-bin/<release>/
 ulimit -n 4096
+# cargo run -p anvil-lab -- --release v0.9.5 run streams --untrusted-pass   # the earlier release
 
 cargo run -p anvil-lab -- list streams                    # scenario ids and titles
 cargo run -p anvil-lab -- run streams --untrusted-pass    # ~25 s
@@ -69,7 +75,7 @@ attribution. Every row passed in every run of the final stability batch (§5).
 |---|---|---|
 | CTRL-STREAMS | control | HTTP/1.1 through the gateway succeeds. The backend receives the request and the operator log records 200. The gateway advertises `Alt-Svc: h3=":18443"`. This is not proof of a QUIC listener: PROTO-006 is. |
 | PROTO-001 | PROTO-001 | Two sequential HTTP/1.1 requests. The second is recorded as `reused` with `prior_requests ≥ 1` and the `reused_connection` warning. No fresh DNS/TCP timing is invented. Ground truth: the same local socket address, and the gateway logged both requests. |
-| PROTO-002 | PROTO-002 | h2 over verified TLS end to end. The upstream leg is also HTTP/2 (an h2 TLS backend). **Observed:** Ferrum 0.9.5 does not relay the backend's plain-HTTP/2 response trailers, even with `TE: trailers`, while gRPC trailers are relayed. Anvil reports exactly what arrived and invents no trailers. The direct-to-backend control proves Anvil preserves `x-checksum`/`x-fixture-complete` after a complete body. |
+| PROTO-002 | PROTO-002 | h2 over verified TLS end to end. The upstream leg is also HTTP/2 (an h2 TLS backend). **Observed:** Ferrum 0.9.5 (and 0.9.7) does not relay the backend's plain-HTTP/2 response trailers, even with `TE: trailers`, while gRPC trailers are relayed. Anvil reports exactly what arrived and invents no trailers. The direct-to-backend control proves Anvil preserves `x-checksum`/`x-fixture-complete` after a complete body. |
 | PROTO-005 | PROTO-005 | h2c prior knowledge sent to the gateway's **TLS** port fails as `exchange.protocol_error`, `exchange.closed_before_response` or `exchange.write_failed`, depending on timing. The TLS phase is `not_applicable`. There is no `client.tls.*` claim and no `exchange.h2_goaway` (see fix 1 in §4). Recovery: h2c on 18480 works. Ground truth: the gateway's upstream leg stayed HTTP/1.1 (per-leg protocols differ). |
 | PROTO-006 | PROTO-006 | Forced HTTP/3 to 18443/udp. One attempt, ALPN `h3`, verified. A completed `quic_handshake` phase, connect `not_applicable`, no TCP-TLS phase. The response is HTTP/3. The backend received the request that the gateway relayed from QUIC. |
 | PROTO-007 | PROTO-007 | Forced HTTP/3 over a UDP-blocked path: the TCP-only relay 19420, with no QUIC behind it. The result is a `quic_handshake_timeout` in a single attempt, with `client.quic.handshake_timeout`. Ground truth: the TCP path saw **no** connection, so there was no silent TCP fallback. Recovery: forced H3 directly on 18443. |
@@ -172,7 +178,15 @@ Catalog version: `2026.09.25-3` (`catalog/diagnostics/findings.en.json`).
 
 ## 5. Stability
 
-Consecutive runs with `--untrusted-pass` on 2026-09-25 (macOS arm64, Ferrum Edge v0.9.5,
+Both releases, `anvil-lab [--release v0.9.5] run all --untrusted-pass` (2026-09-26, macOS
+arm64): streams 62 passed, 0 failed, 0 skipped and cpdp 10 passed, 0 failed on **v0.9.7**
+(`f3bd0027…`) and on **v0.9.5** (`6a531f2c…`). One earlier v0.9.7 run failed UP-002-tcp's
+ground-truth check only: the operator log was read before the gateway wrote the TCP session's
+transaction line (it appears at teardown, just after the client sees the close; the archived log
+had the expected `connection_refused`). UP-002-tcp and UP-004-tcps now wait up to 2 s for that
+line.
+
+Earlier consecutive runs with `--untrusted-pass` on 2026-09-25 (macOS arm64, Ferrum Edge v0.9.5,
 sha256 `6a531f2c…`). The counts are harness totals: the trusted pass, the untrusted pass,
 and PROTO-013 skipped once. A streams run takes about 24 s and a cpdp run about 47 s.
 
@@ -207,7 +221,9 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
   the workspace carries the upstream fix (hyperium/h3#236) until a release includes it
   (`vendor/README.md`). Until that change, PROTO-013 was recorded as skipped.
 - **Plain-HTTP/2 trailers through Ferrum.** 0.9.5 was observed not to relay them
-  (PROTO-002). So the lab verifies Anvil's trailer preservation against the backend
+  (PROTO-002). The recorded observation is the same on 0.9.7, and on both releases it is
+  not stable across passes: the trusted pass saw no relayed trailers, the untrusted repeat
+  saw them relayed (2026-09-26 runs). So the lab verifies Anvil's trailer preservation against the backend
   directly, and verifies through the gateway only that Anvil invents nothing. A cleartext
   h2c-capable backend is reached over HTTP/1.1 for non-gRPC traffic, which is why PROTO-002
   uses an h2 TLS backend.

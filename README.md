@@ -36,7 +36,9 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
     *not* prove, alternatives, and next steps.
   - Ferrum Edge markers count only for gateways you declare, are capped at
     "likely", and are never refined into causes the gateway does not
-    expose. See `docs/diagnostics.md`.
+    expose. Each declared gateway names its release; Anvil ships
+    source-audited catalogs for Ferrum Edge 0.9.7 (the default) and 0.9.5.
+    See `docs/diagnostics.md`.
 - **Test under load**: open (arrival rate), closed (virtual users) and
   iteration workloads run in a separate worker process with the same
   request preparation as Send. Reports include balanced ledgers, HDR
@@ -73,13 +75,16 @@ anvil import-spec Demo openapi.yaml     # OpenAPI/WSDL/Postman/Insomnia/cURL/HAR
 anvil run Demo --folder Smoke --junit report.xml
 ```
 
-Real-gateway failure lab (pinned Ferrum Edge release, loopback only):
+Real-gateway failure lab (pinned Ferrum Edge releases, loopback only; the
+default pin is `lab/gateway/RELEASE.lock`, v0.9.7):
 
 ```bash
 lab/scripts/fetch-gateway.sh              # download + verify the pinned binary
 cargo run -p anvil-lab -- list            # profiles
 cargo run -p anvil-lab -- run all --untrusted-pass
 cargo run -p anvil-lab -- up core         # keep the core lab up for manual testing
+lab/scripts/fetch-gateway.sh v0.9.5       # an earlier supported release …
+cargo run -p anvil-lab -- --release v0.9.5 run all --untrusted-pass   # … and its run
 ```
 
 ## Documentation
