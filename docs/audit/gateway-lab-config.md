@@ -275,6 +275,8 @@ Rule: **profile N uses gateway ports 18N00–18N99 and fixture ports 19N00–19N
 
 All profiles can run at the same time. Profiles 5 and 6 each change process-wide behavior, so they are separate instances. Profile 6 is destroyed by its own test.
 
+The `mesh` profile (Ferrum Edge in mesh mode, `lab/gateway/mesh-*.{conf,json}`, `docs/lab/mesh.md`) sits outside this numbering: its gateway listeners use 17600–17799 (every mesh listener remapped, no default `150xx` port) and its workload fixture 17801.
+
 **Lab PKI** (generated per run, never committed, never added to any system trust store)
 - ECDSA P-256 keys in unencrypted PKCS#8. DTLS requires ECDSA (`docs/configuration.md:1027`).
 - `frontend-ca.pem` → `gateway-server.{pem,key}` with SAN `localhost` and `127.0.0.1`. Used for frontend TLS and DTLS.

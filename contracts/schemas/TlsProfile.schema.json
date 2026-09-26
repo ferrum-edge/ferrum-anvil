@@ -52,10 +52,21 @@
       "default": "tls12"
     },
     "server_name_override": {
-      "description": "Override the SNI / verification name (advanced). The HTTP authority is unchanged.",
+      "description": "Override the SNI / verification name (advanced). The HTTP authority is\nunchanged. The certificate is verified against this name, or against\nthe SPIFFE identity when [`TlsProfile::server_spiffe`] is set. East-west\nSNI passthrough uses names like `outbound_.8080_._.svc.ns.svc.cluster.local`.",
       "type": [
         "string",
         "null"
+      ]
+    },
+    "server_spiffe": {
+      "description": "SPIFFE X.509-SVID server identity (mesh). When set, the peer chain is\nverified against this profile's trust anchors (its trust bundle) and\nthe certificate's single `spiffe://` URI SAN is matched instead of the\nDNS host name. Unset (the default) keeps ordinary host-name verification.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ServerSpiffeIdentity"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "created_at": {
@@ -209,6 +220,26 @@
         "tls12",
         "tls13"
       ]
+    },
+    "ServerSpiffeIdentity": {
+      "description": "Expected SPIFFE identity of a TLS server (X.509-SVID). At least one field\nmust be set; when both are, the ID must belong to the trust domain.",
+      "type": "object",
+      "properties": {
+        "expected_server_spiffe_id": {
+          "description": "Exact SPIFFE ID the server must present, e.g.\n`spiffe://cluster.local/ns/ferrum/sa/svc`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trust_domain": {
+          "description": "Trust domain the server's SPIFFE ID must belong to, e.g. `cluster.local`\n(any workload of that trust domain is accepted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     }
   }
 }

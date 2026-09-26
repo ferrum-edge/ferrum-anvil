@@ -40,6 +40,7 @@ pub fn all() -> Vec<Profile> {
         crate::streams::profile(),
         crate::cpdp::profile(),
         crate::h3x::profile(),
+        crate::mesh::profile(),
     ]
 }
 

@@ -676,9 +676,9 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     }
     if let Some(p) = &b.prep.proxy {
         let why = if spec.masque.is_some() {
-            "the MASQUE proxy is reached over QUIC, which HTTP CONNECT and SOCKS5 proxies do not carry"
+            "the MASQUE proxy is reached over QUIC, which HTTP CONNECT, SOCKS5 and HBONE tunnels do not carry"
         } else {
-            "HTTP CONNECT and SOCKS5 CONNECT carry TCP only"
+            "HTTP CONNECT, SOCKS5 and HBONE tunnels carry TCP only"
         };
         return Err(unsupported(format!("UDP/DTLS cannot be sent through the proxy '{}' ({why})", p.label), "settings.proxy"));
     }

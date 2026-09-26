@@ -60,7 +60,7 @@ impl TokenHttp for EngineTokenHttp<'_> {
             };
             // The token endpoint uses the request's proxy profile (and its
             // NO_PROXY list), exactly like the API request would.
-            let proxy = crate::http_exec::proxy_for(self.ctx, self.settings, &t, &mut inferred).map_err(|e| e.message)?;
+            let proxy = crate::http_exec::proxy_for(self.engine, self.ctx, self.settings, &t, &mut inferred).map_err(|e| e.message)?;
             let plan = HttpPlan {
                 method: http::Method::POST,
                 https: t.scheme == "https",

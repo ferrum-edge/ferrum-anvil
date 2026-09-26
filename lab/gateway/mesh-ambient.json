@@ -1,0 +1,54 @@
+{
+  "mesh": {
+    "workloads": [
+      {
+        "spiffe_id": "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-ztunnel",
+        "service_name": "svc",
+        "namespace": "ferrum",
+        "trust_domain": "cluster.local",
+        "service_account": "anvil-lab-ztunnel",
+        "addresses": [
+          "127.0.0.1"
+        ],
+        "ports": [
+          {
+            "port": 17801,
+            "protocol": "http",
+            "name": "http"
+          }
+        ],
+        "selector": {
+          "labels": {
+            "app": "svc"
+          },
+          "namespace": "ferrum"
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "svc",
+        "namespace": "ferrum",
+        "ports": [
+          {
+            "port": 17801,
+            "protocol": "http",
+            "name": "http"
+          }
+        ],
+        "workloads": [
+          {
+            "spiffe_id": "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-ztunnel"
+          }
+        ]
+      }
+    ],
+    "peer_authentications": [
+      {
+        "name": "anvil-lab-{{MTLS_MODE}}",
+        "namespace": "ferrum",
+        "mtls_mode": "{{MTLS_MODE}}"
+      }
+    ]
+  }
+}

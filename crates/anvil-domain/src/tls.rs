@@ -65,11 +65,34 @@ pub struct TlsProfile {
     pub bindings: Vec<HostBinding>,
     #[serde(default)]
     pub min_version: TlsMinVersion,
-    /// Override the SNI / verification name (advanced). The HTTP authority is unchanged.
+    /// Override the SNI / verification name (advanced). The HTTP authority is
+    /// unchanged. The certificate is verified against this name, or against
+    /// the SPIFFE identity when [`TlsProfile::server_spiffe`] is set. East-west
+    /// SNI passthrough uses names like `outbound_.8080_._.svc.ns.svc.cluster.local`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_name_override: Option<String>,
+    /// SPIFFE X.509-SVID server identity (mesh). When set, the peer chain is
+    /// verified against this profile's trust anchors (its trust bundle) and
+    /// the certificate's single `spiffe://` URI SAN is matched instead of the
+    /// DNS host name. Unset (the default) keeps ordinary host-name verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_spiffe: Option<ServerSpiffeIdentity>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Expected SPIFFE identity of a TLS server (X.509-SVID). At least one field
+/// must be set; when both are, the ID must belong to the trust domain.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ServerSpiffeIdentity {
+    /// Exact SPIFFE ID the server must present, e.g.
+    /// `spiffe://cluster.local/ns/ferrum/sa/svc`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_server_spiffe_id: Option<String>,
+    /// Trust domain the server's SPIFFE ID must belong to, e.g. `cluster.local`
+    /// (any workload of that trust domain is accepted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_domain: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -85,6 +108,11 @@ pub enum ProxyKind {
     /// HTTPS connection to the proxy itself, then CONNECT.
     Https,
     Socks5,
+    /// Mesh HBONE endpoint (Ferrum Mesh / Istio ambient): HTTP/2 `CONNECT`
+    /// over mutual TLS. Anvil presents the client SVID of the proxy's TLS
+    /// profile, verifies the endpoint's server identity, then runs the inner
+    /// connection over the tunnel stream.
+    Hbone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -102,6 +130,43 @@ pub struct ProxyProfile {
     /// `NO_PROXY` semantics: comma-separated hosts/suffixes/CIDRs, `*` for all.
     #[serde(default)]
     pub no_proxy: String,
+    /// TLS profile for the connection to the proxy itself: trust anchors,
+    /// client identity (the client SVID for HBONE) and server identity
+    /// (e.g. the endpoint's SPIFFE ID). Required for `hbone`; optional for
+    /// `https` (default: system roots with strict verification).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_profile_id: Option<Id>,
+    /// HBONE `CONNECT` options (kind `hbone` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hbone: Option<HboneOptions>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;
+/// Ferrum accepts either marker (value `hbone`) or none. A marker is a wire
+/// shape hint only and never authenticates the peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HboneMarker {
+    #[default]
+    None,
+    /// `x-ferrum-mesh-protocol: hbone`
+    FerrumMeshProtocol,
+    /// `x-istio-protocol: hbone`
+    IstioProtocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct HboneOptions {
+    #[serde(default)]
+    pub marker: HboneMarker,
+    /// W3C `baggage` header value for the `CONNECT`, e.g.
+    /// `source.principal=spiffe://cluster.local/ns/a/sa/b`. The endpoint honors
+    /// identity baggage only from trusted assertors that match the client SVID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baggage: Option<String>,
+    /// Additional `CONNECT` request headers (sent verbatim, in order).
+    #[serde(default)]
+    pub extra_headers: Vec<crate::request::KeyValue>,
 }

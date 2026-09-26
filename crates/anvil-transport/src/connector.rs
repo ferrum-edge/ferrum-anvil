@@ -1,5 +1,9 @@
 //! Shared stream establishment: DNS → TCP → proxy tunnel → TLS, recording
 //! each phase. Used by HTTP/1.1, HTTP/2, WebSocket (H1) and raw TCP/TLS.
+//!
+//! With an HBONE proxy the whole outer leg (DNS, TCP, mTLS, HTTP/2 `CONNECT`)
+//! is one `proxy_tunnel` phase here; its own phases and identities are in
+//! `ConnectionObservation::tunnel` (see [`crate::hbone`]).
 
 use crate::dns::{self, DnsConfig};
 use crate::net;
@@ -33,10 +37,13 @@ pub struct ProxyPlan {
     pub host: String,
     pub port: u16,
     pub credentials: Option<(String, Zeroizing<String>)>,
-    /// TLS to the proxy itself (ProxyKind::Https).
+    /// TLS to the proxy itself (ProxyKind::Https), or the mutual TLS with the
+    /// HBONE endpoint (ProxyKind::Hbone: client SVID + server identity).
     pub tls: Option<Arc<PreparedTls>>,
     /// Display label (no credentials).
     pub label: String,
+    /// Extra headers on the HBONE `CONNECT` (markers, `baggage`, extras).
+    pub connect_headers: Vec<(http::HeaderName, http::HeaderValue)>,
 }
 
 impl std::fmt::Debug for ProxyPlan {
@@ -79,6 +86,7 @@ pub fn blank_observation(id: u64) -> ConnectionObservation {
         via_proxy: None,
         tls: None,
         prior_requests: 0,
+        tunnel: None,
     }
 }
 
@@ -92,6 +100,38 @@ pub async fn establish(
 ) -> Result<Established, (TransportFailure, ConnectionObservation)> {
     let mut obs = blank_observation(next_connection_id());
     let stats = ConnStats::new();
+
+    if let Some(p) = proxy
+        && p.kind == ProxyKind::Hbone
+    {
+        obs.via_proxy = Some(p.label.clone());
+        rec.mark(Phase::Dns, PhaseStatus::NotApplicable, Some("the HBONE endpoint resolves the destination (outer DNS: tunnel evidence)"));
+        rec.mark(
+            Phase::Connect,
+            PhaseStatus::NotApplicable,
+            Some("the HBONE endpoint connects to the destination (outer TCP: tunnel evidence)"),
+        );
+        let idx = rec.start(Phase::ProxyTunnel);
+        let io = match crate::hbone::open(rec, p, target.host, target.port, dns_cfg, timeouts).await {
+            Ok((io, t)) => {
+                rec.finish_with(
+                    idx,
+                    PhaseStatus::Completed,
+                    format!("HBONE tunnel via {} (CONNECT {} → {})", p.label, t.authority, t.connect_status.unwrap_or(200)),
+                );
+                obs.tunnel = Some(t);
+                io
+            }
+            Err((f, t)) => {
+                let st = t.failure.as_ref().map(|i| i.deadline_ms.is_some()).unwrap_or(false);
+                rec.finish_with(idx, if st { PhaseStatus::TimedOut } else { PhaseStatus::Failed }, format!("HBONE tunnel via {}", p.label));
+                obs.tunnel = Some(t);
+                return Err((f, obs));
+            }
+        };
+        let io: BoxIo = Box::new(CountingIo::new(io, stats.clone()));
+        return tls_to_destination(rec, target, timeouts, io, stats, obs).await;
+    }
 
     // ---- DNS (of the proxy when proxied: the proxy resolves the target) ----
     let (dns_host, dns_port) = match proxy {
@@ -187,6 +227,17 @@ pub async fn establish(
         }
     }
 
+    tls_to_destination(rec, target, timeouts, io, stats, obs).await
+}
+
+async fn tls_to_destination(
+    rec: &mut Recorder,
+    target: &Target<'_>,
+    timeouts: &Timeouts,
+    mut io: BoxIo,
+    stats: Arc<ConnStats>,
+    mut obs: ConnectionObservation,
+) -> Result<Established, (TransportFailure, ConnectionObservation)> {
     // ---- TLS to destination ----
     match target.tls {
         Some(prepared) => {

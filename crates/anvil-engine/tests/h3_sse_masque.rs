@@ -47,6 +47,7 @@ fn lab_ctx(spec: RequestSpec, version: Option<HttpVersionPolicy>) -> ExecutionCo
         bindings: vec![],
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
+        server_spiffe: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

@@ -67,6 +67,7 @@ fn tls_profile(name: &str, roots: Vec<String>, verify: bool) -> TlsProfile {
         bindings: vec![],
         min_version: Default::default(),
         server_name_override: None,
+        server_spiffe: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -113,6 +114,8 @@ async fn local_006_invalid_proxy_configuration_is_explained_locally() {
         username: None,
         password: None,
         no_proxy: String::new(),
+        tls_profile_id: None,
+        hbone: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -227,6 +230,8 @@ async fn tls_017_https_through_a_rejecting_proxy_is_attributed_to_the_proxy_leg(
         username: None,
         password: None,
         no_proxy: String::new(),
+        tls_profile_id: None,
+        hbone: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

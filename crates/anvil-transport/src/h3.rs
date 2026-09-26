@@ -348,7 +348,7 @@ impl H3Transport {
             let f = TransportFailure::new(
                 Phase::Prepare,
                 FailureKind::UnsupportedCombination,
-                "HTTP/3 cannot be sent through the configured HTTP/SOCKS proxy",
+                "HTTP/3 cannot be sent through the configured proxy (HTTP CONNECT, SOCKS5 and HBONE tunnels carry TCP only)",
             )
             .with_field("settings.proxy");
             return fail(rec, obs, f, DispatchState::NotDispatched);

@@ -12,6 +12,7 @@ pub mod goaway;
 pub mod grpc;
 pub mod grpc_web;
 pub mod h3server;
+pub mod hbone;
 pub mod http;
 pub mod http1_only;
 pub mod idp;

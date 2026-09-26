@@ -207,7 +207,11 @@ impl Pool {
 }
 
 fn pool_key(plan: &HttpPlan) -> String {
-    let proxy = plan.proxy.as_ref().map(|p| format!("{:?}:{}:{}", p.kind, p.host, p.port)).unwrap_or_default();
+    let proxy = plan
+        .proxy
+        .as_ref()
+        .map(|p| format!("{:?}:{}:{}:{}", p.kind, p.host, p.port, p.tls.as_ref().map(|t| t.fingerprint.as_str()).unwrap_or("")))
+        .unwrap_or_default();
     let tls = plan.tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default();
     let dns = format!("{:?}{:?}{:?}", plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference);
     format!(
@@ -261,7 +265,8 @@ impl HttpTransport {
         let key = pool_key(plan);
         let mut outputs = Vec::new();
         let mut attempt_reason = reason;
-        let mut allow_pool = plan.keepalive;
+        // HBONE tunnels carry one execution's identity and headers: fresh per attempt.
+        let mut allow_pool = plan.keepalive && !crate::hbone::is_hbone(plan.proxy.as_ref());
         for attempt_index in (index..).take(2) {
             let (out, redispatch) = self.execute_once(plan, &key, attempt_index, attempt_reason.clone(), allow_pool, events, cancel).await;
             outputs.push(out);
@@ -689,7 +694,8 @@ impl HttpTransport {
         conn.served.fetch_add(1, Ordering::SeqCst);
 
         // ---- pool return ----
-        let reusable = failure.is_none() && plan.keepalive && !conn_close;
+        let tunneled = crate::hbone::is_hbone(plan.proxy.as_ref());
+        let reusable = failure.is_none() && plan.keepalive && !conn_close && !tunneled;
         match &conn.sender {
             Sender::H1(_) => {
                 if reusable {
@@ -700,7 +706,7 @@ impl HttpTransport {
                 }
             }
             Sender::H2(s) => {
-                if s.is_closed() || !plan.keepalive {
+                if s.is_closed() || !plan.keepalive || tunneled {
                     self.pool.evict(key, conn.template.id);
                 } else if !reused {
                     self.pool.checkin(key, conn.clone());

@@ -355,6 +355,7 @@ async fn load_008_load_sends_the_same_request_as_manual_send() {
         bindings: vec![],
         min_version: Default::default(),
         server_name_override: None,
+        server_spiffe: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };

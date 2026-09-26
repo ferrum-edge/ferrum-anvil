@@ -50,6 +50,10 @@ pub fn dns_connect_proxy(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
             .var("message", f.message.clone())
     };
     let proxied = a.connection.as_ref().and_then(|c| c.via_proxy.clone());
+    // The HBONE tunnel leg has its own rule family (mesh.hbone).
+    if a.connection.as_ref().is_some_and(|c| c.tunnel.is_some()) && f.kind == K::ProxyConnectFailed {
+        return;
+    }
     let d = match f.kind {
         K::DnsNoSuchHost => {
             Some(base("client.dns.no_such_host", "network.dns", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Caller))

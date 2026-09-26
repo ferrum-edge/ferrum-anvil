@@ -25,6 +25,7 @@ mod fixtures_tls;
 mod gateway;
 mod h3x;
 mod harness;
+mod mesh;
 mod policy;
 mod profiles;
 mod scenario;

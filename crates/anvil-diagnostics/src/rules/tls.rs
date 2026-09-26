@@ -1,7 +1,7 @@
 use super::Ctx;
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
-use anvil_domain::execution::{FailureKind as K, TlsVerification};
+use anvil_domain::execution::{FailureKind as K, PeerIdentityCheck, TlsObservation, TlsVerification};
 use anvil_domain::outcome::{OutcomeWarning, WarningCode};
 
 /// Alerts that specifically concern the client's certificate.
@@ -71,6 +71,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                     .var("sans", if leaf.subject_alt_names.is_empty() { "none".into() } else { leaf.subject_alt_names.join(", ") });
             }
             d = d.ev_at(E::TlsVerifier, "tls.server_name", t.server_name.clone(), a.index).var("server_name", t.server_name.clone());
+            d = identity_evidence(d, t, a.index);
             if let Some(req) = t.client_certificate_requested {
                 d = d.ev_at(E::NativeTransport, "tls.client_cert_requested", req.to_string(), a.index);
             }
@@ -96,7 +97,20 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         K::TlsUntrustedIssuer => Some(base("client.tls.untrusted_issuer", "tls.verification", Confidence::Confirmed, Owner::Caller)),
         K::TlsExpired => Some(base("client.tls.expired", "tls.verification", Confidence::Confirmed, Owner::ApiOwner)),
         K::TlsNotYetValid => Some(base("client.tls.not_yet_valid", "tls.verification", Confidence::Confirmed, Owner::Unknown)),
-        K::TlsNameMismatch => Some(base("client.tls.name_mismatch", "tls.verification", Confidence::Confirmed, Owner::Caller)),
+        K::TlsNameMismatch => {
+            let mut d = base("client.tls.name_mismatch", "tls.verification", Confidence::Confirmed, Owner::Caller);
+            if tls.map(|t| t.server_name_overridden).unwrap_or(false) {
+                d = d.alt("The TLS profile's SNI / verification name override was used for this check instead of the URL host.");
+            }
+            Some(d)
+        }
+        K::TlsSpiffeIdMismatch => {
+            Some(spiffe(base("client.tls.spiffe_id_mismatch", "tls.verification", Confidence::Confirmed, Owner::Caller), tls))
+        }
+        K::TlsUntrustedTrustDomain => {
+            Some(spiffe(base("client.tls.untrusted_trust_domain", "tls.verification", Confidence::Confirmed, Owner::Caller), tls))
+        }
+        K::TlsInvalidSvid => Some(spiffe(base("client.tls.invalid_svid", "tls.verification", Confidence::Confirmed, Owner::ApiOwner), tls)),
         K::TlsRevoked => Some(base("client.tls.revoked", "tls.verification", Confidence::Confirmed, Owner::ApiOwner)),
         K::TlsBadCertificate => Some(base("client.tls.bad_certificate", "tls.verification", Confidence::Confirmed, Owner::ApiOwner)),
         K::TlsAlertReceived | K::TlsAlertAfterHandshake => {
@@ -105,7 +119,14 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 // RFC 8446 §6.2: certificate_required is sent precisely when a
                 // client certificate was required and none was provided.
                 Some(base("client.tls.client_cert_required", "tls.handshake", Confidence::Confirmed, Owner::Caller))
-            } else if presented && CLIENT_CERT_ALERTS.contains(&alert.as_str()) {
+            } else if presented
+                && (CLIENT_CERT_ALERTS.contains(&alert.as_str())
+                    // TLS 1.3: after the client's Finished, the peer's only
+                    // remaining handshake decision is the client certificate
+                    // (Ferrum Edge 0.9.7 mesh listeners answer an untrusted
+                    // trust domain this way).
+                    || (f.kind == K::TlsAlertAfterHandshake && alert == "handshake_failure"))
+            {
                 Some(base("client.tls.client_cert_rejected", "tls.handshake", Confidence::Likely, Owner::Caller))
             } else if alert == "handshake_failure" && requested == Some(true) && !presented {
                 Some(
@@ -147,8 +168,55 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     }
 }
 
+/// Identity evidence recorded for every TLS failure finding: the SNI sent,
+/// the identity check applied and the peer's SPIFFE ID.
+pub fn identity_evidence(mut d: Draft, t: &TlsObservation, attempt: u32) -> Draft {
+    d = d.ev_at(E::NativeTransport, "tls.sni", t.sni.clone().unwrap_or_else(|| "none (IP address or not sent)".into()), attempt);
+    if t.server_name_overridden {
+        d = d.ev_at(E::Configuration, "tls.server_name_override", t.server_name.clone(), attempt);
+    }
+    if let Some(c) = &t.identity_check {
+        d = d.ev_at(E::TlsVerifier, "tls.identity_check", describe_check(c), attempt).var("identity_check", describe_check(c));
+    }
+    if let Some(id) = &t.peer_spiffe_id {
+        d = d.ev_at(E::TlsVerifier, "peer.spiffe_id", id.clone(), attempt);
+    }
+    d
+}
+
+/// SPIFFE-specific variables (expected identity, presented ID, detail).
+fn spiffe(mut d: Draft, tls: Option<&TlsObservation>) -> Draft {
+    let Some(t) = tls else { return d };
+    d = d.var("peer_spiffe_id", t.peer_spiffe_id.clone().unwrap_or_else(|| "no single SPIFFE ID".into()));
+    match &t.identity_check {
+        Some(PeerIdentityCheck::SpiffeId { expected, trust_domain }) => {
+            d = d.var("expected", expected.clone()).var("trust_domain", trust_domain.clone());
+        }
+        Some(PeerIdentityCheck::SpiffeTrustDomain { trust_domain }) => {
+            d = d.var("expected", format!("any SPIFFE ID in trust domain {trust_domain}")).var("trust_domain", trust_domain.clone());
+        }
+        _ => {}
+    }
+    if let TlsVerification::Failed { detail, .. } = &t.verification {
+        d = d.var("detail", detail.clone());
+    }
+    d
+}
+
+/// Plain-language identity check, for evidence and wording.
+pub fn describe_check(c: &PeerIdentityCheck) -> String {
+    match c {
+        PeerIdentityCheck::HostName { name } => format!("host name {name}"),
+        PeerIdentityCheck::SpiffeId { expected, .. } => format!("SPIFFE ID {expected}"),
+        PeerIdentityCheck::SpiffeTrustDomain { trust_domain } => format!("SPIFFE trust domain {trust_domain}"),
+    }
+}
+
 pub fn describe_verification(k: K) -> String {
     match k {
+        K::TlsSpiffeIdMismatch => "the certificate's SPIFFE ID is not the expected one".into(),
+        K::TlsUntrustedTrustDomain => "the certificate's SPIFFE trust domain is not trusted".into(),
+        K::TlsInvalidSvid => "the certificate is not a valid X.509-SVID".into(),
         K::TlsUntrustedIssuer => "the certificate is not issued by a trusted authority".into(),
         K::TlsExpired => "the certificate has expired".into(),
         K::TlsNotYetValid => "the certificate is not yet valid".into(),
