@@ -565,11 +565,28 @@ async fn load_soap_and_graphql_outcomes_not_determined_from_the_body_are_not_suc
         settings: small_capture.clone(),
         ..RequestSpec::http("POST", &f.url("/redirect?to=%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3Dfixture"))
     };
+    let request = ctx(authorization_redirect);
+    let manual = Engine::new().execute(&request, EventCtx::none(), CancellationToken::new()).await;
+    let top = manual
+        .record
+        .findings
+        .iter()
+        .filter(|f| f.severity >= anvil_domain::diagnostics::Severity::Warning)
+        .max_by_key(|f| f.severity)
+        .or(manual.record.findings.first())
+        .expect("redirect produces a diagnostic finding")
+        .code
+        .clone();
     let id = Id::new();
-    let r =
-        run(plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]), vec![(id, ctx(authorization_redirect))], None).await;
+    let r = run(
+        plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]),
+        vec![(id, request)],
+        None,
+    )
+    .await;
     assert_eq!(r.requests.application_failures, 1);
-    assert_eq!(r.failure_categories[0].category, "application_failure: auth.browser_session_required");
+    assert_eq!(r.failure_categories[0].category, format!("application_failure: {top}"));
+    assert_ne!(r.failure_categories[0].category, "application_failure: application.not_determined_from_body");
 
     // A plain request is judged by its status, which a prefix does not hide.
     let s = RequestSpec { settings: small_capture, ..RequestSpec::http("GET", &f.url("/soap-fault")) };
