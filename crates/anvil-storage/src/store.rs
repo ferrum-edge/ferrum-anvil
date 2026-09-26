@@ -12,6 +12,8 @@
 //! statement; [`Store::atomically`] holds it for its whole transaction and
 //! hands the closure a [`StoreTx`], so no other caller can write into, read
 //! from, commit or roll back a transaction it does not own.
+//! [`Store::read_consistently`] does the same for reads only: its closure gets
+//! a [`StoreRead`] over one consistent state and never takes the write lock.
 
 use crate::crypto::{self, Key};
 use anvil_domain::Id;

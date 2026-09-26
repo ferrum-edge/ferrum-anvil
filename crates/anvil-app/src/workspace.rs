@@ -149,22 +149,35 @@ impl App {
     /// Move a folder under a new parent (None = root) at `sort_key`,
     /// refusing moves that would create an ancestry cycle.
     pub fn move_folder(&self, id: &Id, new_parent: Option<Id>, sort_key: f64) -> Result<Folder> {
-        let mut f = self.folder(id)?;
-        if let Some(p) = new_parent {
-            let mut cur = Some(p);
-            while let Some(c) = cur {
-                if c == *id {
-                    return Err(AppError::Invalid("a folder cannot be moved into itself or one of its subfolders".into()));
+        // Check the ancestry and save in one transaction, so two concurrent
+        // moves (a under b and b under a) cannot both pass the check.
+        self.store.atomically(|s| {
+            let Some(mut f) = s.get::<Folder>(kind::FOLDER, id)? else { return Ok(Err(AppError::NotFound("folder".into()))) };
+            if let Some(p) = new_parent {
+                // `seen` stops the walk at a parent cycle already in saved or
+                // imported data instead of looping forever.
+                let mut seen = HashSet::new();
+                let mut cur = Some(p);
+                while let Some(c) = cur {
+                    if c == *id {
+                        return Ok(Err(AppError::Invalid("a folder cannot be moved into itself or one of its subfolders".into())));
+                    }
+                    if !seen.insert(c) {
+                        return Ok(Err(AppError::Invalid("the target folder's ancestry is cyclic".into())));
+                    }
+                    let Some(a) = s.get::<Folder>(kind::FOLDER, &c)? else { return Ok(Err(AppError::NotFound("folder".into()))) };
+                    if c == p && a.workspace_id != f.workspace_id {
+                        return Ok(Err(AppError::Invalid("cannot move a folder to another workspace".into())));
+                    }
+                    cur = a.parent_id;
                 }
-                cur = self.folder(&c)?.parent_id;
             }
-            if self.folder(&p)?.workspace_id != f.workspace_id {
-                return Err(AppError::Invalid("cannot move a folder to another workspace".into()));
-            }
-        }
-        f.parent_id = new_parent;
-        f.sort_key = sort_key;
-        self.save_folder(f)
+            f.parent_id = new_parent;
+            f.sort_key = sort_key;
+            f.meta.updated_at = chrono::Utc::now();
+            s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
+            Ok(Ok(f))
+        })?
     }
 
     /// Ancestor chain root → leaf (inclusive).
@@ -311,7 +324,12 @@ impl App {
         let path_of = |r: &RequestDefinition| -> String {
             let mut parts = vec![r.name.clone()];
             let mut cur = r.folder_id;
-            while let Some(c) = cur {
+            // `seen` stops the walk at a parent cycle (possible in saved or
+            // imported data) instead of looping forever.
+            let mut seen = HashSet::new();
+            while let Some(c) = cur
+                && seen.insert(c)
+            {
                 match folders.iter().find(|f| f.meta.id == c) {
                     Some(f) => {
                         parts.push(f.name.clone());
