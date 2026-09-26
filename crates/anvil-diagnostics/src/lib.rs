@@ -21,9 +21,25 @@ use anvil_domain::outcome::{ApplicationState, OutcomeWarning, ProtocolStatus, Wa
 use anvil_domain::request::Protocol;
 pub use facts::{BodyFacts, DiagnosticInput, FerrumTrust};
 
-/// Catalog version string recorded in every execution record.
+/// Catalog versions this build embeds: the findings wording catalog and every
+/// Ferrum compatibility catalog (e.g. `findings:V ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7`).
 pub fn catalog_version() -> String {
-    format!("findings:{} ferrum:{}", render::catalog().version, ferrum::catalog().compatibility_id)
+    format!("findings:{} ferrum:{}", render::catalog().version, ferrum::compatibility_ids().collect::<Vec<_>>().join(","))
+}
+
+/// Catalog version string recorded in an execution record: the findings
+/// catalog plus the Ferrum catalog the diagnosis actually used — the trusted
+/// profile's compatibility id, `<id>(no-catalog)` when this build has no
+/// catalog for it, or `none` without a trusted Ferrum profile.
+pub fn catalog_version_for(trust: &FerrumTrust) -> String {
+    let ferrum = match trust {
+        FerrumTrust::Trusted { compatibility_id, .. } => match ferrum::catalog_for(compatibility_id) {
+            Some(c) => c.compatibility_id.clone(),
+            None => format!("{}(no-catalog)", compatibility_id.trim()),
+        },
+        FerrumTrust::NotConfigured => "none".to_string(),
+    };
+    format!("findings:{} ferrum:{ferrum}", render::catalog().version)
 }
 
 /// A rule's claim before wording is applied.

@@ -69,7 +69,7 @@ fn ferrum_profile() -> IntegrationProfile {
         name: "lab streams gateway".into(),
         kind: IntegrationKind::FerrumGateway {
             hosts: GATEWAY_PORTS.iter().map(|p| HostBinding { host: "127.0.0.1".into(), port: Some(*p) }).collect(),
-            compatibility_id: "ferrum-edge-0.9.5".into(),
+            compatibility_id: crate::gateway::compatibility_id(),
             require_verified_tls: false,
             detail: None,
             console_url: None,
@@ -314,7 +314,9 @@ fn op_from(env: &Env) -> usize {
 }
 
 /// Like [`op_log`], but waits (up to 3 s) for at least `n` lines: streamed
-/// gRPC-Web responses are logged when the body ends, after the client read it.
+/// gRPC-Web responses are logged when the body ends, after the client read it,
+/// and stream-proxy (TCP/TLS) sessions when the gateway tears the session down,
+/// which can land just after the client has observed the close.
 async fn op_log_settled(env: &Env, from: usize, proxy_id: &str, n: usize) -> Vec<String> {
     for _ in 0..30 {
         let lines = op_log(env, from, proxy_id);

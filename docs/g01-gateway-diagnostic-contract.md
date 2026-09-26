@@ -10,7 +10,7 @@ statuses and bodies stay unchanged.
 ## Problem
 
 Today a client sees a coarse token (`connection_failure`, `backend_timeout`,
-…) and a status. On v0.9.5:
+…) and a status. On v0.9.5 and v0.9.7 (the marker code is unchanged between them):
 
 - a token merges several causes. For example, `connection_failure` covers
   DNS, TCP, TLS, pool and egress policy;

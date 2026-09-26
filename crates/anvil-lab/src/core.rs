@@ -48,7 +48,7 @@ pub fn ctx(env: &Env, method: &str, path: &str) -> ExecutionContext {
             name: "lab core gateway".into(),
             kind: IntegrationKind::FerrumGateway {
                 hosts: vec![HostBinding { host: "127.0.0.1".into(), port: Some(18080) }],
-                compatibility_id: "ferrum-edge-0.9.5".into(),
+                compatibility_id: crate::gateway::compatibility_id(),
                 require_verified_tls: false,
                 detail: None,
                 console_url: None,

@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "streams" (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "streams" (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios (crates/anvil-lab/src/streams.rs, docs/lab/streams-cpdp.md):
 #   HTTP/1.1 keep-alive, HTTP/2 (h2 over TLS + h2c), HTTP/3 through the QUIC listener,

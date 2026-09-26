@@ -1,9 +1,13 @@
 # Failure lab: policy, admission and drain profiles
 
 Three real-gateway profiles for the WAF/policy and gateway-admission families of the failure matrix
-(build plan §15.3, §15.4). Every stimulus drives the pinned Ferrum Edge **v0.9.5** release binary
-(`lab/gateway/RELEASE.lock`) with controllable local fixtures. No response is faked, and no failure
-is injected as an enum.
+(build plan §15.3, §15.4). Every stimulus drives a pinned Ferrum Edge release binary with
+controllable local fixtures: **v0.9.7** by default (`lab/gateway/RELEASE.lock`), **v0.9.5** with
+`--release v0.9.5` (`lab/gateway/releases/v0.9.5.lock`). The lab's trusted Ferrum profile declares the
+running release's compatibility id. No response is faked, and no failure is injected as an enum.
+Behaviour recorded below as "0.9.5" was re-observed on 0.9.7: every scenario passes on both releases
+with the same expectations, except `GW-010-BOT.allow-edge`, whose verdict is release-dependent (#5685;
+see `docs/audit/gateway-0.9.7-delta.md`).
 
 | Profile | Gateway listeners | Fixture ports | Config | Scenarios |
 |---|---|---|---|---|
@@ -17,7 +21,7 @@ behaviour (`FERRUM_MAX_REQUESTS=1`, a 64 KiB retained-response budget, SIGTERM),
 own gateway instance.
 
 The `admission` profile also starts a **second gateway process in mesh mode** for UP-018. On 0.9.5
-the only per-destination physical-connection ceiling is DestinationRule
+(and still on 0.9.7) the only per-destination physical-connection ceiling is DestinationRule
 `connectionPool.tcp.maxConnections` (`Upstream.port_overrides[].max_connections`). File mode rejects
 that field, and only the mesh slice-apply layer projects it. The instance runs the egress-gateway
 topology from a localized mesh document (`FERRUM_MESH_CONFIG_PROTOCOL=file`):
@@ -37,10 +41,17 @@ cargo run -p anvil-lab -- run admission --untrusted-pass
 cargo run -p anvil-lab -- run drain --untrusted-pass
 cargo run -p anvil-lab -- run policy --scenario GW-013-TIMEOUT   # one scenario
 cargo run -p anvil-lab -- up policy       # keep fixtures + gateway up for manual/desktop use
+cargo run -p anvil-lab -- --release v0.9.5 run policy --untrusted-pass   # the earlier release
 ```
 
-- **Binary.** The lab looks for the verified binary in `$ANVIL_LAB_FERRUM_BIN`, then `lab/bin/`, then
-  `../lab-bin/`. A git worktree under `.claude/worktrees/` should set `ANVIL_LAB_FERRUM_BIN` explicitly.
+- **Release.** `--release <tag>` (or `$ANVIL_LAB_RELEASE`) selects `lab/gateway/releases/<tag>.lock`;
+  without it the lab uses `lab/gateway/RELEASE.lock`. `lab/scripts/fetch-gateway.sh [<tag>]` downloads
+  and verifies the matching binary into `lab/bin/<tag>/`.
+- **Binary.** The lab looks for the verified binary in `$ANVIL_LAB_FERRUM_BIN`, then
+  `lab/bin/<release>/<asset>`, then `../lab-bin/<release>/<asset>`, then the legacy unversioned
+  `lab/bin/<asset>` and `../lab-bin/<asset>`. A binary whose sha256 differs from the lock is refused;
+  one in a legacy location is skipped instead (it may belong to another release). A git worktree under
+  `.claude/worktrees/` should set `ANVIL_LAB_FERRUM_BIN` explicitly.
 - **Results.** Each run writes `results/lab/<stamp>-<profile>/`:
   - `summary.json`
   - `<ID>.json`: checks, observed summary, recovery summary and operator-log evidence
@@ -51,8 +62,8 @@ cargo run -p anvil-lab -- up policy       # keep fixtures + gateway up for manua
   Ferrum-like header may only surface as `ferrum.marker.unverified`.
 - **Trust ceiling.** In the trusted pass the destination is a trusted Ferrum profile over plain HTTP,
   so every marker-derived and body-derived claim is capped at `likely`. `X-Gateway-Error` and
-  `X-Gateway-Upstream-Status` can be spoofed on 0.9.5 (see GW-019 below), so `confirmed` is not
-  reachable in any case.
+  `X-Gateway-Upstream-Status` can be spoofed on 0.9.5 and 0.9.7 (see GW-019 below), so `confirmed` is
+  not reachable in any case.
 
 ### Evidence types
 
@@ -151,9 +162,13 @@ connection-failure family:
   DNS.
 - The caller's own certificate is never blamed.
 
-## 3. Live 0.9.5 behaviour recorded by these runs
+## 3. Live 0.9.5 behaviour recorded by these runs (re-observed on 0.9.7)
 
 These results confirm or correct `docs/audit/gateway-lab-config.md` items that were marked "verify live".
+The same scenarios pass unchanged against v0.9.7. The one release difference these profiles show is
+`GW-010-BOT.allow-edge`: an `allow_list` entry ending in punctuation (`anvil-lab-monitor/`) followed by
+a non-word character never matches on 0.9.5 (`\b…\b` anchoring), so the bot pattern wins (403, backend
+untouched); on 0.9.7 it matches and the request reaches the backend (200).
 
 - **Plugin rejections carry no marker.** WAF, bot, OPA deny, OPA fail-closed 503, IP, validator, rate
   limit, AI guard and AI budget responses carry no `X-Gateway-Error`. The operator transaction line has
@@ -164,9 +179,8 @@ These results confirm or correct `docs/audit/gateway-lab-config.md` items that w
   protect `X-Gateway-Upstream-Status` anywhere. It does **not** protect `X-Gateway-Error` on plugin
   rejection responses, which is the basis of the §4 fix.
 - **`ai_response_guard` rejections are stamped `backend_error`** even though the provider answered
-  200. The source catalog (`catalog/ferrum/ferrum-edge-0.9.5/outcomes.json`,
-  `plugin.ai_response_guard.*`) lists no token. This is a catalog drift to correct; that file is outside
-  this change.
+  200. The source catalogs (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7}/outcomes.json`,
+  `plugin.ai_response_guard.*`) list no token. This is a catalog drift still to correct.
 - **The `ai_request_guard` allow-list body** is `"Model '<m>' is not in the allowed models list"` under
   `"error":"Model not allowed"`. The catalog body shape shows only the block-list wording.
 - **The AI budget is reservation-based.** A request whose reservation (prompt estimate plus
@@ -224,8 +238,8 @@ disabling the WAF, TLS or a policy.
 ## 5. Limitations
 
 - **Evidence mode.** Only plain-HTTP trusted profiles are exercised, so `confirmed` gateway
-  attribution is never expected. On 0.9.5 it would require the proposed gateway-owned diagnostic
-  contract (plan §9.4).
+  attribution is never expected. On 0.9.5 and 0.9.7 it would require the proposed gateway-owned
+  diagnostic contract (plan §9.4).
 - **Mocks.** The OPA and AI mocks verify the gateway's adapter behaviour only, not any real policy
   engine or provider.
 - **Not covered here.** ACL denial (GW-011) belongs to the `auth` profile, and stale DP config
@@ -246,7 +260,11 @@ disabling the WAF, TLS or a policy.
 
 ## 6. Stability record
 
-The runs below used `anvil-lab run <profile> --untrusted-pass` against v0.9.5, on macOS 26 arm64, on
+Both releases, `anvil-lab [--release v0.9.5] run all --untrusted-pass` (2026-09-26, macOS 26 arm64):
+policy 48 passed / 0 failed / 1 skipped, admission 8 / 0 / 2 and drain 4 / 0 / 0 on **v0.9.7** and on
+**v0.9.5** (policy gained `GW-010-BOT.allow-edge`, run trusted and untrusted).
+
+The earlier runs below used `anvil-lab run <profile> --untrusted-pass` against v0.9.5, on macOS 26 arm64, on
 2026-09-25. There were three consecutive runs per profile after the final commit.
 
 | Profile | Run 1 | Run 2 | Run 3 | Wall time per run |

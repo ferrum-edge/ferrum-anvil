@@ -11,8 +11,11 @@
 //! * `Draft::new("code", …)`
 //! * helper closures declared as `let name = |code: &str, …|` and called as `name("code", …)`
 //! * `let code = match … { … => "code", … }`
-//! * `format!("ferrum.token.{t}")`, expanded over the Ferrum compatibility
-//!   catalog's public token vocabulary.
+//! * `format!("ferrum.token.{t}")`, expanded over the public token vocabulary
+//!   of every embedded Ferrum compatibility catalog (one per supported release).
+//!
+//! It also checks that every Ferrum catalog on disk is embedded and internally
+//! consistent.
 //!
 //! A `Draft::new` whose statement supplies its own `catalog_text` (adapter
 //! observations worded at the call site) is exempt from needing a catalog
@@ -135,8 +138,14 @@ fn every_emitted_code_has_catalog_wording_and_no_entry_is_stale() {
 
     let mut expected: BTreeMap<String, String> =
         emitted.worded_by_catalog.iter().map(|(c, f)| (c.clone(), f.iter().cloned().collect::<Vec<_>>().join(", "))).collect();
-    for t in &ferrum::catalog().tokens {
-        expected.insert(format!("ferrum.token.{t}"), "rules/ferrum_rules.rs (public token vocabulary)".into());
+    // Every embedded Ferrum release's vocabulary needs wording, not only the default's.
+    for cat in ferrum::catalogs() {
+        for t in &cat.tokens {
+            expected.insert(
+                format!("ferrum.token.{t}"),
+                format!("rules/ferrum_rules.rs (public token vocabulary of {})", cat.compatibility_id),
+            );
+        }
     }
 
     let missing: Vec<String> =
@@ -146,6 +155,119 @@ fn every_emitted_code_has_catalog_wording_and_no_entry_is_stale() {
     let stale: Vec<&String> =
         catalog.findings.keys().filter(|c| !expected.contains_key(*c) && !emitted.self_worded.contains_key(*c)).collect();
     assert!(stale.is_empty(), "catalog entries no rule emits (stale wording or an unrecognised construction pattern): {stale:?}");
+}
+
+/// Every Ferrum compatibility catalog on disk is embedded (and vice versa), and
+/// each one is internally consistent: its own compatibility id and source
+/// commit on every citation, no dangling sibling / fixture / removal ids, and
+/// only its own public tokens in markers and release notes.
+#[test]
+fn ferrum_catalogs_are_embedded_and_internally_consistent() {
+    let dir = repo_root().join("catalog/ferrum");
+    let on_disk: BTreeSet<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().join("outcomes.json").exists())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    let embedded: BTreeSet<String> = ferrum::compatibility_ids().map(String::from).collect();
+    assert_eq!(on_disk, embedded, "every catalog/ferrum/<id>/outcomes.json must be embedded in anvil_diagnostics::ferrum");
+    assert!(embedded.contains(ferrum::DEFAULT_COMPATIBILITY_ID));
+
+    let ident = Regex::new(r"^[a-z][a-z0-9_]*$").unwrap();
+    let mut previous: Option<BTreeSet<String>> = None;
+    for id in ferrum::compatibility_ids() {
+        let raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(id).join("outcomes.json")).unwrap()).unwrap();
+        let mut problems = Vec::new();
+        assert_eq!(raw["compatibility_id"], id);
+        let sha = raw["gateway"]["source_sha"].as_str().expect("gateway.source_sha");
+        assert_eq!(sha.len(), 40, "{id}: full source sha");
+        let tag = raw["gateway"]["release_tag"].as_str().expect("gateway.release_tag");
+        assert_eq!(format!("ferrum-edge-{}", tag.trim_start_matches('v')), id);
+        let tokens: BTreeSet<&str> = raw["public_tokens"].as_array().unwrap().iter().filter_map(|t| t.as_str()).collect();
+        let outcomes = raw["outcomes"].as_array().expect("outcomes");
+        let mut ids = BTreeSet::new();
+        for o in outcomes {
+            let oid = o["id"].as_str().unwrap_or("<no id>").to_string();
+            if !ids.insert(oid.clone()) {
+                problems.push(format!("duplicate outcome {oid}"));
+            }
+            for field in ["family", "condition", "minimum_truthful_diagnosis", "owner", "evidence_visibility"] {
+                if o[field].as_str().is_none_or(|s| s.trim().is_empty()) {
+                    problems.push(format!("{oid}: empty {field}"));
+                }
+            }
+            let sources = o["source"].as_array().map(Vec::as_slice).unwrap_or_default();
+            if sources.is_empty() {
+                problems.push(format!("{oid}: no source citation"));
+            }
+            for s in sources {
+                if s["sha"].as_str() != Some(&sha[..7]) {
+                    problems.push(format!("{oid}: source {} cites sha {} instead of {}", s["path"], s["sha"], &sha[..7]));
+                }
+                if s["line"].as_u64().is_none_or(|l| l == 0) || s["path"].as_str().is_none_or(str::is_empty) {
+                    problems.push(format!("{oid}: malformed source {s}"));
+                }
+            }
+            if let Some(t) = o["public_signal"]["x_gateway_error"].as_str() {
+                for part in t.split('|').map(str::trim).filter(|p| ident.is_match(p)) {
+                    if !tokens.contains(part) {
+                        problems.push(format!("{oid}: x_gateway_error {part:?} is not one of this release's public tokens"));
+                    }
+                }
+            }
+        }
+        for o in outcomes {
+            for s in o["shared_signal_with"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                if !s.as_str().is_some_and(|s| ids.contains(s)) {
+                    problems.push(format!("{}: shared_signal_with names unknown outcome {s}", o["id"]));
+                }
+            }
+        }
+        for (case, list) in raw["fixture_index"].as_object().unwrap() {
+            for x in list.as_array().unwrap() {
+                if !x.as_str().is_some_and(|x| ids.contains(x)) {
+                    problems.push(format!("fixture_index[{case}] names unknown outcome {x}"));
+                }
+            }
+        }
+        for t in raw["marker_semantics"]["tokens"].as_object().map(|m| m.keys().collect::<Vec<_>>()).unwrap_or_default() {
+            if !tokens.contains(t.as_str()) {
+                problems.push(format!("marker_semantics names unknown token {t}"));
+            }
+        }
+        for r in raw["removed_outcomes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let rid = r["id"].as_str().unwrap_or_default();
+            if ids.contains(rid) {
+                problems.push(format!("removed outcome {rid} is still listed"));
+            }
+            if previous.as_ref().is_some_and(|p| !p.contains(rid)) {
+                problems.push(format!("removed outcome {rid} does not exist in the previous release's catalog"));
+            }
+            if r["reason"].as_str().is_none_or(|s| s.trim().is_empty()) {
+                problems.push(format!("removed outcome {rid} has no reason"));
+            }
+        }
+        if raw["drift"].as_array().is_none_or(Vec::is_empty) {
+            problems.push("no drift / reconciliation section".into());
+        }
+        assert!(problems.is_empty(), "{id} catalog problems:\n  {}", problems.join("\n  "));
+        previous = Some(ids);
+    }
+}
+
+/// The desktop profile dialog offers exactly the embedded catalogs, newest
+/// (the default for new profiles) first.
+#[test]
+fn desktop_profile_dialog_offers_the_embedded_catalogs() {
+    let src = std::fs::read_to_string(repo_root().join("apps/desktop/src/Dialogs.tsx")).unwrap();
+    let start = src.find("export const FERRUM_COMPATIBILITY").expect("FERRUM_COMPATIBILITY list in Dialogs.tsx");
+    let list = &src[start..start + src[start..].find("] as const").expect("end of list")];
+    let offered: Vec<String> = Regex::new(r#"id: "([^"]+)""#).unwrap().captures_iter(list).map(|c| c[1].to_string()).collect();
+    let mut embedded: Vec<String> = ferrum::compatibility_ids().map(String::from).collect();
+    embedded.reverse();
+    assert_eq!(offered, embedded, "Dialogs.tsx FERRUM_COMPATIBILITY must list every embedded catalog, newest first");
+    assert_eq!(offered.first().map(String::as_str), Some(ferrum::DEFAULT_COMPATIBILITY_ID));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-10",
+  "version": "2026.09.25-11",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1539,7 +1539,7 @@
       "alternatives": [],
       "does_not_prove": [
         "That this request failed.",
-        "That the gateway (not a backend or a response-header plugin) set the header — both can add it to responses on Ferrum Edge 0.9.5."
+        "That the gateway (not a backend or a response-header plugin) set the header — on every audited Ferrum Edge release both can add it to responses."
       ],
       "remediation": [
         {
@@ -1571,7 +1571,7 @@
     },
     "ferrum.marker.unknown_token": {
       "title": "Unrecognized gateway diagnostic value",
-      "explanation": "The trusted gateway sent X-Gateway-Error: {token}, which is not in the {compat} compatibility catalog. Anvil shows it as-is without guessing what it means.",
+      "explanation": "The trusted gateway sent X-Gateway-Error: {token}, which is not in the vocabulary Anvil knows for this gateway ({basis}). Anvil shows it as-is without guessing what it means.",
       "alternatives": [],
       "does_not_prove": [
         "Any interpretation based on how the value is spelled."
@@ -1586,7 +1586,7 @@
     },
     "ferrum.marker.inconsistent": {
       "title": "Gateway diagnostic value contradicts the response status",
-      "explanation": "The response carries X-Gateway-Error: {token} on HTTP {status}. Ferrum Edge ({compat}) writes its diagnostic values only on 5xx responses (and gRPC trailers), so this value did not come from the gateway's error classification. Anvil does not use it to explain this response.",
+      "explanation": "The response carries X-Gateway-Error: {token} on HTTP {status}. Ferrum Edge writes its diagnostic values only on 5xx responses (and gRPC trailers) ({basis}), so this value did not come from the gateway's error classification. Anvil does not use it to explain this response.",
       "alternatives": [
         "A response-header plugin on this route added the value to a rejection.",
         "An intermediary or the backend added the header."
@@ -1631,7 +1631,7 @@
     },
     "ferrum.token.backend_timeout": {
       "title": "Gateway reported a backend timeout",
-      "explanation": "Ferrum Edge reports ({token}, status {status}) a timeout while exchanging with the backend. The value does not say which stage (upload, waiting for headers, body) timed out. On 0.9.5 any 504, including a backend's own, carries this value.",
+      "explanation": "Ferrum Edge reports ({token}, status {status}) a timeout while exchanging with the backend. The value does not say which stage (upload, waiting for headers, body) timed out. {release_detail}",
       "alternatives": [
         "The backend was slow to produce response headers.",
         "The backend stopped reading the upload.",
@@ -1641,7 +1641,7 @@
       "does_not_prove": [
         "Which stage timed out.",
         "That the backend never received the request.",
-        "That the backend received the request: on 0.9.5 a pooled HTTP/1.1 connection closing at the wrong moment can hold a request until the read timeout without delivering it."
+        "That the backend received the request."
       ],
       "remediation": [
         {
@@ -1653,7 +1653,7 @@
     },
     "ferrum.token.backend_error": {
       "title": "Gateway classified this as a backend error",
-      "explanation": "Ferrum Edge marked this response with {token} (status {status}). On 0.9.5 this value is attached to 5xx responses the backend returned itself, to failures the gateway observed talking to the backend, and to some gateway-only refusals (response-buffer capacity, HTTP/1.1 in-flight limits, egress-policy denials, response-phase policy rejections). It does not say which of these happened.",
+      "explanation": "Ferrum Edge marked this response with {token} (status {status}). The value covers 5xx responses the backend returned itself as well as failures and refusals on the gateway side, and it does not say which of these happened. {release_detail}",
       "alternatives": [
         "The application returned this 5xx itself.",
         "The backend reset or closed the connection.",
@@ -1746,9 +1746,9 @@
     },
     "ferrum.marker.absent": {
       "title": "No gateway diagnostic marker on this error",
-      "explanation": "This {status} came through the trusted gateway profile without an X-Gateway-Error value. The absence of a marker does not identify where the error originated.",
+      "explanation": "This {status} came through the trusted gateway profile without an X-Gateway-Error value. The absence of a marker does not identify where the error originated. {release_detail}",
       "alternatives": [
-        "A gateway plugin rejected the request (for example an authorization dependency failing closed); on Ferrum Edge 0.9.5 plugin rejections carry no X-Gateway-Error value.",
+        "A gateway plugin rejected the request (for example an authorization dependency failing closed); plugin rejections need not carry an X-Gateway-Error value.",
         "The application returned the error and the gateway did not classify it.",
         "An intermediary removed the header.",
         "The error came from a component outside the gateway."
@@ -1796,7 +1796,7 @@
     },
     "ferrum.backend_passthrough": {
       "title": "The backend's own response passed through the gateway",
-      "explanation": "The body is not a gateway-generated error body. On Ferrum Edge 0.9.5, a backend's own {status} passes through with the gateway marker {token}. This is consistent with the application producing the status.",
+      "explanation": "The body is not a gateway-generated error body. On {release}, a backend's own {status} passes through with the gateway marker {token}. This is consistent with the application producing the status.",
       "alternatives": [
         "An intermediary behind the gateway produced it."
       ],
@@ -1813,7 +1813,7 @@
     },
     "ferrum.relayed_backend_response": {
       "title": "The gateway relayed this response from behind it",
-      "explanation": "The body matches a gateway rejection ({outcome}), but the {status} response carries the gateway's own Via hop ({via}). Ferrum Edge 0.9.5 adds that hop only to responses built on its backend path; its authentication and authorization rejections never carry it. This response most likely came from the service behind the gateway, not from the gateway's own checks.",
+      "explanation": "The body matches a gateway rejection ({outcome}), but the {status} response carries the gateway's own Via hop ({via}). {release} adds that hop only to responses built on its backend path; its authentication and authorization rejections never carry it. This response most likely came from the service behind the gateway, not from the gateway's own checks.",
       "alternatives": [
         "Another gateway or proxy behind this one produced the rejection.",
         "The application reuses the gateway's error wording."
@@ -2638,6 +2638,27 @@
       ],
       "confirm_with": [
         "Operator logs for the stream listener at this time (Ferrum Edge: \"socket peer is not in FERRUM_TRUSTED_PROXIES\" or \"did not start with a valid PROXY header\")."
+      ]
+    },
+    "ferrum.catalog.unavailable": {
+      "title": "No audited catalog for this gateway version",
+      "explanation": "The trusted Ferrum profile {profile} declares compatibility {compat}, but Anvil has no source-audited outcome catalog for that version (catalogs available: {available}). Anvil therefore does not compare this response with known gateway outcomes, and reads any X-Gateway-Error value only with the coarse meaning every audited release shares.",
+      "alternatives": [
+        "The gateway behaves like an audited release for this response.",
+        "The gateway release changed a status, body or marker that Anvil's audited catalogs describe differently."
+      ],
+      "does_not_prove": [
+        "Which gateway outcome produced this response.",
+        "That this gateway release uses the same response bodies or markers as an audited release."
+      ],
+      "remediation": [
+        {
+          "text": "Set the profile's compatibility version to the release this gateway actually runs, if Anvil has a catalog for it; otherwise use an Anvil build that supports that release.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The gateway's release version from its operator (for example `ferrum-edge --version`)."
       ]
     }
   },

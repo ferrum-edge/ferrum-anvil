@@ -207,7 +207,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         id: Id::new(),
         schema_version: anvil_domain::SCHEMA_VERSION,
         adapter_version: anvil_transport::ADAPTER_VERSION.to_string(),
-        catalog_version: anvil_diagnostics::catalog_version(),
+        catalog_version: anvil_diagnostics::catalog_version_for(&a.trust),
         compatibility_id: match &a.trust {
             FerrumTrust::Trusted { compatibility_id, .. } => Some(compatibility_id.clone()),
             _ => None,
@@ -320,7 +320,7 @@ pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: Da
         id: Id::new(),
         schema_version: anvil_domain::SCHEMA_VERSION,
         adapter_version: anvil_transport::ADAPTER_VERSION.to_string(),
-        catalog_version: anvil_diagnostics::catalog_version(),
+        catalog_version: anvil_diagnostics::catalog_version_for(&FerrumTrust::NotConfigured),
         compatibility_id: None,
         workspace_id: ctx.workspace_id,
         request_id: ctx.request_id,

@@ -11,7 +11,7 @@ pass.
 |---|---|
 | Source | `ferrum-edge/ferrum-anvil`, branch `claude/anvil-desktop-client-3f372d`, draft PR ferrum-edge/ferrum-anvil#1 |
 | Website (staged, pre-release) | `ferrum-edge/ferrumedge`, branch `claude/anvil-website`, draft PR ferrum-edge/ferrumedge#54. Do not merge before a release. |
-| Gateway compatibility target | Ferrum Edge v0.9.5 release binary (source `20e7603`), checksum-pinned in `lab/gateway/RELEASE.lock` |
+| Gateway compatibility targets | Ferrum Edge v0.9.7 release binary (source `8fed134`, the default pin, `lab/gateway/RELEASE.lock`) and v0.9.5 (source `20e7603`, `lab/gateway/releases/v0.9.5.lock`), both checksum-pinned; each has its own source-audited catalog |
 | Gateway changes | None. The proposed authorized diagnostic API (G01) is specified in `docs/g01-gateway-diagnostic-contract.md` but is not implemented in the gateway. |
 | Signed artifacts, checksums | None: signing is blocked on owner credentials. The release workflow only produces draft releases (see `docs/release.md`). |
 
@@ -38,7 +38,7 @@ pass.
 - **Evidence-based diagnostics.**
   - Deterministic rules run over typed evidence.
   - Each finding has a confidence (confirmed/likely/unknown/conflicting), a scope (the leg it concerns), an owner, what it does not prove, alternatives and next steps.
-  - A source-audited catalog of 528 Ferrum Edge 0.9.5 outcomes backs the Ferrum-specific findings.
+  - Source-audited catalogs back the Ferrum-specific findings: 538 Ferrum Edge 0.9.7 outcomes and 528 Ferrum Edge 0.9.5 outcomes. A declared gateway uses the catalog of its own release; a release without a catalog gets no outcome matching and an explicit finding saying so.
   - Markers count only for declared gateways and are capped at "likely". The seven coarse `X-Gateway-Error` values are never refined into precise causes.
   - No cloud service or LLM is involved.
   - See `docs/diagnostics.md` and `catalog/`.
@@ -56,7 +56,7 @@ pass.
   - Locking the app stops the run and keeps a partial report.
   - See `docs/load.md`.
 - **Real-gateway failure lab.**
-  - 8 profiles (core, policy, admission, drain, tls, auth, streams, cpdp) drive the pinned gateway binary with controllable fixtures.
+  - 8 profiles (core, policy, admission, drain, tls, auth, streams, cpdp) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`.
   - Ground truth is independent of the diagnosis.
   - Every scenario runs twice: trusted, and with the gateway untrusted.
   - See `docs/lab/`.
@@ -77,7 +77,7 @@ Exact commands are in `docs/release.md` → "Local verification record".
 | `cargo test --workspace --exclude anvil-desktop` | 66 test binaries, 433 passed, 0 failed, 0 ignored |
 | Renderer (`tsc`, `vitest`) | clean; 24 passed |
 | Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway) | 9 spec files, 18 tests passed, on both the debug and release-profile e2e builds |
-| `anvil-lab run all --untrusted-pass` | 308 passed, 0 failed, 15 skipped with stated reasons |
+| `anvil-lab [--release v0.9.5] run all --untrusted-pass` | v0.9.7 and v0.9.5 each: 314 passed, 0 failed, 15 skipped with stated reasons |
 | Release check on the production `.app`, `.dmg`, raw binary and CLI, with runtime probe | pass. The e2e build fails as required. |
 | Plaintext-at-rest audit (profile files, WAL/SHM side files, temp files) | no leak |
 | `cargo deny`, license inventory, `gitleaks` over the branch | clean |
@@ -125,7 +125,7 @@ results and reasoned statuses.
   - gRPC-Web carries only unary and server streaming (the protocol's limit) and cannot use server reflection; gRPC over HTTP/3 opens a fresh QUIC connection per call.
   - See `docs/protocols.md` §5.
 - **XML signing.** Anvil does not sign XML. AUTH-030/031 run live with lab-signed fixtures, which Anvil sends verbatim.
-- **Ferrum Edge 0.9.5 only.** Other gateway versions are not validated. The gateway does not relay plain-HTTP/2 trailers.
+- **Ferrum Edge 0.9.5 and 0.9.7 only.** Other gateway versions have no catalog and are not validated. Several 0.9.7 changes are source-audited but not reproduced live (Gateway API route timeouts, Redis quota counting, the WAF `fail_closed` disposition; see `docs/audit/gateway-0.9.7-delta.md`). The gateway relays plain-HTTP/2 trailers inconsistently in the lab (both releases).
 - **Measurements.** Resource numbers come from one machine. Webview helper processes and cold start are not measured.
 
 ## Reproducing
@@ -134,5 +134,7 @@ results and reasoned statuses.
 cargo build --workspace
 lab/scripts/fetch-gateway.sh                     # pinned Ferrum Edge release, checksum-verified
 cargo run -p anvil-lab -- run all --untrusted-pass
+lab/scripts/fetch-gateway.sh v0.9.5              # the earlier supported release
+cargo run -p anvil-lab -- --release v0.9.5 run all --untrusted-pass
 (cd apps/desktop && npm ci && npm run e2e:build && npm run e2e)
 ```

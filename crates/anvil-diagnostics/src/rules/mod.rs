@@ -142,7 +142,7 @@ pub const RULES: &[RuleMeta] = &[
     RuleMeta {
         id: "ferrum.catalog",
         version: 1,
-        summary: "Signature matching against the source-audited Ferrum outcome inventory",
+        summary: "Signature matching against the source-audited Ferrum outcome inventory of the profile's own release; a release without a catalog is reported, never matched",
         fixtures: &[
             "UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010", "GW-011", "GW-012", "GW-013",
             "GW-014", "AUTH-001", "UP-017", "UP-018", "UP-019",

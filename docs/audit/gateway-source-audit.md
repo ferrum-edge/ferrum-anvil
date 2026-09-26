@@ -7,6 +7,7 @@
 | Compared refs | `8ef06f2cece2847b552b7858c73fa9a1a265442f` (tag `v0.9.6`: tagged, never published; the handoff plan's reviewed SHA) and `origin/main` `8fed1346ce2e267eb69c03683cb89ea44d785e0b` (release prep for v0.9.7, which ships the 0.9.6 content) |
 | Audit date | 2026-09-25 |
 | Machine-readable inventory | [`catalog/ferrum/ferrum-edge-0.9.5/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.5/outcomes.json) (528 outcomes) |
+| Next release | v0.9.7: [`gateway-0.9.7-delta.md`](gateway-0.9.7-delta.md) and [`catalog/ferrum/ferrum-edge-0.9.7/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.7/outcomes.json). That audit also corrected three of this catalog's drift notes and two data errors (gRPC status of 15 records, `Content-Type` of backend-failure bodies); the fixes are recorded in this catalog's `drift` section. |
 | Libraries that decide some wire behaviour (v0.9.5 `Cargo.lock`) | hyper 1.9.0, h2 0.4.19, rustls 0.23.40, h3 0.0.8, quinn; vendored patches for reqwest, h3, h3-quinn and tungstenite |
 
 ## Method

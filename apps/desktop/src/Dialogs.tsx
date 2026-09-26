@@ -22,6 +22,13 @@ import { Modal, SecretField, Tabs, humanize } from "./ui";
 
 const now = () => new Date().toISOString();
 
+/** Ferrum Edge releases with a source-audited catalog in anvil-diagnostics
+ * (`catalog/ferrum/<id>/outcomes.json`), newest first; new profiles use the first. */
+export const FERRUM_COMPATIBILITY = [
+  { id: "ferrum-edge-0.9.7", label: "Ferrum Edge 0.9.7" },
+  { id: "ferrum-edge-0.9.5", label: "Ferrum Edge 0.9.5" },
+] as const;
+
 // ------------------------------------------------------------ environments
 
 export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () => void; onChanged: () => void }) {
@@ -250,7 +257,7 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
               <ProfileList
                 items={ints.map((p) => ({ id: p.id, name: p.name, meta: `${p.compatibility_id} · ${p.hosts.map((h) => h.host + (h.port ? `:${h.port}` : "")).join(", ")}${p.require_verified_tls === false ? " · plain-HTTP trust (lab)" : ""}` }))}
                 onEdit={(id) => setEditing({ kind: "ferrum", value: ints.find((p) => p.id === id)! })}
-                onNew={() => setEditing({ kind: "ferrum", value: { ...base, name: "My gateway", kind: "ferrum_gateway", hosts: [{ host: "gateway.example.com" }], compatibility_id: "ferrum-edge-0.9.5", require_verified_tls: true } })}
+                onNew={() => setEditing({ kind: "ferrum", value: { ...base, name: "My gateway", kind: "ferrum_gateway", hosts: [{ host: "gateway.example.com" }], compatibility_id: FERRUM_COMPATIBILITY[0].id, require_verified_tls: true } })}
               />
             </>
           )}
@@ -624,7 +631,12 @@ function FerrumForm({ p, onChange }: { p: IntegrationProfile; onChange: (p: Inte
       <label className="lbl">
         Compatibility catalog
         <select className="field" value={p.compatibility_id} onChange={(e) => onChange({ ...p, compatibility_id: e.target.value })}>
-          <option value="ferrum-edge-0.9.5">Ferrum Edge 0.9.5</option>
+          {FERRUM_COMPATIBILITY.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+          {!FERRUM_COMPATIBILITY.some((c) => c.id === p.compatibility_id) && <option value={p.compatibility_id}>{p.compatibility_id} (no catalog in this build)</option>}
         </select>
       </label>
       <label className="check">

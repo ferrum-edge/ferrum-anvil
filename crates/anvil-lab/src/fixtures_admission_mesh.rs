@@ -1,6 +1,6 @@
-//! The admission profile's second gateway instance: Ferrum Edge 0.9.5 in
+//! The admission profile's second gateway instance: Ferrum Edge (0.9.5 / 0.9.7) in
 //! **mesh mode** (egress-gateway topology, localized file config), used for
-//! UP-018. In 0.9.5 the per-destination physical-connection ceiling
+//! UP-018. In 0.9.5 and 0.9.7 the per-destination physical-connection ceiling
 //! (DestinationRule `connectionPool.tcp.maxConnections`) exists only as a
 //! mesh-projected `Upstream.port_overrides[].max_connections`; file mode
 //! rejects that field, so the live ceiling needs this instance.
@@ -34,7 +34,7 @@ pub const H1_LANE: Target = Target {
     profile_name: "lab admission mesh gateway",
     isolation: "lab-admission-mesh",
 };
-/// Operator id of the materialized egress proxy (0.9.5 escapes `-` in the
+/// Operator id of the materialized egress proxy (0.9.5 and 0.9.7 escape `-` in the
 /// ServiceEntry name as `_dash_`).
 pub const H1_PROXY_ID: &str = "mesh-egress-ferrum-anvil_dash_lab_dash_h1_dash_capped-localhost-19503";
 
@@ -117,7 +117,7 @@ pub fn request(mesh: &MeshInstance, lane: &Target, trusted: bool, path: &str) ->
                     HostBinding { host: "localhost".into(), port: Some(EGRESS_PORT) },
                     HostBinding { host: "127.0.0.1".into(), port: Some(EGRESS_PORT) },
                 ],
-                compatibility_id: "ferrum-edge-0.9.5".into(),
+                compatibility_id: crate::gateway::compatibility_id(),
                 require_verified_tls: false,
                 detail: None,
                 console_url: None,

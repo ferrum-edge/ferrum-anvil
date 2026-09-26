@@ -2,11 +2,15 @@
 // core`): a route whose backend refuses connections. With the gateway
 // declared as a Ferrum gateway profile, the diagnosis attributes the failure
 // to the gateway→backend leg at "likely" (markers are coarse and spoofable on
-// v0.9.5) and never claims TLS or DNS. Skipped without a lab gateway.
+// every audited release) and never claims TLS or DNS. Skipped without a lab
+// gateway. ANVIL_E2E_GATEWAY_COMPAT names the lab's release catalog (default:
+// the lab's default pin, ferrum-edge-0.9.7; `anvil-lab --release v0.9.5 up
+// core` needs ferrum-edge-0.9.5).
 import { $, $$, expect } from "@wdio/globals";
 import { invoke, newRequest, responseTab, screenshot, send, setUrl, waitForWorkbench } from "../helpers";
 
 const gateway = process.env.ANVIL_E2E_GATEWAY?.replace(/\/+$/, "");
+const compat = process.env.ANVIL_E2E_GATEWAY_COMPAT || "ferrum-edge-0.9.7";
 
 (gateway ? describe : describe.skip)("Ferrum gateway — backend connection failure", () => {
   before(async () => {
@@ -18,10 +22,10 @@ const gateway = process.env.ANVIL_E2E_GATEWAY?.replace(/\/+$/, "");
       profile: {
         id: crypto.randomUUID(),
         workspace_id: ws,
-        name: "Lab gateway (v0.9.5)",
+        name: `Lab gateway (${compat})`,
         kind: "ferrum_gateway",
         hosts: [{ host: u.hostname, port: Number(u.port) }],
-        compatibility_id: "ferrum-edge-0.9.5",
+        compatibility_id: compat,
         require_verified_tls: false,
         created_at: now,
         updated_at: now,

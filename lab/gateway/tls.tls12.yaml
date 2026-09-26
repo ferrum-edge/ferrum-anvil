@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "tls", TLS-1.2-only instance (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "tls", TLS-1.2-only instance (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: TLS-005.tls12, TLS-006.tls12, TLS-008.tls12, TLS-X01 (HTTPS 127.0.0.1:18344).
 # Settings:  tls.tls12.conf. Backend: the tls profile's echo fixture 127.0.0.1:19309.

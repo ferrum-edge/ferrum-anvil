@@ -1,9 +1,11 @@
-# Real-gateway failure lab: the pinned Ferrum Edge release binary (verified
-# against lab/gateway/RELEASE.lock) plus controllable fixtures, running the
-# failure-matrix scenarios through Anvil's engine with and without the
-# destination declared as a trusted Ferrum profile.
-#   PR (engine/diagnostics/lab changes): core profile
-#   nightly + manual:                    all profiles
+# Real-gateway failure lab: a pinned Ferrum Edge release binary (verified
+# against lab/gateway/RELEASE.lock, or lab/gateway/releases/<release>.lock)
+# plus controllable fixtures, running the failure-matrix scenarios through
+# Anvil's engine with and without the destination declared as a trusted
+# Ferrum profile.
+#   PR (engine/diagnostics/lab changes): core profile, default pin
+#   nightly:                             all profiles, default pin + every earlier supported release
+#   manual:                              chosen profile and release
 name: Lab
 
 on:
@@ -24,6 +26,10 @@ on:
         description: Lab profile to run (core, all, ...)
         default: all
         required: true
+      release:
+        description: Gateway release (lab/gateway/releases/<release>.lock); empty = RELEASE.lock
+        default: ""
+        required: false
 
 permissions:
   contents: read
@@ -38,13 +44,18 @@ env:
 
 jobs:
   lab:
-    name: Lab · ${{ matrix.os }}
+    # The default pin keeps the historical job name (required-check names stay stable).
+    name: Lab · ${{ matrix.os }}${{ matrix.release && format(' · {0}', matrix.release) || '' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
+        # "" = the default pin (RELEASE.lock). Nightly also re-runs the earlier supported release.
+        release: ${{ fromJSON(github.event_name == 'schedule' && '["", "v0.9.5"]' || format('["{0}"]', inputs.release || '')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      ANVIL_LAB_RELEASE: ${{ matrix.release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,7 +65,7 @@ jobs:
           tauri-deps: "false"
           node: "false"
           cache-key: lab
-      - name: Lint gateway lab profiles (plugin keys from the pinned source)
+      - name: Lint gateway lab profiles (plugin keys accepted by every supported release)
         run: ruby lab/gateway/lint-profiles.rb
       - name: Fetch and verify the pinned Ferrum Edge gateway
         env:
@@ -73,7 +84,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lab-results-${{ matrix.os }}-${{ github.run_id }}
+          name: lab-results-${{ matrix.os }}-${{ matrix.release || 'pinned' }}-${{ github.run_id }}
           path: |
             results/lab/**
             lab/.run/**/*.log

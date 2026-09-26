@@ -174,6 +174,28 @@ impl AuthFixtures {
         anvil_auth::jwt::sign(JwtAlgorithm::ES256, key, &claims, &extra, Some(kid), chrono::Utc::now()).expect("lab issuer token")
     }
 
+    /// An otherwise valid access token whose `iss` claim is the given JSON
+    /// value (e.g. an array containing the trusted issuer).
+    pub fn issuer_token_with_iss(&self, iss: serde_json::Value) -> String {
+        let claims = JwtClaims {
+            iss: None,
+            sub: Some("alice".into()),
+            aud: Some(AUDIENCE.into()),
+            expires_in_secs: Some(300),
+            not_before_offset_secs: None,
+            extra_json: String::new(),
+        };
+        anvil_auth::jwt::sign(
+            JwtAlgorithm::ES256,
+            &self.issuer_key,
+            &claims,
+            &serde_json::json!({ "iss": iss }),
+            Some(ISSUER_KID),
+            chrono::Utc::now(),
+        )
+        .expect("lab issuer token")
+    }
+
     /// A valid access token from the published key.
     pub fn good_token(&self) -> String {
         self.issuer_token(&self.issuer_key, ISSUER_KID, ISSUER, AUDIENCE, 300, serde_json::Value::Null)

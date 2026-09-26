@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "tls" (ferrum-edge v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "tls" (ferrum-edge v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: TLS-001/002/005/006/008/009/013..016 and AUTH-026 (frontend mTLS on HTTPS 127.0.0.1:18343),
 #            UP-004..UP-008 and UP-016 (backend TLS, via plaintext listener 127.0.0.1:18380),

@@ -5,7 +5,7 @@
 //! Config: `lab/gateway/admission.{conf,yaml}`.
 //!
 //! A second instance runs the same binary in **mesh mode** (egress-gateway
-//! topology, `lab/gateway/admission-mesh.{conf,json}`) for UP-018: in 0.9.5 a
+//! topology, `lab/gateway/admission-mesh.{conf,json}`) for UP-018: in 0.9.5 and 0.9.7 a
 //! per-destination physical-connection ceiling (DestinationRule
 //! `maxConnections`) exists only on the mesh slice-apply path.
 
@@ -164,7 +164,7 @@ fn up015(env: &Env) -> Fut<'_> {
         if env.trusted {
             c.scope(&o, "ferrum.token.backend_error", SourceScope::Unknown);
             caveat(&mut c, &o, "ferrum.token.backend_error", "gateway-local limit");
-            // 0.9.5 has two sources of this exact signal (the core budget and a
+            // 0.9.5 and 0.9.7 have two sources of this exact signal (the core budget and a
             // custom plugin without a declared body producer): the honest
             // result is the ambiguous finding naming the buffer-capacity cause.
             let ids = catalog_ids(&o);
@@ -433,10 +433,11 @@ const SKIPPED: &[(&str, &str, &str)] = &[
     (
         "UP-018-H2",
         "Backend connection ceiling, pooled lanes (direct H2 / gRPC / H3)",
-        "Not reachable with a single-destination lab on 0.9.5: the direct-H2 pool multiplexes, so a maxConnections=1 ceiling is \
-         never re-dialled - with SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s behind the first on the one \
-         connection (200, one backend connection), and a backend that GOAWAYs each connection made the pool reuse the draining \
-         connection (502 connection_failure, operator error_class connection_pool_error = pool cancellation, not the ceiling). \
+        "Not reachable with a single-destination lab on {release}: the direct-H2 pool multiplexes, so a maxConnections=1 ceiling \
+         is never re-dialled. Observed live on 0.9.5: with SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s \
+         behind the first on the one connection (200, one backend connection), and a backend that GOAWAYs each connection made \
+         the pool reuse the draining connection (502 connection_failure, operator error_class connection_pool_error = pool \
+         cancellation, not the ceiling). \
          The pooled-lane public signal (502 connection_failure \"Backend unavailable\") is covered by the contract test \
          up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family (crates/anvil-diagnostics/tests/upstream_setup_contract.rs).",
     ),
