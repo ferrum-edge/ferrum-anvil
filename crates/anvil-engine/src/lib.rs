@@ -108,7 +108,9 @@ impl Engine {
         if let Some(p) = self.tls.lock().get(key) {
             return Ok(p.clone());
         }
-        let p = Arc::new(anvil_transport::tls::prepare(s)?);
+        let mut p = anvil_transport::tls::prepare(s)?;
+        p.profile_key = key.to_string();
+        let p = Arc::new(p);
         let mut cache = self.tls.lock();
         if let Some((variant, _)) = key.rsplit_once('|') {
             let prefix = format!("{variant}|");
@@ -136,10 +138,12 @@ impl Engine {
     }
 
     /// Clear every per-session sensitive cache (on vault lock, workspace
-    /// close or explicit reset): pooled authenticated connections, tokens,
-    /// Workload API SVIDs, cookies and prepared client identities.
+    /// close or explicit reset): pooled authenticated connections, TLS/QUIC
+    /// session tickets, tokens, Workload API SVIDs, cookies and prepared
+    /// client identities.
     pub fn clear_sensitive_state(&self) {
         self.http.pool.clear();
+        self.http.tickets.clear();
         self.h3.clear();
         if let Some(c) = &self.grpc_channels {
             c.clear();
@@ -152,6 +156,14 @@ impl Engine {
 
     pub fn clear_isolation(&self, isolation: &str) {
         self.http.pool.clear_isolation(isolation);
+        self.http.tickets.clear_isolation(isolation);
+        self.h3.clear_isolation(isolation);
         self.cookies.lock().remove(isolation);
+    }
+
+    /// Session tickets held for 0-RTT, over TCP and QUIC (for tests and the
+    /// lock check).
+    pub fn session_tickets_held(&self) -> usize {
+        self.http.tickets.tickets_held() + self.h3.tickets.tickets_held()
     }
 }

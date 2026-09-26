@@ -7,6 +7,7 @@ import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
 import { ProxyHeaderEvidence } from "./ProxyProtocolEditor";
 import { WsExtensionsEvidence } from "./WsDeflateEditor";
 import { WorkloadEvidenceView } from "./WorkloadApi";
+import { EarlyDataEvidence, earlyDataSummary } from "./EarlyData";
 
 type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
 
@@ -337,8 +338,19 @@ function Timing({ attempt }: { attempt?: AttemptObservation }) {
           <tr><td className="k">Response headers (logical)</td><td className="v">{fmtBytes(attempt.bytes.response_headers_logical)}</td></tr>
           <tr><td className="k">Response body (wire)</td><td className="v">{fmtBytes(attempt.bytes.response_body_wire)}</td></tr>
           <tr><td className="k">Connection bytes written / read</td><td className="v">{fmtBytes(attempt.bytes.connection_bytes_written)} / {fmtBytes(attempt.bytes.connection_bytes_read)} (connection-scoped, incl. TLS)</td></tr>
+          {attempt.early_data?.offered && (
+            <tr>
+              <td className="k">Sent as 0-RTT early data{attempt.early_data.bytes_estimated ? " (estimated)" : ""}</td>
+              <td className="v">
+                {fmtBytes(attempt.early_data.bytes)} — {earlyDataSummary(attempt.early_data)}
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
+      {attempt.early_data?.offered && (
+        <p className="hint">With 0-RTT early data the request is written before the handshake completes, so the request-write phase overlaps the handshake phase.</p>
+      )}
     </div>
   );
 }
@@ -361,7 +373,13 @@ function PhaseRow({ p, total }: { p: PhaseTiming; total: number }) {
 
 function Connection({ attempt }: { attempt?: AttemptObservation }) {
   const c = attempt?.connection;
-  if (!c) return <div className="faint">No connection was established for this attempt.</div>;
+  if (!c)
+    return (
+      <div className="col">
+        <div className="faint">No connection was established for this attempt.</div>
+        {attempt?.early_data && <EarlyDataEvidence e={attempt.early_data} />}
+      </div>
+    );
   return (
     <div className="col">
       <table className="grid">
@@ -378,6 +396,7 @@ function Connection({ attempt }: { attempt?: AttemptObservation }) {
       </table>
       {c.tunnel && <TunnelView t={c.tunnel} />}
       {c.tls && <TlsView t={c.tls} title={innerTlsTitle(c.tunnel?.kind, c.tls.version)} />}
+      {attempt?.early_data && <EarlyDataEvidence e={attempt.early_data} />}
       {c.proxy_header && <ProxyHeaderEvidence h={c.proxy_header} />}
     </div>
   );
@@ -477,6 +496,22 @@ function TlsView({ t, title = "TLS" }: { t: TlsObservation; title?: string }) {
   );
 }
 
+function attemptReason(a: AttemptObservation): string {
+  const r = a.reason;
+  switch (r.reason) {
+    case "redirect":
+      return `redirect ${r.status}`;
+    case "retry":
+      return `retry after ${humanize(r.after)}`;
+    case "protocol_fallback":
+      return `fallback from ${r.from}`;
+    case "too_early_retry":
+      return "retry after 425 Too Early (after the handshake)";
+    default:
+      return humanize(r.reason);
+  }
+}
+
 function Attempts({ attempts }: { attempts: AttemptObservation[] }) {
   return (
     <table className="grid">
@@ -487,9 +522,12 @@ function Attempts({ attempts }: { attempts: AttemptObservation[] }) {
         {attempts.map((a) => (
           <tr key={a.index}>
             <td className="k">{a.index}</td>
-            <td className="k">{a.reason.reason === "redirect" ? `redirect ${a.reason.status}` : a.reason.reason === "retry" ? `retry after ${humanize(a.reason.after)}` : a.reason.reason === "protocol_fallback" ? `fallback from ${a.reason.from}` : humanize(a.reason.reason)}</td>
+            <td className="k">{attemptReason(a)}</td>
             <td className="v">{a.method} {a.url}</td>
-            <td className="v">{a.response_status ?? (a.failure ? humanize(a.failure.kind) : "—")}</td>
+            <td className="v">
+              {a.response_status ?? (a.failure ? humanize(a.failure.kind) : "—")}
+              {a.early_data && <span className="faint"> · {earlyDataSummary(a.early_data)}</span>}
+            </td>
             <td className="k">{humanize(a.dispatch)}</td>
             <td className="k">{fmtUs(a.duration_us)}</td>
           </tr>

@@ -86,6 +86,7 @@ impl TokenHttp for EngineTokenHttp<'_> {
                 // The token endpoint is another listener: never the request's PROXY header.
                 proxy_header: None,
                 proxy_header_withheld: None,
+                early_data: anvil_transport::http::EarlyDataIntent::Off,
             };
             let mut outs = self.engine.http.execute(&plan, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
             let out = outs.pop().ok_or("no attempt")?;

@@ -244,6 +244,7 @@ export interface LoadRefusal {
     | "udp_masque"
     | "udp_hbone"
     | "hbone_persistent"
+    | "early_data"
     | "incomplete_request";
   request_id?: string | null;
   message: string;

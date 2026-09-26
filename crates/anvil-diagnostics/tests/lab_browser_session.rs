@@ -17,6 +17,7 @@ const AUTHORIZE: &str = "http://127.0.0.1:19102/authorize?response_type=code&cli
 
 fn attempt(index: u32, reason: AttemptReason, url: &str, status: u16) -> AttemptObservation {
     AttemptObservation {
+        early_data: None,
         index,
         reason,
         method: "GET".into(),

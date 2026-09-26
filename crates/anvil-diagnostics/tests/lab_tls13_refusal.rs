@@ -42,6 +42,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
     let mut failure = TransportFailure::new(Phase::AwaitResponseHeaders, s.kind, "connection closed");
     failure.tls_alert = s.alert.map(|a| a.to_string());
     AttemptObservation {
+        early_data: None,
         index: 0,
         reason: AttemptReason::Initial,
         method: "GET".into(),

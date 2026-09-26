@@ -23,6 +23,7 @@ import type {
 } from "./generated/contracts";
 import { AuthEditor } from "./AuthEditor";
 import { DatagramEnvelopeEditor, ProxyHeaderEditor } from "./ProxyProtocolEditor";
+import { EarlyDataSettings } from "./EarlyData";
 import { KeyValueEditor, Tabs, fmtBytes, humanize, useDebounced } from "./ui";
 import { WsDeflateEditor } from "./WsDeflateEditor";
 
@@ -1105,6 +1106,7 @@ export function SettingsOverridesEditor({
           UDP cannot go through “{selectedProxy.name}”: {selectedProxy.kind === "socks5" ? "SOCKS5" : "HTTP CONNECT"} tunnels carry TCP only. Choose an HBONE proxy profile or the MASQUE option on the UDP tab; otherwise the request is refused before anything is sent.
         </div>
       )}
+      <EarlyDataSettings value={s.early_data} onChange={(early_data) => upd({ early_data })} />
     </div>
   );
 }
@@ -1168,6 +1170,14 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
           <tr><td className="k">Proxy</td><td className="v">{eff.proxy ?? "none"}</td></tr>
           <tr><td className="k">Ferrum trust</td><td className="v">{eff.ferrum_trust ?? "not a declared Ferrum gateway (markers are unverified)"}</td></tr>
           <tr><td className="k">HTTP version</td><td className="v">{humanize(eff.settings.http_version)}</td></tr>
+          <tr>
+            <td className="k">0-RTT early data</td>
+            <td className="v">
+              {eff.settings.early_data?.enabled
+                ? `on — GET, HEAD, OPTIONS${(eff.settings.early_data.extra_methods ?? []).length ? `, ${(eff.settings.early_data.extra_methods ?? []).join(", ")}` : ""} (replayable)`
+                : "off"}
+            </td>
+          </tr>
           <tr><td className="k">Body</td><td className="v">{fmtBytes(eff.body_bytes)} {eff.content_type ? `· ${eff.content_type}` : ""}</td></tr>
         </tbody>
       </table>

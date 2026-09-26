@@ -432,6 +432,9 @@ export type AttemptReason =
   | {
       scheme: string;
       reason: "auth_challenge";
+    }
+  | {
+      reason: "too_early_retry";
     };
 /**
  * Which peer identity check the TLS verifier applied (or would have applied,
@@ -512,6 +515,28 @@ export type TunnelKind = "hbone" | "connect_udp";
  * via the `definition` "DispatchState".
  */
 export type DispatchState = "unknown" | "not_dispatched" | "sent" | "may_have_been_sent";
+/**
+ * Which handshake would carry the early data.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "EarlyDataTransport".
+ */
+export type EarlyDataTransport = "quic" | "tls";
+/**
+ * Why an attempt covered by the early-data opt-in did not send early data.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "EarlyDataNotUsed".
+ */
+export type EarlyDataNotUsed =
+  | "no_ticket"
+  | "ticket_without_early_data"
+  | "method_not_eligible"
+  | "connection_reused"
+  | "retry_after_too_early"
+  | "alpn_not_fixed"
+  | "through_proxy"
+  | "handshake_completed_first";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "BodyCompleteness".
@@ -1491,6 +1516,10 @@ export interface SettingsOverrides {
   keepalive?: boolean | null;
   infer_content_type?: boolean | null;
   integration_profile_id?: Id | null;
+  /**
+   * TLS 1.3 / QUIC 0-RTT early data (off unless a layer enables it).
+   */
+  early_data?: EarlyDataPolicy | null;
 }
 /**
  * Partial timeout overrides (each class independently inheritable).
@@ -1572,6 +1601,30 @@ export interface Limits {
   max_decoded_bytes: number;
   max_response_header_bytes: number;
   max_request_body_bytes: number;
+}
+/**
+ * TLS 1.3 / QUIC 0-RTT early data (RFC 8446 §2.3, RFC 9001 §4.6) with the
+ * RFC 8470 semantics. Off by default: data sent before the handshake
+ * completes can be replayed by anyone on the path, so only requests that are
+ * safe to repeat may use it.
+ *
+ * With `enabled`, a request whose method is eligible (GET, HEAD, OPTIONS, and
+ * the idempotent methods listed in `extra_methods`) is sent as early data on
+ * a new connection that resumes an earlier session of the same workspace, TLS
+ * profile, client identity, server name and port. Any other method is sent
+ * normally, after the handshake, and the record says why early data was not
+ * used. A non-idempotent method in `extra_methods` is refused before traffic.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "EarlyDataPolicy".
+ */
+export interface EarlyDataPolicy {
+  enabled: boolean;
+  /**
+   * Idempotent methods allowed in early data besides GET, HEAD and OPTIONS
+   * (`PUT`, `DELETE`, `TRACE`). Only an explicit choice adds them.
+   */
+  extra_methods?: string[];
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1697,6 +1750,7 @@ export interface EffectiveSettings {
   keepalive: boolean;
   infer_content_type: boolean;
   integration_profile_id?: Id | null;
+  early_data?: EarlyDataPolicy1;
   /**
    * Field path → layer label ("app", "workspace", "folder:<name>", "request", "run").
    */
@@ -1729,6 +1783,27 @@ export interface Timeouts {
    * Whole-attempt deadline.
    */
   total_ms?: number | null;
+}
+/**
+ * TLS 1.3 / QUIC 0-RTT early data (RFC 8446 §2.3, RFC 9001 §4.6) with the
+ * RFC 8470 semantics. Off by default: data sent before the handshake
+ * completes can be replayed by anyone on the path, so only requests that are
+ * safe to repeat may use it.
+ *
+ * With `enabled`, a request whose method is eligible (GET, HEAD, OPTIONS, and
+ * the idempotent methods listed in `extra_methods`) is sent as early data on
+ * a new connection that resumes an earlier session of the same workspace, TLS
+ * profile, client identity, server name and port. Any other method is sent
+ * normally, after the handshake, and the record says why early data was not
+ * used. A non-idempotent method in `extra_methods` is refused before traffic.
+ */
+export interface EarlyDataPolicy1 {
+  enabled: boolean;
+  /**
+   * Idempotent methods allowed in early data besides GET, HEAD and OPTIONS
+   * (`PUT`, `DELETE`, `TRACE`). Only an explicit choice adds them.
+   */
+  extra_methods?: string[];
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -2036,6 +2111,10 @@ export interface AttemptObservation {
   response_status?: number | null;
   failure?: TransportFailure | null;
   duration_us: number;
+  /**
+   * 0-RTT early data evidence, when the early-data opt-in applied.
+   */
+  early_data?: EarlyDataObservation | null;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -2362,6 +2441,64 @@ export interface ByteCounts {
   response_body_decoded?: number | null;
   connection_bytes_written?: number | null;
   connection_bytes_read?: number | null;
+}
+/**
+ * 0-RTT evidence for one attempt. Present only when the early-data opt-in
+ * applied to the attempt.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "EarlyDataObservation".
+ */
+export interface EarlyDataObservation {
+  transport: EarlyDataTransport;
+  /**
+   * The request method is eligible under the policy.
+   */
+  method_eligible: boolean;
+  /**
+   * A session ticket was taken from the ticket cache for this connection,
+   * so the ClientHello offered resumption.
+   */
+  resumption_attempted: boolean;
+  /**
+   * The server resumed the session (no certificate exchange). `None` when
+   * resumption was not attempted or the handshake did not complete.
+   */
+  resumption_accepted?: boolean | null;
+  /**
+   * The ClientHello offered early data and the request was written into it.
+   */
+  offered: boolean;
+  /**
+   * The server accepted (`true`) or rejected (`false`) the early data.
+   * `None` when none was offered or the handshake did not complete.
+   */
+  accepted?: boolean | null;
+  /**
+   * Request bytes written before the handshake completed: exact TLS
+   * plaintext over TCP; over HTTP/3 the logical request (estimated QPACK
+   * header size plus body bytes), without QUIC framing.
+   */
+  bytes: number;
+  bytes_estimated?: boolean;
+  /**
+   * The server rejected the early data, so the transport sent the same
+   * request again after the handshake. This is how TLS/QUIC deliver
+   * rejected early data (the server discarded it unread), not an
+   * application retry.
+   */
+  resent_after_handshake?: boolean;
+  not_used?: EarlyDataNotUsed | null;
+  /**
+   * Session tickets that arrived for this server and TLS profile while the
+   * attempt ran.
+   */
+  tickets_received: number;
+  /**
+   * `max_early_data_size` of the newest ticket that arrived (0: the server
+   * does not allow early data with its tickets).
+   */
+  ticket_max_early_data?: number | null;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -2753,6 +2890,10 @@ export interface SettingsOverrides1 {
   keepalive?: boolean | null;
   infer_content_type?: boolean | null;
   integration_profile_id?: Id | null;
+  /**
+   * TLS 1.3 / QUIC 0-RTT early data (off unless a layer enables it).
+   */
+  early_data?: EarlyDataPolicy | null;
 }
 /**
  * Claims editor for the JWT helper. Anvil signs only with key material the
@@ -4016,6 +4157,10 @@ export interface SettingsOverrides2 {
   keepalive?: boolean | null;
   infer_content_type?: boolean | null;
   integration_profile_id?: Id | null;
+  /**
+   * TLS 1.3 / QUIC 0-RTT early data (off unless a layer enables it).
+   */
+  early_data?: EarlyDataPolicy | null;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -4943,6 +5088,10 @@ export interface SettingsOverrides3 {
   keepalive?: boolean | null;
   infer_content_type?: boolean | null;
   integration_profile_id?: Id | null;
+  /**
+   * TLS 1.3 / QUIC 0-RTT early data (off unless a layer enables it).
+   */
+  early_data?: EarlyDataPolicy | null;
 }
 /**
  * Unit ledger of the measured window: one entry per `Engine::execute` call,

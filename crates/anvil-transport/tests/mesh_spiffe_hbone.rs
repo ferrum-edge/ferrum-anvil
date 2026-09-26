@@ -93,6 +93,7 @@ fn plan(url: &str, tls: Option<TlsSettings>, proxy: Option<ProxyPlan>) -> HttpPl
         tls: tls.map(|t| Arc::new(tls::prepare(&t).expect("tls profile"))),
         isolation: "mesh-test".into(),
         display_url: url.into(),
+        early_data: anvil_transport::http::EarlyDataIntent::Off,
     }
 }
 

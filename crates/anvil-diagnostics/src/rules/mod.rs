@@ -4,6 +4,7 @@
 mod application;
 mod auth_session;
 mod dispatch;
+mod early_data;
 mod ferrum_rules;
 mod http_status;
 mod mesh;
@@ -215,6 +216,12 @@ pub const RULES: &[RuleMeta] = &[
         summary: "HTTP/3 forced mode and fallback reporting",
         fixtures: &["PROTO-006", "PROTO-007", "PROTO-008"],
     },
+    RuleMeta {
+        id: "protocol.early_data",
+        version: 1,
+        summary: "TLS 1.3 / QUIC 0-RTT early data: accepted (replay note), rejected and re-sent by the transport, no ticket, tickets without early data; 425 Too Early with the retry outcome",
+        fixtures: &["EARLY-001", "EARLY-002", "EARLY-003", "EARLY-004", "EARLY-005", "EARLY-006"],
+    },
 ];
 
 /// Whether the execution stopped at an interactive login step (AUTH-017).
@@ -233,6 +240,7 @@ pub fn run_all(ctx: &Ctx<'_>, drafts: &mut Vec<Draft>, warnings: &mut Vec<Outcom
     ferrum_rules::rules(ctx, drafts, warnings);
     application::rules(ctx, drafts, warnings);
     protocols::rules(ctx, drafts, warnings);
+    early_data::rules(ctx, drafts);
     proxy_header::rules(ctx, drafts);
     auth_session::rules(ctx, drafts);
     workload::rules(ctx, drafts);

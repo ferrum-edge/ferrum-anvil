@@ -37,6 +37,18 @@ against it).
   exports and support bundles; query-string key warning.
 - **Replay by the client itself:** HMAC nonce, DPoP proof and JWT regenerated per
   send; no automatic retry of possibly-processed non-idempotent requests.
+- **Replay of 0-RTT early data by the network:** data sent before a TLS 1.3 / QUIC
+  handshake completes can be captured and replayed to the server by anyone on the
+  path (RFC 8446 §8). Early data is off by default and opt-in per settings layer;
+  only GET, HEAD, OPTIONS and explicitly listed idempotent methods (PUT, DELETE,
+  TRACE) are sent as early data, a policy listing any other method is refused
+  before traffic, imports turn the opt-in off, and load runs refuse it. An accepted
+  early request carries a finding that says it could be replayed. The retry after
+  `425 Too Early` happens once, after the handshake, only for eligible requests.
+- **Session tickets:** the tickets early data needs are secrets that let the
+  holder resume a session. They are kept in memory only, per workspace, transport,
+  host and port, TLS profile and client identity, never persisted or exported, and
+  dropped with pooled connections and OAuth tokens when the vault locks.
 - **Accidental load against third parties:** explicit preflight acknowledgement,
   destination list, imported plans untrusted, bounded arrivals and abort rules.
 - **Malicious bundle trying to enable insecure settings:** import normalisation

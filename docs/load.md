@@ -70,6 +70,7 @@ with a `RefusalCode`; the editor shows it and cannot start the run):
 | `udp_masque` | UDP through a MASQUE (CONNECT-UDP) proxy would open a QUIC connection and tunnel per exchange; there are no tunnel denominators. |
 | `udp_hbone` | UDP through a mesh HBONE datagram tunnel would open an mTLS connection and tunnel per exchange; there are no tunnel denominators. |
 | `hbone_persistent` | HTTP or gRPC through a mesh HBONE proxy in persistent mode: tunnels carry one execution's identity and are never pooled, so persistent mode could not be honoured. Fresh mode is allowed (it is what would happen). |
+| `early_data` | The request enables 0-RTT early data: handshakes that share session tickets are serialized (their evidence is per connection) and the report has no early-data denominators. |
 | `incomplete_request` | A gRPC request without a service, method or schema. |
 
 Interactive sessions (`Engine::open_session`) are never used by a load run:

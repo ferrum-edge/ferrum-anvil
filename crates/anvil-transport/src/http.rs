@@ -67,6 +67,42 @@ pub struct HttpPlan {
     /// Why a configured header is not sent on this attempt (a redirect to
     /// another listener); recorded as a `not_applicable` header phase.
     pub proxy_header_withheld: Option<String>,
+    /// How the 0-RTT early-data opt-in applies to this attempt.
+    pub early_data: EarlyDataIntent,
+}
+
+/// How the early-data opt-in applies to one attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EarlyDataIntent {
+    /// The opt-in is off: ordinary connections, no session-ticket cache.
+    #[default]
+    Off,
+    /// Send the request as early data on a new connection that resumes a
+    /// ticket allowing it (otherwise after the handshake, with the reason).
+    Send,
+    /// Resume a ticket when there is one, but never send early data.
+    Hold(EarlyDataNotUsed),
+}
+
+/// The evidence an attempt under the opt-in starts from.
+pub(crate) fn early_observation(intent: EarlyDataIntent, transport: EarlyDataTransport) -> EarlyDataObservation {
+    EarlyDataObservation {
+        transport,
+        method_eligible: !matches!(intent, EarlyDataIntent::Hold(EarlyDataNotUsed::MethodNotEligible)),
+        resumption_attempted: false,
+        resumption_accepted: None,
+        offered: false,
+        accepted: None,
+        bytes: 0,
+        bytes_estimated: false,
+        resent_after_handshake: false,
+        not_used: match intent {
+            EarlyDataIntent::Hold(r) => Some(r),
+            _ => None,
+        },
+        tickets_received: 0,
+        ticket_max_early_data: None,
+    }
 }
 
 pub struct AttemptOutput {
@@ -161,6 +197,10 @@ impl Pooled {
 #[derive(Default)]
 pub struct Pool {
     idle: Mutex<HashMap<String, Vec<Pooled>>>,
+    /// The connection that answered `425 Too Early` to early data, kept
+    /// (even with connection reuse off) for the engine's one retry on it
+    /// after the handshake (RFC 8470 §5.2).
+    too_early: Mutex<HashMap<String, Pooled>>,
 }
 
 const MAX_IDLE_PER_KEY: usize = 8;
@@ -205,11 +245,13 @@ impl Pool {
     /// Drop every pooled connection (e.g. on vault lock or workspace switch).
     pub fn clear(&self) {
         self.idle.lock().clear();
+        self.too_early.lock().clear();
     }
 
     /// Drop pooled connections whose key starts with an isolation prefix.
     pub fn clear_isolation(&self, isolation: &str) {
         self.idle.lock().retain(|k, _| !k.starts_with(&format!("{isolation}|")));
+        self.too_early.lock().retain(|k, _| !k.starts_with(&format!("{isolation}|")));
     }
 }
 
@@ -241,6 +283,9 @@ fn pool_key(plan: &HttpPlan) -> String {
 #[derive(Default)]
 pub struct HttpTransport {
     pub pool: Pool,
+    /// TLS 1.3 session tickets for early data over TCP (used only under the
+    /// early-data opt-in).
+    pub tickets: crate::tickets::TicketCache,
 }
 
 fn alpn_for(policy: HttpVersionPolicy) -> &'static [&'static str] {
@@ -299,11 +344,41 @@ impl HttpTransport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> (AttemptOutput, bool) {
+        let mut early = (plan.early_data != EarlyDataIntent::Off && plan.https).then(|| EarlyAttempt {
+            obs: early_observation(plan.early_data, EarlyDataTransport::Tls),
+            info: None,
+            send: false,
+            t0: None,
+        });
+        let (mut out, redispatch) = self.execute_once_inner(plan, key, index, reason, allow_pool, events, cancel, &mut early).await;
+        if let Some(e) = early {
+            let t0 = e.t0.unwrap_or_else(Instant::now);
+            e.finish(&mut out.observation, t0);
+        }
+        (out, redispatch)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_once_inner(
+        &self,
+        plan: &HttpPlan,
+        key: &str,
+        index: u32,
+        reason: AttemptReason,
+        allow_pool: bool,
+        events: &EventCtx,
+        cancel: &CancellationToken,
+        early: &mut Option<EarlyAttempt>,
+    ) -> (AttemptOutput, bool) {
         let started_at = Utc::now();
         let mut rec = Recorder::new(index, events.clone());
+        if let Some(e) = early.as_mut() {
+            e.t0 = Some(rec.t0);
+        }
         events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: index });
         let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let mut obs = AttemptObservation {
+            early_data: None,
             index,
             reason,
             method: plan.method.to_string(),
@@ -365,8 +440,15 @@ impl HttpTransport {
 
         // ---- acquire a connection ----
         let q = rec.start(Phase::Queue);
-        let pooled = if allow_pool { self.pool.checkout(key) } else { None };
-        let (conn, reused) = match pooled {
+        // The retry after `425 Too Early` goes out on the connection that
+        // answered it, whose handshake is complete.
+        let handed = match plan.early_data {
+            EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly) => self.pool.too_early.lock().remove(key).filter(|p| p.is_usable()),
+            _ => None,
+        };
+        let pooled = handed.or_else(|| if allow_pool { self.pool.checkout(key) } else { None });
+        let mut deferred: Option<ConnTask> = None;
+        let (mut conn, reused) = match pooled {
             Some(p) => {
                 rec.finish(q, PhaseStatus::Completed);
                 rec.mark(Phase::Dns, PhaseStatus::Reused, Some("pooled connection"));
@@ -382,6 +464,11 @@ impl HttpTransport {
                 if plan.https {
                     rec.mark(Phase::TlsHandshake, PhaseStatus::Reused, Some("pooled connection"));
                 }
+                if let Some(e) = early.as_mut()
+                    && e.obs.not_used.is_none()
+                {
+                    e.obs.not_used = Some(EarlyDataNotUsed::ConnectionReused);
+                }
                 (p, true)
             }
             None => {
@@ -390,8 +477,42 @@ impl HttpTransport {
                 let alpn: &[&str] = if plan.https { alpn_for(plan.version) } else { &[] };
                 let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: forward };
                 let header = plan.proxy_header.as_ref().map(connector::PreTlsHeader::of);
+                // Under the early-data opt-in a direct TLS connection goes
+                // through the session-ticket cache. Early data itself needs a
+                // single offered protocol (it is written before ALPN is known).
+                let resumption = match (early.as_mut(), plan.tls.clone()) {
+                    (Some(e), Some(prepared)) if plan.proxy.is_none() => {
+                        let wants = plan.early_data == EarlyDataIntent::Send;
+                        e.send = wants && alpn.len() == 1;
+                        if wants && alpn.len() > 1 {
+                            e.obs.not_used = Some(EarlyDataNotUsed::AlpnNotFixed);
+                        }
+                        Some(connector::TlsResumption { tickets: &self.tickets, isolation: &plan.isolation, prepared, send_early: e.send })
+                    }
+                    (Some(e), _) => {
+                        if e.obs.not_used.is_none() {
+                            e.obs.not_used = Some(EarlyDataNotUsed::ThroughProxy);
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                let connecting = async {
+                    match resumption {
+                        Some(r) => connector::establish_resumable(&mut rec, &target, &plan.dns, &plan.timeouts, r, header).await,
+                        None => (
+                            connector::establish_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), header).await,
+                            None,
+                        ),
+                    }
+                };
                 let est = tokio::select! {
-                    r = connector::establish_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), header) => r,
+                    (r, info) = connecting => {
+                        if let (Some(e), Some(i)) = (early.as_mut(), info) {
+                            e.info = Some(i);
+                        }
+                        r
+                    }
                     _ = cancel.cancelled() => {
                         let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::Canceled, "canceled during connection setup");
                         return (fail(rec, obs, f, DispatchState::NotDispatched), false);
@@ -412,8 +533,13 @@ impl HttpTransport {
                         return (fail(rec, obs, f, DispatchState::NotDispatched), false);
                     }
                 };
-                match self.handshake(&mut rec, plan, est).await {
-                    Ok(p) => (p, false),
+                let early_alpn =
+                    early.as_ref().and_then(|e| e.info.as_ref()).and_then(|i| i.early.as_ref()).and_then(|_| alpn.first().copied());
+                match self.handshake(&mut rec, plan, est, early_alpn).await {
+                    Ok((p, task)) => {
+                        deferred = task;
+                        (p, false)
+                    }
                     Err((f, cobs)) => {
                         obs.connection = Some(cobs);
                         return (fail(rec, obs, f, DispatchState::NotDispatched), false);
@@ -497,21 +623,34 @@ impl HttpTransport {
 
         let send_result: Result<hyper::Response<Incoming>, (hyper::Error, bool)> = {
             let conn_sender = conn.sender.clone();
+            // With TLS early data in flight the connection task starts only
+            // now that the request is queued, so its first write is the
+            // request itself, as early data.
+            let deferred = deferred.take();
             let fut = async move {
                 match conn_sender {
                     Sender::H1(s) => {
                         let mut guard = s.lock().await;
                         let fut = guard.try_send_request(req);
                         drop(guard);
+                        if let Some(task) = deferred {
+                            tokio::spawn(task);
+                        }
                         fut.await.map_err(|mut e| {
                             let unsent = e.take_message().is_some();
                             (e.into_error(), unsent)
                         })
                     }
-                    Sender::H2(mut s) => s.try_send_request(req).await.map_err(|mut e| {
-                        let unsent = e.take_message().is_some();
-                        (e.into_error(), unsent)
-                    }),
+                    Sender::H2(mut s) => {
+                        let fut = s.try_send_request(req);
+                        if let Some(task) = deferred {
+                            tokio::spawn(task);
+                        }
+                        fut.await.map_err(|mut e| {
+                            let unsent = e.take_message().is_some();
+                            (e.into_error(), unsent)
+                        })
+                    }
                 }
             };
             tokio::pin!(fut);
@@ -715,13 +854,23 @@ impl HttpTransport {
         conn.served.fetch_add(1, Ordering::SeqCst);
 
         // ---- pool return ----
+        // A connection whose handshake completed during the request keeps
+        // its final TLS evidence for later requests.
+        if let Some(t) = early.as_ref().and_then(|e| e.info.as_ref()).and_then(|i| i.early.as_ref()).and_then(|p| p.state.observation()) {
+            conn.template.tls = Some(t);
+        }
         let tunneled = crate::hbone::is_hbone(plan.proxy.as_ref());
+        // Only an eligible request is retried after 425 (the engine's rule).
+        let kept_for_retry = plan.early_data == EarlyDataIntent::Send && status == 425 && failure.is_none() && !conn_close && !tunneled;
+        if kept_for_retry {
+            self.pool.too_early.lock().insert(key.to_string(), conn.clone());
+        }
         let reusable = failure.is_none() && plan.keepalive && !conn_close && !tunneled;
         match &conn.sender {
             Sender::H1(_) => {
                 if reusable {
                     self.pool.checkin(key, conn.clone());
-                } else {
+                } else if !kept_for_retry {
                     conn.closed.store(true, Ordering::SeqCst);
                     self.pool.evict(key, conn.template.id);
                 }
@@ -766,14 +915,23 @@ impl HttpTransport {
         (AttemptOutput { observation: obs, response: Some(response), body: captured }, false)
     }
 
+    /// Set up HTTP/1.1 or HTTP/2 over an established stream. With
+    /// `early_alpn` (TLS early data in flight, so nothing is negotiated yet)
+    /// the protocol is the single one offered, and the connection task is
+    /// returned instead of spawned: it must start only after the request is
+    /// queued, or its first flush would finish the handshake before the
+    /// request was written as early data.
     async fn handshake(
         &self,
         rec: &mut Recorder,
         plan: &HttpPlan,
         est: Established,
-    ) -> Result<Pooled, (TransportFailure, ConnectionObservation)> {
+        early_alpn: Option<&str>,
+    ) -> Result<(Pooled, Option<ConnTask>), (TransportFailure, ConnectionObservation)> {
         let Established { io, stats, mut observation } = est;
-        let negotiated = observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone());
+        let defer = early_alpn.is_some();
+        let mut deferred: Option<ConnTask> = None;
+        let negotiated = observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone()).or_else(|| early_alpn.map(String::from));
         let use_h2 = match plan.version {
             HttpVersionPolicy::H2c => true,
             HttpVersionPolicy::Http2Only => {
@@ -802,10 +960,15 @@ impl HttpTransport {
             match b.handshake::<_, InstrumentedBody>(io).await {
                 Ok((s, conn)) => {
                     let c = closed.clone();
-                    tokio::spawn(async move {
+                    let task: ConnTask = Box::pin(async move {
                         let _ = conn.await;
                         c.store(true, Ordering::SeqCst);
                     });
+                    if defer {
+                        deferred = Some(task);
+                    } else {
+                        tokio::spawn(task);
+                    }
                     observation.protocol = Some("h2".into());
                     Sender::H2(s)
                 }
@@ -820,10 +983,15 @@ impl HttpTransport {
             match b.handshake::<_, InstrumentedBody>(io).await {
                 Ok((s, conn)) => {
                     let c = closed.clone();
-                    tokio::spawn(async move {
+                    let task: ConnTask = Box::pin(async move {
                         let _ = conn.await;
                         c.store(true, Ordering::SeqCst);
                     });
+                    if defer {
+                        deferred = Some(task);
+                    } else {
+                        tokio::spawn(task);
+                    }
                     observation.protocol = Some("http/1.1".into());
                     Sender::H1(Arc::new(tokio::sync::Mutex::new(s)))
                 }
@@ -834,14 +1002,90 @@ impl HttpTransport {
             }
         };
         rec.finish(idx, PhaseStatus::Completed);
-        Ok(Pooled {
-            sender,
-            stats,
-            template: observation,
-            served: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            idle_since: Instant::now(),
-            closed,
-        })
+        Ok((
+            Pooled {
+                sender,
+                stats,
+                template: observation,
+                served: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                idle_since: Instant::now(),
+                closed,
+            },
+            deferred,
+        ))
+    }
+}
+
+/// A hyper connection task whose start was deferred (TLS early data).
+type ConnTask = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Early-data bookkeeping of one TCP attempt under the opt-in.
+struct EarlyAttempt {
+    obs: EarlyDataObservation,
+    info: Option<crate::early_tls::ResumableInfo>,
+    /// The ClientHello was allowed to offer early data.
+    send: bool,
+    /// The attempt recorder's clock origin.
+    t0: Option<Instant>,
+}
+
+impl EarlyAttempt {
+    /// Complete the attempt's early-data evidence once the attempt ended:
+    /// the handshake outcome, early bytes, tickets that arrived; close the
+    /// TLS phase of an early-data handshake at its measured completion.
+    fn finish(mut self, obs: &mut AttemptObservation, t0: Instant) {
+        if let Some(info) = &self.info {
+            let e = &mut self.obs;
+            match &info.early {
+                Some(p) => {
+                    e.resumption_attempted = true;
+                    e.bytes = p.state.early_bytes();
+                    // Early data covers the request only when bytes went into it.
+                    e.offered = e.bytes > 0;
+                    e.not_used = if e.offered { None } else { Some(EarlyDataNotUsed::HandshakeCompletedFirst) };
+                    if let Some(done) = p.state.done() {
+                        e.accepted = e.offered.then_some(done.early_accepted);
+                        e.resumption_accepted = Some(done.resumed);
+                        e.resent_after_handshake = !done.early_accepted && e.bytes > 0;
+                        if let Some(ph) = obs.phases.get_mut(p.tls_phase) {
+                            ph.end_us = Some(done.at.saturating_duration_since(t0).as_micros() as u64);
+                            ph.status = PhaseStatus::Completed;
+                            ph.detail = Some(
+                                match (done.early_accepted, done.resumed) {
+                                    (true, _) => "resumed session; TLS 1.3 early data accepted (completed while the request was written)",
+                                    (false, true) => "resumed session; early data rejected by the server",
+                                    (false, false) => "full handshake; early data rejected by the server",
+                                }
+                                .into(),
+                            );
+                        }
+                        if let (Some(c), Some(t)) = (obs.connection.as_mut(), p.state.observation()) {
+                            c.tls = Some(t);
+                        }
+                    }
+                }
+                None => {
+                    // A ticket that allowed early data but produced none had expired.
+                    let offered_ticket = match (self.send, info.taken) {
+                        (_, None) => false,
+                        (true, Some(n)) => n == 0,
+                        (false, Some(_)) => true,
+                    };
+                    e.resumption_attempted = offered_ticket;
+                    if offered_ticket {
+                        e.resumption_accepted = info.resumed;
+                    }
+                    if self.send && e.not_used.is_none() {
+                        e.not_used =
+                            Some(if info.taken == Some(0) { EarlyDataNotUsed::TicketWithoutEarlyData } else { EarlyDataNotUsed::NoTicket });
+                    }
+                }
+            }
+            let n = info.ctx.store.received().saturating_sub(info.tickets_before);
+            e.tickets_received = n;
+            e.ticket_max_early_data = if n > 0 { info.ctx.store.newest_max_early() } else { None };
+        }
+        obs.early_data = Some(self.obs);
     }
 }
 

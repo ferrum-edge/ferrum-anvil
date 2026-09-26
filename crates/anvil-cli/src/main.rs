@@ -210,6 +210,61 @@ struct SendArgs {
     /// Send even if the body fails syntax lint.
     #[arg(long)]
     send_anyway: bool,
+    /// HTTP version policy for this send (overrides the saved settings).
+    #[arg(long, value_enum)]
+    http_version: Option<HttpVersionArg>,
+    /// Do not reuse a pooled connection for this send.
+    #[arg(long)]
+    no_keepalive: bool,
+    /// Send an eligible request (GET, HEAD, OPTIONS, plus --early-data-method)
+    /// as TLS 1.3 / QUIC 0-RTT early data when a session ticket allows it.
+    /// Tickets live in memory only, so a single `send` process starts without
+    /// one: its record shows the full handshake and the tickets it received.
+    #[arg(long)]
+    early_data: bool,
+    /// With --early-data: an idempotent method (PUT, DELETE, TRACE) that may
+    /// also be sent as early data. Repeatable. Other methods are refused.
+    #[arg(long = "early-data-method", requires = "early_data")]
+    early_data_methods: Vec<String>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum HttpVersionArg {
+    Auto,
+    Http1,
+    Http2,
+    H2c,
+    Http3,
+    Http3Fallback,
+}
+
+impl HttpVersionArg {
+    fn policy(self) -> anvil_domain::settings::HttpVersionPolicy {
+        use anvil_domain::settings::HttpVersionPolicy as P;
+        match self {
+            HttpVersionArg::Auto => P::Auto,
+            HttpVersionArg::Http1 => P::Http1Only,
+            HttpVersionArg::Http2 => P::Http2Only,
+            HttpVersionArg::H2c => P::H2c,
+            HttpVersionArg::Http3 => P::Http3Only,
+            HttpVersionArg::Http3Fallback => P::Http3WithFallback,
+        }
+    }
+}
+
+/// The run-layer settings a `send` asks for on the command line, if any.
+fn send_override(s: &SendArgs) -> Option<anvil_domain::settings::SettingsOverrides> {
+    if s.http_version.is_none() && !s.no_keepalive && !s.early_data {
+        return None;
+    }
+    Some(anvil_domain::settings::SettingsOverrides {
+        http_version: s.http_version.map(HttpVersionArg::policy),
+        keepalive: s.no_keepalive.then_some(false),
+        early_data: s
+            .early_data
+            .then(|| anvil_domain::settings::EarlyDataPolicy { enabled: true, extra_methods: s.early_data_methods.clone() }),
+        ..Default::default()
+    })
 }
 
 #[derive(clap::Args)]
@@ -402,6 +457,39 @@ fn ws_extension_lines(e: &WsExtensions) -> Vec<String> {
     out
 }
 
+/// One line of 0-RTT evidence for the terminal.
+fn early_data_line(e: &anvil_domain::execution::EarlyDataObservation) -> String {
+    use anvil_domain::execution::EarlyDataTransport;
+    let mut parts = vec![match e.transport {
+        EarlyDataTransport::Quic => "QUIC".to_string(),
+        EarlyDataTransport::Tls => "TLS/TCP".to_string(),
+    }];
+    if e.resumption_attempted {
+        parts.push(match e.resumption_accepted {
+            Some(true) => "session resumed".into(),
+            Some(false) => "resumption declined".into(),
+            None => "resumption offered".into(),
+        });
+    }
+    if e.offered {
+        parts.push(format!(
+            "{} bytes offered as early data, {}",
+            e.bytes,
+            match e.accepted {
+                Some(true) => "accepted",
+                Some(false) if e.resent_after_handshake => "rejected and re-sent after the handshake",
+                Some(false) => "rejected",
+                None => "outcome unknown",
+            }
+        ));
+    }
+    if let Some(r) = e.not_used {
+        parts.push(format!("not used: {r:?}"));
+    }
+    parts.push(format!("{} ticket(s) received", e.tickets_received));
+    parts.join(", ")
+}
+
 fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     let r = &out.record;
     if json {
@@ -428,6 +516,11 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     if let ProtocolStatus::WebSocket { extensions: Some(e), .. } = &r.outcome.protocol_status {
         for line in ws_extension_lines(e) {
             println!("  {line}");
+        }
+    }
+    for a in &r.attempts {
+        if let Some(e) = &a.early_data {
+            println!("  early data (attempt {}): {}", a.index, early_data_line(e));
         }
     }
     for w in &r.outcome.warnings {
@@ -759,7 +852,13 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     rid,
                     &ws.meta.id,
                     draft,
-                    SendOptions { environment: env, record_history: !s.no_history, send_anyway: s.send_anyway, ..Default::default() },
+                    SendOptions {
+                        environment: env,
+                        record_history: !s.no_history,
+                        send_anyway: s.send_anyway,
+                        run_override: send_override(s),
+                        ..Default::default()
+                    },
                     EventCtx::none(),
                     cancel,
                 )

@@ -400,6 +400,7 @@ dependencies = [
  "prost-reflect",
  "protox",
  "quinn",
+ "quinn-proto",
  "rcgen",
  "rustls",
  "rustls-pki-types",

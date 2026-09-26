@@ -46,6 +46,8 @@ pub enum RefusalCode {
     UdpHbone,
     /// A mesh HBONE proxy with the persistent connection mode (HTTP, gRPC).
     HbonePersistent,
+    /// The request enables 0-RTT early data.
+    EarlyData,
     /// The request lacks what its protocol needs (e.g. a gRPC method).
     IncompleteRequest,
 }
@@ -117,6 +119,15 @@ fn uses_dtls(ctx: &ExecutionContext) -> bool {
 /// Classify one request, or refuse it.
 pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) -> Result<StepUnit, Refusal> {
     let refuse = |code: RefusalCode, message: String| Err(Refusal { code, request_id: id, message });
+    if anvil_engine::settings::resolve(&ctx.settings_layers).early_data.enabled {
+        // Early-data handshakes of one session-ticket context are serialized
+        // (their evidence is per connection), which would distort a load
+        // measurement; the report has no early-data denominators either.
+        return refuse(
+            RefusalCode::EarlyData,
+            "the request enables 0-RTT early data, which load runs do not support (handshakes that share session tickets are serialized and the report does not count early data); turn early data off for the requests of this plan".into(),
+        );
+    }
     let hbone_persistent = mode == ConnectionMode::Persistent && is_hbone(ctx);
     let hbone_msg = |what: &str| {
         format!(

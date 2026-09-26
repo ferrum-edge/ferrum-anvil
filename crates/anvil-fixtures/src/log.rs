@@ -66,6 +66,14 @@ pub enum GroundTruth {
         spiffe_id: String,
         answer: String,
     },
+    /// An early-data fixture received a request; `early` = it arrived in
+    /// TLS 1.3 / QUIC 0-RTT early data the server accepted.
+    EarlyDataRequest {
+        method: String,
+        path: String,
+        early: bool,
+        status: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

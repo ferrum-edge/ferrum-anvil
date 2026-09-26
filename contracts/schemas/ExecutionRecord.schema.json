@@ -342,6 +342,13 @@
             }
           ]
         },
+        "early_data": {
+          "description": "0-RTT early data policy (records written before it existed load as off).",
+          "$ref": "#/$defs/EarlyDataPolicy",
+          "default": {
+            "enabled": false
+          }
+        },
         "sources": {
           "description": "Field path → layer label (\"app\", \"workspace\", \"folder:<name>\", \"request\", \"run\").",
           "type": "array",
@@ -622,6 +629,25 @@
         "max_decoded_bytes",
         "max_response_header_bytes",
         "max_request_body_bytes"
+      ]
+    },
+    "EarlyDataPolicy": {
+      "description": "TLS 1.3 / QUIC 0-RTT early data (RFC 8446 §2.3, RFC 9001 §4.6) with the\nRFC 8470 semantics. Off by default: data sent before the handshake\ncompletes can be replayed by anyone on the path, so only requests that are\nsafe to repeat may use it.\n\nWith `enabled`, a request whose method is eligible (GET, HEAD, OPTIONS, and\nthe idempotent methods listed in `extra_methods`) is sent as early data on\na new connection that resumes an earlier session of the same workspace, TLS\nprofile, client identity, server name and port. Any other method is sent\nnormally, after the handshake, and the record says why early data was not\nused. A non-idempotent method in `extra_methods` is refused before traffic.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "extra_methods": {
+          "description": "Idempotent methods allowed in early data besides GET, HEAD and OPTIONS\n(`PUT`, `DELETE`, `TRACE`). Only an explicit choice adds them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "enabled"
       ]
     },
     "SettingSource": {
@@ -1205,6 +1231,17 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "early_data": {
+          "description": "0-RTT early data evidence, when the early-data opt-in applied.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EarlyDataObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1298,6 +1335,19 @@
           "required": [
             "reason",
             "scheme"
+          ]
+        },
+        {
+          "description": "The previous attempt was eligible for early data and the server\nanswered `425 Too Early` (it did not process the request). Sent once\nmore after the handshake completed, never as early data (RFC 8470 §5.2).",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "const": "too_early_retry"
+            }
+          },
+          "required": [
+            "reason"
           ]
         }
       ]
@@ -2524,6 +2574,147 @@
         "request_headers_logical",
         "request_headers_estimated",
         "request_body"
+      ]
+    },
+    "EarlyDataObservation": {
+      "description": "0-RTT evidence for one attempt. Present only when the early-data opt-in\napplied to the attempt.",
+      "type": "object",
+      "properties": {
+        "transport": {
+          "$ref": "#/$defs/EarlyDataTransport"
+        },
+        "method_eligible": {
+          "description": "The request method is eligible under the policy.",
+          "type": "boolean"
+        },
+        "resumption_attempted": {
+          "description": "A session ticket was taken from the ticket cache for this connection,\nso the ClientHello offered resumption.",
+          "type": "boolean"
+        },
+        "resumption_accepted": {
+          "description": "The server resumed the session (no certificate exchange). `None` when\nresumption was not attempted or the handshake did not complete.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "offered": {
+          "description": "The ClientHello offered early data and the request was written into it.",
+          "type": "boolean"
+        },
+        "accepted": {
+          "description": "The server accepted (`true`) or rejected (`false`) the early data.\n`None` when none was offered or the handshake did not complete.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "bytes": {
+          "description": "Request bytes written before the handshake completed: exact TLS\nplaintext over TCP; over HTTP/3 the logical request (estimated QPACK\nheader size plus body bytes), without QUIC framing.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_estimated": {
+          "type": "boolean"
+        },
+        "resent_after_handshake": {
+          "description": "The server rejected the early data, so the transport sent the same\nrequest again after the handshake. This is how TLS/QUIC deliver\nrejected early data (the server discarded it unread), not an\napplication retry.",
+          "type": "boolean"
+        },
+        "not_used": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EarlyDataNotUsed"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tickets_received": {
+          "description": "Session tickets that arrived for this server and TLS profile while the\nattempt ran.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ticket_max_early_data": {
+          "description": "`max_early_data_size` of the newest ticket that arrived (0: the server\ndoes not allow early data with its tickets).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "transport",
+        "method_eligible",
+        "resumption_attempted",
+        "offered",
+        "bytes",
+        "tickets_received"
+      ]
+    },
+    "EarlyDataTransport": {
+      "description": "Which handshake would carry the early data.",
+      "oneOf": [
+        {
+          "description": "QUIC 0-RTT packets (HTTP/3).",
+          "type": "string",
+          "const": "quic"
+        },
+        {
+          "description": "TLS 1.3 early data over TCP (HTTP/1.1 or HTTP/2).",
+          "type": "string",
+          "const": "tls"
+        }
+      ]
+    },
+    "EarlyDataNotUsed": {
+      "description": "Why an attempt covered by the early-data opt-in did not send early data.",
+      "oneOf": [
+        {
+          "description": "No session ticket from an earlier connection to this server (same\nworkspace, TLS profile, client identity, server name and port): a full\nhandshake, which may deliver tickets for the next request.",
+          "type": "string",
+          "const": "no_ticket"
+        },
+        {
+          "description": "A ticket was offered, but the server issued it without permission for\nearly data (`max_early_data_size = 0`): resumption only.",
+          "type": "string",
+          "const": "ticket_without_early_data"
+        },
+        {
+          "description": "The method is not eligible (GET, HEAD, OPTIONS, or an idempotent\nmethod the policy lists); the request was sent after the handshake.",
+          "type": "string",
+          "const": "method_not_eligible"
+        },
+        {
+          "description": "An established pooled connection carried the request; no handshake.",
+          "type": "string",
+          "const": "connection_reused"
+        },
+        {
+          "description": "The retry after `425 Too Early`: retries are never early data.",
+          "type": "string",
+          "const": "retry_after_too_early"
+        },
+        {
+          "description": "The HTTP version policy offers more than one ALPN protocol over TCP,\nso the protocol of the early data would be a guess (HTTP/1.1-only or\nHTTP/2-only fixes it).",
+          "type": "string",
+          "const": "alpn_not_fixed"
+        },
+        {
+          "description": "A forward proxy or tunnel carries the connection; early data is only\nsent on a direct connection.",
+          "type": "string",
+          "const": "through_proxy"
+        },
+        {
+          "description": "The ticket allowed early data, but the handshake completed before the\nrequest was written (a fast path finishes it while HTTP/3 is still\nbeing set up), so the request went out as ordinary data.",
+          "type": "string",
+          "const": "handshake_completed_first"
+        }
       ]
     },
     "ResponseRecord": {

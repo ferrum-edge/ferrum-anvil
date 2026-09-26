@@ -43,6 +43,7 @@ pub fn all() -> Vec<Profile> {
         crate::mesh::profile(),
         crate::proxyproto::profile(),
         crate::workload::profile(),
+        crate::early::profile(),
     ]
 }
 

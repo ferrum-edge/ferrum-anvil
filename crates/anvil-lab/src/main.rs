@@ -16,6 +16,7 @@ mod auth;
 mod core;
 mod cpdp;
 mod drain;
+mod early;
 mod fixtures;
 mod fixtures_admission_mesh;
 mod fixtures_auth;

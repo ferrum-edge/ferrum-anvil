@@ -89,6 +89,53 @@ pub struct RetryPolicy {
     pub only_safe: bool,
 }
 
+/// TLS 1.3 / QUIC 0-RTT early data (RFC 8446 §2.3, RFC 9001 §4.6) with the
+/// RFC 8470 semantics. Off by default: data sent before the handshake
+/// completes can be replayed by anyone on the path, so only requests that are
+/// safe to repeat may use it.
+///
+/// With `enabled`, a request whose method is eligible (GET, HEAD, OPTIONS, and
+/// the idempotent methods listed in `extra_methods`) is sent as early data on
+/// a new connection that resumes an earlier session of the same workspace, TLS
+/// profile, client identity, server name and port. Any other method is sent
+/// normally, after the handshake, and the record says why early data was not
+/// used. A non-idempotent method in `extra_methods` is refused before traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
+pub struct EarlyDataPolicy {
+    pub enabled: bool,
+    /// Idempotent methods allowed in early data besides GET, HEAD and OPTIONS
+    /// (`PUT`, `DELETE`, `TRACE`). Only an explicit choice adds them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_methods: Vec<String>,
+}
+
+impl EarlyDataPolicy {
+    /// Methods that are always eligible when early data is enabled (safe, RFC 9110 §9.2.1).
+    pub const DEFAULT_METHODS: &'static [&'static str] = &["GET", "HEAD", "OPTIONS"];
+    /// Idempotent methods (RFC 9110 §9.2.2) a user may add explicitly.
+    pub const ALLOWED_EXTRA_METHODS: &'static [&'static str] = &["PUT", "DELETE", "TRACE"];
+
+    /// Whether `method` may be sent as early data under this policy (the
+    /// policy's own validity is checked separately).
+    pub fn allows(&self, method: &str) -> bool {
+        let m = method.trim();
+        self.enabled
+            && (Self::DEFAULT_METHODS.iter().any(|d| d.eq_ignore_ascii_case(m))
+                || self
+                    .extra_methods
+                    .iter()
+                    .any(|x| x.trim().eq_ignore_ascii_case(m) && Self::ALLOWED_EXTRA_METHODS.iter().any(|a| a.eq_ignore_ascii_case(m))))
+    }
+
+    /// The first listed method that may never be sent as early data (not idempotent), if any.
+    pub fn invalid_extra_method(&self) -> Option<&str> {
+        self.extra_methods.iter().map(|m| m.trim()).find(|m| {
+            !Self::DEFAULT_METHODS.iter().any(|d| d.eq_ignore_ascii_case(m))
+                && !Self::ALLOWED_EXTRA_METHODS.iter().any(|a| a.eq_ignore_ascii_case(m))
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct DnsOverride {
     /// Host name to override (exact, case-insensitive).
@@ -168,6 +215,9 @@ pub struct SettingsOverrides {
     pub infer_content_type: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_profile_id: Option<Id>,
+    /// TLS 1.3 / QUIC 0-RTT early data (off unless a layer enables it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub early_data: Option<EarlyDataPolicy>,
 }
 
 /// Partial timeout overrides (each class independently inheritable).
@@ -216,6 +266,9 @@ pub struct EffectiveSettings {
     pub keepalive: bool,
     pub infer_content_type: bool,
     pub integration_profile_id: Option<Id>,
+    /// 0-RTT early data policy (records written before it existed load as off).
+    #[serde(default)]
+    pub early_data: EarlyDataPolicy,
     /// Field path → layer label ("app", "workspace", "folder:<name>", "request", "run").
     pub sources: Vec<SettingSource>,
 }
@@ -244,6 +297,7 @@ impl Default for EffectiveSettings {
             keepalive: true,
             infer_content_type: true,
             integration_profile_id: None,
+            early_data: EarlyDataPolicy::default(),
             sources: vec![],
         }
     }

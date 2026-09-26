@@ -607,10 +607,106 @@ impl Default for HboneDatagramChannel {
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum AttemptReason {
     Initial,
-    Redirect { status: u16 },
-    Retry { after: FailureKind },
-    ProtocolFallback { from: String },
-    AuthChallenge { scheme: String },
+    Redirect {
+        status: u16,
+    },
+    Retry {
+        after: FailureKind,
+    },
+    ProtocolFallback {
+        from: String,
+    },
+    AuthChallenge {
+        scheme: String,
+    },
+    /// The previous attempt was eligible for early data and the server
+    /// answered `425 Too Early` (it did not process the request). Sent once
+    /// more after the handshake completed, never as early data (RFC 8470 §5.2).
+    TooEarlyRetry,
+}
+
+/// Which handshake would carry the early data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EarlyDataTransport {
+    /// QUIC 0-RTT packets (HTTP/3).
+    Quic,
+    /// TLS 1.3 early data over TCP (HTTP/1.1 or HTTP/2).
+    Tls,
+}
+
+/// Why an attempt covered by the early-data opt-in did not send early data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EarlyDataNotUsed {
+    /// No session ticket from an earlier connection to this server (same
+    /// workspace, TLS profile, client identity, server name and port): a full
+    /// handshake, which may deliver tickets for the next request.
+    NoTicket,
+    /// A ticket was offered, but the server issued it without permission for
+    /// early data (`max_early_data_size = 0`): resumption only.
+    TicketWithoutEarlyData,
+    /// The method is not eligible (GET, HEAD, OPTIONS, or an idempotent
+    /// method the policy lists); the request was sent after the handshake.
+    MethodNotEligible,
+    /// An established pooled connection carried the request; no handshake.
+    ConnectionReused,
+    /// The retry after `425 Too Early`: retries are never early data.
+    RetryAfterTooEarly,
+    /// The HTTP version policy offers more than one ALPN protocol over TCP,
+    /// so the protocol of the early data would be a guess (HTTP/1.1-only or
+    /// HTTP/2-only fixes it).
+    AlpnNotFixed,
+    /// A forward proxy or tunnel carries the connection; early data is only
+    /// sent on a direct connection.
+    ThroughProxy,
+    /// The ticket allowed early data, but the handshake completed before the
+    /// request was written (a fast path finishes it while HTTP/3 is still
+    /// being set up), so the request went out as ordinary data.
+    HandshakeCompletedFirst,
+}
+
+/// 0-RTT evidence for one attempt. Present only when the early-data opt-in
+/// applied to the attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EarlyDataObservation {
+    pub transport: EarlyDataTransport,
+    /// The request method is eligible under the policy.
+    pub method_eligible: bool,
+    /// A session ticket was taken from the ticket cache for this connection,
+    /// so the ClientHello offered resumption.
+    pub resumption_attempted: bool,
+    /// The server resumed the session (no certificate exchange). `None` when
+    /// resumption was not attempted or the handshake did not complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumption_accepted: Option<bool>,
+    /// The ClientHello offered early data and the request was written into it.
+    pub offered: bool,
+    /// The server accepted (`true`) or rejected (`false`) the early data.
+    /// `None` when none was offered or the handshake did not complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<bool>,
+    /// Request bytes written before the handshake completed: exact TLS
+    /// plaintext over TCP; over HTTP/3 the logical request (estimated QPACK
+    /// header size plus body bytes), without QUIC framing.
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bytes_estimated: bool,
+    /// The server rejected the early data, so the transport sent the same
+    /// request again after the handshake. This is how TLS/QUIC deliver
+    /// rejected early data (the server discarded it unread), not an
+    /// application retry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resent_after_handshake: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_used: Option<EarlyDataNotUsed>,
+    /// Session tickets that arrived for this server and TLS profile while the
+    /// attempt ran.
+    pub tickets_received: u32,
+    /// `max_early_data_size` of the newest ticket that arrived (0: the server
+    /// does not allow early data with its tickets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_max_early_data: Option<u32>,
 }
 
 /// Byte accounting for one attempt. Logical header sizes on HTTP/2/3 are
@@ -651,6 +747,9 @@ pub struct AttemptObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<TransportFailure>,
     pub duration_us: u64,
+    /// 0-RTT early data evidence, when the early-data opt-in applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub early_data: Option<EarlyDataObservation>,
 }
 
 impl AttemptObservation {

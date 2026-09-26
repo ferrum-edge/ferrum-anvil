@@ -46,7 +46,7 @@ TLS alert or a close right after Anvil sent one; see
 [protocols.md §3.10](protocols.md)); a fragment never changes a finding's
 confidence.
 
-The catalog has 163 finding codes (catalog version shown in the app status
+The catalog has 168 finding codes (catalog version shown in the app status
 bar; every record names the findings catalog and the Ferrum catalog it used):
 
 | Family | Codes | Examples |
@@ -57,7 +57,8 @@ bar; every record names the findings catalog and the Ferrum catalog it used):
 | `hbone.*` | 12 | mesh HBONE tunnel leg: endpoint unreachable, mTLS split by leg, CONNECT refused/unavailable, HTTP/2 tunnel errors; UDP datagram tunnels: ended by the endpoint, truncated record, datagram over the record limit |
 | `exchange.*` | 11 | write failures, header timeout, HTTP/2 GOAWAY/RST/REFUSED_STREAM, closed before response |
 | `response.*` | 4 | incomplete body, idle/total body timeouts, stream reset mid-body |
-| `request.*` | 4 | canceled; processing uncertain; an earlier attempt may have processed |
+| `request.*` | 5 | canceled; processing uncertain; an earlier attempt may have processed; `425 Too Early` with the retry outcome |
+| `early_data.*` | 4 | TLS 1.3 / QUIC 0-RTT: accepted (with the replay note), rejected and re-sent by the transport, no session ticket, tickets without early data |
 | `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings) |
 | `ferrum.*` | 18 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog |
 | `app.*`, `auth.*` | 11 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
@@ -175,6 +176,29 @@ the verifier's reason. Ferrum Edge's `jwks_auth` answers an expired token, a
 wrong audience and an unknown key with the same `401 {"error":"Invalid or
 unrecognized JWT"}`, and a backend can send that body too (lab `WL-009`).
 
+## 0-RTT early data and `425 Too Early`
+
+With the early-data opt-in ([protocols.md §3.12](protocols.md)) every attempt carries
+`early_data` evidence: whether a session ticket was offered and the server resumed,
+whether early data was offered and accepted, the bytes written before the handshake
+completed, whether the transport re-sent rejected early data, which tickets arrived,
+and why early data was not used. The `protocol.early_data` rule reads only that
+evidence and the observed status:
+
+| Code | When | Confidence, scope |
+|---|---|---|
+| `early_data.accepted` | the request was written as early data and the server accepted it | confirmed, `client_to_peer`, info; "does not prove" says that early data can be replayed and that the server's anti-replay is invisible to the client |
+| `early_data.rejected` | early data was offered and rejected; the request was re-sent after the handshake | confirmed, info; the re-send is the protocol delivering discarded data, not an application retry; why it was rejected stays an alternative |
+| `early_data.no_ticket` | a completed full handshake under the opt-in delivered no session ticket | confirmed that none arrived during the exchange, info; not that the server never issues them |
+| `early_data.ticket_without_early_data` | a resumed session whose ticket did not allow early data | confirmed, info |
+| `request.too_early` | an attempt was answered `425 Too Early` | confirmed that the server declined to process it, **scope unknown**: a gateway's early-data method policy and a backend that saw `Early-Data: 1` give the same public answer; names the retry outcome (one retry after the handshake, only for requests eligible under the opt-in); for a request that did not travel as early data it says so and lists the alternatives (a server that counts requests racing the handshake as early data, an `Early-Data: 1` request header, another component) |
+
+A request that missed the 0-RTT window (the handshake completed before it was written)
+is recorded as `handshake_completed_first` and never gets `early_data.accepted`. For a
+declared Ferrum gateway, a final `425 {"error":"Method not allowed in 0-RTT early data"}`
+also matches the release catalog's `gateway.admission.early_data_rejected` (HTTPS header
+path and HTTP/3 0-RTT path), capped at likely because a backend can send the same body.
+
 ## Ferrum Edge catalogs (`catalog/ferrum/<compatibility-id>/outcomes.json`)
 
 Anvil embeds one source-audited catalog per supported gateway release:
@@ -243,6 +267,9 @@ only presentation; every card shows its own confidence.
 - Never recommend retrying a request whose dispatch state is
   `may_have_been_sent` when its method is not idempotent. The engine does
   not replay it automatically either.
+- The only automatic retry after a status is the one RFC 8470 allows: a
+  request eligible for early data that got `425 Too Early` is sent once more
+  after the handshake, never as early data and never twice.
 - Remediation names an owner. Gateway-to-backend problems go to the gateway
   operator or backend owner, not to the caller's credentials.
 

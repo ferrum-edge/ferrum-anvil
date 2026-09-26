@@ -4124,7 +4124,8 @@
       "protocols": [
         "http1",
         "http2",
-        "grpc"
+        "grpc",
+        "http3"
       ],
       "source": [
         {
@@ -4132,9 +4133,15 @@
           "line": 30959,
           "symbol": "0-RTT early data enforcement",
           "sha": "8fed134"
+        },
+        {
+          "path": "src/http3/server.rs",
+          "line": 2808,
+          "symbol": "HTTP/3 0-RTT early data method gate",
+          "sha": "8fed134"
         }
       ],
-      "condition": "Request carries Early-Data: 1 (added by a trusted CDN per RFC 8470) and its method is not in the configured early-data method list.",
+      "condition": "HTTPS (H1/H2): the request carries Early-Data: 1 (added by a trusted CDN per RFC 8470) and its method is not in the configured early-data method list. HTTP/3: the request stream was accepted while the QUIC handshake was still in progress (0.5-RTT window, listener with FERRUM_TLS_EARLY_DATA_METHODS and no frontend mTLS) and its method is not in that list; checked before routing, so no proxy_id is logged.",
       "error_class": null,
       "public_signal": {
         "http_status": 425,
@@ -4154,7 +4161,7 @@
       "remediation": "Caller/CDN: retry without early data.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": ""
+      "notes": "Anvil lab `early` (EARLY-002, EARLY-006) observes both paths with the same public signal. The HTTP/3 listener classifies any request stream accepted before its handshake-completion signal as early data (accept polling is biased ahead of that signal), so a 1-RTT request racing the handshake can also draw this answer."
     },
     {
       "id": "gateway.routing.no_route",

@@ -83,6 +83,7 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         }
     }
     let mut forwarding = 0;
+    let mut early_data = 0;
     for s in g
         .workspaces
         .iter_mut()
@@ -96,9 +97,20 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
             r.forward_credentials_cross_origin = false;
             forwarding += 1;
         }
+        if let Some(e) = s.early_data.as_mut()
+            && e.enabled
+        {
+            e.enabled = false;
+            early_data += 1;
+        }
     }
     if forwarding > 0 {
         warnings.push(format!("{forwarding} item(s) forwarded credentials to other origins on redirect; the import turned that off."));
+    }
+    if early_data > 0 {
+        warnings.push(format!(
+            "{early_data} item(s) sent requests as replayable 0-RTT early data; the import turned that off. Re-enable it deliberately where replay is harmless."
+        ));
     }
     let mut legacy = 0;
     for r in &mut g.requests {

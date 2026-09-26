@@ -63,6 +63,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
     f.tls_alert = s.inner.tls_alert.clone();
     f.status = s.status;
     AttemptObservation {
+        early_data: None,
         index: 0,
         reason: AttemptReason::Initial,
         method: "POST".into(),

@@ -229,6 +229,7 @@ mod tests {
         };
         c.proxy_header = h;
         AttemptObservation {
+            early_data: None,
             index: 0,
             reason: AttemptReason::Initial,
             method: "TCP".into(),

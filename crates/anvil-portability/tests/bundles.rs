@@ -274,6 +274,8 @@ fn data_008_imports_never_activate_bypass_or_trust() {
     });
     g.requests[0].spec.settings.redirects =
         Some(anvil_domain::settings::RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    g.workspaces[0].settings.early_data =
+        Some(anvil_domain::settings::EarlyDataPolicy { enabled: true, extra_methods: vec!["PUT".into()] });
     let (bytes, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
     let opened = bundle::open(&bytes, None).unwrap();
     assert!(opened.graph.tls_profiles.iter().all(|t| t.verify), "verification bypass is not imported as active");
@@ -286,6 +288,11 @@ fn data_008_imports_never_activate_bypass_or_trust() {
         "cross-origin credential forwarding is not imported as active"
     );
     assert!(opened.warnings.iter().any(|w| w.contains("other origins")));
+    assert!(
+        opened.graph.workspaces.iter().all(|w| w.settings.early_data.as_ref().is_none_or(|e| !e.enabled)),
+        "replayable 0-RTT early data is not imported as active"
+    );
+    assert!(opened.warnings.iter().any(|w| w.contains("0-RTT early data")));
 }
 
 /// SPIFFE Workload API sources need no secret, so an import draws on the
