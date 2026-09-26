@@ -405,11 +405,14 @@ impl TokenCache {
         let basic = client_auth(cfg, &mut form);
         let request = http.post_form(&cfg.token_url, form, basic);
         let (state, task_key, grant, skew) = (self.state.clone(), key.clone(), cfg.grant, cfg.refresh_skew_secs);
-        // Spawned and registered under the state lock: the task cannot finish
-        // before it is registered, and a lock or a sign-out from now on
-        // aborts it.
+        // The generation check and registration share the state lock, so a
+        // sign-in cannot slip between them. A refresh that was superseded
+        // before registration returns the newer sign-in without spawning.
         let task = {
             let mut st = self.state.lock();
+            if st.generation(key) != generation {
+                return Refreshed::Done(st.superseded_answer(key, generation, cfg.refresh_skew_secs));
+            }
             st.next_refresh = st.next_refresh.wrapping_add(1);
             let id = st.next_refresh;
             let task = tokio::spawn(async move {
@@ -443,12 +446,7 @@ impl TokenCache {
                     Err(other) => Refreshed::Done(Err(other.into())),
                 }
             });
-            if st.generation(key) == generation {
-                st.refreshes.insert(key.clone(), (id, task.abort_handle()));
-            } else {
-                // Superseded before it started: nothing is sent.
-                task.abort();
-            }
+            st.refreshes.insert(key.clone(), (id, task.abort_handle()));
             task
         };
         match task.await {

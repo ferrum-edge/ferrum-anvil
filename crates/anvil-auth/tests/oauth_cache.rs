@@ -397,7 +397,7 @@ async fn an_older_refresh_never_overwrites_a_newer_sign_in() {
     assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn a_send_that_waited_through_a_sign_in_is_served_by_it() {
     let issuer = Arc::new(Issuer::gated());
     issuer.rotate.store(true, Ordering::SeqCst);
@@ -410,8 +410,18 @@ async fn a_send_that_waited_through_a_sign_in_is_served_by_it() {
     };
     let refreshing = spawn();
     issuer.received.notified().await;
-    let waiter = spawn();
-    settle().await; // the waiter found the expired token and queued on the single-flight lock
+    let waiter_started = Arc::new(Notify::new());
+    let waiter = {
+        let (cache, issuer, cfg, waiter_started) = (cache.clone(), issuer.clone(), cfg.clone(), waiter_started.clone());
+        tokio::spawn(async move {
+            waiter_started.notify_one();
+            acquire(&cache, &cfg, &issuer).await
+        })
+    };
+    // On this current-thread runtime, the waiter runs from the notification
+    // straight into acquire and blocks on the refresh's single-flight lock
+    // before this task resumes to store the sign-in.
+    waiter_started.notified().await;
     sign_in(&cache, &cfg, signed_in("new-sign-in", "rt-new", false));
     issuer.release.notify_one();
     assert_eq!(refreshing.await.unwrap().unwrap(), "new-sign-in");
