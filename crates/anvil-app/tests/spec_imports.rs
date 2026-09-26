@@ -11,10 +11,12 @@ use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::assertions::{Extraction, ExtractionSource};
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::runner::RunStepStatus;
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::tls::{ClientIdentity, HostBinding, TlsProfile};
+use anvil_domain::settings::ProxySelection;
+use anvil_domain::tls::{ClientIdentity, HostBinding, ProxyKind, ProxyProfile, TlsProfile};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
 use anvil_domain::workspace::{Environment, Variable, Workspace};
 use anvil_engine::ExecutionContext;
@@ -24,6 +26,7 @@ use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_storage::store::DB_FILE;
+use anvil_transport::recorder::EventCtx;
 use std::collections::HashSet;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
@@ -516,39 +519,23 @@ fn an_imported_collection_does_not_use_a_client_identity_bound_to_no_host() {
     let root_id = done.root_folder_id.unwrap();
     // The destination selects a TLS profile whose client certificate goes to
     // any host (no bindings).
-    let identity = ClientIdentity::Pem {
-        cert_chain_pem: "-----BEGIN CERTIFICATE-----".into(),
-        private_key_pem: SensitiveValue::Template { value: "destination-key".into() },
-    };
-    let tls = app
-        .save_tls_profile(TlsProfile {
-            id: Id::new(),
-            workspace_id: dest.meta.id,
-            name: "device cert".into(),
-            verify: true,
-            use_system_roots: true,
-            extra_roots_pem: vec![],
-            client_identity: Some(identity),
-            bindings: vec![],
-            min_version: Default::default(),
-            server_name_override: None,
-            server_spiffe: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        })
-        .unwrap();
+    let tls = unbound_client_certificate(&app, &dest.meta.id, "device cert");
     dest.settings.tls_profile_id = Some(tls.id);
     let dest = app.save_workspace(dest).unwrap();
     let deep = app.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
     let build = || app.build_context(Some(deep.meta.id), &dest.meta.id, None, &SendOptions::default());
+    let plan = load_plan(dest.meta.id, deep.meta.id);
 
     let err = refused(build(), "a client identity bound to no host");
+    assert!(err.contains("TLS profile 'device cert'"), "{err}");
+    let err = refused(app.load_job(&plan), "load: a client identity bound to no host");
     assert!(err.contains("TLS profile 'device cert'"), "{err}");
     // Bound to hosts, it is presented only to them.
     let mut bound = tls.clone();
     bound.bindings = vec![HostBinding { host: "internal.example.invalid".into(), port: None }];
     app.save_tls_profile(bound).unwrap();
     build().expect("a bound client identity");
+    app.load_job(&plan).expect("load: a bound client identity");
     app.save_tls_profile(tls).unwrap();
     refused(build(), "unbound again");
     // The workspace's own requests, and the import root once the user opens
@@ -558,6 +545,117 @@ fn an_imported_collection_does_not_use_a_client_identity_bound_to_no_host() {
     app.build_context(Some(mine.meta.id), &dest.meta.id, None, &SendOptions::default()).expect("a workspace request");
     app.set_import_root_workspace_scope(&root_id, true).unwrap();
     build().expect("an opened import root");
+}
+
+#[tokio::test]
+async fn an_imported_collection_does_not_use_a_proxys_client_identity_bound_to_no_host() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut dest = destination_with_credentials(&app);
+    let done = import(&app, COLLECTION.as_bytes(), into(&dest.meta.id));
+    let root_id = done.root_folder_id.unwrap();
+    // The destination selects no TLS profile of its own, but an HTTPS proxy
+    // whose own TLS profile presents a client certificate to any host.
+    let tls = unbound_client_certificate(&app, &dest.meta.id, "proxy cert");
+    let now = chrono::Utc::now();
+    let proxy = app
+        .save_proxy_profile(ProxyProfile {
+            id: Id::new(),
+            workspace_id: dest.meta.id,
+            name: "egress".into(),
+            kind: ProxyKind::Https,
+            address: "proxy.example.invalid:3128".into(),
+            username: None,
+            password: None,
+            // The request targets this host, so the engine bypasses the
+            // proxy; its selected unbound TLS profile is still refused.
+            no_proxy: "api.example.invalid".into(),
+            tls_profile_id: Some(tls.id),
+            hbone: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    dest.settings.proxy_profile_id = Some(ProxySelection::Profile { id: proxy.id });
+    let dest = app.save_workspace(dest).unwrap();
+    let deep = app.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
+    let build = || app.build_context(Some(deep.meta.id), &dest.meta.id, None, &SendOptions::default());
+    let plan = load_plan(dest.meta.id, deep.meta.id);
+
+    let sent = app.send(Some(deep.meta.id), &dest.meta.id, None, SendOptions::default(), EventCtx::none(), CancellationToken::new()).await;
+    let refusals = [
+        ("send", refused(sent, "send")),
+        ("build_context", refused(build(), "build_context")),
+        ("load_job", refused(app.load_job(&plan), "load_job")),
+        ("load_preflight", refused(app.load_preflight(&plan), "load_preflight")),
+    ];
+    for (call, err) in refusals {
+        assert!(err.contains("TLS profile 'proxy cert'") && err.contains("bound to no host"), "{call}: {err}");
+        assert!(err.contains("proxy 'egress'"), "{call}: {err}");
+    }
+    // Bound to the proxy's host, it is presented only there.
+    let mut bound = tls.clone();
+    bound.bindings = vec![HostBinding { host: "proxy.example.invalid".into(), port: None }];
+    app.save_tls_profile(bound).unwrap();
+    build().expect("a bound client identity");
+    app.load_job(&plan).expect("load: a bound client identity");
+    app.save_tls_profile(tls).unwrap();
+    refused(build(), "unbound again");
+    refused(app.load_job(&plan), "load: unbound again");
+    // The workspace's own requests, and the import root once the user opens
+    // it, use the proxy as before.
+    let spec = RequestSpec::http("GET", "https://api.example.invalid/mine");
+    let mine = app.create_request(&dest.meta.id, None, "mine", spec).unwrap();
+    app.build_context(Some(mine.meta.id), &dest.meta.id, None, &SendOptions::default()).expect("a workspace request");
+    app.set_import_root_workspace_scope(&root_id, true).unwrap();
+    build().expect("an opened import root");
+    app.load_job(&plan).expect("load: an opened import root");
+}
+
+/// A TLS profile whose client certificate goes to any host (no bindings).
+fn unbound_client_certificate(app: &App, ws: &Id, name: &str) -> TlsProfile {
+    let identity = ClientIdentity::Pem {
+        cert_chain_pem: "-----BEGIN CERTIFICATE-----".into(),
+        private_key_pem: SensitiveValue::Template { value: "destination-key".into() },
+    };
+    let now = chrono::Utc::now();
+    app.save_tls_profile(TlsProfile {
+        id: Id::new(),
+        workspace_id: *ws,
+        name: name.into(),
+        verify: true,
+        use_system_roots: true,
+        extra_roots_pem: vec![],
+        client_identity: Some(identity),
+        bindings: vec![],
+        min_version: Default::default(),
+        server_name_override: None,
+        server_spiffe: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .unwrap()
+}
+
+fn load_plan(ws: Id, request: Id) -> LoadPlan {
+    let now = chrono::Utc::now();
+    LoadPlan {
+        id: Id::new(),
+        workspace_id: ws,
+        name: "smoke".into(),
+        workload: Workload::Iterations { iterations: 2, concurrency: 1 },
+        chain: vec![request],
+        mix: vec![],
+        dataset_id: None,
+        environment_id: None,
+        connection_mode: Default::default(),
+        warmup_secs: 0,
+        abort: None,
+        seed: 1,
+        trusted: true,
+        created_at: now,
+        updated_at: now,
+    }
 }
 
 fn token_login(url: &str, token: &str) -> RequestSpec {

@@ -118,10 +118,11 @@ not applied to it and the run report says so in a note.
 A JWT-SVID drawn from this device's SPIFFE Workload API or from a token file
 is refused, and so is a request whose effective settings select a TLS
 profile with a client identity (a certificate or this device's X.509-SVID)
-bound to no host, since it would be presented to any host the collection
-names. Only the request's own selected profile is checked: a proxy profile's
-TLS profile still applies to the connection to that proxy (see below). So an imported `Bearer {{token}}` can
-never pick up the destination's `token`, whether it is a variable of the
+bound to no host, along with the selected proxy's own TLS profile, whatever
+the proxy's kind or `no_proxy`, so the check does not depend on the destination.
+A sealed import root sent through an HBONE mesh proxy whose SVID profile is
+unbound is refused until the root is opened. So an imported `Bearer {{token}}`
+can never pick up the destination's `token`, whether it is a variable of the
 destination or a value its own login request extracted earlier in the same
 run: it stays unresolved and the request is not sent.
 
@@ -148,7 +149,9 @@ roots, minimum version), proxy profiles, DNS overrides and gateway profiles
 selected by the destination workspace or an outer folder. A TLS profile with
 a client identity applies only when it is bound to hosts, and then the
 identity is presented only to those hosts. A proxy carries the connection
-and its own TLS profile is used only for the connection to the proxy.
+and its own TLS profile is used only for the connection to the proxy; a
+client identity in it likewise applies only when that profile is bound to
+hosts.
 
 Cookies and cached OAuth tokens are kept per workspace, not per import root.
 Every request of the workspace, under an import root or not, shares the
