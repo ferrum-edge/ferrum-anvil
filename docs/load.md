@@ -23,7 +23,11 @@ request's own layers:
 
 It also appends iteration-scoped variable layers (lowest to highest
 precedence): `load` (`{{anvil.iteration}}`, `{{anvil.vu}}`), the dataset row,
-and values extracted by earlier chain steps. Each send gets a seed derived
+and values extracted by earlier chain steps. A request under an unopened
+import root (see [import.md](import.md#persisting-an-import-anvil-app)) gets no
+dataset row and only values extracted by chain steps under the same root;
+values it extracts reach only those steps (`ExecutionContext::scope`, carried
+to the worker). Each send gets a seed derived
 from the plan seed, the iteration and the step, so `{{$randomInt}}` /
 `{{$randomFrom}}` are reproducible per iteration.
 

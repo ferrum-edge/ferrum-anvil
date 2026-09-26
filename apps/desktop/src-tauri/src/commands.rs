@@ -202,6 +202,14 @@ pub fn folder_save(st: State<'_, DesktopState>, folder: Folder) -> R<Folder> {
     st.app()?.save_folder(folder).map_err(e)
 }
 
+/// The user's explicit choice to let an imported collection's requests also
+/// resolve the workspace's variables, active environment and auth, and this
+/// device's workload identity (see `App::build_context`).
+#[tauri::command]
+pub fn folder_set_workspace_scope(st: State<'_, DesktopState>, folder_id: String, allow: bool) -> R<Folder> {
+    st.app()?.set_import_root_workspace_scope(&id(&folder_id)?, allow).map_err(e)
+}
+
 #[tauri::command]
 pub fn folder_move(st: State<'_, DesktopState>, folder_id: String, parent_id: Option<String>, sort_key: f64) -> R<Folder> {
     let parent = parent_id.map(|p| id(&p)).transpose()?;

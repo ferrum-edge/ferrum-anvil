@@ -2,7 +2,7 @@
 
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
-use anvil_domain::request::{Body, KeyValue, RequestSpec};
+use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::TlsProfile;
 use anvil_domain::workspace::*;
@@ -34,6 +34,9 @@ fn sample() -> PortableGraph {
         variables: vec![],
         auth: AuthConfig::Inherit,
         tags: vec![],
+        import_root: false,
+        import_environment_ids: vec![],
+        use_workspace_scope: false,
     };
     let f2 = Folder { meta: Meta::new(), parent_id: Some(f1.meta.id), name: "Refunds".into(), sort_key: 2.0, ..f1.clone() };
     let secret_id = Id::new();
@@ -338,6 +341,45 @@ fn data_008_workload_api_sources_are_flagged_and_send_anyway_is_not_imported() {
     assert!(opened.warnings.iter().any(|w| w.contains("2 JWT-SVID auth profile(s) sent tokens that failed")), "{:?}", opened.warnings);
     assert!(opened.warnings.iter().any(|w| w.contains("1 JWT-SVID auth profile(s) fetch tokens from this machine's SPIFFE Workload API")));
     assert!(opened.warnings.iter().any(|w| w.contains("TLS profile(s) lab present this machine's X.509-SVID")));
+}
+
+#[test]
+fn imports_never_open_an_import_root_and_list_every_linked_file() {
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let env = g.environments[0].meta.id;
+    g.folders[0].import_root = true;
+    g.folders[0].use_workspace_scope = true;
+    g.folders[0].import_environment_ids = vec![env, Id::new()];
+    let upload = AttachmentRef::LinkedFile { path: "/home/user/upload.bin".into() };
+    g.requests[0].spec.body = Body::Binary { attachment: upload, content_type: None };
+    g.datasets.push(Dataset {
+        meta: Meta::new(),
+        workspace_id: ws,
+        name: "rows".into(),
+        format: DatasetFormat::Csv,
+        attachment: AttachmentRef::LinkedFile { path: "/home/user/rows.csv".into() },
+        sensitive_columns: vec![],
+    });
+    let (bytes, preview) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    assert!(preview.manifest.device_bindings.iter().any(|d| d.contains("datasets")), "{:?}", preview.manifest.device_bindings);
+
+    let opened = bundle::open(&bytes, Some("correct horse battery")).unwrap();
+    let root = opened.graph.folders.iter().find(|f| f.meta.id == g.folders[0].meta.id).unwrap();
+    assert!(root.import_root, "the boundary is kept");
+    assert!(!root.use_workspace_scope, "the device-local choice is not");
+    assert_eq!(root.import_environment_ids, vec![env], "only environments of its own workspace in the bundle");
+    assert!(opened.warnings.iter().any(|w| w.contains("imported collection")), "{:?}", opened.warnings);
+    let expected = vec!["request 'Create order': /home/user/upload.bin".to_string(), "dataset 'rows': /home/user/rows.csv".to_string()];
+    assert_eq!(opened.graph.linked_files(), expected);
+    assert!(opened.warnings.iter().any(|w| w.contains("/home/user/rows.csv")), "{:?}", opened.warnings);
+
+    // A duplicate's import root names the copied environment.
+    let mut dup = opened.graph.clone();
+    plan::remap_all(&mut dup).unwrap();
+    let root = dup.folders.iter().find(|f| f.import_root).unwrap();
+    assert_eq!(root.import_environment_ids, vec![dup.environments[0].meta.id]);
+    assert_ne!(root.import_environment_ids, vec![env]);
 }
 
 #[test]

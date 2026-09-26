@@ -27,6 +27,7 @@
 //! normalisation as bundle imports, and writes everything in one transaction
 //! after taking a checkpoint.
 
+use crate::linked_files::LinkedFileBinding;
 use crate::port::ImportReport;
 use crate::specs::SpecSourceRecord;
 use crate::workspace::attachment_index_id;
@@ -100,6 +101,7 @@ pub const OBJECT_KINDS: &[&str] = &[
 pub const NOT_CARRIED_KINDS: &[(&str, &str)] = &[
     (kind::IMPORT_SOURCE, "attachment index entries name blobs by a key of this profile; restore rebuilds them from the attachments"),
     (kind::TOKEN_FILE, "token-file bindings name files on this device; they are bound again on the target machine"),
+    (kind::LINKED_FILE, "linked-file bindings name files on this device; they are chosen again on the target machine"),
 ];
 
 /// Every store table and how a full backup covers it.
@@ -389,12 +391,14 @@ struct Raw {
     history: Vec<HistoryRow>,
     load_reports: Vec<Value>,
     token_files: usize,
+    linked_files: usize,
 }
 
 struct Snapshot {
     contents: BackupContents,
     excluded: Vec<String>,
     token_files: usize,
+    linked_files: usize,
 }
 
 /// Validated, typed and normalised backup contents, ready to write.
@@ -512,9 +516,10 @@ impl App {
             let mut load_reports: Vec<Value> = r.list_load_reports(None)?;
             load_reports.sort_by(|a, b| run_id(a).cmp(run_id(b)));
             let token_files = r.object_meta(kind::TOKEN_FILE)?.len();
-            Ok(Raw { objects, index, secrets, history, load_reports, token_files })
+            let linked_files = r.object_meta(kind::LINKED_FILE)?.len();
+            Ok(Raw { objects, index, secrets, history, load_reports, token_files, linked_files })
         })?;
-        let Raw { objects, index, secrets, history, load_reports, token_files } = raw;
+        let Raw { objects, index, secrets, history, load_reports, token_files, linked_files } = raw;
         let mut attachments = Vec::new();
         let mut excluded = Vec::new();
         for (entry, blob) in &index {
@@ -531,7 +536,7 @@ impl App {
         }
         attachments.sort_by(|a, b| a.sha256.as_str().cmp(b.sha256.as_str()));
         let contents = BackupContents { objects, secrets, attachments, history, load_reports };
-        Ok(Snapshot { contents, excluded, token_files })
+        Ok(Snapshot { contents, excluded, token_files, linked_files })
     }
 }
 
@@ -557,6 +562,12 @@ fn build_manifest(snap: &Snapshot) -> BackupManifest {
         device_bindings.push(format!(
             "{} token-file binding(s) name files on this device and are not in the backup; bind them again on the target machine.",
             snap.token_files
+        ));
+    }
+    if snap.linked_files > 0 {
+        device_bindings.push(format!(
+            "{} linked-file binding(s) name files on this device and are not in the backup; choose the files again on the target machine.",
+            snap.linked_files
         ));
     }
     BackupManifest {
@@ -821,6 +832,7 @@ fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, policy: Conf
         warnings,
         secrets_restored: true,
         missing_secrets: d.missing_secrets.clone(),
+        linked_files: d.graph.linked_files(),
         checkpoint,
         workspaces: d.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
         workspace_ids: d.graph.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
@@ -905,6 +917,15 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     }
     for x in &d.run_reports {
         w.put(kind::RUN_REPORT, &x.run_id, Some(&x.workspace_id), None, x.started_at.timestamp_millis() as f64, x)?;
+    }
+    // A linked-file binding was chosen for the request or dataset it names;
+    // one this restore overwrites is not that object any more.
+    let requests = g.requests.iter().map(|r| (kind::REQUEST, r.meta.id));
+    let datasets = g.datasets.iter().map(|x| (kind::DATASET, x.meta.id));
+    let written: HashSet<Id> = requests.chain(datasets).filter(|(k, id)| !w.keep(k, &id.to_string())).map(|(_, id)| id).collect();
+    let bindings: Vec<LinkedFileBinding> = w.tx.list(kind::LINKED_FILE, None)?;
+    for b in bindings.iter().filter(|b| written.contains(&b.referrer.id())) {
+        w.tx.delete(kind::LINKED_FILE, &b.id)?;
     }
     for (id, owner, s) in &d.secrets {
         if !w.keep(SECRET, &s.id) {

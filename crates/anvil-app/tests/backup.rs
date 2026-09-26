@@ -4,6 +4,7 @@
 
 use anvil_app::backup::{self, BackupContents, BackupError, NOT_CARRIED_KINDS, OBJECT_KINDS, TABLES};
 use anvil_app::exec::SendOptions;
+use anvil_app::linked_files::LinkedFileReferrer;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::runner::RunSettings;
 use anvil_app::specs::SpecTarget;
@@ -12,7 +13,7 @@ use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::load::{LoadPlan, Workload};
-use anvil_domain::request::{Body, KeyValue, RequestSpec};
+use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::Theme;
 use anvil_domain::workspace::{DatasetFormat, Meta, ProtectionMode, Scenario, ScenarioStep, UserProfile, Variable};
@@ -416,6 +417,12 @@ fn authentic_contents_are_still_validated_and_normalised() {
         c.objects.push(row);
     });
     assert_refused(&b, &device_bound, "a device-bound kind");
+    let linked_binding = resealed(&bytes, |_, c| {
+        let mut row = c.objects[obj(c, kind::WORKSPACE)].clone();
+        row.kind = kind::LINKED_FILE.into();
+        c.objects.push(row);
+    });
+    assert_refused(&b, &linked_binding, "a linked-file binding");
     let foreign_object = resealed(&bytes, |_, c| {
         let i = obj(c, kind::TLS_PROFILE);
         c.objects[i].value["workspace_id"] = json!(local.meta.id);
@@ -510,4 +517,38 @@ fn merge_keeps_local_items_and_replace_restores_the_backup() {
     assert_eq!(b.workspace(&ws.meta.id).unwrap().name, "W");
     assert_eq!(b.settings().unwrap().theme, Theme::Light);
     assert_eq!(b.workspaces().unwrap().len(), 1, "a restore never duplicates");
+}
+
+#[test]
+fn linked_file_bindings_stay_on_their_device_and_a_replace_drops_overwritten_ones() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let path = files.path().join("upload.bin");
+    std::fs::write(&path, "linked-file-content").unwrap();
+    let path = std::fs::canonicalize(&path).unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("W").unwrap();
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/x");
+    spec.body = Body::Binary { attachment: AttachmentRef::LinkedFile { path: path.display().to_string() }, content_type: None };
+    let r = a.create_request(&ws.meta.id, None, "upload", spec).unwrap();
+    a.bind_linked_file(LinkedFileReferrer::Request { id: r.meta.id }, &path).unwrap();
+    let (bytes, preview) = a.export_backup_with(PASS, KdfParams::testing()).unwrap();
+    let notes = &preview.manifest.device_bindings;
+    assert!(notes.iter().any(|d| d.contains("linked-file binding")), "{notes:?}");
+    assert!(a.backup_contents().unwrap().objects.iter().all(|o| o.kind != kind::LINKED_FILE));
+
+    // A clean profile gets the request and a listing of its linked file, never the binding.
+    let b = new_app(root.path(), "b");
+    let dry = b.restore_preview(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(dry.linked_files.len(), 1, "{:?}", dry.linked_files);
+    assert!(dry.linked_files[0].starts_with("request 'upload'"), "{:?}", dry.linked_files);
+    b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(b.linked_file_bindings().unwrap().is_empty(), "a restore never binds a linked file");
+
+    // Merge keeps the stored request and its binding; Replace overwrites the
+    // request, which is not what the file was chosen for.
+    a.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+    assert_eq!(a.linked_file_bindings().unwrap().len(), 1);
+    a.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(a.linked_file_bindings().unwrap().is_empty());
 }

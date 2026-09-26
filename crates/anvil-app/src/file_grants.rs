@@ -18,7 +18,9 @@
 //!
 //! A JWT-SVID token file (`jwt_svid_file`) is different: it is re-read at
 //! every send, so the choice is kept as a persistent binding in the vault
-//! (`anvil_app::token_files`) rather than as a session grant.
+//! (`anvil_app::token_files`) rather than as a session grant. So is a linked
+//! local file a saved request or dataset names (`linked_file`,
+//! `anvil_app::linked_files`).
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -60,6 +62,9 @@ pub enum FilePurpose {
     RunReportExport,
     /// Bind a JWT-SVID token file that the backend reads at send time.
     JwtSvidFile,
+    /// Bind a linked local file that a saved request or dataset names, so
+    /// the backend may read it at send time.
+    LinkedFile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +88,7 @@ impl FilePurpose {
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
             | FilePurpose::Dataset => Access::Read,
-            FilePurpose::JwtSvidFile => Access::Bind,
+            FilePurpose::JwtSvidFile | FilePurpose::LinkedFile => Access::Bind,
         }
     }
 
@@ -102,7 +107,11 @@ impl FilePurpose {
             FilePurpose::PemFile | FilePurpose::Pkcs12File => MIB,
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
-            FilePurpose::BundleExport | FilePurpose::LoadReportExport | FilePurpose::RunReportExport | FilePurpose::JwtSvidFile => 0,
+            FilePurpose::BundleExport
+            | FilePurpose::LoadReportExport
+            | FilePurpose::RunReportExport
+            | FilePurpose::JwtSvidFile
+            | FilePurpose::LinkedFile => 0,
         }
     }
 }
@@ -114,8 +123,9 @@ pub struct FileGrant {
     pub token: String,
     /// The chosen file's name without its folder, for display.
     pub file_name: String,
-    /// Only for a bound token file (`jwt_svid_file`): the bound path, which
-    /// the auth setting names. The backend reads it only while it is bound.
+    /// Only for a bound file (`jwt_svid_file`, `linked_file`): the bound
+    /// path, which the auth setting or linked-file reference names. The
+    /// backend reads it only while it is bound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }

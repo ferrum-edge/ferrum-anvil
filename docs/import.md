@@ -68,6 +68,84 @@ Codes are stable strings (for example `recursive_schema`,
   keys, no whitespace) of the generated `RequestSpec` with `source` removed
   (`anvil_import::spec_hash`).
 
+## Persisting an import (`anvil-app`)
+
+`App::spec_import` gives every import its own fresh `id_namespace` (any
+namespace in the caller's options is ignored) and keeps it in the stored
+source record; only a reimport of that import (`spec_reimport_plan`/`_apply`)
+reuses it. Importing the same source again, into the same or another
+workspace, therefore creates an independent copy and never moves or
+overwrites an earlier import's requests. An import that would still overwrite
+a stored object is refused.
+
+The import is atomic: a restore checkpoint is taken first, then the new
+workspace or root folder, the original bytes (a stored attachment), folders,
+requests, environments and the source record are written in one
+transaction. If anything fails, including taking the checkpoint, nothing is
+written.
+
+Imported into an existing workspace, the objects go under a new top-level
+folder, the *import root* (`Folder::import_root`), that carries the source's
+workspace-level scope: description, settings, variables and auth. A source
+without auth of its own gets an explicit `none` there. Imported environments
+are added to the destination workspace and listed on the import root
+(`import_environment_ids`).
+
+The import root is a boundary. A request under it resolves only the imported
+collection's own scope (`App::build_context`):
+
+- variables of the import root and the folders under it, and of an
+  environment the import brought with it when that one is selected;
+- auth of the import root, the folders under it and the request;
+- in a collection run or a load chain, values extracted in the same
+  iteration by requests under the same import root.
+
+The destination workspace's variables and auth, folders above the import
+root, and every other environment (including the destination's active one,
+even when chosen for a send) are left out, whether or not their values are
+secret. So are the run-local values of the workspace: a value extracted in
+the same iteration by a request outside the import root, and the row of the
+run's or load plan's dataset. Each prepared request carries the import root
+it was sealed under (`ExecutionContext::scope`, `None` outside one), and
+the runner and the load executor hand a step only the extracted values of
+its own scope and, outside an import root only, the dataset row. It works
+the other way too: a value extracted under the import root is not visible
+to the workspace's own requests. Runs of requests that are not under an
+import root are unchanged.
+
+A JWT-SVID drawn from this device's SPIFFE Workload API or from a token file
+is refused, and so is a TLS profile whose client identity (a certificate or
+this device's X.509-SVID) is bound to no host, since it would be presented
+to any host the collection names. So an imported `Bearer {{token}}` can
+never pick up the destination's `token`, whether it is a variable of the
+destination or a value its own login request extracted earlier in the same
+run: it stays unresolved and the request is not sent.
+
+The user can open an import root to its workspace on this device
+(`use_workspace_scope`, set only by `App::set_import_root_workspace_scope`
+and the desktop command `folder_set_workspace_scope`; the desktop control
+that calls it is pending). Then the workspace's variables, active
+environment and auth, this device's workload identity and TLS client
+identities, and the run's extracted values and dataset rows apply under it
+as under any folder. An import never sets it: a spec import creates the root
+with it off, saving a folder keeps the stored value, and a bundle import
+turns it off with a warning (the import root itself is kept).
+
+Precedence. In a workspace of its own the source's collection variables are
+workspace variables, below the environment. Under an import root they rank
+the same way: workspace variables (only when opened), then folders above the
+import root (only when opened), then the import root's variables, then the
+environment, then the folders under the import root and the run's
+iteration values. An existing-workspace import therefore prepares
+exactly like a new-workspace import of the same source.
+
+Other settings still apply under an import root: TLS trust (verification,
+roots, minimum version), proxy profiles, DNS overrides and gateway profiles
+selected by the destination workspace or an outer folder. A TLS profile with
+a client identity applies only when it is bound to hosts, and then the
+identity is presented only to those hosts. A proxy carries the connection
+and its own TLS profile is used only for the connection to the proxy.
+
 ## Reimport (DATA-012)
 
 `reimport_diff(previous, fresh)` links requests by operation key and

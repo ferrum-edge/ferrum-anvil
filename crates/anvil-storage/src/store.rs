@@ -99,6 +99,10 @@ pub mod kind {
     /// (`anvil_app::token_files`). Device-specific: not in [`ALL`], never
     /// exported or imported.
     pub const TOKEN_FILE: &str = "token_file";
+    /// Linked local files the user bound in the desktop's native open dialog
+    /// (`anvil_app::linked_files`). Device-specific: not in [`ALL`], never
+    /// exported or imported.
+    pub const LINKED_FILE: &str = "linked_file";
     pub const ALL: &[&str] = &[
         WORKSPACE,
         FOLDER,
@@ -683,12 +687,12 @@ impl StoreTx<'_> {
         self.records()?.delete_secret(id)
     }
 
-    /// See [`Store::put_blob`].
+    /// [`Store::put_blob`] inside this transaction: rolled back with it.
     pub fn put_blob(&self, bytes: &[u8]) -> Result<String> {
         self.records()?.put_blob(bytes)
     }
 
-    /// See [`Store::pin_blob`].
+    /// [`Store::pin_blob`] inside this transaction: rolled back with it.
     pub fn pin_blob(&self, id: &str) -> Result<()> {
         self.records()?.pin_blob(id)
     }

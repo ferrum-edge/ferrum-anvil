@@ -73,6 +73,7 @@ const REFERENCE_FIELDS: &[&str] = &[
     "integration_profile_id",
     "scenario_id",
     "chain",
+    "import_environment_ids",
 ];
 
 /// Give every object, revision and secret a fresh id and rewrite every

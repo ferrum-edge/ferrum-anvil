@@ -1,5 +1,6 @@
 //! Export/import between the encrypted store and portable bundles.
 
+use crate::linked_files::LinkedFileBinding;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::workspace::Workspace;
@@ -16,6 +17,10 @@ pub struct ImportReport {
     pub warnings: Vec<String>,
     pub secrets_restored: bool,
     pub missing_secrets: Vec<String>,
+    /// Linked local files the bundle's requests and datasets name
+    /// (`request 'Upload': /path`). Each stays unused until the user
+    /// chooses it on this device for that request or dataset.
+    pub linked_files: Vec<String>,
     pub checkpoint: Option<String>,
     /// Workspace names as they will appear (or appear) after import.
     pub workspaces: Vec<String>,
@@ -130,6 +135,7 @@ impl App {
             warnings: opened.warnings,
             secrets_restored: opened.secrets_restored,
             missing_secrets: missing_secrets(&opened.graph),
+            linked_files: opened.graph.linked_files(),
             checkpoint: None,
             workspaces: opened.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: vec![],
@@ -219,6 +225,14 @@ impl App {
                     s.put(kind::SCENARIO, &sc.meta.id, Some(&sc.workspace_id), None, 0.0, sc)?;
                 }
             }
+            // A linked-file binding was chosen for the request or dataset it
+            // names; one this import overwrites is not that object any more.
+            let written: HashSet<Id> =
+                g.requests.iter().map(|r| r.meta.id).chain(g.datasets.iter().map(|d| d.meta.id)).filter(|id| !skip(id)).collect();
+            let bindings: Vec<LinkedFileBinding> = s.list(kind::LINKED_FILE, None)?;
+            for b in bindings.iter().filter(|b| written.contains(&b.referrer.id())) {
+                s.delete(kind::LINKED_FILE, &b.id)?;
+            }
             for (id, v) in &g.secrets {
                 if let Ok(sid) = id.parse::<Id>() {
                     if policy == ConflictPolicy::Merge && s.as_read().get_secret(&sid)?.is_some() {
@@ -244,6 +258,7 @@ impl App {
             warnings: opened.warnings,
             secrets_restored: opened.secrets_restored,
             missing_secrets: missing_secrets(&g),
+            linked_files: g.linked_files(),
             checkpoint: Some(checkpoint.display().to_string()),
             workspaces: g.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: g.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),

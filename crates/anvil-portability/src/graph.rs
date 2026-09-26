@@ -2,6 +2,7 @@
 
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::load::LoadPlan;
+use anvil_domain::request::AttachmentRef;
 use anvil_domain::settings::AppSettings;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, Workspace};
@@ -68,5 +69,40 @@ impl PortableGraph {
             + self.datasets.len()
             + self.scenarios.len()
             + self.load_plans.len()
+    }
+
+    /// Every linked local file the graph's requests and datasets name, as
+    /// `request 'Upload': /path/to/file`. Each names a file on the machine
+    /// that made the bundle, and stays unused on this one until the user
+    /// chooses it here for that request or dataset.
+    pub fn linked_files(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in &self.requests {
+            let mut paths = Vec::new();
+            linked_paths(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut paths);
+            out.extend(paths.into_iter().map(|p| format!("request '{}': {p}", r.name)));
+        }
+        for d in &self.datasets {
+            if let AttachmentRef::LinkedFile { path } = &d.attachment {
+                out.push(format!("dataset '{}': {path}", d.name));
+            }
+        }
+        out
+    }
+}
+
+fn linked_paths(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if o.get("kind").and_then(|k| k.as_str()) == Some("linked_file") {
+                let path = o.get("path").and_then(|p| p.as_str()).unwrap_or_default();
+                if !out.iter().any(|p| p == path) {
+                    out.push(path.to_string());
+                }
+            }
+            o.values().for_each(|x| linked_paths(x, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| linked_paths(x, out)),
+        _ => {}
     }
 }

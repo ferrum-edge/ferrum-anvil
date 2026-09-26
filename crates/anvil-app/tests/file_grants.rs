@@ -249,6 +249,20 @@ fn a_token_file_choice_is_never_a_session_grant() {
 }
 
 #[test]
+fn a_linked_file_choice_is_never_a_session_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file(dir.path(), "payload.bin", b"payload");
+    let grants = FileGrants::default();
+    assert_eq!(FilePurpose::LinkedFile.access(), Access::Bind);
+    assert_eq!(FilePurpose::LinkedFile.max_read_bytes(), 0);
+    assert_eq!(grants.grant_read(FilePurpose::LinkedFile, &path).unwrap_err(), GrantError::WrongPurpose);
+    assert_eq!(grants.grant_write(FilePurpose::LinkedFile, &path).unwrap_err(), GrantError::WrongPurpose);
+    assert!(grants.is_empty());
+    let g = grants.grant_read(FilePurpose::Attachment, &path).unwrap();
+    assert_eq!(grants.read(&g.token, FilePurpose::LinkedFile).unwrap_err(), GrantError::WrongPurpose);
+}
+
+#[test]
 fn a_failed_write_that_is_kept_stays_within_the_bound() {
     let dir = tempfile::tempdir().unwrap();
     let src = file(dir.path(), "a.bin", b"x");

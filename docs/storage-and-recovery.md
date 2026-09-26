@@ -52,9 +52,10 @@ commands return `LOCKED` until unlock.
   is inside it:
   - A bundle import writes its objects and secrets in the transaction; its
     attachments are stored after the commit and stay if storing one fails.
-  - A spec import writes its folders, requests, environments and source record
-    in the transaction; the new workspace or root folder and the stored
-    original file are written before it and stay if the transaction fails.
+  - A spec import writes everything in the transaction: the new workspace or
+    root folder, the stored original file, its folders, requests,
+    environments and source record. A failure, including one taking the
+    checkpoint, leaves the profile as it was.
   - A full-backup restore writes everything, attachments included, in the
     transaction.
 
@@ -92,9 +93,12 @@ any passphrase is asked for or any derivation runs, unless they are within:
 Exports use 64 MiB, 3 passes and 1 lane.
 Imports never send requests, run scripts or load plans, and never activate TLS
 bypasses, plain-HTTP marker trust, cross-origin credential forwarding or the
-legacy HMAC opt-in; the preview lists what was normalised. Device-bound items
+legacy HMAC opt-in, and never open an imported collection's root folder to its
+workspace; the preview lists what was normalised. Device-bound items
 (keychain entries, provider sessions, linked local files) are reported as
-needing rebinding.
+needing rebinding, and the preview lists each linked local file with the
+request or dataset that names it. A bundle import drops this device's
+linked-file bindings for every request and dataset it overwrites.
 
 ## Full backups
 
@@ -124,17 +128,21 @@ in it can be read or changed without the export passphrase:
   spec-import provenance and run reports), every vault secret (workspace-owned
   and profile-level), every stored attachment, the complete history with its
   stored response bodies, and every load report.
-- It does not carry OS keychain entries, local data keys, provider sessions or
-  token-file bindings (they name files on this device); the preview lists them.
-  Attachment index entries and blob pins are specific to one database and are
-  rebuilt on restore. Linked local files are listed as needing rebinding.
+- It does not carry OS keychain entries, local data keys, provider sessions,
+  token-file bindings or linked-file bindings (they name files on this
+  device); the preview lists them. Attachment index entries and blob pins are
+  specific to one database and are rebuilt on restore. The restore preview
+  lists each linked local file with the request or dataset that names it; a
+  restore drops this device's linked-file bindings for every request and
+  dataset it overwrites.
 - `crates/anvil-app/tests/backup.rs` fails when the store gains a table or an
   object kind that a full backup neither carries nor lists as left out, and
   compares the whole inventory of a restored profile with its source.
 
 Restore is preview-then-apply. Every item is checked against its schema
 version, its type and the rest of the backup (ids, owning workspaces,
-attachment hashes), the import trust normalisation above applies, and
+attachment hashes), the import trust normalisation above applies (an
+imported collection opened to its workspace is closed again), and
 everything is written in one
 transaction after a checkpoint. A request revision is restored under its
 request, in that request's workspace: revisions whose request is not in the
