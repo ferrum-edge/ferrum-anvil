@@ -408,17 +408,17 @@ impl Pool {
     /// still usable.
     fn take_too_early(&self, key: &str) -> Option<(Pooled, Option<StreamLease>)> {
         let ttl = self.shared.limits.idle_ttl.min(TOO_EARLY_TTL);
-        let (found, expired) = {
+        let (found, discarded) = {
             let mut state = self.shared.state.lock();
             let p = state.too_early.remove(key)?;
-            if p.expired(Instant::now(), ttl) {
+            if p.expired(Instant::now(), ttl) || !p.is_usable() {
                 (None, Some(p))
             } else {
                 let lease = p.lease();
                 (Some((p, lease)), None)
             }
         };
-        drop(expired);
+        drop(discarded);
         found
     }
 

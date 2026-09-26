@@ -114,6 +114,16 @@ impl Origin {
 /// Start an origin. With `close_on` = n, the n-th request on a connection is
 /// answered with `connection: close` and the connection is then closed.
 async fn origin(close_on: Option<usize>) -> Origin {
+    origin_with(close_on, false).await
+}
+
+/// Start an origin that closes the socket after answering `425` without
+/// advertising `connection: close`.
+async fn origin_closes_after_425() -> Origin {
+    origin_with(None, true).await
+}
+
+async fn origin_with(close_on: Option<usize>, close_after_425: bool) -> Origin {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -146,11 +156,12 @@ async fn origin(close_on: Option<usize>) -> Origin {
                         let close = close_on == Some(served);
                         let connection = if close { "connection: close\r\n" } else { "" };
                         let resp = format!("HTTP/1.1 {status}\r\ncontent-length: 2\r\n{connection}\r\nok");
-                        if stream.write_all(resp.as_bytes()).await.is_err() || close {
+                        if stream.write_all(resp.as_bytes()).await.is_err() || close || (close_after_425 && status == "425 Too Early") {
                             break 'conn;
                         }
                     }
                 }
+                drop(stream);
                 c.fetch_add(1, Ordering::SeqCst);
             });
         }
@@ -341,4 +352,26 @@ async fn the_connection_kept_for_the_retry_after_425_expires() {
     assert!(!reused(&after_expiry), "the retry reused a connection kept beyond 10 seconds");
     assert_ne!(conn_id(&after_expiry), conn_id(&second));
     assert_eq!(o.accepted(), 3);
+}
+
+#[tokio::test]
+async fn a_closed_connection_kept_for_a_425_retry_is_replaced() {
+    init();
+    let t = HttpTransport::new();
+    let o = origin_closes_after_425().await;
+    let mut p = plan(&format!("{}too-early", o.url));
+    p.keepalive = false;
+    p.early_data = EarlyDataIntent::Send;
+
+    let first = answer_425(&t, &p).await;
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the origin did not close the first socket");
+
+    let mut retry = p.clone();
+    retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
+    let again = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await.pop().unwrap();
+    assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
+    assert_eq!(again.observation.response_status, Some(425));
+    assert!(!reused(&again), "the retry reused the connection closed by the origin");
+    assert_ne!(conn_id(&again), conn_id(&first));
+    assert_eq!(o.accepted(), 2);
 }
