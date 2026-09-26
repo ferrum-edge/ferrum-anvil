@@ -193,10 +193,8 @@ async fn extracted_values_and_dataset_rows_stay_on_their_side_of_an_import_root(
     assert_eq!(steps[5].status, RunStepStatus::Passed, "{r:#?}");
     // Ground truth: what reached the peer.
     let some = |s: &str| Some(s.to_string());
-    let expected = [
-        ("imported".to_string(), some("tok-imported-0002"), None),
-        ("me".to_string(), some("tok-user-0001"), some("pw-row-secret-1")),
-    ];
+    let expected =
+        [("imported".to_string(), some("tok-imported-0002"), None), ("me".to_string(), some("tok-user-0001"), some("pw-row-secret-1"))];
     assert_eq!(received_steps(&f), expected);
 }
 
