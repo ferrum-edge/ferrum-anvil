@@ -385,7 +385,9 @@ needs no confirmation.
   database's `meta` table (`secrets_left_at_v2`, removed when none is left).
   A secret that opens under its schema 2 AAD instead shows that the recorded
   version was set back after the step ran: the unlock fails as an integrity
-  error, the profile stays locked and nothing is written. Earlier builds
+  error, the profile stays locked and nothing is written. This check detects
+  a set-back database only while one of its schema 2 secrets still names its
+  owner. Earlier builds
   refuse a schema 2 database, and a full backup made from one, as newer.
 - Skipped secrets and the migration trust the database as found. Replacing
   the whole database with an older checkpoint, or restoring a schema 1
@@ -393,9 +395,9 @@ needs no confirmation.
   kept outside the database.
 - Restoring a checkpoint opens it read-only and refuses one written by a
   newer schema, or sealed with another data key, before the live database is
-  touched. A checkpoint
-  from an older schema is migrated under the same hold of the connection as
-  the copy; if the copy or the migration fails, the profile is left locked.
+  touched. A checkpoint from an older schema is migrated under the same hold
+  of the connection as the copy; if the copy or the migration fails, the
+  profile is left locked.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
 - Bundles carry `format_version`; unknown future formats are rejected, and so
