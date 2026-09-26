@@ -103,7 +103,7 @@ impl RunSecrets {
         r.prepared.url = red.url(&r.prepared.url);
         r.prepared.headers = red.headers(&r.prepared.headers);
         for s in &mut r.prepared.inferred {
-            *s = red.text(s);
+            *s = red.inferred(s);
         }
         for a in &mut r.attempts {
             a.url = red.url(&a.url);
@@ -145,14 +145,7 @@ impl RunSecrets {
             }
         }
         for f in &mut r.findings {
-            f.title = red.text(&f.title);
-            f.explanation = red.text(&f.explanation);
-            for e in &mut f.evidence {
-                e.value = red.text(&e.value);
-            }
-            for a in &mut f.alternatives {
-                *a = red.text(a);
-            }
+            red.finding(f);
         }
     }
 
@@ -233,6 +226,50 @@ mod tests {
         assert_eq!(s.values.len(), MAX_RUN_SECRETS);
         assert_eq!(s.text("x secret-04105 y"), format!("x {REDACTED} y"));
         assert_eq!(s.text("secret-00000"), "secret-00000", "oldest evicted");
+    }
+
+    #[test]
+    fn records_redact_url_values_as_urls() {
+        use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Evidence, EvidenceSource, Owner, Severity, SourceScope};
+        use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
+
+        let ctx = anvil_engine::ExecutionContext::standalone(anvil_domain::request::RequestSpec::http("GET", "https://example.test/"));
+        let resolver = anvil_engine::vars::Resolver::new(vec![], None);
+        let failure = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, "not sent");
+        let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+        // `%2D` is not a canonical encoding: exact-value scrubbing misses it,
+        // URL redaction does not.
+        record.prepared.inferred.push("auth dpop.htu: https://h/u/run%2Dvalue-5e6f/x".into());
+        let endpoint = "idp.test/t/run%2Dvalue-5e6f/authorize";
+        record.findings.push(DiagnosticFinding {
+            code: "auth.browser_session_required".into(),
+            rule_id: "auth.session".into(),
+            rule_version: 1,
+            title: "login".into(),
+            explanation: format!("example.test redirected this request ({endpoint})."),
+            scope: SourceScope::Unknown,
+            confidence: Confidence::Likely,
+            severity: Severity::Error,
+            evidence: vec![Evidence {
+                source: EvidenceSource::HttpHeader,
+                key: "redirect.authorization_endpoint".into(),
+                value: endpoint.into(),
+                attempt: Some(1),
+            }],
+            alternatives: vec![],
+            does_not_prove: vec![],
+            remediation: vec![],
+            owner: Owner::Caller,
+            confirm_with: vec![],
+        });
+
+        let mut s = RunSecrets::new(vec![]);
+        s.add_values(vec!["run-value-5e6f".to_string()]);
+        s.scrub_record(&mut record);
+        assert!(record.prepared.inferred.contains(&format!("auth dpop.htu: https://h/u/{REDACTED}/x")), "{:?}", record.prepared.inferred);
+        let f = record.findings.last().unwrap();
+        assert_eq!(f.evidence[0].value, format!("idp.test/t/{REDACTED}/authorize"));
+        assert_eq!(f.explanation, format!("example.test redirected this request (idp.test/t/{REDACTED}/authorize)."));
     }
 
     #[test]

@@ -41,7 +41,12 @@ against it).
   by value. URL path segments, query names and values and fragments are
   compared after percent-decoding, and a component that hides a secret is
   replaced whole, so no reversible encoding of it is kept; a URL that still
-  reveals one once decoded keeps only its scheme and authority. A collection
+  reveals one once decoded keeps only its scheme and authority. Userinfo is
+  always replaced, in scheme-relative URLs (`//user:pw@host`) too. URLs inside
+  headers (`Location`, `Content-Location`, `Referer`, the `Link` targets and
+  `anchor` parameters, the `Refresh` target) and URL-valued diagnostic
+  evidence (the authorization endpoint of a login redirect, also where the
+  explanation quotes it) get the same URL redaction. A collection
   run drops a content-encoded response body it cannot check for sensitive run
   values.
 - **Redirect hops:** every hop is evaluated for its own target. Once a redirect

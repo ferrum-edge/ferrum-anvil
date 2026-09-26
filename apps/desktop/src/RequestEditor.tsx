@@ -723,7 +723,7 @@ const ASSERTION_TYPES: { id: Assertion["type"]; label: string }[] = [
 ];
 
 /** Tooltip for XPath fields; the engine rejects anything outside this subset. */
-const XPATH_HELP = "XPath subset: /a/b (child), //b (descendant), * (any element), [n] (n-th matching child, from 1), final @attr or text(). Names match local names; namespace prefixes are ignored. Other predicates, axes and functions are errors.";
+const XPATH_HELP = "XPath subset: /a/b (child), //b (descendant), * (any element), [n] (n-th matching child, from 1), final @attr or text() (//@attr and //text() search the whole document). Names match local names; namespace prefixes are ignored. Other predicates, axes, functions and spaces between steps are errors. See docs/runner.md.";
 
 const COMPARISONS: Comparison[] = ["equals", "not_equals", "contains", "not_contains", "matches", "exists", "not_exists", "less_than", "greater_than"];
 

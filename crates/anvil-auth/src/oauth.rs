@@ -407,7 +407,9 @@ impl TokenCache {
         let (state, task_key, grant, skew) = (self.state.clone(), key.clone(), cfg.grant, cfg.refresh_skew_secs);
         // The generation check and registration share the state lock, so a
         // sign-in cannot slip between them. A refresh that was superseded
-        // before registration returns the newer sign-in without spawning.
+        // before registration does not spawn: it answers like
+        // `superseded_answer`, with the newer sign-in's token when only a
+        // sign-in happened since, and `Canceled` after a lock or a sign-out.
         let task = {
             let mut st = self.state.lock();
             if st.generation(key) != generation {

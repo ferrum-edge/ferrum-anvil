@@ -175,3 +175,111 @@ fn json_escaped_secrets_are_scrubbed_from_text() {
     assert_eq!(r.text(&format!("{rendered} is not of type \"integer\"")), format!("\"{REDACTED}\" is not of type \"integer\""));
     assert_eq!(r.text(&format!("raw {secret}")), format!("raw {REDACTED}"));
 }
+
+#[test]
+fn a_link_anchor_parameter_is_redacted_as_a_url() {
+    let r = redactor();
+    let quoted =
+        r.header("Link", r#"<https://h/next>; rel="next"; anchor="https://h/u/AUDIT%2fsecret%2Bwith%3Dreserved?token=eyJ.anchor""#);
+    assert_eq!(quoted, format!(r#"<https://h/next>; rel="next"; anchor="https://h/u/{REDACTED}?token={REDACTED}""#));
+    let bare = r.header("Link", "<https://h/a>; Anchor = /u/AUDIT%2fsecret%2Bwith%3Dreserved; rel=up, <https://h/b>; rel=next");
+    assert_eq!(bare, format!("<https://h/a>; Anchor = /u/{REDACTED}; rel=up, <https://h/b>; rel=next"));
+    let plain = r##"<https://h/a>; rel="x"; anchor="#frag", <https://h/b>; title="anchor=here""##;
+    assert_eq!(r.header("Link", plain), plain, "anchors without secrets and look-alikes stay readable");
+}
+
+#[test]
+fn userinfo_in_a_scheme_relative_url_is_redacted() {
+    let r = redactor();
+    assert_eq!(r.url("//admin:hunter2@h/p?q=1"), format!("//{REDACTED}@h/p?q=1"));
+    assert_eq!(r.header("Location", "//admin:hunter2@h/"), format!("//{REDACTED}@h/"));
+    assert_eq!(r.url("//h/p"), "//h/p");
+    assert_eq!(r.url("/p/a@b"), "/p/a@b", "an @ in a path is not userinfo");
+}
+
+#[test]
+fn raw_secrets_in_urls_without_encoding_are_still_found() {
+    let r = Redactor::new(vec!["plain-secret-4b1c".into()], vec![]);
+    // Exact-value scrubbing runs first; the whole-URL check then has nothing to decode.
+    assert_eq!(r.url("https://h/a/plain-secret-4b1c/b"), format!("https://h/a/{REDACTED}/b"));
+    assert_eq!(r.url("https://h/a/b?page=2"), "https://h/a/b?page=2");
+}
+
+/// A login redirect whose authorization endpoint path carries a secret in a
+/// form exact-value scrubbing does not recognize (`%2D` is not canonical).
+#[test]
+fn authorization_endpoint_evidence_is_redacted_as_a_url() {
+    use anvil_domain::execution::{AttemptObservation, AttemptReason, BodyCapture, BodyCompleteness, ByteCounts, DispatchState};
+    use anvil_domain::execution::{HeaderEntry, ResponseRecord};
+    use anvil_domain::outcome::ProtocolStatus;
+
+    let authorize = "https://idp.test/t/path%2Dsecret-7f3a/authorize?response_type=code&client_id=c1";
+    let attempt = |index: u32, reason: AttemptReason, url: &str, status: u16| AttemptObservation {
+        early_data: None,
+        index,
+        reason,
+        method: "GET".into(),
+        url: url.into(),
+        started_at: chrono::Utc::now(),
+        connection: None,
+        phases: vec![],
+        dispatch: DispatchState::Sent,
+        bytes: ByteCounts::default(),
+        response_status: Some(status),
+        failure: None,
+        duration_us: 1,
+    };
+    let attempts = vec![
+        attempt(0, AttemptReason::Initial, "https://api.test/echo", 302),
+        attempt(1, AttemptReason::Redirect { status: 302 }, authorize, 200),
+    ];
+    let page = b"<html>Sign in</html>";
+    let response = ResponseRecord {
+        status: 200,
+        reason: None,
+        http_version: "HTTP/1.1".into(),
+        headers: vec![HeaderEntry { name: "content-type".into(), value: "text/html".into() }],
+        trailers: vec![],
+        trailers_received: false,
+        body: BodyCapture {
+            completeness: BodyCompleteness::Complete,
+            wire_bytes: page.len() as u64,
+            declared_length: Some(page.len() as u64),
+            captured_bytes: page.len() as u64,
+            display_truncated: false,
+            content_type: Some("text/html".into()),
+            content_encoding: None,
+            decoded_bytes: None,
+            decoding: None,
+            decoding_detail: None,
+            blob_sha256: None,
+        },
+    };
+    let status = ProtocolStatus::Http { status: 200, reason: None };
+    let diagnosis = anvil_diagnostics::diagnose(&anvil_diagnostics::DiagnosticInput {
+        protocol: anvil_domain::request::Protocol::Http,
+        method: "GET",
+        preparation_failure: None,
+        attempts: &attempts,
+        response: Some(&response),
+        body: page,
+        stream: None,
+        protocol_status: &status,
+        trust: &anvil_diagnostics::FerrumTrust::NotConfigured,
+        tls_verification_enabled: true,
+        credentials_stripped_on_redirect: false,
+        protocol_fallback_from: None,
+        workload: None,
+    });
+    let mut finding = diagnosis.findings.into_iter().find(|f| f.code == "auth.browser_session_required").expect("login redirect finding");
+    assert!(finding.explanation.contains("path%2Dsecret-7f3a"), "precondition: {}", finding.explanation);
+
+    let r = Redactor::new(vec!["path-secret-7f3a".into()], vec![]);
+    r.finding(&mut finding);
+    let endpoint = finding.evidence.iter().find(|e| e.key == "redirect.authorization_endpoint").expect("endpoint evidence");
+    assert_eq!(endpoint.value, format!("idp.test/t/{REDACTED}/authorize"));
+    assert!(finding.explanation.contains(&format!("idp.test/t/{REDACTED}/authorize")), "{}", finding.explanation);
+    for text in std::iter::once(&finding.explanation).chain(finding.evidence.iter().map(|e| &e.value)) {
+        assert!(!reveals(text, "path-secret-7f3a"), "{text}");
+    }
+}

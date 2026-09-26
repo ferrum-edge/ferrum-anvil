@@ -8,9 +8,9 @@ use anvil_domain::Id;
 use anvil_domain::assertions::{Assertion, AssertionKind, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::load::*;
-use anvil_domain::request::{Body, KeyValue, PayloadEncoding, Protocol, RequestSpec, StreamPayload, UdpSpec};
+use anvil_domain::request::{Body, KeyValue, PayloadEncoding, Protocol, RequestSpec, SoapVersion, StreamPayload, UdpSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
-use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
+use anvil_domain::settings::{Limits, SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::TlsProfile;
 use anvil_engine::context::MemorySecrets;
 use anvil_engine::{Engine, ExecutionContext};
@@ -531,6 +531,63 @@ async fn load_010_bounded_samples_under_sustained_failures_and_large_bodies() {
             .await;
     assert_eq!(r.requests.completed, 16, "bodies larger than the in-memory capture are still read completely");
     assert!(r.bytes_received >= 16 * n);
+}
+
+/// A SOAP or GraphQL response larger than the capture: a fault past the
+/// captured prefix would go unseen, so the unit is not a success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_soap_and_graphql_outcomes_not_determined_from_the_body_are_not_successes() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let small_capture = SettingsOverrides { limits: Some(Limits { capture_bytes: 16, ..Limits::default() }), ..Default::default() };
+    let soap = Body::Soap {
+        version: SoapVersion::Soap11,
+        envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+        action: None,
+    };
+    let graphql = Body::GraphQl { query: "{ user { id email } }".into(), variables: String::new(), operation_name: None };
+    for (path, body) in [("/soap-fault", soap), ("/graphql-errors", graphql)] {
+        let s = RequestSpec { body, settings: small_capture.clone(), ..RequestSpec::http("POST", &f.url(path)) };
+        let id = Id::new();
+        let r = run(plan(Workload::Iterations { iterations: 4, concurrency: 1 }, vec![id]), vec![(id, ctx(s))], None).await;
+        assert_eq!((r.requests.completed, r.requests.application_failures), (4, 4), "{path}");
+        assert_eq!(r.latency_success.count, 0, "{path}");
+        assert_eq!(r.failure_categories.len(), 1, "{path}: {:?}", r.failure_categories);
+        assert_eq!(r.failure_categories[0].category, "application_failure: application.not_determined_from_body", "{path}");
+    }
+
+    let authorization_redirect = RequestSpec {
+        body: Body::Soap {
+            version: SoapVersion::Soap11,
+            envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+            action: None,
+        },
+        settings: small_capture.clone(),
+        ..RequestSpec::http("POST", &f.url("/redirect?to=%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3Dfixture"))
+    };
+    let request = ctx(authorization_redirect);
+    let manual = Engine::new().execute(&request, EventCtx::none(), CancellationToken::new()).await;
+    let top = manual
+        .record
+        .findings
+        .iter()
+        .filter(|f| f.severity >= anvil_domain::diagnostics::Severity::Warning)
+        .max_by_key(|f| f.severity)
+        .or(manual.record.findings.first())
+        .expect("redirect produces a diagnostic finding")
+        .code
+        .clone();
+    let id = Id::new();
+    let r = run(plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]), vec![(id, request)], None).await;
+    assert_eq!(r.requests.application_failures, 1);
+    assert_eq!(r.failure_categories[0].category, format!("application_failure: {top}"));
+    assert_ne!(r.failure_categories[0].category, "application_failure: application.not_determined_from_body");
+
+    // A plain request is judged by its status, which a prefix does not hide.
+    let s = RequestSpec { settings: small_capture, ..RequestSpec::http("GET", &f.url("/soap-fault")) };
+    let id = Id::new();
+    let r = run(plan(Workload::Iterations { iterations: 4, concurrency: 1 }, vec![id]), vec![(id, ctx(s))], None).await;
+    assert_eq!((r.requests.completed, r.requests.application_failures, r.latency_success.count), (4, 0, 4));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

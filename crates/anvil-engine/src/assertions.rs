@@ -10,9 +10,10 @@ use anvil_domain::outcome::{ProtocolStatus, TransportState};
 pub struct Observed<'a> {
     pub response: Option<&'a ResponseRecord>,
     pub body: &'a [u8],
-    /// Why the body is not the complete decoded content (a truncated or
-    /// failed content decoding). Assertions that read the body are then not
-    /// evaluated rather than judged against a prefix or still-encoded bytes.
+    /// Why the body is not the complete decoded content (a capture cut short,
+    /// or a truncated or failed content decoding). Assertions that read the
+    /// body are then not evaluated rather than judged against a prefix or
+    /// still-encoded bytes.
     pub body_unavailable: Option<&'a str>,
     pub latency_ms: Option<u64>,
     pub protocol_status: &'a ProtocolStatus,
@@ -162,6 +163,28 @@ fn xpath_axis<'a, 'i>(nodes: &[roxmltree::Node<'a, 'i>], descendant: bool) -> Ve
     out
 }
 
+/// The elements an element step selects below `nodes`, in document order
+/// without duplicates: each node has one parent, and the axis lists every
+/// parent once.
+fn xpath_elements<'a, 'i>(
+    nodes: &[roxmltree::Node<'a, 'i>],
+    descendant: bool,
+    name: &str,
+    position: Option<usize>,
+) -> Vec<roxmltree::Node<'a, 'i>> {
+    let mut next = Vec::new();
+    for parent in xpath_axis(nodes, descendant) {
+        let mut matched = parent.children().filter(|c| c.is_element() && (name == "*" || c.tag_name().name() == name));
+        match position {
+            Some(i) => next.extend(matched.nth(i - 1)),
+            None => next.extend(matched),
+        }
+    }
+    // Children of nested parents interleave.
+    next.sort();
+    next
+}
+
 /// XPath subset over a DTD-free parse, validated before the body is read:
 /// `/a/b`, `//b`, `/a/b[2]`, `/a/*`, `/a/@attr`, `//@attr`, `/a/text()`.
 /// Names match local names (namespace prefixes ignored). The result is the
@@ -184,17 +207,7 @@ pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
                 return Ok(owners.find_map(|n| n.attributes().find(|a| a.name() == name).map(|a| a.value().to_string())));
             }
             XStep::Element { descendant, name, position } => {
-                let mut next = Vec::new();
-                for parent in xpath_axis(&nodes, descendant) {
-                    let mut matched = parent.children().filter(|c| c.is_element() && (name == "*" || c.tag_name().name() == name));
-                    match position {
-                        Some(i) => next.extend(matched.nth(i - 1)),
-                        None => next.extend(matched),
-                    }
-                }
-                // Children of nested parents interleave.
-                next.sort();
-                nodes = next;
+                nodes = xpath_elements(&nodes, descendant, name, position);
                 if nodes.is_empty() {
                     return Ok(None);
                 }
@@ -221,8 +234,8 @@ fn reads_body(k: &AssertionKind) -> bool {
     }
 }
 
-fn not_fully_decoded(reason: &str) -> String {
-    format!("the response body was not fully decoded ({reason})")
+fn body_not_available(reason: &str) -> String {
+    format!("the complete response body is not available ({reason})")
 }
 
 /// Comparisons and validation use the original values; only the evidence a
@@ -237,7 +250,7 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
             if let Some(reason) = o.body_unavailable
                 && reads_body(&a.kind)
             {
-                return Err(not_fully_decoded(reason));
+                return Err(body_not_available(reason));
             }
             Ok(match &a.kind {
                 AssertionKind::Status { comparison, value } => {
@@ -331,6 +344,20 @@ fn default_label(k: &AssertionKind) -> String {
     }
 }
 
+fn extraction_value(source: &ExtractionSource, response: Option<&ResponseRecord>, body: &[u8]) -> Result<Option<String>, String> {
+    Ok(match source {
+        ExtractionSource::JsonPath { path } => json_path(body, path)?,
+        ExtractionSource::XPath { path } => xpath(body, path)?,
+        ExtractionSource::Header { name } => response.and_then(|r| r.header_values(name).first().map(|s| s.to_string())),
+        ExtractionSource::Regex { pattern, group } => {
+            let re = regex::RegexBuilder::new(pattern).size_limit(1 << 20).build().map_err(|x| format!("invalid pattern: {x}"))?;
+            let text = String::from_utf8_lossy(body);
+            re.captures(&text).and_then(|c| c.get(*group)).map(|m| m.as_str().to_string())
+        }
+        ExtractionSource::Status => response.map(|r| r.status.to_string()),
+    })
+}
+
 /// Run extractions; returns (variable, value, sensitive). With
 /// `body_unavailable` set, extractions that read the body fail instead of
 /// matching against a prefix or still-encoded bytes.
@@ -346,19 +373,10 @@ pub fn extract(
             if let Some(reason) = body_unavailable
                 && matches!(e.source, ExtractionSource::JsonPath { .. } | ExtractionSource::XPath { .. } | ExtractionSource::Regex { .. })
             {
-                return Err(format!("extraction for '{}' was not run: {}", e.variable, not_fully_decoded(reason)));
+                return Err(format!("extraction for '{}' was not run: {}", e.variable, body_not_available(reason)));
             }
-            let v = match &e.source {
-                ExtractionSource::JsonPath { path } => json_path(body, path)?,
-                ExtractionSource::XPath { path } => xpath(body, path)?,
-                ExtractionSource::Header { name } => response.and_then(|r| r.header_values(name).first().map(|s| s.to_string())),
-                ExtractionSource::Regex { pattern, group } => {
-                    let re = regex::RegexBuilder::new(pattern).size_limit(1 << 20).build().map_err(|x| format!("invalid pattern: {x}"))?;
-                    let text = String::from_utf8_lossy(body);
-                    re.captures(&text).and_then(|c| c.get(*group)).map(|m| m.as_str().to_string())
-                }
-                ExtractionSource::Status => response.map(|r| r.status.to_string()),
-            };
+            // Name the variable: a run reports several extractions' errors together.
+            let v = extraction_value(&e.source, response, body).map_err(|x| format!("extraction for '{}': {x}", e.variable))?;
             v.map(|v| (e.variable.clone(), v, e.sensitive)).ok_or_else(|| format!("extraction for '{}' matched nothing", e.variable))
         })
         .collect()
@@ -377,5 +395,26 @@ mod tests {
         let xml = br#"<s:Envelope xmlns:s="x"><s:Body><r a="1"><v>one</v><v>two</v></r></s:Body></s:Envelope>"#;
         assert_eq!(xpath(xml, "//v[2]").unwrap().as_deref(), Some("two"));
         assert_eq!(xpath(xml, "/Envelope/Body/r/@a").unwrap().as_deref(), Some("1"));
+    }
+
+    /// The `id` attributes of the elements `path` (element steps only) selects.
+    fn selected_ids(xml: &str, path: &str) -> Vec<String> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut nodes = vec![doc.root()];
+        for step in parse_xpath(path).unwrap() {
+            let XStep::Element { descendant, name, position } = step else { panic!("{path}: element steps only") };
+            nodes = xpath_elements(&nodes, descendant, name, position);
+        }
+        nodes.iter().map(|n| n.attribute("id").unwrap_or("?").to_string()).collect()
+    }
+
+    #[test]
+    fn descendant_steps_select_each_element_once_in_document_order() {
+        let xml = r#"<r id="r"><a id="a1"><a id="a2"><b id="b1"/></a><b id="b2"><b id="b3"/></b></a><b id="b4"/></r>"#;
+        assert_eq!(selected_ids(xml, "//a//b"), ["b1", "b2", "b3"], "no element twice although a2 is inside a1");
+        assert_eq!(selected_ids(xml, "//a"), ["a1", "a2"]);
+        assert_eq!(selected_ids(xml, "//b"), ["b1", "b2", "b3", "b4"]);
+        // `//` below an element selects its descendants, never the element itself.
+        assert_eq!(selected_ids(r#"<b id="outer"><b id="inner"><b id="deepest"/></b></b>"#, "/b//b"), ["inner", "deepest"]);
     }
 }

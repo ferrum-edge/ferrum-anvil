@@ -10,6 +10,7 @@ use anvil_diagnostics::{DiagnosticInput, FerrumTrust};
 use anvil_domain::Id;
 use anvil_domain::execution::*;
 use anvil_domain::outcome::*;
+use anvil_domain::request::Body;
 use anvil_domain::settings::EffectiveSettings;
 use anvil_domain::workload::WorkloadApiEvidence;
 use anvil_transport::decode::{self, DecodeOutcome};
@@ -67,15 +68,6 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     }
 }
 
-/// An inferred note with its values redacted. An auth fact's `htu` (the DPoP
-/// target URI) is a URL whose path can carry a secret.
-fn redact_inferred(line: &str, r: &Redactor) -> String {
-    match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
-        Some((k, v)) if k.ends_with(".htu") => format!("auth {k}: {}", r.url(v)),
-        _ => r.text(line),
-    }
-}
-
 /// The decoded representation of a response body and how decoding went.
 #[derive(Default)]
 struct BodyDecoding {
@@ -86,9 +78,30 @@ struct BodyDecoding {
     detail: Option<String>,
 }
 
-fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64) -> BodyDecoding {
+fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64, session: bool) -> BodyDecoding {
+    let partial = r.body.display_truncated || r.body.completeness != BodyCompleteness::Complete;
     match decode::decode(r.body.content_encoding.as_deref(), raw, limit) {
         DecodeOutcome::Identity => BodyDecoding::default(),
+        // A capture cut short is not the whole encoded body, even when its
+        // bytes decode cleanly (the cut can fall between two gzip members).
+        DecodeOutcome::Decoded { bytes, truncated_at_limit: false } if capture_gap(&r.body, session).is_some() => {
+            let captured = format!("only {} bytes of the body were captured", raw.len());
+            // A local limit (capture or response size) leaves a decoded
+            // prefix; a body the peer or a cancel cut short is not decoded.
+            if r.body.display_truncated || r.body.completeness == BodyCompleteness::StoppedAtLocalLimit {
+                BodyDecoding {
+                    bytes: Some(Bytes::from(bytes)),
+                    status: Some(ContentDecoding::TruncatedAtLimit),
+                    detail: Some(format!("decoding stopped at the end of the captured bytes; {captured}")),
+                }
+            } else {
+                BodyDecoding {
+                    bytes: None,
+                    status: Some(ContentDecoding::Failed),
+                    detail: Some(format!("the encoded body is incomplete; {captured}")),
+                }
+            }
+        }
         DecodeOutcome::Decoded { bytes, truncated_at_limit: false } => {
             BodyDecoding { bytes: Some(Bytes::from(bytes)), status: Some(ContentDecoding::Complete), detail: None }
         }
@@ -104,7 +117,6 @@ fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64) -> BodyDecoding {
         },
         DecodeOutcome::Failed { coding, message } => {
             // A capture cut short explains a decoder error on its own.
-            let partial = r.body.display_truncated || r.body.completeness != BodyCompleteness::Complete;
             let note = if partial { format!("; only {} bytes of the body were captured", raw.len()) } else { String::new() };
             BodyDecoding {
                 bytes: None,
@@ -148,7 +160,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let raw_body = last.body.clone();
     // Decode for display/assertions; the raw captured bytes stay the evidence.
     let BodyDecoding { bytes: decoded, status: decoding_status, detail: decoding_detail } = match &response {
-        Some(r) if a.settings.decompress && !raw_body.is_empty() => decode_body(r, &raw_body, a.settings.limits.max_decoded_bytes),
+        Some(r) if a.settings.decompress && !raw_body.is_empty() => {
+            decode_body(r, &raw_body, a.settings.limits.max_decoded_bytes, a.stream.is_some())
+        }
         _ => BodyDecoding::default(),
     };
     let body_for_eval: &[u8] = decoded.as_deref().unwrap_or(&raw_body);
@@ -221,6 +235,12 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         response.as_ref().map(|r| matches!(r.body.completeness, BodyCompleteness::Complete | BodyCompleteness::NoBody)).unwrap_or(false);
     // A partial or undecodable body cannot show an application-level fault.
     let body_complete = body_complete && decoding_gap.is_none();
+    // A SOAP fault or GraphQL error arrives in a 2xx body. When only a prefix
+    // of that body was captured, a fault past the prefix goes unseen, so the
+    // application outcome is not determined rather than read as a success.
+    let judged_from_body = matches!(ctx.spec.body, Body::Soap { .. } | Body::GraphQl { .. });
+    let undetermined = body_unavailable.as_deref().filter(|_| judged_from_body && body_complete);
+    let body_complete = body_complete && undetermined.is_none();
     // A redirect into an interactive login (AUTH-017) never evaluated the API,
     // even when the login page itself answered 200.
     let application = if diagnosis.stopped_at_login {
@@ -229,6 +249,12 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         anvil_diagnostics::assess_application(ctx.spec.protocol, &protocol_status, &diagnosis.body, body_complete)
     };
     let mut warnings = diagnosis.warnings.clone();
+    if let Some(reason) = undetermined.filter(|_| application == ApplicationState::NotEvaluated) {
+        let message = format!(
+            "The application outcome was not determined: a SOAP fault or GraphQL error is reported in the response body, and the complete body is not available ({reason})"
+        );
+        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+    }
     if let Some(l) = &a.lint_bypassed {
         warnings.push(OutcomeWarning { code: WarningCode::LintBypassed, message: format!("Sent despite a lint error: {l}") });
     }
@@ -283,10 +309,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     redact_attempts(&mut attempts, redactor);
     let mut findings = diagnosis.findings;
     for f in &mut findings {
-        f.explanation = redactor.text(&f.explanation);
-        for e in &mut f.evidence {
-            e.value = redactor.text(&e.value);
-        }
+        redactor.finding(f);
     }
     if let Some(r) = response.as_mut() {
         r.headers = redactor.headers(&r.headers);
@@ -294,9 +317,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     }
     let prepared_headers: Vec<HeaderEntry> =
         a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect();
-    let mut inferred: Vec<String> = a.inferred.iter().map(|i| redact_inferred(i, redactor)).collect();
+    let mut inferred: Vec<String> = a.inferred.iter().map(|i| redactor.inferred(i)).collect();
     for (k, v) in &a.auth_facts {
-        inferred.push(redact_inferred(&format!("auth {k}: {v}"), redactor));
+        inferred.push(redactor.inferred(&format!("auth {k}: {v}")));
     }
     let record = ExecutionRecord {
         id: Id::new(),
@@ -523,10 +546,62 @@ mod tests {
     fn inferred_auth_facts_are_redacted_and_the_htu_as_a_url() {
         let r = Redactor::new(vec!["path-secret-7f3a".into()], vec![]);
         // `%2D` is not a canonical encoding, so only URL redaction finds it.
-        let htu = redact_inferred("auth dpop.htu: https://h/u/path%2Dsecret-7f3a/x", &r);
+        let htu = r.inferred("auth dpop.htu: https://h/u/path%2Dsecret-7f3a/x");
         assert_eq!(htu, format!("auth dpop.htu: https://h/u/{REDACTED}/x"));
-        assert_eq!(redact_inferred("auth hmac.nonce: n-path-secret-7f3a", &r), format!("auth hmac.nonce: n-{REDACTED}"));
-        assert_eq!(redact_inferred("Accept-Encoding: gzip, br", &r), "Accept-Encoding: gzip, br");
+        assert_eq!(r.inferred("auth hmac.nonce: n-path-secret-7f3a"), format!("auth hmac.nonce: n-{REDACTED}"));
+        assert_eq!(r.inferred("Accept-Encoding: gzip, br"), "Accept-Encoding: gzip, br");
+    }
+
+    /// One complete gzip member holding `hello`.
+    const GZIP_HELLO: [u8; 25] = [
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x86, 0xa6, 0x10, 0x36, 0x05,
+        0x00, 0x00, 0x00,
+    ];
+
+    fn gzip_response(completeness: BodyCompleteness, wire_bytes: u64, display_truncated: bool) -> ResponseRecord {
+        ResponseRecord {
+            status: 200,
+            reason: None,
+            http_version: "HTTP/1.1".into(),
+            headers: vec![],
+            trailers: vec![],
+            trailers_received: false,
+            body: BodyCapture {
+                completeness,
+                wire_bytes,
+                declared_length: None,
+                captured_bytes: GZIP_HELLO.len() as u64,
+                display_truncated,
+                content_type: Some("text/plain".into()),
+                content_encoding: Some("gzip".into()),
+                decoded_bytes: None,
+                decoding: None,
+                decoding_detail: None,
+                blob_sha256: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_capture_cut_short_is_never_labelled_completely_decoded() {
+        let whole = decode_body(&gzip_response(BodyCompleteness::Complete, 25, false), &GZIP_HELLO, 1024, false);
+        assert_eq!(whole.status, Some(ContentDecoding::Complete));
+        // The capture ends between two gzip members: its bytes decode
+        // cleanly, but they are not the whole body.
+        let captured = decode_body(&gzip_response(BodyCompleteness::Complete, 50, true), &GZIP_HELLO, 1024, false);
+        assert_eq!(captured.status, Some(ContentDecoding::TruncatedAtLimit));
+        assert_eq!(captured.bytes.as_deref(), Some(&b"hello"[..]), "the decoded prefix stays viewable");
+        assert!(captured.detail.as_deref().is_some_and(|d| d.contains("only 25 bytes")), "{:?}", captured.detail);
+        let limited = decode_body(&gzip_response(BodyCompleteness::StoppedAtLocalLimit, 25, false), &GZIP_HELLO, 1024, false);
+        assert_eq!(limited.status, Some(ContentDecoding::TruncatedAtLimit));
+        for cut in [BodyCompleteness::Incomplete, BodyCompleteness::Canceled] {
+            let d = decode_body(&gzip_response(cut, 25, false), &GZIP_HELLO, 1024, false);
+            assert_eq!(d.status, Some(ContentDecoding::Failed), "{cut:?}");
+            assert!(d.bytes.is_none(), "{cut:?}");
+        }
+        // A session ends on its own terms; only the capture limit counts there.
+        let session = decode_body(&gzip_response(BodyCompleteness::Incomplete, 25, false), &GZIP_HELLO, 1024, true);
+        assert_eq!(session.status, Some(ContentDecoding::Complete));
     }
 
     #[test]
