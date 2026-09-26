@@ -382,10 +382,18 @@ needs no confirmation.
   left as it is, still sealed under the schema 1 AAD, which no schema 2 AAD
   equals, so reading it keeps failing as before and it can be deleted. The
   step still commits; the number left is logged and recorded in the
-  database's `meta` table (`secrets_left_at_v2`). Earlier builds refuse a
-  schema 2 database, and a full backup made from one, as newer.
-- Restoring a checkpoint refuses one written by a newer schema, or sealed
-  with another data key, before the live database is touched. A checkpoint
+  database's `meta` table (`secrets_left_at_v2`, removed when none is left).
+  A secret that opens under its schema 2 AAD instead shows that the recorded
+  version was set back after the step ran: the unlock fails as an integrity
+  error, the profile stays locked and nothing is written. Earlier builds
+  refuse a schema 2 database, and a full backup made from one, as newer.
+- Skipped secrets and the migration trust the database as found. Replacing
+  the whole database with an older checkpoint, or restoring a schema 1
+  checkpoint whose owner column was edited, cannot be detected without state
+  kept outside the database.
+- Restoring a checkpoint opens it read-only and refuses one written by a
+  newer schema, or sealed with another data key, before the live database is
+  touched. A checkpoint
   from an older schema is migrated under the same hold of the connection as
   the copy; if the copy or the migration fails, the profile is left locked.
 - A database or bundle written by a **newer** schema is refused with a clear

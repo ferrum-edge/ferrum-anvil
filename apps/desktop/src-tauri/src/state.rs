@@ -237,7 +237,7 @@ impl PendingEntry {
     pub fn register(running: &Arc<Running>, id: Id) -> Result<Self, String> {
         let token = Arc::new(CancellationToken::new());
         match running.lock().entry(id) {
-            Entry::Occupied(_) => return Err(format!("execution {id} is already running")),
+            Entry::Occupied(_) => return Err(format!("attempt {id} is already running")),
             Entry::Vacant(v) => {
                 v.insert(token.clone());
             }
@@ -458,7 +458,7 @@ mod tests {
         let id = Id::new();
         let first = PendingEntry::register(&running, id).unwrap();
         let second = PendingEntry::register(&running, id).map(|_| ());
-        assert_eq!(second, Err(format!("execution {id} is already running")));
+        assert_eq!(second, Err(format!("attempt {id} is already running")));
         // The refusal leaves the first execution's entry and token in place.
         assert!(cancel_pending(&running, &id));
         assert!(first.token().is_cancelled());

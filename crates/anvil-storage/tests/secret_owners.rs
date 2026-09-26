@@ -266,3 +266,39 @@ fn a_restored_checkpoint_from_schema_1_is_resealed() {
     set_owner(dir.path(), &id, None);
     assert!(matches!(store.get_secret(&id), Err(StoreError::Integrity)));
 }
+
+#[test]
+fn a_schema_2_secret_in_a_database_set_back_to_schema_1_fails_the_migration_and_changes_nothing() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek.clone()).unwrap();
+    let (a, b) = (Id::new(), Id::new());
+    let (genuine, planted) = (Id::new(), Id::new());
+    store.put_secret(&genuine, Some(&a), "token", "sealed-at-v2").unwrap();
+    store.lock();
+    // The version set back, and an older schema 1 row of workspace `a` put
+    // back under workspace `b`.
+    downgrade(dir.path());
+    plant_v1_secret(dir.path(), &dek, &planted, Some(&b), "from-a-checkpoint");
+    let before = (payload(dir.path(), &genuine), payload(dir.path(), &planted));
+
+    assert!(matches!(store.unlock(dek.clone()), Err(StoreError::Integrity)));
+    assert!(store.is_locked(), "a failed migration leaves the store locked");
+    assert!(matches!(Store::open(dir.path(), dek.clone()), Err(StoreError::Integrity)));
+    assert_eq!(stored_version(dir.path()), "1");
+    assert_eq!((payload(dir.path(), &genuine), payload(dir.path(), &planted)), before);
+    assert_eq!(left_at_v2(dir.path()), None);
+}
+
+#[test]
+fn a_migration_that_leaves_no_secret_removes_an_earlier_count() {
+    let (dir, dek) = profile();
+    drop(Store::open(dir.path(), dek.clone()).unwrap());
+    downgrade(dir.path());
+    db(dir.path()).execute("INSERT INTO meta(key, value) VALUES('secrets_left_at_v2', '3')", []).unwrap();
+    let id = Id::new();
+    plant_v1_secret(dir.path(), &dek, &id, None, "legacy");
+
+    let store = Store::open(dir.path(), dek).unwrap();
+    assert_eq!(value(&store, &id), "legacy");
+    assert_eq!(left_at_v2(dir.path()), None);
+}

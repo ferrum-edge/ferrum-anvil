@@ -56,7 +56,9 @@
   Database schema 2 re-seals existing secrets once, in one transaction, when
   a profile is opened or unlocked, trusting the owner each row names at that
   time. A secret that already failed to decrypt is left as it is (it still
-  fails and can be deleted) and counted in the log. Earlier builds refuse a
+  fails and can be deleted) and counted in the log; a secret already sealed
+  for its owner in a database still marked schema 1 fails the unlock and
+  nothing is written. Earlier builds refuse a
   schema 2 database, and a full backup made from one, as newer. Restoring a
   checkpoint refuses a newer or foreign one before touching the profile. The
   desktop reads an imported bundle or backup and derives its key on a worker

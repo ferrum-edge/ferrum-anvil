@@ -24,7 +24,7 @@
 use crate::crypto::{self, Key};
 use anvil_domain::Id;
 use parking_lot::{Mutex, MutexGuard, RwLock};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
@@ -246,7 +246,12 @@ fn stored_schema_version(conn: &Connection) -> Result<i64> {
 /// does not open was already corrupt or altered, since schema 1 never changed
 /// its associated data: it is left as it is, still sealed under that data,
 /// which no [`secret_aad`] equals, so reading it keeps failing with
-/// `Integrity` and it can be deleted. Returns how many rows were left.
+/// `Integrity` and it can be deleted. Returns how many rows were left, also
+/// recorded in `meta` (`secrets_left_at_v2`, removed when none was).
+///
+/// A row that opens under [`secret_aad`] instead was sealed by schema 2, so
+/// the version recorded in `meta` was set back after this step ran: the step
+/// fails with `Integrity` and its transaction writes nothing.
 fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
     let rows: Vec<(String, Option<String>, Vec<u8>)> = {
         let mut st = conn.prepare("SELECT id, workspace_id, payload FROM secrets")?;
@@ -254,11 +259,15 @@ fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
     };
     let mut left = 0;
     for (id, owner, env) in rows {
+        let v2 = secret_aad(&id, owner.as_deref());
         let Ok(pt) = crypto::open(key, &aad("secrets", "secret", &id), &env) else {
+            if crypto::open(key, &v2, &env).is_ok() {
+                return Err(StoreError::Integrity);
+            }
             left += 1;
             continue;
         };
-        let env = crypto::seal(key, &secret_aad(&id, owner.as_deref()), &pt);
+        let env = crypto::seal(key, &v2, &pt);
         conn.execute("UPDATE secrets SET payload=?1 WHERE id=?2", params![env, id])?;
     }
     if left > 0 {
@@ -266,6 +275,8 @@ fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
             "INSERT INTO meta(key, value) VALUES('secrets_left_at_v2', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![left.to_string()],
         )?;
+    } else {
+        conn.execute("DELETE FROM meta WHERE key='secrets_left_at_v2'", [])?;
     }
     Ok(left)
 }
@@ -385,6 +396,16 @@ impl Store {
         self.key.read().clone().ok_or(StoreError::Locked)
     }
 
+    /// The connection and the key for an operation that seals. The key is
+    /// read only once the connection is held, so a call that raced a failed
+    /// [`Store::restore_checkpoint`], which locks the store under that hold,
+    /// fails with `Locked` instead of writing with the key it read before.
+    fn sealing(&self) -> Result<(MutexGuard<'_, Connection>, Key)> {
+        let conn = self.conn()?;
+        let key = self.key()?;
+        Ok((conn, key))
+    }
+
     /// The connection for one ordinary operation. It waits for a transaction
     /// open on another thread to finish, so it never runs inside a
     /// transaction it does not own.
@@ -444,8 +465,7 @@ impl Store {
         sort_key: f64,
         value: &T,
     ) -> Result<()> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.put(kind, id, workspace_id, parent_id, sort_key, value)
     }
 
@@ -490,8 +510,7 @@ impl Store {
     // ------------------------------------------------------------ secrets
 
     pub fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.put_secret(id, workspace_id, label, value)
     }
 
@@ -537,10 +556,9 @@ impl Store {
     /// Store bytes; the id is a keyed hash (content-addressed without
     /// revealing a plain hash of the content).
     pub fn put_blob(&self, bytes: &[u8]) -> Result<String> {
-        let key = self.key()?;
         // One lock for check and insert: a concurrent put of the same bytes
         // cannot slip in between and trip the primary key.
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.put_blob(bytes)
     }
 
@@ -644,8 +662,7 @@ impl Store {
     // ------------------------------------------------------------ load reports
 
     pub fn put_load_report<T: Serialize>(&self, id: &Id, workspace_id: Option<&Id>, started_at_ms: i64, report: &T) -> Result<()> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.put_load_report(id, workspace_id, started_at_ms, report)
     }
 
@@ -726,13 +743,15 @@ impl Store {
     /// the copy. A copy or migration that fails leaves the store locked.
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
         let key = self.key()?;
-        let src = Connection::open(path)?;
+        let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let found = stored_schema_version(&src)?;
         if found > DB_SCHEMA_VERSION {
             return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
         }
         check_canary(&src, &key)?;
         let mut conn = self.conn()?;
+        // Locked meanwhile (another restore failed): nothing is copied.
+        let _ = self.key()?;
         let r = restore_on(&mut conn, &src, &key);
         if r.is_err() {
             *self.key.write() = None;
