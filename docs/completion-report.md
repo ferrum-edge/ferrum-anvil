@@ -21,18 +21,19 @@ pass.
   - Both run on one Rust engine.
   - Typed IPC only and a strict CSP; the webview does no I/O.
   - The lock is enforced in the backend.
-  - Architecture decisions are recorded in `docs/adr/0001–0010`.
+  - Architecture decisions are recorded in `docs/adr/0001–0011`.
 - **Build and send.**
   - Workspaces with nested folders, saved requests with immutable revisions, environments, variables and history.
   - Effective-request preview.
   - Live lint.
   - Timing and sizes.
-  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3); gRPC in four modes over HTTP/2 or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or HTTP/3; TCP/TLS; UDP and DTLS, direct or through an HTTP/3 CONNECT-UDP (MASQUE) proxy.
-  - Mesh and edge features: HBONE tunnels (HTTP/2 CONNECT over mTLS), SPIFFE ID or trust-domain server verification with X.509-SVID client identities, SNI override, and PROXY protocol v1/v2 headers (TCP/TLS and HTTP-family requests over TCP) and datagram envelopes (UDP/DTLS).
+  - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3, with opt-in permessage-deflate); gRPC in four modes over HTTP/2 or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or HTTP/3; TCP/TLS; UDP and DTLS, direct, through an HTTP/3 CONNECT-UDP (MASQUE) proxy or through a mesh HBONE datagram tunnel.
+  - Opt-in 0-RTT early data (QUIC for HTTP/3, TLS 1.3 over TCP) for replay-safe methods, with `425 Too Early` handled per RFC 8470 and session tickets kept in memory only.
+  - Mesh and edge features: HBONE tunnels (HTTP/2 CONNECT over mTLS) for TCP and, as Ferrum Mesh datagram tunnels, UDP and DTLS; SPIFFE ID or trust-domain server verification with X.509-SVID client identities (from files or a SPIFFE Workload API); SNI override; PROXY protocol v1/v2 headers (TCP/TLS and HTTP-family requests over TCP) and datagram envelopes (UDP/DTLS).
   - Interactive sessions for the session protocols.
   - See `docs/protocols.md`.
 - **Auth and TLS.**
-  - Auth types: API key, Basic, Bearer, JWT, OAuth 2.0 (client credentials, refresh, authorization code + PKCE in the system browser), Ferrum HMAC v2, DPoP, WS-Security UsernameToken, a verbatim user-supplied SAML assertion, and multi-auth.
+  - Auth types: API key, Basic, Bearer, JWT, OAuth 2.0 (client credentials, refresh, authorization code + PKCE in the system browser), Ferrum HMAC v2, DPoP, WS-Security UsernameToken, a verbatim user-supplied SAML assertion, JWT-SVID (from a SPIFFE Workload API, a file or a variable, checked locally before sending), and multi-auth.
   - Private CAs and mTLS with PEM or PKCS#12.
   - Verification is on by default; a bypass is scoped to a profile and warned about.
   - Auth is applied after final serialization, and the load engine reuses it unchanged.
@@ -76,14 +77,14 @@ Exact commands are in `docs/release.md` → "Local verification record".
 | Check | Result |
 |---|---|
 | `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` | clean |
-| `cargo test --workspace --exclude anvil-desktop` | 73 test binaries, 560 passed, 0 failed, 1 ignored (the real OS keychain round trip, run by CI on each OS) |
-| Renderer (`tsc`, `vitest`) | clean; 38 passed |
+| `cargo test --workspace --exclude anvil-desktop` | 93 test binaries, 716 passed, 0 failed, 2 ignored (the real OS keychain round trip, run by CI on each OS; the Python `websockets` interop check) |
+| Renderer (`tsc`, `vitest`) | clean; 78 passed |
 | Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway on Ferrum Edge 0.9.7) | 9 spec files, 18 tests passed (earlier also on the release-profile e2e build) |
-| `anvil-lab [--release v0.9.5] run all --untrusted-pass` (11 profiles) | v0.9.7 and v0.9.5 each: 442 passed, 0 failed, 17 skipped with stated reasons |
+| `anvil-lab [--release v0.9.5] run <profile> --untrusted-pass` (13 profiles) | v0.9.7 and v0.9.5 each: 530 passed, 0 failed, 19 skipped with stated reasons |
 | Release check on the production `.app`, `.dmg`, raw binary and CLI, with runtime probe | pass. The e2e build fails as required. |
 | Plaintext-at-rest audit (profile files, WAL/SHM side files, temp files) | no leak |
 | `cargo deny`, license inventory, `gitleaks` over the branch | clean |
-| CI (PR #1) | Linux and macOS: all lanes pass, including the OS credential store round trip. Windows: E2E passes; the Rust lane's last failure was a test that assumed an immediate loopback refusal (Windows retries the SYN for about 2 s), now fixed; see the PR checks for the current state. |
+| CI (PR #1) | Linux and macOS: all lanes pass, including the OS credential store round trip. Windows: E2E passes; the Rust lane is re-running after fixes for Unix-only load-test helpers (see the PR checks for the current state). |
 
 ### Failure matrix (182 seed cases)
 
@@ -91,8 +92,8 @@ Exact commands are in `docs/release.md` → "Local verification record".
 results and reasoned statuses.
 
 - **172 cases have executed evidence:**
-  - 96 live against the real gateway;
-  - 75 automated tests;
+  - 97 live against the real gateway;
+  - 74 automated tests;
   - 1 executed release check.
 - **6 are blocked:**
   - TRUST-009/010/011 need the G01 gateway detail API, which no gateway release has.
@@ -116,6 +117,10 @@ results and reasoned statuses.
 - On Windows, `anvil run` overflowed the 1 MiB main-thread stack in deep engine futures. The CLI, the load worker and the desktop runtime now run on large-stack threads.
 - A first address that never answers (for example `::1` on a Windows host) used up the whole connect budget. Connects now use Happy Eyeballs (RFC 8305) and record superseded attempts as canceled.
 - The lab's operator-log checks read a stream session's transaction line before the gateway had written it (it is written at teardown); they now wait for it.
+- `anvil load run` never exited after a normal completion (the worker waited on stdin after its runtime was dropped).
+- TLS session resumption never happened: rustls resumes only with the same verifier instance and Anvil built one per connection. Resumption is now used under the 0-RTT opt-in; other connections keep a full handshake.
+- A `425 Too Early` from Ferrum Edge arrives after the gateway stops reading the request body, which Anvil reported as a write failure; the response is now read after a stopped HTTP/3 write.
+- UDP and DTLS load units were initially unaware of the tunnels added in parallel; UDP/DTLS through HBONE is now refused for load like MASQUE, and pooled gRPC channels are keyed by the PROXY header plan.
 
 ## Known limitations and unimplemented features
 
@@ -126,7 +131,9 @@ results and reasoned statuses.
 - **Protocol and load gaps:**
   - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).
   - WebSocket permessage-deflate (opt-in) relies on a vendored tungstenite 0.30.0 with an Anvil-written codec patch until a tungstenite release has one (`vendor/README.md`). Ferrum Edge never negotiates it, so compressed sessions are proven against fixtures and Python `websockets`, and through the gateway only as "offered, not negotiated".
-  - Load testing runs one worker on one machine. Client-streaming and bidirectional gRPC, gRPC with server reflection, SSE with reconnection, UDP through MASQUE and mixed-protocol plans are refused for load; there is no load action that holds sessions open while messages flow at a rate (see `docs/load.md`).
+  - Load testing runs one worker on one machine. Client-streaming and bidirectional gRPC, gRPC with server reflection, SSE with reconnection, UDP and DTLS through a MASQUE or HBONE tunnel, requests with 0-RTT early data, HTTP/gRPC through HBONE in persistent mode and mixed-protocol plans are refused for load; there is no load action that holds sessions open while messages flow at a rate (see `docs/load.md`).
+  - Not built, and not offered by Ferrum Edge either: double HBONE, HBONE over QUIC, CONNECT-IP and WebTransport; CONNECT-UDP over HTTP/2. PROXY headers are refused over HTTP/3 and through proxies.
+  - The SPIFFE Workload API client's Windows named-pipe endpoint is implemented but only compiled and tested by CI; SPIRE itself is not in the lab (the Workload API is exercised against Ferrum Edge's dev-mode implementation and an independent fixture).
   - gRPC-Web carries only unary and server streaming (the protocol's limit) and cannot use server reflection; a manually sent gRPC call over HTTP/3 opens a fresh QUIC connection (load runs reuse pooled channels).
   - See `docs/protocols.md` §5.
 - **XML signing.** Anvil does not sign XML. AUTH-030/031 run live with lab-signed fixtures, which Anvil sends verbatim.

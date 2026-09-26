@@ -32,11 +32,12 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
   `docs/protocols.md`.
 - **Auth and TLS**:
   - Auth types: API key, Basic, Bearer, JWT signing, OAuth 2.0, Ferrum HMAC
-    v2, DPoP, WS-Security, and multi-auth.
+    v2, DPoP, WS-Security, JWT-SVID (from a SPIFFE Workload API, a file or
+    a variable, checked locally before sending), and multi-auth.
   - OAuth 2.0 supports client credentials, refresh, and auth code + PKCE via
     the system browser.
-  - TLS: mTLS with PEM or PKCS#12 client certificates bound to hosts, and
-    private CA roots.
+  - TLS: mTLS with PEM or PKCS#12 client certificates bound to hosts, or
+    an X.509-SVID fetched from a SPIFFE Workload API; private CA roots.
   - Verification is on by default. A bypass is scoped to a profile and
     warned about.
 - **Understand the failure**: every response is analysed by deterministic

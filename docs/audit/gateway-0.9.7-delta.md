@@ -183,8 +183,8 @@ These are errors in data carried over from the 0.9.5 audit, not gateway changes.
 
 | Release | Binary | Result |
 |---|---|---|
-| v0.9.7 (`lab/gateway/RELEASE.lock`, `lab/gateway/releases/v0.9.7.lock`) | `ferrum-edge-macos-aarch64` sha256 `f3bd0027…0dd03` | 442 passed, 0 failed, 17 skipped: core 36/0/0, policy 48/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 80/0/5, streams 84/0/0, cpdp 10/0/0, h3x 34/0/0, mesh 30/0/2, proxyproto 42/0/0 (2026-09-26, after the protocol merges) |
-| v0.9.5 (`lab/gateway/releases/v0.9.5.lock`) | `ferrum-edge-macos-aarch64` sha256 `6a531f2c…ce5f` | 442 passed, 0 failed, 17 skipped: the same per-profile counts |
+| v0.9.7 (`lab/gateway/RELEASE.lock`, `lab/gateway/releases/v0.9.7.lock`) | `ferrum-edge-macos-aarch64` sha256 `f3bd0027…0dd03` | 530 passed, 0 failed, 19 skipped: core 36/0/0, policy 48/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 80/0/5, streams 98/0/0, cpdp 10/0/0, h3x 40/0/0, mesh 60/0/4, proxyproto 46/0/0, workload 18/0/0, early 16/0/0 (2026-09-26, after every protocol merge) |
+| v0.9.5 (`lab/gateway/releases/v0.9.5.lock`) | `ferrum-edge-macos-aarch64` sha256 `6a531f2c…ce5f` | 530 passed, 0 failed, 19 skipped: the same per-profile counts |
 
 Behaviour differences observed live:
 

@@ -263,26 +263,27 @@ E2E build and requires it to fail.
 
 Recorded 2026-09-26 on macOS 26 (Darwin 25.6), Apple M4, Rust 1.98.1,
 Node 23.11, branch `claude/anvil-desktop-client-3f372d` (draft PR
-ferrum-edge/ferrum-anvil#1), after the last functional merge (gRPC over
-HTTP/3 and gRPC-Web, SSE over HTTP/3 and CONNECT-UDP, the mesh client, PROXY
-protocol, Ferrum Edge 0.9.7).
+ferrum-edge/ferrum-anvil#1), after the last functional merge (UDP and DTLS
+through HBONE, DTLS through CONNECT-UDP, PROXY headers on HTTP-family
+requests, per-protocol load units, the SPIFFE Workload API and JWT-SVIDs,
+0-RTT early data, WebSocket permessage-deflate).
 
 | Check | Command | Result |
 | --- | --- | --- |
 | Format and lints | `cargo fmt --all --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings` | clean |
-| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 73 test binaries: 560 passed, 0 failed, 1 ignored (the real OS keychain round trip, which CI runs with `--ignored` on each OS) |
+| Rust tests | `cargo test --locked --workspace --exclude anvil-desktop` | 93 test binaries: 716 passed, 0 failed, 2 ignored (the real OS keychain round trip, which CI runs with `--ignored` on each OS, and the Python `websockets` interop check, run with `ANVIL_INTEROP_PYTHON`) |
 | Contract drift | `cargo run -p anvil-cli -- schema --out contracts/schemas` + `npm run contracts` | no drift |
-| Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 38 passed |
+| Renderer | `npx tsc --noEmit -p .`; `npm test` | clean; 78 passed |
 | Native E2E through the gateway | `npm run e2e:build`, `anvil-lab up core` (Ferrum Edge v0.9.7), `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080 npm run e2e` | 9 spec files, 18 tests passed (boot, success, refusal diagnosis, effective request, gateway diagnosis, untrusted TLS, load report, offline/no-account, lock) |
-| Real-gateway lab | `anvil-lab run all --untrusted-pass` (Ferrum Edge v0.9.7 release binary, the default pin) and `anvil-lab --release v0.9.5 run all --untrusted-pass` (v0.9.5 release binary) | each release: 442 passed, 0 failed, 17 skipped with stated reasons: core 36/0/0, policy 48/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 80/0/5, streams 84/0/0, cpdp 10/0/0, h3x 34/0/0, mesh 30/0/2, proxyproto 42/0/0; `AUTH-009.iss-array`, `AUTH-X01.nbf` and `GW-010-BOT.allow-edge` pass with release-dependent expectations |
-| Lab profile lint | `ruby lab/gateway/lint-profiles.rb` | 12 gateway configurations OK; a mistyped nested plugin key is caught |
+| Real-gateway lab | `anvil-lab run <profile> --untrusted-pass` for every profile (Ferrum Edge v0.9.7 release binary, the default pin) and the same with `--release v0.9.5` (v0.9.5 release binary) | each release: 530 passed, 0 failed, 19 skipped with stated reasons: core 36/0/0, policy 48/0/1, admission 8/0/2, drain 4/0/0, tls 66/0/7, auth 80/0/5, streams 98/0/0, cpdp 10/0/0, h3x 40/0/0, mesh 60/0/4, proxyproto 46/0/0, workload 18/0/0, early 16/0/0; `AUTH-009.iss-array`, `AUTH-X01.nbf` and `GW-010-BOT.allow-edge` pass with release-dependent expectations |
+| Lab profile lint | `ruby lab/gateway/lint-profiles.rb` | every gateway configuration OK; a mistyped nested plugin key is caught |
 | Release check, production artifacts | `npx tauri build --ci --bundles app,dmg`; `cargo build --release --locked -p anvil-cli`; `scripts/release-check.sh --runtime-probe` over the `.app`, `.dmg`, raw `anvil-desktop` and `anvil` | **pass**: graph without the WebDriver plugin or `e2e`, 0 of 11 hook strings in each, no WebDriver listener and no env-driven unlock at runtime |
 | Release check, negative control | `scripts/release-check.sh --no-graph target/debug/anvil-desktop` (e2e build) | **fail (exit 1)** as required: all 11 strings found |
 | cargo-deny | `cargo deny --locked check` | advisories, bans, licenses, sources ok |
 | License inventory | `node scripts/licenses.mjs --check` | up to date: 782 crates, 5 npm packages |
-| Secret scan | `gitleaks git --log-opts origin/main..HEAD` with `.gitleaks.toml` | no leaks in the branch history (146 commits). An earlier `gitleaks dir .` found only git-ignored lab output, build output and throwaway lab keys (`results/`, `target/`, `lab/.run/`), nothing in tracked files |
+| Secret scan | `gitleaks git` (full history) with `.gitleaks.toml` | no leaks; the RFC 6455 sample `Sec-WebSocket-Key` in the vendored tungstenite tests is allowlisted by value. An earlier `gitleaks dir .` found only git-ignored lab output, build output and throwaway lab keys (`results/`, `target/`, `lab/.run/`), nothing in tracked files |
 | Plaintext at rest | `cargo test -p anvil-app --test at_rest` | no planted marker in profile files, WAL/SHM side files or new temp files |
-| Failure matrix | `python3 scripts/matrix-coverage.py` (lab evidence from the v0.9.7 runs) | 172 of 182 with executed evidence (96 live, 75 automated, 1 release check); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
+| Failure matrix | `python3 scripts/matrix-coverage.py` (lab evidence from the v0.9.7 runs) | 172 of 182 with executed evidence (97 live, 74 automated, 1 release check; LOAD-013 is now live: gRPC, WebSocket and UDP load through the gateway checked against its transaction log); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
 
 Earlier on this branch (still valid; the scripts and workflows they exercise are unchanged in substance):
 
