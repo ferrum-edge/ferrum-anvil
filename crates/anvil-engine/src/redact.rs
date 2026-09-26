@@ -133,8 +133,8 @@ impl Redactor {
         }
     }
 
-    /// Scrub exact secret values (and their canonical encoded forms) from
-    /// arbitrary text.
+    /// Scrub raw secret values, their canonical percent encodings and JSON
+    /// string escapes from arbitrary text.
     ///
     /// Limits: only the raw value, the encodings in [`encoded_forms`] and the
     /// value's JSON string escaping (as rendered in JSON diagnostics) are
