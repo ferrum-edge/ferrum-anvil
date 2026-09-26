@@ -75,6 +75,30 @@ case "icon":
     ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: dest.minY), end: CGPoint(x: 0, y: dest.minY + fade), options: [])
     save(ctx.makeImage()!, a[3])
     print(String(format: "background #%02x%02x%02x", Int(bg.0 * 255), Int(bg.1 * 255), Int(bg.2 * 255)))
+case "og":
+    // swift brand.swift og <src.png> <out.png> cx cy cw ch: a 1200x630 social
+    // card with the crop fitted to the height and its sides faded into the
+    // logo's background colour.
+    let img = load(a[2])
+    let (cx, cy, cw, ch) = (Int(a[4])!, Int(a[5])!, Int(a[6])!, Int(a[7])!)
+    let crop = img.cropping(to: CGRect(x: cx, y: cy, width: cw, height: ch))!
+    let bg = sample(img, 30, cy + ch / 2, 6)
+    let (w, h) = (1200.0, 630.0)
+    let ctx = rgba(Int(w), Int(h))
+    ctx.setFillColor(CGColor(srgbRed: bg.0, green: bg.1, blue: bg.2, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    let dw = Double(cw) * h / Double(ch)
+    let dest = CGRect(x: (w - dw) / 2, y: 0, width: dw, height: h)
+    ctx.interpolationQuality = .high
+    ctx.draw(crop, in: dest)
+    let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+    let solid = CGColor(srgbRed: bg.0, green: bg.1, blue: bg.2, alpha: 1)
+    let clear = CGColor(srgbRed: bg.0, green: bg.1, blue: bg.2, alpha: 0)
+    let g = CGGradient(colorsSpace: cs, colors: [solid, clear] as CFArray, locations: [0, 1])!
+    let fade = 90.0
+    ctx.drawLinearGradient(g, start: CGPoint(x: dest.minX, y: 0), end: CGPoint(x: dest.minX + fade, y: 0), options: [])
+    ctx.drawLinearGradient(g, start: CGPoint(x: dest.maxX, y: 0), end: CGPoint(x: dest.maxX - fade, y: 0), options: [])
+    save(ctx.makeImage()!, a[3])
 default:
     fatalError("unknown command \(a[1])")
 }
