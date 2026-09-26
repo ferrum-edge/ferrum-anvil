@@ -164,7 +164,7 @@ export interface ExportPreview {
   literals_moved: number;
 }
 export interface ImportReport {
-  plan: { policy: string; to_create: number; to_replace: number; skipped_existing: number; conflicts: string[] };
+  plan: { policy: string; to_create: number; to_replace: number; skipped_existing: number; conflicts: string[]; foreign_secrets: string[] };
   warnings: string[];
   secrets_restored: boolean;
   missing_secrets: string[];

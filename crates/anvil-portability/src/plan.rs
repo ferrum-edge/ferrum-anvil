@@ -1,6 +1,6 @@
 //! Import planning: conflict detection and id remapping per policy.
 
-use crate::graph::PortableGraph;
+use crate::graph::{PortableGraph, SecretValue};
 use anvil_domain::Id;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,10 +19,26 @@ pub enum ConflictPolicy {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ImportPlan {
     pub policy: ConflictPolicy,
+    /// Objects and secrets (counted together).
     pub to_create: usize,
     pub to_replace: usize,
     pub skipped_existing: usize,
+    /// Objects and secrets that share an id with one already stored.
     pub conflicts: Vec<String>,
+    /// Secrets that share an id with one stored here that a workspace outside
+    /// the bundle (or no workspace) owns. Replace never overwrites or
+    /// re-owns such a secret, so a Replace import is refused while any is
+    /// listed; Merge keeps the stored secret and Duplicate never touches it.
+    pub foreign_secrets: Vec<String>,
+}
+
+/// What the store already holds, as far as an import can collide with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Existing {
+    /// Ids of every stored object.
+    pub objects: HashSet<Id>,
+    /// Every stored secret, with the workspace that owns it (`None`: none does).
+    pub secrets: HashMap<Id, Option<Id>>,
 }
 
 pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
@@ -40,18 +56,39 @@ pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
     v
 }
 
-/// Compute what applying `g` would do given the ids that already exist.
-pub fn plan(g: &PortableGraph, existing: &HashSet<Id>, policy: ConflictPolicy) -> ImportPlan {
-    let ids = all_ids(g);
-    let conflicts: Vec<String> =
-        ids.iter().filter(|(_, id, _)| existing.contains(id)).map(|(k, id, n)| format!("{k} '{n}' ({id})")).collect();
+/// Compute what applying `g` would do given what already exists.
+pub fn plan(g: &PortableGraph, existing: &Existing, policy: ConflictPolicy) -> ImportPlan {
+    let mut ids = all_ids(g);
+    ids.extend(secret_ids(g).map(|(id, v)| ("secret".to_string(), id, v.label.clone())));
+    let conflicts: Vec<String> = ids
+        .iter()
+        .filter(|(_, id, _)| existing.objects.contains(id) || existing.secrets.contains_key(id))
+        .map(|(k, id, n)| format!("{k} '{n}' ({id})"))
+        .collect();
+    let foreign_secrets = foreign_secrets(g, existing);
     let n = ids.len();
     let c = conflicts.len();
-    match policy {
-        ConflictPolicy::Merge => ImportPlan { policy, to_create: n - c, to_replace: 0, skipped_existing: c, conflicts },
-        ConflictPolicy::Replace => ImportPlan { policy, to_create: n - c, to_replace: c, skipped_existing: 0, conflicts },
-        ConflictPolicy::Duplicate => ImportPlan { policy, to_create: n, to_replace: 0, skipped_existing: 0, conflicts },
-    }
+    let (to_create, to_replace, skipped_existing) = match policy {
+        ConflictPolicy::Merge => (n - c, 0, c),
+        ConflictPolicy::Replace => (n - c, c, 0),
+        ConflictPolicy::Duplicate => (n, 0, 0),
+    };
+    ImportPlan { policy, to_create, to_replace, skipped_existing, conflicts, foreign_secrets }
+}
+
+/// The bundle's secrets, by id (validation refuses any other key).
+fn secret_ids(g: &PortableGraph) -> impl Iterator<Item = (Id, &SecretValue)> {
+    g.secrets.iter().filter_map(|(k, v)| Some((k.parse::<Id>().ok()?, v)))
+}
+
+/// Bundle secrets whose id is stored here under an owner that is not a
+/// workspace in the bundle, as `secret 'label' (id)`.
+pub fn foreign_secrets(g: &PortableGraph, existing: &Existing) -> Vec<String> {
+    let ws: HashSet<Id> = g.workspaces.iter().map(|w| w.meta.id).collect();
+    secret_ids(g)
+        .filter(|(id, _)| existing.secrets.get(id).is_some_and(|owner| owner.is_none_or(|w| !ws.contains(&w))))
+        .map(|(id, v)| format!("secret '{}' ({id})", v.label))
+        .collect()
 }
 
 /// Fields that hold the id of an object in the graph (a string, a list of

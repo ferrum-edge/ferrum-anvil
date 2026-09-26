@@ -1,5 +1,6 @@
 //! Bundle import into a profile: a Duplicate copy is independent of its
-//! source, and bundles this build cannot read change nothing.
+//! source, a secret stays with the workspace that owns it, and bundles this
+//! build cannot read change nothing.
 
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
@@ -7,10 +8,11 @@ use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::RequestSpec;
-use anvil_domain::secret::SensitiveValue;
-use anvil_portability::bundle::{self, BundleError};
+use anvil_domain::secret::{SecretRef, SensitiveValue};
+use anvil_domain::workspace::{Meta, RequestDefinition, Variable, Workspace};
+use anvil_portability::bundle::{self, BundleError, BundleKind, ExportOptions};
 use anvil_portability::plan::ConflictPolicy;
-use anvil_portability::{ExportMode, SecretValue};
+use anvil_portability::{ExportMode, PortableGraph, SecretValue};
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use sha2::Digest;
@@ -64,6 +66,60 @@ fn edit_manifest(bytes: &[u8], edit: impl Fn(&mut serde_json::Value)) -> Vec<u8>
 async fn send(app: &App, ws: &Id, request: &Id) -> u16 {
     let out = app.send(Some(*request), ws, None, SendOptions::default(), EventCtx::none(), CancellationToken::new()).await.unwrap();
     out.record.response.as_ref().map(|r| r.status).unwrap_or_else(|| panic!("no response: {:?}", out.record.findings))
+}
+
+/// Send `request` and expect its auth to fail before anything is sent.
+async fn refused_auth(app: &App, ws: &Id, request: &Id) {
+    let out = app.send(Some(*request), ws, None, SendOptions::default(), EventCtx::none(), CancellationToken::new()).await.unwrap();
+    assert!(out.record.findings.iter().any(|f| f.code == "local.auth_preparation_failed"), "{:?}", out.record.findings);
+}
+
+fn bearer(secret: &SecretRef, url: &str) -> RequestSpec {
+    let mut spec = RequestSpec::http("GET", url);
+    spec.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: secret.clone() }, prefix: "Bearer".into() };
+    spec
+}
+
+/// An encrypted bundle as anyone could write one: a workspace of its own
+/// whose request uses `secret`, with a value for that secret id.
+fn bundle_reusing_secret_id(secret: &SecretRef, url: &str) -> Vec<u8> {
+    let ws = Workspace {
+        meta: Meta::new(),
+        name: "Incoming".into(),
+        description: String::new(),
+        settings: Default::default(),
+        variables: vec![],
+        auth: AuthConfig::Inherit,
+        active_environment_id: None,
+    };
+    let request = RequestDefinition {
+        meta: Meta::new(),
+        workspace_id: ws.meta.id,
+        folder_id: None,
+        name: "Use token".into(),
+        description: String::new(),
+        tags: vec![],
+        favorite: false,
+        sort_key: 1.0,
+        spec: bearer(secret, url),
+        revision_id: None,
+    };
+    let mut g = PortableGraph { workspaces: vec![ws.clone()], requests: vec![request], ..Default::default() };
+    let value = SecretValue {
+        label: secret.label.clone(),
+        value: "placeholder-incoming".into(),
+        workspace_id: Some(ws.meta.id.to_string()),
+    };
+    g.secrets.insert(secret.id.to_string(), value);
+    let opts = ExportOptions {
+        kind: BundleKind::Workspace,
+        mode: ExportMode::EncryptedTransfer,
+        passphrase: Some(EXPORT_PASS),
+        include_history: false,
+        kdf: KdfParams::testing(),
+        app_version: "test",
+    };
+    bundle::write(&g, &opts).unwrap().0
 }
 
 #[tokio::test]
@@ -157,6 +213,120 @@ fn merge_import_keeps_an_existing_secret() {
     a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
     let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
     assert_eq!(value.as_str(), "placeholder-rotated-token", "Merge keeps what already exists");
+}
+
+#[tokio::test]
+async fn replace_import_never_takes_a_secret_from_another_workspace() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let bytes = bundle_reusing_secret_id(&token, &fx.url("/echo"));
+    let listed = format!("secret 'bearer' ({})", token.id);
+    let untouched = |a: &App| {
+        let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
+        assert_eq!(value.as_str(), TOKEN, "the stored value is kept");
+        assert_eq!(a.store.list_secret_ids(Some(&ws.meta.id)).unwrap(), vec![token.id.to_string()], "and so is its owner");
+    };
+
+    // The preview lists the secret, as a conflict and as owned outside the bundle.
+    let preview = a.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(preview.plan.foreign_secrets, vec![listed.clone()]);
+    assert!(preview.plan.conflicts.contains(&listed), "{:?}", preview.plan.conflicts);
+
+    // Replace refuses the whole bundle.
+    let e = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains(&listed)), "{e}");
+    assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
+    untouched(&a);
+
+    // Merge keeps the stored secret, and the imported request cannot use it.
+    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert_eq!(rep.plan.foreign_secrets, vec![listed]);
+    untouched(&a);
+    let incoming: Id = rep.workspace_ids[0].parse().unwrap();
+    let request = a.requests(&incoming).unwrap().remove(0);
+    refused_auth(&a, &incoming, &request.meta.id).await;
+    assert_eq!(fx.log.count_requests(), 0, "the other workspace's secret was never sent");
+}
+
+#[test]
+fn replace_import_restores_a_secret_its_own_workspace_owns() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    a.store.put_secret(&token.id, Some(&ws.meta.id), "bearer", "placeholder-rotated-token").unwrap();
+    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap();
+    assert!(rep.plan.foreign_secrets.is_empty(), "{:?}", rep.plan);
+    assert!(rep.plan.conflicts.contains(&format!("secret 'bearer' ({})", token.id)), "{:?}", rep.plan.conflicts);
+    let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
+    assert_eq!(value.as_str(), TOKEN, "Replace restores the bundle's value");
+    assert_eq!(a.store.list_secret_ids(Some(&ws.meta.id)).unwrap(), vec![token.id.to_string()]);
+}
+
+#[tokio::test]
+async fn a_request_resolves_only_secrets_its_own_workspace_owns() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let url = fx.url(&format!("/auth/bearer?token={TOKEN}"));
+    let own = a.create_request(&ws.meta.id, None, "Check token", bearer(&token, &url)).unwrap();
+    assert_eq!(send(&a, &ws.meta.id, &own.meta.id).await, 200);
+    let sent = fx.log.count_requests();
+
+    // Another workspace that names the secret's id cannot use it.
+    let other = a.create_workspace("Other").unwrap();
+    let borrowed = a.create_request(&other.meta.id, None, "Borrow token", bearer(&token, &url)).unwrap();
+    refused_auth(&a, &other.meta.id, &borrowed.meta.id).await;
+    let mut w = a.workspace(&other.meta.id).unwrap();
+    w.variables.push(Variable {
+        name: "token".into(),
+        value: SensitiveValue::Secret { secret: token.clone() },
+        secret: true,
+        enabled: true,
+        description: String::new(),
+    });
+    a.save_workspace(w).unwrap();
+    let Err(e) = a.build_context(Some(borrowed.meta.id), &other.meta.id, None, &SendOptions::default()) else {
+        panic!("a variable naming another workspace's secret resolved")
+    };
+    assert!(e.to_string().contains("not in this workspace's vault"), "{e}");
+
+    // Neither can any workspace use a secret no workspace owns.
+    let unowned = a.set_secret(None, "unowned", TOKEN).unwrap();
+    let orphan = a.create_request(&ws.meta.id, None, "Unowned token", bearer(&unowned, &url)).unwrap();
+    refused_auth(&a, &ws.meta.id, &orphan.meta.id).await;
+    assert_eq!(fx.log.count_requests(), sent, "nothing more was sent");
+    assert_eq!(send(&a, &ws.meta.id, &own.meta.id).await, 200, "the owner still uses its secret");
+}
+
+#[tokio::test]
+async fn a_duplicate_without_the_secret_never_uses_its_sources() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let url = fx.url(&format!("/auth/bearer?token={TOKEN}"));
+    let original = a.create_request(&ws.meta.id, None, "Check token", bearer(&token, &url)).unwrap();
+
+    // A share-safe bundle carries the reference but not the secret.
+    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let rep = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
+    assert_eq!(rep.missing_secrets.len(), 1, "{:?}", rep.missing_secrets);
+    let copy_ws: Id = rep.workspace_ids[0].parse().unwrap();
+    let copy = a.requests(&copy_ws).unwrap().remove(0);
+    refused_auth(&a, &copy_ws, &copy.meta.id).await;
+    assert_eq!(fx.log.count_requests(), 0, "the copy never sent its source's secret");
+    assert_eq!(send(&a, &ws.meta.id, &original.meta.id).await, 200, "the source still works");
 }
 
 #[test]

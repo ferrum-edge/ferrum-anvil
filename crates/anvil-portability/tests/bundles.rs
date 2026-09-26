@@ -7,7 +7,7 @@ use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::TlsProfile;
 use anvil_domain::workspace::*;
 use anvil_portability::bundle::{self, BundleError, BundleKind, ExportMode, ExportOptions};
-use anvil_portability::plan::{self, ConflictPolicy};
+use anvil_portability::plan::{self, ConflictPolicy, Existing};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::KdfParams;
 use std::collections::HashSet;
@@ -385,7 +385,7 @@ fn imports_never_open_an_import_root_and_list_every_linked_file() {
 #[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();
-    let existing: HashSet<Id> = g.requests.iter().map(|r| r.meta.id).collect();
+    let existing = Existing { objects: g.requests.iter().map(|r| r.meta.id).collect(), ..Default::default() };
     let merge = plan::plan(&g, &existing, ConflictPolicy::Merge);
     assert_eq!(merge.skipped_existing, 2);
     let replace = plan::plan(&g, &existing, ConflictPolicy::Replace);
@@ -393,7 +393,7 @@ fn data_006_conflict_policies_and_duplicate_remap() {
     let mut dup = g.clone();
     plan::remap_all(&mut dup).unwrap();
     let new_ids: HashSet<Id> = dup.requests.iter().map(|r| r.meta.id).collect();
-    assert!(new_ids.is_disjoint(&existing));
+    assert!(new_ids.is_disjoint(&existing.objects));
     // References follow the remap.
     let folder_ids: HashSet<Id> = dup.folders.iter().map(|f| f.meta.id).collect();
     assert!(dup.requests.iter().all(|r| r.folder_id.map(|f| folder_ids.contains(&f)).unwrap_or(true)));
@@ -657,4 +657,224 @@ fn validation_collapses_repeated_revisions_and_drops_orphans() {
     let warnings = anvil_portability::validate::validate_and_normalize(&mut g).unwrap();
     assert_eq!(g.revisions, vec![rev]);
     assert!(warnings.iter().any(|w| w.contains("1 request revision(s)")), "{warnings:?}");
+}
+
+#[test]
+fn plan_lists_secret_conflicts_and_secrets_owned_outside_the_bundle() {
+    let g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let secret: Id = g.secrets.keys().next().unwrap().parse().unwrap();
+    let listed = format!("secret 'orders key' ({secret})");
+    let stored = |owner: Option<Id>| Existing { secrets: [(secret, owner)].into_iter().collect(), ..Default::default() };
+
+    // Nothing stored: nothing conflicts, and the secret counts as created.
+    let fresh = plan::plan(&g, &Existing::default(), ConflictPolicy::Replace);
+    assert!(fresh.conflicts.is_empty() && fresh.foreign_secrets.is_empty(), "{fresh:?}");
+    assert_eq!(fresh.to_create, g.object_count() + 1);
+
+    // Stored under a workspace of the bundle: a conflict Replace may overwrite.
+    let own = plan::plan(&g, &stored(Some(ws)), ConflictPolicy::Replace);
+    assert_eq!(own.conflicts, vec![listed.clone()]);
+    assert_eq!(own.to_replace, 1);
+    assert!(own.foreign_secrets.is_empty(), "{own:?}");
+
+    // Stored under another workspace, or under none: listed as foreign for every policy.
+    for owner in [Some(Id::new()), None] {
+        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+            let p = plan::plan(&g, &stored(owner), policy);
+            assert_eq!(p.conflicts, vec![listed.clone()], "{policy:?}");
+            assert_eq!(p.foreign_secrets, vec![listed.clone()], "{policy:?}");
+        }
+    }
+    let merge = plan::plan(&g, &stored(Some(Id::new())), ConflictPolicy::Merge);
+    assert_eq!(merge.skipped_existing, 1);
+}
+
+fn proxy(workspace_id: Id) -> anvil_domain::tls::ProxyProfile {
+    anvil_domain::tls::ProxyProfile {
+        id: Id::new(),
+        workspace_id,
+        name: "corp".into(),
+        kind: Default::default(),
+        address: "proxy.example.com:3128".into(),
+        username: None,
+        password: None,
+        no_proxy: String::new(),
+        tls_profile_id: None,
+        hbone: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn integration(workspace_id: Id) -> anvil_domain::integration::IntegrationProfile {
+    anvil_domain::integration::IntegrationProfile {
+        id: Id::new(),
+        workspace_id,
+        name: "lab gateway".into(),
+        kind: anvil_domain::integration::IntegrationKind::FerrumGateway {
+            hosts: vec![],
+            compatibility_id: "ferrum-edge-0.9.5".into(),
+            require_verified_tls: true,
+            detail: None,
+            console_url: None,
+        },
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn dataset(workspace_id: Id) -> Dataset {
+    Dataset {
+        meta: Meta::new(),
+        workspace_id,
+        name: "rows".into(),
+        format: DatasetFormat::Csv,
+        attachment: AttachmentRef::Stored { sha256: "a".repeat(64), file_name: "rows.csv".into(), size: 1, media_type: None },
+        sensitive_columns: vec![],
+    }
+}
+
+fn scenario(workspace_id: Id, requests: &[Id]) -> Scenario {
+    Scenario {
+        meta: Meta::new(),
+        workspace_id,
+        name: "smoke".into(),
+        description: String::new(),
+        steps: requests.iter().map(|r| ScenarioStep { request_id: *r, enabled: true, delay_ms: 0 }).collect(),
+        dataset_id: None,
+        iterations: 1,
+        stop_on_failure: false,
+        trusted: false,
+    }
+}
+
+fn load_plan(workspace_id: Id, chain: &[Id]) -> anvil_domain::load::LoadPlan {
+    serde_json::from_value(serde_json::json!({
+        "id": Id::new(),
+        "workspace_id": workspace_id,
+        "name": "soak",
+        "workload": { "model": "iterations", "iterations": 1, "concurrency": 1 },
+        "chain": chain,
+        "created_at": chrono::Utc::now(),
+        "updated_at": chrono::Utc::now(),
+    }))
+    .unwrap()
+}
+
+#[test]
+fn validation_refuses_objects_and_references_outside_their_workspace() {
+    use anvil_portability::validate::validate_and_normalize;
+    let invalid = |mut g: PortableGraph, needle: &str| match validate_and_normalize(&mut g) {
+        Err(BundleError::Invalid(m)) => assert!(m.contains(needle), "{needle}: {m}"),
+        other => panic!("expected an invalid bundle ({needle}), got {other:?}"),
+    };
+    let foreign = Id::new();
+    let base = sample();
+    let ws = base.workspaces[0].meta.id;
+    let request = base.requests[0].meta.id;
+    // A second workspace in the same bundle: references may not cross into it.
+    let mut two = sample();
+    let mut other = two.workspaces[0].clone();
+    other.meta = Meta::new();
+    other.name = "Other".into();
+    let other_ws = other.meta.id;
+    two.workspaces.push(other);
+    let mut other_req = two.requests[0].clone();
+    other_req.meta = Meta::new();
+    other_req.workspace_id = other_ws;
+    other_req.folder_id = None;
+    let other_req_id = other_req.meta.id;
+    two.requests.push(other_req);
+    let mut other_env = two.environments[0].clone();
+    other_env.meta = Meta::new();
+    other_env.workspace_id = other_ws;
+    let other_env_id = other_env.meta.id;
+    two.environments.push(other_env);
+    let other_data = dataset(other_ws);
+    let other_data_id = other_data.meta.id;
+    two.datasets.push(other_data);
+    let mut ok = two.clone();
+    ok.scenarios.push(scenario(other_ws, &[other_req_id]));
+    ok.load_plans.push(load_plan(ws, &[request]));
+    validate_and_normalize(&mut ok).expect("references within their own workspace are valid");
+
+    // Workspace-scoped objects of a workspace that is not in the bundle.
+    let with = |edit: &dyn Fn(&mut PortableGraph)| {
+        let mut g = base.clone();
+        edit(&mut g);
+        g
+    };
+    let outside = "belongs to a workspace that is not in the bundle";
+    invalid(with(&|g| g.tls_profiles[0].workspace_id = foreign), outside);
+    invalid(with(&|g| g.proxy_profiles.push(proxy(foreign))), outside);
+    invalid(with(&|g| g.integrations.push(integration(foreign))), outside);
+    invalid(with(&|g| g.datasets.push(dataset(foreign))), outside);
+    invalid(with(&|g| g.scenarios.push(scenario(foreign, &[]))), outside);
+    invalid(with(&|g| g.load_plans.push(load_plan(foreign, &[]))), outside);
+
+    // Folder and request references into another workspace of the bundle.
+    let mut g = two.clone();
+    g.folders[1].workspace_id = other_ws;
+    invalid(g, "has a parent that is not in the bundle or its workspace");
+    let mut g = two.clone();
+    g.requests[0].workspace_id = other_ws;
+    invalid(g, "is in a folder that is not in the bundle or its workspace");
+
+    // Scenario and load plan references outside the bundle or into another workspace.
+    for step in [Id::new(), other_req_id] {
+        let mut g = two.clone();
+        g.scenarios.push(scenario(ws, &[request, step]));
+        invalid(g, "scenario 'smoke' runs a request that is not in the bundle or its workspace");
+        let mut g = two.clone();
+        g.load_plans.push(load_plan(ws, &[step]));
+        invalid(g, "load plan 'soak' runs a request that is not in the bundle or its workspace");
+        let mut g = two.clone();
+        let mut p = load_plan(ws, &[]);
+        p.mix.push(anvil_domain::load::WeightedStep { request_id: step, weight: 1 });
+        g.load_plans.push(p);
+        invalid(g, "load plan 'soak' runs a request that is not in the bundle or its workspace");
+    }
+    for data in [Id::new(), other_data_id] {
+        let mut g = two.clone();
+        g.scenarios.push(Scenario { dataset_id: Some(data), ..scenario(ws, &[request]) });
+        invalid(g, "scenario 'smoke' uses a dataset that is not in the bundle or its workspace");
+        let mut g = two.clone();
+        g.load_plans.push(anvil_domain::load::LoadPlan { dataset_id: Some(data), ..load_plan(ws, &[request]) });
+        invalid(g, "load plan 'soak' uses a dataset that is not in the bundle or its workspace");
+    }
+    for env in [Id::new(), other_env_id] {
+        let mut g = two.clone();
+        g.load_plans.push(anvil_domain::load::LoadPlan { environment_id: Some(env), ..load_plan(ws, &[request]) });
+        invalid(g, "load plan 'soak' uses an environment that is not in the bundle or its workspace");
+    }
+}
+
+#[test]
+fn a_request_keeps_only_a_revision_of_its_own_from_the_bundle() {
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    let owner = rev.request_id;
+    // One request names a revision of a different request, another one a
+    // revision the bundle does not carry.
+    g.requests[1].revision_id = Some(rev.id);
+    let borrowed = g.requests[1].meta.id;
+    let mut third = g.requests[0].clone();
+    third.meta = Meta::new();
+    third.name = "Third".into();
+    third.revision_id = Some(Id::new());
+    let third_id = third.meta.id;
+    g.requests.push(third);
+
+    anvil_portability::validate::validate_and_normalize(&mut g).unwrap();
+    let revision_of = |id: Id| g.requests.iter().find(|r| r.meta.id == id).unwrap().revision_id;
+    assert_eq!(revision_of(owner), Some(rev.id), "a request keeps its own revision");
+    assert_eq!(revision_of(borrowed), None, "another request's revision is dropped");
+    assert_eq!(revision_of(third_id), None, "a revision the bundle does not carry is dropped");
+
+    // A Duplicate copy therefore never points at a revision outside itself.
+    let mut dup = g.clone();
+    plan::remap_all(&mut dup).unwrap();
+    let copied: HashSet<Id> = dup.revisions.iter().map(|r| r.id).collect();
+    assert!(dup.requests.iter().filter_map(|r| r.revision_id).all(|r| copied.contains(&r)));
 }

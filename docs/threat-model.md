@@ -130,9 +130,14 @@ against it).
   (memory, passes, lanes, memory × passes, salt length; see
   [storage-and-recovery.md](storage-and-recovery.md#export-and-import)) are
   refused before any derivation.
-- **Bundle identities:** bundle secrets must belong to a workspace in the
-  bundle, object ids must be unique, and a Duplicate import gives every object,
-  revision and secret a new id.
+- **Bundle identities:** bundle secrets and every workspace-scoped object
+  must belong to a workspace in the bundle, and references between objects
+  must stay within their workspace; object ids must be unique, and a Duplicate
+  import gives every object, revision and secret a new id. A Replace import
+  never overwrites or re-owns a secret that a workspace outside the bundle
+  owns; it is refused instead.
+- **Secret scope:** a request resolves only secrets its own workspace owns; a
+  reference to any other stored secret fails before anything is sent.
 - **Lock bypass:** backend refuses privileged commands while locked; key dropped;
   sessions/executions/load runs stopped.
 - **Test backdoors shipped:** E2E WebDriver and env unlock only under the `e2e`

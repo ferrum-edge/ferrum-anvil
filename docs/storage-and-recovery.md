@@ -24,6 +24,12 @@ columns needed for listing (ids, kinds, parent ids, sort keys, timestamps) are
 stored in the clear. The plaintext-leak test searches the database, its WAL and
 journal, and blobs for known secret and body values.
 
+Each vault secret belongs to one workspace. A request resolves a secret
+reference only when its own workspace owns that secret, whether the reference
+is in its auth, a variable, an environment or a profile. A reference to any
+other secret (another workspace's, or one no workspace owns) fails as if the
+secret were not stored, and nothing is sent.
+
 ## Unlocking
 
 | Protection | How the data key is obtained |
@@ -72,9 +78,21 @@ Import is preview-then-apply with conflict policies (duplicate, merge, replace).
 Duplicate gives every imported object, request revision and secret a new id and
 makes each copied secret belong to the copied workspace, so the copy never
 overwrites or depends on its source: deleting either leaves the other working.
-Merge keeps objects, revisions and secrets that already exist. A bundle whose
-secrets belong to a workspace it does not contain, or that gives two objects
-one id, is refused.
+A copy whose bundle left a secret out does not use the source's secret either.
+Merge keeps objects, revisions and secrets that already exist. Replace
+overwrites them, but never a secret that a workspace outside the bundle (or no
+workspace) owns: the preview lists such secrets, and a Replace import that
+would overwrite one is refused and changes nothing. The preview lists every
+object and secret that shares an id with one already stored.
+
+A bundle is refused when any workspace-scoped object (folder, request,
+environment, TLS, proxy or integration profile, dataset, scenario, load plan)
+belongs to a workspace it does not contain; when a folder's parent, a
+request's folder, or a request, dataset or environment that a scenario or load
+plan names is missing from it or in another of its workspaces; when a secret
+belongs to a workspace it does not contain; or when it gives two objects one
+id. A request keeps its current-revision link only when the bundle carries
+that revision of it.
 
 An encrypted bundle's vault key is derived with the Argon2id costs its manifest
 names, before the vault can be authenticated. Those costs are refused, before

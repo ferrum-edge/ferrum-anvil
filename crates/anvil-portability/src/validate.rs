@@ -1,9 +1,14 @@
 //! Import validation and safety normalization.
 //!
-//! * Referential integrity: folders/requests/environments must belong to a
-//!   workspace in the bundle; folder parents must exist and form no cycle;
-//!   every secret must be owned by a workspace in the bundle; no two objects
-//!   share an id. Revisions of requests outside the bundle are left out.
+//! * Referential integrity: every workspace-scoped object (folders,
+//!   requests, environments, TLS/proxy/integration profiles, datasets,
+//!   scenarios, load plans) must belong to a workspace in the bundle; folder
+//!   parents, request folders and the requests, datasets and environments a
+//!   scenario or load plan names must be in the bundle and in the same
+//!   workspace; folder parents form no cycle; every secret must be owned by a
+//!   workspace in the bundle; no two objects share an id. Revisions of
+//!   requests outside the bundle are left out, and a request keeps its
+//!   `revision_id` only when that revision of it is in the bundle.
 //! * Safety: imports never activate a TLS verification bypass, never mark
 //!   scenarios or load plans as trusted, never enable legacy HMAC, and never
 //!   open an imported collection's root folder to its workspace. Linked
@@ -18,15 +23,35 @@ use std::collections::{HashMap, HashSet};
 pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, BundleError> {
     let mut warnings = Vec::new();
     let ws: HashSet<Id> = g.workspaces.iter().map(|w| w.meta.id).collect();
-    let folder_ids: HashSet<Id> = g.folders.iter().map(|f| f.meta.id).collect();
-    for f in &g.folders {
-        if !ws.contains(&f.workspace_id) {
-            return Err(BundleError::Invalid(format!("folder '{}' belongs to a workspace that is not in the bundle", f.name)));
+    // Import writes each object under the workspace it names, and a Duplicate
+    // import remaps only workspaces in the bundle: any other workspace id
+    // would place the object in an unrelated local workspace.
+    let members = [
+        g.folders.iter().map(|x| ("folder", x.name.as_str(), x.workspace_id)).collect::<Vec<_>>(),
+        g.requests.iter().map(|x| ("request", x.name.as_str(), x.workspace_id)).collect(),
+        g.environments.iter().map(|x| ("environment", x.name.as_str(), x.workspace_id)).collect(),
+        g.tls_profiles.iter().map(|x| ("TLS profile", x.name.as_str(), x.workspace_id)).collect(),
+        g.proxy_profiles.iter().map(|x| ("proxy profile", x.name.as_str(), x.workspace_id)).collect(),
+        g.integrations.iter().map(|x| ("integration profile", x.name.as_str(), x.workspace_id)).collect(),
+        g.datasets.iter().map(|x| ("dataset", x.name.as_str(), x.workspace_id)).collect(),
+        g.scenarios.iter().map(|x| ("scenario", x.name.as_str(), x.workspace_id)).collect(),
+        g.load_plans.iter().map(|x| ("load plan", x.name.as_str(), x.workspace_id)).collect(),
+    ];
+    for (kind, name, w) in members.into_iter().flatten() {
+        if !ws.contains(&w) {
+            return Err(BundleError::Invalid(format!("{kind} '{name}' belongs to a workspace that is not in the bundle")));
         }
+    }
+    // Each object a reference may name, with its workspace.
+    let folder_ws: HashMap<Id, Id> = g.folders.iter().map(|f| (f.meta.id, f.workspace_id)).collect();
+    let request_ws: HashMap<Id, Id> = g.requests.iter().map(|r| (r.meta.id, r.workspace_id)).collect();
+    let dataset_ws: HashMap<Id, Id> = g.datasets.iter().map(|d| (d.meta.id, d.workspace_id)).collect();
+    let environment_ws: HashMap<Id, Id> = g.environments.iter().map(|e| (e.meta.id, e.workspace_id)).collect();
+    for f in &g.folders {
         if let Some(p) = f.parent_id
-            && !folder_ids.contains(&p)
+            && folder_ws.get(&p) != Some(&f.workspace_id)
         {
-            return Err(BundleError::Invalid(format!("folder '{}' has a parent that is not in the bundle", f.name)));
+            return Err(BundleError::Invalid(format!("folder '{}' has a parent that is not in the bundle or its workspace", f.name)));
         }
     }
     // Cycle detection over parent links.
@@ -42,18 +67,36 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         }
     }
     for r in &g.requests {
-        if !ws.contains(&r.workspace_id) {
-            return Err(BundleError::Invalid(format!("request '{}' belongs to a workspace that is not in the bundle", r.name)));
-        }
         if let Some(fid) = r.folder_id
-            && !folder_ids.contains(&fid)
+            && folder_ws.get(&fid) != Some(&r.workspace_id)
         {
-            return Err(BundleError::Invalid(format!("request '{}' is in a folder that is not in the bundle", r.name)));
+            return Err(BundleError::Invalid(format!("request '{}' is in a folder that is not in the bundle or its workspace", r.name)));
         }
     }
-    for e in &g.environments {
-        if !ws.contains(&e.workspace_id) {
-            return Err(BundleError::Invalid(format!("environment '{}' belongs to a workspace that is not in the bundle", e.name)));
+    // A scenario or load plan runs requests, a dataset and an environment of
+    // its own workspace; one outside the bundle would be a local object that
+    // a Duplicate import never remaps.
+    let outside = |map: &HashMap<Id, Id>, id: &Id, w: &Id| map.get(id) != Some(w);
+    for sc in &g.scenarios {
+        if sc.steps.iter().any(|st| outside(&request_ws, &st.request_id, &sc.workspace_id)) {
+            return Err(BundleError::Invalid(format!("scenario '{}' runs a request that is not in the bundle or its workspace", sc.name)));
+        }
+        if sc.dataset_id.is_some_and(|d| outside(&dataset_ws, &d, &sc.workspace_id)) {
+            return Err(BundleError::Invalid(format!("scenario '{}' uses a dataset that is not in the bundle or its workspace", sc.name)));
+        }
+    }
+    for p in &g.load_plans {
+        if p.chain.iter().chain(p.mix.iter().map(|m| &m.request_id)).any(|r| outside(&request_ws, r, &p.workspace_id)) {
+            return Err(BundleError::Invalid(format!("load plan '{}' runs a request that is not in the bundle or its workspace", p.name)));
+        }
+        if p.dataset_id.is_some_and(|d| outside(&dataset_ws, &d, &p.workspace_id)) {
+            return Err(BundleError::Invalid(format!("load plan '{}' uses a dataset that is not in the bundle or its workspace", p.name)));
+        }
+        if p.environment_id.is_some_and(|e| outside(&environment_ws, &e, &p.workspace_id)) {
+            return Err(BundleError::Invalid(format!(
+                "load plan '{}' uses an environment that is not in the bundle or its workspace",
+                p.name
+            )));
         }
     }
     // Two requests can name the same revision, so a backup may carry it
@@ -80,6 +123,15 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
             "{} request revision(s) belonged to requests that are not in the bundle and were left out.",
             before - revisions.len()
         ));
+    }
+    // A request's current revision must be one of its own in the bundle;
+    // any other id would name an object this import does not write (and a
+    // Duplicate import does not remap). Saving the request records a new one.
+    let own_revisions: HashSet<(Id, Id)> = revisions.iter().map(|r| (r.id, r.request_id)).collect();
+    for r in &mut g.requests {
+        if r.revision_id.is_some_and(|rev| !own_revisions.contains(&(rev, r.meta.id))) {
+            r.revision_id = None;
+        }
     }
     g.revisions = revisions;
     // Import writes objects by id, so a repeated id would make one object

@@ -21,14 +21,22 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-/// Vault-backed secret resolution (fails closed while locked).
-pub struct StoreSecrets(pub Arc<Store>);
+/// Vault-backed secret resolution for one workspace (fails closed while
+/// locked). Only secrets that workspace owns resolve: a reference to any
+/// other secret, whoever owns it, fails as if the secret were not stored.
+pub struct StoreSecrets {
+    pub store: Arc<Store>,
+    pub workspace: Id,
+}
 
 impl SecretResolver for StoreSecrets {
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
-        match self.0.get_secret(&r.id) {
+        match self.store.get_workspace_secret(&r.id, &self.workspace) {
             Ok(Some((_, v))) => Ok(v),
-            Ok(None) => Err(format!("secret '{}' is not in this vault (it may not have been imported)", r.label)),
+            Ok(None) => Err(format!(
+                "secret '{}' is not in this workspace's vault (it may belong to another workspace or not have been imported)",
+                r.label
+            )),
             Err(anvil_storage::StoreError::Locked) => Err("Anvil is locked".into()),
             Err(e) => Err(e.to_string()),
         }
@@ -134,7 +142,7 @@ impl App {
         let sealed = root.filter(|&i| !chain[i].use_workspace_scope);
         let inner = &chain[sealed.unwrap_or(0)..];
         let settings = self.settings()?;
-        let secrets = StoreSecrets(self.store.clone());
+        let secrets = StoreSecrets { store: self.store.clone(), workspace: *ws_id };
         let mut settings_layers = vec![("app".to_string(), settings.defaults.clone()), ("workspace".to_string(), ws.settings.clone())];
         for f in &chain {
             settings_layers.push((format!("folder:{}", f.name), f.settings.clone()));
@@ -205,7 +213,7 @@ impl App {
             tls_profiles: self.tls_profiles(ws_id)?,
             proxy_profiles: self.proxy_profiles(ws_id)?,
             integrations: self.integrations(ws_id)?,
-            secrets: Arc::new(StoreSecrets(self.store.clone())),
+            secrets: Arc::new(secrets),
             attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,

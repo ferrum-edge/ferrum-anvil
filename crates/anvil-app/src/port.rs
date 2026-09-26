@@ -5,7 +5,7 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::workspace::Workspace;
 use anvil_portability::bundle::{self, BundleKind, ExportMode, ExportOptions, ExportPreview};
-use anvil_portability::plan::{self, ConflictPolicy, ImportPlan};
+use anvil_portability::plan::{self, ConflictPolicy, Existing, ImportPlan};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::{KdfParams, StoreRead, kind};
 use serde::Serialize;
@@ -124,7 +124,7 @@ impl App {
     /// Dry run: validate and plan without mutating anything.
     pub fn import_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
-        let plan = plan::plan(&opened.graph, &self.store.read_consistently(existing_ids)?, policy);
+        let plan = plan::plan(&opened.graph, &self.store.read_consistently(existing)?, policy);
         Ok(ImportReport {
             plan,
             warnings: opened.warnings,
@@ -141,6 +141,10 @@ impl App {
     /// written in one transaction, which any failure before its commit rolls
     /// back. Attachments are stored after the commit and stay stored if that
     /// step fails.
+    ///
+    /// Under Replace, a bundle secret whose id is stored here under a
+    /// workspace outside the bundle (or under none) refuses the whole import:
+    /// another workspace's secret is never overwritten or re-owned.
     pub fn import(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
         let mut g = opened.graph;
@@ -151,8 +155,14 @@ impl App {
         let plan = self.store.atomically(|s| {
             // Read inside the transaction, so merge and naming decisions see
             // exactly what the writes below land on.
-            let existing = existing_ids(&s.as_read())?;
+            let existing = existing(&s.as_read())?;
             let plan = plan::plan(&g, &existing, policy);
+            if policy == ConflictPolicy::Replace && !plan.foreign_secrets.is_empty() {
+                return Ok(Err(AppError::Invalid(format!(
+                    "Replace cannot overwrite secrets that belong to a workspace outside the bundle ({}); nothing was imported. Import as copies instead.",
+                    plan.foreign_secrets.join(", ")
+                ))));
+            }
             if policy == ConflictPolicy::Duplicate {
                 // Fresh ids for every object, revision and secret: the copy
                 // can never overwrite or share anything with its source.
@@ -166,7 +176,7 @@ impl App {
                     w.name = format!("{} (imported)", w.name);
                 }
             }
-            let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.contains(id);
+            let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.objects.contains(id);
             for w in &g.workspaces {
                 if !skip(&w.meta.id) {
                     s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, w)?;
@@ -229,7 +239,7 @@ impl App {
             }
             for (id, v) in &g.secrets {
                 if let Ok(sid) = id.parse::<Id>() {
-                    if policy == ConflictPolicy::Merge && s.as_read().get_secret(&sid)?.is_some() {
+                    if policy == ConflictPolicy::Merge && existing.secrets.contains_key(&sid) {
                         continue;
                     }
                     // Owned by a workspace of this import (remapped for Duplicate).
@@ -237,8 +247,8 @@ impl App {
                     s.put_secret(&sid, ws.as_ref(), &v.label, &v.value)?;
                 }
             }
-            Ok(plan)
-        })?;
+            Ok(Ok(plan))
+        })??;
         for (sha, bytes) in &g.attachments {
             let r = self.put_attachment(sha, bytes, None)?;
             if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = r
@@ -260,17 +270,23 @@ impl App {
     }
 }
 
-/// Ids of every stored object, read through `s`.
-fn existing_ids(s: &StoreRead<'_>) -> anvil_storage::store::Result<HashSet<Id>> {
-    let mut ids = HashSet::new();
+/// Every stored object id, and every stored secret with its owner, read
+/// through `s`.
+fn existing(s: &StoreRead<'_>) -> anvil_storage::store::Result<Existing> {
+    let mut e = Existing::default();
     for k in kind::ALL {
         for m in s.object_meta(k)? {
             if let Ok(id) = m.id.parse() {
-                ids.insert(id);
+                e.objects.insert(id);
             }
         }
     }
-    Ok(ids)
+    for (id, owner) in s.secret_owners()? {
+        if let Ok(id) = id.parse() {
+            e.secrets.insert(id, owner.and_then(|w| w.parse().ok()));
+        }
+    }
+    Ok(e)
 }
 
 /// Secret references in the graph whose values were not included.

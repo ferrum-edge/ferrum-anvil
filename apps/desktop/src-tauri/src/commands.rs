@@ -610,18 +610,27 @@ pub fn export_preview(
     st.app()?.export_preview(ws.as_ref(), mode(&export_mode)?, false).map_err(e)
 }
 
+/// Run `f` on a blocking worker thread. Writing or opening an encrypted
+/// bundle derives its vault key (Argon2id), which must not stall the UI
+/// thread that runs synchronous commands.
+async fn off_ui_thread<T: Send + 'static>(f: impl FnOnce() -> anvil_app::Result<T> + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|x| x.to_string())?.map_err(e)
+}
+
 /// Write to the destination the user picked in the native save dialog
 /// (`file_choose` with purpose `bundle_export`); `grant` is that selection.
 #[tauri::command]
-pub fn export_to_path(
+pub async fn export_to_path(
     st: State<'_, DesktopState>,
     workspace_id: Option<String>,
     export_mode: String,
     passphrase: Option<String>,
     grant: String,
 ) -> R<usize> {
+    let app = st.app()?;
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    let (bytes, _) = st.app()?.export(ws.as_ref(), mode(&export_mode)?, passphrase.as_deref(), false).map_err(e)?;
+    let mode = mode(&export_mode)?;
+    let (bytes, _) = off_ui_thread(move || app.export(ws.as_ref(), mode, passphrase.as_deref(), false)).await?;
     st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
 }
 
@@ -632,7 +641,7 @@ fn read_bundle(st: &DesktopState, grant: &str) -> R<Vec<u8>> {
 }
 
 #[tauri::command]
-pub fn import_preview(
+pub async fn import_preview(
     st: State<'_, DesktopState>,
     grant: String,
     passphrase: Option<String>,
@@ -640,11 +649,12 @@ pub fn import_preview(
 ) -> R<anvil_app::port::ImportReport> {
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
-    app.import_preview(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let policy = policy(&conflict_policy)?;
+    off_ui_thread(move || app.import_preview(&bytes, passphrase.as_deref(), policy)).await
 }
 
 #[tauri::command]
-pub fn import_apply(
+pub async fn import_apply(
     st: State<'_, DesktopState>,
     grant: String,
     passphrase: Option<String>,
@@ -652,7 +662,8 @@ pub fn import_apply(
 ) -> R<anvil_app::port::ImportReport> {
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
-    app.import(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let policy = policy(&conflict_policy)?;
+    off_ui_thread(move || app.import(&bytes, passphrase.as_deref(), policy)).await
 }
 
 // ------------------------------------------------------------- attachments

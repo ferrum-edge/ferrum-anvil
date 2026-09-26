@@ -911,6 +911,12 @@ export function ImportDialog(props: {
             </tbody>
           </table>
           {preview.missing_secrets.length > 0 && <div className="warn-box">You'll need to fill in {preview.missing_secrets.length} placeholder(s): {preview.missing_secrets.slice(0, 8).join(", ")}</div>}
+          {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "replace" && (
+            <div className="bad-box">Replace can't overwrite secrets that belong to a workspace outside this bundle: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}. Import as copies instead.</div>
+          )}
+          {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "merge" && (
+            <div className="warn-box">These secrets already exist here in another workspace and are kept; the imported items that use them won't resolve them: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}</div>
+          )}
           {preview.warnings.map((w, i) => (
             <div key={i} className="warn-box">
               {w}
