@@ -363,6 +363,7 @@ dependencies = [
  "http",
  "jsonschema",
  "jsonwebtoken",
+ "libc",
  "p12-keystore",
  "parking_lot",
  "percent-encoding",

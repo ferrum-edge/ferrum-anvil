@@ -12,6 +12,14 @@
   version. Share-safe bundles of either format still import, but only
   without a passphrase: one given for a bundle that is not encrypted is
   refused, since it would verify nothing.
+- Desktop: opening another profile now locks the previous one and stops its
+  runs, sends, sessions and load runs. Each records only into the profile it
+  started under, and a load report that finished while its profile was
+  locked is saved when that profile is next unlocked, never into another.
+  Progress of a closed profile's work no longer reaches the new profile's
+  window, and its sessions cannot be driven from there. A JWT-SVID token
+  file is read through links (such as a Kubernetes projected token), but
+  the file opened must be a regular file of at most 16 KiB.
 - Bundle imports now store the load plans and history records a bundle
   carries (exports include load plans, and list a plan left out because it
   names a deleted object among the excluded items), and a Duplicate import
