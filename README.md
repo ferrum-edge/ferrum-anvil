@@ -73,13 +73,19 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
 
 ## Build and run
 
-Requirements: Rust (stable, see `rust-toolchain.toml`), Node ≥ 22. On Linux,
+Requirements: Rust stable (see `rust-toolchain.toml`), Node.js 22.23.3 (the
+version used in CI), and npm. On Linux,
 Tauri's WebKitGTK dependencies are also required.
 
 ```bash
-cargo build --workspace                   # engine, CLI, lab
+cd apps/desktop
+npm ci
+npm run build                              # required before compiling anvil-desktop
+cd ../..
+cargo build --workspace                   # engine, CLI, lab and desktop
+cargo install --path crates/anvil-cli     # put the `anvil` command on PATH
 cargo test --workspace --exclude anvil-desktop
-cd apps/desktop && npm ci && npx tauri dev   # desktop app (dev)
+cd apps/desktop && npx tauri dev           # desktop app (dev)
 ```
 
 CLI quick start:
