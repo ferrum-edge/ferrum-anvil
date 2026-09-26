@@ -3,6 +3,7 @@
 //! build cannot read change nothing.
 
 use anvil_app::exec::SendOptions;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
@@ -11,9 +12,9 @@ use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::workspace::{Meta, RequestDefinition, Variable, Workspace};
 use anvil_portability::bundle::{self, BundleError, BundleKind, ExportOptions};
-use anvil_portability::plan::ConflictPolicy;
+use anvil_portability::plan::{ConflictPolicy, ExistingWorkspace};
 use anvil_portability::{ExportMode, PortableGraph, SecretValue};
-use anvil_storage::KdfParams;
+use anvil_storage::{KdfParams, kind};
 use anvil_transport::recorder::EventCtx;
 use sha2::Digest;
 use std::io::Write;
@@ -63,6 +64,11 @@ fn edit_manifest(bytes: &[u8], edit: impl Fn(&mut serde_json::Value)) -> Vec<u8>
     w.finish().unwrap().into_inner()
 }
 
+/// Approval to write into the stored workspace `ws`.
+fn into(ws: &Id) -> ImportApproval {
+    ImportApproval { existing_workspaces: vec![*ws] }
+}
+
 async fn send(app: &App, ws: &Id, request: &Id) -> u16 {
     let out = app.send(Some(*request), ws, None, SendOptions::default(), EventCtx::none(), CancellationToken::new()).await.unwrap();
     out.record.response.as_ref().map(|r| r.status).unwrap_or_else(|| panic!("no response: {:?}", out.record.findings))
@@ -80,6 +86,36 @@ fn bearer(secret: &SecretRef, url: &str) -> RequestSpec {
     spec
 }
 
+/// A saved request named `name` in workspace `ws`.
+fn request_in(ws: Id, name: &str, spec: RequestSpec) -> RequestDefinition {
+    RequestDefinition {
+        meta: Meta::new(),
+        workspace_id: ws,
+        folder_id: None,
+        name: name.into(),
+        description: String::new(),
+        tags: vec![],
+        favorite: false,
+        sort_key: 1.0,
+        spec,
+        revision_id: None,
+    }
+}
+
+/// `g` as an encrypted bundle: anyone with this build can write one, so its
+/// encryption says nothing about who did.
+fn encrypted(g: &PortableGraph) -> Vec<u8> {
+    let opts = ExportOptions {
+        kind: BundleKind::Workspace,
+        mode: ExportMode::EncryptedTransfer,
+        passphrase: Some(EXPORT_PASS),
+        include_history: false,
+        kdf: KdfParams::testing(),
+        app_version: "test",
+    };
+    bundle::write(g, &opts).unwrap().0
+}
+
 /// An encrypted bundle as anyone could write one: a workspace of its own
 /// whose request uses `secret`, with a value for that secret id.
 fn bundle_reusing_secret_id(secret: &SecretRef, url: &str) -> Vec<u8> {
@@ -92,34 +128,12 @@ fn bundle_reusing_secret_id(secret: &SecretRef, url: &str) -> Vec<u8> {
         auth: AuthConfig::Inherit,
         active_environment_id: None,
     };
-    let request = RequestDefinition {
-        meta: Meta::new(),
-        workspace_id: ws.meta.id,
-        folder_id: None,
-        name: "Use token".into(),
-        description: String::new(),
-        tags: vec![],
-        favorite: false,
-        sort_key: 1.0,
-        spec: bearer(secret, url),
-        revision_id: None,
-    };
+    let request = request_in(ws.meta.id, "Use token", bearer(secret, url));
     let mut g = PortableGraph { workspaces: vec![ws.clone()], requests: vec![request], ..Default::default() };
-    let value = SecretValue {
-        label: secret.label.clone(),
-        value: "placeholder-incoming".into(),
-        workspace_id: Some(ws.meta.id.to_string()),
-    };
+    let value =
+        SecretValue { label: secret.label.clone(), value: "placeholder-incoming".into(), workspace_id: Some(ws.meta.id.to_string()) };
     g.secrets.insert(secret.id.to_string(), value);
-    let opts = ExportOptions {
-        kind: BundleKind::Workspace,
-        mode: ExportMode::EncryptedTransfer,
-        passphrase: Some(EXPORT_PASS),
-        include_history: false,
-        kdf: KdfParams::testing(),
-        app_version: "test",
-    };
-    bundle::write(&g, &opts).unwrap().0
+    encrypted(&g)
 }
 
 #[tokio::test]
@@ -129,7 +143,7 @@ async fn duplicate_import_is_independent_of_its_source() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let mut spec = RequestSpec::http("GET", &fx.url(&format!("/auth/bearer?token={TOKEN}")));
     spec.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: token.clone() }, prefix: "Bearer".into() };
     let original = a.create_request(&ws.meta.id, None, "Check token", spec).unwrap();
@@ -183,7 +197,7 @@ fn duplicating_twice_gives_two_independent_copies() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let mut spec = RequestSpec::http("GET", "https://api.example.test/");
     spec.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: token }, prefix: "Bearer".into() };
     a.create_request(&ws.meta.id, None, "Check token", spec).unwrap();
@@ -207,10 +221,10 @@ fn merge_import_keeps_an_existing_secret() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
     a.store.put_secret(&token.id, Some(&ws.meta.id), "bearer", "placeholder-rotated-token").unwrap();
-    a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws.meta.id)).unwrap();
     let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
     assert_eq!(value.as_str(), "placeholder-rotated-token", "Merge keeps what already exists");
 }
@@ -222,7 +236,7 @@ async fn replace_import_never_takes_a_secret_from_another_workspace() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let bytes = bundle_reusing_secret_id(&token, &fx.url("/echo"));
     let listed = format!("secret 'bearer' ({})", token.id);
     let untouched = |a: &App| {
@@ -257,11 +271,11 @@ fn replace_import_restores_a_secret_its_own_workspace_owns() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
     a.store.put_secret(&token.id, Some(&ws.meta.id), "bearer", "placeholder-rotated-token").unwrap();
-    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap();
-    assert!(rep.plan.foreign_secrets.is_empty(), "{:?}", rep.plan);
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace, &into(&ws.meta.id)).unwrap();
+    assert!(rep.plan.foreign_secrets.is_empty() && rep.plan.foreign_objects.is_empty(), "{:?}", rep.plan);
     assert!(rep.plan.conflicts.contains(&format!("secret 'bearer' ({})", token.id)), "{:?}", rep.plan.conflicts);
     let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
     assert_eq!(value.as_str(), TOKEN, "Replace restores the bundle's value");
@@ -275,7 +289,7 @@ async fn a_request_resolves_only_secrets_its_own_workspace_owns() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let url = fx.url(&format!("/auth/bearer?token={TOKEN}"));
     let own = a.create_request(&ws.meta.id, None, "Check token", bearer(&token, &url)).unwrap();
     assert_eq!(send(&a, &ws.meta.id, &own.meta.id).await, 200);
@@ -299,8 +313,10 @@ async fn a_request_resolves_only_secrets_its_own_workspace_owns() {
     };
     assert!(e.to_string().contains("not in this workspace's vault"), "{e}");
 
-    // Neither can any workspace use a secret no workspace owns.
-    let unowned = a.set_secret(None, "unowned", TOKEN).unwrap();
+    // Neither can any workspace use a secret no workspace owns (only older
+    // builds stored one).
+    let unowned = SecretRef { id: Id::new(), label: "unowned".into() };
+    a.store.put_secret(&unowned.id, None, &unowned.label, TOKEN).unwrap();
     let orphan = a.create_request(&ws.meta.id, None, "Unowned token", bearer(&unowned, &url)).unwrap();
     refused_auth(&a, &ws.meta.id, &orphan.meta.id).await;
     assert_eq!(fx.log.count_requests(), sent, "nothing more was sent");
@@ -314,7 +330,7 @@ async fn a_duplicate_without_the_secret_never_uses_its_sources() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    let token = a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let url = fx.url(&format!("/auth/bearer?token={TOKEN}"));
     let original = a.create_request(&ws.meta.id, None, "Check token", bearer(&token, &url)).unwrap();
 
@@ -334,7 +350,7 @@ fn bundles_this_build_cannot_read_change_nothing() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
-    a.set_secret(Some(&ws.meta.id), "bearer", TOKEN).unwrap();
+    a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
 
     let b_root = tempfile::tempdir().unwrap();
@@ -356,4 +372,122 @@ fn bundles_this_build_cannot_read_change_nothing() {
     // The same bundle at the current schema imports.
     b.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_bundle_that_claims_a_stored_workspace_is_refused_until_approved() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
+
+    // A bundle that names the stored workspace's id (ids travel in every
+    // bundle) and adds a request there that sends its secret to any URL.
+    let claimed = Workspace { name: "Look-alike".into(), variables: vec![Variable::plain("base", "placeholder")], ..ws.clone() };
+    let request = request_in(ws.meta.id, "Use token", bearer(&token, &fx.url("/echo")));
+    let bytes = encrypted(&PortableGraph { workspaces: vec![claimed], requests: vec![request], ..Default::default() });
+    let expected = vec![ExistingWorkspace { id: ws.meta.id, name: "Payments".into() }];
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        // The preview names the stored workspace...
+        let preview = a.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap();
+        assert_eq!(preview.plan.existing_workspaces, expected, "{policy:?}");
+        // ...and applying without approving it, or approving another one, is refused.
+        let e = a.import(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
+        assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Payments'")), "{policy:?}: {e}");
+        let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&Id::new())).unwrap_err();
+        assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Payments'")), "{policy:?}: {e}");
+    }
+    // Nothing was written: the workspace, its requests and its secret are as they were.
+    assert_eq!(a.workspaces().unwrap(), vec![ws.clone()]);
+    assert!(a.requests(&ws.meta.id).unwrap().is_empty());
+    assert_eq!(a.store.list_secret_ids(Some(&ws.meta.id)).unwrap(), vec![token.id.to_string()]);
+
+    // A Duplicate copy claims no stored workspace, and its request cannot use the secret.
+    let preview = a.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap();
+    assert!(preview.plan.existing_workspaces.is_empty(), "{:?}", preview.plan);
+    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap();
+    let copy_ws: Id = rep.workspace_ids[0].parse().unwrap();
+    assert_ne!(copy_ws, ws.meta.id);
+    let copy = a.requests(&copy_ws).unwrap().remove(0);
+    refused_auth(&a, &copy_ws, &copy.meta.id).await;
+    assert_eq!(fx.log.count_requests(), 0, "the stored workspace's secret was never sent");
+
+    // Once the user approves the stored workspace, Merge writes into it.
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws.meta.id)).unwrap();
+    assert_eq!(rep.workspace_ids, vec![ws.meta.id.to_string()]);
+    assert_eq!(a.requests(&ws.meta.id).unwrap().len(), 1);
+    assert_eq!(a.workspace(&ws.meta.id).unwrap(), ws, "Merge keeps the stored workspace itself");
+}
+
+#[test]
+fn replace_never_overwrites_an_object_of_another_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let folder = a.create_folder(&ws.meta.id, None, "Orders").unwrap();
+
+    // A bundle with a workspace of its own and a folder that reuses the
+    // stored folder's id, with variables of its own.
+    let incoming = Workspace { meta: Meta::new(), name: "Incoming".into(), ..ws.clone() };
+    let mut look_alike = folder.clone();
+    look_alike.workspace_id = incoming.meta.id;
+    look_alike.variables.push(Variable::plain("base", "https://elsewhere.example.test"));
+    let bytes = encrypted(&PortableGraph { workspaces: vec![incoming], folders: vec![look_alike], ..Default::default() });
+    let listed = format!("folder 'Orders' ({})", folder.meta.id);
+
+    let preview = a.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(preview.plan.foreign_objects, vec![listed.clone()]);
+    assert!(preview.plan.existing_workspaces.is_empty(), "{:?}", preview.plan);
+    let e = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains(&listed)), "{e}");
+    assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
+    assert_eq!(a.folder(&folder.meta.id).unwrap(), folder, "the folder stays in its workspace, unchanged");
+
+    // Merge keeps the stored folder.
+    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert_eq!(rep.plan.foreign_objects, vec![listed]);
+    assert_eq!(a.folder(&folder.meta.id).unwrap(), folder);
+}
+
+#[test]
+fn a_request_is_prepared_only_in_its_own_workspace_and_folders() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let other = a.create_workspace("Other").unwrap();
+    // The request names a secret of the other workspace.
+    let token = a.set_secret(&other.meta.id, "bearer", TOKEN).unwrap();
+    let request = a.create_request(&ws.meta.id, None, "Check token", bearer(&token, "https://api.example.test/")).unwrap();
+
+    // Prepared as if it were in the other workspace, it would resolve that
+    // workspace's secrets: refused.
+    let Err(e) = a.build_context(Some(request.meta.id), &other.meta.id, None, &SendOptions::default()) else {
+        panic!("a request was prepared in another workspace")
+    };
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains("request 'Check token' is not in this workspace")), "{e}");
+    // In its own workspace it is prepared as usual.
+    let ctx = a.build_context(Some(request.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
+    assert_eq!(ctx.workspace_id, Some(ws.meta.id));
+
+    // A request whose folder is in another workspace takes nothing from it.
+    let folder = a.create_folder(&other.meta.id, None, "Orders").unwrap();
+    let mut stray = request.clone();
+    stray.meta = Meta::new();
+    stray.folder_id = Some(folder.meta.id);
+    a.store.put(kind::REQUEST, &stray.meta.id, Some(&ws.meta.id), stray.folder_id.as_ref(), stray.sort_key, &stray).unwrap();
+    let Err(e) = a.build_context(Some(stray.meta.id), &ws.meta.id, None, &SendOptions::default()) else {
+        panic!("a folder of another workspace was followed")
+    };
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains("folder 'Orders' is not in this workspace")), "{e}");
+}
+
+#[test]
+fn a_secret_needs_a_stored_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let e = a.set_secret(&Id::new(), "bearer", TOKEN).unwrap_err();
+    assert!(matches!(e, AppError::NotFound(_)), "{e}");
+    assert!(a.store.list_secret_ids(None).unwrap().is_empty(), "nothing was stored");
 }

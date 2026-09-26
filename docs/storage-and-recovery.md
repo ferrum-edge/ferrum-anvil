@@ -28,7 +28,15 @@ Each vault secret belongs to one workspace. A request resolves a secret
 reference only when its own workspace owns that secret, whether the reference
 is in its auth, a variable, an environment or a profile. A reference to any
 other secret (another workspace's, or one no workspace owns) fails as if the
-secret were not stored, and nothing is sent.
+secret were not stored, and nothing is sent. A saved request is prepared
+only in its own workspace, and only with folders of that workspace; a load
+plan may run only requests of its own workspace. Creating a secret requires the
+workspace that will own it.
+
+A secret stored with no owning workspace (possible only through older builds)
+no longer resolves for any request. Store its value again from the workspace
+that uses it: open the field, choose **Replace**, and keep the value in the
+vault again.
 
 ## Unlocking
 
@@ -81,9 +89,20 @@ overwrites or depends on its source: deleting either leaves the other working.
 A copy whose bundle left a secret out does not use the source's secret either.
 Merge keeps objects, revisions and secrets that already exist. Replace
 overwrites them, but never a secret that a workspace outside the bundle (or no
-workspace) owns: the preview lists such secrets, and a Replace import that
+workspace) owns, and never an object stored in a different workspace from the
+one the bundle gives it: the preview lists both, and a Replace import that
 would overwrite one is refused and changes nothing. The preview lists every
 object and secret that shares an id with one already stored.
+
+Workspace ids travel in every bundle, so a bundle can claim a workspace that is
+already stored here, such as a re-imported backup. Under Merge or Replace the
+import then writes into that workspace, and whatever it adds there (a request
+to any URL, a variable, an auth setting) can use that workspace's vault
+secrets. The preview lists every such workspace as an error, and applying is
+refused unless the user confirms each one after the preview (the desktop's
+checkbox; `anvil import --into-existing <WORKSPACE_ID>`). Confirm only for a
+bundle you trust: a passphrase shows the bundle was not altered after it was
+encrypted, not who wrote it. Duplicate never writes into a stored workspace.
 
 A bundle is refused when any workspace-scoped object (folder, request,
 environment, TLS, proxy or integration profile, dataset, scenario, load plan)
@@ -91,7 +110,8 @@ belongs to a workspace it does not contain; when a folder's parent, a
 request's folder, or a request, dataset or environment that a scenario or load
 plan names is missing from it or in another of its workspaces; when a secret
 belongs to a workspace it does not contain; or when it gives two objects one
-id. A request keeps its current-revision link only when the bundle carries
+id. These checks are about the bundle's own consistency: "a workspace it
+contains" can be one already stored here, as above. A request keeps its current-revision link only when the bundle carries
 that revision of it.
 
 An encrypted bundle's vault key is derived with the Argon2id costs its manifest

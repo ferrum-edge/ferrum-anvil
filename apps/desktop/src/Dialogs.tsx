@@ -805,8 +805,11 @@ export function ImportDialog(props: {
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
   const [preview, setPreview] = useState<ImportReport | null>(null);
+  // Set only after the preview named the existing workspaces the bundle writes into.
+  const [intoExisting, setIntoExisting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const existing = preview?.plan.existing_workspaces ?? [];
   const choose = async () => {
     setErr(null);
     try {
@@ -814,6 +817,7 @@ export function ImportDialog(props: {
       if (f) {
         setFile(f);
         setPreview(null);
+        setIntoExisting(false);
       }
     } catch (e) {
       setErr(String((e as Error).message));
@@ -823,6 +827,7 @@ export function ImportDialog(props: {
     if (!file) return;
     setErr(null);
     setBusy(true);
+    setIntoExisting(false);
     try {
       setPreview(await api.importPreview(file.token, pass || null, policy));
     } catch (e) {
@@ -837,7 +842,10 @@ export function ImportDialog(props: {
     setBusy(true);
     setErr(null);
     try {
-      const r = await api.importApply(file.token, pass || null, policy);
+      if (!preview) return;
+      // Apply exactly what was previewed; the backend refuses any existing workspace not approved here.
+      const approved = intoExisting ? existing.map((w) => w.id) : [];
+      const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved);
       props.onImported(r.workspace_ids);
       props.onClose();
     } catch (e) {
@@ -857,7 +865,7 @@ export function ImportDialog(props: {
             <button className="btn" disabled={!file || busy} onClick={doPreview}>
               Preview
             </button>
-            <button className="btn primary" disabled={!preview || busy} onClick={apply}>
+            <button className="btn primary" disabled={!preview || busy || (existing.length > 0 && !intoExisting)} onClick={apply}>
               Import
             </button>
           </>
@@ -893,7 +901,15 @@ export function ImportDialog(props: {
       </label>
       <label className="lbl">
         If objects already exist
-        <select className="field" value={policy} onChange={(e) => setPolicy(e.target.value)}>
+        <select
+          className="field"
+          value={policy}
+          onChange={(e) => {
+            setPolicy(e.target.value);
+            setPreview(null);
+            setIntoExisting(false);
+          }}
+        >
           <option value="duplicate">Import as copies (new ids)</option>
           <option value="merge">Merge (keep existing, add new)</option>
           <option value="replace">Replace existing</option>
@@ -911,6 +927,24 @@ export function ImportDialog(props: {
             </tbody>
           </table>
           {preview.missing_secrets.length > 0 && <div className="warn-box">You'll need to fill in {preview.missing_secrets.length} placeholder(s): {preview.missing_secrets.slice(0, 8).join(", ")}</div>}
+          {existing.length > 0 && (
+            <div className="bad-box col">
+              <span>
+                This bundle writes into your existing workspace{existing.length > 1 ? "s" : ""} {existing.map((w) => `'${w.name}'`).join(", ")}; imported items can use
+                {existing.length > 1 ? " their" : " its"} vault secrets and send them wherever they point. A passphrase only proves the bundle was not altered in transit, not who wrote it. Import as copies unless you trust where this bundle came from.
+              </span>
+              <label className="check">
+                <input type="checkbox" checked={intoExisting} onChange={(e) => setIntoExisting(e.target.checked)} />
+                I trust this bundle: write into {existing.length > 1 ? "these workspaces" : "this workspace"}
+              </label>
+            </div>
+          )}
+          {preview.plan.foreign_objects.length > 0 && preview.plan.policy === "replace" && (
+            <div className="bad-box">Replace can't overwrite objects that belong to another workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}. Import as copies instead.</div>
+          )}
+          {preview.plan.foreign_objects.length > 0 && preview.plan.policy === "merge" && (
+            <div className="warn-box">These objects already exist here in another workspace and are kept; imported items that point at them won't use them: {preview.plan.foreign_objects.slice(0, 8).join(", ")}</div>
+          )}
           {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "replace" && (
             <div className="bad-box">Replace can't overwrite secrets that belong to a workspace outside this bundle: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}. Import as copies instead.</div>
           )}

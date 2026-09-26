@@ -180,13 +180,19 @@ impl App {
         })?
     }
 
-    /// Ancestor chain root → leaf (inclusive).
-    pub fn folder_chain(&self, id: Option<Id>) -> Result<Vec<Folder>> {
+    /// Ancestor chain root → leaf (inclusive); every folder must be in `ws`.
+    pub fn folder_chain(&self, ws: &Id, id: Option<Id>) -> Result<Vec<Folder>> {
         let mut chain = Vec::new();
         let mut cur = id;
         let mut guard = 0;
         while let Some(c) = cur {
             let f = self.folder(&c)?;
+            // Folder settings, auth and variables apply only inside their own
+            // workspace; a parent id that names another workspace's folder
+            // is refused rather than followed.
+            if f.workspace_id != *ws {
+                return Err(AppError::Invalid(format!("folder '{}' is not in this workspace", f.name)));
+            }
             cur = f.parent_id;
             chain.push(f);
             guard += 1;
@@ -423,15 +429,13 @@ impl App {
 
     // ------------------------------------------------------------ secrets
 
-    pub fn set_secret(&self, ws: Option<&Id>, label: &str, value: &str) -> Result<SecretRef> {
+    /// Store a new secret owned by workspace `ws`, which must exist: a
+    /// request resolves only secrets its own workspace owns.
+    pub fn set_secret(&self, ws: &Id, label: &str, value: &str) -> Result<SecretRef> {
+        self.workspace(ws)?;
         let id = Id::new();
-        self.store.put_secret(&id, ws, label, value)?;
+        self.store.put_secret(&id, Some(ws), label, value)?;
         Ok(SecretRef { id, label: label.into() })
-    }
-
-    pub fn update_secret(&self, r: &SecretRef, ws: Option<&Id>, value: &str) -> Result<()> {
-        self.store.put_secret(&r.id, ws, &r.label, value)?;
-        Ok(())
     }
 
     // ------------------------------------------------------------ profiles

@@ -312,7 +312,7 @@ fn api_key_collection() -> String {
 /// values, including an `api_key` the imported collection's auth names.
 fn destination_with_environment(app: &App) -> (Workspace, Environment) {
     let mut ws = destination_with_credentials(app);
-    let secret = app.set_secret(Some(&ws.meta.id), "api key", "destination-secret").unwrap();
+    let secret = app.set_secret(&ws.meta.id, "api key", "destination-secret").unwrap();
     let from_vault = |name: &str| Variable {
         name: name.into(),
         value: SensitiveValue::Secret { secret: secret.clone() },

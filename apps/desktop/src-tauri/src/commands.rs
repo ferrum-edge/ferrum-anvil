@@ -290,15 +290,8 @@ pub fn environment_delete(st: State<'_, DesktopState>, environment_id: String) -
 
 /// Store a secret; only the reference comes back to the UI.
 #[tauri::command]
-pub fn secret_create(st: State<'_, DesktopState>, workspace_id: Option<String>, label: String, value: String) -> R<SecretRef> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.set_secret(ws.as_ref(), &label, &value).map_err(e)
-}
-
-#[tauri::command]
-pub fn secret_update(st: State<'_, DesktopState>, secret: SecretRef, workspace_id: Option<String>, value: String) -> R<()> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.update_secret(&secret, ws.as_ref(), &value).map_err(e)
+pub fn secret_create(st: State<'_, DesktopState>, workspace_id: String, label: String, value: String) -> R<SecretRef> {
+    st.app()?.set_secret(&id(&workspace_id)?, &label, &value).map_err(e)
 }
 
 /// Generate a DPoP P-256 key inside the vault; returns only its reference and public thumbprint.
@@ -309,11 +302,11 @@ pub struct GeneratedKey {
 }
 
 #[tauri::command]
-pub fn dpop_generate_key(st: State<'_, DesktopState>, workspace_id: Option<String>, label: String) -> R<GeneratedKey> {
+pub fn dpop_generate_key(st: State<'_, DesktopState>, workspace_id: String, label: String) -> R<GeneratedKey> {
+    let ws = id(&workspace_id)?;
     let pem = anvil_auth::dpop::generate_key_pem().map_err(|x| x.to_string())?;
     let (x, y) = anvil_auth::dpop::public_jwk(&pem).map_err(|x| x.to_string())?;
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    let secret = st.app()?.set_secret(ws.as_ref(), &label, &pem).map_err(e)?;
+    let secret = st.app()?.set_secret(&ws, &label, &pem).map_err(e)?;
     Ok(GeneratedKey { secret, jkt: anvil_auth::dpop::thumbprint(&x, &y) })
 }
 
@@ -659,11 +652,14 @@ pub async fn import_apply(
     grant: String,
     passphrase: Option<String>,
     conflict_policy: String,
+    approval: Option<anvil_app::port::ImportApproval>,
 ) -> R<anvil_app::port::ImportReport> {
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
     let policy = policy(&conflict_policy)?;
-    off_ui_thread(move || app.import(&bytes, passphrase.as_deref(), policy)).await
+    // Only the workspaces the user confirmed after the preview's warning.
+    let approval = approval.unwrap_or_default();
+    off_ui_thread(move || app.import_approved(&bytes, passphrase.as_deref(), policy, &approval)).await
 }
 
 // ------------------------------------------------------------- attachments
@@ -705,8 +701,8 @@ pub fn read_text_file(
         String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())?
     };
     if let Some(label) = store_as_secret {
-        let ws = workspace_id.map(|w| id(&w)).transpose()?;
-        let r = app.set_secret(ws.as_ref(), &label, &text).map_err(e)?;
+        let ws = workspace_id.ok_or_else(|| "a secret must belong to a workspace; open one first".to_string())?;
+        let r = app.set_secret(&id(&ws)?, &label, &text).map_err(e)?;
         return Ok(TextFile { text: None, secret: Some(r) });
     }
     Ok(TextFile { text: Some(text), secret: None })

@@ -8,7 +8,7 @@ use anvil_portability::bundle::{self, BundleKind, ExportMode, ExportOptions, Exp
 use anvil_portability::plan::{self, ConflictPolicy, Existing, ImportPlan};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::{KdfParams, StoreRead, kind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,6 +26,16 @@ pub struct ImportReport {
     pub workspaces: Vec<String>,
     /// Ids of the imported workspaces (after any duplicate remap); empty for a preview.
     pub workspace_ids: Vec<String>,
+}
+
+/// What the user confirmed after reading an import preview.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ImportApproval {
+    /// Workspaces stored here that the bundle claims (the preview's
+    /// `plan.existing_workspaces`) and that the user agreed to write into.
+    /// Any claimed workspace missing from this list refuses the import.
+    #[serde(default)]
+    pub existing_workspaces: Vec<Id>,
 }
 
 impl App {
@@ -137,15 +147,33 @@ impl App {
         })
     }
 
+    /// [`App::import_approved`] with nothing approved: a bundle that claims
+    /// a workspace stored here is refused under Merge and Replace.
+    pub fn import(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
+        self.import_approved(bytes, passphrase, policy, &ImportApproval::default())
+    }
+
     /// Apply after taking a restore checkpoint. Objects and secrets are
     /// written in one transaction, which any failure before its commit rolls
     /// back. Attachments are stored after the commit and stay stored if that
     /// step fails.
     ///
-    /// Under Replace, a bundle secret whose id is stored here under a
-    /// workspace outside the bundle (or under none) refuses the whole import:
-    /// another workspace's secret is never overwritten or re-owned.
-    pub fn import(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
+    /// The whole import is refused, before anything is written, when:
+    /// - under Merge or Replace, the bundle claims a workspace stored here
+    ///   that `approval` does not name: what it writes there could use that
+    ///   workspace's vault secrets, and a bundle's encryption says nothing
+    ///   about who wrote it;
+    /// - under Replace, a bundle secret's id is stored here under a workspace
+    ///   outside the bundle (or under none), or a bundle object's kind and id
+    ///   are stored here in another workspace: an object or secret is never
+    ///   overwritten or moved out of its workspace.
+    pub fn import_approved(
+        &self,
+        bytes: &[u8],
+        passphrase: Option<&str>,
+        policy: ConflictPolicy,
+        approval: &ImportApproval,
+    ) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
         let mut g = opened.graph;
         let checkpoint = self.store.checkpoint("before-import")?;
@@ -157,6 +185,24 @@ impl App {
             // exactly what the writes below land on.
             let existing = existing(&s.as_read())?;
             let plan = plan::plan(&g, &existing, policy);
+            let unapproved: Vec<String> = plan
+                .existing_workspaces
+                .iter()
+                .filter(|w| !approval.existing_workspaces.contains(&w.id))
+                .map(|w| format!("'{}' ({})", w.name, w.id))
+                .collect();
+            if !unapproved.is_empty() {
+                return Ok(Err(AppError::Invalid(format!(
+                    "this bundle writes into your existing workspace {}, and what it imports there can use that workspace's vault secrets; nothing was imported. Import as copies, or confirm writing into it after the preview.",
+                    unapproved.join(", ")
+                ))));
+            }
+            if policy == ConflictPolicy::Replace && !plan.foreign_objects.is_empty() {
+                return Ok(Err(AppError::Invalid(format!(
+                    "Replace cannot overwrite objects that belong to another workspace ({}); nothing was imported. Import as copies instead.",
+                    plan.foreign_objects.join(", ")
+                ))));
+            }
             if policy == ConflictPolicy::Replace && !plan.foreign_secrets.is_empty() {
                 return Ok(Err(AppError::Invalid(format!(
                     "Replace cannot overwrite secrets that belong to a workspace outside the bundle ({}); nothing was imported. Import as copies instead.",
@@ -170,9 +216,8 @@ impl App {
             }
             // A different workspace with the same name would be
             // indistinguishable in the UI; label the incoming copy.
-            let local: Vec<Workspace> = s.list(kind::WORKSPACE, None)?;
             for w in &mut g.workspaces {
-                if local.iter().any(|l| l.name == w.name && l.meta.id != w.meta.id) {
+                if existing.workspaces.iter().any(|(id, name)| *name == w.name && *id != w.meta.id) {
                     w.name = format!("{} (imported)", w.name);
                 }
             }
@@ -270,16 +315,20 @@ impl App {
     }
 }
 
-/// Every stored object id, and every stored secret with its owner, read
-/// through `s`.
+/// Every stored object and secret with its owner, and every stored
+/// workspace with its name, read through `s`.
 fn existing(s: &StoreRead<'_>) -> anvil_storage::store::Result<Existing> {
     let mut e = Existing::default();
     for k in kind::ALL {
         for m in s.object_meta(k)? {
             if let Ok(id) = m.id.parse() {
                 e.objects.insert(id);
+                e.owners.insert((m.kind, id), m.workspace_id.and_then(|w| w.parse().ok()));
             }
         }
+    }
+    for w in s.list::<Workspace>(kind::WORKSPACE, None)? {
+        e.workspaces.insert(w.meta.id, w.name);
     }
     for (id, owner) in s.secret_owners()? {
         if let Ok(id) = id.parse() {

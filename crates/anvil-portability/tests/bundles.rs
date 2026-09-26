@@ -7,7 +7,7 @@ use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::TlsProfile;
 use anvil_domain::workspace::*;
 use anvil_portability::bundle::{self, BundleError, BundleKind, ExportMode, ExportOptions};
-use anvil_portability::plan::{self, ConflictPolicy, Existing};
+use anvil_portability::plan::{self, ConflictPolicy, Existing, ExistingWorkspace};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::KdfParams;
 use std::collections::HashSet;
@@ -688,6 +688,39 @@ fn plan_lists_secret_conflicts_and_secrets_owned_outside_the_bundle() {
     }
     let merge = plan::plan(&g, &stored(Some(Id::new())), ConflictPolicy::Merge);
     assert_eq!(merge.skipped_existing, 1);
+}
+
+#[test]
+fn plan_lists_stored_workspaces_the_bundle_claims_and_objects_stored_in_another_workspace() {
+    let g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let folder = &g.folders[0];
+
+    // A workspace stored here under a bundle workspace's id is listed with its
+    // local name for Merge and Replace; a Duplicate copy claims none.
+    let claimed = Existing { workspaces: [(ws, "Local payments".to_string())].into_iter().collect(), ..Default::default() };
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        let p = plan::plan(&g, &claimed, policy);
+        assert_eq!(p.existing_workspaces, vec![ExistingWorkspace { id: ws, name: "Local payments".into() }], "{policy:?}");
+    }
+    assert!(plan::plan(&g, &claimed, ConflictPolicy::Duplicate).existing_workspaces.is_empty());
+    assert!(plan::plan(&g, &Existing::default(), ConflictPolicy::Merge).existing_workspaces.is_empty());
+
+    // A folder stored in its own workspace is an ordinary conflict.
+    let stored = |kind: &str, owner: Option<Id>| Existing {
+        owners: [((kind.to_string(), folder.meta.id), owner)].into_iter().collect(),
+        ..Default::default()
+    };
+    assert!(plan::plan(&g, &stored("folder", Some(ws)), ConflictPolicy::Replace).foreign_objects.is_empty());
+    // Stored in another workspace, or in none: listed for every policy.
+    let listed = format!("folder 'Orders' ({})", folder.meta.id);
+    for owner in [Some(Id::new()), None] {
+        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+            assert_eq!(plan::plan(&g, &stored("folder", owner), policy).foreign_objects, vec![listed.clone()], "{policy:?}");
+        }
+    }
+    // The same id under another kind is a different stored object.
+    assert!(plan::plan(&g, &stored("request", Some(Id::new())), ConflictPolicy::Replace).foreign_objects.is_empty());
 }
 
 fn proxy(workspace_id: Id) -> anvil_domain::tls::ProxyProfile {

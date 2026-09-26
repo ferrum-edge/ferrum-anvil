@@ -133,9 +133,16 @@ impl App {
             (None, Some(d)) => (None, d),
             (None, None) => return Err(AppError::Invalid("nothing to send".into())),
         };
+        // Secrets, variables and profiles below all come from `ws_id`, so a
+        // saved request resolves only in its own workspace.
+        if let Some(r) = &req
+            && r.workspace_id != *ws_id
+        {
+            return Err(AppError::Invalid(format!("request '{}' is not in this workspace", r.name)));
+        }
         let referrer = req.as_ref().map(|r| LinkedFileReferrer::Request { id: r.meta.id });
         let linked = self.bound_linked_files(referrer, &spec)?;
-        let chain = self.folder_chain(req.as_ref().and_then(|r| r.folder_id))?;
+        let chain = self.folder_chain(ws_id, req.as_ref().and_then(|r| r.folder_id))?;
         // The innermost import root; unless the user opened it to the
         // workspace, nothing outside it resolves under it.
         let root = chain.iter().rposition(|f| f.import_root);

@@ -19,6 +19,7 @@ mod specs_load;
 
 use anvil_app::App;
 use anvil_app::exec::SendOptions;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::diagnostics::{Confidence, Severity};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
@@ -110,6 +111,12 @@ enum Cmd {
         policy: Policy,
         #[arg(long)]
         dry_run: bool,
+        /// Write into this workspace stored here (repeatable). Merge and
+        /// Replace refuse a bundle that claims a stored workspace unless it
+        /// is named here; `--dry-run` lists them under
+        /// `plan.existing_workspaces`. Only for bundles you trust.
+        #[arg(long = "into-existing", value_name = "WORKSPACE_ID")]
+        into_existing: Vec<String>,
     },
     /// Decode a JWT locally (never verifies it).
     Jwt { token: String },
@@ -924,7 +931,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Cmd::Import { file, policy, dry_run } => {
+        Cmd::Import { file, policy, dry_run, into_existing } => {
             let bytes = std::fs::read(file)?;
             let pass = std::env::var("ANVIL_EXPORT_PASSPHRASE").ok();
             let pol = match policy {
@@ -932,7 +939,15 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 Policy::Replace => ConflictPolicy::Replace,
                 Policy::Duplicate => ConflictPolicy::Duplicate,
             };
-            let rep = if *dry_run { app.import_preview(&bytes, pass.as_deref(), pol)? } else { app.import(&bytes, pass.as_deref(), pol)? };
+            let mut approval = ImportApproval::default();
+            for w in into_existing {
+                approval.existing_workspaces.push(w.parse().with_context(|| format!("invalid workspace id '{w}'"))?);
+            }
+            let rep = if *dry_run {
+                app.import_preview(&bytes, pass.as_deref(), pol)?
+            } else {
+                app.import_approved(&bytes, pass.as_deref(), pol, &approval)?
+            };
             println!("{}", serde_json::to_string_pretty(&rep)?);
             Ok(0)
         }

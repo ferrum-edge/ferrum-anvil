@@ -141,6 +141,24 @@ fn plan(ws: Id, req: Id) -> LoadPlan {
     }
 }
 
+#[test]
+fn a_load_plan_runs_only_requests_of_its_own_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let other = app.create_workspace("Other").unwrap();
+    let req = app.create_request(&ws.meta.id, None, "echo", RequestSpec::http("GET", "https://api.example.test/")).unwrap();
+    let stray = plan(other.meta.id, req.meta.id);
+    let Err(e) = app.save_load_plan(stray.clone()) else { panic!("a plan saved another workspace's request") };
+    assert!(e.to_string().contains("request 'echo' in this load plan belongs to another workspace"), "{e}");
+    assert!(app.load_plans(&other.meta.id).unwrap().is_empty());
+    // A plan that was never saved here (or was imported) is checked again
+    // before any request is prepared.
+    let Err(e) = app.load_job(&stray) else { panic!("a plan prepared another workspace's request") };
+    assert!(e.to_string().contains("belongs to another workspace"), "{e}");
+    app.save_load_plan(plan(ws.meta.id, req.meta.id)).unwrap();
+}
+
 #[tokio::test]
 async fn load_plan_requires_acknowledgement_runs_and_stores_report() {
     anvil_fixtures::init();

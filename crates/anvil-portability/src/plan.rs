@@ -30,6 +30,24 @@ pub struct ImportPlan {
     /// re-owns such a secret, so a Replace import is refused while any is
     /// listed; Merge keeps the stored secret and Duplicate never touches it.
     pub foreign_secrets: Vec<String>,
+    /// Objects stored here under the same kind and id as a bundle object but
+    /// in a different workspace than the bundle gives it. Replace never moves
+    /// an object out of its workspace, so a Replace import is refused while
+    /// any is listed; Merge keeps the stored object.
+    pub foreign_objects: Vec<String>,
+    /// Workspaces stored here that the bundle claims by id (Merge and
+    /// Replace; a Duplicate copy never claims one). The import writes into
+    /// them, and what it writes can use their vault secrets, so it is refused
+    /// unless the user approves each one after the preview.
+    pub existing_workspaces: Vec<ExistingWorkspace>,
+}
+
+/// A workspace stored here that a bundle claims by id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExistingWorkspace {
+    pub id: Id,
+    /// Its name here.
+    pub name: String,
 }
 
 /// What the store already holds, as far as an import can collide with it.
@@ -37,6 +55,11 @@ pub struct ImportPlan {
 pub struct Existing {
     /// Ids of every stored object.
     pub objects: HashSet<Id>,
+    /// Every stored object by kind and id, with the workspace that owns it
+    /// (`None` for a workspace itself).
+    pub owners: HashMap<(String, Id), Option<Id>>,
+    /// Every stored workspace, with its name.
+    pub workspaces: HashMap<Id, String>,
     /// Every stored secret, with the workspace that owns it (`None`: none does).
     pub secrets: HashMap<Id, Option<Id>>,
 }
@@ -66,6 +89,11 @@ pub fn plan(g: &PortableGraph, existing: &Existing, policy: ConflictPolicy) -> I
         .map(|(k, id, n)| format!("{k} '{n}' ({id})"))
         .collect();
     let foreign_secrets = foreign_secrets(g, existing);
+    let foreign_objects = foreign_objects(g, existing);
+    let existing_workspaces = match policy {
+        ConflictPolicy::Duplicate => vec![],
+        ConflictPolicy::Merge | ConflictPolicy::Replace => existing_workspaces(g, existing),
+    };
     let n = ids.len();
     let c = conflicts.len();
     let (to_create, to_replace, skipped_existing) = match policy {
@@ -73,7 +101,47 @@ pub fn plan(g: &PortableGraph, existing: &Existing, policy: ConflictPolicy) -> I
         ConflictPolicy::Replace => (n - c, c, 0),
         ConflictPolicy::Duplicate => (n, 0, 0),
     };
-    ImportPlan { policy, to_create, to_replace, skipped_existing, conflicts, foreign_secrets }
+    ImportPlan { policy, to_create, to_replace, skipped_existing, conflicts, foreign_secrets, foreign_objects, existing_workspaces }
+}
+
+/// Bundle workspaces whose id is a workspace stored here, with its name here.
+pub fn existing_workspaces(g: &PortableGraph, existing: &Existing) -> Vec<ExistingWorkspace> {
+    g.workspaces
+        .iter()
+        .filter_map(|w| existing.workspaces.get(&w.meta.id).map(|name| ExistingWorkspace { id: w.meta.id, name: name.clone() }))
+        .collect()
+}
+
+/// Every object an import writes, as (kind, id, name, owning workspace); a
+/// workspace has no owner, and a revision belongs to its request's.
+fn owned_ids(g: &PortableGraph) -> Vec<(&'static str, Id, String, Option<Id>)> {
+    let requests: HashMap<Id, (Id, &str)> = g.requests.iter().map(|r| (r.meta.id, (r.workspace_id, r.name.as_str()))).collect();
+    let mut v = Vec::new();
+    v.extend(g.workspaces.iter().map(|x| ("workspace", x.meta.id, x.name.clone(), None)));
+    v.extend(g.folders.iter().map(|x| ("folder", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.requests.iter().map(|x| ("request", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.revisions.iter().map(|x| {
+        let request = requests.get(&x.request_id);
+        ("revision", x.id, request.map(|r| r.1.to_string()).unwrap_or_default(), request.map(|r| r.0))
+    }));
+    v.extend(g.environments.iter().map(|x| ("environment", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.tls_profiles.iter().map(|x| ("tls_profile", x.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.proxy_profiles.iter().map(|x| ("proxy_profile", x.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.integrations.iter().map(|x| ("integration", x.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.datasets.iter().map(|x| ("dataset", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.scenarios.iter().map(|x| ("scenario", x.meta.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.load_plans.iter().map(|x| ("load_plan", x.id, x.name.clone(), Some(x.workspace_id))));
+    v
+}
+
+/// Bundle objects whose kind and id are stored here in a different
+/// workspace than the bundle gives them, as `folder 'name' (id)`.
+pub fn foreign_objects(g: &PortableGraph, existing: &Existing) -> Vec<String> {
+    owned_ids(g)
+        .into_iter()
+        .filter(|(k, id, _, owner)| existing.owners.get(&(k.to_string(), *id)).is_some_and(|stored| stored != owner))
+        .map(|(k, id, n, _)| format!("{k} '{n}' ({id})"))
+        .collect()
 }
 
 /// The bundle's secrets, by id (validation refuses any other key).

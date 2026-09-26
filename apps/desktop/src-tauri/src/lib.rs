@@ -141,7 +141,6 @@ pub fn run() {
             commands::environment_save,
             commands::environment_delete,
             commands::secret_create,
-            commands::secret_update,
             commands::dpop_generate_key,
             commands::tls_profiles_list,
             commands::tls_profile_save,

@@ -2,6 +2,7 @@
 //! profile (different data key, no shared keychain), then a successful send.
 
 use anvil_app::exec::SendOptions;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
@@ -30,7 +31,7 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
     let ws = a.create_workspace("Payments").unwrap();
     let orders = a.create_folder(&ws.meta.id, None, "Orders").unwrap();
     let refunds = a.create_folder(&ws.meta.id, Some(orders.meta.id), "Refunds").unwrap();
-    let key_ref = a.set_secret(Some(&ws.meta.id), "api key", "k-SECRET-4242").unwrap();
+    let key_ref = a.set_secret(&ws.meta.id, "api key", "k-SECRET-4242").unwrap();
     let mut env_vars = vec![Variable::plain("base", &fx.url(""))];
     env_vars.push(Variable {
         name: "tok".into(),
@@ -87,8 +88,12 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
     let hdrs = fx.log.last_request_headers().unwrap();
     assert!(hdrs.iter().any(|(n, v)| n == "x-env-token" && v == "ENV-TOKEN-777"), "secret variable restored");
 
-    // Importing the same bundle again with Merge is idempotent.
-    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    // Importing the same bundle again with Merge writes into the stored
+    // workspace, so only once the user approves that; then it is idempotent.
+    let e = b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap_err();
+    assert!(e.to_string().contains("existing workspace 'Payments'"), "{e}");
+    let approval = ImportApproval { existing_workspaces: vec![ws_b.meta.id] };
+    b.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &approval).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
     // Duplicate creates a separate copy.
     b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate).unwrap();
@@ -102,7 +107,7 @@ async fn data_001_share_safely_import_reports_missing_secrets_and_fails_locally(
     let a_root = tempfile::tempdir().unwrap();
     let a = new_app(a_root.path(), "a");
     let ws = a.create_workspace("Shared").unwrap();
-    let key_ref = a.set_secret(Some(&ws.meta.id), "token", "tok-SHOULD-NOT-TRAVEL").unwrap();
+    let key_ref = a.set_secret(&ws.meta.id, "token", "tok-SHOULD-NOT-TRAVEL").unwrap();
     let mut spec = RequestSpec::http("GET", &fx.url("/echo"));
     spec.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: key_ref }, prefix: "Bearer".into() };
     a.create_request(&ws.meta.id, None, "Echo", spec).unwrap();
@@ -126,7 +131,7 @@ async fn data_015_locked_app_refuses_privileged_operations() {
     let ws = a.create_workspace("W").unwrap();
     a.lock();
     assert!(matches!(a.workspaces(), Err(AppError::Locked)));
-    assert!(matches!(a.set_secret(None, "x", "y"), Err(AppError::Locked)));
+    assert!(matches!(a.set_secret(&ws.meta.id, "x", "y"), Err(AppError::Locked)));
     assert!(matches!(
         a.send(
             None,

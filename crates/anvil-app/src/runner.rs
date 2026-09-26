@@ -127,9 +127,9 @@ impl App {
         }
         let requests = self.folder_run_requests(ws, folder)?;
         if requests.is_empty() {
-            return Err(AppError::Invalid(format!("folder '{}' contains no requests", self.folder_path(folder)?)));
+            return Err(AppError::Invalid(format!("folder '{}' contains no requests", self.folder_path(ws, folder)?)));
         }
-        let mut plan = RunPlan::folder(*ws, folder, &self.folder_path(folder)?, requests);
+        let mut plan = RunPlan::folder(*ws, folder, &self.folder_path(ws, folder)?, requests);
         plan.dataset = settings.dataset.clone();
         self.run_plan(plan, settings, cancel).await
     }
@@ -224,11 +224,11 @@ impl App {
     }
 
     /// `Orders/Refunds` style path of a folder (`/` for the workspace root).
-    pub fn folder_path(&self, folder: Option<Id>) -> Result<String> {
+    pub fn folder_path(&self, ws: &Id, folder: Option<Id>) -> Result<String> {
         if folder.is_none() {
             return Ok("/".into());
         }
-        Ok(self.folder_chain(folder)?.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("/"))
+        Ok(self.folder_chain(ws, folder)?.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("/"))
     }
 
     /// Resolve a folder by id or `Parent/Child` path (`/` or empty = root).

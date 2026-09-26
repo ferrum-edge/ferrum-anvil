@@ -135,9 +135,23 @@ against it).
   must stay within their workspace; object ids must be unique, and a Duplicate
   import gives every object, revision and secret a new id. A Replace import
   never overwrites or re-owns a secret that a workspace outside the bundle
-  owns; it is refused instead.
+  owns, nor overwrites an object stored in another workspace; it is refused
+  instead.
+- **Bundle writing into an existing workspace:** workspace ids are not
+  secret, so any bundle can claim a workspace already stored here. Merge and
+  Replace into a stored workspace assume the bundle is trusted: what they write
+  there can use that workspace's vault secrets. The preview lists each such
+  workspace as an error and the import is refused unless the user confirms each
+  one after the preview. Encryption proves nothing about who wrote a bundle; it
+  only shows the bundle was not altered after it was encrypted. Duplicate never
+  writes into a stored workspace and is the safe choice for untrusted bundles.
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
-  reference to any other stored secret fails before anything is sent.
+  reference to any other stored secret fails before anything is sent. A saved
+  request is prepared only in its own workspace and with folders of that
+  workspace, and a load plan runs only requests of its own workspace. This
+  scope is the workspace boundary: it does not separate items inside one
+  workspace, so anything imported into a workspace (see above) can use its
+  secrets.
 - **Lock bypass:** backend refuses privileged commands while locked; key dropped;
   sessions/executions/load runs stopped.
 - **Test backdoors shipped:** E2E WebDriver and env unlock only under the `e2e`
@@ -147,6 +161,12 @@ against it).
 
 ## Residual risks
 
+- A bundle the user confirms writing into an existing workspace is trusted
+  with that workspace's secrets (see "Bundle writing into an existing
+  workspace").
+- A secret's owning workspace is stored as plaintext metadata next to the
+  encrypted record and is not authenticated with it; changing it needs local
+  write access to the database.
 - Keychain-protected profiles are as strong as the OS session.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.

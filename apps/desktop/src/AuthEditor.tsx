@@ -417,7 +417,9 @@ function DpopFields({ c, onChange, workspaceId }: { c: DpopConfig; onChange: (c:
       <div className="row">
         <button
           className="btn small"
+          disabled={!workspaceId}
           onClick={async () => {
+            if (!workspaceId) return;
             const g = await api.generateDpopKey(workspaceId, "DPoP proof key");
             setJkt(g.jkt);
             onChange({ ...c, private_key_pem: { kind: "secret", secret: g.secret } });
