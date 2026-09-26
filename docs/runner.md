@@ -133,6 +133,37 @@ remaining steps of that iteration are `skipped` and the next iteration runs.
 An iteration is `passed`, `failed` (any failed/error step) or `incomplete`
 (the run was canceled or aborted during it).
 
+## XPath subset
+
+XPath assertions and extractions (in Send, collection runs and load) use a
+small, strictly parsed subset of XPath 1.0 over a DTD-free XML parse:
+
+| Syntax | Selects |
+|---|---|
+| `/a/b` | child elements named `b` of the `a` root element |
+| `//b` | elements named `b` anywhere below the context (descendant-or-self, then child) |
+| `*` | any element, e.g. `/a/*` |
+| `b[n]` | the n-th matching `b` child of each parent, counting from 1; a position past the last match selects nothing |
+| `.../@attr` | the attribute on the selected elements (`//@attr`: on any element below) |
+| `.../text()` | the text-node children of the selected elements (`//text()`: of any element below) |
+
+Names match **local names**: a namespace prefix in the path (`s:Body`,
+`@xml:lang`) is ignored rather than resolved, so `/Envelope/Body` and
+`/soap:Envelope/soap:Body` select the same elements whatever namespace the
+document uses. The value is that of the first selected node in document
+order: an element's full text content, an attribute value or one text node.
+An empty selection is "no value" (`exists` fails, `not_exists` passes, an
+extraction matches nothing).
+
+Anything else is an evaluation error, reported as "could not evaluate" (the
+assertion fails whatever its comparison) or as a failed extraction, never a
+step that silently selects other nodes: predicates other than a single
+positive position (`[@id='x']`, `[last()]`, `[1][2]`), `[0]`, unbalanced
+brackets, empty steps (`/a//`, `/a/`), axes (`child::`, `..`, `.`), node
+tests and functions (`node()`, `@*`), unions (`|`), a relative path, and a
+step after `@attr` or `text()`. The path is checked before the body is
+parsed.
+
 ## Cancellation, lock and abort
 
 The run's `CancellationToken` is passed to every engine execution and to the
