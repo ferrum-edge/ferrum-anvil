@@ -2953,8 +2953,9 @@ export interface OAuth2Config {
    */
   client_auth?: "basic_header" | "request_body";
   /**
-   * Where the acquired access token is cached (vault) — id of the token
-   * cache entry, managed by the engine.
+   * Token-cache identity: profiles with different ids never share a
+   * cached token. When unset, the app uses the id of the workspace,
+   * folder or request that defines the profile.
    */
   token_cache_id?: Id | null;
   /**

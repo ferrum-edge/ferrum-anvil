@@ -516,8 +516,8 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
 
     // OAuth: acquire/refresh through the same transport before sending.
     // Interactive grants without a usable token fail here, typed, before the
-    // API request exists on the wire. Canceling the execution abandons the
-    // token request.
+    // API request exists on the wire. Canceling the execution stops waiting
+    // for the token (see `oauth_http::acquire`).
     if let Some((key, cfg)) = &prep.oauth_key {
         match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, &cancel).await {
             Ok(t) => {

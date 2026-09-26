@@ -1,34 +1,58 @@
 //! Token-cache identity and generations: a cached token is only ever reused
-//! for the exact grant, audience, client, scope, issuer and token-cache
-//! identity it was issued for, and a clear (lock) or forget (sign-out) wins
-//! over every acquisition still in flight.
+//! for the exact grant, audience, client, scope, issuer, authorization URL
+//! and token-cache identity it was issued for; a clear (lock), a forget
+//! (sign-out) or a new sign-in wins over every acquisition still in flight;
+//! and a refresh finishes even when its caller stops waiting.
 
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, OAuthResolved, TokenCache, TokenHttp, TokenKey};
 use anvil_domain::Id;
 use anvil_domain::auth::OAuthGrant;
 use chrono::{Duration, Utc};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
 /// Scriptable issuer. With a gate, every token request reports that it
-/// arrived and then waits until the test releases it.
+/// arrived and then waits until the test releases it. A handle: token
+/// requests share its state and borrow nothing.
+#[derive(Clone, Default)]
+struct Issuer(Arc<IssuerState>);
+
 #[derive(Default)]
-struct Issuer {
+struct IssuerState {
     calls: AtomicU64,
     completed: AtomicU64,
     forms: Mutex<Vec<Vec<(String, String)>>>,
-    gated: bool,
+    gated: AtomicBool,
     received: Notify,
     release: Notify,
     down: AtomicBool,
+    /// Answer with a new refresh token (`rt-<n>`), as a rotating issuer does.
+    rotate: AtomicBool,
+}
+
+impl Deref for Issuer {
+    type Target = IssuerState;
+
+    fn deref(&self) -> &IssuerState {
+        &self.0
+    }
 }
 
 impl Issuer {
     fn gated() -> Self {
-        Issuer { gated: true, ..Issuer::default() }
+        let issuer = Issuer::default();
+        issuer.gated.store(true, Ordering::SeqCst);
+        issuer
+    }
+
+    fn down() -> Self {
+        let issuer = Issuer::default();
+        issuer.down.store(true, Ordering::SeqCst);
+        issuer
     }
 
     fn form_value(&self, request: usize, name: &str) -> Option<String> {
@@ -37,24 +61,26 @@ impl Issuer {
 }
 
 impl TokenHttp for Issuer {
-    fn post_form<'a>(
-        &'a self,
-        _url: &'a str,
+    fn post_form(
+        &self,
+        _url: &str,
         form: Vec<(String, String)>,
         _basic: Option<(String, String)>,
-    ) -> BoxFut<'a, Result<(u16, Vec<u8>), String>> {
+    ) -> BoxFut<'static, Result<(u16, Vec<u8>), String>> {
+        let state = self.0.clone();
         Box::pin(async move {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            self.forms.lock().unwrap().push(form);
-            if self.gated {
-                self.received.notify_one();
-                self.release.notified().await;
+            let n = state.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            state.forms.lock().unwrap().push(form);
+            if state.gated.load(Ordering::SeqCst) {
+                state.received.notify_one();
+                state.release.notified().await;
             }
-            self.completed.fetch_add(1, Ordering::SeqCst);
-            if self.down.load(Ordering::SeqCst) {
+            state.completed.fetch_add(1, Ordering::SeqCst);
+            if state.down.load(Ordering::SeqCst) {
                 return Err("connect refused".into());
             }
-            Ok((200, format!(r#"{{"access_token":"t{n}","token_type":"Bearer","expires_in":3600}}"#).into_bytes()))
+            let refresh = if state.rotate.load(Ordering::SeqCst) { format!(r#","refresh_token":"rt-{n}""#) } else { String::new() };
+            Ok((200, format!(r#"{{"access_token":"t{n}","token_type":"Bearer","expires_in":3600{refresh}}}"#).into_bytes()))
         })
     }
 }
@@ -63,6 +89,7 @@ fn client_credentials(audience: &str) -> OAuthResolved {
     OAuthResolved {
         grant: OAuthGrant::ClientCredentials,
         token_url: "http://issuer.test/token".into(),
+        authorization_url: "http://issuer.test/authorize".into(),
         client_id: "client".into(),
         client_secret: Zeroizing::new("secret".into()),
         scope: "api.read".into(),
@@ -91,6 +118,12 @@ fn signed_in(access: &str, refresh: &str, expired: bool) -> CachedToken {
     }
 }
 
+/// Store a completed sign-in, as the authorization-code redemption does.
+fn sign_in(cache: &TokenCache, cfg: &OAuthResolved, t: CachedToken) {
+    let k = key(cfg);
+    assert!(cache.store_sign_in(&k, cache.generation(&k), t), "nothing superseded this sign-in");
+}
+
 async fn acquire(cache: &TokenCache, cfg: &OAuthResolved, issuer: &Issuer) -> Result<String, AuthError> {
     cache.get_or_acquire(&key(cfg), cfg, issuer, Utc::now()).await.map(|t| t.access_token.to_string())
 }
@@ -116,6 +149,7 @@ fn key_changes_with_every_input_that_decides_the_token() {
         ("client id", OAuthResolved { client_id: "other".into(), ..base.clone() }),
         ("client auth", OAuthResolved { basic_client_auth: false, ..base.clone() }),
         ("token cache id", OAuthResolved { token_cache_id: Some(Id::new()), ..base.clone() }),
+        ("authorization URL", OAuthResolved { authorization_url: "http://issuer.test/authorize?org=b".into(), ..base.clone() }),
     ];
     for (what, v) in &variants {
         assert_ne!(key(&base), key(v), "a different {what} must not share the cached token");
@@ -123,6 +157,24 @@ fn key_changes_with_every_input_that_decides_the_token() {
     assert_ne!(TokenKey::new("workspace-a", &base), TokenKey::new("workspace-b", &base), "partitions are separate");
     // Refresh timing does not change what the token authorizes.
     assert_eq!(key(&base), key(&OAuthResolved { refresh_skew_secs: 120, ..base.clone() }));
+    // Client credentials never visit the authorization endpoint.
+    let cc = client_credentials("api-a");
+    assert_eq!(key(&cc), key(&OAuthResolved { authorization_url: "http://elsewhere.test/authorize".into(), ..cc.clone() }));
+}
+
+#[tokio::test]
+async fn profiles_that_differ_only_in_authorization_url_do_not_share_a_sign_in() {
+    let issuer = Issuer::default();
+    let cache = TokenCache::new();
+    // Same issuer, client, scope and audience; the authorization URL picks
+    // the organization (Auth0 `organization`, Keycloak `kc_idp_hint`, …).
+    let org_a = OAuthResolved { authorization_url: "http://issuer.test/authorize?organization=org-a".into(), ..pkce("api-a") };
+    let org_b = OAuthResolved { authorization_url: "http://issuer.test/authorize?organization=org-b".into(), ..pkce("api-a") };
+    sign_in(&cache, &org_a, signed_in("org-a-token", "org-a-rt", false));
+    assert_eq!(acquire(&cache, &org_a, &issuer).await.unwrap(), "org-a-token");
+    let e = acquire(&cache, &org_b, &issuer).await.expect_err("nobody signed in through org-b");
+    assert!(matches!(e, AuthError::InteractionRequired(_)), "{e:?}");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -158,7 +210,7 @@ async fn profiles_with_different_token_cache_ids_do_not_share_a_sign_in() {
     let cache = TokenCache::new();
     let alice = OAuthResolved { token_cache_id: Some(Id::new()), ..pkce("api-a") };
     let bob = OAuthResolved { token_cache_id: Some(Id::new()), ..pkce("api-a") };
-    cache.insert(&key(&alice), signed_in("alice-token", "alice-rt", false));
+    sign_in(&cache, &alice, signed_in("alice-token", "alice-rt", false));
     assert_eq!(acquire(&cache, &alice, &issuer).await.unwrap(), "alice-token");
     let e = acquire(&cache, &bob, &issuer).await.expect_err("bob has not signed in");
     assert!(matches!(e, AuthError::InteractionRequired(_)), "{e:?}");
@@ -185,7 +237,7 @@ async fn clear_during_acquisition_discards_the_late_token() {
     assert!(cache.get(&key(&cfg)).is_none(), "the late token did not repopulate the cleared cache");
 
     // With the issuer gone, nothing cached can be sent.
-    let down = Issuer { down: AtomicBool::new(true), ..Issuer::default() };
+    let down = Issuer::down();
     let e = acquire(&cache, &cfg, &down).await.expect_err("no cached token after the clear");
     assert!(matches!(e, AuthError::Acquisition(_)), "{e:?}");
 }
@@ -195,7 +247,7 @@ async fn sign_out_during_refresh_discards_the_late_token() {
     let issuer = Arc::new(Issuer::gated());
     let cache = Arc::new(TokenCache::new());
     let cfg = pkce("api-a");
-    cache.insert(&key(&cfg), signed_in("old", "rt-1", true));
+    sign_in(&cache, &cfg, signed_in("old", "rt-1", true));
     let task = {
         let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
         tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
@@ -241,7 +293,7 @@ async fn sign_out_of_one_profile_leaves_other_acquisitions_alone() {
     let cache = Arc::new(TokenCache::new());
     let cfg = client_credentials("api-a");
     let other = pkce("api-b");
-    cache.insert(&key(&other), signed_in("other", "rt", false));
+    sign_in(&cache, &other, signed_in("other", "rt", false));
     let task = {
         let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
         tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
@@ -291,4 +343,107 @@ fn insert_if_current_refuses_results_from_an_older_generation() {
     cache.remove(&b);
     assert!(cache.insert_if_current(&a, g, signed_in("fresh", "rt", false)), "another profile's sign-out is unrelated");
     assert_eq!(cache.get(&a).unwrap().access_token.as_str(), "fresh");
+}
+
+// ---------------------------------------------------------------- sign-ins ---
+
+#[test]
+fn a_sign_in_that_straddles_a_lock_or_sign_out_is_discarded() {
+    let cache = TokenCache::new();
+    let k = key(&pkce("api-a"));
+
+    let g = cache.generation(&k);
+    cache.clear();
+    assert!(!cache.store_sign_in(&k, g, signed_in("late", "rt", false)), "a lock during the sign-in wins");
+    assert!(cache.get(&k).is_none());
+
+    let g = cache.generation(&k);
+    cache.remove(&k);
+    assert!(!cache.store_sign_in(&k, g, signed_in("late", "rt", false)), "a sign-out during the sign-in wins");
+    assert!(cache.get(&k).is_none());
+
+    let g = cache.generation(&k);
+    assert!(cache.store_sign_in(&k, g, signed_in("fresh", "rt", false)));
+    assert_eq!(cache.get(&k).unwrap().access_token.as_str(), "fresh");
+    assert_ne!(cache.generation(&k), g, "storing a sign-in starts a new generation");
+    assert!(!cache.insert_if_current(&k, g, signed_in("older", "rt", false)), "work from before the sign-in cannot overwrite it");
+    assert_eq!(cache.get(&k).unwrap().access_token.as_str(), "fresh");
+}
+
+#[tokio::test]
+async fn an_older_refresh_never_overwrites_a_newer_sign_in() {
+    let issuer = Arc::new(Issuer::gated());
+    issuer.rotate.store(true, Ordering::SeqCst);
+    let cache = Arc::new(TokenCache::new());
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("old", "rt-0", true));
+    let task = {
+        let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
+        tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
+    };
+    issuer.received.notified().await;
+    // The user signs in again while the refresh is in flight.
+    sign_in(&cache, &cfg, signed_in("new-sign-in", "rt-new", false));
+    issuer.release.notify_one();
+    let e = task.await.unwrap().expect_err("a refresh older than the sign-in must not succeed");
+    assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
+    assert_eq!(issuer.completed.load(Ordering::SeqCst), 1, "the issuer did answer");
+    let stored = cache.get(&key(&cfg)).unwrap();
+    assert_eq!(stored.access_token.as_str(), "new-sign-in", "the late refresh did not overwrite the sign-in");
+    assert_eq!(stored.refresh_token.as_ref().map(|rt| rt.as_str()), Some("rt-new"));
+    assert_eq!(acquire(&cache, &cfg, &issuer).await.unwrap(), "new-sign-in");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
+}
+
+// ------------------------------------------------------ abandoned refresh ---
+
+#[tokio::test]
+async fn a_refresh_whose_caller_stops_waiting_still_stores_the_rotated_token() {
+    let issuer = Arc::new(Issuer::gated());
+    issuer.rotate.store(true, Ordering::SeqCst);
+    let cache = Arc::new(TokenCache::new());
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("old", "rt-0", true));
+    tokio::select! {
+        r = acquire(&cache, &cfg, &issuer) => panic!("the gated issuer never answered: {r:?}"),
+        _ = issuer.received.notified() => {} // the caller stops waiting once the refresh is out
+    }
+    assert_eq!(issuer.form_value(0, "refresh_token").as_deref(), Some("rt-0"));
+
+    // A send that arrives meanwhile waits for that refresh instead of
+    // presenting the refresh token the issuer is rotating a second time.
+    let waiter = {
+        let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
+        tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
+    };
+    settle().await;
+    issuer.release.notify_one();
+    assert_eq!(waiter.await.unwrap().unwrap(), "t1");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 1, "rt-0 was presented once");
+    let stored = cache.get(&key(&cfg)).expect("the abandoned refresh stored its token");
+    assert_eq!(stored.access_token.as_str(), "t1");
+    assert_eq!(stored.refresh_token.as_ref().map(|rt| rt.as_str()), Some("rt-1"), "the rotated refresh token was kept");
+}
+
+#[tokio::test]
+async fn a_refresh_whose_caller_stopped_waiting_loses_to_a_lock() {
+    let issuer = Arc::new(Issuer::gated());
+    issuer.rotate.store(true, Ordering::SeqCst);
+    let cache = Arc::new(TokenCache::new());
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("old", "rt-0", true));
+    tokio::select! {
+        r = acquire(&cache, &cfg, &issuer) => panic!("the gated issuer never answered: {r:?}"),
+        _ = issuer.received.notified() => {}
+    }
+    cache.clear(); // lock
+    issuer.release.notify_one();
+    while issuer.completed.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    settle().await;
+    assert!(cache.get(&key(&cfg)).is_none(), "the late refresh did not repopulate the cleared cache");
+    let e = acquire(&cache, &cfg, &issuer).await.expect_err("locked: a new sign-in is needed");
+    assert!(matches!(e, AuthError::InteractionRequired(_)), "{e:?}");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
 }

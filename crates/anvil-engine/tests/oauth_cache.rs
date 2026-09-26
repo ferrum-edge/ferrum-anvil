@@ -1,16 +1,19 @@
 //! OAuth token cache through `Engine::execute`, over real loopback sockets:
-//! a changed profile never reuses a token issued for another grant or
-//! audience, and a cancel or lock while a token request is in flight wins
-//! over the late issuer answer.
+//! a changed profile never reuses a token issued for another grant, audience
+//! or authorization URL; a cancel or lock while a token request is in flight
+//! wins over the late issuer answer; and a send canceled during a refresh
+//! does not lose the refresh token the issuer rotated.
 //!
 //! The fixture is one HTTP/1.1 listener serving `/token` (a scriptable
 //! issuer that can hold its answer) and `/api` (records the Authorization
 //! header it receives). Its counters only check that conditions were reached.
 
+use anvil_auth::oauth::CachedToken;
 use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::execution::{DispatchState, FailureKind};
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SensitiveValue;
+use anvil_engine::oauth_http::interactive_oauth;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_transport::recorder::EventCtx;
 use std::net::SocketAddr;
@@ -21,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 #[derive(Default)]
 struct Fixture {
@@ -33,6 +37,9 @@ struct Fixture {
     release: Notify,
     /// Answer token requests with 503.
     issuer_down: AtomicBool,
+    /// Issue a new refresh token (`rt-<n>`) with every token, as a rotating
+    /// issuer does.
+    rotate: AtomicBool,
 }
 
 impl Fixture {
@@ -92,7 +99,8 @@ async fn serve(mut sock: TcpStream, fx: Arc<Fixture>) {
         if fx.issuer_down.load(Ordering::SeqCst) {
             ("503 Service Unavailable", r#"{"error":"temporarily_unavailable"}"#.to_string())
         } else {
-            ("200 OK", format!(r#"{{"access_token":"late-or-live-{n}","token_type":"Bearer","expires_in":3600}}"#))
+            let refresh = if fx.rotate.load(Ordering::SeqCst) { format!(r#","refresh_token":"rt-{n}""#) } else { String::new() };
+            ("200 OK", format!(r#"{{"access_token":"late-or-live-{n}","token_type":"Bearer","expires_in":3600{refresh}}}"#))
         }
     } else {
         fx.api_authorization.lock().unwrap().push(header(&head, "authorization").unwrap_or_default());
@@ -128,6 +136,22 @@ fn ctx(addr: SocketAddr, config: OAuth2Config) -> ExecutionContext {
 
 async fn send(engine: &Engine, ctx: &ExecutionContext) -> ExecutionOutput {
     engine.execute(ctx, EventCtx::none(), CancellationToken::new()).await
+}
+
+fn token(access: &str, refresh: &str, expires_in_secs: i64) -> CachedToken {
+    CachedToken {
+        access_token: Zeroizing::new(access.into()),
+        token_type: "Bearer".into(),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(expires_in_secs)),
+        refresh_token: Some(Zeroizing::new(refresh.into())),
+    }
+}
+
+/// Cache `t` for the profile of `ctx`, as a completed browser sign-in does.
+fn sign_in(engine: &Engine, ctx: &ExecutionContext, t: CachedToken) {
+    let target = interactive_oauth(ctx).unwrap();
+    let key = target.cache_key();
+    assert!(engine.tokens.store_sign_in(key, engine.tokens.generation(key), t));
 }
 
 fn failure_kind(o: &ExecutionOutput) -> Option<FailureKind> {
@@ -238,4 +262,75 @@ async fn lock_during_token_request_discards_the_late_token() {
     let o = send(&engine, &c).await;
     assert_eq!(failure_kind(&o), Some(FailureKind::AuthPreparationFailed), "the late token did not repopulate the cache");
     assert!(fx.api_hits().is_empty());
+}
+
+#[tokio::test]
+async fn a_sign_in_through_one_authorization_url_is_never_sent_for_another() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let engine = Engine::new();
+    // Identical profiles except for the organization the sign-in selects.
+    let with_org = |org: &str| {
+        let mut config = oauth(addr, OAuthGrant::AuthorizationCodePkce, "api-a");
+        config.authorization_url = format!("http://{addr}/authorize?organization={org}");
+        ctx(addr, config)
+    };
+    let (org_a, org_b) = (with_org("org-a"), with_org("org-b"));
+    sign_in(&engine, &org_a, token("org-a-token", "org-a-rt", 3600));
+
+    assert_eq!(status(&send(&engine, &org_a).await), Some(200));
+    let o = send(&engine, &org_b).await;
+    assert_eq!(failure_kind(&o), Some(FailureKind::OAuthInteractionRequired));
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+    assert_eq!(fx.api_hits(), ["Bearer org-a-token"], "org-b never received org-a's token");
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn canceling_a_send_during_a_refresh_keeps_the_rotated_refresh_token() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let engine = Arc::new(Engine::new());
+    let c = ctx(addr, oauth(addr, OAuthGrant::AuthorizationCodePkce, "api-a"));
+    sign_in(&engine, &c, token("expired", "rt-0", -10));
+    fx.rotate.store(true, Ordering::SeqCst);
+    fx.hold.store(true, Ordering::SeqCst);
+
+    let cancel = CancellationToken::new();
+    let run = {
+        let (engine, c, cancel) = (engine.clone(), c.clone(), cancel.clone());
+        tokio::spawn(async move { engine.execute(&c, EventCtx::none(), cancel).await })
+    };
+    fx.received.notified().await;
+    assert!(fx.token_forms.lock().unwrap()[0].contains("refresh_token=rt-0"));
+    cancel.cancel();
+    let o = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the canceled send ended while the issuer was still holding its answer")
+        .unwrap();
+    assert_eq!(failure_kind(&o), Some(FailureKind::Canceled));
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+
+    // The issuer rotates the refresh token after the send gave up; the
+    // refresh still lands in the cache.
+    fx.hold.store(false, Ordering::SeqCst);
+    fx.release.notify_one();
+    let key = interactive_oauth(&c).unwrap().cache_key().clone();
+    let stored = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(t) = engine.tokens.get(&key).filter(|t| t.access_token.as_str() == "late-or-live-1") {
+                break t;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the refresh finished after its caller stopped waiting");
+    assert_eq!(stored.refresh_token.as_ref().map(|rt| rt.as_str()), Some("rt-1"), "the rotated refresh token was kept");
+
+    // The next send uses it without presenting rt-0 again.
+    let o = send(&engine, &c).await;
+    assert_eq!(status(&o), Some(200), "{:?}", o.record.attempts);
+    assert_eq!(fx.api_hits(), ["Bearer late-or-live-1"]);
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 1);
 }

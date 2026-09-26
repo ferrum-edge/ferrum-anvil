@@ -57,7 +57,9 @@ pub async fn authorize_api(
     let grant = authorize_in_browser(&request, opener, observer, opts, cancel).await?;
     observer.event(FlowEvent::ExchangingCode);
     let redeemed = tokio::select! {
-        r = oauth_http::redeem_authorization_code(engine, ctx, &t, generation, &grant.code, &grant.verifier, &grant.redirect_uri, cancel) => r,
+        r = oauth_http::redeem_authorization_code(
+            engine, ctx, &t, generation, &grant.code, &grant.verifier, &grant.redirect_uri, cancel,
+        ) => r,
         _ = cancel.cancelled() => return Err(failed(observer, FlowError::Canceled)),
     };
     drop(grant);

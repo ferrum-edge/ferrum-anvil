@@ -33,8 +33,8 @@ pub enum AuthError {
     /// silently switching to another grant.
     #[error("{0}")]
     InteractionRequired(String),
-    /// The acquisition was abandoned: its execution was canceled, or the
-    /// credential cache was cleared (lock, sign-out) while it was in flight.
+    /// The acquisition was abandoned: its execution was canceled, or a lock,
+    /// a sign-out or a new sign-in superseded it while it was in flight.
     /// Nothing it obtained was cached or used.
     #[error("{0}")]
     Canceled(String),

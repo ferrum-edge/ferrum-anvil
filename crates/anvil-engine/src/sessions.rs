@@ -129,11 +129,10 @@ async fn apply_auth(
     target: &Target,
     headers: Vec<(String, String)>,
     body: &[u8],
+    cancel: &CancellationToken,
 ) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
-        // Canceling the execution drops the whole preparation (see
-        // `execute`), and the token request with it.
-        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, &CancellationToken::new()).await {
+        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, cancel).await {
             Ok(t) => replace_oauth(&mut prep.auth, &t),
             Err(e) => return Err(crate::oauth_http::acquisition_failure(cfg, e, "Nothing was sent.")),
         }
@@ -282,18 +281,20 @@ fn redact_fn(r: &Redactor) -> RedactFn {
     Arc::new(move |s: &str| r.text(s))
 }
 
+/// `cancel` ends a wait for an OAuth token (nothing is sent).
 async fn prepare_session(
     engine: &Engine,
     ctx: &ExecutionContext,
     r: &Resolver,
     interactive: bool,
+    cancel: &CancellationToken,
 ) -> Result<SessionPrep, TransportFailure> {
     match ctx.spec.protocol {
-        Protocol::WebSocket => prepare_ws(engine, ctx, r).await,
-        Protocol::Grpc => prepare_grpc(engine, ctx, r, interactive).await,
-        Protocol::Sse => prepare_sse(engine, ctx, r).await,
+        Protocol::WebSocket => prepare_ws(engine, ctx, r, cancel).await,
+        Protocol::Grpc => prepare_grpc(engine, ctx, r, interactive, cancel).await,
+        Protocol::Sse => prepare_sse(engine, ctx, r, cancel).await,
         Protocol::Tcp => prepare_tcp(engine, ctx, r),
-        Protocol::Udp => prepare_udp(engine, ctx, r).await,
+        Protocol::Udp => prepare_udp(engine, ctx, r, cancel).await,
         Protocol::Http => Err(unsupported("HTTP is request/response; use execute() rather than a session", "protocol")),
     }
 }
@@ -328,7 +329,12 @@ fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_
     }))
 }
 
-async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
+async fn prepare_ws(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.websocket.clone().unwrap_or(WsSpec {
         bootstrap: WsBootstrap::Http1Upgrade,
         subprotocols: vec![],
@@ -371,7 +377,7 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
         .map(|(i, s)| r.resolve(s, &format!("websocket.subprotocols[{i}]")))
         .collect::<Result<Vec<_>, _>>()?;
     let method = if spec.bootstrap == WsBootstrap::Http2ExtendedConnect { "CONNECT" } else { "GET" };
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "GET", &target, headers, &[]).await?;
+    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "GET", &target, headers, &[], cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
@@ -411,7 +417,12 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
     Ok(finish_prep(b, Plan::Ws(plan), method.into(), url, headers, Bytes::new(), vec![]))
 }
 
-async fn prepare_sse(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
+async fn prepare_sse(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.sse.clone().unwrap_or(SseSpec { max_events: 0, idle_timeout_ms: 30_000, last_event_id: None, reconnect: false });
     let mut b = base(engine, ctx, r, &["https", "http"])?;
     if let Some(f) = sse::version_unsupported(b.prep.settings.http_version, b.prep.http.target.scheme == "https", b.prep.proxy.is_some()) {
@@ -432,7 +443,7 @@ async fn prepare_sse(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     let last_event_id = spec.last_event_id.as_ref().map(|v| r.resolve(v, "sse.last_event_id")).transpose()?;
     let body = b.prep.http.body.clone();
     let method = b.prep.http.method.clone();
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &method, &target, headers, &body).await?;
+    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &method, &target, headers, &body, cancel).await?;
     let t = Target { query, ..target.clone() };
     let plan = sse::SsePlan {
         method: http::Method::from_bytes(method.as_bytes()).unwrap_or(http::Method::GET),
@@ -498,7 +509,13 @@ async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Sc
     }
 }
 
-async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, interactive: bool) -> Result<SessionPrep, TransportFailure> {
+async fn prepare_grpc(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    interactive: bool,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
     let Some(spec) = ctx.spec.grpc.clone() else {
         return Err(local(FailureKind::BodySerialization, "a gRPC request needs a service, method and schema", "grpc"));
     };
@@ -610,7 +627,8 @@ async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, int
     let prefix = target.path.trim_end_matches('/').to_string();
     let path = format!("{prefix}/{service}/{method_name}");
     let call_target = Target { path: path.clone(), ..target.clone() };
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "POST", &call_target, headers, &unary_body).await?;
+    let (headers, query, facts) =
+        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "POST", &call_target, headers, &unary_body, cancel).await?;
     if !query.is_empty() && query != target.query {
         return Err(unsupported("an auth profile that adds query parameters cannot be used with gRPC (the path is fixed)", "auth"));
     }
@@ -735,7 +753,12 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     Ok(p)
 }
 
-async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
+async fn prepare_udp(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.udp.clone().unwrap_or(UdpSpec {
         dtls: false,
         datagrams: vec![],
@@ -773,7 +796,7 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
                 "udp.proxy_protocol",
             ));
         }
-        return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams, use_dtls).await;
+        return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams, use_dtls, cancel).await;
     }
     if let Some(p) = hbone {
         if envelope.is_some() {
@@ -1016,6 +1039,7 @@ async fn prepare_masque(
     target: &Target,
     datagrams: Vec<Bytes>,
     use_dtls: bool,
+    cancel: &CancellationToken,
 ) -> Result<SessionPrep, TransportFailure> {
     for (i, d) in datagrams.iter().enumerate() {
         if d.len() > masque::MAX_UDP_PAYLOAD {
@@ -1075,7 +1099,8 @@ async fn prepare_masque(
         .filter(|(n, _)| has_explicit_header(&ctx.spec, n) || n.eq_ignore_ascii_case("user-agent"))
         .cloned()
         .collect();
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "CONNECT", &proxy_target, headers, &[]).await?;
+    let (headers, query, facts) =
+        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "CONNECT", &proxy_target, headers, &[], cancel).await?;
     let t = Target { query, ..proxy_target };
     let connect_url = t.url();
     let display_url = b.redactor.url(&connect_url);
@@ -1377,7 +1402,7 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     // cancellation abandons it and nothing is sent.
     let prepared = tokio::select! {
         biased;
-        p = prepare_session(engine, ctx, &resolver, false) => p,
+        p = prepare_session(engine, ctx, &resolver, false, &cancel) => p,
         _ = cancel.cancelled() => {
             Err(TransportFailure::new(Phase::Prepare, FailureKind::Canceled, "the execution was canceled before anything was sent"))
         }
@@ -1487,7 +1512,7 @@ impl Engine {
             Ok(m) => {
                 let ctx = m.unwrap_or(ctx);
                 let workload = (!workload.is_empty()).then_some(workload);
-                let prepared = prepare_session(self, &ctx, &resolver, true).await;
+                let prepared = prepare_session(self, &ctx, &resolver, true, &cancel).await;
                 (ctx, prepared, workload)
             }
             Err(f) => (ctx, Err(f), Some(workload)),

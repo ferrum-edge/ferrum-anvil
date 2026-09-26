@@ -95,10 +95,11 @@ impl MockProvider {
         observer.event(FlowEvent::ExchangingCode);
         let ctx = ExecutionContext::standalone(RequestSpec::http("POST", &self.cfg.token_endpoint));
         let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
-        let http = EngineTokenHttp { engine: &self.engine, ctx: &ctx, settings: &settings, cancel };
+        let http = EngineTokenHttp { engine: &self.engine, ctx: &ctx, settings: &settings };
         let resolved = OAuthResolved {
             grant: OAuthGrant::AuthorizationCodePkce,
             token_url: self.cfg.token_endpoint.clone(),
+            authorization_url: self.cfg.authorization_endpoint.clone(),
             client_id: self.cfg.client_id.clone(),
             client_secret: Zeroizing::new(String::new()),
             scope: self.cfg.scope.clone(),
