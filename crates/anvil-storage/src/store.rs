@@ -112,6 +112,11 @@ pub mod kind {
     /// (`anvil_app::linked_files`). Device-specific: not in [`ALL`], never
     /// exported or imported.
     pub const LINKED_FILE: &str = "linked_file";
+    /// Workspaces sealed from this device's workload identity, stored under
+    /// the id of the workspace each seals (`anvil_app::device_identity`).
+    /// Device-specific: not in [`ALL`], never exported, backed up or
+    /// imported.
+    pub const DEVICE_IDENTITY_SEAL: &str = "device_identity_seal";
     pub const ALL: &[&str] = &[
         WORKSPACE,
         FOLDER,

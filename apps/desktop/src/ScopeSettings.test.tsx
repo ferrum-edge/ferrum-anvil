@@ -1,7 +1,8 @@
 // Renderer tests for the workspace settings' device-identity seal (jsdom; IPC
-// mocked). A bundle import seals a workspace from this device's workload
-// identity; the dialog says so and lifts the seal only after the user
-// confirms. The seal itself is enforced by the backend (anvil-app tests).
+// mocked). A bundle import or backup restore seals a workspace from this
+// device's workload identity; the dialog says so and lifts the seal only
+// after the user confirms. The seal itself is enforced by the backend
+// (anvil-app tests).
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Workspace } from "./generated/contracts";
 
@@ -15,7 +16,7 @@ import { ScopeSettingsDialog } from "./ScopeSettings";
 
 const now = "2026-01-01T00:00:00Z";
 const ws = { id: "ws-1", name: "Imported", schema_version: 1, created_at: now, updated_at: now } as Workspace;
-const BANNER = /A bundle import wrote into this workspace/;
+const BANNER = /A bundle import or backup restore wrote into this workspace/;
 
 afterEach(() => {
   cleanup();

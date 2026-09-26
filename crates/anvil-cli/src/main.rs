@@ -28,6 +28,7 @@ use anvil_domain::outcome::{
 };
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::tls::HostBinding;
+use anvil_domain::workspace::Workspace;
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
@@ -169,12 +170,19 @@ enum WorkloadCmd {
 #[derive(Subcommand)]
 enum WorkspaceCmd {
     List,
-    Create { name: String },
-    Tree { workspace: String },
-    /// Let requests in a workspace that a bundle import wrote into use this
-    /// device's workload identity again (a JWT-SVID from the Workload API or
-    /// a token file). Only for workspaces you trust.
-    AllowDeviceIdentity { workspace: String },
+    Create {
+        name: String,
+    },
+    Tree {
+        workspace: String,
+    },
+    /// Let requests in a workspace that a bundle import or backup restore
+    /// wrote into use this device's workload identity (JWT-SVID or
+    /// X.509-SVID) again. Name the workspace by its id or its exact,
+    /// unshared name. Only for workspaces you trust.
+    AllowDeviceIdentity {
+        workspace: String,
+    },
 }
 
 #[derive(clap::Args)]
@@ -429,6 +437,21 @@ fn open_app(cli: &Cli) -> Result<App> {
 fn kv(h: &str) -> Result<KeyValue> {
     let (n, v) = h.split_once(':').ok_or_else(|| anyhow!("header '{h}' must be 'Name: value'"))?;
     Ok(KeyValue::new(n.trim(), v.trim_start()))
+}
+
+/// The workspace `id_or_name` names exactly: its id, or a name (case
+/// included) that no other workspace has. A seal is never lifted on a guess.
+fn exact_workspace(app: &App, id_or_name: &str) -> Result<Workspace> {
+    let all = app.workspaces()?;
+    if let Some(w) = all.iter().find(|w| w.meta.id.to_string() == id_or_name) {
+        return Ok(w.clone());
+    }
+    let mut named: Vec<Workspace> = all.into_iter().filter(|w| w.name == id_or_name).collect();
+    match named.len() {
+        1 => Ok(named.remove(0)),
+        0 => bail!("no workspace has the id or the exact name '{id_or_name}' (`anvil workspace list` shows them)"),
+        n => bail!("{n} workspaces are named '{id_or_name}'; name the one you mean by its id (`anvil workspace list`)"),
+    }
 }
 
 /// WebSocket extension negotiation and compression evidence, one fact per line.
@@ -773,7 +796,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 Ok(0)
             }
             WorkspaceCmd::AllowDeviceIdentity { workspace } => {
-                let w = app.find_workspace(workspace)?;
+                let w = exact_workspace(&app, workspace)?;
                 if app.allow_device_identity(&w.meta.id)? {
                     println!("requests in '{}' may now use this device's workload identity", w.name);
                 } else {

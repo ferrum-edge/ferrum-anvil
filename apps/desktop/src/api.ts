@@ -480,7 +480,7 @@ export const api = {
   createWorkspace: (name: string) => call<Workspace>("workspace_create", { name }),
   saveWorkspace: (workspace: Workspace) => call<Workspace>("workspace_save", { workspace }),
   deleteWorkspace: (workspaceId: string) => call<void>("workspace_delete", { workspaceId }),
-  /** Whether a bundle import sealed the workspace from this device's workload identity (JWT-SVID). */
+  /** Whether a bundle import or backup restore sealed the workspace from this device's workload identity (JWT-SVID or X.509-SVID). */
   deviceIdentitySealed: (workspaceId: string) => call<boolean>("workspace_device_identity_sealed", { workspaceId }),
   /** Let the workspace's requests use this device's workload identity again (an explicit user choice). */
   allowDeviceIdentity: (workspaceId: string) => call<boolean>("workspace_allow_device_identity", { workspaceId }),

@@ -98,9 +98,11 @@ impl App {
     /// local file, a saved request only ones chosen for it in the native
     /// dialog on this device, and (when confined) a JWT-SVID token file is
     /// read only if it was bound in the native dialog. In a workspace a
-    /// bundle import wrote into, a JWT-SVID from this device's Workload API
-    /// or a token file is refused until the user allows it on this device
-    /// (`crate::device_identity`).
+    /// bundle import or backup restore wrote into, this device's workload
+    /// identity is refused until the user allows it on this device
+    /// (`crate::device_identity`): a JWT-SVID from its Workload API or a
+    /// token file, and a TLS profile, the request's own or its proxy's, that
+    /// presents its X.509-SVID.
     ///
     /// Under an import root (`Folder::import_root`) only the imported
     /// collection's own scope resolves: the root and the folders under it,
@@ -231,7 +233,7 @@ impl App {
             refuse_device_identity(&ctx.effective_auth().1)?;
             refuse_unbound_client_identity(&ctx)?;
         }
-        self.check_device_identity(&ws, &ctx.effective_auth().1)?;
+        self.check_device_identity(&ws, &ctx)?;
         self.check_token_files(&ctx.effective_auth().1)?;
         Ok(ctx)
     }

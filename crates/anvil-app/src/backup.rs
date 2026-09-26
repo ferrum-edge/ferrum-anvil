@@ -29,7 +29,10 @@
 //! import, it writes into a workspace stored here only once the user approves
 //! it: a backup's passphrase says nothing about who made it. App settings
 //! apply to every workspace's requests, so Replace also keeps this profile's
-//! app settings while it holds a workspace the backup does not claim.
+//! app settings while it holds a workspace the backup does not claim. Like a
+//! bundle import, a restore seals every workspace it writes from this
+//! device's workload identity until the user allows it on this device
+//! (`crate::device_identity`).
 
 use crate::linked_files::LinkedFileBinding;
 use crate::port::{self, ImportApproval, ImportReport};
@@ -107,6 +110,7 @@ pub const NOT_CARRIED_KINDS: &[(&str, &str)] = &[
     (kind::IMPORT_SOURCE, "attachment index entries name blobs by a key of this profile; restore rebuilds them from the attachments"),
     (kind::TOKEN_FILE, "token-file bindings name files on this device; they are bound again on the target machine"),
     (kind::LINKED_FILE, "linked-file bindings name files on this device; they are chosen again on the target machine"),
+    (kind::DEVICE_IDENTITY_SEAL, "seals are this device's choice; a restore seals every workspace it writes on the target machine"),
 ];
 
 /// Every store table and how a full backup covers it.
@@ -516,6 +520,11 @@ impl App {
     ///   kind and id are stored here in another workspace, or a backup
     ///   secret's id is stored here under another owner: nothing is ever
     ///   overwritten or moved out of its workspace.
+    ///
+    /// Every workspace in the backup is sealed from this device's workload
+    /// identity in the same transaction (`crate::device_identity`), so
+    /// restoring your own backup on a new device means allowing it again for
+    /// the workspaces you trust.
     pub fn restore_approved(
         &self,
         bytes: &[u8],
@@ -537,6 +546,9 @@ impl App {
             };
             let keep_settings = keeps_local_settings(&d, &local, policy);
             write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
+            // This device's workload identity stays out of every workspace
+            // written here until the user allows it on this device.
+            crate::device_identity::seal_in(s, d.graph.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes)))
         })??;
         Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string())))
@@ -1034,6 +1046,7 @@ fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, notes: Vec<S
     }
     warnings.extend(manifest.excluded.iter().map(|e| format!("Not in the backup: {e}")));
     warnings.extend(manifest.device_bindings.iter().cloned());
+    warnings.extend(crate::device_identity::sealed_note(&d.graph.workspaces));
     ImportReport {
         plan,
         warnings,

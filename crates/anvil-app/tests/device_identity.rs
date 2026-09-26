@@ -1,11 +1,11 @@
-//! A bundle import seals, on this device only, every workspace it writes
-//! into from this device's workload identity: its requests are refused a
-//! JWT-SVID from the Workload API or a token file, whatever the conflict
-//! policy, until the user allows it here. A JWT-SVID from a vault or variable
-//! value still works, only a bundle import creates a seal, and the seal
-//! never leaves the device.
+//! A bundle import or full-backup restore seals, on this device only, every
+//! workspace it writes into from this device's workload identity: its
+//! requests are refused a JWT-SVID from the Workload API or a token file, and
+//! a TLS profile (their own or their proxy's) presenting an X.509-SVID from
+//! the Workload API, whatever the conflict policy, until the user allows it
+//! here. A JWT-SVID from a vault or variable value still works, only an
+//! import or a restore creates a seal, and the seal never leaves the device.
 
-use anvil_app::device_identity::DEVICE_IDENTITY_SEAL;
 use anvil_app::exec::SendOptions;
 use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
@@ -14,13 +14,16 @@ use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SensitiveValue;
+use anvil_domain::settings::ProxySelection;
+use anvil_domain::tls::{ClientIdentity, ProxyKind, ProxyProfile, TlsProfile};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
-use anvil_storage::KdfParams;
+use anvil_storage::{KdfParams, kind};
 use std::path::Path;
 
 const URL: &str = "https://api.example.invalid/svid";
+const BACKUP_PASS: &str = "backup passphrase 1";
 
 /// Requests that would present this device's JWT-SVID (see [`auths`]).
 const DEVICE: &[&str] = &["workload api", "token file", "multi"];
@@ -40,9 +43,10 @@ fn refused<T>(r: Result<T, AppError>, label: &str) -> String {
     }
 }
 
-/// Approval to write into the stored workspace `ws`.
-fn into(ws: &Id) -> ImportApproval {
-    ImportApproval { existing_workspaces: vec![*ws] }
+/// Approval to write `file` into the stored workspaces `ws`.
+fn approve(file: &[u8], ws: Vec<Id>) -> ImportApproval {
+    let _ = file;
+    ImportApproval { existing_workspaces: ws }
 }
 
 fn jwt_svid(source: JwtSvidSource) -> AuthConfig {
@@ -98,14 +102,14 @@ fn assert_sealed(app: &App, ws: &Id) {
         let built = app.build_context(Some(r.meta.id), ws, None, &SendOptions::default());
         if DEVICE.contains(&r.name.as_str()) {
             let err = refused(built, &r.name);
-            assert!(err.contains("a bundle import wrote into"), "{}: {err}", r.name);
+            assert!(err.contains("a bundle import or backup restore wrote into"), "{}: {err}", r.name);
             assert!(err.contains(&format!("anvil workspace allow-device-identity {ws}")), "{}: {err}", r.name);
         } else {
             built.unwrap_or_else(|e| panic!("{}: {e}", r.name));
         }
     }
     let err = refused(app.build_context(None, ws, Some(workload_api_draft()), &SendOptions::default()), "draft");
-    assert!(err.contains("a bundle import wrote into"), "draft: {err}");
+    assert!(err.contains("a bundle import or backup restore wrote into"), "draft: {err}");
 }
 
 /// Every request of `ws`, and a draft, builds.
@@ -166,7 +170,7 @@ fn an_import_seals_each_existing_workspace_it_writes_into_and_nothing_else() {
 
     // Written into with approval, even from its own export, it is sealed.
     for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
-        app.import_approved(&bytes, None, policy, &into(&ws)).unwrap();
+        app.import_approved(&bytes, None, policy, &approve(&bytes, vec![ws])).unwrap();
         assert_sealed(&app, &ws);
         assert!(app.allow_device_identity(&ws).unwrap());
         assert_open(&app, &ws);
@@ -185,7 +189,7 @@ fn a_seal_stays_on_this_device_and_goes_with_its_workspace() {
     assert_sealed(&b, &ws);
 
     // A full backup does not carry it.
-    assert!(b.backup_contents().unwrap().objects.iter().all(|o| o.kind != DEVICE_IDENTITY_SEAL));
+    assert!(b.backup_contents().unwrap().objects.iter().all(|o| o.kind != kind::DEVICE_IDENTITY_SEAL));
 
     // Deleting the workspace deletes its seal; only a stored workspace is allowed.
     b.delete_workspace(&ws).unwrap();
@@ -198,4 +202,139 @@ fn a_seal_stays_on_this_device_and_goes_with_its_workspace() {
     b.lock();
     assert!(matches!(b.device_identity_sealed(&ws), Err(AppError::Locked)));
     assert!(matches!(b.allow_device_identity(&ws), Err(AppError::Locked)));
+}
+
+#[test]
+fn a_backup_restore_seals_every_workspace_it_writes_until_the_user_allows_it() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "old device");
+    let ws = source_workspace(&a);
+    let other = a.create_workspace("Other").unwrap().meta.id;
+    let (backup, _) = a.export_backup_with(BACKUP_PASS, KdfParams::testing()).unwrap();
+    // Taking a backup seals nothing where it was taken.
+    assert_open(&a, &ws);
+
+    // Restored on a new device, every workspace is sealed; the preview and
+    // the report say so.
+    let b = new_app(root.path(), "new device");
+    let preview = b.restore_preview(&backup, Some(BACKUP_PASS), ConflictPolicy::Merge).unwrap();
+    assert!(preview.warnings.iter().any(|w| w.contains("allow-device-identity")), "{:?}", preview.warnings);
+    assert!(!b.device_identity_sealed(&ws).unwrap());
+    let report = b.restore(&backup, Some(BACKUP_PASS), ConflictPolicy::Merge).unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("allow-device-identity")), "{:?}", report.warnings);
+    assert_sealed(&b, &ws);
+    assert!(b.device_identity_sealed(&other).unwrap());
+    // Restoring your own backup on a new device means lifting the seals.
+    assert!(b.allow_device_identity(&ws).unwrap());
+    assert!(b.allow_device_identity(&other).unwrap());
+    assert_open(&b, &ws);
+
+    // A refused restore seals nothing.
+    assert!(b.restore(&backup, Some(BACKUP_PASS), ConflictPolicy::Replace).is_err());
+    assert_open(&b, &ws);
+    assert!(!b.device_identity_sealed(&other).unwrap());
+
+    // Restored again over the workspaces it claims, with approval, they are
+    // sealed again.
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        b.restore_approved(&backup, Some(BACKUP_PASS), policy, &approve(&backup, vec![ws, other])).unwrap();
+        assert_sealed(&b, &ws);
+        assert!(b.device_identity_sealed(&other).unwrap());
+        assert!(b.allow_device_identity(&ws).unwrap());
+        assert!(b.allow_device_identity(&other).unwrap());
+        assert_open(&b, &ws);
+    }
+}
+
+fn tls_profile(app: &App, ws: &Id, name: &str, client_identity: Option<ClientIdentity>) -> Id {
+    let now = chrono::Utc::now();
+    let p = TlsProfile {
+        id: Id::new(),
+        workspace_id: *ws,
+        name: name.into(),
+        verify: true,
+        use_system_roots: true,
+        extra_roots_pem: vec![],
+        client_identity,
+        bindings: vec![],
+        min_version: Default::default(),
+        server_name_override: None,
+        server_spiffe: None,
+        created_at: now,
+        updated_at: now,
+    };
+    app.save_tls_profile(p).unwrap().id
+}
+
+/// An HBONE proxy whose own connection uses TLS profile `tls`.
+fn proxy_profile(app: &App, ws: &Id, tls: Id) -> Id {
+    let now = chrono::Utc::now();
+    let p = ProxyProfile {
+        id: Id::new(),
+        workspace_id: *ws,
+        name: "mesh".into(),
+        kind: ProxyKind::Hbone,
+        address: "mesh.example.invalid:15008".into(),
+        username: None,
+        password: None,
+        no_proxy: String::new(),
+        tls_profile_id: Some(tls),
+        hbone: None,
+        created_at: now,
+        updated_at: now,
+    };
+    app.save_proxy_profile(p).unwrap().id
+}
+
+/// A draft that selects TLS profile `tls` and proxy profile `proxy`.
+fn with_profiles(tls: Option<Id>, proxy: Option<Id>) -> RequestSpec {
+    let mut spec = RequestSpec::http("GET", URL);
+    spec.settings.tls_profile_id = tls;
+    spec.settings.proxy_profile_id = proxy.map(|id| ProxySelection::Profile { id });
+    spec
+}
+
+#[test]
+fn a_sealed_workspace_refuses_tls_profiles_that_present_this_devices_x509_svid() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "source");
+    let ws = source_workspace(&a);
+    let (bytes, _) = a.export(Some(&ws), ExportMode::ShareSafely, None, false).unwrap();
+    let b = new_app(root.path(), "target");
+    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    assert!(b.device_identity_sealed(&ws).unwrap());
+
+    let svid = ClientIdentity::WorkloadApi { endpoint: String::new(), spiffe_id: None, trust_bundle: false };
+    let x509 = tls_profile(&b, &ws, "svid", Some(svid));
+    let plain = tls_profile(&b, &ws, "plain", None);
+    let (svid_proxy, plain_proxy) = (proxy_profile(&b, &ws, x509), proxy_profile(&b, &ws, plain));
+    // (label, draft, whether it would present this device's X.509-SVID)
+    let cases = [
+        ("own profile", with_profiles(Some(x509), None), true),
+        ("proxy's profile", with_profiles(None, Some(svid_proxy)), true),
+        ("proxy's profile only", with_profiles(Some(plain), Some(svid_proxy)), true),
+        ("no svid", with_profiles(Some(plain), Some(plain_proxy)), false),
+        ("no profile", with_profiles(None, None), false),
+    ];
+    let build = |spec: &RequestSpec| b.build_context(None, &ws, Some(spec.clone()), &SendOptions::default());
+    for (label, spec, device) in &cases {
+        if *device {
+            let err = refused(build(spec), label);
+            assert!(err.contains("a bundle import or backup restore wrote into") && err.contains("X.509-SVID"), "{label}: {err}");
+            assert!(err.contains(&format!("anvil workspace allow-device-identity {ws}")), "{label}: {err}");
+        } else {
+            build(spec).unwrap_or_else(|e| panic!("{label}: {e}"));
+        }
+    }
+    // Selected for the whole workspace, it is refused to every request.
+    let mut w = b.workspace(&ws).unwrap();
+    w.settings.tls_profile_id = Some(x509);
+    b.save_workspace(w).unwrap();
+    refused(build(&with_profiles(None, None)), "workspace profile");
+
+    // Allowed on this device, every one builds.
+    assert!(b.allow_device_identity(&ws).unwrap());
+    for (label, spec, _) in &cases {
+        build(spec).unwrap_or_else(|e| panic!("{label}: {e}"));
+    }
 }

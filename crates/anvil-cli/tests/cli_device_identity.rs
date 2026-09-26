@@ -1,7 +1,8 @@
 //! `anvil workspace allow-device-identity`: the real binary and a real
 //! profile on disk. A bundle import seals the workspace it writes from this
 //! device's workload identity, and only this command (or the desktop's
-//! workspace settings) lifts the seal.
+//! workspace settings) lifts the seal. It names the workspace by its id or a
+//! unique exact name, never by a guess.
 
 use anvil_app::App;
 use anvil_app::profiles::{ProfileManager, Unlock};
@@ -101,4 +102,46 @@ fn an_imported_workspace_is_sealed_until_allowed_from_the_cli() {
     assert!(text(&o).contains("was not sealed"), "{}", text(&o));
     let o = anvil(&data, &["workspace", "allow-device-identity", &Id::new().to_string()]);
     assert!(!o.status.success(), "{}", text(&o));
+}
+
+#[test]
+fn allow_device_identity_takes_only_an_id_or_a_unique_exact_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let bundle = dir.path().join("w.anvil");
+    setup(&data, &bundle);
+    let o = anvil(&data, &["import", bundle.to_str().unwrap(), "--policy", "duplicate"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let report: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let copy: Id = report["workspace_ids"][0].as_str().unwrap().parse().unwrap();
+    let name = open(&data).workspace(&copy).unwrap().name;
+    let sealed = || open(&data).device_identity_sealed(&copy).unwrap();
+    assert!(sealed());
+
+    // A name that matches only when case is ignored is refused.
+    let lower = name.to_lowercase();
+    assert_ne!(lower, name);
+    let o = anvil(&data, &["workspace", "allow-device-identity", &lower]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("exact name"), "{}", text(&o));
+    assert!(sealed());
+
+    // A name two workspaces share is refused.
+    let o = anvil(&data, &["workspace", "create", &name]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let o = anvil(&data, &["workspace", "allow-device-identity", &name]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("2 workspaces are named"), "{}", text(&o));
+    assert!(sealed());
+
+    // A unique exact name is accepted (the source workspace is not sealed),
+    // and the id lifts the seal.
+    let o = anvil(&data, &["workspace", "allow-device-identity", "W"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("'W' was not sealed"), "{}", text(&o));
+    assert!(sealed());
+    let o = anvil(&data, &["workspace", "allow-device-identity", &copy.to_string()]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("may now use"), "{}", text(&o));
+    assert!(!sealed());
 }

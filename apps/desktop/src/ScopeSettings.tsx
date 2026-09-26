@@ -18,7 +18,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
   const [ws, setWs] = useState<Workspace | null>(props.target.kind === "workspace" ? props.target.workspace : null);
   const [tab, setTab] = useState<Tab>("auth");
   const [err, setErr] = useState<string | null>(null);
-  // Set by a bundle import on this device; only the user lifts it.
+  // Set by a bundle import or backup restore on this device; only the user lifts it.
   const [sealed, setSealed] = useState(false);
   useEffect(() => {
     if (props.target.kind === "folder") api.getFolder(props.target.id).then(setFolder);
@@ -26,7 +26,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
   }, []);
   const allowDeviceIdentity = async (w: Workspace) => {
     const ok = await ask(
-      `Let requests in “${w.name}” use this device's workload identity (a JWT-SVID from the Workload API or a token file)? Only do this if you trust what was imported into it.`,
+      `Let requests in “${w.name}” use this device's workload identity (JWT-SVID or X.509-SVID)? Only do this if you trust what was imported or restored into it.`,
       { title: "Allow this device's workload identity", kind: "warning", okLabel: "Allow" },
     );
     if (!ok) return;
@@ -87,7 +87,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
           {sealed && ws && (
             <div className="warn-box row" role="note">
               <span className="grow">
-                A bundle import wrote into this workspace, so its requests do not use this device's workload identity (a JWT-SVID from the Workload API or a token file).
+                A bundle import or backup restore wrote into this workspace, so its requests do not use this device's workload identity (JWT-SVID or X.509-SVID).
               </span>
               <button className="btn small" onClick={() => void allowDeviceIdentity(ws)}>
                 Allow on this device
