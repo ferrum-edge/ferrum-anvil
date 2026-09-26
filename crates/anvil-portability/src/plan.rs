@@ -19,22 +19,25 @@ pub enum ConflictPolicy {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ImportPlan {
     pub policy: ConflictPolicy,
-    /// Objects and secrets (counted together).
+    /// Objects, secrets and history records (counted together).
     pub to_create: usize,
     pub to_replace: usize,
     pub skipped_existing: usize,
-    /// Objects and secrets that share an id with one already stored.
+    /// Objects, secrets and history records that share an id with one
+    /// already stored.
     pub conflicts: Vec<String>,
     /// Secrets that share an id with one stored here that a workspace outside
     /// the bundle (or no workspace) owns. Replace never overwrites or
     /// re-owns such a secret, so a Replace import is refused while any is
-    /// listed; Merge keeps the stored secret and Duplicate never touches it.
+    /// listed; Merge keeps the stored secret. Empty for Duplicate, which
+    /// gives every secret a fresh id.
     pub foreign_secrets: Vec<String>,
     /// Objects stored here under the same kind and id as a bundle object but
-    /// in a different workspace than the bundle gives it. Replace never moves
-    /// an object out of its workspace, so a Replace import is refused while
-    /// any is listed; Merge keeps the stored object. Empty for Duplicate,
-    /// which gives every object a fresh id.
+    /// in a different workspace than the bundle gives it, and history records
+    /// stored here under the same id but another workspace (or none). Replace
+    /// never moves an object or record out of its workspace, so a Replace
+    /// import is refused while any is listed; Merge keeps the stored one.
+    /// Empty for Duplicate, which gives every object and record a fresh id.
     pub foreign_objects: Vec<String>,
     /// Workspaces stored here that the bundle claims by id (Merge and
     /// Replace; a Duplicate copy never claims one). The import writes into
@@ -63,6 +66,9 @@ pub struct Existing {
     pub workspaces: HashMap<Id, String>,
     /// Every stored secret, with the workspace that owns it (`None`: none does).
     pub secrets: HashMap<Id, Option<Id>>,
+    /// Every stored history (execution) record, with the workspace that owns
+    /// it (`None`: none does).
+    pub history: HashMap<Id, Option<Id>>,
 }
 
 pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
@@ -84,19 +90,23 @@ pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
 pub fn plan(g: &PortableGraph, existing: &Existing, policy: ConflictPolicy) -> ImportPlan {
     let mut ids = all_ids(g);
     ids.extend(secret_ids(g).map(|(id, v)| ("secret".to_string(), id, v.label.clone())));
-    let conflicts: Vec<String> = ids
+    let mut conflicts: Vec<String> = ids
         .iter()
         .filter(|(_, id, _)| existing.objects.contains(id) || existing.secrets.contains_key(id))
         .map(|(k, id, n)| format!("{k} '{n}' ({id})"))
         .collect();
-    let foreign_secrets = foreign_secrets(g, existing);
-    // A Duplicate copy gives every object a fresh id: none lands on a stored
-    // object, and none claims a stored workspace.
-    let (foreign_objects, existing_workspaces) = match policy {
-        ConflictPolicy::Duplicate => (vec![], vec![]),
-        ConflictPolicy::Merge | ConflictPolicy::Replace => (foreign_objects(g, existing), existing_workspaces(g, existing)),
+    // History records are stored apart from objects, by id alone.
+    let history = history_ids(g);
+    conflicts.extend(history.iter().filter(|(id, _)| existing.history.contains_key(id)).map(|(id, _)| format!("history ({id})")));
+    // A Duplicate copy gives every object, secret and history record a fresh
+    // id: none lands on a stored one, and none claims a stored workspace.
+    let (foreign_secrets, foreign_objects, existing_workspaces) = match policy {
+        ConflictPolicy::Duplicate => (vec![], vec![], vec![]),
+        ConflictPolicy::Merge | ConflictPolicy::Replace => {
+            (foreign_secrets(g, existing), foreign_objects(g, existing), existing_workspaces(g, existing))
+        }
     };
-    let n = ids.len();
+    let n = ids.len() + history.len();
     let c = conflicts.len();
     let (to_create, to_replace, skipped_existing) = match policy {
         ConflictPolicy::Merge => (n - c, 0, c),
@@ -137,13 +147,26 @@ fn owned_ids(g: &PortableGraph) -> Vec<(&'static str, Id, String, Option<Id>)> {
 }
 
 /// Bundle objects whose kind and id are stored here in a different
-/// workspace than the bundle gives them, as `folder 'name' (id)`.
+/// workspace than the bundle gives them, as `folder 'name' (id)`, and bundle
+/// history records whose id is stored here under another workspace (or
+/// none), as `history (id)`.
 pub fn foreign_objects(g: &PortableGraph, existing: &Existing) -> Vec<String> {
-    owned_ids(g)
+    let objects = owned_ids(g)
         .into_iter()
         .filter(|(k, id, _, owner)| existing.owners.get(&(k.to_string(), *id)).is_some_and(|stored| stored != owner))
-        .map(|(k, id, n, _)| format!("{k} '{n}' ({id})"))
-        .collect()
+        .map(|(k, id, n, _)| format!("{k} '{n}' ({id})"));
+    let history = history_ids(g)
+        .into_iter()
+        .filter(|(id, owner)| existing.history.get(id).is_some_and(|stored| stored != owner))
+        .map(|(id, _)| format!("history ({id})"));
+    objects.chain(history).collect()
+}
+
+/// Every history record of the graph by id, with the workspace it names
+/// (validation leaves out a record that is not a valid execution record).
+pub fn history_ids(g: &PortableGraph) -> Vec<(Id, Option<Id>)> {
+    let id = |h: &serde_json::Value, field: &str| h.get(field).and_then(|v| v.as_str()).and_then(|v| v.parse::<Id>().ok());
+    g.history.iter().filter_map(|h| Some((id(h, "id")?, id(h, "workspace_id")))).collect()
 }
 
 /// The bundle's secrets, by id (validation refuses any other key).
@@ -210,8 +233,11 @@ pub fn remap_all(g: &mut PortableGraph) -> Result<HashMap<Id, Id>, serde_json::E
     ng.attachments = std::mem::take(&mut g.attachments);
     ng.history = std::mem::take(&mut g.history);
     // Execution records can hold captured user data, so only their own
-    // top-level links are followed.
+    // top-level links are followed. Each copied record gets a fresh id.
     for h in &mut ng.history {
+        if let Some(serde_json::Value::String(s)) = h.get_mut("id") {
+            *s = Id::new().to_string();
+        }
         for field in ["workspace_id", "request_id", "revision_id", "environment_id"] {
             if let Some(serde_json::Value::String(s)) = h.get_mut(field) {
                 remap(s, &map);

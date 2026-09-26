@@ -465,7 +465,7 @@ fn an_import_that_overwrites_a_request_drops_its_linked_file_binding() {
     app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).expect("bound");
 
     // The bundle is this workspace's own backup: writing into it is approved.
-    let approval = ImportApproval { existing_workspaces: vec![ws.meta.id] };
+    let approval = ImportApproval::for_file(&bytes, vec![ws.meta.id]);
     // Merging leaves the stored request, and its binding, alone.
     app.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &approval).unwrap();
     assert_eq!(app.linked_file_bindings().unwrap().len(), 1);

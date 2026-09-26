@@ -15,6 +15,21 @@ pub const ENVELOPE_V1: u8 = 1;
 pub const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 
+/// Largest Argon2id memory cost (KiB) a stored or received key may ask for.
+pub const MAX_KDF_MEMORY_KIB: u32 = 256 * 1024;
+/// Largest Argon2id pass count a stored or received key may ask for.
+pub const MAX_KDF_ITERATIONS: u32 = 10;
+/// Largest Argon2id lane count a stored or received key may ask for.
+pub const MAX_KDF_PARALLELISM: u32 = 4;
+/// Largest memory x passes product (KiB-passes) a stored or received key may
+/// ask for: 1 GiB in total, e.g. 256 MiB for 4 passes. Profiles and exports
+/// use 64 MiB for 3 passes.
+pub const MAX_KDF_WORK: u64 = 1024 * 1024;
+/// Shortest salt a stored or received key may name.
+pub const MIN_SALT_LEN: usize = 8;
+/// Longest salt a stored or received key may name.
+pub const MAX_SALT_LEN: usize = 64;
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CryptoError {
     #[error("decryption failed: wrong key or the data was modified")]
@@ -114,6 +129,37 @@ impl KdfParams {
     pub fn testing() -> Self {
         KdfParams { algorithm: KdfAlgorithm::Argon2id, m_cost: 1024, t_cost: 1, p_cost: 1 }
     }
+
+    /// Refuse Argon2id costs outside the bounds above, with the reason. The
+    /// costs are read before anything they protect can authenticate, so
+    /// they are checked before any derivation.
+    pub fn check_bounds(&self) -> Result<(), String> {
+        if !(1..=MAX_KDF_ITERATIONS).contains(&self.t_cost) {
+            return Err(format!("{} passes; allowed 1 to {MAX_KDF_ITERATIONS}", self.t_cost));
+        }
+        if !(1..=MAX_KDF_PARALLELISM).contains(&self.p_cost) {
+            return Err(format!("{} lanes; allowed 1 to {MAX_KDF_PARALLELISM}", self.p_cost));
+        }
+        // Argon2 needs at least 8 KiB per lane.
+        let min_memory = 8 * self.p_cost;
+        if !(min_memory..=MAX_KDF_MEMORY_KIB).contains(&self.m_cost) {
+            return Err(format!("{} KiB of memory; allowed {min_memory} to {MAX_KDF_MEMORY_KIB} KiB", self.m_cost));
+        }
+        let work = u64::from(self.m_cost) * u64::from(self.t_cost);
+        if work > MAX_KDF_WORK {
+            return Err(format!("{} KiB for {} passes exceeds the budget of {MAX_KDF_WORK} KiB-passes", self.m_cost, self.t_cost));
+        }
+        Ok(())
+    }
+}
+
+/// Refuse a salt whose length is outside [`MIN_SALT_LEN`] to [`MAX_SALT_LEN`],
+/// with the reason.
+pub fn check_salt(salt: &[u8]) -> Result<(), String> {
+    if !(MIN_SALT_LEN..=MAX_SALT_LEN).contains(&salt.len()) {
+        return Err(format!("{}-byte salt; allowed {MIN_SALT_LEN} to {MAX_SALT_LEN}", salt.len()));
+    }
+    Ok(())
 }
 
 pub fn derive(passphrase: &[u8], salt: &[u8], p: &KdfParams) -> Result<Key, CryptoError> {

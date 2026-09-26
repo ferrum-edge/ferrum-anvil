@@ -855,9 +855,10 @@ export function ImportDialog(props: {
     setErr(null);
     try {
       if (!preview) return;
-      // Apply exactly what was previewed; the backend refuses any existing workspace not approved here.
+      // Apply exactly what was previewed; the backend refuses any existing workspace not approved here,
+      // and a file that is no longer the one previewed.
       const approved = intoExisting ? existing.map((w) => w.id) : [];
-      const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved);
+      const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved, preview.bundle_sha256);
       props.onImported(r.workspace_ids);
       props.onClose();
     } catch (e) {

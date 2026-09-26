@@ -2,6 +2,7 @@
 
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
+use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::request::{
     AttachmentRef, Body, GrpcMode, GrpcSchemaSource, GrpcSpec, GrpcWire, KeyValue, MultipartContent, MultipartPart, Protocol, RequestSpec,
 };
@@ -719,13 +720,17 @@ fn plan_lists_secret_conflicts_and_secrets_owned_outside_the_bundle() {
     assert_eq!(own.to_replace, 1);
     assert!(own.foreign_secrets.is_empty(), "{own:?}");
 
-    // Stored under another workspace, or under none: listed as foreign for every policy.
+    // Stored under another workspace, or under none: listed as foreign for
+    // Merge and Replace. A Duplicate copy gives the secret a fresh id, so it
+    // lands on nothing stored.
     for owner in [Some(Id::new()), None] {
-        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
             let p = plan::plan(&g, &stored(owner), policy);
             assert_eq!(p.conflicts, vec![listed.clone()], "{policy:?}");
             assert_eq!(p.foreign_secrets, vec![listed.clone()], "{policy:?}");
         }
+        let dup = plan::plan(&g, &stored(owner), ConflictPolicy::Duplicate);
+        assert!(dup.foreign_secrets.is_empty(), "{dup:?}");
     }
     let merge = plan::plan(&g, &stored(Some(Id::new())), ConflictPolicy::Merge);
     assert_eq!(merge.skipped_existing, 1);
@@ -1106,7 +1111,7 @@ fn entry(bytes: &[u8], name: &str) -> Vec<u8> {
 fn an_encrypted_bundle_changed_in_any_entry_restores_nothing() {
     let pass = "correct horse battery";
     let mut g = sample();
-    g.history.push(serde_json::json!({"note": "run 1"}));
+    g.history.push(serde_json::to_value(execution_record(Some(g.workspaces[0].meta.id))).unwrap());
     let with_history = ExportOptions { include_history: true, ..opts(ExportMode::EncryptedTransfer, Some(pass)) };
     let (bytes, preview) = bundle::write(&g, &with_history).unwrap();
     assert_eq!(preview.manifest.format_version, bundle::FORMAT_VERSION);
@@ -1242,4 +1247,194 @@ fn format_1_vaults_are_refused_and_nothing_of_them_is_restored() {
     // A share-safe bundle never carries a vault.
     let smuggled = with_entry(&safe, "secrets/portable-vault.enc", &entry(&bytes, "secrets/portable-vault.enc"));
     assert!(matches!(bundle::open(&smuggled, Some(pass)), Err(BundleError::Invalid(_))));
+}
+
+/// A minimal execution record of workspace `workspace_id`.
+fn execution_record(workspace_id: Option<Id>) -> ExecutionRecord {
+    use anvil_domain::execution::{DispatchState, PreparedSummary};
+    use anvil_domain::outcome::{ApplicationState, AssertionState, ExecutionOutcome, ProtocolStatus, TransportState};
+    let now = chrono::Utc::now();
+    let prepared = PreparedSummary {
+        protocol: Protocol::Http,
+        method: "GET".into(),
+        url: "https://api.example.com/orders".into(),
+        headers: vec![],
+        body_bytes: 0,
+        body_sha256: None,
+        content_type: None,
+        auth_label: "none".into(),
+        tls_profile: None,
+        proxy: None,
+        tls_verification_enabled: true,
+        settings: Default::default(),
+        inferred: vec![],
+        omitted_secrets: vec![],
+        workload_api: None,
+    };
+    let outcome = ExecutionOutcome {
+        transport: TransportState::Completed,
+        application: ApplicationState::Success,
+        assertions: AssertionState::NotRun,
+        completeness: None,
+        protocol_status: ProtocolStatus::None,
+        dispatch: DispatchState::Sent,
+        warnings: vec![],
+        summary: "ok".into(),
+    };
+    ExecutionRecord {
+        id: Id::new(),
+        schema_version: anvil_domain::SCHEMA_VERSION,
+        adapter_version: "test".into(),
+        catalog_version: "test".into(),
+        compatibility_id: None,
+        workspace_id,
+        request_id: None,
+        revision_id: None,
+        environment_id: None,
+        started_at: now,
+        finished_at: now,
+        prepared,
+        attempts: vec![],
+        response: None,
+        stream: None,
+        outcome,
+        assertion_results: vec![],
+        extracted: vec![],
+        findings: vec![],
+    }
+}
+
+/// A history record's id, workspace, request, revision and environment.
+type HistoryLinks = (Id, Option<Id>, Option<Id>, Option<Id>, Option<Id>);
+
+/// The id and links of each history record in `g`.
+fn history_links(g: &PortableGraph) -> Vec<HistoryLinks> {
+    let records = g.history.iter().map(|h| serde_json::from_value::<ExecutionRecord>(h.clone()).unwrap());
+    records.map(|r| (r.id, r.workspace_id, r.request_id, r.revision_id, r.environment_id)).collect()
+}
+
+#[test]
+fn history_records_keep_only_links_inside_their_own_workspace() {
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    let ws = g.workspaces[0].meta.id;
+    let (request, other) = (g.requests[0].meta.id, g.requests[1].meta.id);
+    let env = g.environments[0].meta.id;
+    let record =
+        |request_id, revision_id, environment_id| ExecutionRecord { request_id, revision_id, environment_id, ..execution_record(Some(ws)) };
+    let own = record(Some(request), Some(rev.id), Some(env));
+    // Links to objects that are not in the bundle, and a revision of another request.
+    let stray = record(Some(Id::new()), Some(rev.id), Some(Id::new()));
+    let mismatched = record(Some(other), Some(rev.id), None);
+    // Records of a workspace that is not in the bundle, or of none.
+    let elsewhere = execution_record(Some(Id::new()));
+    let nowhere = execution_record(None);
+    for r in [&own, &stray, &mismatched, &elsewhere, &nowhere] {
+        g.history.push(serde_json::to_value(r).unwrap());
+    }
+    let warnings = validate::validate_and_normalize(&mut g).unwrap();
+    assert!(warnings.iter().any(|w| w.contains("2 history record(s) of workspaces that are not in the bundle")), "{warnings:?}");
+    let expected = vec![
+        (own.id, Some(ws), Some(request), Some(rev.id), Some(env)),
+        (stray.id, Some(ws), None, None, None),
+        (mismatched.id, Some(ws), Some(other), None, None),
+    ];
+    assert_eq!(history_links(&g), expected);
+
+    // A record twice refuses the bundle.
+    let mut twice = sample();
+    let again = serde_json::to_value(execution_record(Some(twice.workspaces[0].meta.id))).unwrap();
+    twice.history = vec![again.clone(), again];
+    match validate::validate_and_normalize(&mut twice) {
+        Err(BundleError::Invalid(m)) => assert!(m.contains("appears twice"), "{m}"),
+        other => panic!("expected an invalid bundle, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_history_record_that_is_not_an_execution_record_is_left_out_with_a_warning() {
+    let mut g = sample();
+    let kept = execution_record(Some(g.workspaces[0].meta.id));
+    let mut bad_time = serde_json::to_value(execution_record(Some(g.workspaces[0].meta.id))).unwrap();
+    bad_time["started_at"] = "not a time".into();
+    g.history = vec![serde_json::json!({"note": "run 1"}), serde_json::to_value(&kept).unwrap(), bad_time];
+    let warnings = validate::validate_and_normalize(&mut g).expect("the rest of the bundle imports");
+    assert!(warnings.iter().any(|w| w.contains("2 history record(s) are not valid execution records")), "{warnings:?}");
+    assert_eq!(history_links(&g), vec![(kept.id, kept.workspace_id, None, None, None)]);
+}
+
+#[test]
+fn plan_counts_history_records_and_a_duplicate_copy_gives_them_fresh_ids() {
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let request = g.requests[0].meta.id;
+    let rec = ExecutionRecord { request_id: Some(request), ..execution_record(Some(ws)) };
+    g.history.push(serde_json::to_value(&rec).unwrap());
+    let listed = format!("history ({})", rec.id);
+    let stored = |owner: Option<Id>| Existing { history: [(rec.id, owner)].into_iter().collect(), ..Default::default() };
+
+    // Nothing stored: the record counts as created, with the objects and the secret.
+    let fresh = plan::plan(&g, &Existing::default(), ConflictPolicy::Merge);
+    assert!(fresh.conflicts.is_empty(), "{fresh:?}");
+    assert_eq!(fresh.to_create, g.object_count() + 2);
+    // Stored in its own workspace: a conflict Merge keeps and Replace overwrites.
+    let merge = plan::plan(&g, &stored(Some(ws)), ConflictPolicy::Merge);
+    assert_eq!((merge.conflicts, merge.skipped_existing), (vec![listed.clone()], 1));
+    let replace = plan::plan(&g, &stored(Some(ws)), ConflictPolicy::Replace);
+    assert_eq!(replace.to_replace, 1);
+    assert!(replace.foreign_objects.is_empty(), "{replace:?}");
+    // Stored under another workspace, or under none: listed for Merge and
+    // Replace; a Duplicate copy lands on nothing stored.
+    for owner in [Some(Id::new()), None] {
+        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+            assert_eq!(plan::plan(&g, &stored(owner), policy).foreign_objects, vec![listed.clone()], "{policy:?}");
+        }
+        assert!(plan::plan(&g, &stored(owner), ConflictPolicy::Duplicate).foreign_objects.is_empty());
+    }
+
+    // The copied record gets a fresh id and follows its workspace and request.
+    let mut dup = g.clone();
+    let map = plan::remap_all(&mut dup).unwrap();
+    let copied = history_links(&dup);
+    assert_eq!(copied.len(), 1);
+    assert_ne!(copied[0].0, rec.id, "a copied record never reuses the source's id");
+    assert_eq!((copied[0].1, copied[0].2), (map.get(&ws).copied(), map.get(&request).copied()));
+    validate::validate_and_normalize(&mut dup).unwrap();
+    assert_eq!(history_links(&dup), copied, "the copy keeps its links");
+}
+
+fn oauth(token_cache_id: Option<Id>) -> AuthConfig {
+    AuthConfig::OAuth2 {
+        config: anvil_domain::auth::OAuth2Config {
+            grant: anvil_domain::auth::OAuthGrant::ClientCredentials,
+            token_url: "https://issuer.example.com/token".into(),
+            authorization_url: String::new(),
+            client_id: "orders-client".into(),
+            client_secret: SensitiveValue::default(),
+            scope: "orders.read".into(),
+            audience: String::new(),
+            client_auth: Default::default(),
+            token_cache_id,
+            refresh_skew_secs: 30,
+        },
+    }
+}
+
+#[test]
+fn an_imported_oauth_profile_never_keeps_a_token_cache_id() {
+    let mut g = sample();
+    g.workspaces[0].auth = oauth(Some(Id::new()));
+    g.folders[0].auth = AuthConfig::Multi { profiles: vec![oauth(Some(Id::new())), oauth(None)] };
+    g.requests[1].spec.auth = oauth(Some(Id::new()));
+    let pass = "correct horse battery";
+    for (mode, p) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some(pass))] {
+        let (bytes, _) = bundle::write(&g, &opts(mode, p)).unwrap();
+        assert!(text_of(&bytes).contains("token_cache_id"), "{mode:?}: the bundle names cache ids");
+        let opened = bundle::open(&bytes, p).unwrap();
+        let text = serde_json::to_string(&opened.graph).unwrap();
+        assert!(!text.contains("token_cache_id"), "{mode:?}: {text}");
+        assert_eq!(text.matches("orders-client").count(), 4, "{mode:?}: every profile is kept");
+    }
+    assert_eq!(validate::clear_token_cache_ids(&mut g), 3);
+    assert_eq!(validate::clear_token_cache_ids(&mut g), 0);
 }

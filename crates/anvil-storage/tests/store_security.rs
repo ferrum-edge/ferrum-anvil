@@ -156,3 +156,80 @@ fn history_retention_prunes_by_size() {
     assert!(left.len() < 20 && !left.is_empty());
     assert!(left.iter().map(|h| h.size).sum::<i64>() <= 50_000);
 }
+
+#[test]
+fn replacing_a_history_record_releases_its_old_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let body_of = |id: &Id| -> Option<String> {
+        let conn = rusqlite::Connection::open(dir.path().join("anvil.db")).unwrap();
+        conn.query_row("SELECT body_blob FROM history WHERE id=?1", [id.to_string()], |r| r.get(0)).unwrap()
+    };
+    let record = serde_json::json!({"n": 1});
+    let (replaced, shared, other) = (Id::new(), Id::new(), Id::new());
+    store.add_history(&replaced, None, None, 1, &record, Some(b"old body")).unwrap();
+    let old = body_of(&replaced).unwrap();
+    store.add_history(&replaced, None, None, 1, &record, None).unwrap();
+    assert!(body_of(&replaced).is_none());
+    assert!(store.get_blob(&old).unwrap().is_none(), "the replaced body was released");
+
+    // A body another record still uses stays.
+    store.add_history(&shared, None, None, 1, &record, Some(b"shared body")).unwrap();
+    store.add_history(&other, None, None, 1, &record, Some(b"shared body")).unwrap();
+    let shared_body = body_of(&shared).unwrap();
+    store.add_history(&shared, None, None, 1, &record, None).unwrap();
+    assert!(store.get_blob(&shared_body).unwrap().is_some(), "another record uses it");
+
+    // A pinned attachment with the same content stays; the last use of the
+    // shared body goes.
+    let pinned = store.put_blob(b"attachment").unwrap();
+    store.pin_blob(&pinned).unwrap();
+    store.add_history(&other, None, None, 1, &record, Some(b"attachment")).unwrap();
+    assert!(store.get_blob(&shared_body).unwrap().is_none(), "no record uses it any more");
+    store.add_history(&other, None, None, 1, &record, None).unwrap();
+    assert_eq!(store.get_blob(&pinned).unwrap().unwrap().as_slice(), b"attachment");
+}
+
+#[test]
+fn unlock_refuses_key_derivation_settings_outside_the_bounds() {
+    use anvil_storage::crypto::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM};
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let recovery = created.recovery_key.clone().unwrap();
+    let header = vault::read_header(dir.path()).unwrap();
+    let with = |kdf: Option<KdfParams>, salt: Option<&str>| {
+        let mut h = header.clone();
+        for w in [h.passphrase_wrap.as_mut().unwrap(), h.recovery_wrap.as_mut().unwrap()] {
+            if let Some(kdf) = kdf {
+                w.kdf = Some(kdf);
+            }
+            if let Some(salt) = salt {
+                w.salt = salt.into();
+            }
+        }
+        h
+    };
+    let testing = KdfParams::testing();
+    let refused = [
+        ("memory", with(Some(KdfParams { m_cost: MAX_KDF_MEMORY_KIB + 1, ..testing }), None)),
+        ("passes", with(Some(KdfParams { t_cost: MAX_KDF_ITERATIONS + 1, ..testing }), None)),
+        ("no passes", with(Some(KdfParams { t_cost: 0, ..testing }), None)),
+        ("lanes", with(Some(KdfParams { p_cost: MAX_KDF_PARALLELISM + 1, ..testing }), None)),
+        ("memory x passes", with(Some(KdfParams { m_cost: MAX_KDF_MEMORY_KIB, t_cost: 5, ..testing }), None)),
+        ("short salt", with(None, Some("AAAAAA=="))),
+    ];
+    // Refused before any derivation: none of these costs is ever paid.
+    for (why, h) in &refused {
+        let e = vault::unlock_with_passphrase(h, "pw").unwrap_err();
+        assert!(matches!(&e, vault::VaultError::Header(m) if m.contains("unsupported key-derivation settings")), "{why}: {e}");
+        let e = vault::unlock_with_recovery(h, &recovery).unwrap_err();
+        assert!(matches!(&e, vault::VaultError::Header(m) if m.contains("unsupported key-derivation settings")), "{why}: {e}");
+    }
+    // The header as written still unlocks.
+    assert_eq!(vault::unlock_with_passphrase(&header, "pw").unwrap().as_bytes(), created.dek.as_bytes());
+    // A key is never wrapped with settings unlock would refuse.
+    let other = tempfile::tempdir().unwrap();
+    let costly = KdfParams { m_cost: MAX_KDF_MEMORY_KIB + 1, ..testing };
+    assert!(vault::create_passphrase_profile(other.path(), "t", "pw", costly).is_err());
+}

@@ -9,6 +9,9 @@
 //!   workspace in the bundle; no two objects share an id. Revisions of
 //!   requests outside the bundle are left out, and a request keeps its
 //!   `revision_id` only when that revision of it is in the bundle.
+//!   Execution records of a workspace outside the bundle, or that are not
+//!   valid execution records, are left out, and each keeps only the links to
+//!   objects of its own workspace in the bundle.
 //! * Stored attachments a request or dataset names without their bytes are
 //!   listed by [`uncarried_attachments`]; the importer checks them against
 //!   what its device stores.
@@ -22,6 +25,8 @@
 use crate::bundle::BundleError;
 use crate::graph::PortableGraph;
 use anvil_domain::Id;
+use anvil_domain::auth::AuthConfig;
+use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::request::AttachmentRef;
 use anvil_domain::workspace::RequestRevision;
 use std::collections::{HashMap, HashSet};
@@ -140,6 +145,43 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         }
     }
     g.revisions = revisions;
+    // An execution record is written under the workspace it names; one of a
+    // workspace outside the bundle, or of none, would land in an unrelated
+    // local workspace and is left out. Its links to a request, revision or
+    // environment are kept only when that object is in the bundle and in the
+    // record's workspace (a revision only as one of the linked request), so a
+    // record never appears in the history of an unrelated local object.
+    let revision_request: HashMap<Id, Id> = g.revisions.iter().map(|r| (r.id, r.request_id)).collect();
+    let mut history_ids = HashSet::new();
+    let mut outside_history = 0;
+    let mut unreadable_history = 0;
+    let mut history = Vec::with_capacity(g.history.len());
+    for h in std::mem::take(&mut g.history) {
+        // History is a log, not part of the workspace: a record this version
+        // cannot read is left out rather than refusing the bundle.
+        let Ok(mut rec) = serde_json::from_value::<ExecutionRecord>(h) else {
+            unreadable_history += 1;
+            continue;
+        };
+        if !history_ids.insert(rec.id) {
+            return Err(BundleError::Invalid(format!("history record {} appears twice", rec.id)));
+        }
+        let Some(w) = rec.workspace_id.filter(|w| ws.contains(w)) else {
+            outside_history += 1;
+            continue;
+        };
+        rec.request_id = rec.request_id.filter(|r| request_ws.get(r) == Some(&w));
+        rec.revision_id = rec.revision_id.filter(|v| rec.request_id.is_some_and(|r| revision_request.get(v) == Some(&r)));
+        rec.environment_id = rec.environment_id.filter(|e| environment_ws.get(e) == Some(&w));
+        history.push(serde_json::to_value(&rec)?);
+    }
+    g.history = history;
+    if outside_history > 0 {
+        warnings.push(format!("{outside_history} history record(s) of workspaces that are not in the bundle were left out."));
+    }
+    if unreadable_history > 0 {
+        warnings.push(format!("{unreadable_history} history record(s) are not valid execution records and were left out."));
+    }
     // Import writes objects by id, so a repeated id would make one object
     // silently overwrite another.
     let mut unique = HashSet::new();
@@ -300,6 +342,38 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         ));
     }
     Ok(warnings)
+}
+
+/// Clear the token-cache id of every OAuth 2 profile in the graph's
+/// workspaces, folders and requests, and return how many were cleared. An
+/// imported profile that kept one could share a cached token with a profile
+/// stored here that names the same id (and the same issuer, client and
+/// scope); without one, each caches under the id of the object that defines
+/// it, as spec imports do.
+pub fn clear_token_cache_ids(g: &mut PortableGraph) -> usize {
+    let mut cleared = 0;
+    for a in g
+        .requests
+        .iter_mut()
+        .map(|r| &mut r.spec.auth)
+        .chain(g.folders.iter_mut().map(|f| &mut f.auth))
+        .chain(g.workspaces.iter_mut().map(|w| &mut w.auth))
+    {
+        clear_token_cache_id(a, &mut cleared);
+    }
+    cleared
+}
+
+fn clear_token_cache_id(a: &mut AuthConfig, n: &mut usize) {
+    match a {
+        AuthConfig::OAuth2 { config } => {
+            if config.token_cache_id.take().is_some() {
+                *n += 1;
+            }
+        }
+        AuthConfig::Multi { profiles } => profiles.iter_mut().for_each(|p| clear_token_cache_id(p, n)),
+        _ => {}
+    }
 }
 
 /// A stored attachment that a request or dataset names by content hash and
