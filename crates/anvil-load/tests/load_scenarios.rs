@@ -8,6 +8,7 @@ use anvil_domain::Id;
 use anvil_domain::assertions::{Assertion, AssertionKind, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::load::*;
+use anvil_domain::proxy_protocol::{DatagramAuthSpec, DatagramEnvelopeSpec};
 use anvil_domain::request::{Body, KeyValue, PayloadEncoding, Protocol, RequestSpec, SoapVersion, StreamPayload, UdpSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::{Limits, SettingsOverrides, TimeoutOverrides};
@@ -715,6 +716,55 @@ async fn load_013_udp_sends_more_than_it_receives_and_never_claims_delivery() {
     if cfg!(unix) {
         assert_eq!(d.icmp_unreachable_exchanges, 2, "{d:?}");
     }
+}
+
+/// A UDP load whose datagram PROXY-protocol envelope is authenticated with a
+/// vault-held secret: the parent scopes that secret into the worker job, so
+/// every exchange goes out with its envelope instead of failing preparation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_load_with_a_vault_held_datagram_secret_scopes_it_into_the_worker_job() {
+    let _g = serial().await;
+    let echo = anvil_fixtures::streams::udp("127.0.0.1:0", anvil_fixtures::streams::UdpMode::Echo).await.unwrap();
+    let secret = SecretRef { id: Id::new(), label: "datagram secret".into() };
+    let mut c = udp_ctx(echo.addr, &["hello"], 300);
+    c.spec.udp.as_mut().unwrap().proxy_protocol = Some(DatagramEnvelopeSpec {
+        command: Default::default(),
+        family: Default::default(),
+        source: None,
+        destination: None,
+        authentication: Some(DatagramAuthSpec {
+            secret: SensitiveValue::Secret { secret: secret.clone() },
+            listener_protocol: None,
+            listener_bind_address: "0.0.0.0".into(),
+            listener_port: None,
+            sender_id: 7,
+            epoch: None,
+            first_sequence: 0,
+            timestamp_offset_ms: 0,
+        }),
+    });
+    c.secrets = Arc::new(MemorySecrets(HashMap::from([(secret.id, Zeroizing::new("d".repeat(32)))])));
+    let id = Id::new();
+    let p = plan(Workload::Iterations { iterations: 3, concurrency: 1 }, vec![id]);
+    let job = LoadJob { requests: HashMap::from([(id, c)]), dataset: None };
+    let wj = WorkerJob::from_load_job(&p, &job, opts()).unwrap();
+    assert_eq!(wj.secrets.len(), 1, "the datagram secret is scoped into the worker job");
+    let (p, job, o) = wj.into_load_job().unwrap();
+    let r = LoadRun::prepare(p, job, o).expect("valid plan").execute(CancellationToken::new(), None).await;
+    assert_balanced(&r);
+    assert_eq!((r.requests.completed, r.requests.transport_failures), (3, 0), "{:?}", r.failure_categories);
+    assert_eq!(datagram_metrics(&r).datagrams_sent, 3);
+    let sizes: Vec<u64> = echo
+        .log
+        .entries()
+        .iter()
+        .filter_map(|e| match e.event {
+            GroundTruth::DatagramReceived { bytes } => Some(bytes),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sizes.len(), 3, "ground truth: three datagrams arrived");
+    assert!(sizes.iter().all(|b| *b > "hello".len() as u64), "each datagram carries its envelope: {sizes:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

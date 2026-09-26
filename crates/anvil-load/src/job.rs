@@ -2,9 +2,11 @@
 //!
 //! [`anvil_engine::ExecutionContext`] holds trait objects (secret and
 //! attachment resolvers), so the parent resolves exactly the secrets the
-//! plan's requests reference (effective auth, the selected TLS profile's
-//! client identity, the selected proxy's password) into a scoped map, and the
-//! worker rebuilds contexts over [`MemorySecrets`] / [`MemoryAttachments`].
+//! plan's requests reference (effective auth, the client identities of the
+//! selected TLS profile and of the selected proxy's TLS profile, the selected
+//! proxy's password, the datagram PROXY-protocol authentication secret) into a
+//! scoped map, and the worker rebuilds contexts over [`MemorySecrets`] /
+//! [`MemoryAttachments`].
 //! A linked local file is read once, by the parent through the request's own
 //! resolver (and its checks), and travels as stored bytes: the worker never
 //! opens a local path, and the body cannot change during the run.
@@ -99,7 +101,8 @@ pub struct WorkerRequest {
     pub settings_layers: Vec<(String, SettingsOverrides)>,
     pub auth_layers: Vec<(String, AuthConfig)>,
     pub var_layers: Vec<WireVarLayer>,
-    /// Only the TLS profile the request's effective settings select.
+    /// Only the TLS profiles the request's effective settings select: its own
+    /// and the selected proxy's.
     #[serde(default)]
     pub tls_profiles: Vec<TlsProfile>,
     /// Only the proxy profile the request's effective settings select.
@@ -203,30 +206,39 @@ fn walk_auth(a: &AuthConfig, out: &mut Vec<SecretRef>) {
     }
 }
 
-/// The TLS / proxy profiles a context's effective settings select.
-fn selected_profiles(ctx: &ExecutionContext) -> (Option<&TlsProfile>, Option<&ProxyProfile>) {
+/// The TLS / proxy profiles a context's effective settings select: the
+/// request's TLS profile and the selected proxy's own TLS profile (an HTTPS
+/// or HBONE proxy's handshake), each once.
+fn selected_profiles(ctx: &ExecutionContext) -> (Vec<&TlsProfile>, Option<&ProxyProfile>) {
     let eff = anvil_engine::settings::resolve(&ctx.settings_layers);
-    let tls = eff.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
     let proxy = eff.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
+    let ids = [eff.tls_profile_id, proxy.and_then(|p| p.tls_profile_id)];
+    let tls: Vec<&TlsProfile> = ctx.tls_profiles.iter().filter(|p| ids.contains(&Some(p.id))).collect();
     (tls, proxy)
 }
 
-/// Vault references a context actually needs to execute (scoping).
+/// Vault references a context actually needs to execute (scoping): every
+/// `SensitiveValue` the engine resolves through `ctx.secrets`.
 pub fn secret_refs(ctx: &ExecutionContext) -> Vec<SecretRef> {
     let mut out = Vec::new();
     walk_auth(&ctx.effective_auth().1, &mut out);
     let (tls, proxy) = selected_profiles(ctx);
-    match tls.and_then(|p| p.client_identity.as_ref()) {
-        Some(ClientIdentity::Pem { private_key_pem, .. }) => push_secret(private_key_pem, &mut out),
-        Some(ClientIdentity::Pkcs12 { bundle_b64, password }) => {
-            push_secret(bundle_b64, &mut out);
-            push_secret(password, &mut out);
+    for identity in tls.iter().filter_map(|p| p.client_identity.as_ref()) {
+        match identity {
+            ClientIdentity::Pem { private_key_pem, .. } => push_secret(private_key_pem, &mut out),
+            ClientIdentity::Pkcs12 { bundle_b64, password } => {
+                push_secret(bundle_b64, &mut out);
+                push_secret(password, &mut out);
+            }
+            // Fetched by the worker from the Workload API; no vault secret.
+            ClientIdentity::WorkloadApi { .. } => {}
         }
-        // Fetched by the worker from the Workload API; no vault secret.
-        Some(ClientIdentity::WorkloadApi { .. }) | None => {}
     }
     if let Some(pw) = proxy.and_then(|p| p.password.as_ref()) {
         push_secret(pw, &mut out);
+    }
+    if let Some(a) = ctx.spec.udp.as_ref().and_then(|u| u.proxy_protocol.as_ref()).and_then(|e| e.authentication.as_ref()) {
+        push_secret(&a.secret, &mut out);
     }
     out
 }
@@ -341,7 +353,7 @@ impl WorkerJob {
                             .collect(),
                     })
                     .collect(),
-                tls_profiles: tls.cloned().into_iter().collect(),
+                tls_profiles: tls.into_iter().cloned().collect(),
                 proxy_profiles: proxy.cloned().into_iter().collect(),
                 integrations: ctx
                     .integrations
@@ -508,6 +520,210 @@ mod tests {
         assert!(c.secrets.resolve(&SecretRef { id: unused, label: "old".into() }).is_err());
         assert_eq!(c.var_layers[0].vars[0].value, "var-secret-value");
         assert!(c.var_layers[0].vars[0].secret);
+    }
+
+    /// Every `SensitiveValue` field a worker request carries (its spec, with
+    /// the settings and auth layers, and its TLS and proxy profiles), as
+    /// `Type.field`. Integration profiles are not listed: their
+    /// diagnostic-detail credential is stripped from the job and never
+    /// resolved by the engine.
+    const SENSITIVE_FIELDS: &[&str] = &[
+        "AuthConfig.password",
+        "AuthConfig.signing_key",
+        "AuthConfig.token",
+        "AuthConfig.value",
+        "ClientIdentity.bundle_b64",
+        "ClientIdentity.password",
+        "ClientIdentity.private_key_pem",
+        "DatagramAuthSpec.secret",
+        "DpopConfig.access_token",
+        "DpopConfig.private_key_pem",
+        "HmacConfig.secret",
+        "JwtSvidSource.token",
+        "OAuth2Config.client_secret",
+        "ProxyProfile.password",
+        "WsseConfig.password",
+        "WsseConfig.saml_assertion",
+    ];
+
+    /// The `SensitiveValue` fields the published schemas declare for what a
+    /// worker request carries, as `Type.field` (repeated once per variant
+    /// that declares it).
+    fn schema_sensitive_fields() -> Vec<String> {
+        fn walk(v: &serde_json::Value, field: &str, ty: &str, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    if m.get("$ref").and_then(|r| r.as_str()).is_some_and(|r| r.ends_with("/SensitiveValue")) {
+                        out.push(format!("{ty}.{field}"));
+                    }
+                    for (k, c) in m {
+                        match (k.as_str(), c) {
+                            ("$defs", _) => {}
+                            ("properties", serde_json::Value::Object(props)) => props.iter().for_each(|(f, s)| walk(s, f, ty, out)),
+                            _ => walk(c, field, ty, out),
+                        }
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|c| walk(c, field, ty, out)),
+                _ => {}
+            }
+        }
+        let mut types = std::collections::BTreeMap::new();
+        for (name, schema) in anvil_domain::schema::all() {
+            if !matches!(name, "RequestSpec" | "TlsProfile" | "ProxyProfile") {
+                continue;
+            }
+            let defs = schema.get("$defs").and_then(|d| d.as_object()).cloned().unwrap_or_default();
+            types.entry(name.to_string()).or_insert(schema);
+            for (ty, s) in defs {
+                types.entry(ty).or_insert(s);
+            }
+        }
+        types.remove("SensitiveValue");
+        let mut out = Vec::new();
+        for (ty, s) in &types {
+            walk(s, "", ty, &mut out);
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn every_sensitive_field_the_schemas_declare_is_known_to_secret_refs() {
+        assert_eq!(
+            schema_sensitive_fields(),
+            SENSITIVE_FIELDS,
+            "a sensitive field was added or removed: collect it in `secret_refs`, set it in \
+             `every_vault_reference_a_request_resolves_is_scoped_into_the_job` and list it here"
+        );
+    }
+
+    /// A request that sets every field of `SENSITIVE_FIELDS` to its own vault
+    /// reference: the parent scopes each one into the worker job, and the
+    /// worker resolves each one.
+    #[test]
+    fn every_vault_reference_a_request_resolves_is_scoped_into_the_job() {
+        let mut refs: Vec<SecretRef> = Vec::new();
+        let mut vault_ref = |label: &str| {
+            let r = SecretRef { id: Id::new(), label: label.into() };
+            refs.push(r.clone());
+            serde_json::to_value(SensitiveValue::Secret { secret: r }).unwrap()
+        };
+        let auth: AuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "multi",
+            "profiles": [
+                { "type": "api_key", "name": "x-api-key", "value": vault_ref("api key") },
+                { "type": "basic", "username": "u", "password": vault_ref("basic password") },
+                { "type": "bearer", "token": vault_ref("bearer token") },
+                { "type": "jwt", "algorithm": "HS256", "signing_key": vault_ref("jwt signing key"), "claims": {} },
+                {
+                    "type": "oauth2",
+                    "config": {
+                        "grant": "client_credentials",
+                        "token_url": "https://idp.test/token",
+                        "client_id": "c",
+                        "client_secret": vault_ref("oauth client secret"),
+                    },
+                },
+                { "type": "hmac", "config": { "username": "u", "secret": vault_ref("hmac secret") } },
+                {
+                    "type": "dpop",
+                    "config": { "access_token": vault_ref("dpop access token"), "private_key_pem": vault_ref("dpop key") },
+                },
+                {
+                    "type": "wsse",
+                    "config": { "username": "u", "password": vault_ref("wsse password"), "saml_assertion": vault_ref("saml assertion") },
+                },
+                {
+                    "type": "jwt_svid",
+                    "config": { "source": { "kind": "value", "token": vault_ref("jwt-svid") }, "audiences": ["a"] },
+                },
+            ],
+        }))
+        .unwrap();
+        let now = Utc::now();
+        let (own_tls, proxy_tls, proxy_id) = (Id::new(), Id::new(), Id::new());
+        let tls_profiles: Vec<TlsProfile> = serde_json::from_value(serde_json::json!([
+            {
+                "id": own_tls, "workspace_id": Id::new(), "name": "request",
+                "client_identity": { "format": "pem", "cert_chain_pem": "", "private_key_pem": vault_ref("client key") },
+                "created_at": now, "updated_at": now,
+            },
+            {
+                "id": proxy_tls, "workspace_id": Id::new(), "name": "proxy",
+                "client_identity": {
+                    "format": "pkcs12",
+                    "bundle_b64": vault_ref("proxy client bundle"),
+                    "password": vault_ref("proxy client bundle password"),
+                },
+                "created_at": now, "updated_at": now,
+            },
+        ]))
+        .unwrap();
+        let proxy: ProxyProfile = serde_json::from_value(serde_json::json!({
+            "id": proxy_id, "workspace_id": Id::new(), "name": "proxy", "kind": "https", "address": "proxy.test:443",
+            "username": "u", "password": vault_ref("proxy password"), "tls_profile_id": proxy_tls,
+            "created_at": now, "updated_at": now,
+        }))
+        .unwrap();
+        let udp: anvil_domain::request::UdpSpec = serde_json::from_value(serde_json::json!({
+            "datagrams": [],
+            "proxy_protocol": { "authentication": { "secret": vault_ref("datagram secret") } },
+        }))
+        .unwrap();
+        assert_eq!(refs.len(), SENSITIVE_FIELDS.len(), "the fixture sets every sensitive field once");
+
+        // A profile the request does not select keeps its secret out of the job.
+        let unselected = SecretRef { id: Id::new(), label: "unselected client key".into() };
+        let mut unselected_tls = tls_profiles[0].clone();
+        unselected_tls.id = Id::new();
+        let key = SensitiveValue::Secret { secret: unselected.clone() };
+        unselected_tls.client_identity = Some(ClientIdentity::Pem { cert_chain_pem: String::new(), private_key_pem: key });
+
+        let mut spec = RequestSpec::http("GET", "udp://127.0.0.1:9");
+        spec.protocol = anvil_domain::request::Protocol::Udp;
+        spec.udp = Some(udp);
+        let mut ctx = ExecutionContext::standalone(spec);
+        ctx.auth_layers = vec![("request".into(), auth)];
+        ctx.settings_layers.push((
+            "workspace".into(),
+            SettingsOverrides {
+                tls_profile_id: Some(own_tls),
+                proxy_profile_id: Some(anvil_domain::settings::ProxySelection::Profile { id: proxy_id }),
+                ..Default::default()
+            },
+        ));
+        ctx.tls_profiles = tls_profiles.into_iter().chain([unselected_tls]).collect();
+        ctx.proxy_profiles = vec![proxy];
+        let mut vault: HashMap<Id, Zeroizing<String>> =
+            refs.iter().map(|r| (r.id, Zeroizing::new(format!("value of {}", r.label)))).collect();
+        vault.insert(unselected.id, Zeroizing::new("must-not-leave".into()));
+        ctx.secrets = Arc::new(MemorySecrets(vault));
+
+        let label_set = |rs: &[SecretRef]| {
+            let mut l: Vec<String> = rs.iter().map(|r| r.label.clone()).collect();
+            l.sort();
+            l
+        };
+        assert_eq!(label_set(&secret_refs(&ctx)), label_set(&refs));
+
+        let rid = Id::new();
+        let job = LoadJob { requests: HashMap::from([(rid, ctx)]), dataset: None };
+        let wj = WorkerJob::from_load_job(&plan(vec![rid]), &job, RunOptions::default()).unwrap();
+        assert_eq!(wj.secrets.len(), refs.len());
+        assert!(!serde_json::to_string(&wj).unwrap().contains("must-not-leave"));
+        let mut shipped: Vec<Id> = wj.requests[0].tls_profiles.iter().map(|p| p.id).collect();
+        shipped.sort();
+        let mut want = vec![own_tls, proxy_tls];
+        want.sort();
+        assert_eq!(shipped, want, "the request's TLS profile and its proxy's travel to the worker");
+
+        let (_, lj, _) = wj.into_load_job().unwrap();
+        let c = &lj.requests[&rid];
+        for r in &refs {
+            assert_eq!(c.secrets.resolve(r).unwrap().as_str(), format!("value of {}", r.label));
+        }
+        assert!(c.secrets.resolve(&unselected).is_err());
     }
 
     /// The parent's resolver for one linked file, as `anvil_app` builds it
