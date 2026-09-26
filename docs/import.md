@@ -324,7 +324,13 @@ token, `none`, `{}`/`inherit` → inherit), base environment → workspace
 variables (nested data flattened to dotted names), sub-environments →
 environments, redirect and cookie settings. Nunjucks `{{ _.name }}` becomes
 `{{name}}`; `{% uuid %}` and `{% now %}` map to `{{$uuid}}`,
-`{{$isoTimestamp}}`, `{{$timestamp}}`, `{{$timestampMs}}`.
+`{{$isoTimestamp}}`, `{{$timestamp}}`, `{{$timestampMs}}`. Path parameters
+replace whole `:name` path segments by exact name (query and fragment are
+untouched); literal values are percent-encoded like `encodeURIComponent`,
+`{{variable}}` references are kept, and an empty value becomes a required
+variable. A body MIME type the body kind cannot express (a vendor `+json`
+type, `text/xml`, parameters such as `charset`) is kept as an explicit
+`Content-Type` header unless the request already sets one.
 
 Reported: other template tags (`{% response %}`, `{% base64 %}`, …) and
 Nunjucks filters (left in place), digest/NTLM/Hawk/IAM/netrc/ASAP auth,
@@ -345,8 +351,15 @@ only the first command of a pipeline/list is imported. `$VAR`/`${VAR}` become
 `--http2-prior-knowledge`, `--http3`, `--http3-only`, `--connect-timeout`,
 `-m`, `--url`, short-option clusters (`-sSL`, `-XPOST`). Method inference
 follows curl (data → POST, `-G` → GET with data in the query, `-I` → HEAD).
-A missing scheme defaults to `http://` (reported). SOAP requests
-(`SOAPAction` + XML, or `application/soap+xml`) become SOAP bodies.
+A missing scheme defaults to `http://` (reported). Literal data keeps its
+bytes, line breaks included (curl strips CR/LF only from `@file` data);
+`--form-string` values are literal (no `;type=` metadata, no file reads).
+SOAP requests (`SOAPAction` + XML, or `application/soap+xml`) become SOAP
+bodies; a SOAP 1.2 `action` media-type parameter becomes the SOAP action.
+The SOAP 1.2 `Content-Type` is dropped only when it contains exactly
+`charset=utf-8` and optionally one plain `action` parameter. Otherwise the
+header is kept as explicit, matching what curl sends. A bare
+`application/soap+xml` header is kept as explicit.
 JSON-looking data sent without a `Content-Type` stays form-typed, as curl
 sends it (reported).
 
@@ -365,8 +378,10 @@ once); cookies come from the `Cookie` header or the `cookies` array; URL
 userinfo becomes Basic auth. Bodies: JSON (credential members scrubbed
 recursively), form-urlencoded (from `text` or `params`), multipart `params`
 (file parts as placeholders), other text verbatim with a `body_not_scanned`
-warning, base64 bodies reported. Recorded responses, timings and pages are
-not imported.
+warning, base64 bodies reported. A `postData.mimeType` the body kind cannot
+express (a vendor `+json` type, `text/xml`, parameters) is kept as an
+explicit `Content-Type` header unless one was recorded. Recorded responses,
+timings and pages are not imported.
 
 ## Known limitations
 
@@ -375,6 +390,8 @@ not imported.
   generator cannot guarantee is reported instead.
 * `pattern` is never satisfied deliberately; `not`, conditionals and other
   applicators listed above are not evaluated.
+* Insomnia `{{var}}` references in path-parameter values are copied verbatim,
+  so the rendered value is not percent-encoded.
 * Only the first `oneOf`/`anyOf` branch, the first `xsd:choice` branch and one
   media type per request body are generated.
 * External references are never resolved by the importer; resolving approved

@@ -8,7 +8,9 @@
 //! and unit tests are retained in the report, never executed.
 
 use crate::builder::Builder;
-use crate::common::{body_from_text, credential, dedupe_content_type, env_var, header_content_type, maybe_redact, parse_form};
+use crate::common::{
+    body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact, parse_form,
+};
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
 use anvil_domain::Id;
@@ -17,6 +19,7 @@ use anvil_domain::request::{Body, KeyValue, MultipartContent, MultipartPart, Req
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -496,7 +499,9 @@ fn request(
     spec.params = kv_list(b, r.get("parameters"), &ptr(at, "parameters"), "query");
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");
     let ct = header_content_type(&spec.headers);
-    spec.body = body(b, r.get("body"), &ptr(at, "body"), ct.as_deref());
+    let mut declared = None;
+    spec.body = body(b, r.get("body"), &ptr(at, "body"), ct.as_deref(), &mut declared);
+    keep_declared_content_type(&mut spec.headers, declared);
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match r.get("authentication") {
         Some(a) => auth(b, a, &ptr(at, "authentication"), &name),
@@ -513,25 +518,88 @@ fn request(
     req.description = desc;
 }
 
+/// Resolve `:name` path segments the way Insomnia does: only a whole path
+/// segment matches, by exact name (the first declaration wins), and literal
+/// values are percent-encoded like `encodeURIComponent` so delimiters stay
+/// data. `{{variable}}` references in a value are kept as references. The
+/// query and fragment are left untouched.
 fn path_params(b: &mut Builder, url: &str, params: Option<&Value>, at: &str) -> String {
     let Some(list) = params.and_then(Value::as_array).filter(|l| !l.is_empty()) else { return url.to_string() };
-    let mut out = url.to_string();
-    for p in list {
-        let Some(name) = str_of(p, "name") else { continue };
-        let val = p.get("value").map(scalar_text).unwrap_or_default();
-        let rep = if val.is_empty() {
-            let v = sanitize_var(name);
-            b.report.require_var(&v, false, "Insomnia path parameter without a value", at);
-            format!("{{{{{v}}}}}")
+    let (path, tail) = url.split_at(path_end(url));
+    let mut resolved: Vec<(String, String)> = vec![];
+    let segments: Vec<String> = path
+        .split('/')
+        .map(|seg| {
+            let Some(name) = seg.strip_prefix(':').filter(|n| !n.is_empty()) else { return seg.to_string() };
+            if let Some((_, rep)) = resolved.iter().find(|(n, _)| n == name) {
+                return rep.clone();
+            }
+            let Some(p) = list.iter().find(|p| str_of(p, "name") == Some(name)) else { return seg.to_string() };
+            let val = p.get("value").map(scalar_text).unwrap_or_default();
+            let rep = if val.is_empty() {
+                let v = sanitize_var(name);
+                b.report.require_var(&v, false, "Insomnia path parameter without a value", at);
+                format!("{{{{{v}}}}}")
+            } else {
+                encode_path_value(&template(b, &val, at))
+            };
+            resolved.push((name.to_string(), rep.clone()));
+            rep
+        })
+        .collect();
+    format!("{}{tail}", segments.join("/"))
+}
+
+/// Byte offset of the first `?` or `#` outside `{{…}}` / `{%…%}`.
+fn path_end(url: &str) -> usize {
+    let bytes = url.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"{{") || bytes[i..].starts_with(b"{%") {
+            depth += 1;
+            i += 2;
+        } else if depth > 0 && (bytes[i..].starts_with(b"}}") || bytes[i..].starts_with(b"%}")) {
+            depth -= 1;
+            i += 2;
+        } else if depth == 0 && matches!(bytes[i], b'?' | b'#') {
+            return i;
         } else {
-            template(b, &val, at)
-        };
-        out = out.replace(&format!(":{name}"), &rep);
+            i += 1;
+        }
     }
+    url.len()
+}
+
+/// `encodeURIComponent` for the literal parts of a path parameter value;
+/// `{{…}}` references and `{%…%}` tags are copied verbatim.
+fn encode_path_value(s: &str) -> String {
+    const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("{{").into_iter().chain(rest.find("{%")).min() {
+        let close = if rest[i..].starts_with("{{") { "}}" } else { "%}" };
+        let Some(end) = rest[i + 2..].find(close).map(|e| i + 2 + e + 2) else { break };
+        out.extend(utf8_percent_encode(&rest[..i], COMPONENT));
+        out.push_str(&rest[i..end]);
+        rest = &rest[end..];
+    }
+    out.extend(utf8_percent_encode(rest, COMPONENT));
     out
 }
 
-fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>) -> Body {
+/// `declared` receives the body's media type when the body variant cannot
+/// carry it (a vendor `+json` type, `text/xml`, parameters).
+fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, declared: &mut Option<String>) -> Body {
     let Some(v) = v.filter(|v| v.as_object().is_some_and(|m| !m.is_empty())) else { return Body::None };
     let mime = str_of(v, "mimeType").map(str::to_string).or_else(|| header_ct.map(str::to_string));
     let essence = mime.as_deref().map(crate::util::media_essence).unwrap_or_default();
@@ -597,7 +665,11 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>) -
             Body::None
         }
         "" if text.is_empty() => Body::None,
-        _ => body_from_text(mime.as_deref(), text).0,
+        _ => {
+            let (body, ct) = body_from_text(mime.as_deref(), text);
+            *declared = ct;
+            body
+        }
     }
 }
 
