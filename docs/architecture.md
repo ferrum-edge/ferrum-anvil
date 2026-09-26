@@ -63,6 +63,14 @@ CLI (`anvil`) = same anvil-app services without a webview.
   destination is never used again, and stops while the pool is empty. An
   HTTP/2 connection counts as idle only with no request in flight, so neither
   expiry nor eviction cuts a request short.
+- **The workbench shows the selected workspace's state only.** Its lists
+  (collection tree, history, TLS/proxy/gateway profiles, environments) are
+  cleared when the workspace changes and filled only from the latest read of
+  the workspace still selected; an earlier read that finishes late is
+  dropped. Saving a request keeps the editor usable: saves of one request are
+  written one at a time in the order asked, each moves the saved baseline to
+  what it wrote, and edits made while a save was pending are kept and stay
+  unsaved.
 - **Load traffic never runs in the UI process.** The desktop re-launches its
   own executable with a fixed, non-secret flag and sends the job over stdin.
   The job carries only the secrets its requests reference.
