@@ -181,14 +181,29 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
     }
 }
 
+/// Text [`sanitize`] writes in place of an extracted value: `{{placeholder}}`,
+/// or an empty string for a secret variable.
+fn placeholder_text(placeholder: &str) -> String {
+    if placeholder.is_empty() { String::new() } else { format!("{{{{{placeholder}}}}}") }
+}
+
 /// Put extracted values back (after decrypting an encrypted bundle).
+///
+/// Each value goes back only to the exact pointer it was taken from, and
+/// only while that field still holds the text [`sanitize`] wrote there. A
+/// pointer that is missing, or whose field holds anything else (as a field
+/// already restored by an earlier value usually does), refuses the whole
+/// restore and leaves `v` unchanged.
 pub fn restore(v: &mut serde_json::Value, extracted: &[Extracted]) -> Result<(), String> {
+    let mut restored = v.clone();
     for e in extracted {
-        match v.pointer_mut(&e.pointer) {
-            Some(slot) => *slot = serde_json::Value::String(e.value.clone()),
+        match restored.pointer_mut(&e.pointer) {
+            Some(serde_json::Value::String(slot)) if *slot == placeholder_text(&e.placeholder) => *slot = e.value.clone(),
+            Some(_) => return Err(format!("encrypted vault refers to {}, which does not hold its placeholder", e.pointer)),
             None => return Err(format!("encrypted vault refers to {} which does not exist in the bundle", e.pointer)),
         }
     }
+    *v = restored;
     Ok(())
 }
 
@@ -225,6 +240,51 @@ mod tests {
         assert_eq!(s.extracted.len(), 3);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
+    }
+
+    #[test]
+    fn values_are_restored_only_over_their_placeholders() {
+        let mut v = serde_json::json!({
+            "requests": [{
+                "spec": {
+                    "url": "https://api.example.com/",
+                    "auth": {"type": "basic", "username": "bob", "password": {"kind": "template", "value": "hunter2"}}
+                }
+            }],
+            "environments": [{"variables": [
+                {"name": "db_pw", "value": {"kind": "template", "value": "s3cr3t"}, "secret": true, "enabled": true}
+            ]}]
+        });
+        let s = sanitize(&mut v);
+        assert_eq!(s.extracted.len(), 2);
+        let sanitized = v.clone();
+        let pw = s.extracted.iter().position(|e| e.placeholder == "secret_password").unwrap();
+        let with = |pointer: &str, placeholder: &str| {
+            let mut e = s.extracted.clone();
+            e[pw] = Extracted { pointer: pointer.into(), placeholder: placeholder.into(), value: "hunter2".into() };
+            e
+        };
+        let refused = [
+            // Another field, whatever placeholder is claimed for it.
+            with("/requests/0/spec/url", "secret_password"),
+            with("/requests/0/spec/auth/username", ""),
+            // Not a string, or not there at all.
+            with("/requests/0/spec/auth", "secret_password"),
+            with("", ""),
+            with("/requests/1/spec/auth/password/value", "secret_password"),
+            // The right field under another placeholder.
+            with("/requests/0/spec/auth/password/value", "secret_other"),
+            with("/requests/0/spec/auth/password/value", ""),
+            // The same field twice.
+            vec![s.extracted[pw].clone(), s.extracted[pw].clone()],
+        ];
+        for extracted in refused {
+            let mut target = sanitized.clone();
+            assert!(restore(&mut target, &extracted).is_err(), "{extracted:?}");
+            assert_eq!(target, sanitized, "a refused restore changed nothing: {extracted:?}");
+        }
+        restore(&mut v, &s.extracted).unwrap();
+        assert!(v.to_string().contains("hunter2") && v.to_string().contains("s3cr3t"));
     }
 
     #[test]

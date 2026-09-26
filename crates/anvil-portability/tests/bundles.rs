@@ -1067,3 +1067,179 @@ fn full_backups_are_never_written_or_opened_as_bundles() {
     }
     bundle::open(&bytes, Some(pass)).expect("the untouched bundle opens");
 }
+
+/// Re-pack a bundle without the entry `name`, recomputing the checksums.
+fn without_entry(bytes: &[u8], name: &str) -> Vec<u8> {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).unwrap();
+        let n = f.name().to_string();
+        let mut b = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut b).unwrap();
+        if n != name {
+            w.start_file(n, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(&b).unwrap();
+        }
+    }
+    repack(&w.finish().unwrap().into_inner(), |_, _| {})
+}
+
+/// Re-pack a bundle with the entry `name` replaced by `data`.
+fn replace_entry(bytes: &[u8], name: &str, data: &[u8]) -> Vec<u8> {
+    repack(bytes, |n, b| {
+        if n == name {
+            *b = data.to_vec();
+        }
+    })
+}
+
+/// The bytes of one bundle entry.
+fn entry(bytes: &[u8], name: &str) -> Vec<u8> {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut b = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_name(name).unwrap(), &mut b).unwrap();
+    b
+}
+
+#[test]
+fn an_encrypted_bundle_changed_in_any_entry_restores_nothing() {
+    let pass = "correct horse battery";
+    let mut g = sample();
+    g.history.push(serde_json::json!({"note": "run 1"}));
+    let with_history = ExportOptions { include_history: true, ..opts(ExportMode::EncryptedTransfer, Some(pass)) };
+    let (bytes, preview) = bundle::write(&g, &with_history).unwrap();
+    assert_eq!(preview.manifest.format_version, bundle::FORMAT_VERSION);
+    let opened = bundle::open(&bytes, Some(pass)).expect("the untouched bundle opens");
+    assert!(opened.secrets_restored);
+    assert_eq!(opened.graph.history.len(), 1);
+
+    let attachment = format!("attachments/{}", hex_sha(b"attachment bytes"));
+    let other = b"other attachment bytes";
+    let tampered = [
+        (
+            "a request's destination",
+            edit_json(&bytes, "workspace/objects.json", |o| o["requests"][0]["spec"]["url"] = "https://changed.invalid/".into()),
+        ),
+        ("objects.json re-serialised", edit_json(&bytes, "workspace/objects.json", |_| {})),
+        ("an attachment's bytes", replace_entry(&bytes, &attachment, b"attachment bytes, changed")),
+        ("an attachment removed", without_entry(&bytes, &attachment)),
+        ("an attachment added", with_entry(&bytes, &format!("attachments/{}", hex_sha(other)), other)),
+        ("a history record", replace_entry(&bytes, "history/records.jsonl", b"{\"note\":\"run 2\"}\n")),
+        ("the history removed", without_entry(&bytes, "history/records.jsonl")),
+        ("the manifest's exclusions", edit_json(&bytes, "manifest.json", |m| m["excluded"] = serde_json::json!(["nothing"]))),
+        ("the manifest's placeholders", edit_json(&bytes, "manifest.json", |m| m["placeholders"] = serde_json::json!([]))),
+        ("the manifest's counts", edit_json(&bytes, "manifest.json", |m| m["counts"]["requests"] = 1.into())),
+        ("the manifest's creation time", edit_json(&bytes, "manifest.json", |m| m["created_at"] = "2020-01-01T00:00:00Z".into())),
+        ("the manifest re-serialised", edit_json(&bytes, "manifest.json", |_| {})),
+    ];
+    for (what, b) in &tampered {
+        let e = bundle::open(b, Some(pass)).unwrap_err();
+        assert!(matches!(e, BundleError::WrongPassphrase), "{what}: {e}");
+        assert!(e.to_string().contains("modified"), "{what}: {e}");
+    }
+
+    // The manifest's format and mode are bound too, and are refused before
+    // the vault is opened.
+    let older = edit_json(&bytes, "manifest.json", |m| m["format_version"] = 1.into());
+    let shared = edit_json(&bytes, "manifest.json", |m| m["mode"] = "share_safely".into());
+    let vault_only = edit_json(&bytes, "manifest.json", |m| m["vault"] = serde_json::Value::Null);
+    for p in [None, Some(pass)] {
+        assert!(matches!(bundle::open(&older, p), Err(BundleError::UnboundVault)));
+        assert!(matches!(bundle::open(&shared, p), Err(BundleError::Invalid(_))));
+        assert!(matches!(bundle::open(&vault_only, p), Err(BundleError::Invalid(_))));
+    }
+    let no_vault = without_entry(&bytes, "secrets/portable-vault.enc");
+    assert!(matches!(bundle::open(&no_vault, Some(pass)), Err(BundleError::Checksum(_))));
+}
+
+#[test]
+fn a_passphrase_is_refused_for_a_bundle_without_a_vault() {
+    let pass = "correct horse battery";
+    let g = sample();
+    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    // Without its vault, and relabelled, an encrypted bundle is a share-safe
+    // one: the passphrase would verify nothing about it.
+    let stripped = edit_json(&without_entry(&bytes, "secrets/portable-vault.enc"), "manifest.json", |m| {
+        m["mode"] = "share_safely".into();
+        m["vault"] = serde_json::Value::Null;
+    });
+    let e = bundle::open(&stripped, Some(pass)).unwrap_err();
+    assert!(matches!(e, BundleError::NotEncrypted), "{e}");
+    assert!(e.to_string().contains("not encrypted"), "{e}");
+    // Opened without one, it restores no credentials.
+    let opened = bundle::open(&stripped, None).unwrap();
+    assert!(!opened.secrets_restored && opened.graph.secrets.is_empty());
+
+    // A bundle exported to share safely is refused a passphrase as well.
+    let (safe, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    assert!(matches!(bundle::open(&safe, Some(pass)), Err(BundleError::NotEncrypted)));
+    assert!(!bundle::open(&safe, None).unwrap().secrets_restored);
+}
+
+/// `bytes`, an encrypted bundle of `g`, as format 1 wrote it: its vault
+/// sealed with a constant associated data that binds nothing else in the
+/// archive.
+fn with_format_1_vault(bytes: &[u8], g: &PortableGraph, pass: &str) -> Vec<u8> {
+    use base64::Engine;
+    let manifest: serde_json::Value = serde_json::from_slice(&entry(bytes, "manifest.json")).unwrap();
+    let kdf: KdfParams = serde_json::from_value(manifest["vault"]["kdf"].clone()).unwrap();
+    let salt = base64::engine::general_purpose::STANDARD.decode(manifest["vault"]["salt_b64"].as_str().unwrap()).unwrap();
+    let key = anvil_storage::crypto::derive(pass.as_bytes(), &salt, &kdf).unwrap();
+    let mut objects = serde_json::to_value(g).unwrap();
+    let literals = anvil_portability::sanitize::sanitize(&mut objects).extracted;
+    let payload = serde_json::to_vec(&bundle::VaultPayload { secrets: g.secrets.clone(), literals }).unwrap();
+    let vault = anvil_storage::crypto::seal(&key, b"anvil-portable-vault-v1", &payload);
+    repack(bytes, |n, b| match n {
+        "manifest.json" => {
+            let mut m: serde_json::Value = serde_json::from_slice(b).unwrap();
+            m["format_version"] = 1.into();
+            *b = serde_json::to_vec(&m).unwrap();
+        }
+        "secrets/portable-vault.enc" => *b = vault.clone(),
+        _ => {}
+    })
+}
+
+#[test]
+fn format_1_vaults_are_refused_and_nothing_of_them_is_restored() {
+    let pass = "correct horse battery";
+    let g = sample();
+    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    let v1 = with_format_1_vault(&bytes, &g, pass);
+    // Early full backups relabelled as a workspace bundle (kind, mode, no
+    // settings or app settings) are such bundles; their objects could then
+    // be changed freely, since the vault bound none of them.
+    let relabelled = edit_json(&v1, "workspace/objects.json", |o| o["requests"][0]["spec"]["url"] = "https://changed.invalid/".into());
+    for b in [&v1, &relabelled] {
+        for p in [None, Some(pass)] {
+            let e = bundle::open(b, p).unwrap_err();
+            assert!(matches!(e, BundleError::UnboundVault), "{e}");
+            assert!(e.to_string().contains("export it again"), "{e}");
+        }
+    }
+    // Claiming the current format does not help: the vault does not open
+    // under the binding of a bundle it was not sealed with.
+    for b in [&v1, &relabelled] {
+        let claimed = edit_json(b, "manifest.json", |m| m["format_version"] = bundle::FORMAT_VERSION.into());
+        assert!(matches!(bundle::open(&claimed, Some(pass)), Err(BundleError::WrongPassphrase)));
+    }
+    // Nor does describing a full backup, which is refused as before.
+    let backup = edit_json(&v1, "manifest.json", |m| {
+        m["kind"] = "backup".into();
+        m["mode"] = "full_backup".into();
+    });
+    assert!(matches!(bundle::open(&backup, Some(pass)), Err(BundleError::LegacyFullBackup)));
+
+    // Bundles without a vault (share safely) of format 1 still open.
+    let (safe, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    let safe_v1 = edit_json(&safe, "manifest.json", |m| m["format_version"] = 1.into());
+    for b in [&safe, &safe_v1] {
+        let opened = bundle::open(b, None).unwrap();
+        assert!(!opened.secrets_restored && opened.graph.secrets.is_empty());
+        assert_eq!(opened.graph.requests.len(), g.requests.len());
+    }
+    // A share-safe bundle never carries a vault.
+    let smuggled = with_entry(&safe, "secrets/portable-vault.enc", &entry(&bytes, "secrets/portable-vault.enc"));
+    assert!(matches!(bundle::open(&smuggled, Some(pass)), Err(BundleError::Invalid(_))));
+}

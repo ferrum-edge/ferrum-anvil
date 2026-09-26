@@ -4,14 +4,18 @@
 //! ```text
 //! manifest.json                 format/version, mode, counts, exclusions, placeholders, vault params
 //! workspace/objects.json        object graph with sensitive literals replaced by placeholders
-//! settings/portable.json        portable app settings (backups)
 //! attachments/<sha256>          content-addressed attachments
 //! history/records.jsonl         optional redacted run history
 //! secrets/portable-vault.enc    optional Argon2id + XChaCha20-Poly1305 vault (never plaintext)
 //! checksums.json                sha256 of every entry
 //! ```
-//! Checksums detect corruption; the vault's AEAD authenticates its contents
-//! under the export passphrase. Neither proves who created the bundle.
+//! Checksums detect corruption. An encrypted bundle's vault is sealed with
+//! the SHA-256 of every other entry (manifest included) as associated data,
+//! so it opens only inside the exact bundle it was exported with: a change to
+//! any entry refuses the whole import before any value is restored. Entries
+//! stay readable without the passphrase (only the vault is encrypted), and
+//! nothing proves who created the bundle. `settings/portable.json` is never
+//! written; it marks a legacy full backup, which is refused.
 
 pub mod bundle;
 pub mod graph;
