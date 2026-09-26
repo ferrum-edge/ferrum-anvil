@@ -277,15 +277,22 @@ fn read_linked_dataset(path: &str) -> Result<Vec<u8>> {
     use std::io::Read;
     let max = crate::file_grants::FilePurpose::Dataset.max_read_bytes();
     let too_large = || AppError::Invalid(format!("the linked dataset is larger than {} MiB", max >> 20));
-    let meta = std::fs::metadata(path)?;
+    let not_regular = || AppError::Invalid("the linked dataset is not a regular file".into());
+    // Checked before opening, so a FIFO or device is never opened.
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = std::fs::File::open(path)?;
+    // The checks that count are on the opened handle, not on the path.
+    let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(AppError::Invalid("the linked dataset is not a regular file".into()));
+        return Err(not_regular());
     }
     if meta.len() > max {
         return Err(too_large());
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?.take(max + 1).read_to_end(&mut bytes)?;
+    file.take(max + 1).read_to_end(&mut bytes)?;
     // Bounded even if the file grows while it is read.
     if bytes.len() as u64 > max {
         return Err(too_large());

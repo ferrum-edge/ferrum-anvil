@@ -239,6 +239,6 @@ fn a_linked_dataset_is_read_with_the_dataset_bound() {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
-    let err = app.load_plan_check(&plan).err().expect("too large").to_string();
+    let err = app.load_plan_check(&plan).expect_err("too large").to_string();
     assert!(err.contains("larger than 64 MiB"), "{err}");
 }

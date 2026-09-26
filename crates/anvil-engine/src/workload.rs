@@ -439,12 +439,30 @@ fn resolve_plan(c: &JwtSvidConfig, ctx: &ExecutionContext, r: &Resolver) -> Resu
 }
 
 fn read_token_file(path: &str) -> Result<Zeroizing<String>, TransportFailure> {
+    use std::io::Read;
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth.jwt_svid.path");
-    let meta = std::fs::metadata(path).map_err(|e| fail(format!("the JWT-SVID file {path} is not readable: {e}")))?;
-    if meta.len() > MAX_TOKEN_FILE_BYTES {
-        return Err(fail(format!("the JWT-SVID file {path} is larger than {MAX_TOKEN_FILE_BYTES} bytes")));
+    let unreadable = |e: std::io::Error| fail(format!("the JWT-SVID file {path} is not readable: {e}"));
+    let not_regular = || fail(format!("the JWT-SVID file {path} is not a regular file"));
+    let too_large = || fail(format!("the JWT-SVID file {path} is larger than {MAX_TOKEN_FILE_BYTES} bytes"));
+    // Checked before opening, so a FIFO or device is never opened.
+    if !std::fs::metadata(path).map_err(unreadable)?.is_file() {
+        return Err(not_regular());
     }
-    let raw = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| fail(format!("the JWT-SVID file {path} is not readable: {e}")))?);
+    let file = std::fs::File::open(path).map_err(unreadable)?;
+    // The checks that count are on the opened handle, not on the path.
+    let meta = file.metadata().map_err(unreadable)?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    if meta.len() > MAX_TOKEN_FILE_BYTES {
+        return Err(too_large());
+    }
+    let mut raw = Zeroizing::new(String::new());
+    file.take(MAX_TOKEN_FILE_BYTES + 1).read_to_string(&mut raw).map_err(unreadable)?;
+    // Bounded even if the file grows while it is read.
+    if raw.len() as u64 > MAX_TOKEN_FILE_BYTES {
+        return Err(too_large());
+    }
     Ok(Zeroizing::new(raw.trim().to_string()))
 }
 
@@ -923,4 +941,47 @@ pub async fn probe(endpoint: &str, audience: Option<&str>, timeout: Duration) ->
         }
     }
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("anvil-token-file-{}-{name}", Id::new()))
+    }
+
+    #[test]
+    fn token_file_is_read_and_trimmed() {
+        let p = temp_path("ok");
+        std::fs::write(&p, "  a.b.c\n").unwrap();
+        let token = read_token_file(p.to_str().unwrap());
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(token.unwrap().as_str(), "a.b.c");
+    }
+
+    #[test]
+    fn oversized_token_file_is_refused() {
+        let p = temp_path("large");
+        std::fs::write(&p, vec![b'a'; MAX_TOKEN_FILE_BYTES as usize + 1]).unwrap();
+        let err = read_token_file(p.to_str().unwrap()).unwrap_err();
+        std::fs::remove_file(&p).unwrap();
+        assert!(err.message.contains("is larger than"), "{}", err.message);
+    }
+
+    #[test]
+    fn directory_is_not_read_as_a_token_file() {
+        let p = temp_path("dir");
+        std::fs::create_dir(&p).unwrap();
+        let err = read_token_file(p.to_str().unwrap()).unwrap_err();
+        std::fs::remove_dir(&p).unwrap();
+        assert!(err.message.contains("is not a regular file"), "{}", err.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_is_not_read_as_a_token_file() {
+        let err = read_token_file("/dev/zero").unwrap_err();
+        assert!(err.message.contains("is not a regular file"), "{}", err.message);
+    }
 }

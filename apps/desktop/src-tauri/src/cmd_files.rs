@@ -44,8 +44,10 @@ pub async fn file_choose(
     purpose: FilePurpose,
     options: Option<DialogOptions>,
 ) -> R<Vec<FileGrant>> {
-    st.app()?;
+    // Read before the lock check, so a lock after it always moves the
+    // generation past this value.
     let generation = st.file_grants.generation();
+    st.app()?;
     let options = options.unwrap_or_default();
     match purpose.access() {
         Access::Write if options.multiple => return Err("a save dialog chooses one file".into()),
@@ -96,6 +98,14 @@ pub async fn file_choose(
                     return Err(GrantError::Revoked.to_string());
                 }
                 let b = app.bind_token_file(&path).map_err(e)?;
+                // A lock during the bind returns nothing to the webview. The
+                // binding is kept: it names only a file the user chose in the
+                // native dialog, lets nothing read it without a request that
+                // names it, and may predate this choice, so removing it here
+                // could drop a binding the user made earlier.
+                if st.file_grants.generation() != generation {
+                    return Err(GrantError::Revoked.to_string());
+                }
                 let file_name = std::path::Path::new(&b.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 Ok(FileGrant { token: b.id.to_string(), file_name, path: Some(b.path) })
             }
