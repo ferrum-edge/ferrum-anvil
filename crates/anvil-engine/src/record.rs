@@ -505,10 +505,7 @@ mod tests {
         let spec = anvil_domain::request::RequestSpec {
             extractions: vec![anvil_domain::assertions::Extraction {
                 variable: "value".into(),
-                source: anvil_domain::assertions::ExtractionSource::Regex {
-                    pattern: format!("{secret}("),
-                    group: 0,
-                },
+                source: anvil_domain::assertions::ExtractionSource::Regex { pattern: format!("{secret}("), group: 0 },
                 sensitive: false,
             }],
             ..anvil_domain::request::RequestSpec::http("GET", "https://example.test/")
@@ -555,12 +552,7 @@ mod tests {
             lint_bypassed: None,
             attempts: vec![],
             last: AttemptOutput {
-                observation: anvil_transport::session::new_attempt(
-                    0,
-                    AttemptReason::Initial,
-                    "GET",
-                    "https://example.test/",
-                ),
+                observation: anvil_transport::session::new_attempt(0, AttemptReason::Initial, "GET", "https://example.test/"),
                 response: Some(response),
                 body: Bytes::from_static(b"body"),
             },
