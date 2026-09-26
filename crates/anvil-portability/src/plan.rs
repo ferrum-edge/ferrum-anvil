@@ -25,7 +25,7 @@ pub struct ImportPlan {
     pub conflicts: Vec<String>,
 }
 
-fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
+pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
     let mut v = Vec::new();
     v.extend(g.workspaces.iter().map(|x| ("workspace".to_string(), x.meta.id, x.name.clone())));
     v.extend(g.folders.iter().map(|x| ("folder".to_string(), x.meta.id, x.name.clone())));
@@ -54,41 +54,111 @@ pub fn plan(g: &PortableGraph, existing: &HashSet<Id>, policy: ConflictPolicy) -
     }
 }
 
-/// Give every object a fresh id and rewrite all references (Duplicate policy).
-/// Secret ids are remapped too, so duplicated workspaces never share vault entries.
-pub fn remap_all(g: &mut PortableGraph) -> HashMap<Id, Id> {
+/// Fields that hold the id of an object in the graph (a string, a list of
+/// strings, or an object such as a proxy selection whose own `id` is one).
+/// Domain types have no free-form maps, so every JSON key in a serialized
+/// graph is a field name from those types; user text is never a key.
+const REFERENCE_FIELDS: &[&str] = &[
+    "id",
+    "workspace_id",
+    "parent_id",
+    "folder_id",
+    "request_id",
+    "revision_id",
+    "dataset_id",
+    "environment_id",
+    "active_environment_id",
+    "tls_profile_id",
+    "proxy_profile_id",
+    "integration_profile_id",
+    "scenario_id",
+    "chain",
+];
+
+/// Give every object, revision and secret a fresh id and rewrite every
+/// reference to them (Duplicate policy). The copy shares no identity with the
+/// source: writing it can never overwrite a source object, and each copied
+/// secret is owned by the copied workspace.
+///
+/// Only reference fields are rewritten, and only when they name an object or
+/// secret in this graph; text that merely looks like an id is left alone.
+pub fn remap_all(g: &mut PortableGraph) -> Result<HashMap<Id, Id>, serde_json::Error> {
     let mut map: HashMap<Id, Id> = HashMap::new();
     for (_, id, _) in all_ids(g) {
         map.insert(id, Id::new());
     }
-    let mut secret_map: HashMap<String, String> = HashMap::new();
-    for k in g.secrets.keys() {
-        secret_map.insert(k.clone(), Id::new().to_string());
+    for r in &g.revisions {
+        map.insert(r.id, Id::new());
     }
-    // Rewrite via JSON so every reference field is covered uniformly.
-    let mut v = serde_json::to_value(&*g).expect("graph serializes");
+    let mut secret_map: HashMap<Id, Id> = HashMap::new();
+    for k in g.secrets.keys() {
+        if let Ok(id) = k.parse::<Id>() {
+            secret_map.insert(id, Id::new());
+        }
+    }
+    let mut v = serde_json::to_value(&*g)?;
     rewrite(&mut v, &map, &secret_map);
-    let mut ng: PortableGraph = serde_json::from_value(v).expect("remapped graph deserializes");
+    let mut ng: PortableGraph = serde_json::from_value(v)?;
     ng.attachments = std::mem::take(&mut g.attachments);
     ng.history = std::mem::take(&mut g.history);
-    ng.secrets = std::mem::take(&mut g.secrets).into_iter().map(|(k, v)| (secret_map.get(&k).cloned().unwrap_or(k), v)).collect();
+    // Execution records can hold captured user data, so only their own
+    // top-level links are followed.
+    for h in &mut ng.history {
+        for field in ["workspace_id", "request_id", "revision_id", "environment_id"] {
+            if let Some(serde_json::Value::String(s)) = h.get_mut(field) {
+                remap(s, &map);
+            }
+        }
+    }
+    ng.secrets = std::mem::take(&mut g.secrets)
+        .into_iter()
+        .map(|(k, mut secret)| {
+            // Owned by the copied workspace; validation rejects any other owner.
+            let owner = secret.workspace_id.as_deref().and_then(|w| w.parse::<Id>().ok()).and_then(|w| map.get(&w));
+            secret.workspace_id = owner.map(|w| w.to_string());
+            let id = k.parse::<Id>().ok().and_then(|id| secret_map.get(&id)).map(|id| id.to_string()).unwrap_or(k);
+            (id, secret)
+        })
+        .collect();
     *g = ng;
-    map
+    Ok(map)
 }
 
-fn rewrite(v: &mut serde_json::Value, map: &HashMap<Id, Id>, secrets: &HashMap<String, String>) {
+fn remap(s: &mut String, map: &HashMap<Id, Id>) {
+    if let Some(n) = s.parse::<Id>().ok().and_then(|id| map.get(&id)) {
+        *s = n.to_string();
+    }
+}
+
+fn rewrite(v: &mut serde_json::Value, ids: &HashMap<Id, Id>, secrets: &HashMap<Id, Id>) {
+    use serde_json::Value;
     match v {
-        serde_json::Value::String(s) => {
-            if let Ok(id) = s.parse::<Id>() {
-                if let Some(n) = map.get(&id) {
-                    *s = n.to_string();
-                } else if let Some(n) = secrets.get(s.as_str()) {
-                    *s = n.clone();
+        Value::Object(o) => {
+            // A vault reference: `{"kind":"secret","secret":{"id":…,"label":…}}`.
+            if o.get("kind").and_then(Value::as_str) == Some("secret")
+                && let Some(Value::Object(r)) = o.get_mut("secret")
+            {
+                if let Some(Value::String(s)) = r.get_mut("id") {
+                    remap(s, secrets);
+                }
+                return;
+            }
+            for (k, x) in o.iter_mut() {
+                match x {
+                    Value::String(s) if REFERENCE_FIELDS.contains(&k.as_str()) => remap(s, ids),
+                    Value::Array(a) if REFERENCE_FIELDS.contains(&k.as_str()) => {
+                        for e in a {
+                            match e {
+                                Value::String(s) => remap(s, ids),
+                                other => rewrite(other, ids, secrets),
+                            }
+                        }
+                    }
+                    other => rewrite(other, ids, secrets),
                 }
             }
         }
-        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| rewrite(x, map, secrets)),
-        serde_json::Value::Object(o) => o.values_mut().for_each(|x| rewrite(x, map, secrets)),
+        Value::Array(a) => a.iter_mut().for_each(|x| rewrite(x, ids, secrets)),
         _ => {}
     }
 }

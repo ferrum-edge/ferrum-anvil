@@ -68,6 +68,26 @@ commands return `LOCKED` until unlock.
 | Full backup | Everything including history and settings | Encrypted |
 
 Import is preview-then-apply with conflict policies (duplicate, merge, replace).
+Duplicate gives every imported object, request revision and secret a new id and
+makes each copied secret belong to the copied workspace, so the copy never
+overwrites or depends on its source: deleting either leaves the other working.
+Merge keeps objects, revisions and secrets that already exist. A bundle whose
+secrets belong to a workspace it does not contain, or that gives two objects
+one id, is refused.
+
+An encrypted bundle's vault key is derived with the Argon2id costs its manifest
+names, before the vault can be authenticated. Those costs are refused, before
+any passphrase is asked for or any derivation runs, unless they are within:
+
+| Cost | Allowed |
+|---|---|
+| Memory | 8 KiB per lane up to 256 MiB |
+| Passes | 1 to 10 |
+| Lanes | 1 to 4 |
+| Memory × passes | at most 1 GiB (e.g. 256 MiB for 4 passes) |
+| Salt | 8 to 64 bytes |
+
+Exports use 64 MiB, 3 passes and 1 lane.
 Imports never send requests, run scripts or load plans, and never activate TLS
 bypasses, plain-HTTP marker trust, cross-origin credential forwarding or the
 legacy HMAC opt-in; the preview lists what was normalised. Device-bound items
@@ -81,6 +101,11 @@ needing rebinding.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
 - Bundles carry `format_version`; unknown future formats are rejected.
+- A bundle's manifest `schema_version`, and the `schema_version` of every object,
+  settings record and history record in it, is checked before anything is
+  decrypted, interpreted or written. A newer schema is refused, and so is an
+  older one that has no migration step, so fields from another schema are never
+  silently dropped.
 - Contracts (`contracts/schemas`) are generated from the Rust types; additive
   fields use serde defaults so older records keep loading.
 
