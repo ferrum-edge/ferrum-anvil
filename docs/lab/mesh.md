@@ -181,6 +181,22 @@ Three consecutive `anvil-lab run mesh --untrusted-pass` runs on 2026-09-26 on th
 runs 2 and 3) and were explained by the lost-alert findings, as designed; the other runs of the same
 scenarios read the alert.
 
+With UDP through HBONE (MESH-018 to MESH-028, commit "UDP through HBONE tunnels"), on 2026-09-26 on the
+final code (macOS arm64, `ferrum-edge-macos-aarch64` pinned by `lab/gateway/RELEASE.lock` and
+`lab/gateway/releases/v0.9.5.lock`):
+
+| Run | Result |
+|---|---|
+| v0.9.7 run 1 (`results/lab/20260926T043340Z-mesh`) | 52 passed, 0 failed, 4 skipped |
+| v0.9.7 run 2 (`results/lab/20260926T043354Z-mesh`) | 52 passed, 0 failed, 4 skipped |
+| v0.9.7 run 3 (`results/lab/20260926T043404Z-mesh`) | 52 passed, 0 failed, 4 skipped |
+| v0.9.5 (`--release v0.9.5`, `results/lab/20260926T043415Z-mesh`) | 52 passed, 0 failed, 4 skipped |
+
+52 = 26 scenarios × (trusted + untrusted pass); the skips are MESH-016, 017, 029 and 030. No untrusted
+run produced a `ferrum.token.*` or `ferrum.outcome*` finding. In every run and pass, MESH-026 and MESH-027
+saw the endpoint's `END_STREAM` (`closed_by = peer`), never a reset. The lost-alert shapes appeared in runs
+2 and 3 (MESH-012) and on v0.9.5 (MESH-006, MESH-013), explained by the lost-alert findings.
+
 ## 5. Limitations
 
 - No Kubernetes, CNI, eBPF or node agent: captured (transparent) traffic, NodeWaypoint and the Ambient
