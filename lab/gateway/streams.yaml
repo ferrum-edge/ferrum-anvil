@@ -55,7 +55,9 @@ proxies:
     strip_listen_path: true
     pool_enable_http2: false
 
-  # PROTO-009/010/012/013: WebSocket echo; the backend leg is always HTTP/1.1 Upgrade.
+  # PROTO-009/010/012/013, WS-DEFLATE-*: WebSocket echo; the backend leg is always HTTP/1.1
+  # Upgrade. With `pmd` query options the backend is a permessage-deflate peer, which records
+  # whether the client's Sec-WebSocket-Extensions offer reached it (the gateway strips it).
   #   H1 Upgrade:          ws://127.0.0.1:18480/ws
   #   H2 extended CONNECT: h2c on 18480 or h2 (TLS) on 18443, :protocol=websocket
   - id: proto012-ws-echo

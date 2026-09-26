@@ -9,6 +9,10 @@ use std::time::SystemTime;
 
 /// `DatagramRelayed`: a CONNECT-UDP proxy fixture relayed a client HTTP
 /// Datagram to its UDP target; `via` is `capsule` or `quic_datagram`.
+/// `WsExtensions`: a WebSocket fixture's extension negotiation, the client's
+/// `Sec-WebSocket-Extensions` offer (absent: none arrived) and its answer.
+/// `WsMessage`: a data message a WebSocket fixture received, whether RSV1
+/// (compressed) was set, and its payload bytes on the wire and decoded.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GroundTruth {
@@ -21,6 +25,8 @@ pub enum GroundTruth {
     DatagramReceived { bytes: u64 },
     MessageReceived { bytes: u64 },
     DatagramRelayed { bytes: u64, via: String },
+    WsExtensions { offer: Option<String>, answer: Option<String> },
+    WsMessage { compressed: bool, wire_bytes: u64, bytes: u64 },
 }
 
 #[derive(Debug, Clone, Serialize)]

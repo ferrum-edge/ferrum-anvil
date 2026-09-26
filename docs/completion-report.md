@@ -124,6 +124,7 @@ results and reasoned statuses.
 - **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md` and ferrum-edge/ferrum-anvil#3.
 - **Protocol and load gaps:**
   - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).
+  - WebSocket permessage-deflate (opt-in) relies on a vendored tungstenite 0.30.0 with an Anvil-written codec patch until a tungstenite release has one (`vendor/README.md`). Ferrum Edge never negotiates it, so compressed sessions are proven against fixtures and Python `websockets`, and through the gateway only as "offered, not negotiated".
   - Load testing is HTTP-family only, one worker on one machine.
   - HTTP/3 has not been exercised under load.
   - gRPC-Web carries only unary and server streaming (the protocol's limit) and cannot use server reflection; gRPC over HTTP/3 opens a fresh QUIC connection per call.

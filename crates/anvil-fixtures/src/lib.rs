@@ -26,6 +26,7 @@ pub mod proxy_protocol;
 pub mod raw;
 pub mod streams;
 pub mod tlsserver;
+pub mod ws_deflate;
 
 pub use log::{GroundTruth, GroundTruthLog};
 pub use pki::LabPki;

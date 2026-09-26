@@ -32,6 +32,7 @@ pub mod stats;
 pub mod tls;
 pub mod udp;
 pub mod ws;
+pub mod ws_deflate;
 
 pub use recorder::{EventCtx, EventFn};
 

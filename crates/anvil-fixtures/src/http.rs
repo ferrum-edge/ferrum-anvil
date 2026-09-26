@@ -20,7 +20,9 @@
 //! * `/auth/basic?user=&pass=`, `/auth/bearer?token=`, `/auth/apikey?name=&value=&in=header|query`
 //! * `/count/{key}` — per-key request counter (dispatch ground truth)
 //! * `/oauth/token`, `/oauth/authorize` — minimal fixture identity provider
-//! * `/ws` — WebSocket echo via H1 Upgrade or H2 extended CONNECT
+//! * `/ws` — WebSocket echo via H1 Upgrade or H2 extended CONNECT; with a
+//!   permessage-deflate offer or `pmd` query options, the independent
+//!   RFC 7692 peer in [`crate::ws_deflate`]
 
 use crate::log::{GroundTruth, GroundTruthLog};
 use crate::tlsserver::{TlsServerOptions, client_cn, server_config};
@@ -550,6 +552,12 @@ async fn websocket(req: Request<Incoming>, qs: Vec<(String, String)>, log: Groun
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.split(',').next())
         .map(|s| s.trim().to_string());
+    let offer: Option<String> = {
+        let v: Vec<&str> = req.headers().get_all("sec-websocket-extensions").iter().filter_map(|v| v.to_str().ok()).collect();
+        (!v.is_empty()).then(|| v.join(", "))
+    };
+    let mode = crate::ws_deflate::Mode::parse(req.uri().query());
+    let deflate = mode.applies(offer.as_deref()).then(|| crate::ws_deflate::negotiate(offer.as_deref(), &mode, &log));
     let mut resp = if is_h2_connect {
         Response::builder().status(200)
     } else {
@@ -563,10 +571,17 @@ async fn websocket(req: Request<Incoming>, qs: Vec<(String, String)>, log: Groun
     if let Some(p) = &proto {
         resp = resp.header("sec-websocket-protocol", p);
     }
+    if let Some(answer) = deflate.as_ref().and_then(|s| s.answer.as_deref()) {
+        resp = resp.header("sec-websocket-extensions", answer);
+    }
     tokio::spawn(async move {
         let Ok(upgraded) = hyper::upgrade::on(req).await else {
             return;
         };
+        if let Some(session) = deflate {
+            crate::ws_deflate::serve(TokioIo::new(upgraded), session, log).await;
+            return;
+        }
         let mut cfg = tungstenite::protocol::WebSocketConfig::default();
         cfg.max_message_size = Some(max);
         cfg.max_frame_size = Some(max);

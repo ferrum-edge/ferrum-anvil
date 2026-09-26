@@ -16,12 +16,14 @@ use crate::harness::{self, LabEnv, Outcome, RunCtx};
 use crate::profiles::{BoxFut, Profile, RunArgs};
 use crate::scenario::{CheckKind, Checks, ScenarioResult};
 use anvil_domain::Id;
-use anvil_domain::diagnostics::Confidence;
+use anvil_domain::diagnostics::{Confidence, Severity, SourceScope};
 use anvil_domain::execution::{
     AttemptObservation, AttemptReason, Direction, DispatchState, FailureKind, Phase, PhaseStatus, TlsVerification,
 };
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
-use anvil_domain::outcome::{ApplicationState, ClosedBy, GrpcStatusSource, ProtocolStatus, TransportState, WarningCode};
+use anvil_domain::outcome::{
+    ApplicationState, ClosedBy, GrpcStatusSource, ProtocolStatus, TransportState, WarningCode, WsExtensions, WsNegotiation,
+};
 use anvil_domain::request::*;
 use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::{HostBinding, TlsMinVersion, TlsProfile};
@@ -148,6 +150,7 @@ fn ws_ctx(env: &Env, url: &str, bootstrap: WsBootstrap, messages: &[&str], idle_
         expect_messages: 0,
         max_message_bytes: 1024 * 1024,
         idle_close_ms,
+        permessage_deflate: Default::default(),
     });
     let tls = url.starts_with("wss://");
     ctx_with(env, s, if tls { lab_root(env) } else { None }, None)
@@ -969,6 +972,292 @@ fn proto013_blocked(env: &Env) -> Fut<'_> {
             .await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
+// --------------------------------------------- WebSocket permessage-deflate ---
+
+/// The WebSocket echo backend, reached directly (the control).
+const WS_BACKEND: &str = "127.0.0.1:19401";
+const DEFLATE_OFFER: &str = "permessage-deflate; client_max_window_bits";
+
+/// A WebSocket session that offers permessage-deflate (default parameters).
+fn ws_deflate_ctx(env: &Env, url: &str, bootstrap: WsBootstrap, messages: &[&str]) -> ExecutionContext {
+    let mut x = ws_ctx(env, url, bootstrap, messages, 3_000);
+    if let Some(w) = x.spec.websocket.as_mut() {
+        w.permessage_deflate = WsDeflateOffer { enabled: true, ..Default::default() };
+    }
+    x
+}
+
+fn ws_extensions(o: &ExecutionOutput) -> Option<&WsExtensions> {
+    match &o.record.outcome.protocol_status {
+        ProtocolStatus::WebSocket { extensions, .. } => extensions.as_ref(),
+        _ => None,
+    }
+}
+
+/// A backend negotiation record: `(offer received, answer given)`.
+type Negotiation = (Option<String>, Option<String>);
+
+/// What the deflate-capable backend saw since entry `from`: its negotiation
+/// records, and each message's RSV1 flag.
+fn backend_deflate_since(log: &anvil_fixtures::GroundTruthLog, from: usize) -> (Vec<Negotiation>, Vec<bool>) {
+    let (mut negotiations, mut compressed) = (vec![], vec![]);
+    for e in log.entries().into_iter().skip(from) {
+        match e.event {
+            GroundTruth::WsExtensions { offer, answer } => negotiations.push((offer, answer)),
+            GroundTruth::WsMessage { compressed: c, .. } => compressed.push(c),
+            _ => {}
+        }
+    }
+    (negotiations, compressed)
+}
+
+/// A long, repetitive message: compressible if anything compressed it.
+fn deflate_msg() -> String {
+    "anvil offers permessage-deflate; ".repeat(40)
+}
+
+/// Anvil's side of an offer the gateway never answers: recorded as
+/// "offered, not negotiated", an info finding, and an uncompressed session
+/// that otherwise succeeds.
+fn deflate_not_negotiated_checks(c: &mut Checks, o: &ExecutionOutput, label: &str, handshake: u16, messages: u64) {
+    let (hs, code, by) = ws_status(o);
+    c.add(
+        CheckKind::Diagnosis,
+        format!("{label}: {handshake} bootstrap, backend's Close 1000 relayed, complete success"),
+        hs == Some(handshake) && code == Some(1000) && by == Some(ClosedBy::Peer) && is_success(o),
+        format!("{hs:?} {code:?} {by:?} {}", outcome_line(o)),
+    );
+    let e = ws_extensions(o);
+    c.add(
+        CheckKind::Diagnosis,
+        format!("{label}: the offer is recorded as offered, not negotiated (the answer named no extension)"),
+        e.map(|e| e.negotiation == WsNegotiation::NotNegotiated && e.offered.as_deref() == Some(DEFLATE_OFFER) && e.answered.is_none())
+            .unwrap_or(false),
+        format!("{:?}", e.map(|e| (&e.negotiation, &e.offered, &e.answered))),
+    );
+    let t = e.and_then(|e| e.traffic.as_ref());
+    c.add(
+        CheckKind::Diagnosis,
+        format!("{label}: the session ran uncompressed both ways ({messages} message(s) each way, none with RSV1)"),
+        t.map(|t| {
+            t.sent.messages == messages
+                && t.received.messages == messages
+                && t.sent.compressed_messages == 0
+                && t.received.compressed_messages == 0
+                && t.sent.wire_bytes == t.sent.payload_bytes
+        })
+        .unwrap_or(false),
+        format!("{t:?}"),
+    );
+    let f = o.record.findings.iter().find(|f| f.code == "ws.deflate_not_negotiated");
+    c.add(
+        CheckKind::Diagnosis,
+        format!("{label}: ws.deflate_not_negotiated is information that names no hop"),
+        f.map(|f| f.severity == Severity::Info && f.scope == SourceScope::Unknown && f.confidence == Confidence::Confirmed)
+            .unwrap_or(false),
+        format!("{:?}", codes(o)),
+    );
+    c.add(
+        CheckKind::Diagnosis,
+        format!("{label}: no refusal or compression-violation finding"),
+        !codes(o)
+            .iter()
+            .any(|x| x == "ws.extension_answer_refused" || x == "ws.compressed_without_negotiation" || x == "ws.decompression_failed"),
+        format!("{:?}", codes(o)),
+    );
+    c.add(
+        CheckKind::Diagnosis,
+        format!("{label}: echoes intact"),
+        previews(o, Direction::Received, "text").len() as u64 == messages
+            && previews(o, Direction::Received, "text").iter().all(|p| deflate_msg().starts_with(p.as_str())),
+        format!("{} previews", previews(o, Direction::Received, "text").len()),
+    );
+    c.absent_prefix(o, "ferrum.token");
+}
+
+/// Ground truth: the gateway's backend handshake carried no
+/// `Sec-WebSocket-Extensions`, so the deflate-capable backend answered none
+/// and received only uncompressed messages.
+fn backend_saw_no_offer(c: &mut Checks, env: &Env, from: usize, label: &str, messages: usize) {
+    let (negotiations, compressed) = backend_deflate_since(&env.fx.ws.log, from);
+    c.add(
+        CheckKind::GroundTruth,
+        format!("{label}: no Sec-WebSocket-Extensions reached the (deflate-capable) backend, which answered none"),
+        negotiations.len() == 1 && negotiations.iter().all(|(o, a)| o.is_none() && a.is_none()),
+        format!("{negotiations:?}"),
+    );
+    let reqs = requests_since(&env.fx.ws.log, from);
+    c.add(
+        CheckKind::GroundTruth,
+        format!("{label}: the backend's upgrade request has no Sec-WebSocket-Extensions header"),
+        reqs.len() == 1 && reqs.iter().all(|(_, h)| hdr(h, "sec-websocket-extensions").is_none()),
+        format!("{:?}", reqs.iter().map(|(p, _)| p).collect::<Vec<_>>()),
+    );
+    c.add(
+        CheckKind::GroundTruth,
+        format!("{label}: the backend received {messages} uncompressed message(s)"),
+        compressed.len() == messages && compressed.iter().all(|c| !c),
+        format!("{compressed:?}"),
+    );
+}
+
+/// Control: the same backend, reached directly, negotiates and compresses.
+async fn deflate_direct_control(env: &Env, c: &mut Checks) -> ExecutionOutput {
+    let msg = deflate_msg();
+    let from = env.fx.ws.log.entries().len();
+    let d = send(env, &ws_deflate_ctx(env, &format!("ws://{WS_BACKEND}/ws?pmd=accept&close_after=1"), WsBootstrap::Http1Upgrade, &[&msg]))
+        .await;
+    let e = ws_extensions(&d);
+    let (negotiations, compressed) = backend_deflate_since(&env.fx.ws.log, from);
+    c.add(
+        CheckKind::Recovery,
+        "control: the same backend, reached directly, negotiates permessage-deflate and both sides compress",
+        is_success(&d)
+            && e.map(|e| e.negotiation == WsNegotiation::Negotiated).unwrap_or(false)
+            && e.and_then(|e| e.traffic.as_ref())
+                .map(|t| t.sent.compressed_messages == 1 && t.received.compressed_messages == 1)
+                .unwrap_or(false)
+            && negotiations
+                .first()
+                .map(|(o, a)| o.as_deref() == Some(DEFLATE_OFFER) && a.as_deref() == Some("permessage-deflate"))
+                .unwrap_or(false)
+            && compressed == vec![true],
+        format!("{} {:?} {negotiations:?} {compressed:?}", outcome_line(&d), e.map(|e| &e.negotiation)),
+    );
+    d
+}
+
+/// WS-DEFLATE-001: Anvil offers permessage-deflate through the gateway
+/// (HTTP/1.1 Upgrade). Ferrum Edge strips the offer before its backend
+/// handshake and never answers one (0.9.5/0.9.7 `src/proxy/mod.rs`
+/// `is_websocket_backend_strip_header`, `WEBSOCKET_TRANSPORT_MANAGED_RESPONSE_HEADERS`).
+fn ws_deflate_h1(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let msg = deflate_msg();
+        let before = env.fx.ws.log.entries().len();
+        let o =
+            send(env, &ws_deflate_ctx(env, &format!("ws://{HTTP}/ws?pmd=accept&close_after=2"), WsBootstrap::Http1Upgrade, &[&msg, &msg]))
+                .await;
+        deflate_not_negotiated_checks(&mut c, &o, "HTTP/1.1", 101, 2);
+        backend_saw_no_offer(&mut c, env, before, "HTTP/1.1", 2);
+        let d = deflate_direct_control(env, &mut c).await;
+        Outcome { main: Some(o), recovery: Some(d), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+    })
+}
+
+/// WS-DEFLATE-002: the same over RFC 8441 extended CONNECT, h2 over TLS
+/// and h2c. The gateway re-originates the session as an HTTP/1.1 Upgrade.
+fn ws_deflate_h2(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let msg = deflate_msg();
+        let before = env.fx.ws.log.entries().len();
+        let o = send(
+            env,
+            &ws_deflate_ctx(env, &format!("wss://{HTTPS}/ws?pmd=accept&close_after=1"), WsBootstrap::Http2ExtendedConnect, &[&msg]),
+        )
+        .await;
+        deflate_not_negotiated_checks(&mut c, &o, "h2 over TLS", 200, 1);
+        c.add(CheckKind::Diagnosis, "h2 over TLS: TLS to the gateway verified", tls_verified(&o), "");
+        backend_saw_no_offer(&mut c, env, before, "h2 over TLS", 1);
+        let before = env.fx.ws.log.entries().len();
+        let h2c = send(
+            env,
+            &ws_deflate_ctx(env, &format!("ws://{HTTP}/ws?pmd=accept&close_after=1"), WsBootstrap::Http2ExtendedConnect, &[&msg]),
+        )
+        .await;
+        deflate_not_negotiated_checks(&mut c, &h2c, "h2c", 200, 1);
+        backend_saw_no_offer(&mut c, env, before, "h2c", 1);
+        Outcome { main: Some(o), recovery: Some(h2c), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+    })
+}
+
+/// WS-DEFLATE-003: the same over RFC 9220 (HTTP/3) to the gateway's QUIC
+/// listener (0.9.5/0.9.7 `src/http3/websocket.rs` strips the offer too).
+fn ws_deflate_h3(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let msg = deflate_msg();
+        let before = env.fx.ws.log.entries().len();
+        let o = send(
+            env,
+            &ws_deflate_ctx(env, &format!("wss://{HTTPS}/ws?pmd=accept&close_after=1"), WsBootstrap::Http3ExtendedConnect, &[&msg]),
+        )
+        .await;
+        quic_phases_ok(&mut c, &o);
+        deflate_not_negotiated_checks(&mut c, &o, "HTTP/3", 200, 1);
+        backend_saw_no_offer(&mut c, env, before, "HTTP/3", 1);
+        let ops = op_log(env, from, "proto012-ws-echo");
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway's operator log records an RFC 9220 (HTTP/3) WebSocket upgrade",
+            ops.iter().any(|l| l.contains("H3 WebSocket (RFC 9220)")),
+            format!("{} lines", ops.len()),
+        );
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: ops }
+    })
+}
+
+/// WS-DEFLATE-lookalike: a backend that compresses its reply although
+/// nothing was negotiated with it. The gateway's WebSocket bridge cannot
+/// decode it and ends the session itself; Anvil never receives a compressed
+/// frame, so it must not report the peer's compression violation — only a
+/// session the peer (the gateway) ended.
+fn ws_deflate_lookalike(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let before = env.fx.ws.log.entries().len();
+        let o = send(env, &ws_deflate_ctx(env, &format!("ws://{HTTP}/ws?pmd=unnegotiated"), WsBootstrap::Http1Upgrade, &[&deflate_msg()]))
+            .await;
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend compressed its reply without any negotiation",
+            env.fx
+                .ws
+                .log
+                .entries()
+                .into_iter()
+                .skip(before)
+                .any(|e| e.event == GroundTruth::FaultApplied { fault: "ws_compressed_without_negotiation".into() }),
+            "",
+        );
+        let e = ws_extensions(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "Anvil received no compressed frame and claims no compression violation",
+            e.and_then(|e| e.traffic.as_ref()).map(|t| t.received.compressed_messages == 0).unwrap_or(false)
+                && e.map(|e| e.violation.is_none()).unwrap_or(false)
+                && !codes(&o).iter().any(|x| x == "ws.compressed_without_negotiation" || x == "ws.decompression_failed"),
+            format!("{:?} {:?}", e.and_then(|e| e.traffic.as_ref()), codes(&o)),
+        );
+        c.not_success(&o);
+        let (_, code, by) = ws_status(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "the session end is the peer's (the gateway's close or drop), not a fault Anvil caused",
+            matches!(by, Some(ClosedBy::Peer) | Some(ClosedBy::Abnormal)),
+            format!("{code:?} {by:?}"),
+        );
+        c.has_any(&o, &["ws.closed_other", "ws.closed_abnormally", "ws.closed_policy"]);
+        c.add(
+            CheckKind::Diagnosis,
+            "the close is not pinned on the backend application (the gateway may have authored it)",
+            o.record.findings.iter().filter(|f| f.code.starts_with("ws.closed_")).all(|f| {
+                f.does_not_prove.iter().any(|d| d.contains("Which hop") || d.contains("peer chose"))
+                    || f.alternatives.iter().any(|a| a.contains("gateway") || a.contains("intermediary"))
+            }),
+            format!("{:?}", codes(&o)),
+        );
+        let r = ws_recovery(env, &mut c).await;
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
     })
 }
 
@@ -2464,6 +2753,26 @@ pub fn all() -> Vec<Def> {
         Def { id: "TRUST-007-sse", title: "SSE aborted mid-stream after HTTP 200", run: trust007_sse },
         Def { id: "PROTO-013", title: "WebSocket over HTTP/3 extended CONNECT (RFC 9220)", run: proto013 },
         Def { id: "PROTO-013-blocked", title: "WebSocket over HTTP/3 on a UDP-blocked path: no fallback", run: proto013_blocked },
+        Def {
+            id: "WS-DEFLATE-001",
+            title: "WebSocket permessage-deflate offered through the gateway (HTTP/1.1): not negotiated, uncompressed",
+            run: ws_deflate_h1,
+        },
+        Def {
+            id: "WS-DEFLATE-002",
+            title: "WebSocket permessage-deflate offered over HTTP/2 extended CONNECT (TLS, h2c): not negotiated",
+            run: ws_deflate_h2,
+        },
+        Def {
+            id: "WS-DEFLATE-003",
+            title: "WebSocket permessage-deflate offered over HTTP/3 (RFC 9220): not negotiated",
+            run: ws_deflate_h3,
+        },
+        Def {
+            id: "WS-DEFLATE-lookalike",
+            title: "A backend that compresses without negotiation: the gateway ends the session, no violation claimed",
+            run: ws_deflate_lookalike,
+        },
         Def { id: "PROTO-019", title: "TCP half-close through the stream proxy", run: proto019 },
         Def { id: "PROTO-019-echo", title: "TCP newline-framed echo through the stream proxy", run: proto019_echo },
         Def { id: "PROTO-019-tls", title: "TCP+TLS terminated at the gateway, tcps to the backend", run: proto019_tls },

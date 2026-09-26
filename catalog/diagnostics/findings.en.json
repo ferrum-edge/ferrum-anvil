@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-11",
+  "version": "2026.09.26-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2036,6 +2036,116 @@
       "confirm_with": [
         "Gateway or proxy logs for this WebSocket session."
       ]
+    },
+    "ws.deflate_not_negotiated": {
+      "title": "permessage-deflate was offered but not negotiated",
+      "explanation": "Anvil offered {offered}, but the handshake answer named {answered}, so the session ran uncompressed. This is not an error: a server may decline any extension, and an intermediary may remove the offer or the answer.",
+      "alternatives": [
+        "The server does not support permessage-deflate, or chose not to use it for this session.",
+        "A proxy or gateway between Anvil and the server removed the Sec-WebSocket-Extensions offer or answer; some gateways never negotiate WebSocket extensions."
+      ],
+      "does_not_prove": [
+        "That the server cannot compress.",
+        "Which hop dropped the offer: the server, or a proxy or gateway in front of it."
+      ],
+      "remediation": [
+        {
+          "text": "Nothing is required. To see which hop drops the offer, send the same request directly to the backend and compare the answers.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The server's handshake log, and the same request sent without any intermediary."
+      ]
+    },
+    "ws.extension_answer_refused": {
+      "title": "The server's WebSocket extension answer was refused",
+      "explanation": "The handshake answer's Sec-WebSocket-Extensions ({answered}) does not fit what Anvil offered ({offered}): {problem}. RFC 6455 §4.1 and RFC 7692 §7 require the client to fail the connection, so no message was exchanged.",
+      "alternatives": [
+        "The server's extension negotiation is incorrect for this offer.",
+        "An intermediary added or rewrote the Sec-WebSocket-Extensions answer."
+      ],
+      "does_not_prove": [
+        "That the WebSocket endpoint works incorrectly otherwise.",
+        "Which hop wrote the answer: the server, or a proxy or gateway in front of it."
+      ],
+      "remediation": [
+        {
+          "text": "Make the server answer only with extensions that were offered, with valid parameters that fit the offer.",
+          "owner": "unknown"
+        },
+        {
+          "text": "To test the endpoint without compression, turn permessage-deflate off for this request.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The server's handshake log for this request."
+      ]
+    },
+    "ws.compressed_without_negotiation": {
+      "title": "The peer sent a compressed message that was never negotiated",
+      "explanation": "A data message arrived with RSV1 set, the permessage-deflate \"compressed\" bit, although the handshake negotiated no compression.{offer_note} Anvil treated it as a protocol violation by the peer and closed the session with 1002.",
+      "alternatives": [
+        "The server compresses messages without negotiating permessage-deflate.",
+        "An intermediary removed the extension negotiation from the handshake but still relays the server's compressed frames."
+      ],
+      "does_not_prove": [
+        "Which hop compressed the message.",
+        "That the message content itself was invalid."
+      ],
+      "remediation": [
+        {
+          "text": "Make the server negotiate permessage-deflate before it compresses, or stop it from compressing; check any proxy or gateway that rewrites the handshake.",
+          "owner": "unknown"
+        }
+      ],
+      "confirm_with": [
+        "The server's and any gateway's WebSocket logs for this session."
+      ]
+    },
+    "ws.decompression_failed": {
+      "title": "A compressed WebSocket message could not be decompressed",
+      "explanation": "A permessage-deflate message from the peer was not valid DEFLATE data ({detail}). Anvil treated it as a protocol violation by the peer and closed the session with 1002.",
+      "alternatives": [
+        "The peer's compressor does not follow the negotiated parameters, for example it relies on context takeover after agreeing not to.",
+        "The peer's compressor is faulty.",
+        "An intermediary modified the frames."
+      ],
+      "does_not_prove": [
+        "Which hop produced the invalid data.",
+        "That earlier messages of the session were affected."
+      ],
+      "remediation": [
+        {
+          "text": "Check the server's permessage-deflate implementation against the negotiated parameters.",
+          "owner": "unknown"
+        },
+        {
+          "text": "To test the endpoint without compression, turn permessage-deflate off for this request.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "ws.too_large_after_decompression": {
+      "title": "A compressed message exceeded Anvil's limit after decompression",
+      "explanation": "A permessage-deflate message grew past Anvil's local message limit ({limit} bytes) while it was decompressed, after {compressed} compressed bytes. Anvil stopped decompressing and closed the session with 1009. The limit applies after decompression, so a small compressed message cannot expand without bound.",
+      "alternatives": [
+        "The application legitimately sends large, highly compressible messages.",
+        "A decompression bomb: a small message crafted to expand enormously."
+      ],
+      "does_not_prove": [
+        "That the message was corrupt or malicious.",
+        "That the peer exceeded any limit of its own."
+      ],
+      "remediation": [
+        {
+          "text": "If messages this large are expected, raise the WebSocket message limit for this request intentionally.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
     },
     "sse.canceled": {
       "title": "The event stream was stopped",

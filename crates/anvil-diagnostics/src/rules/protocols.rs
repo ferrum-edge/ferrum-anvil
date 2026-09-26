@@ -2,7 +2,9 @@ use super::Ctx;
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
 use anvil_domain::execution::{Direction, FailureKind};
-use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, MasqueTunnel, OutcomeWarning, ProtocolStatus, WarningCode};
+use anvil_domain::outcome::{
+    ClosedBy, GrpcStatusSource, MasqueTunnel, OutcomeWarning, ProtocolStatus, WarningCode, WsExtensions, WsNegotiation, WsViolationKind,
+};
 
 pub fn grpc_name(code: i32) -> &'static str {
     match code {
@@ -24,6 +26,78 @@ pub fn grpc_name(code: i32) -> &'static str {
         15 => "DATA_LOSS",
         16 => "UNAUTHENTICATED",
         _ => "UNRECOGNIZED",
+    }
+}
+
+fn decompressed_too_large(e: &Option<WsExtensions>) -> bool {
+    e.as_ref().and_then(|e| e.violation.as_ref()).map(|v| v.kind == WsViolationKind::TooLargeAfterDecompression).unwrap_or(false)
+}
+
+/// WebSocket extension negotiation (RFC 6455 §9) and permessage-deflate
+/// (RFC 7692). A declined offer is information, not a fault: any server, or
+/// any proxy or gateway on the path, may decline or strip an extension.
+fn ws_extension_rules(e: &WsExtensions, idx: u32, out: &mut Vec<Draft>) {
+    let offered = e.offered.clone().unwrap_or_else(|| "nothing".into());
+    let answered = e.answered.clone().unwrap_or_else(|| "no extension".into());
+    let base = |code: &str, scope: SourceScope, owner: Owner, sev: Severity| {
+        Draft::new(code, "protocol.websocket", Confidence::Confirmed, scope, owner, sev)
+            .ev_at(E::HttpHeader, "request.sec-websocket-extensions", offered.clone(), idx)
+            .ev_at(E::HttpHeader, "response.sec-websocket-extensions", answered.clone(), idx)
+            .var("offered", offered.clone())
+            .var("answered", answered.clone())
+    };
+    match e.negotiation {
+        WsNegotiation::NotNegotiated => {
+            let mut d = base("ws.deflate_not_negotiated", SourceScope::Unknown, Owner::Unknown, Severity::Info);
+            if let Some(t) = &e.traffic {
+                d = d.ev_at(E::NativeTransport, "ws.received.compressed_messages", t.received.compressed_messages.to_string(), idx);
+            }
+            out.push(d);
+        }
+        WsNegotiation::Rejected => out.push(
+            base("ws.extension_answer_refused", SourceScope::ResponseDelivery, Owner::Unknown, Severity::Error)
+                .var("problem", e.problem.clone().unwrap_or_default()),
+        ),
+        WsNegotiation::NotOffered | WsNegotiation::Negotiated => {}
+    }
+    let Some(v) = &e.violation else { return };
+    let with_counts = |d: Draft| match &e.traffic {
+        Some(t) => d.ev_at(E::NativeTransport, "ws.received.messages", t.received.messages.to_string(), idx).ev_at(
+            E::NativeTransport,
+            "ws.received.compressed_messages",
+            t.received.compressed_messages.to_string(),
+            idx,
+        ),
+        None => d,
+    };
+    match v.kind {
+        WsViolationKind::CompressedWithoutNegotiation => out.push(with_counts(
+            base("ws.compressed_without_negotiation", SourceScope::ResponseDelivery, Owner::Unknown, Severity::Error)
+                .ev_at(E::NativeTransport, "ws.frame.rsv1", "set on a data message", idx)
+                .var(
+                    "offer_note",
+                    match e.negotiation {
+                        WsNegotiation::NotNegotiated => " Anvil had offered permessage-deflate, but the answer did not accept it.",
+                        _ => "",
+                    },
+                ),
+        )),
+        WsViolationKind::Undecodable => out.push(with_counts(
+            base("ws.decompression_failed", SourceScope::ResponseDelivery, Owner::Unknown, Severity::Error)
+                .ev_at(E::NativeTransport, "ws.inflate.error", v.detail.clone().unwrap_or_default(), idx)
+                .var("detail", v.detail.clone().unwrap_or_else(|| "invalid DEFLATE data".into())),
+        )),
+        WsViolationKind::TooLargeAfterDecompression => {
+            let limit = v.limit_bytes.map(|b| b.to_string()).unwrap_or_else(|| "the configured".into());
+            let compressed = v.compressed_bytes.map(|b| b.to_string()).unwrap_or_else(|| "a few".into());
+            out.push(with_counts(
+                base("ws.too_large_after_decompression", SourceScope::LocalClient, Owner::Caller, Severity::Error)
+                    .ev_at(E::LocalValidation, "ws.max_message_bytes", limit.clone(), idx)
+                    .ev_at(E::NativeTransport, "ws.message.compressed_bytes", compressed.clone(), idx)
+                    .var("limit", limit)
+                    .var("compressed", compressed),
+            ))
+        }
     }
 }
 
@@ -79,7 +153,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 }
             _ => {}
         },
-        ProtocolStatus::WebSocket { handshake_status, close_code, close_reason, closed_by } => {
+        ProtocolStatus::WebSocket { handshake_status, close_code, close_reason, closed_by, extensions } => {
             // Who started the closing handshake, stated from the evidence: a
             // 1000 that Anvil sent (user close, idle close) is not the peer's choice.
             let closer = match closed_by {
@@ -106,9 +180,14 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 (_, Some(1000), _) | (_, Some(1001), _) => out.push(base("ws.closed_normally", Confidence::Confirmed, Owner::Unknown, Severity::Info)),
                 (_, None, ClosedBy::Abnormal) | (_, Some(1006), _) => out.push(base("ws.closed_abnormally", Confidence::Confirmed, Owner::Unknown, Severity::Error)),
                 (_, Some(1008), _) => out.push(base("ws.closed_policy", Confidence::Confirmed, Owner::Unknown, Severity::Error)),
+                // Anvil's limit hit while decompressing: explained by `ws.too_large_after_decompression`.
+                (_, Some(1009), ClosedBy::Client) if decompressed_too_large(extensions) => {}
                 (_, Some(1009), _) => out.push(base("ws.closed_too_big", Confidence::Confirmed, Owner::Caller, Severity::Error)),
                 (_, Some(_), ClosedBy::Peer) => out.push(base("ws.closed_other", Confidence::Confirmed, Owner::Unknown, Severity::Warning)),
                 _ => {}
+            }
+            if let Some(e) = extensions {
+                ws_extension_rules(e, idx, out);
             }
         }
         ProtocolStatus::Sse { events, closed_by, .. } => {
@@ -274,8 +353,8 @@ fn masque_rules(ctx: &Ctx<'_>, m: &MasqueTunnel, out: &mut Vec<Draft>) {
 #[cfg(test)]
 mod tests {
     use crate::facts::{DiagnosticInput, FerrumTrust};
-    use anvil_domain::diagnostics::DiagnosticFinding;
-    use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
+    use anvil_domain::diagnostics::{DiagnosticFinding, Owner, Severity, SourceScope};
+    use anvil_domain::outcome::{ClosedBy, ProtocolStatus, WsCompressionViolation, WsExtensions, WsNegotiation, WsViolationKind};
     use anvil_domain::request::Protocol;
 
     fn diagnose(protocol: Protocol, status: ProtocolStatus) -> Vec<DiagnosticFinding> {
@@ -298,7 +377,94 @@ mod tests {
     }
 
     fn ws(code: u16, by: ClosedBy) -> ProtocolStatus {
-        ProtocolStatus::WebSocket { handshake_status: Some(101), close_code: Some(code), close_reason: String::new(), closed_by: by }
+        ProtocolStatus::WebSocket {
+            handshake_status: Some(101),
+            close_code: Some(code),
+            close_reason: String::new(),
+            closed_by: by,
+            extensions: None,
+        }
+    }
+
+    fn ws_ext(code: Option<u16>, by: ClosedBy, e: WsExtensions) -> ProtocolStatus {
+        ProtocolStatus::WebSocket {
+            handshake_status: Some(101),
+            close_code: code,
+            close_reason: String::new(),
+            closed_by: by,
+            extensions: Some(e),
+        }
+    }
+
+    fn ext(negotiation: WsNegotiation, violation: Option<WsViolationKind>) -> WsExtensions {
+        WsExtensions {
+            offered: Some("permessage-deflate; client_max_window_bits".into()),
+            answered: None,
+            negotiation,
+            problem: None,
+            deflate: None,
+            traffic: None,
+            violation: violation.map(|kind| WsCompressionViolation {
+                kind,
+                compressed_bytes: Some(4096),
+                limit_bytes: Some(65536),
+                detail: Some("invalid block type".into()),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_declined_deflate_offer_is_information_that_names_no_hop() {
+        let f = diagnose(Protocol::WebSocket, ws_ext(Some(1000), ClosedBy::Peer, ext(WsNegotiation::NotNegotiated, None)));
+        let d = find(&f, "ws.deflate_not_negotiated");
+        assert_eq!((d.severity, d.scope), (Severity::Info, SourceScope::Unknown));
+        assert!(d.explanation.contains("permessage-deflate; client_max_window_bits"), "{}", d.explanation);
+        assert!(d.alternatives.iter().any(|a| a.contains("gateway")), "{:?}", d.alternatives);
+        assert!(d.does_not_prove.iter().any(|x| x.contains("Which hop")), "{:?}", d.does_not_prove);
+        find(&f, "ws.closed_normally");
+        // A negotiated or never-offered extension says nothing.
+        for n in [WsNegotiation::Negotiated, WsNegotiation::NotOffered] {
+            let f = diagnose(Protocol::WebSocket, ws_ext(Some(1000), ClosedBy::Peer, ext(n, None)));
+            assert!(!f.iter().any(|x| x.code.starts_with("ws.deflate") || x.code.starts_with("ws.extension")), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_extension_answer_carries_its_reason() {
+        let mut e = ext(WsNegotiation::Rejected, None);
+        e.answered = Some("permessage-deflate; mystery".into());
+        e.problem = Some("mystery is not a permessage-deflate parameter".into());
+        let f = diagnose(Protocol::WebSocket, ws_ext(None, ClosedBy::NotClosed, e));
+        let d = find(&f, "ws.extension_answer_refused");
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.explanation.contains("mystery is not a permessage-deflate parameter"), "{}", d.explanation);
+    }
+
+    #[test]
+    fn compression_violations_are_the_peers_and_the_local_limit_is_anvils() {
+        let f = diagnose(
+            Protocol::WebSocket,
+            ws_ext(Some(1002), ClosedBy::Client, ext(WsNegotiation::NotOffered, Some(WsViolationKind::CompressedWithoutNegotiation))),
+        );
+        let d = find(&f, "ws.compressed_without_negotiation");
+        assert_eq!((d.scope, d.severity), (SourceScope::ResponseDelivery, Severity::Error));
+        assert!(d.alternatives.iter().any(|a| a.contains("intermediary")), "{:?}", d.alternatives);
+        let f = diagnose(
+            Protocol::WebSocket,
+            ws_ext(Some(1002), ClosedBy::Client, ext(WsNegotiation::Negotiated, Some(WsViolationKind::Undecodable))),
+        );
+        assert!(find(&f, "ws.decompression_failed").explanation.contains("invalid block type"));
+        let f = diagnose(
+            Protocol::WebSocket,
+            ws_ext(Some(1009), ClosedBy::Client, ext(WsNegotiation::Negotiated, Some(WsViolationKind::TooLargeAfterDecompression))),
+        );
+        let d = find(&f, "ws.too_large_after_decompression");
+        assert_eq!((d.scope, d.owner), (SourceScope::LocalClient, Owner::Caller));
+        assert!(d.explanation.contains("65536") && d.explanation.contains("after decompression"), "{}", d.explanation);
+        assert!(!f.iter().any(|x| x.code == "ws.closed_too_big"), "the specific finding replaces the generic one");
+        // The peer's own 1009 stays the generic, two-sided finding.
+        let f = diagnose(Protocol::WebSocket, ws_ext(Some(1009), ClosedBy::Peer, ext(WsNegotiation::Negotiated, None)));
+        find(&f, "ws.closed_too_big");
     }
 
     fn find<'a>(f: &'a [DiagnosticFinding], code: &str) -> &'a DiagnosticFinding {

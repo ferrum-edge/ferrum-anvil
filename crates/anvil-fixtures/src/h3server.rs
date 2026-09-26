@@ -6,8 +6,9 @@
 //! * `/echo` — JSON echo of method, path, headers and body length
 //! * `CONNECT /ws` with `:protocol = websocket` (RFC 9220) — WebSocket echo
 //!   with the same `close_after` / `abnormal_after` / `max` query options as
-//!   the TCP fixture's `/ws`; a CONNECT elsewhere or without that protocol
-//!   gets 400
+//!   the TCP fixture's `/ws` (and, with a permessage-deflate offer or `pmd`
+//!   options, the same RFC 7692 peer, [`crate::ws_deflate`]); a CONNECT
+//!   elsewhere or without that protocol gets 400
 //! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — native gRPC over HTTP/3
 //!   (all four call modes, full duplex, status in HTTP/3 trailers), or
 //!   gRPC-Web (binary/text) for an `application/grpc-web*` content type
@@ -282,9 +283,18 @@ async fn websocket(req: http::Request<()>, mut stream: ServerStream, log: Ground
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.split(',').next())
         .map(|s| s.trim().to_string());
+    let offer: Option<String> = {
+        let v: Vec<&str> = req.headers().get_all("sec-websocket-extensions").iter().filter_map(|v| v.to_str().ok()).collect();
+        (!v.is_empty()).then(|| v.join(", "))
+    };
+    let mode = crate::ws_deflate::Mode::parse(req.uri().query());
+    let deflate = mode.applies(offer.as_deref()).then(|| crate::ws_deflate::negotiate(offer.as_deref(), &mode, &log));
     let mut resp = http::Response::builder().status(200).header("x-fixture-protocol", "h3");
     if let Some(p) = &proto {
         resp = resp.header("sec-websocket-protocol", p);
+    }
+    if let Some(answer) = deflate.as_ref().and_then(|s| s.answer.as_deref()) {
+        resp = resp.header("sec-websocket-extensions", answer);
     }
     log.push(GroundTruth::ResponseStarted { status: 200 });
     if stream.send_response(resp.body(()).expect("static response")).await.is_err() {
@@ -319,6 +329,11 @@ async fn websocket(req: http::Request<()>, mut stream: ServerStream, log: Ground
         }
         let _ = wr.shutdown().await;
     });
+    if let Some(session) = deflate {
+        crate::ws_deflate::serve(app, session, log).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), uplink).await;
+        return;
+    }
     let cfg = WebSocketConfig::default().max_message_size(Some(max)).max_frame_size(Some(max));
     let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(app, Role::Server, Some(cfg)).await;
     let mut n = 0u32;

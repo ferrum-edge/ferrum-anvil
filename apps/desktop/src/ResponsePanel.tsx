@@ -5,6 +5,7 @@ import type { ExecutionView } from "./api";
 import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation, TunnelObservation } from "./generated/contracts";
 import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
 import { ProxyHeaderEvidence } from "./ProxyProtocolEditor";
+import { WsExtensionsEvidence } from "./WsDeflateEditor";
 
 type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
 
@@ -65,6 +66,8 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
   const status = resp?.status;
   const last = r.attempts[r.attempts.length - 1];
   const stream = r.stream;
+  const ps = r.outcome.protocol_status;
+  const wsExtensions = ps?.protocol === "websocket" ? ps.extensions : null;
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "diagnosis", label: "Diagnosis", count: findings.length },
     ...(stream ? [{ id: "messages" as Tab, label: "Messages", count: stream.messages.length }] : []),
@@ -98,11 +101,21 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
       <Tabs tabs={tabs} value={effectiveTab} onChange={setTab} />
       <div className="pane">
         {effectiveTab === "diagnosis" && <Findings view={view} />}
-        {effectiveTab === "messages" && stream && <Messages t={stream} />}
+        {effectiveTab === "messages" && stream && (
+          <>
+            {wsExtensions && <WsExtensionsEvidence e={wsExtensions} />}
+            <Messages t={stream} />
+          </>
+        )}
         {effectiveTab === "body" && <Body view={view} />}
         {effectiveTab === "headers" && <Headers view={view} />}
         {effectiveTab === "timing" && <Timing attempt={last} />}
-        {effectiveTab === "connection" && <Connection attempt={last} />}
+        {effectiveTab === "connection" && (
+          <>
+            <Connection attempt={last} />
+            {wsExtensions && !stream && <WsExtensionsEvidence e={wsExtensions} />}
+          </>
+        )}
         {effectiveTab === "attempts" && <Attempts attempts={r.attempts} />}
         {effectiveTab === "tests" && <TestsView view={view} />}
       </div>
@@ -496,12 +509,16 @@ function ProtocolBadge({ p }: { p?: ProtocolStatus | null }) {
           {p.grpc_message ? ` · ${p.grpc_message}` : ""}
         </span>
       );
-    case "websocket":
+    case "websocket": {
+      const n = p.extensions?.negotiation;
+      const deflate = n === "negotiated" ? " · deflate" : n === "not_negotiated" ? " · deflate not negotiated" : n === "rejected" ? " · extension refused" : "";
       return (
         <span className="badge">
           WebSocket{p.close_code != null ? ` closed ${p.close_code}${p.close_reason ? ` (${p.close_reason})` : ""} by ${humanize(p.closed_by)}` : ` · ${humanize(p.closed_by)}`}
+          {deflate}
         </span>
       );
+    }
     case "sse":
       return <span className="badge">SSE · {p.events} events · {humanize(p.closed_by)}</span>;
     case "tcp":

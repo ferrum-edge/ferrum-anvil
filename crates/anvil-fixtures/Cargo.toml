@@ -25,7 +25,8 @@ x509-parser.workspace = true
 time = "0.3"
 serde.workspace = true
 serde_json.workspace = true
-flate2.workspace = true
+# zlib-rs: raw DEFLATE with a chosen LZ77 window (the RFC 7692 peer in ws_deflate.rs).
+flate2 = { workspace = true, features = ["zlib-rs"] }
 socket2.workspace = true
 tokio-tungstenite.workspace = true
 parking_lot.workspace = true

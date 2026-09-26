@@ -466,6 +466,7 @@ async fn session_protocols_get_the_same_typed_failure_before_any_handshake() {
         expect_messages: 0,
         max_message_bytes: 1024,
         idle_close_ms: 500,
+        permessage_deflate: Default::default(),
     });
     let o = send(&Engine::new(), &ctx).await;
     assert_eq!(failure_kind(&o), Some(FailureKind::OAuthInteractionRequired), "{:?}", o.record.findings);

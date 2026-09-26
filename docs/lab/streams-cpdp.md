@@ -65,7 +65,7 @@ cargo run -p anvil-lab -- up cpdp
 | | streams | cpdp |
 |---|---|---|
 | Gateway | HTTP 18480 (h1 + h2c); HTTPS 18443/tcp and HTTP/3 18443/udp; admin 18490; stream listeners 18401–18409 | CP admin 18790, CP gRPC 18795; DP HTTP 18780, admin 18791; orphan DP HTTP 18770, admin 18771 (its CP URL 18799 is left unbound) |
-| Fixtures | 19401 WS echo, 19402 gRPC (h2c; also answers gRPC-Web for `application/grpc-web*` requests), 19403 HTTP echo, 19404 TCP reply-after-half-close, 19405 UDP echo, 19406 UDP silent, 19407 UDP drop-every-other, 19408 TCP echo, 19411 TLS echo (lab CA), 19412 gRPC that holds its headers for 4 s, 19413 SSE, 19414 TLS echo (untrusted CA), 19416 SSE that aborts mid-stream, 19417 HTTPS h2 backend, 19420 TCP-only relay to 18443. **Unbound on purpose:** 19409 (gRPC down) and 19410 (TCP refused). | 19701 HTTP echo; 19795 DP→CP relay (can be cut) |
+| Fixtures | 19401 WS echo (the RFC 7692 permessage-deflate peer for `pmd` requests), 19402 gRPC (h2c; also answers gRPC-Web for `application/grpc-web*` requests), 19403 HTTP echo, 19404 TCP reply-after-half-close, 19405 UDP echo, 19406 UDP silent, 19407 UDP drop-every-other, 19408 TCP echo, 19411 TLS echo (lab CA), 19412 gRPC that holds its headers for 4 s, 19413 SSE, 19414 TLS echo (untrusted CA), 19416 SSE that aborts mid-stream, 19417 HTTPS h2 backend, 19420 TCP-only relay to 18443. **Unbound on purpose:** 19409 (gRPC down) and 19410 (TCP refused). | 19701 HTTP echo; 19795 DP→CP relay (can be cut) |
 
 ## 2. `streams` scenarios
 
@@ -87,6 +87,10 @@ attribution. Every row passed in every run of the final stability batch (§5).
 | PROTO-012 | PROTO-012 | RFC 8441 extended CONNECT over h2 (TLS, 18443) and h2c (18480): method CONNECT, protocol h2, a 200 bootstrap, echo, and Close 1000. Ground truth: the gateway re-originated both sessions to the backend as HTTP/1.1 Upgrade (`GET /ws`), never CONNECT. |
 | PROTO-013 | PROTO-013 | WebSocket over HTTP/3 (RFC 9220) to the gateway's QUIC listener. Anvil waits for the gateway's `SETTINGS_ENABLE_CONNECT_PROTOCOL`, sends `CONNECT` with `:protocol = websocket`, gets 200, and the echo and the backend's Close 1000 come back over QUIC (ALPN `h3`, no TCP phase). Ground truth: the gateway's operator log records "H3 WebSocket (RFC 9220) upgrade request received", and it re-originates the session to the backend as an HTTP/1.1 Upgrade (`GET /ws`). |
 | PROTO-013-blocked | PROTO-013 | The same session to the TCP-only relay (no UDP): a `quic_handshake_timeout` in one attempt, nothing dispatched, and no fallback: the relay sees no TCP connection and the backend no session. Recovery over the real QUIC listener succeeds. |
+| WS-DEFLATE-001 | WebSocket permessage-deflate (protocols.md §3.1) | Anvil offers permessage-deflate (`permessage-deflate; client_max_window_bits`) through the gateway over HTTP/1.1 Upgrade (`/ws?pmd=accept`: the backend is the fixture's RFC 7692 peer, which accepts any offer). The answer names no extension, so Anvil records **offered, not negotiated** (`ws.deflate_not_negotiated`, info, scope unknown, confirmed), the session succeeds with the backend's Close 1000, and both messages each way cross the wire uncompressed (0 compressed, wire bytes = payload bytes). No refusal, violation or token finding. Ground truth: the backend's upgrade request carried **no** `Sec-WebSocket-Extensions`, its negotiation record is (no offer, no answer), and it received two uncompressed messages. Control: the same backend reached directly (19401) negotiates `permessage-deflate` and both sides compress, so the gateway path is what drops the offer (0.9.5/0.9.7 `src/proxy/mod.rs` `is_websocket_backend_strip_header`; the answer header is also transport-managed, `WEBSOCKET_TRANSPORT_MANAGED_RESPONSE_HEADERS`). |
+| WS-DEFLATE-002 | WebSocket permessage-deflate | The same over RFC 8441 extended CONNECT, h2 over verified TLS (18443) and h2c (18480): 200 bootstrap, offered-not-negotiated, uncompressed session, and the backend (reached as an HTTP/1.1 Upgrade) saw no offer. |
+| WS-DEFLATE-003 | WebSocket permessage-deflate | The same over RFC 9220 (HTTP/3) to the QUIC listener (QUIC phases as in PROTO-006): offered-not-negotiated, uncompressed, no offer at the backend (0.9.5/0.9.7 `src/http3/websocket.rs` strips it). The operator log records the RFC 9220 upgrade. |
+| WS-DEFLATE-lookalike | WebSocket permessage-deflate (lookalike) | The backend compresses its reply (RSV1) although nothing was negotiated with it (`/ws?pmd=unnegotiated`; ground truth `ws_compressed_without_negotiation`). **Observed (0.9.5 and 0.9.7):** the gateway's bridge cannot decode it and closes the client session itself with **1002**. Anvil received no compressed frame, so it must not report `ws.compressed_without_negotiation` or `ws.decompression_failed`: it reports a peer close (`ws.closed_other`) that leaves open which hop authored it, not a success. Recovery: a normal session. |
 | PROTO-014 | PROTO-014 | Application error status: HTTP 200 with `grpc-status 5` in trailers. The transport completed, but the RPC failed (`app.grpc_status`), with no gateway token. Ground truth: the backend returned it. |
 | PROTO-014-down | PROTO-014 (UP-002 on gRPC) | The gRPC backend is down (19409 unbound). **HTTP 200 trailers-only** `grpc-status 14`, `grpc-message: Backend unavailable`, and **no `X-Gateway-Error`**. That is an RPC failure. Anvil does not claim which component authored a trailers-only status, and makes no client-leg connect claim. Operator `error_class` is `connection_refused`. |
 | PROTO-015 | PROTO-015 | The backend replies once, then resets before any status. The gateway resets the client stream: the status is `missing`, the transport `incomplete`, the application never a success, and `app.grpc_status_missing` is emitted. The message before the reset is kept. |
@@ -190,6 +194,14 @@ Catalog version: `2026.09.25-3` (`catalog/diagnostics/findings.en.json`).
 
 ## 5. Stability
 
+After WebSocket permessage-deflate was added (WS-DEFLATE-001/002/003 and WS-DEFLATE-lookalike,
+2026-09-26, macOS arm64), three consecutive `run streams --untrusted-pass` runs on **v0.9.7**
+gave **92 passed, 0 failed, 0 skipped** each (46 scenarios × 2 passes, about 30 s per run),
+and one run on **v0.9.5** gave the same 92/0/0. No `ferrum.*` finding appeared in any untrusted
+WS-DEFLATE record, the backend never saw a `Sec-WebSocket-Extensions` header through the
+gateway, and the lookalike's gateway close was 1002 (`closed_by` peer) in every run on both
+releases.
+
 Both releases, `anvil-lab [--release v0.9.5] run all --untrusted-pass` (2026-09-26, macOS
 arm64): streams 62 passed, 0 failed, 0 skipped and cpdp 10 passed, 0 failed on **v0.9.7**
 (`f3bd0027…`) and on **v0.9.5** (`6a531f2c…`). One earlier v0.9.7 run failed UP-002-tcp's
@@ -276,6 +288,14 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
     `X-Gateway-Error`, so Anvil reports RPC failures of unknown origin.
   - Not exercised: gRPC-Web through the native HTTP/3 backend path (the backend is h2c),
     gRPC-Web `+json`, request trailer frames, and `Accept`-negotiated mode switching.
+- **WebSocket permessage-deflate through Ferrum** can only be "offered, not negotiated": both
+  releases strip the offer and never answer one, over every frontend (source above, and
+  WS-DEFLATE-001/002/003 show it live, with the backend as independent witness). A compressed
+  session through the gateway therefore cannot be exercised; compressed sessions, context
+  takeover, window bits, fragmentation, bombs and refused answers are covered against the
+  fixture's RFC 7692 peer and Python `websockets` (`docs/protocols.md` §4). The streams
+  backend (19401) runs that peer when a request carries `pmd` query options, so no port or
+  gateway route was added.
 - **gRPC client deadline wording.** A local gRPC deadline is typed as `total_timeout` with
   `deadline_ms`. The generic `response.body_total_timeout` wording then speaks of the
   "total deadline", when this was the gRPC deadline. The value is right, but the wording is

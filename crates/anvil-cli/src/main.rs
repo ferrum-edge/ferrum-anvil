@@ -22,7 +22,9 @@ use anvil_app::exec::SendOptions;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::diagnostics::{Confidence, Severity};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
-use anvil_domain::outcome::{ApplicationState, AssertionState, TransportState};
+use anvil_domain::outcome::{
+    ApplicationState, AssertionState, ProtocolStatus, TransportState, WsExtensions, WsNegotiation, WsViolationKind,
+};
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::tls::HostBinding;
 use anvil_portability::ExportMode;
@@ -337,6 +339,43 @@ fn kv(h: &str) -> Result<KeyValue> {
     Ok(KeyValue::new(n.trim(), v.trim_start()))
 }
 
+/// WebSocket extension negotiation and compression evidence, one fact per line.
+fn ws_extension_lines(e: &WsExtensions) -> Vec<String> {
+    let state = match e.negotiation {
+        WsNegotiation::NotOffered => "not offered",
+        WsNegotiation::NotNegotiated => "offered, not negotiated (the session is uncompressed)",
+        WsNegotiation::Negotiated => "negotiated",
+        WsNegotiation::Rejected => "the server's answer was refused (handshake failed)",
+    };
+    let mut out = vec![format!("permessage-deflate: {state}")];
+    if let Some(o) = &e.offered {
+        out.push(format!("  offered:  {o}"));
+    }
+    out.push(format!("  answered: {}", e.answered.as_deref().unwrap_or("no extension")));
+    if let Some(p) = &e.problem {
+        out.push(format!("  refused because {p}"));
+    }
+    if let Some(t) = &e.traffic {
+        for (dir, x) in [("sent", t.sent), ("received", t.received)] {
+            out.push(format!(
+                "  {dir}: {} message(s), {} compressed, {} payload bytes, {} bytes on the wire",
+                x.messages, x.compressed_messages, x.payload_bytes, x.wire_bytes
+            ));
+        }
+    }
+    if let Some(v) = &e.violation {
+        out.push(format!(
+            "  ended by {}",
+            match v.kind {
+                WsViolationKind::CompressedWithoutNegotiation => "a compressed message the peer never negotiated",
+                WsViolationKind::Undecodable => "a compressed message from the peer that could not be decompressed",
+                WsViolationKind::TooLargeAfterDecompression => "Anvil's message limit, reached while decompressing",
+            }
+        ));
+    }
+    out
+}
+
 fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     let r = &out.record;
     if json {
@@ -359,6 +398,11 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
             })
             .collect();
         println!("  phases: {}", phases.join(" · "));
+    }
+    if let ProtocolStatus::WebSocket { extensions: Some(e), .. } = &r.outcome.protocol_status {
+        for line in ws_extension_lines(e) {
+            println!("  {line}");
+        }
     }
     for w in &r.outcome.warnings {
         println!("  ! {}", w.message);
