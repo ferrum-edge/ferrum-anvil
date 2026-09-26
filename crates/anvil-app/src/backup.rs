@@ -70,8 +70,6 @@ const MAX_HEADER_BYTES: usize = 4096;
 pub const MAX_BACKUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MIN_PASSPHRASE_LEN: usize = 8;
 const SALT_LEN: usize = 16;
-const MIN_SALT_LEN: usize = 8;
-const MAX_SALT_LEN: usize = 64;
 const MAX_LISTED_CONFLICTS: usize = 50;
 
 /// Bounds on the Argon2id costs a backup may name: the same as for bundle
@@ -363,9 +361,7 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<(Back
     }
     check_kdf(&header.kdf)?;
     let salt = B64.decode(&header.salt_b64).map_err(|_| BackupError::NotABackup("the salt is not base64".into()))?;
-    if !(MIN_SALT_LEN..=MAX_SALT_LEN).contains(&salt.len()) {
-        return Err(BackupError::UnsupportedKdf(format!("{}-byte salt; allowed {MIN_SALT_LEN} to {MAX_SALT_LEN} bytes", salt.len())));
-    }
+    crypto::check_salt(&salt).map_err(BackupError::UnsupportedKdf)?;
     let passphrase = passphrase.ok_or(BackupError::PassphraseRequired)?;
     let (aad, envelope) = bytes.split_at(header_end);
     let key = crypto::derive(passphrase.as_bytes(), &salt, &header.kdf).map_err(|e| BackupError::UnsupportedKdf(e.to_string()))?;

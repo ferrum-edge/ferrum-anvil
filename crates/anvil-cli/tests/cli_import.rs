@@ -93,8 +93,13 @@ fn a_backup_restores_into_a_stored_workspace_only_with_into_existing() {
         assert_eq!(o.status.code(), Some(3), "{policy}: {}", text(&o));
         assert!(text(&o).contains("existing workspace 'W'"), "{policy}: {}", text(&o));
     }
-    // Approved for another file, it is refused too.
+    // Approved for another file, it is refused too, and so is a dry run of it.
     let other_file = "0".repeat(64);
+    let o = anvil(&data, &["import", file, "--dry-run", "--bundle-sha256", &other_file]);
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("not the one that was previewed"), "{}", text(&o));
+    let o = anvil(&data, &["import", file, "--dry-run", "--bundle-sha256", &digest.to_uppercase()]);
+    assert_eq!(o.status.code(), Some(0), "the digest the dry run showed checks: {}", text(&o));
     let o = anvil(&data, &["import", file, "--policy", "merge", "--into-existing", &id, "--bundle-sha256", &other_file]);
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(text(&o).contains("not the one that was previewed"), "{}", text(&o));

@@ -158,6 +158,40 @@ fn history_retention_prunes_by_size() {
 }
 
 #[test]
+fn replacing_a_history_record_releases_its_old_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let body_of = |id: &Id| -> Option<String> {
+        let conn = rusqlite::Connection::open(dir.path().join("anvil.db")).unwrap();
+        conn.query_row("SELECT body_blob FROM history WHERE id=?1", [id.to_string()], |r| r.get(0)).unwrap()
+    };
+    let record = serde_json::json!({"n": 1});
+    let (replaced, shared, other) = (Id::new(), Id::new(), Id::new());
+    store.add_history(&replaced, None, None, 1, &record, Some(b"old body")).unwrap();
+    let old = body_of(&replaced).unwrap();
+    store.add_history(&replaced, None, None, 1, &record, None).unwrap();
+    assert!(body_of(&replaced).is_none());
+    assert!(store.get_blob(&old).unwrap().is_none(), "the replaced body was released");
+
+    // A body another record still uses stays.
+    store.add_history(&shared, None, None, 1, &record, Some(b"shared body")).unwrap();
+    store.add_history(&other, None, None, 1, &record, Some(b"shared body")).unwrap();
+    let shared_body = body_of(&shared).unwrap();
+    store.add_history(&shared, None, None, 1, &record, None).unwrap();
+    assert!(store.get_blob(&shared_body).unwrap().is_some(), "another record uses it");
+
+    // A pinned attachment with the same content stays; the last use of the
+    // shared body goes.
+    let pinned = store.put_blob(b"attachment").unwrap();
+    store.pin_blob(&pinned).unwrap();
+    store.add_history(&other, None, None, 1, &record, Some(b"attachment")).unwrap();
+    assert!(store.get_blob(&shared_body).unwrap().is_none(), "no record uses it any more");
+    store.add_history(&other, None, None, 1, &record, None).unwrap();
+    assert_eq!(store.get_blob(&pinned).unwrap().unwrap().as_slice(), b"attachment");
+}
+
+#[test]
 fn unlock_refuses_key_derivation_settings_outside_the_bounds() {
     use anvil_storage::crypto::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM};
     let dir = tempfile::tempdir().unwrap();

@@ -9,8 +9,9 @@
 //!   workspace in the bundle; no two objects share an id. Revisions of
 //!   requests outside the bundle are left out, and a request keeps its
 //!   `revision_id` only when that revision of it is in the bundle.
-//!   Execution records of a workspace outside the bundle are left out, and
-//!   each keeps only the links to objects of its own workspace in the bundle.
+//!   Execution records of a workspace outside the bundle, or that are not
+//!   valid execution records, are left out, and each keeps only the links to
+//!   objects of its own workspace in the bundle.
 //! * Stored attachments a request or dataset names without their bytes are
 //!   listed by [`uncarried_attachments`]; the importer checks them against
 //!   what its device stores.
@@ -153,10 +154,15 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
     let revision_request: HashMap<Id, Id> = g.revisions.iter().map(|r| (r.id, r.request_id)).collect();
     let mut history_ids = HashSet::new();
     let mut outside_history = 0;
+    let mut unreadable_history = 0;
     let mut history = Vec::with_capacity(g.history.len());
     for h in std::mem::take(&mut g.history) {
-        let mut rec: ExecutionRecord =
-            serde_json::from_value(h).map_err(|e| BundleError::Invalid(format!("a history record is not a valid execution record: {e}")))?;
+        // History is a log, not part of the workspace: a record this version
+        // cannot read is left out rather than refusing the bundle.
+        let Ok(mut rec) = serde_json::from_value::<ExecutionRecord>(h) else {
+            unreadable_history += 1;
+            continue;
+        };
         if !history_ids.insert(rec.id) {
             return Err(BundleError::Invalid(format!("history record {} appears twice", rec.id)));
         }
@@ -172,6 +178,9 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
     g.history = history;
     if outside_history > 0 {
         warnings.push(format!("{outside_history} history record(s) of workspaces that are not in the bundle were left out."));
+    }
+    if unreadable_history > 0 {
+        warnings.push(format!("{unreadable_history} history record(s) are not valid execution records and were left out."));
     }
     // Import writes objects by id, so a repeated id would make one object
     // silently overwrite another.

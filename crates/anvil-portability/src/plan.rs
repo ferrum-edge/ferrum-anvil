@@ -163,7 +163,7 @@ pub fn foreign_objects(g: &PortableGraph, existing: &Existing) -> Vec<String> {
 }
 
 /// Every history record of the graph by id, with the workspace it names
-/// (validation refuses a record that is not a valid execution record).
+/// (validation leaves out a record that is not a valid execution record).
 pub fn history_ids(g: &PortableGraph) -> Vec<(Id, Option<Id>)> {
     let id = |h: &serde_json::Value, field: &str| h.get(field).and_then(|v| v.as_str()).and_then(|v| v.parse::<Id>().ok());
     g.history.iter().filter_map(|h| Some((id(h, "id")?, id(h, "workspace_id")))).collect()

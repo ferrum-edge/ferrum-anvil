@@ -799,12 +799,17 @@ async fn an_import_stores_the_load_plans_and_history_the_bundle_carries() {
     assert_eq!(sent.len(), 1);
     let plan = a.save_load_plan(load_plan(ws.meta.id, request.meta.id)).unwrap();
     // A plan whose request was deleted since would make the bundle
-    // unimportable; it stays behind.
+    // unimportable; it stays behind, listed among the excluded items.
     let gone = a.create_request(&ws.meta.id, None, "Gone", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
-    a.save_load_plan(load_plan(ws.meta.id, gone.meta.id)).unwrap();
+    a.save_load_plan(LoadPlan { name: "stale".into(), ..load_plan(ws.meta.id, gone.meta.id) }).unwrap();
     a.delete_request(&gone.meta.id).unwrap();
     let (bytes, preview) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, true).unwrap();
     assert_eq!((preview.manifest.counts["load_plans"], preview.manifest.counts["history"]), (1, 1));
+    let excluded = &preview.manifest.excluded;
+    assert!(excluded.iter().any(|x| x.starts_with("load plan 'stale'")), "{excluded:?}");
+    assert!(!excluded.iter().any(|x| x.contains("'smoke'")), "{excluded:?}");
+    let planned = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
+    assert_eq!(planned.manifest.excluded, preview.manifest.excluded);
 
     // Into another profile, under the bundle's own ids.
     let b = new_app(root.path(), "b");
@@ -836,6 +841,41 @@ async fn an_import_stores_the_load_plans_and_history_the_bundle_carries() {
     let source = a.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
     assert_eq!(source.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec![sent[0].id.as_str()], "the source's history is untouched");
     assert_eq!(a.load_plans(&ws.meta.id).unwrap().len(), 2, "and so are its plans");
+}
+
+#[tokio::test]
+async fn an_imported_history_record_is_never_dated_after_its_import() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let request = a.create_request(&ws.meta.id, None, "Echo", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
+    let opts = SendOptions { record_history: true, ..Default::default() };
+    a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
+    let mut g = a.graph(Some(&ws.meta.id), false, true).unwrap();
+    assert_eq!(g.history.len(), 1);
+    g.history[0]["started_at"] = "2999-01-01T00:00:00Z".into();
+    let opts = ExportOptions {
+        kind: BundleKind::Workspace,
+        mode: ExportMode::ShareSafely,
+        passphrase: None,
+        include_history: true,
+        kdf: KdfParams::testing(),
+        app_version: "test",
+    };
+    let (bytes, _) = bundle::write(&g, &opts).unwrap();
+
+    let b = new_app(root.path(), "b");
+    let before = chrono::Utc::now();
+    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    let after = chrono::Utc::now();
+    let stored = b.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
+    assert_eq!(stored.len(), 1);
+    let at = stored[0].started_at;
+    assert!(before.timestamp_millis() <= at && at <= after.timestamp_millis(), "stored at {at}");
+    let (record, _) = b.store.get_history::<anvil_domain::execution::ExecutionRecord>(&stored[0].id).unwrap().unwrap();
+    assert_eq!(record.started_at.timestamp_millis(), at);
 }
 
 #[test]

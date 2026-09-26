@@ -120,6 +120,7 @@ enum Cmd {
         /// The `bundle_sha256` of the dry run you reviewed: the import is
         /// refused unless the file still has it. Without it,
         /// `--into-existing` approves the file as this command reads it.
+        /// With `--dry-run`, the dry run is refused unless the file has it.
         #[arg(long = "bundle-sha256", value_name = "SHA256")]
         bundle_sha256: Option<String>,
     },
@@ -975,6 +976,13 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             // read, unless `--bundle-sha256` names the file a dry run showed.
             if !approval.existing_workspaces.is_empty() || bundle_sha256.is_some() {
                 approval.bundle_sha256 = Some(bundle_sha256.clone().unwrap_or_else(|| anvil_app::port::file_sha256(&bytes)));
+            }
+            // A dry run checks the file against the digest it is given too.
+            if *dry_run
+                && let Some(d) = bundle_sha256
+                && !d.eq_ignore_ascii_case(&anvil_app::port::file_sha256(&bytes))
+            {
+                bail!("the file is not the one that was previewed (its bundle_sha256 differs); nothing was changed. Preview it again.");
             }
             // A full backup is restored; anything else is imported as a bundle.
             let rep = match (anvil_app::backup::is_backup(&bytes), *dry_run) {

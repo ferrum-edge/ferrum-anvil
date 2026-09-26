@@ -203,7 +203,7 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
     }
     let mut objects = serde_json::to_value(graph)?;
     let san = sanitize::sanitize(&mut objects);
-    let mut excluded = Vec::new();
+    let mut excluded = graph.omitted.clone();
     // Stored files whose content could not be read here travel without it.
     for u in crate::validate::uncarried_attachments(graph)? {
         let entry = format!("a stored file of {} (its content could not be read; it fails until the file is attached again)", u.item);

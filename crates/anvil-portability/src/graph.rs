@@ -46,6 +46,10 @@ pub struct PortableGraph {
     /// Optional run history (execution records, already redacted).
     #[serde(skip)]
     pub history: Vec<serde_json::Value>,
+    /// Items the exporter left out of this graph (labels only), listed among
+    /// the bundle's excluded items. Never written as an object.
+    #[serde(skip)]
+    pub omitted: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

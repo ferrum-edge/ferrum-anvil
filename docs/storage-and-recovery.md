@@ -125,12 +125,15 @@ bundle of every workspace, not a backup: it carries no app settings, profiles,
 spec-import records or load reports, and its bundle kind is `workspace`.
 
 A bundle carries each workspace's load plans, except one that still names a
-request, dataset or environment deleted since (an import would refuse it), and,
-when history is included, the workspace's history records without their
-response bodies. An import stores both. A history record is kept only when it
-belongs to a workspace in the bundle, and keeps its request, revision and
-environment links only when the bundle carries that object in the record's
-workspace (a revision only as one of the linked request).
+request, dataset or environment deleted since (an import would refuse it; the
+export lists it among its excluded items), and, when history is included, the
+workspace's history records without their response bodies. An import stores
+both. A history record is kept only when it belongs to a workspace in the
+bundle, and keeps its request, revision and environment links only when the
+bundle carries that object in the record's workspace (a revision only as one
+of the linked request). A record that is not a valid execution record is left
+out with a warning, and one dated after the import is stored with the import
+time as its start, so history retention still ages it out.
 
 In either bundle mode only the vault is encrypted. The objects (names, URLs,
 header and body text), attachments and history are ordinary zip entries that
@@ -192,7 +195,8 @@ workspace must name that digest too, and applying a file with any other digest
 read from it. The desktop passes the digest back itself; in the CLI,
 `--into-existing` approves the file as that command reads it, and
 `--bundle-sha256 <SHA256>` from a reviewed `--dry-run` pins the approval to
-that file. The same applies to full backups.
+that file (a `--dry-run` given it is refused for any other file). The same
+applies to full backups.
 
 A bundle is refused when any workspace-scoped object (folder, request,
 environment, TLS, proxy or integration profile, dataset, scenario, load plan)
@@ -346,7 +350,9 @@ needs no confirmation.
 
 Configurable in Settings: enable/disable history, keep or drop response bodies,
 maximum age (days) and total size; pruning keeps the newest records within the
-budget. "Clear all history" deletes history records only.
+budget. "Clear all history" deletes history records only. A history record
+that is overwritten (an import under Replace) releases its old response body
+unless another record still uses it.
 
 Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so

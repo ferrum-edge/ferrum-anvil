@@ -125,8 +125,9 @@ impl App {
             }
         }
         // A load plan travels with the requests, dataset and environment it
-        // names. One that still names one deleted since is left out: an
-        // import refuses a plan whose objects are not in the bundle.
+        // names. One that still names one deleted since is left out, and
+        // listed among the export's excluded items: an import refuses a plan
+        // whose objects are not in the bundle.
         for w in &wss {
             let id = w.meta.id;
             let requests: HashSet<Id> = g.requests.iter().filter(|r| r.workspace_id == id).map(|r| r.meta.id).collect();
@@ -138,6 +139,8 @@ impl App {
                 let environment = p.environment_id.is_none_or(|e| environments.contains(&e));
                 if runs && dataset && environment {
                     g.load_plans.push(p);
+                } else {
+                    g.omitted.push(format!("load plan '{}' (it names a request, dataset or environment deleted since)", p.name));
                 }
             }
         }
@@ -259,6 +262,7 @@ impl App {
         let mut g = opened.graph;
         let uncarried = validate::uncarried_attachments(&g)?;
         let checkpoint = self.store.checkpoint("before-import")?;
+        let imported_at = chrono::Utc::now();
         // A failure rolls back this import's own transaction and nothing else.
         // The checkpoint is never restored automatically: that would also
         // erase whatever other callers saved since it was taken.
@@ -368,11 +372,14 @@ impl App {
             }
             // Validation keeps only records of a workspace in the bundle, as
             // valid execution records; the bundle carries no response bodies.
+            // A record is never dated after its import, so age-based
+            // retention always reaches it.
             for h in &g.history {
-                let rec: ExecutionRecord = serde_json::from_value(h.clone())?;
+                let mut rec: ExecutionRecord = serde_json::from_value(h.clone())?;
                 if policy == ConflictPolicy::Merge && existing.history.contains_key(&rec.id) {
                     continue;
                 }
+                rec.started_at = rec.started_at.min(imported_at);
                 let started_at = rec.started_at.timestamp_millis();
                 s.add_history(&rec.id, rec.workspace_id.as_ref(), rec.request_id.as_ref(), started_at, &rec, None)?;
             }

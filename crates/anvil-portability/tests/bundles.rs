@@ -1320,12 +1320,8 @@ fn history_records_keep_only_links_inside_their_own_workspace() {
     let ws = g.workspaces[0].meta.id;
     let (request, other) = (g.requests[0].meta.id, g.requests[1].meta.id);
     let env = g.environments[0].meta.id;
-    let record = |request_id, revision_id, environment_id| ExecutionRecord {
-        request_id,
-        revision_id,
-        environment_id,
-        ..execution_record(Some(ws))
-    };
+    let record =
+        |request_id, revision_id, environment_id| ExecutionRecord { request_id, revision_id, environment_id, ..execution_record(Some(ws)) };
     let own = record(Some(request), Some(rev.id), Some(env));
     // Links to objects that are not in the bundle, and a revision of another request.
     let stray = record(Some(Id::new()), Some(rev.id), Some(Id::new()));
@@ -1345,18 +1341,26 @@ fn history_records_keep_only_links_inside_their_own_workspace() {
     ];
     assert_eq!(history_links(&g), expected);
 
-    // A record twice, or one that is not an execution record, refuses the bundle.
-    let invalid = |g: &mut PortableGraph, needle: &str| match validate::validate_and_normalize(g) {
-        Err(BundleError::Invalid(m)) => assert!(m.contains(needle), "{m}"),
-        other => panic!("expected an invalid bundle ({needle}), got {other:?}"),
-    };
+    // A record twice refuses the bundle.
     let mut twice = sample();
     let again = serde_json::to_value(execution_record(Some(twice.workspaces[0].meta.id))).unwrap();
     twice.history = vec![again.clone(), again];
-    invalid(&mut twice, "appears twice");
-    let mut note = sample();
-    note.history.push(serde_json::json!({"note": "run 1"}));
-    invalid(&mut note, "not a valid execution record");
+    match validate::validate_and_normalize(&mut twice) {
+        Err(BundleError::Invalid(m)) => assert!(m.contains("appears twice"), "{m}"),
+        other => panic!("expected an invalid bundle, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_history_record_that_is_not_an_execution_record_is_left_out_with_a_warning() {
+    let mut g = sample();
+    let kept = execution_record(Some(g.workspaces[0].meta.id));
+    let mut bad_time = serde_json::to_value(execution_record(Some(g.workspaces[0].meta.id))).unwrap();
+    bad_time["started_at"] = "not a time".into();
+    g.history = vec![serde_json::json!({"note": "run 1"}), serde_json::to_value(&kept).unwrap(), bad_time];
+    let warnings = validate::validate_and_normalize(&mut g).expect("the rest of the bundle imports");
+    assert!(warnings.iter().any(|w| w.contains("2 history record(s) are not valid execution records")), "{warnings:?}");
+    assert_eq!(history_links(&g), vec![(kept.id, kept.workspace_id, None, None, None)]);
 }
 
 #[test]
