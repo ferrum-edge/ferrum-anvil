@@ -225,10 +225,15 @@ fn a_header_edited_back_to_keychain_mode_does_not_unlock_from_the_leftover_entry
     let mut flipped = vault::read_header(dir.path()).unwrap();
     flipped.protection = ProtectionMode::OsKeychain;
     assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
-    // Without a MAC it would pass for an earlier build's header, but the
-    // entry was written for a MAC'd header.
+    // Without a MAC it still carries the wraps no keychain header has.
     flipped.protection_mac = None;
     assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
+    // Without the wraps too it would pass for an earlier build's header, but
+    // the entry was tagged before the passphrase header was written.
+    let mut bare = flipped.clone();
+    bare.passphrase_wrap = None;
+    bare.recovery_wrap = None;
+    assert!(matches!(vault::unlock_with_keychain(&bare), Err(VaultError::HeaderTampered)));
     // A MAC that is not even hex is refused as well.
     flipped.protection_mac = Some("zz".into());
     assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
