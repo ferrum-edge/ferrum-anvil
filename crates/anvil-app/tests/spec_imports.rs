@@ -567,7 +567,9 @@ async fn an_imported_collection_does_not_use_a_proxys_client_identity_bound_to_n
             address: "proxy.example.invalid:3128".into(),
             username: None,
             password: None,
-            no_proxy: String::new(),
+            // The request targets this host, so the engine bypasses the
+            // proxy; its selected unbound TLS profile is still refused.
+            no_proxy: "api.example.invalid".into(),
             tls_profile_id: Some(tls.id),
             hbone: None,
             created_at: now,
@@ -589,6 +591,7 @@ async fn an_imported_collection_does_not_use_a_proxys_client_identity_bound_to_n
     ];
     for (call, err) in refusals {
         assert!(err.contains("TLS profile 'proxy cert'") && err.contains("bound to no host"), "{call}: {err}");
+        assert!(err.contains("proxy 'egress'"), "{call}: {err}");
     }
     // Bound to the proxy's host, it is presented only there.
     let mut bound = tls.clone();

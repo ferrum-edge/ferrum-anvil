@@ -118,10 +118,11 @@ not applied to it and the run report says so in a note.
 A JWT-SVID drawn from this device's SPIFFE Workload API or from a token file
 is refused, and so is a request whose effective settings select a TLS
 profile with a client identity (a certificate or this device's X.509-SVID)
-bound to no host, since it would be presented to any host the collection
-names. Both selected profiles are checked: the request's own and the selected
-proxy's own TLS profile (an HTTPS or HBONE proxy's handshake). So an imported `Bearer {{token}}` can
-never pick up the destination's `token`, whether it is a variable of the
+bound to no host, along with the selected proxy's own TLS profile, whatever
+the proxy's kind or `no_proxy`, so the check does not depend on the destination.
+A sealed import root sent through an HBONE mesh proxy whose SVID profile is
+unbound is refused until the root is opened. So an imported `Bearer {{token}}`
+can never pick up the destination's `token`, whether it is a variable of the
 destination or a value its own login request extracted earlier in the same
 run: it stays unresolved and the request is not sent.
 
