@@ -38,7 +38,10 @@ against it).
   parameters and form fields the user marks sensitive are redacted by name and
   by value. URL path segments, query names and values and fragments are
   compared after percent-decoding, and a component that hides a secret is
-  replaced whole, so no reversible encoding of it is kept.
+  replaced whole, so no reversible encoding of it is kept; a URL that still
+  reveals one once decoded keeps only its scheme and authority. A collection
+  run drops a content-encoded response body it cannot check for sensitive run
+  values.
 - **Replay by the client itself:** HMAC nonce, DPoP proof and JWT regenerated per
   send; no automatic retry of possibly-processed non-idempotent requests.
 - **Replay of 0-RTT early data by the network:** data sent before a TLS 1.3 / QUIC

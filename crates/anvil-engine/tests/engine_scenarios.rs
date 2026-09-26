@@ -10,7 +10,7 @@ use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::outcome::*;
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::secret::{REDACTED, SensitiveValue};
-use anvil_domain::settings::{Limits, RetryPolicy, SettingsOverrides};
+use anvil_domain::settings::{Limits, RedirectPolicy, RetryPolicy, SettingsOverrides};
 use anvil_domain::tls::HostBinding;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
@@ -487,4 +487,73 @@ async fn encoded_secret_query_values_leave_no_reversible_trace_in_the_record() {
     assert!(url.contains(&format!("q={REDACTED}")) && url.contains(&format!("s={REDACTED}")), "{url}");
     assert!(url.contains(&format!("pin={REDACTED}")), "a parameter marked sensitive is redacted by name: {url}");
     assert!(url.contains("page=2"), "ordinary parameters stay readable: {url}");
+}
+
+#[tokio::test]
+async fn form_fields_marked_sensitive_are_redacted_from_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = "FORM-OTP-51c7 x";
+    let mut ctx = ctx_for(&f.url("/echo"));
+    ctx.spec.method = "POST".into();
+    let mut otp = KeyValue::new("one_time_code", secret);
+    otp.sensitive = true;
+    ctx.spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), otp] };
+    // Fails, and its observed value is the echoed form body.
+    let kind = AssertionKind::JsonPath { path: "$.body".into(), comparison: Comparison::Equals, value: "x".into() };
+    ctx.spec.assertions.push(labeled("echo", kind));
+    let o = run(&e, &ctx).await;
+    assert_eq!(o.record.response.as_ref().unwrap().status, 200);
+    // Ground truth: the server received the form-encoded value.
+    let echoed = String::from_utf8_lossy(&o.body).into_owned();
+    assert!(echoed.contains("one_time_code=FORM-OTP-51c7+x"), "{echoed}");
+    let actual = result(&o, "echo").actual.clone().expect("observed value");
+    assert!(actual.contains("user=alice") && actual.contains(REDACTED), "{actual}");
+    let json = serde_json::to_string(&o.record).unwrap();
+    assert!(!reveals(&json, secret), "a form field marked sensitive is recoverable from the execution record");
+}
+
+/// A redirect whose `Location` carries a secret partly encoded, with the
+/// `/` inside it left raw: no single path segment holds the whole value.
+fn redirect_ctx(f: &fx::Fixture, secret: &str) -> ExecutionContext {
+    let location = "/echo/RDR/secret%2Bwith%3Dreserved?page=2";
+    let mut ctx = ctx_for(&f.url(&format!("/redirect?status=302&to={}", url_encode(location))));
+    ctx.var_layers = vec![VarLayer {
+        label: "environment:lab".into(),
+        vars: vec![VarEntry { name: "credential".into(), value: secret.into(), secret: true }],
+    }];
+    ctx.spec.headers.push(KeyValue::new("X-Credential", "{{credential}}"));
+    ctx
+}
+
+#[tokio::test]
+async fn a_secret_in_a_redirect_location_is_not_recoverable_from_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = "RDR/secret+with=reserved";
+
+    // Followed: the second attempt's URL is the Location.
+    let o = run(&e, &redirect_ctx(&f, secret)).await;
+    assert_eq!(o.record.attempts.len(), 2);
+    assert!(matches!(o.record.attempts[1].reason, AttemptReason::Redirect { status: 302 }));
+    let reqs = f.log.requests();
+    assert!(reqs.last().unwrap().1.contains("/echo/RDR/secret%2Bwith%3Dreserved"), "{reqs:?}");
+    let url = &o.record.attempts[1].url;
+    assert!(url.ends_with(&format!("/{REDACTED}")) && !reveals(url, secret), "{url}");
+    let json = serde_json::to_string(&o.record).unwrap();
+    assert!(!reveals(&json, secret), "the followed redirect target is recoverable from the execution record");
+
+    // Not followed: the Location header itself is in the record.
+    let mut ctx = redirect_ctx(&f, secret);
+    let redirects = RedirectPolicy { follow: false, ..RedirectPolicy::default() };
+    ctx.settings_layers.push(("run".into(), SettingsOverrides { redirects: Some(redirects), ..Default::default() }));
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.status, 302);
+    let location = r.headers.iter().find(|h| h.name.eq_ignore_ascii_case("location")).map(|h| h.value.as_str());
+    assert_eq!(location, Some(REDACTED));
+    let json = serde_json::to_string(&o.record).unwrap();
+    assert!(!reveals(&json, secret), "the Location header is recoverable from the execution record");
 }

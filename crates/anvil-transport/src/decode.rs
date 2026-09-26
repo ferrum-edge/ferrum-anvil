@@ -22,7 +22,10 @@ pub enum DecodeOutcome {
 }
 
 /// Decode `data` according to a `Content-Encoding` header value (codings are
-/// applied in listed order, so they are removed in reverse).
+/// applied in listed order, so they are removed in reverse). Only the last
+/// layer removed can stop at `limit` and yield a decoded prefix: an earlier
+/// layer that exceeds it leaves bytes that are still encoded, so that is
+/// reported as [`DecodeOutcome::Failed`].
 pub fn decode(content_encoding: Option<&str>, data: &[u8], limit: u64) -> DecodeOutcome {
     let Some(ce) = content_encoding else {
         return DecodeOutcome::Identity;
@@ -36,7 +39,7 @@ pub fn decode(content_encoding: Option<&str>, data: &[u8], limit: u64) -> Decode
     }
     let mut current = data.to_vec();
     let mut truncated = false;
-    for coding in codings.iter().rev() {
+    for (i, coding) in codings.iter().rev().enumerate() {
         let reader: Box<dyn Read> = match coding.as_str() {
             "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(&current[..])),
             "deflate" => {
@@ -66,13 +69,14 @@ pub fn decode(content_encoding: Option<&str>, data: &[u8], limit: u64) -> Decode
             }
         }
         if out.len() as u64 > limit {
+            if i + 1 < codings.len() {
+                let message = format!("the decoded size exceeded the local limit of {limit} bytes before every content-coding was removed");
+                return DecodeOutcome::Failed { coding: coding.clone(), message };
+            }
             out.truncate(limit as usize);
             truncated = true;
         }
         current = out;
-        if truncated {
-            break;
-        }
     }
     DecodeOutcome::Decoded { bytes: current, truncated_at_limit: truncated }
 }
@@ -98,6 +102,34 @@ mod tests {
             DecodeOutcome::Decoded { bytes, truncated_at_limit } => {
                 assert_eq!(bytes.len(), 100);
                 assert!(truncated_at_limit, "decompression bomb bound must apply");
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn limit_hit_before_the_last_layer_is_a_failure() {
+        fn gzip(data: &[u8]) -> Vec<u8> {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(data).unwrap();
+            enc.finish().unwrap()
+        }
+        let inner = gzip(&vec![b'a'; 10_000]);
+        let twice = gzip(&inner);
+        assert!(inner.len() > 10, "gzip framing alone is larger than the limit below");
+        match decode(Some("gzip, gzip"), &twice, 10) {
+            DecodeOutcome::Failed { coding, message } => {
+                assert_eq!(coding, "gzip");
+                assert!(message.contains("limit"), "{message}");
+            }
+            o => panic!("a still-encoded prefix must not be reported as decoded: {o:?}"),
+        }
+        // Only the last layer stops at the limit: that is a decoded prefix.
+        let limit = inner.len() as u64 + 1;
+        match decode(Some("gzip, gzip"), &twice, limit) {
+            DecodeOutcome::Decoded { bytes, truncated_at_limit } => {
+                assert!(truncated_at_limit);
+                assert_eq!(bytes, vec![b'a'; limit as usize]);
             }
             o => panic!("{o:?}"),
         }

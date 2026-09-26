@@ -67,6 +67,15 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     }
 }
 
+/// An inferred note with its values redacted. An auth fact's `htu` (the DPoP
+/// target URI) is a URL whose path can carry a secret.
+fn redact_inferred(line: &str, r: &Redactor) -> String {
+    match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
+        Some((k, v)) if k.ends_with(".htu") => format!("auth {k}: {}", r.url(v)),
+        _ => r.text(line),
+    }
+}
+
 /// The decoded representation of a response body and how decoding went.
 #[derive(Default)]
 struct BodyDecoding {
@@ -253,9 +262,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     }
     let prepared_headers: Vec<HeaderEntry> =
         a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect();
-    let mut inferred = a.inferred.clone();
+    let mut inferred: Vec<String> = a.inferred.iter().map(|i| redact_inferred(i, redactor)).collect();
     for (k, v) in &a.auth_facts {
-        inferred.push(format!("auth {k}: {v}"));
+        inferred.push(redact_inferred(&format!("auth {k}: {v}"), redactor));
     }
     let record = ExecutionRecord {
         id: Id::new(),
@@ -471,4 +480,20 @@ pub fn local_failure_with(
         findings: diag.findings,
     };
     ExecutionOutput { record, body: Bytes::new(), decoded_body: None, extracted: vec![], session_facts: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anvil_domain::secret::REDACTED;
+
+    #[test]
+    fn inferred_auth_facts_are_redacted_and_the_htu_as_a_url() {
+        let r = Redactor::new(vec!["path-secret-7f3a".into()], vec![]);
+        // `%2D` is not a canonical encoding, so only URL redaction finds it.
+        let htu = redact_inferred("auth dpop.htu: https://h/u/path%2Dsecret-7f3a/x", &r);
+        assert_eq!(htu, format!("auth dpop.htu: https://h/u/{REDACTED}/x"));
+        assert_eq!(redact_inferred("auth hmac.nonce: n-path-secret-7f3a", &r), format!("auth hmac.nonce: n-{REDACTED}"));
+        assert_eq!(redact_inferred("Accept-Encoding: gzip, br", &r), "Accept-Encoding: gzip, br");
+    }
 }

@@ -5,9 +5,11 @@
 //! and (2) exact-value scrubbing of every secret value resolved during the
 //! execution, including its canonical percent-encoded forms. URL components
 //! are percent-decoded before they are compared, so an encoded secret is
-//! replaced whole rather than left in a reversible form. Arbitrary content
-//! can still contain secrets Anvil cannot recognize; exports show a preview
-//! for that reason.
+//! replaced whole rather than left in a reversible form, and a finished URL
+//! that still reveals a secret once decoded (a secret split across
+//! components) keeps only its scheme and authority. Arbitrary content can
+//! still contain secrets Anvil cannot recognize; exports show a preview for
+//! that reason.
 
 use crate::vars::Resolver;
 use anvil_domain::execution::HeaderEntry;
@@ -22,6 +24,7 @@ const MIN_SECRET_LEN: usize = 4;
 const MAX_DECODE_ROUNDS: usize = 3;
 
 /// Headers whose values are URLs (and so may carry encoded query values).
+/// `Link` and `Refresh` embed URLs in a larger value and are handled apart.
 const URL_HEADERS: &[&str] = &["location", "content-location", "referer"];
 
 const SENSITIVE_HEADERS: &[&str] = &[
@@ -118,6 +121,13 @@ impl Redactor {
 
     /// Scrub exact secret values (and their canonical encoded forms) from
     /// arbitrary text.
+    ///
+    /// Limits: only the raw value and the encodings in [`encoded_forms`] are
+    /// recognized. A secret encoded any other way (partly or doubly
+    /// percent-encoded, base64, JSON- or HTML-escaped), split by other
+    /// content, or shorter than 4 characters passes through, and names are
+    /// not consulted. Use [`Redactor::url`], [`Redactor::header`] or
+    /// [`Redactor::json_text`] where the structure is known.
     pub fn text(&self, s: &str) -> String {
         let mut out = s.to_string();
         for v in &self.patterns {
@@ -147,6 +157,37 @@ impl Redactor {
                 break;
             }
             layer = decoded;
+        }
+        false
+    }
+
+    /// True when a secret can be read from `s` directly or after undoing up to
+    /// [`MAX_DECODE_ROUNDS`] layers of percent-encoding, with `+` read either
+    /// way at every layer.
+    fn reveals_secret(&self, s: &str) -> bool {
+        if self.secrets.is_empty() {
+            return false;
+        }
+        let mut layers: Vec<Vec<u8>> = vec![s.as_bytes().to_vec()];
+        for round in 0..=MAX_DECODE_ROUNDS {
+            if layers.iter().any(|l| self.secrets.iter().any(|x| contains_bytes(l, x.as_bytes()))) {
+                return true;
+            }
+            if round == MAX_DECODE_ROUNDS {
+                break;
+            }
+            let mut next: Vec<Vec<u8>> = Vec::new();
+            for l in &layers {
+                let plus: Vec<u8> = l.iter().map(|&b| if b == b'+' { b' ' } else { b }).collect();
+                let plain: Vec<u8> = percent_encoding::percent_decode(l).collect();
+                let form: Vec<u8> = percent_encoding::percent_decode(&plus).collect();
+                for d in [plain, form] {
+                    if !next.contains(&d) {
+                        next.push(d);
+                    }
+                }
+            }
+            layers = next;
         }
         false
     }
@@ -184,7 +225,42 @@ impl Redactor {
         if URL_HEADERS.iter().any(|h| name.eq_ignore_ascii_case(h)) {
             return self.url(value);
         }
+        if name.eq_ignore_ascii_case("link") {
+            return self.link(value);
+        }
+        if name.eq_ignore_ascii_case("refresh") {
+            return self.refresh(value);
+        }
         self.text(value)
+    }
+
+    /// `Link` (RFC 8288): every `<URI-reference>` is redacted as a URL.
+    fn link(&self, value: &str) -> String {
+        let value = self.text(value);
+        let mut out = String::with_capacity(value.len());
+        let mut rest = value.as_str();
+        while let Some(start) = rest.find('<') {
+            let Some(len) = rest[start + 1..].find('>') else { break };
+            out.push_str(&rest[..=start]);
+            out.push_str(&self.url(&rest[start + 1..start + 1 + len]));
+            out.push('>');
+            rest = &rest[start + 2 + len..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// `Refresh` (`5; url=https://…`): the target after `url=` is redacted as
+    /// a URL, keeping surrounding quotes.
+    fn refresh(&self, value: &str) -> String {
+        let value = self.text(value);
+        let Some(at) = value.to_ascii_lowercase().find("url=") else { return self.url(&value) };
+        let (head, target) = value.split_at(at + 4);
+        let quote = target.chars().next().filter(|c| matches!(*c, '"' | '\'') && target.len() > 1 && target.ends_with(*c));
+        if let Some(q) = quote {
+            return format!("{head}{q}{}{q}", self.url(&target[1..target.len() - 1]));
+        }
+        format!("{head}{}", self.url(target))
     }
 
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
@@ -194,7 +270,10 @@ impl Redactor {
     /// Redact sensitive query parameter values and secret values in a URL.
     /// Path segments, query names and values and the fragment are compared
     /// after percent-decoding; a component that hides a secret is replaced
-    /// whole, so no reversible encoding of it survives.
+    /// whole, so no reversible encoding of it survives. The fragment is read
+    /// as `k=v` pairs too (e.g. `#access_token=…`). If the finished URL still
+    /// reveals a secret once decoded (a secret split across components by a
+    /// raw `/` or `&`), everything after the authority is replaced.
     pub fn url(&self, u: &str) -> String {
         let u = self.text(u);
         let (base, frag) = match u.split_once('#') {
@@ -207,31 +286,54 @@ impl Redactor {
         };
         let mut out = self.url_path(before_query);
         if let Some(q) = query {
-            let parts: Vec<String> = q
-                .split('&')
-                .map(|kv| match kv.split_once('=') {
-                    Some((k, v)) => {
-                        let dk = percent_encoding::percent_decode_str(k).decode_utf8_lossy();
-                        let k = if self.hides_secret(k) { REDACTED } else { k };
-                        if is_sensitive_name(&dk, &self.extra_names) || self.hides_secret(v) {
-                            format!("{k}={REDACTED}")
-                        } else {
-                            format!("{k}={v}")
-                        }
-                    }
-                    None if self.hides_secret(kv) => REDACTED.to_string(),
-                    None => kv.to_string(),
-                })
-                .collect();
-            out = format!("{out}?{}", parts.join("&"));
+            out = format!("{out}?{}", self.pairs(q));
         }
         // Userinfo in the authority is always sensitive.
         let out = redact_userinfo(&out);
-        match frag {
-            Some(f) if self.hides_secret(f) => format!("{out}#{REDACTED}"),
-            Some(f) => format!("{out}#{f}"),
+        let out = match frag {
+            Some(f) => format!("{out}#{}", self.pairs(f)),
             None => out,
+        };
+        self.seal(out)
+    }
+
+    /// `k=v&k=v` (a query or a fragment) with sensitive names' values and
+    /// every name, value or bare part that hides a secret replaced.
+    fn pairs(&self, q: &str) -> String {
+        q.split('&')
+            .map(|kv| match kv.split_once('=') {
+                Some((k, v)) => {
+                    let dk = percent_encoding::percent_decode_str(k).decode_utf8_lossy();
+                    let k = if self.hides_secret(k) { REDACTED } else { k };
+                    if is_sensitive_name(&dk, &self.extra_names) || self.hides_secret(v) {
+                        format!("{k}={REDACTED}")
+                    } else {
+                        format!("{k}={v}")
+                    }
+                }
+                None if self.hides_secret(kv) => REDACTED.to_string(),
+                None => kv.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    /// Final whole-URL check: components are examined one at a time, so a
+    /// secret containing a delimiter that was left raw is split across them.
+    /// If the finished URL still reveals a secret, only its scheme and
+    /// authority are kept (nothing at all if even that reveals one).
+    fn seal(&self, u: String) -> String {
+        if !self.reveals_secret(&u) {
+            return u;
         }
+        let sealed = match u.split_once("://").filter(|(scheme, _)| is_scheme(scheme)) {
+            Some((scheme, rest)) => {
+                let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                format!("{scheme}://{}/{REDACTED}", &rest[..end])
+            }
+            None => REDACTED.to_string(),
+        };
+        if self.reveals_secret(&sealed) { REDACTED.to_string() } else { sealed }
     }
 
     /// `scheme://authority/path` (or a bare path) with every path segment that
@@ -310,6 +412,10 @@ fn lower_hex(encoded: &str) -> String {
         }
     }
     out
+}
+
+fn is_scheme(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
 }
 
 fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {

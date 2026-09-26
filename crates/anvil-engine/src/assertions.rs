@@ -110,9 +110,21 @@ pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
     Ok(nodes.first().map(|n| n.descendants().filter(|d| d.is_text()).map(|d| d.text().unwrap_or("")).collect::<String>()))
 }
 
+/// Exhaustive so a new assertion kind has to decide whether it reads the body.
 fn reads_body(k: &AssertionKind) -> bool {
     use AssertionKind as K;
-    matches!(k, K::JsonPath { .. } | K::XPath { .. } | K::JsonSchema { .. } | K::Body { .. })
+    match k {
+        K::JsonPath { .. } | K::XPath { .. } | K::JsonSchema { .. } | K::Body { .. } => true,
+        K::Status { .. }
+        | K::StatusIn { .. }
+        | K::Header { .. }
+        | K::Trailer { .. }
+        | K::LatencyMs { .. }
+        | K::GrpcStatus { .. }
+        | K::MessageCount { .. }
+        | K::Diagnostic { .. }
+        | K::Transport { .. } => false,
+    }
 }
 
 fn not_fully_decoded(reason: &str) -> String {

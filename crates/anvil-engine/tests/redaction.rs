@@ -117,3 +117,52 @@ fn fields_marked_sensitive_are_redacted_by_name_and_by_value() {
     assert_eq!(r.text("echo FLAGGED-LITERAL-4c1d"), format!("echo {REDACTED}"));
     assert_eq!(r.url("https://h/?customer_ssn=1"), format!("https://h/?customer_ssn={REDACTED}"), "configured names still apply");
 }
+
+#[test]
+fn a_secret_split_across_path_segments_by_a_raw_slash_is_not_recoverable() {
+    let r = redactor();
+    // Encoded apart from the `/`: neither segment holds the whole value.
+    for u in ["https://h/users/AUDIT/secret%2Bwith%3Dreserved/items?page=2", "https://h/users/AUDIT/secret%2bwith=reserved"] {
+        let out = r.url(u);
+        assert_eq!(out, format!("https://h/{REDACTED}"), "{u}");
+        assert!(!reveals(&out, SECRET), "{u} → {out}");
+    }
+    let relative = r.url("/users/AUDIT/secret%2Bwith%3Dreserved");
+    assert_eq!(relative, REDACTED);
+}
+
+#[test]
+fn a_secret_split_across_query_parts_by_a_raw_ampersand_is_not_recoverable() {
+    let secret = "raw&secret=value";
+    let r = Redactor::new(vec![secret.into()], vec![]);
+    for u in ["https://h:8443/p?q=raw&secret%3Dvalue&page=2", "https://h:8443/p?q=raw&secret%3dvalue#top"] {
+        let out = r.url(u);
+        assert_eq!(out, format!("https://h:8443/{REDACTED}"), "{u}");
+        assert!(!reveals(&out, secret), "{u} → {out}");
+    }
+}
+
+#[test]
+fn fragment_parameters_are_redacted_by_name_and_by_value() {
+    let r = redactor();
+    let out = r.url("https://app/cb#access_token=eyJ.fragment.tok&state=s1&expires_in=3600");
+    assert_eq!(out, format!("https://app/cb#access_token={REDACTED}&state=s1&expires_in=3600"));
+    let out = r.url("https://app/cb#code=AUDIT%2fsecret%2Bwith%3Dreserved&state=s1");
+    assert_eq!(out, format!("https://app/cb#code={REDACTED}&state=s1"));
+    assert_eq!(r.url("https://app/docs#section-2"), "https://app/docs#section-2", "plain fragments stay readable");
+}
+
+#[test]
+fn link_and_refresh_headers_are_redacted_as_urls() {
+    let r = redactor();
+    let link = r.header(
+        "Link",
+        r#"<https://h/p?page=2&access_token=eyJ.link.tok>; rel="next", <https://h/u/AUDIT%2fsecret%2Bwith%3Dreserved>; rel="prev""#,
+    );
+    assert_eq!(link, format!(r#"<https://h/p?page=2&access_token={REDACTED}>; rel="next", <https://h/u/{REDACTED}>; rel="prev""#));
+    let refresh = r.header("Refresh", "5; url=https://h/cb?code=AUDIT%2fsecret%2Bwith%3Dreserved&state=s1");
+    assert_eq!(refresh, format!("5; url=https://h/cb?code={REDACTED}&state=s1"));
+    let quoted = r.header("Refresh", "0; URL='https://h/cb?token=eyJ.refresh.tok'");
+    assert_eq!(quoted, format!("0; URL='https://h/cb?token={REDACTED}'"));
+    assert_eq!(r.header("Refresh", "30"), "30");
+}
