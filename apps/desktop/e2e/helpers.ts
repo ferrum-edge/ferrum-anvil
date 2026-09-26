@@ -49,7 +49,7 @@ export async function waitForWorkbench(): Promise<void> {
   await browser.waitUntil(async () => (await ws.getValue()) !== "", { timeout: 30_000, timeoutMsg: "no workspace was selected" });
 }
 
-const openTabs = () => $$('nav[aria-label="Open requests"] [role="tab"]');
+const openTabs = () => $$('[role="tablist"][aria-label="Open requests"] [role="tab"]');
 
 /** Create a new request from the sidebar and wait for its editor. */
 export async function newRequest(): Promise<void> {
