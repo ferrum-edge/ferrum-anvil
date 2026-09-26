@@ -277,6 +277,10 @@ impl crate::App {
     /// unlocking with the recovery key). Re-wraps the existing data key;
     /// nothing is re-encrypted and the recovery key stays valid. An
     /// OS-keychain profile is refused: see [`crate::App::convert_to_passphrase`].
+    ///
+    /// The read here only picks the message for the wrong mode: the header
+    /// rewritten is read and checked again under the header lock
+    /// ([`vault::change_passphrase`]).
     pub fn change_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<()> {
         check_new_passphrase(new_passphrase)?;
         let mut h = vault::read_header(&self.dir)?;
@@ -293,7 +297,10 @@ impl crate::App {
     /// removed; if the credential store refuses, removal is retried at each
     /// unlock until the entry is removed (see
     /// [`ProfileSummary::leftover_keychain_entry`]). A passphrase profile is
-    /// refused.
+    /// refused, as is a conversion whose keychain entry the credential store
+    /// refuses to tag first (nothing is changed then). As in
+    /// [`crate::App::change_passphrase`], the header rewritten is read and
+    /// checked under the header lock.
     pub fn convert_to_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<KeychainConversion> {
         check_new_passphrase(new_passphrase)?;
         let mut h = vault::read_header(&self.dir)?;

@@ -50,14 +50,24 @@ The backend accepts only the unlock methods of the profile's protection mode
 (recorded in the plaintext header): the passphrase and recovery key for a
 passphrase profile, the OS keychain for a keychain profile.
 
-The mode is authenticated: the header carries an HMAC-SHA256 under the data
-key over the profile id, the protection mode and the key check, and every
-unlock verifies it once the data key is obtained. A header edited to claim
-another mode is refused. Keychain entries written for a header with this MAC
-are tagged, and a tagged entry never opens a header without a MAC, so removing
-the MAC does not help either. Headers and keychain entries written by earlier
-builds have neither; they still open, and get both at their next successful
-unlock (the MAC first, then the tag).
+The mode is authenticated: the header carries an HMAC-SHA256 over the profile
+id, the protection mode and the key check, under a MAC key derived from the
+data key (HKDF-SHA256, info `anvil-profile-protection-v1`), and every unlock
+verifies it once the data key is obtained. A header edited to claim another
+mode is refused, and changing the passphrase or converting rewrites only a
+header that still verifies. Keychain entries written for a header with this
+MAC are tagged, and a tagged entry never opens a header without a MAC, so
+removing the MAC does not help either. A keychain header never carries a
+passphrase or recovery wrap, so one without a MAC that does is refused too.
+
+Headers and keychain entries written by earlier builds have neither the MAC
+nor the tag. They still open, and get both at their next successful unlock
+(the MAC first, then the tag): a header from an earlier build is trusted as it
+is found at its first unlock on this build. One case stays open until the
+entry is gone: a keychain entry left over from a conversion done by an earlier
+build holds the untagged key, and if the credential store refuses both to
+delete it and to overwrite it (step 3 below), a header edited back to keychain
+mode with its MAC and both wraps removed still opens from it.
 
 The header is plaintext, so its Argon2id costs and salts are checked before any
 derivation runs, against the same bounds as a bundle's or backup's
@@ -70,28 +80,38 @@ passphrase* converts an unlocked keychain profile to passphrase protection
 (*Change unlock passphrase* is for passphrase profiles only). The data key is
 not changed, so nothing is re-encrypted. In order:
 
-1. The header is rewritten atomically with the passphrase wrap, a wrap for a
-   **new recovery key** (shown once) and the passphrase mode with its MAC: a
-   synced temporary file of the writer's own (named after its process and a
-   random suffix) is renamed over the header, then the directory is flushed
-   (`fsync` on macOS, Linux and the BSDs; `FlushFileBuffers` on a directory
-   handle on Windows). The directory flush is best effort: a file system that
-   refuses it (some FUSE and SMB mounts) is logged, not treated as a failure,
-   because the new header is already in place. From here on the keychain no
-   longer opens the profile.
-2. The keychain entry is removed and its account name dropped from the header.
-   If the credential store refuses, or the app stops between the two steps,
-   the header keeps the account name, and until the old entry is removed the
-   removal is retried after each successful unlock until the entry is gone.
-   The retry edits the header as it is on disk at that moment, holding an
-   advisory lock on `profile.lock` in the profile directory that every header
-   writer takes, so a passphrase changed meanwhile by another process is kept.
-   An entry that holds a different key is left alone. Settings lists such a
-   leftover entry (service `com.ferrumedge.anvil`, account `profile-<id>`) so
-   it can also be removed by hand; each retry may raise the credential
-   store's own permission prompt. Until the entry is gone, a copy of the
-   header saved before the conversion is still a valid keychain header for
-   it, so removing the entry is what fully ends keychain access.
+1. A header written by an earlier build gets its MAC, and the keychain entry
+   is tagged if it is not yet. If the credential store refuses, the
+   conversion stops and nothing has changed.
+2. The header is rewritten atomically with the passphrase wrap, a wrap for a
+   **new recovery key** (shown once) and the passphrase mode with its MAC.
+   The header rewritten is the one on disk, read under an advisory lock on
+   `profile.lock` in the profile directory that every header writer takes,
+   and it must still verify under the data key. A synced temporary file of
+   the writer's own (named after its process and a random suffix) is renamed
+   over the header, then the directory is flushed (`fsync` on macOS, Linux
+   and the BSDs; `FlushFileBuffers` on a directory handle on Windows). The
+   directory flush is best effort: a file system that refuses it (some FUSE
+   and SMB mounts) is logged, not treated as a failure, because the new
+   header is already in place. A temporary file older than ten minutes, left
+   by a writer that stopped before the rename, is removed by the next writer
+   holding the lock. From here on the keychain no longer opens the profile.
+3. The keychain entry is removed and its account name dropped from the header.
+   If the credential store refuses the delete, the header keeps the account
+   name and the entry is overwritten with a marker that holds no key; if the
+   app stops between the two steps, the header keeps the account name too.
+   Until the old entry is
+   removed, the removal is retried after each successful unlock until the
+   entry is gone. The retry edits the header as it is on disk at that moment,
+   under the same lock, so a passphrase changed meanwhile by another process
+   is kept. An entry that holds a different key is left alone. Settings lists
+   such a leftover entry (service `com.ferrumedge.anvil`, account
+   `profile-<id>`) so it can also be removed by hand; each retry may raise
+   the credential store's own permission prompt. While the entry still holds
+   the key (the store refused the overwrite too, or the app stopped before
+   the delete), a copy of the header saved before the conversion is still a
+   valid keychain header for it, so removing the entry is what fully ends
+   keychain access.
 
 `crates/anvil-storage/tests/keychain_conversion.rs` and
 `crates/anvil-app/tests/keychain_conversion.rs` cover this with keyring-core's

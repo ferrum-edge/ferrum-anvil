@@ -5,8 +5,8 @@
 #![cfg(feature = "os-keychain")]
 
 use anvil_domain::workspace::ProtectionMode;
-use anvil_storage::KdfParams;
 use anvil_storage::vault::{self, VaultError};
+use anvil_storage::{KdfParams, Key};
 
 const SERVICE: &str = "com.ferrumedge.anvil";
 const PASS: &str = "new passphrase 123";
@@ -28,6 +28,22 @@ fn fail_next(account: &str) {
     let e = entry(account);
     let cred = e.as_any().downcast_ref::<keyring_core::mock::Cred>().unwrap();
     cred.set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
+}
+
+/// What this build stores for `dek`: the key behind the entry tag.
+fn tagged(dek: &Key) -> Vec<u8> {
+    [b"anvil-dek-v2:".as_slice(), dek.as_bytes().as_slice()].concat()
+}
+
+/// Put a converted profile's old entry (holding `secret`) and its account
+/// name back, as a conversion leaves them when it stops after publishing the
+/// passphrase header, or when the store refuses both the delete and the
+/// overwrite with the marker.
+fn leave_entry_behind(dir: &std::path::Path, account: &str, secret: &[u8]) {
+    entry(account).set_secret(secret).unwrap();
+    let mut h = vault::read_header(dir).unwrap();
+    h.keychain_account = Some(account.into());
+    vault::write_header(dir, &h).unwrap();
 }
 
 #[test]
@@ -64,22 +80,34 @@ fn converted_profile_unlocks_only_with_passphrase_or_recovery_key() {
 }
 
 #[test]
-fn failed_entry_removal_still_refuses_keychain_unlock_and_is_retried() {
+fn a_conversion_stops_unchanged_when_the_store_refuses_to_tag_the_entry() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    let before = std::fs::read(vault::header_path(dir.path())).unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+
+    fail_next(&account);
+    let r = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing());
+    assert!(matches!(r, Err(VaultError::KeychainUnavailable(_))));
+    assert_eq!(std::fs::read(vault::header_path(dir.path())).unwrap(), before, "the header is unchanged");
+    let h = vault::read_header(dir.path()).unwrap();
+    assert_eq!(vault::unlock_with_keychain(&h).unwrap().as_bytes(), created.dek.as_bytes(), "still a keychain profile");
+}
+
+#[test]
+fn an_entry_left_behind_still_refuses_keychain_unlock_and_is_retried() {
     mock_store();
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
     let account = created.header.keychain_account.clone().unwrap();
     let mut h = vault::read_header(dir.path()).unwrap();
+    vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    leave_entry_behind(dir.path(), &account, &tagged(&created.dek));
 
-    fail_next(&account);
-    let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
-    assert!(!conv.keychain_entry_removed);
-
-    // The passphrase header was published before the store was touched.
     let mut h = vault::read_header(dir.path()).unwrap();
     assert_eq!(h.protection, ProtectionMode::Passphrase);
-    assert_eq!(h.keychain_account.as_deref(), Some(account.as_str()), "kept so removal can be retried");
-    assert!(entry(&account).get_secret().is_ok(), "the store refused, so the entry is still there");
     assert!(matches!(vault::unlock_with_keychain(&h), Err(VaultError::WrongProtection(_))));
     assert!(vault::unlock_with_passphrase(&h, PASS).is_ok());
 
@@ -147,9 +175,8 @@ fn retry_with_a_stale_header_keeps_a_newer_passphrase() {
     let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
     let account = created.header.keychain_account.clone().unwrap();
     let mut h = vault::read_header(dir.path()).unwrap();
-    fail_next(&account);
-    let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
-    assert!(!conv.keychain_entry_removed);
+    vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    leave_entry_behind(dir.path(), &account, &tagged(&created.dek));
 
     // An unlock read this header, then another process changed the passphrase
     // before the unlock retried the removal.
@@ -191,10 +218,8 @@ fn a_header_edited_back_to_keychain_mode_does_not_unlock_from_the_leftover_entry
     let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
     let account = created.header.keychain_account.clone().unwrap();
     let mut h = vault::read_header(dir.path()).unwrap();
-    fail_next(&account);
     let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
-    assert!(!conv.keychain_entry_removed);
-    assert!(entry(&account).get_secret().is_ok(), "the old entry is still in the store");
+    leave_entry_behind(dir.path(), &account, &tagged(&created.dek));
 
     // The mode is authenticated: flipping it back breaks the MAC.
     let mut flipped = vault::read_header(dir.path()).unwrap();
@@ -263,11 +288,19 @@ fn a_converted_header_from_an_earlier_build_is_sealed_at_the_next_unlock() {
     let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
     let account = created.header.keychain_account.clone().unwrap();
     let mut h = vault::read_header(dir.path()).unwrap();
-    fail_next(&account);
     vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
     // As an earlier build left it: no MAC, the bare key still in the store.
-    entry(&account).set_secret(created.dek.as_bytes()).unwrap();
+    leave_entry_behind(dir.path(), &account, created.dek.as_bytes());
     let mut h = strip_mac(dir.path());
+
+    // Edited back to keychain mode, it still carries the passphrase and
+    // recovery wraps no keychain header has, so it is neither unlocked from
+    // the untagged entry nor sealed.
+    let mut flipped = h.clone();
+    flipped.protection = ProtectionMode::OsKeychain;
+    assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
+    assert!(matches!(vault::upgrade_header(dir.path(), &mut flipped, &created.dek), Err(VaultError::HeaderTampered)));
+    assert!(vault::read_header(dir.path()).unwrap().protection_mac.is_none(), "nothing was sealed");
 
     let dek = vault::unlock_with_passphrase(&h, PASS).unwrap();
     vault::upgrade_header(dir.path(), &mut h, &dek).unwrap();
@@ -325,4 +358,24 @@ fn concurrent_header_writers_do_not_share_a_temporary_file() {
         std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     left.sort();
     assert_eq!(left, ["profile.json", "profile.lock"], "no temporary file is left behind");
+}
+
+#[test]
+fn a_header_write_removes_temporary_files_abandoned_long_ago() {
+    let dir = tempfile::tempdir().unwrap();
+    vault::create_passphrase_profile(dir.path(), "pw", PASS, KdfParams::testing()).unwrap();
+    let file = |name: &str, age_secs: u64| {
+        let path = dir.path().join(name);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs)).unwrap();
+        path
+    };
+    let abandoned = file("profile.json.4242.00ff00ff00ff00ff.tmp", 3600);
+    let in_flight = file("profile.json.4243.0123456789abcdef.tmp", 0);
+    let unrelated = file("notes.tmp", 3600);
+
+    vault::write_header(dir.path(), &vault::read_header(dir.path()).unwrap()).unwrap();
+    assert!(!abandoned.exists(), "a writer that stopped an hour ago left it");
+    assert!(in_flight.exists(), "a recent one may still be another writer's");
+    assert!(unrelated.exists());
 }
