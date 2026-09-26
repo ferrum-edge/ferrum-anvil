@@ -6,7 +6,8 @@ use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::Id;
 use anvil_domain::request::RequestSpec;
 use anvil_storage::{KdfParams, StoreError, kind};
-use std::sync::{Arc, mpsc};
+use anvil_app::AppError;
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -76,4 +77,91 @@ fn deleting_a_folder_in_a_parent_cycle_terminates() {
     app.delete_folder(&a.meta.id).unwrap();
     assert!(app.folders(&ws.meta.id).unwrap().is_empty());
     assert!(app.requests(&ws.meta.id).unwrap().iter().all(|r| r.meta.id != req.meta.id));
+}
+
+fn open_app(name: &str) -> (tempfile::TempDir, App) {
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, dek, _recovery) = pm.create_passphrase(name, PASSPHRASE, KdfParams::testing()).unwrap();
+    let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+    let app = App::open(s.dir.clone(), h, dek).unwrap();
+    (root, app)
+}
+
+/// Run `f` on another thread and fail the test, instead of hanging it, if it
+/// does not finish in time.
+fn within_timeout<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_secs(20)).expect("the folder walk did not terminate")
+}
+
+/// Close the parent cycle a -> b -> a with `save_folder`, which does not
+/// validate ancestry, as an imported bundle could. Returns (a, b).
+fn folder_cycle(app: &App, ws: &Id) -> (Id, Id) {
+    let a = app.create_folder(ws, None, "a").unwrap();
+    let b = app.create_folder(ws, Some(a.meta.id), "b").unwrap();
+    let mut a = app.folder(&a.meta.id).unwrap();
+    a.parent_id = Some(b.meta.id);
+    let a = app.save_folder(a).unwrap();
+    (a.meta.id, b.meta.id)
+}
+
+#[test]
+fn moving_a_folder_under_a_parent_cycle_terminates() {
+    let (_root, app) = open_app("move-cycle");
+    let app = Arc::new(app);
+    let ws = app.create_workspace("cycle").unwrap();
+    let (a, _b) = folder_cycle(&app, &ws.meta.id);
+    let x = app.create_folder(&ws.meta.id, None, "x").unwrap();
+
+    let moved = within_timeout({
+        let app = Arc::clone(&app);
+        move || app.move_folder(&x.meta.id, Some(a), 1.0)
+    });
+    assert!(matches!(moved, Err(AppError::Invalid(_))), "{moved:?}");
+    assert_eq!(app.folder(&x.meta.id).unwrap().parent_id, None, "a refused move must not be saved");
+}
+
+#[test]
+fn finding_a_request_inside_a_parent_cycle_terminates() {
+    let (_root, app) = open_app("find-cycle");
+    let app = Arc::new(app);
+    let ws = app.create_workspace("cycle").unwrap();
+    let (_a, b) = folder_cycle(&app, &ws.meta.id);
+    let req = app.create_request(&ws.meta.id, Some(b), "in b", RequestSpec::http("GET", "http://127.0.0.1/")).unwrap();
+    let other = app.create_request(&ws.meta.id, None, "other", RequestSpec::http("GET", "http://127.0.0.1/")).unwrap();
+
+    let found = within_timeout({
+        let (app, ws) = (Arc::clone(&app), ws.meta.id);
+        move || (app.find_request(&ws, "in b").map(|r| r.meta.id), app.find_request(&ws, "other").map(|r| r.meta.id))
+    });
+    assert_eq!(found.0.unwrap(), req.meta.id);
+    assert_eq!(found.1.unwrap(), other.meta.id);
+}
+
+#[test]
+fn concurrent_opposing_folder_moves_cannot_create_a_cycle() {
+    let (_root, app) = open_app("move-race");
+    let app = Arc::new(app);
+    let ws = app.create_workspace("race").unwrap();
+    for round in 0..50 {
+        let a = app.create_folder(&ws.meta.id, None, &format!("a{round}")).unwrap().meta.id;
+        let b = app.create_folder(&ws.meta.id, None, &format!("b{round}")).unwrap().meta.id;
+        let start = Arc::new(Barrier::new(2));
+        let mover = |id: Id, under: Id| {
+            let (app, start) = (Arc::clone(&app), Arc::clone(&start));
+            thread::spawn(move || {
+                start.wait();
+                app.move_folder(&id, Some(under), 1.0).is_ok()
+            })
+        };
+        let (ab, ba) = (mover(a, b), mover(b, a));
+        let moved = [ab.join().unwrap(), ba.join().unwrap()];
+        assert_eq!(moved.iter().filter(|m| **m).count(), 1, "round {round}: exactly one of the opposing moves may succeed");
+        let (fa, fb) = (app.folder(&a).unwrap(), app.folder(&b).unwrap());
+        assert!(!(fa.parent_id == Some(b) && fb.parent_id == Some(a)), "round {round}: the moves created a parent cycle");
+    }
 }
