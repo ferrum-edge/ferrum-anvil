@@ -1356,6 +1356,65 @@ fn proto014_h3(env: &Env) -> Fut<'_> {
     })
 }
 
+/// PROTO-014-down over HTTP/3: the gateway's own answer for a backend that is
+/// down arrives as a trailers-only HTTP/3 response (status in the headers).
+fn proto014_h3_down(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let o = send(
+            env,
+            &grpc_wire_ctx(
+                env,
+                &format!("grpcs://{HTTPS}/grpc-down"),
+                "Unary",
+                GrpcMode::Unary,
+                &[r#"{"message":"x"}"#],
+                GrpcWire::Grpc,
+                Some(HttpVersionPolicy::Http3Only),
+            ),
+        )
+        .await;
+        let (http, st, src, msg) = grpc_status(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "HTTP 200 over HTTP/3, trailers-only grpc-status 14 (UNAVAILABLE)",
+            http == Some(200) && st == Some(14) && src == Some(GrpcStatusSource::TrailersOnly),
+            format!("{http:?} {st:?} {src:?} {msg}"),
+        );
+        quic_phases_ok(&mut c, &o);
+        c.add(
+            CheckKind::Diagnosis,
+            "an RPC failure, not a missing status; no HTTP/3 trailers are claimed",
+            o.record.outcome.application == ApplicationState::Failure
+                && o.record.response.as_ref().map(|r| !r.trailers_received).unwrap_or(false)
+                && !codes(&o).contains(&"app.grpc_status_missing".to_string()),
+            outcome_line(&o),
+        );
+        c.has(&o, "app.grpc_status");
+        let f = o.record.findings.iter().find(|f| f.code == "app.grpc_status");
+        c.add(
+            CheckKind::Diagnosis,
+            "the origin of a trailers-only status is left open; no client-leg connect claim",
+            f.map(|f| f.does_not_prove.iter().any(|d| d.contains("Which component"))).unwrap_or(false)
+                && !codes(&o).iter().any(|x| x.starts_with("client.connect")),
+            "",
+        );
+        c.absent_prefix(&o, "ferrum.token");
+        let ops = op_log_settled(env, from, "proto014-grpc-down", 1).await;
+        c.operator_class(&ops, "proto014-grpc-down", &["connection_refused", "connection_pool_error", "request_error"]);
+        let r = send(env, &h3_grpc(env, "Unary", GrpcMode::Unary, &[r#"{"message":"ok"}"#], HttpVersionPolicy::Http3Only)).await;
+        c.add(
+            CheckKind::Recovery,
+            "the healthy route answers grpc-status 0 over HTTP/3",
+            grpc_status(&r).1 == Some(0) && is_success(&r),
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
 fn h3_grpc_blocked(env: &Env, policy: HttpVersionPolicy) -> ExecutionContext {
     let mut x = grpc_wire_ctx(
         env,
@@ -2369,6 +2428,11 @@ pub fn all() -> Vec<Def> {
         Def { id: "UP-010-grpc", title: "gRPC backend header stall: gateway backend deadline", run: up010_grpc },
         Def { id: "PROTO-016-h3", title: "gRPC over HTTP/3 (four call modes), bridged to the h2c backend", run: proto016_h3 },
         Def { id: "PROTO-014-h3", title: "gRPC over HTTP/3: HTTP 200 with an error status in HTTP/3 trailers", run: proto014_h3 },
+        Def {
+            id: "PROTO-014-h3-down",
+            title: "gRPC over HTTP/3 to a down backend: gateway trailers-only status 14",
+            run: proto014_h3_down,
+        },
         Def {
             id: "PROTO-016-h3-blocked",
             title: "Forced gRPC over HTTP/3 on a UDP-blocked path: no TCP fallback",

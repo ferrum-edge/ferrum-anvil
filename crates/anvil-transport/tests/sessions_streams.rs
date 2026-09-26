@@ -539,6 +539,26 @@ async fn grpc_web_malformed_bodies_fail_typed_and_are_never_success() {
             assert!(out.facts.grpc_framing_error.is_none(), "{label}");
         }
     }
+    // The trailer frame's grpc-message is percent-decoded and grpc-status-details-bin decoded.
+    let details = {
+        use base64::Engine;
+        // google.rpc.Status { code: 3, message: "bad arg" }
+        base64::engine::general_purpose::STANDARD.encode([0x08, 0x03, 0x12, 0x07, b'b', b'a', b'd', b' ', b'a', b'r', b'g'])
+    };
+    let block = format!("grpc-status: 3\r\ngrpc-message: bad%20arg\r\ngrpc-status-details-bin: {details}\r\n");
+    let addr = raw_h1(h1_response("application/grpc-web+proto", 200, &web_frame(0x80, block.as_bytes()))).await;
+    let plan = echo_plan(addr.port(), false, "Unary", GrpcMode::Unary, r#"{"message":"x"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto);
+    let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert!(failure_of(&out).is_none(), "{:?}", failure_of(&out));
+    match &out.status {
+        ProtocolStatus::Grpc { http_status, grpc_status, grpc_message, source } => {
+            assert_eq!((*http_status, *grpc_status, *source), (Some(200), Some(3), GrpcStatusSource::TrailerFrame));
+            assert_eq!(grpc_message.as_deref(), Some("bad arg"));
+        }
+        other => panic!("{other:?}"),
+    }
+    let d = out.facts.grpc_status_details.clone().unwrap_or_default();
+    assert!(d.contains("code=3") && d.contains("bad arg"), "{d}");
     // A non-gRPC answer (an intermediary's HTML error) is kept as evidence, not parsed.
     let addr = raw_h1(h1_response("text/html", 502, b"<html>bad gateway</html>")).await;
     let plan = echo_plan(addr.port(), false, "Unary", GrpcMode::Unary, r#"{"message":"x"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto);

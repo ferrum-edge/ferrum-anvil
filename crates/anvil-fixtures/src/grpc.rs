@@ -199,7 +199,9 @@ pub type H3Stream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes
 
 /// Native gRPC over HTTP/3: the same echo service, full duplex. Request DATA
 /// is read while responses are written; the status goes out as HTTP/3
-/// trailers. A fixture abort resets the stream (`H3_INTERNAL_ERROR`) before
+/// trailers, or — when it is the first thing the service produces (an
+/// immediate `fail_with`) — as a trailers-only answer in the response
+/// headers. A fixture abort resets the stream (`H3_INTERNAL_ERROR`) before
 /// any status.
 pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTruthLog) {
     let path = req.uri().path().to_string();
@@ -225,12 +227,30 @@ pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTrut
     });
     let (tx, mut rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
     tokio::spawn(run(path, FrameReader { src: Src::Chan(drx), buf: BytesMut::new() }, tx, log.clone(), deny_reflection));
-    let resp = http::Response::builder().status(200).header("content-type", "application/grpc").body(()).expect("static response");
+    // Response headers wait for the first frame, so an immediate status is a
+    // genuine trailers-only answer (one HEADERS frame, then FIN), as real
+    // servers send it.
+    let mut first = rx.next().await;
+    let mut resp = http::Response::builder().status(200).header("content-type", "application/grpc");
+    let immediate_status = matches!(&first, Some(Ok(f)) if f.is_trailers());
+    if immediate_status && let Some(Ok(f)) = first.take() {
+        for (n, v) in f.into_trailers().ok().iter().flatten() {
+            resp = resp.header(n, v);
+        }
+        log.push(GroundTruth::FaultApplied { fault: "grpc_h3_trailers_only".into() });
+    }
     log.push(GroundTruth::ResponseStarted { status: 200 });
-    if send.send_response(resp).await.is_err() {
+    if send.send_response(resp.body(()).expect("static response")).await.is_err() {
         return;
     }
-    while let Some(item) = rx.next().await {
+    if immediate_status {
+        let _ = send.finish().await;
+        return;
+    }
+    while let Some(item) = match first.take() {
+        Some(i) => Some(i),
+        None => rx.next().await,
+    } {
         match item {
             Ok(f) => match f.into_data() {
                 Ok(d) => {

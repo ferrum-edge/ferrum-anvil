@@ -885,13 +885,32 @@ async fn proto_014_grpc_over_h3_error_status_and_reset_before_status() {
     let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
     let e = Engine::new();
     let url = format!("grpcs://127.0.0.1:{}", f.addr.port());
+    // An immediate error: a trailers-only answer (the status in the HTTP/3 response headers).
     let c =
         grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[r#"{"message":"x","failWith":7}"#], GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
     let o = run(&e, &c).await;
-    assert_eq!(grpc_status(&o), (Some(200), Some(7), GrpcStatusSource::Trailers));
+    assert!(f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "grpc_h3_trailers_only".into() }));
+    assert_eq!(grpc_status(&o), (Some(200), Some(7), GrpcStatusSource::TrailersOnly));
+    assert!(!o.record.response.as_ref().unwrap().trailers_received);
     assert_eq!(o.record.outcome.transport, TransportState::Completed, "the HTTP/3 exchange completed");
     assert_eq!(o.record.outcome.application, ApplicationState::Failure, "HTTP 200 is not RPC success");
-    assert!(finding(&o, "app.grpc_status").title.contains("PERMISSION_DENIED"));
+    let g = finding(&o, "app.grpc_status");
+    assert!(g.title.contains("PERMISSION_DENIED"));
+    assert!(g.explanation.contains("trailers-only"), "{}", g.explanation);
+    // An error after messages: the status in the HTTP/3 trailers, the messages kept.
+    let c = grpc_wire_ctx(
+        &url,
+        "ServerStream",
+        GrpcMode::ServerStreaming,
+        &[r#"{"message":"m","count":2,"failWith":9}"#],
+        GrpcWire::Grpc,
+        HttpVersionPolicy::Http3Only,
+    );
+    let o = run(&e, &c).await;
+    assert_eq!(grpc_status(&o), (Some(200), Some(9), GrpcStatusSource::Trailers));
+    assert!(o.record.response.as_ref().unwrap().trailers_received);
+    assert_eq!(previews(&o, Direction::Received, "grpc_message").len(), 2);
+    assert!(finding(&o, "app.grpc_status").title.contains("FAILED_PRECONDITION"));
     // PROTO-015 over HTTP/3: one reply, then the stream is reset before any status.
     let msg = format!(r#"{{"message":"hi","failWith":{ABORT_WITHOUT_STATUS}}}"#);
     let o = run(&e, &grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[&msg], GrpcWire::Grpc, HttpVersionPolicy::Http3Only)).await;
