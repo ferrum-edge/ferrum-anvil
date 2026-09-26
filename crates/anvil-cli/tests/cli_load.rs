@@ -27,6 +27,7 @@ fn setup(root: &Path, http: &str, udp: std::net::SocketAddr) {
         expect_messages: 2,
         max_message_bytes: 1 << 20,
         idle_close_ms: 2_000,
+        permessage_deflate: Default::default(),
     });
     app.create_request(&ws.meta.id, None, "Socket", socket).unwrap();
     let mut dgram = RequestSpec::http("GET", &format!("udp://{udp}"));

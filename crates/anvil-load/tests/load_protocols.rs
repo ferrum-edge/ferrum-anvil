@@ -399,6 +399,7 @@ fn ws_ctx(url: &str, messages: &[&str], expect: u32, idle_ms: u64) -> ExecutionC
         expect_messages: expect,
         max_message_bytes: 1024 * 1024,
         idle_close_ms: idle_ms,
+        permessage_deflate: Default::default(),
     });
     c
 }

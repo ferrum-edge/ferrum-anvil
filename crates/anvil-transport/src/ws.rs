@@ -19,6 +19,13 @@
 //! code/reason and who closed. A connection that ends without a Close frame
 //! is reported as 1006 with `closed_by = abnormal` — 1006 is a local
 //! designation, never a code the peer transmitted.
+//!
+//! RFC 7692 `permessage-deflate` is offered only when the request enables it
+//! ([`crate::ws_deflate`]). The same negotiation runs for every bootstrap:
+//! an answer that does not fit the offer, or names an extension that was not
+//! offered, fails the handshake with a typed reason. The codec runs inside
+//! the (vendored) tungstenite; previews show the decompressed payload, and
+//! `max_message_bytes` limits the decompressed size.
 
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
@@ -27,9 +34,12 @@ use crate::http::sleep_until_opt;
 use crate::recorder::{EventCtx, Recorder};
 use crate::session::*;
 use crate::tls::PreparedTls;
+use crate::ws_deflate::{self, DeflateOffer, FrameMeter, Metered};
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::*;
-use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
+use anvil_domain::outcome::{
+    ClosedBy, ProtocolStatus, WsCompressionTraffic, WsCompressionViolation, WsExtensions, WsNegotiation, WsViolationKind,
+};
 use anvil_domain::request::{WsBootstrap, WsMessage};
 use anvil_domain::settings::{Limits, Timeouts};
 use bytes::{Buf, Bytes, BytesMut};
@@ -42,7 +52,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, DeflateConfig, Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 
@@ -59,6 +69,8 @@ pub struct WsPlan {
     pub request_target: String,
     pub headers: Vec<(HeaderName, HeaderValue)>,
     pub subprotocols: Vec<String>,
+    /// The RFC 7692 `permessage-deflate` offer (`None`: not offered).
+    pub deflate: Option<DeflateOffer>,
     /// Messages sent right after the session opens.
     pub script: Vec<WsMessage>,
     /// Automation: close after this many inbound data messages (0 = idle-driven).
@@ -136,6 +148,9 @@ fn build_request(plan: &WsPlan, h2: bool, key: &str) -> Result<Request<Empty<Byt
     if !plan.subprotocols.is_empty() {
         set_default("sec-websocket-protocol", &plan.subprotocols.join(", "))?;
     }
+    if let Some(d) = &plan.deflate {
+        set_default("sec-websocket-extensions", &d.header_value())?;
+    }
     let mut req = if h2 {
         set_default("user-agent", concat!("Ferrum-Anvil/", env!("CARGO_PKG_VERSION")))?;
         let uri = format!("{}://{}{}", if plan.secure { "https" } else { "http" }, plan.authority, plan.request_target);
@@ -191,6 +206,80 @@ fn negotiate_subprotocol(plan: &WsPlan, headers: &HeaderMap, facts: &mut Session
         facts.notes.push(format!("subprotocols offered ({}) but the server selected none", plan.subprotocols.join(", ")));
     }
     Ok(())
+}
+
+/// What was offered: Anvil's permessage-deflate, or a user-supplied header.
+fn offer_name(plan: &WsPlan) -> &'static str {
+    if plan.deflate.is_some() { "permessage-deflate" } else { "a Sec-WebSocket-Extensions header" }
+}
+
+/// Every `Sec-WebSocket-Extensions` value in `h`, in order.
+fn extension_values(h: &HeaderMap) -> Vec<String> {
+    h.get_all("sec-websocket-extensions").iter().map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).collect()
+}
+
+/// Check the server's `Sec-WebSocket-Extensions` answer against what the
+/// request offered (RFC 6455 §4.1, RFC 7692 §7). Returns the evidence
+/// (`None` when nothing was offered or answered) and the codec to run, or
+/// the reason the answer is refused.
+fn negotiate_extensions(
+    plan: &WsPlan,
+    offered: &[String],
+    resp: &HeaderMap,
+    facts: &mut SessionFacts,
+) -> (Option<WsExtensions>, Result<Option<DeflateConfig>, String>) {
+    let answered = extension_values(resp);
+    if offered.is_empty() && answered.is_empty() {
+        return (None, Ok(None));
+    }
+    let redact = |s: String| match &plan.redact {
+        Some(r) => r(&s),
+        None => s,
+    };
+    let bounded = |s: String| {
+        if s.len() <= 512 {
+            return s;
+        }
+        let mut end = 512;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    };
+    let mut ext = WsExtensions {
+        offered: (!offered.is_empty()).then(|| redact(offered.join(", "))),
+        answered: (!answered.is_empty()).then(|| redact(bounded(answered.join(", ")))),
+        negotiation: WsNegotiation::NotOffered,
+        problem: None,
+        deflate: None,
+        traffic: None,
+        violation: None,
+    };
+    let answer: Vec<&str> = answered.iter().map(String::as_str).collect();
+    // A user-supplied header with the toggle off: Anvil sent it, but runs no codec for it.
+    let raw_offer = plan.deflate.is_none() && !offered.is_empty();
+    match ws_deflate::negotiate(plan.deflate.as_ref(), &answer, raw_offer) {
+        Ok(Some(a)) => {
+            facts.notes.push(ws_deflate::describe(&a.params));
+            ext.negotiation = WsNegotiation::Negotiated;
+            ext.deflate = Some(a.params);
+            (Some(ext), Ok(Some(a.codec)))
+        }
+        Ok(None) => {
+            facts.notes.push(format!(
+                "{} offered but not negotiated: the answer named no extension, so the session is uncompressed",
+                offer_name(plan)
+            ));
+            ext.negotiation = WsNegotiation::NotNegotiated;
+            (Some(ext), Ok(None))
+        }
+        Err(e) => {
+            let e = redact(e);
+            ext.negotiation = WsNegotiation::Rejected;
+            ext.problem = Some(e.clone());
+            (Some(ext), Err(e))
+        }
+    }
 }
 
 /// Wait up to `ms` for the HTTP/3 peer's SETTINGS. `Ok(enabled)` says whether
@@ -367,6 +456,7 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         }
     };
     let req_headers = header_entries(req.headers());
+    let offered = extension_values(req.headers());
     obs.bytes.request_headers_logical = logical_header_bytes(&req_headers) + plan.request_target.len() as u64 + 16;
     obs.bytes.request_headers_estimated = true;
     let w_idx = rec.start(Phase::RequestWrite);
@@ -411,11 +501,12 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let headers = header_entries(resp.headers());
     obs.bytes.response_headers_logical = Some(logical_header_bytes(&headers));
     let content_type = resp.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-    let ws_status = |closed_by: ClosedBy| ProtocolStatus::WebSocket {
+    let ws_status = |closed_by: ClosedBy, extensions: Option<WsExtensions>| ProtocolStatus::WebSocket {
         handshake_status: Some(status),
         close_code: None,
         close_reason: String::new(),
         closed_by,
+        extensions,
     };
 
     // ---- rejected handshake: keep the (bounded) response as evidence ----
@@ -466,31 +557,52 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         return SessionOutput::single(
             crate::http::AttemptOutput { observation: obs, response: Some(response), body: captured },
             None,
-            ws_status(ClosedBy::NotClosed),
+            ws_status(ClosedBy::NotClosed, None),
             facts,
         );
     }
 
     let response = response_record(status, http::Version::HTTP_3, headers, body_capture(BodyCompleteness::NoBody, 0, &[], content_type));
-    if let Err(e) = negotiate_subprotocol(plan, resp.headers(), &mut facts) {
-        close_quic(&quic);
-        let mut f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsProtocolError, e);
-        f.status = Some(status);
-        obs.failure = Some(f);
-        let obs = finish_attempt(rec, obs, events);
-        return SessionOutput::single(
-            crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new() },
-            None,
-            ws_status(ClosedBy::NotClosed),
-            facts,
-        );
-    }
+    let (extensions, deflate) = negotiate_extensions(plan, &offered, resp.headers(), &mut facts);
+    let checked = match deflate {
+        Ok(d) => negotiate_subprotocol(plan, resp.headers(), &mut facts).map(|()| d),
+        Err(e) => Err(format!("the server's Sec-WebSocket-Extensions answer is refused: {e}")),
+    };
+    let deflate = match checked {
+        Ok(d) => d,
+        Err(e) => {
+            close_quic(&quic);
+            let mut f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsProtocolError, e);
+            f.status = Some(status);
+            obs.failure = Some(f);
+            let obs = finish_attempt(rec, obs, events);
+            return SessionOutput::single(
+                crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new() },
+                None,
+                ws_status(ClosedBy::NotClosed, extensions),
+                facts,
+            );
+        }
+    };
 
     // ---- session over the HTTP/3 stream ----
     let stats = crate::stats::ConnStats::new();
     let stream_error = Arc::new(parking_lot::Mutex::new(None));
     let (io, uplink) = bridge_h3_stream(stream, stats.clone(), stream_error.clone());
-    let cx = SessionCtx { plan, events, cancel, interactive, total_deadline, stats, written_before: 0, read_before: 0, status, response };
+    let cx = SessionCtx {
+        plan,
+        events,
+        cancel,
+        interactive,
+        total_deadline,
+        stats,
+        written_before: 0,
+        read_before: 0,
+        status,
+        response,
+        deflate,
+        extensions,
+    };
     let mut out = run_session(io, rec, obs, facts, commands, cx).await;
     // Let the last frames (normally our Close) leave before the connection closes.
     let _ = tokio::time::timeout(Duration::from_millis(500), uplink).await;
@@ -599,6 +711,7 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
         }
     };
     let req_headers = header_entries(req.headers());
+    let offered = extension_values(req.headers());
     obs.bytes.request_headers_logical = logical_header_bytes(&req_headers) + plan.request_target.len() as u64 + 16;
     obs.bytes.request_headers_estimated = h2;
     let written_before = stats.bytes_written();
@@ -702,6 +815,7 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
             close_code: None,
             close_reason: String::new(),
             closed_by: ClosedBy::NotClosed,
+            extensions: None,
         };
         return SessionOutput::single(
             crate::http::AttemptOutput { observation: obs, response: Some(response), body: captured },
@@ -712,29 +826,39 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
     }
 
     let response = response_record(status, version, headers.clone(), body_capture(BodyCompleteness::NoBody, 0, &[], content_type));
-    let handshake_fail = |rec: Recorder, mut obs: AttemptObservation, msg: String, facts: SessionFacts| {
-        let mut f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsProtocolError, msg);
-        f.status = Some(status);
-        obs.failure = Some(f);
-        let obs = finish_attempt(rec, obs, events);
-        let ps = ProtocolStatus::WebSocket {
-            handshake_status: Some(status),
-            close_code: None,
-            close_reason: String::new(),
-            closed_by: ClosedBy::NotClosed,
+    let handshake_fail =
+        |rec: Recorder, mut obs: AttemptObservation, msg: String, facts: SessionFacts, extensions: Option<WsExtensions>| {
+            let mut f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsProtocolError, msg);
+            f.status = Some(status);
+            obs.failure = Some(f);
+            let obs = finish_attempt(rec, obs, events);
+            let ps = ProtocolStatus::WebSocket {
+                handshake_status: Some(status),
+                close_code: None,
+                close_reason: String::new(),
+                closed_by: ClosedBy::NotClosed,
+                extensions,
+            };
+            SessionOutput::single(
+                crate::http::AttemptOutput { observation: obs, response: Some(response.clone()), body: Bytes::new() },
+                None,
+                ps,
+                facts,
+            )
         };
-        SessionOutput::single(
-            crate::http::AttemptOutput { observation: obs, response: Some(response.clone()), body: Bytes::new() },
-            None,
-            ps,
-            facts,
-        )
-    };
     if !h2 && let Err(e) = validate_upgrade(resp.headers(), &key) {
-        return handshake_fail(rec, obs, format!("invalid WebSocket handshake response: {e}"), facts);
+        return handshake_fail(rec, obs, format!("invalid WebSocket handshake response: {e}"), facts, None);
     }
+    let (extensions, deflate) = negotiate_extensions(plan, &offered, resp.headers(), &mut facts);
+    let deflate = match deflate {
+        Ok(d) => d,
+        Err(e) => {
+            let msg = format!("the server's Sec-WebSocket-Extensions answer is refused: {e}");
+            return handshake_fail(rec, obs, msg, facts, extensions);
+        }
+    };
     if let Err(e) = negotiate_subprotocol(plan, resp.headers(), &mut facts) {
-        return handshake_fail(rec, obs, e, facts);
+        return handshake_fail(rec, obs, e, facts, extensions);
     }
     let upgraded = tokio::select! {
         u = hyper::upgrade::on(resp) => Some(u),
@@ -742,7 +866,9 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
     };
     let upgraded = match upgraded {
         Some(Ok(u)) => u,
-        Some(Err(e)) => return handshake_fail(rec, obs, format!("the connection could not be switched to WebSocket: {e}"), facts),
+        Some(Err(e)) => {
+            return handshake_fail(rec, obs, format!("the connection could not be switched to WebSocket: {e}"), facts, extensions);
+        }
         None => {
             let f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::Canceled, "canceled while opening the WebSocket stream");
             obs.failure = Some(f);
@@ -752,6 +878,7 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
                 close_code: None,
                 close_reason: String::new(),
                 closed_by: ClosedBy::Client,
+                extensions,
             };
             return SessionOutput::single(
                 crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new() },
@@ -762,7 +889,20 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
         }
     };
 
-    let cx = SessionCtx { plan, events, cancel, interactive, total_deadline, stats, written_before, read_before, status, response };
+    let cx = SessionCtx {
+        plan,
+        events,
+        cancel,
+        interactive,
+        total_deadline,
+        stats,
+        written_before,
+        read_before,
+        status,
+        response,
+        deflate,
+        extensions,
+    };
     run_session(TokioIo::new(upgraded), rec, obs, facts, commands, cx).await
 }
 
@@ -780,6 +920,10 @@ struct SessionCtx<'a> {
     read_before: u64,
     status: u16,
     response: ResponseRecord,
+    /// The negotiated `permessage-deflate` codec (`None`: none).
+    deflate: Option<DeflateConfig>,
+    /// Extension evidence from the handshake; the session adds its traffic.
+    extensions: Option<WsExtensions>,
 }
 
 /// The WebSocket session itself, over whichever stream the bootstrap opened
@@ -795,13 +939,37 @@ async fn run_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let SessionCtx { plan, events, cancel, interactive, total_deadline, stats, written_before, read_before, status, response } = cx;
+    let SessionCtx {
+        plan,
+        events,
+        cancel,
+        interactive,
+        total_deadline,
+        stats,
+        written_before,
+        read_before,
+        status,
+        response,
+        deflate,
+        extensions,
+    } = cx;
     // ---- session ----
     let s_idx = rec.start(Phase::Session);
     let max = plan.max_message_bytes.clamp(16, usize::MAX as u64) as usize;
-    let cfg = WebSocketConfig::default().max_message_size(Some(max)).max_frame_size(Some(max));
-    let mut ws = WebSocketStream::from_raw_socket(io, Role::Client, Some(cfg)).await;
+    // The frame limit is on the wire; the message limit is on the
+    // (decompressed) message.
+    let cfg = WebSocketConfig::default().max_message_size(Some(max)).max_frame_size(Some(max)).deflate(deflate);
+    let meter = Arc::new(parking_lot::Mutex::new(FrameMeter::default()));
+    let mut ws = WebSocketStream::from_raw_socket(Metered::new(io, meter.clone()), Role::Client, Some(cfg)).await;
     let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
+    if let Some(e) = &extensions {
+        let note = match &e.deflate {
+            Some(p) => ws_deflate::describe(p),
+            None => format!("{} offered but not negotiated: the session is uncompressed", offer_name(plan)),
+        };
+        tr.note("extension", &note);
+    }
+    let mut violation: Option<WsCompressionViolation> = None;
     let mut close: Option<Close> = None;
     let mut client_close_sent: Option<(u16, String)> = None;
     let mut peer_close_seen = false;
@@ -860,7 +1028,8 @@ where
     }
     loop {
         if let Some(e) = pending_error.take() {
-            classify_ws_error(e, &mut close, &mut failure, &mut ws, &mut tr, peer_close_seen, &stats).await;
+            let st = ErrorState { close: &mut close, failure: &mut failure, violation: &mut violation };
+            classify_ws_error(e, st, &mut ws, &mut tr, peer_close_seen, &stats).await;
             break;
         }
         let idle_deadline = if !interactive && client_close_sent.is_none() && !peer_close_seen { Some(last_inbound + idle) } else { None };
@@ -1050,11 +1219,35 @@ where
         Some(r) => r(&close.reason),
         None => close.reason,
     };
+    // A frame that claimed compression when none was negotiated is evidence
+    // even when nothing was offered.
+    let extensions = match (extensions, &violation) {
+        (Some(e), _) => Some(e),
+        (None, Some(_)) => Some(WsExtensions {
+            offered: None,
+            answered: None,
+            negotiation: WsNegotiation::NotOffered,
+            problem: None,
+            deflate: None,
+            traffic: None,
+            violation: None,
+        }),
+        (None, None) => None,
+    };
+    let extensions = extensions.map(|mut e| {
+        let (mut sent, mut received) = meter.lock().totals();
+        sent.payload_bytes = tr.sent_bytes();
+        received.payload_bytes = tr.received_bytes();
+        e.traffic = Some(WsCompressionTraffic { sent, received });
+        e.violation = violation;
+        e
+    });
     let ps = ProtocolStatus::WebSocket {
         handshake_status: Some(status),
         close_code: close.code,
         close_reason: reason,
         closed_by: close.closed_by,
+        extensions,
     };
     SessionOutput::single(
         crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new() },
@@ -1064,19 +1257,25 @@ where
     )
 }
 
+/// Where [`classify_ws_error`] records its conclusions.
+struct ErrorState<'a> {
+    close: &'a mut Option<Close>,
+    failure: &'a mut Option<TransportFailure>,
+    violation: &'a mut Option<WsCompressionViolation>,
+}
+
 /// Map a WebSocket error to the close outcome and a typed failure. For
 /// local policy violations the client sends the matching Close code.
 async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
     e: tungstenite::Error,
-    close: &mut Option<Close>,
-    failure: &mut Option<TransportFailure>,
+    st: ErrorState<'_>,
     ws: &mut WebSocketStream<S>,
     tr: &mut Transcript,
     peer_close_seen: bool,
     stats: &crate::stats::ConnStats,
 ) {
     use tungstenite::Error as E;
-    use tungstenite::error::ProtocolError as P;
+    use tungstenite::error::{CapacityError as C, ProtocolError as P};
     // Once the peer's Close frame has arrived the WebSocket session is over;
     // how the TCP/TLS connection is torn down afterwards (FIN, RST, or no TLS
     // close_notify) does not change the close outcome.
@@ -1086,6 +1285,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
         }
         return;
     }
+    let ErrorState { close, failure, violation } = st;
     let mut close_with = |code: u16, reason: &str| {
         *close = Some(Close { code: Some(code), reason: reason.into(), closed_by: ClosedBy::Client });
         (code, reason.to_string())
@@ -1093,6 +1293,24 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
     match e {
         // A clean end; the caller derives the outcome from the Close frames seen.
         E::ConnectionClosed | E::AlreadyClosed => {}
+        // The local limit applies to the decompressed message (decompression-bomb protection).
+        E::Capacity(C::DecompressedMessageTooLong { compressed_size, max_size }) => {
+            let (code, reason) = close_with(1009, "message too big");
+            *failure = Some(TransportFailure::new(
+                Phase::Session,
+                FailureKind::WsMessageTooLarge,
+                format!(
+                    "a compressed inbound message grew past Anvil's local message limit ({max_size} bytes) while it was decompressed, after {compressed_size} compressed bytes; Anvil stopped decompressing and closed the session with 1009. This is a local size policy applied after decompression, not a protocol corruption"
+                ),
+            ));
+            *violation = Some(WsCompressionViolation {
+                kind: WsViolationKind::TooLargeAfterDecompression,
+                compressed_bytes: Some(compressed_size as u64),
+                limit_bytes: Some(max_size as u64),
+                detail: None,
+            });
+            send_close_and_drain(ws, tr, code, &reason).await;
+        }
         E::Capacity(c) => {
             let (code, reason) = close_with(1009, "message too big");
             *failure = Some(TransportFailure::new(
@@ -1120,6 +1338,38 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
                 FailureKind::BodyIncomplete,
                 "the connection ended without a WebSocket Close frame (reported as 1006; 1006 is never sent by a peer)",
             ));
+        }
+        E::Protocol(P::CompressedMessageNotNegotiated) => {
+            let (code, reason) = close_with(1002, "protocol error");
+            *failure = Some(TransportFailure::new(
+                Phase::Session,
+                FailureKind::WsProtocolError,
+                "WebSocket protocol violation by the peer: a data message arrived with RSV1 set (compressed), but no permessage-deflate was negotiated; Anvil closed with 1002",
+            ));
+            *violation = Some(WsCompressionViolation {
+                kind: WsViolationKind::CompressedWithoutNegotiation,
+                compressed_bytes: None,
+                limit_bytes: None,
+                detail: None,
+            });
+            send_close_and_drain(ws, tr, code, &reason).await;
+        }
+        E::Protocol(P::InvalidCompressedMessage(detail)) => {
+            let (code, reason) = close_with(1002, "protocol error");
+            *failure = Some(TransportFailure::new(
+                Phase::Session,
+                FailureKind::WsProtocolError,
+                format!(
+                    "WebSocket protocol violation by the peer: a permessage-deflate message could not be decompressed ({detail}); Anvil closed with 1002"
+                ),
+            ));
+            *violation = Some(WsCompressionViolation {
+                kind: WsViolationKind::Undecodable,
+                compressed_bytes: None,
+                limit_bytes: None,
+                detail: Some(detail),
+            });
+            send_close_and_drain(ws, tr, code, &reason).await;
         }
         E::Protocol(p) => {
             let (code, reason) = close_with(1002, "protocol error");

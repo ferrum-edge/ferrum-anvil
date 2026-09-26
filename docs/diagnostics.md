@@ -46,7 +46,7 @@ TLS alert or a close right after Anvil sent one; see
 [protocols.md §3.10](protocols.md)); a fragment never changes a finding's
 confidence.
 
-The catalog has 151 finding codes (catalog version shown in the app status
+The catalog has 156 finding codes (catalog version shown in the app status
 bar; every record names the findings catalog and the Ferrum catalog it used):
 
 | Family | Codes | Examples |
@@ -63,7 +63,7 @@ bar; every record names the findings catalog and the Ferrum catalog it used):
 | `app.*`, `auth.*` | 7 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry |
 | `grpc.*`, `grpc_web.*` | 2 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame |
 | `masque.*` | 5 | CONNECT-UDP tunnel: proxy refused, no extended CONNECT or HTTP/3 datagrams, SETTINGS never arrived, abnormal end |
-| `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 15 | close codes, idle/cancel, abnormal close, no UDP response observed, PROXY header possibly rejected |
+| `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 20 | close codes, idle/cancel, abnormal close, WebSocket permessage-deflate (offered but not negotiated, a refused extension answer, compressed frames never negotiated, undecodable data, the local limit reached after decompression), no UDP response observed, PROXY header possibly rejected |
 
 ## TLS identity: host names, SPIFFE IDs and SNI
 

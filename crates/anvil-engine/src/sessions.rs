@@ -30,7 +30,7 @@ use anvil_transport::dns::DnsConfig;
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::session::{CommandRx, RedactFn, SessionFacts, SessionOutput, TranscriptLimits};
 use anvil_transport::tls::{ClientIdentityMaterial, PreparedTls};
-use anvil_transport::{dtls, grpc, hbone_udp, masque, rawtcp, sse, udp, ws};
+use anvil_transport::{dtls, grpc, hbone_udp, masque, rawtcp, sse, udp, ws, ws_deflate};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use http::{HeaderName, HeaderValue};
@@ -290,6 +290,36 @@ async fn prepare_session(
     }
 }
 
+/// The validated `permessage-deflate` offer, refused before any traffic when
+/// it cannot be sent as configured.
+fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_deflate::DeflateOffer>, TransportFailure> {
+    if !o.enabled {
+        return Ok(None);
+    }
+    if has_explicit_header(spec, "sec-websocket-extensions") {
+        return Err(unsupported(
+            "permessage-deflate is enabled and the request also sets Sec-WebSocket-Extensions; remove the header or turn permessage-deflate off (Anvil must know exactly what it offered to check the server's answer)",
+            "websocket.permessage_deflate",
+        ));
+    }
+    for (name, bits) in [("server_max_window_bits", o.server_max_window_bits), ("client_max_window_bits", o.client_max_window_bits)] {
+        if let Some(b) = bits
+            && !(8..=15).contains(&b)
+        {
+            return Err(unsupported(
+                format!("{name} must be from 8 to 15 (RFC 7692 §7.1.2), not {b}"),
+                &format!("websocket.permessage_deflate.{name}"),
+            ));
+        }
+    }
+    Ok(Some(ws_deflate::DeflateOffer {
+        server_no_context_takeover: o.server_no_context_takeover,
+        client_no_context_takeover: o.client_no_context_takeover,
+        server_max_window_bits: o.server_max_window_bits,
+        client_max_window_bits: o.client_max_window_bits,
+    }))
+}
+
 async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.websocket.clone().unwrap_or(WsSpec {
         bootstrap: WsBootstrap::Http1Upgrade,
@@ -298,7 +328,9 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
         expect_messages: 0,
         max_message_bytes: 16 * 1024 * 1024,
         idle_close_ms: 5_000,
+        permessage_deflate: Default::default(),
     });
+    let deflate = ws_deflate_offer(&ctx.spec, &spec.permessage_deflate)?;
     let mut b = base(engine, ctx, r, &["wss", "ws"])?;
     let target = b.prep.http.target.clone();
     let mut headers = b.prep.http.headers.clone();
@@ -335,6 +367,9 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
+    if let Some(d) = &deflate {
+        b.inferred.push(format!("Sec-WebSocket-Extensions: {} (permessage-deflate offered, RFC 7692)", d.header_value()));
+    }
     let t = Target { query, ..target.clone() };
     let plan = ws::WsPlan {
         bootstrap: spec.bootstrap,
@@ -345,6 +380,7 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
         request_target: t.request_target(),
         headers: header_pairs(&headers),
         subprotocols,
+        deflate,
         script,
         expect_messages: spec.expect_messages,
         idle_close_ms: spec.idle_close_ms,

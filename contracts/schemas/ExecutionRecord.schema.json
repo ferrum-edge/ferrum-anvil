@@ -2488,6 +2488,17 @@
             "closed_by": {
               "$ref": "#/$defs/ClosedBy"
             },
+            "extensions": {
+              "description": "Extension negotiation and compression, when an extension was\noffered or answered, or a frame claimed one.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsExtensions"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "protocol": {
               "type": "string",
               "const": "websocket"
@@ -2623,6 +2634,242 @@
           "description": "No terminal status was received — the RPC result is unknown.",
           "type": "string",
           "const": "missing"
+        }
+      ]
+    },
+    "WsExtensions": {
+      "description": "WebSocket extension negotiation (RFC 6455 §9) and RFC 7692\n`permessage-deflate` evidence for one session.",
+      "type": "object",
+      "properties": {
+        "offered": {
+          "description": "The `Sec-WebSocket-Extensions` offer Anvil sent (absent: none).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "answered": {
+          "description": "The server's `Sec-WebSocket-Extensions` answer, verbatim and bounded\n(absent: the answer named no extension).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "negotiation": {
+          "$ref": "#/$defs/WsNegotiation"
+        },
+        "problem": {
+          "description": "Why the answer was refused (`negotiation = rejected`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deflate": {
+          "description": "The agreed parameters (`negotiation = negotiated`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsDeflateParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "traffic": {
+          "description": "Data messages of the session, before and after compression (absent\nwhen the session never opened).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsCompressionTraffic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "violation": {
+          "description": "A received frame broke the compression that was (or was not)\nnegotiated, and Anvil ended the session.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsCompressionViolation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "negotiation"
+      ]
+    },
+    "WsNegotiation": {
+      "oneOf": [
+        {
+          "description": "Nothing was offered and nothing was answered.",
+          "type": "string",
+          "const": "not_offered"
+        },
+        {
+          "description": "Offered, but the answer named no extension: the session is uncompressed.",
+          "type": "string",
+          "const": "not_negotiated"
+        },
+        {
+          "description": "`permessage-deflate` is in use.",
+          "type": "string",
+          "const": "negotiated"
+        },
+        {
+          "description": "The answer did not fit the offer, or named an extension that was not\noffered; Anvil failed the handshake (RFC 6455 §4.1, RFC 7692 §7).",
+          "type": "string",
+          "const": "rejected"
+        }
+      ]
+    },
+    "WsDeflateParams": {
+      "description": "Agreed `permessage-deflate` parameters (RFC 7692 §7.1).",
+      "type": "object",
+      "properties": {
+        "server_no_context_takeover": {
+          "type": "boolean"
+        },
+        "client_no_context_takeover": {
+          "type": "boolean"
+        },
+        "server_max_window_bits": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "client_max_window_bits": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "client_compresses": {
+          "description": "Anvil compressed the messages it sent. False when the agreed client\nwindow is 2^8 bytes, which Anvil's DEFLATE cannot produce: it then\nsends uncompressed messages, which RFC 7692 §6 allows.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "server_no_context_takeover",
+        "client_no_context_takeover",
+        "client_compresses"
+      ]
+    },
+    "WsCompressionTraffic": {
+      "description": "Per-direction data-message totals of a WebSocket session.",
+      "type": "object",
+      "properties": {
+        "sent": {
+          "$ref": "#/$defs/WsDirectionTotals"
+        },
+        "received": {
+          "$ref": "#/$defs/WsDirectionTotals"
+        }
+      },
+      "required": [
+        "sent",
+        "received"
+      ]
+    },
+    "WsDirectionTotals": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "description": "Text and binary messages whose first frame crossed the wire.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "compressed_messages": {
+          "description": "Of those, messages with RSV1 set (compressed).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "payload_bytes": {
+          "description": "Payload bytes of the complete messages, uncompressed (the sizes in\nthe transcript).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wire_bytes": {
+          "description": "Data-frame payload bytes on the wire, as sent or received\n(compressed where RSV1 was set).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "messages",
+        "compressed_messages",
+        "payload_bytes",
+        "wire_bytes"
+      ]
+    },
+    "WsCompressionViolation": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/WsViolationKind"
+        },
+        "compressed_bytes": {
+          "description": "Compressed bytes of the offending message received when it failed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "limit_bytes": {
+          "description": "Anvil's local message limit, in decompressed bytes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "detail": {
+          "description": "The decompressor's description of the problem.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "WsViolationKind": {
+      "description": "Why a received frame ended a session (all are the peer's frames).",
+      "oneOf": [
+        {
+          "description": "A data message arrived with RSV1 set although no compression was\nnegotiated (RFC 6455 §5.2).",
+          "type": "string",
+          "const": "compressed_without_negotiation"
+        },
+        {
+          "description": "A compressed message could not be decompressed (RFC 7692 §7.2.2).",
+          "type": "string",
+          "const": "undecodable"
+        },
+        {
+          "description": "A compressed message grew past Anvil's local message limit while it\nwas decompressed.",
+          "type": "string",
+          "const": "too_large_after_decompression"
         }
       ]
     },

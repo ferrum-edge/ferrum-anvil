@@ -24,6 +24,7 @@ import type {
 import { AuthEditor } from "./AuthEditor";
 import { DatagramEnvelopeEditor, ProxyHeaderEditor } from "./ProxyProtocolEditor";
 import { KeyValueEditor, Tabs, fmtBytes, humanize, useDebounced } from "./ui";
+import { WsDeflateEditor } from "./WsDeflateEditor";
 
 export interface Profiles {
   tls: TlsProfile[];
@@ -469,7 +470,13 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
         <div className="row">
           <NumField label="Wait for inbound messages" value={ws.expect_messages} onChange={(v) => set({ websocket: { ...ws, expect_messages: v ?? undefined } })} />
           <NumField label="Close after idle (ms)" value={ws.idle_close_ms} onChange={(v) => set({ websocket: { ...ws, idle_close_ms: v ?? undefined } })} />
+          <NumField
+            label="Inbound message limit (bytes, after decompression)"
+            value={ws.max_message_bytes}
+            onChange={(v) => set({ websocket: { ...ws, max_message_bytes: v ?? undefined } })}
+          />
         </div>
+        <WsDeflateEditor value={ws.permessage_deflate} onChange={(d) => set({ websocket: { ...ws, permessage_deflate: d } })} />
       </div>
     );
   }

@@ -396,6 +396,7 @@ async fn websocket_grpc_grpc_web_and_sse_carry_the_header() {
         expect_messages: 1,
         max_message_bytes: 1024 * 1024,
         idle_close_ms: 1_500,
+        permessage_deflate: Default::default(),
     });
     let o = run(&e, &ctx(s, Some(header(ProxyHeaderVersion::V2, "203.0.113.40:4040")), None)).await;
     assert!(last(&o).failure.is_none(), "{:?}", last(&o).failure);
@@ -461,6 +462,7 @@ async fn http3_forward_proxies_hbone_and_raw_protocols_are_refused_before_traffi
         expect_messages: 0,
         max_message_bytes: 1024,
         idle_close_ms: 500,
+        permessage_deflate: Default::default(),
     });
     cases.push(("WebSocket over HTTP/3", ctx(ws, h(), None)));
     let mut sse = RequestSpec::http("GET", &url);

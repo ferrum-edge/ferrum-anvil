@@ -500,6 +500,11 @@ export type ProtocolStatus =
       close_code?: number | null;
       close_reason?: string;
       closed_by: ClosedBy;
+      /**
+       * Extension negotiation and compression, when an extension was
+       * offered or answered, or a frame claimed one.
+       */
+      extensions?: WsExtensions | null;
       protocol: "websocket";
     }
   | {
@@ -536,6 +541,18 @@ export type GrpcStatusSource = "trailers" | "trailers_only" | "trailer_frame" | 
  * via the `definition` "ClosedBy".
  */
 export type ClosedBy = ("peer" | "client" | "timeout" | "not_closed") | "abnormal";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsNegotiation".
+ */
+export type WsNegotiation = "not_offered" | "not_negotiated" | "negotiated" | "rejected";
+/**
+ * Why a received frame ended a session (all are the peer's frames).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsViolationKind".
+ */
+export type WsViolationKind = "compressed_without_negotiation" | "undecodable" | "too_large_after_decompression";
 /**
  * How HTTP Datagrams travelled through a CONNECT-UDP tunnel.
  *
@@ -2201,6 +2218,114 @@ export interface ExecutionOutcome {
   summary: string;
 }
 /**
+ * WebSocket extension negotiation (RFC 6455 §9) and RFC 7692
+ * `permessage-deflate` evidence for one session.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsExtensions".
+ */
+export interface WsExtensions {
+  /**
+   * The `Sec-WebSocket-Extensions` offer Anvil sent (absent: none).
+   */
+  offered?: string | null;
+  /**
+   * The server's `Sec-WebSocket-Extensions` answer, verbatim and bounded
+   * (absent: the answer named no extension).
+   */
+  answered?: string | null;
+  negotiation: WsNegotiation;
+  /**
+   * Why the answer was refused (`negotiation = rejected`).
+   */
+  problem?: string | null;
+  /**
+   * The agreed parameters (`negotiation = negotiated`).
+   */
+  deflate?: WsDeflateParams | null;
+  /**
+   * Data messages of the session, before and after compression (absent
+   * when the session never opened).
+   */
+  traffic?: WsCompressionTraffic | null;
+  /**
+   * A received frame broke the compression that was (or was not)
+   * negotiated, and Anvil ended the session.
+   */
+  violation?: WsCompressionViolation | null;
+}
+/**
+ * Agreed `permessage-deflate` parameters (RFC 7692 §7.1).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsDeflateParams".
+ */
+export interface WsDeflateParams {
+  server_no_context_takeover: boolean;
+  client_no_context_takeover: boolean;
+  server_max_window_bits?: number | null;
+  client_max_window_bits?: number | null;
+  /**
+   * Anvil compressed the messages it sent. False when the agreed client
+   * window is 2^8 bytes, which Anvil's DEFLATE cannot produce: it then
+   * sends uncompressed messages, which RFC 7692 §6 allows.
+   */
+  client_compresses: boolean;
+}
+/**
+ * Per-direction data-message totals of a WebSocket session.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsCompressionTraffic".
+ */
+export interface WsCompressionTraffic {
+  sent: WsDirectionTotals;
+  received: WsDirectionTotals;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsDirectionTotals".
+ */
+export interface WsDirectionTotals {
+  /**
+   * Text and binary messages whose first frame crossed the wire.
+   */
+  messages: number;
+  /**
+   * Of those, messages with RSV1 set (compressed).
+   */
+  compressed_messages: number;
+  /**
+   * Payload bytes of the complete messages, uncompressed (the sizes in
+   * the transcript).
+   */
+  payload_bytes: number;
+  /**
+   * Data-frame payload bytes on the wire, as sent or received
+   * (compressed where RSV1 was set).
+   */
+  wire_bytes: number;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsCompressionViolation".
+ */
+export interface WsCompressionViolation {
+  kind: WsViolationKind;
+  /**
+   * Compressed bytes of the offending message received when it failed.
+   */
+  compressed_bytes?: number | null;
+  /**
+   * Anvil's local message limit, in decompressed bytes.
+   */
+  limit_bytes?: number | null;
+  /**
+   * The decompressor's description of the problem.
+   */
+  detail?: string | null;
+}
+/**
  * Evidence about an RFC 9298 CONNECT-UDP tunnel through an HTTP/3 proxy.
  * Counts cover only what Anvil sent and received; delivery to the target
  * is never inferred.
@@ -3665,6 +3790,35 @@ export interface WsSpec {
    * Close the session after this idle period (automation only).
    */
   idle_close_ms?: number;
+  permessage_deflate?: WsDeflateOffer;
+}
+/**
+ * RFC 7692 per-message compression. Off unless enabled, so requests
+ * saved before it existed keep the uncompressed wire they had.
+ */
+export interface WsDeflateOffer {
+  /**
+   * Offer `permessage-deflate`.
+   */
+  enabled?: boolean;
+  /**
+   * Ask the server to compress every message with an empty context.
+   */
+  server_no_context_takeover?: boolean;
+  /**
+   * Announce that Anvil compresses every message with an empty context.
+   */
+  client_no_context_takeover?: boolean;
+  /**
+   * Ask the server to use at most a 2^N-byte LZ77 window.
+   */
+  server_max_window_bits?: number | null;
+  /**
+   * `None` offers `client_max_window_bits` without a value, as browsers
+   * do: the server may then limit Anvil's window. `Some(N)` also promises
+   * that Anvil uses at most a 2^N-byte window.
+   */
+  client_max_window_bits?: number | null;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -4567,4 +4721,35 @@ export interface CensoredTimeouts1 {
   deadline_ms_max?: number | null;
   elapsed_at_timeout: LatencySummary2;
   label: string;
+}
+/**
+ * The `permessage-deflate` offer (RFC 7692 §7.1) Anvil sends in
+ * `Sec-WebSocket-Extensions`. Window sizes are base-2 logarithms (8–15).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsDeflateOffer".
+ */
+export interface WsDeflateOffer1 {
+  /**
+   * Offer `permessage-deflate`.
+   */
+  enabled?: boolean;
+  /**
+   * Ask the server to compress every message with an empty context.
+   */
+  server_no_context_takeover?: boolean;
+  /**
+   * Announce that Anvil compresses every message with an empty context.
+   */
+  client_no_context_takeover?: boolean;
+  /**
+   * Ask the server to use at most a 2^N-byte LZ77 window.
+   */
+  server_max_window_bits?: number | null;
+  /**
+   * `None` offers `client_max_window_bits` without a value, as browsers
+   * do: the server may then limit Anvil's window. `Some(N)` also promises
+   * that Anvil uses at most a 2^N-byte window.
+   */
+  client_max_window_bits?: number | null;
 }

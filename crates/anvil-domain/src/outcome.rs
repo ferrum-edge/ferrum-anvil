@@ -110,6 +110,10 @@ pub enum ProtocolStatus {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         close_reason: String,
         closed_by: ClosedBy,
+        /// Extension negotiation and compression, when an extension was
+        /// offered or answered, or a frame claimed one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extensions: Option<WsExtensions>,
     },
     Sse {
         http_status: u16,
@@ -176,6 +180,112 @@ pub struct MasqueTunnel {
     pub dropped: u64,
     /// How the CONNECT stream (the tunnel) ended.
     pub closed_by: ClosedBy,
+}
+
+/// WebSocket extension negotiation (RFC 6455 §9) and RFC 7692
+/// `permessage-deflate` evidence for one session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WsExtensions {
+    /// The `Sec-WebSocket-Extensions` offer Anvil sent (absent: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered: Option<String>,
+    /// The server's `Sec-WebSocket-Extensions` answer, verbatim and bounded
+    /// (absent: the answer named no extension).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered: Option<String>,
+    pub negotiation: WsNegotiation,
+    /// Why the answer was refused (`negotiation = rejected`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// The agreed parameters (`negotiation = negotiated`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deflate: Option<WsDeflateParams>,
+    /// Data messages of the session, before and after compression (absent
+    /// when the session never opened).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<WsCompressionTraffic>,
+    /// A received frame broke the compression that was (or was not)
+    /// negotiated, and Anvil ended the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violation: Option<WsCompressionViolation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WsNegotiation {
+    /// Nothing was offered and nothing was answered.
+    NotOffered,
+    /// Offered, but the answer named no extension: the session is uncompressed.
+    NotNegotiated,
+    /// `permessage-deflate` is in use.
+    Negotiated,
+    /// The answer did not fit the offer, or named an extension that was not
+    /// offered; Anvil failed the handshake (RFC 6455 §4.1, RFC 7692 §7).
+    Rejected,
+}
+
+/// Agreed `permessage-deflate` parameters (RFC 7692 §7.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WsDeflateParams {
+    pub server_no_context_takeover: bool,
+    pub client_no_context_takeover: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_max_window_bits: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_max_window_bits: Option<u8>,
+    /// Anvil compressed the messages it sent. False when the agreed client
+    /// window is 2^8 bytes, which Anvil's DEFLATE cannot produce: it then
+    /// sends uncompressed messages, which RFC 7692 §6 allows.
+    pub client_compresses: bool,
+}
+
+/// Per-direction data-message totals of a WebSocket session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WsCompressionTraffic {
+    pub sent: WsDirectionTotals,
+    pub received: WsDirectionTotals,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct WsDirectionTotals {
+    /// Text and binary messages whose first frame crossed the wire.
+    pub messages: u64,
+    /// Of those, messages with RSV1 set (compressed).
+    pub compressed_messages: u64,
+    /// Payload bytes of the complete messages, uncompressed (the sizes in
+    /// the transcript).
+    pub payload_bytes: u64,
+    /// Data-frame payload bytes on the wire, as sent or received
+    /// (compressed where RSV1 was set).
+    pub wire_bytes: u64,
+}
+
+/// Why a received frame ended a session (all are the peer's frames).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WsViolationKind {
+    /// A data message arrived with RSV1 set although no compression was
+    /// negotiated (RFC 6455 §5.2).
+    CompressedWithoutNegotiation,
+    /// A compressed message could not be decompressed (RFC 7692 §7.2.2).
+    Undecodable,
+    /// A compressed message grew past Anvil's local message limit while it
+    /// was decompressed.
+    TooLargeAfterDecompression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WsCompressionViolation {
+    pub kind: WsViolationKind,
+    /// Compressed bytes of the offending message received when it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compressed_bytes: Option<u64>,
+    /// Anvil's local message limit, in decompressed bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_bytes: Option<u64>,
+    /// The decompressor's description of the problem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// The composite outcome. Transport completion, application status and

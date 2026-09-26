@@ -273,6 +273,33 @@ pub struct WsSpec {
     /// Close the session after this idle period (automation only).
     #[serde(default = "default_ws_idle")]
     pub idle_close_ms: u64,
+    /// RFC 7692 per-message compression. Off unless enabled, so requests
+    /// saved before it existed keep the uncompressed wire they had.
+    #[serde(default)]
+    pub permessage_deflate: WsDeflateOffer,
+}
+
+/// The `permessage-deflate` offer (RFC 7692 §7.1) Anvil sends in
+/// `Sec-WebSocket-Extensions`. Window sizes are base-2 logarithms (8–15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct WsDeflateOffer {
+    /// Offer `permessage-deflate`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Ask the server to compress every message with an empty context.
+    #[serde(default)]
+    pub server_no_context_takeover: bool,
+    /// Announce that Anvil compresses every message with an empty context.
+    #[serde(default)]
+    pub client_no_context_takeover: bool,
+    /// Ask the server to use at most a 2^N-byte LZ77 window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_max_window_bits: Option<u8>,
+    /// `None` offers `client_max_window_bits` without a value, as browsers
+    /// do: the server may then limit Anvil's window. `Some(N)` also promises
+    /// that Anvil uses at most a 2^N-byte window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_max_window_bits: Option<u8>,
 }
 
 fn default_ws_max_message() -> u64 {

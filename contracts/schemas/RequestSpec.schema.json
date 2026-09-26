@@ -2074,6 +2074,15 @@
           "format": "uint64",
           "minimum": 0,
           "default": 5000
+        },
+        "permessage_deflate": {
+          "description": "RFC 7692 per-message compression. Off unless enabled, so requests\nsaved before it existed keep the uncompressed wire they had.",
+          "$ref": "#/$defs/WsDeflateOffer",
+          "default": {
+            "enabled": false,
+            "server_no_context_takeover": false,
+            "client_no_context_takeover": false
+          }
         }
       }
     },
@@ -2171,6 +2180,47 @@
           ]
         }
       ]
+    },
+    "WsDeflateOffer": {
+      "description": "The `permessage-deflate` offer (RFC 7692 §7.1) Anvil sends in\n`Sec-WebSocket-Extensions`. Window sizes are base-2 logarithms (8–15).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Offer `permessage-deflate`.",
+          "type": "boolean",
+          "default": false
+        },
+        "server_no_context_takeover": {
+          "description": "Ask the server to compress every message with an empty context.",
+          "type": "boolean",
+          "default": false
+        },
+        "client_no_context_takeover": {
+          "description": "Announce that Anvil compresses every message with an empty context.",
+          "type": "boolean",
+          "default": false
+        },
+        "server_max_window_bits": {
+          "description": "Ask the server to use at most a 2^N-byte LZ77 window.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "client_max_window_bits": {
+          "description": "`None` offers `client_max_window_bits` without a value, as browsers\ndo: the server may then limit Anvil's window. `Some(N)` also promises\nthat Anvil uses at most a 2^N-byte window.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        }
+      }
     },
     "SseSpec": {
       "type": "object",

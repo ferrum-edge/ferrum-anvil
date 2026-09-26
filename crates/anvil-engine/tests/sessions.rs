@@ -231,6 +231,7 @@ fn ws_spec(messages: Vec<WsMessage>) -> WsSpec {
         expect_messages: 0,
         max_message_bytes: 1024 * 1024,
         idle_close_ms: 1_500,
+        permessage_deflate: Default::default(),
     }
 }
 

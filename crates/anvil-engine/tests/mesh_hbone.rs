@@ -304,6 +304,7 @@ async fn websocket_and_raw_tcp_run_over_the_hbone_tunnel() {
         expect_messages: 0,
         max_message_bytes: 1024 * 1024,
         idle_close_ms: 1_500,
+        permessage_deflate: Default::default(),
     });
     let o = run(&via_hbone(s, &ep.address(), Some(client_svid_profile()), HboneMarker::None)).await;
     match &o.record.outcome.protocol_status {

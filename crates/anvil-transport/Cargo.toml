@@ -28,6 +28,7 @@ quinn.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
 tokio-tungstenite.workspace = true
+tungstenite.workspace = true
 hickory-resolver.workspace = true
 dns-lookup.workspace = true
 socket2.workspace = true
