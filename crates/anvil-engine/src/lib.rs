@@ -48,12 +48,21 @@ pub struct ExecutionOutput {
     pub decoded_body: Option<Bytes>,
     /// Iteration-local extracted variables: (name, value, sensitive).
     pub extracted: Vec<(String, String, bool)>,
+    /// Typed facts a session adapter observed beyond the record (e.g. echoed
+    /// and repeated datagram payloads). Not persisted; `None` for HTTP and
+    /// for sessions that failed during preparation.
+    pub session_facts: Option<anvil_transport::session::SessionFacts>,
 }
 
 pub struct Engine {
     pub http: HttpTransport,
     pub h3: anvil_transport::h3::H3Transport,
     pub tokens: Arc<anvil_auth::oauth::TokenCache>,
+    /// Reusable gRPC channels. `None` (the default, manual Send): every gRPC
+    /// call opens its own connection. The load engine sets this on each
+    /// virtual user's engine, and calls then reuse a pooled connection
+    /// whenever the effective `keepalive` setting is on.
+    pub grpc_channels: Option<Arc<anvil_transport::grpc::Channels>>,
     tls: Mutex<HashMap<String, Arc<PreparedTls>>>,
     cookies: Mutex<HashMap<String, cookie_store::CookieStore>>,
 }
@@ -71,6 +80,7 @@ impl Engine {
             http: HttpTransport::new(),
             h3: anvil_transport::h3::H3Transport::new(),
             tokens: Arc::new(anvil_auth::oauth::TokenCache::new()),
+            grpc_channels: None,
             tls: Mutex::new(HashMap::new()),
             cookies: Mutex::new(HashMap::new()),
         }
@@ -119,6 +129,9 @@ impl Engine {
     pub fn clear_sensitive_state(&self) {
         self.http.pool.clear();
         self.h3.clear();
+        if let Some(c) = &self.grpc_channels {
+            c.clear();
+        }
         self.tokens.clear();
         self.tls.lock().clear();
         self.cookies.lock().clear();

@@ -12,19 +12,20 @@
 //! Every send is one `Engine::execute(ctx, EventCtx::none(), cancel)` call,
 //! so request bytes, auth generation and TLS policy match a manual Send. Each
 //! slot (virtual user / concurrency lane / in-flight slot) has its own engine
-//! (own connection pool and cookie jar) while all slots share one OAuth
-//! [`TokenCache`](anvil_auth::oauth::TokenCache), so token refresh stays
-//! single-flight across the whole run.
+//! (own connection pool, gRPC channels and cookie jar) while all slots share
+//! one OAuth [`TokenCache`](anvil_auth::oauth::TokenCache), so token refresh
+//! stays single-flight across the whole run. Each send is one *unit* of the
+//! plan's [`LoadUnitKind`] (see [`crate::protocol`]).
 
 use crate::LoadError;
 use crate::dataset::Dataset;
 use crate::health::{self, HealthSampler};
 use crate::metrics::{self, Metrics, SECONDARY_SIGFIG, SendObservation, Terminal, new_histogram};
+use crate::protocol::{self, StepUnit};
 use crate::report::{self, RunMeta};
 use crate::schedule;
 use anvil_domain::Id;
 use anvil_domain::load::*;
-use anvil_domain::request::Protocol;
 use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext};
@@ -147,6 +148,9 @@ pub struct MetricsSnapshot {
     pub protocols: Vec<(String, u64)>,
     pub destinations: Vec<String>,
     pub generator: GeneratorHealth,
+    /// Protocol denominators of the plan's unit kind (LOAD-013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<ProtocolLoadMetrics>,
 }
 
 /// Throttled progress event (≤ 4/s). `timeline_delta` carries only buckets
@@ -258,6 +262,9 @@ struct Shared {
     plan: LoadPlan,
     run_id: Id,
     steps: Vec<Arc<ExecutionContext>>,
+    /// The unit each step produces (same order as `steps`).
+    units: Vec<StepUnit>,
+    unit: LoadUnitKind,
     /// Cumulative weights for a weighted mix; empty for a chain.
     mix_cumulative: Vec<u64>,
     dataset: Option<Dataset>,
@@ -303,6 +310,9 @@ impl Shared {
             .get_or_init(|| {
                 let mut e = Engine::new();
                 e.tokens = self.tokens.clone();
+                // gRPC calls reuse this slot's channels while keep-alive is on
+                // (the persistent connection mode); fresh mode turns it off.
+                e.grpc_channels = Some(Arc::new(anvil_transport::grpc::Channels::new()));
                 Arc::new(e)
             })
             .clone()
@@ -386,6 +396,10 @@ impl Shared {
 
     fn end_send(&self, slot: usize, measured: bool, o: &SendObservation) {
         let now = Instant::now();
+        // Shard, then ledger (the order `snapshot` uses): a snapshot sees a
+        // finished unit in both the ledger and the metrics, or in neither,
+        // so protocol denominators balance in every progress snapshot.
+        let mut sh = self.shard(slot).lock();
         {
             let mut l = self.ledger.lock();
             let s = l.side(measured);
@@ -417,7 +431,6 @@ impl Shared {
                 }
             }
         }
-        let mut sh = self.shard(slot).lock();
         if measured {
             sh.metrics.record(o);
         }
@@ -511,14 +524,17 @@ impl Shared {
     }
 
     fn snapshot(&self, until: Instant, sampler: &HealthSampler) -> MetricsSnapshot {
+        // Every shard, then the ledger (see `end_send`): one consistent cut.
+        let guards: Vec<_> = self.shards.iter().map(|s| s.lock()).collect();
         let (measured, warmup) = {
             let l = self.ledger.lock();
             (l.measured.clone(), l.warmup.clone())
         };
         let mut m = Metrics::new();
-        for s in &self.shards {
-            m.merge(&s.lock().metrics);
+        for g in &guards {
+            m.merge(&g.metrics);
         }
+        drop(guards);
         let (counts, requests) = measured.balanced();
         let dur = until.saturating_duration_since(self.t0 + self.warmup).as_secs_f64();
         let rate = |n: u64| if dur > 0.0 { n as f64 / dur } else { 0.0 };
@@ -551,6 +567,7 @@ impl Shared {
             bytes_received: m.bytes_received,
             protocols: m.protocols.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             destinations: m.destinations.iter().cloned().collect(),
+            protocol: Some(m.proto.summary(self.unit, self.plan.connection_mode, &self.units)),
             generator: GeneratorHealth {
                 peak_cpu_percent: sampler.peak_cpu_percent,
                 peak_rss_bytes: sampler.peak_rss_bytes,
@@ -615,7 +632,7 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
         sh.begin_send(slot, measured);
         let t = Instant::now();
         let out = engine.execute(&ctx, EventCtx::none(), sh.hard.clone()).await;
-        let obs = metrics::observe(&out.record, t.elapsed().as_micros() as u64);
+        let obs = metrics::observe(&out, t.elapsed().as_micros() as u64, &sh.units[si]);
         sh.end_send(slot, measured, &obs);
         app |= obs.application_failure;
         assertion |= obs.assertion_failure;
@@ -783,6 +800,7 @@ pub struct LoadRun {
     meta: RunMeta,
     opts: RunOptions,
     steps: Vec<Arc<ExecutionContext>>,
+    units: Vec<StepUnit>,
     mix_cumulative: Vec<u64>,
     dataset: Option<Dataset>,
     slots: usize,
@@ -899,19 +917,21 @@ impl LoadRun {
             return Err(LoadError::Invalid("the plan references a dataset but none was provided".into()));
         }
 
-        let mut steps = Vec::with_capacity(ids.len());
-        let mut revisions = Vec::new();
+        let mut resolved = Vec::with_capacity(ids.len());
         for id in &ids {
             let ctx = job
                 .requests
                 .get(id)
                 .ok_or_else(|| LoadError::Invalid(format!("request {id} referenced by the plan was not resolved into the job")))?;
-            if ctx.spec.protocol != Protocol::Http {
-                return Err(LoadError::Unsupported(format!(
-                    "{:?} requests cannot be load tested yet: datagram/stream denominators (LOAD-013) are not implemented, and the engine refuses rather than counting sends as deliveries",
-                    ctx.spec.protocol
-                )));
-            }
+            resolved.push((*id, ctx));
+        }
+        // One unit kind per plan; unsupported combinations are refused here,
+        // before any traffic (LOAD-013).
+        let (unit, units) =
+            protocol::classify_plan(resolved.iter().map(|(id, c)| (*id, *c)), plan.connection_mode).map_err(LoadError::Refused)?;
+        let mut steps = Vec::with_capacity(ids.len());
+        let mut revisions = Vec::new();
+        for (_, ctx) in resolved {
             let mut ctx = ctx.clone();
             // Run-level override layer (highest precedence): the plan's
             // connection mode and a bounded per-send capture.
@@ -941,8 +961,9 @@ impl LoadRun {
             request_revisions: revisions,
             dataset_sha256: dataset.as_ref().map(|d| d.sha256.clone()),
             started_at: Utc::now(),
+            unit,
         };
-        Ok(LoadRun { meta, opts, steps, mix_cumulative, dataset, slots: slots.max(1) })
+        Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1) })
     }
 
     pub fn meta(&self) -> &RunMeta {
@@ -959,7 +980,7 @@ impl LoadRun {
     /// cancelling `lock` stops the run like a user cancel but records
     /// `stopped_by_lock`.
     pub async fn execute_lockable(self, cancel: CancellationToken, lock: CancellationToken, progress: Option<ProgressSink>) -> LoadReport {
-        let LoadRun { mut meta, opts, steps, mix_cumulative, dataset, slots } = self;
+        let LoadRun { mut meta, opts, steps, units, mix_cumulative, dataset, slots } = self;
         let plan = meta.plan.clone();
         let planned_secs = match &plan.workload {
             Workload::ClosedVirtualUsers { stages, .. } | Workload::OpenArrivalRate { stages, .. } => schedule::total_secs(stages),
@@ -971,6 +992,8 @@ impl LoadRun {
         let sh = Arc::new(Shared {
             run_id: meta.run_id,
             steps,
+            units,
+            unit: meta.unit,
             mix_cumulative,
             dataset,
             t0: Instant::now(),

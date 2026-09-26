@@ -3,9 +3,11 @@
 //! compatible (same engine build, workload model, warmup handling, protocol,
 //! connection mode, dataset and request set). Incompatible runs get the
 //! reasons instead of numbers that look equivalent but are not (LOAD-014).
+//! Runs of different load units (HTTP requests vs WebSocket sessions vs UDP
+//! exchanges, ...) are refused outright (LOAD-013).
 
 use anvil_domain::Id;
-use anvil_domain::load::{ConnectionMode, LoadReport, Workload};
+use anvil_domain::load::{ConnectionMode, LoadReport, LoadUnitKind, Workload};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +89,83 @@ fn failure_ratio(r: &LoadReport) -> f64 {
     if finished == 0 { 0.0 } else { failed as f64 / finished as f64 }
 }
 
+fn unit(r: &LoadReport) -> LoadUnitKind {
+    r.protocol_metrics.as_ref().map(|p| p.unit).unwrap_or_default()
+}
+
+/// Protocol denominators that are comparable between two runs of the same
+/// unit kind (rates per unit, never raw totals of different run lengths).
+fn protocol_deltas(a: &LoadReport, b: &LoadReport, mk: &dyn Fn(&str, f64, f64) -> MetricDelta) -> Vec<MetricDelta> {
+    let (Some(pa), Some(pb)) = (&a.protocol_metrics, &b.protocol_metrics) else { return vec![] };
+    let per = |n: u64, d: u64| if d == 0 { 0.0 } else { n as f64 / d as f64 };
+    let mut out = Vec::new();
+    if let (Some(x), Some(y)) = (&pa.grpc, &pb.grpc) {
+        out.push(mk("non-OK status ratio", per(x.non_ok, x.ok + x.non_ok), per(y.non_ok, y.ok + y.non_ok)));
+        out.push(mk("missing-status ratio", per(x.missing_status, a.requests.started), per(y.missing_status, b.requests.started)));
+    }
+    if let (Some(x), Some(y)) = (&pa.stream, &pb.stream) {
+        out.push(mk("messages per opened stream", per(x.messages_received, x.opened), per(y.messages_received, y.opened)));
+        if x.time_to_first_message.count > 0 && y.time_to_first_message.count > 0 {
+            out.push(mk("time to first message p50 (µs)", x.time_to_first_message.p50_us as f64, y.time_to_first_message.p50_us as f64));
+            out.push(mk("time to first message p99 (µs)", x.time_to_first_message.p99_us as f64, y.time_to_first_message.p99_us as f64));
+        }
+    }
+    if let (Some(x), Some(y)) = (&pa.websocket, &pb.websocket) {
+        out.push(mk("sessions opened ratio", per(x.opened, a.requests.started), per(y.opened, b.requests.started)));
+        out.push(mk("messages received per opened session", per(x.messages_received, x.opened), per(y.messages_received, y.opened)));
+        if x.rtt.count > 0 && y.rtt.count > 0 {
+            out.push(mk("round trip p50 (µs)", x.rtt.p50_us as f64, y.rtt.p50_us as f64));
+            out.push(mk("round trip p99 (µs)", x.rtt.p99_us as f64, y.rtt.p99_us as f64));
+        }
+    }
+    if let (Some(x), Some(y)) = (&pa.tcp, &pb.tcp) {
+        out.push(mk(
+            "frames received per exchange",
+            per(x.frames_received, a.requests.completed),
+            per(y.frames_received, b.requests.completed),
+        ));
+    }
+    if let (Some(x), Some(y)) = (&pa.datagram, &pb.datagram) {
+        // An observed ratio, never a delivery rate.
+        out.push(mk(
+            "datagrams received per sent (observed)",
+            per(x.datagrams_received, x.datagrams_sent),
+            per(y.datagrams_received, y.datagrams_sent),
+        ));
+        out.push(mk(
+            "exchanges with no response observed (ratio)",
+            per(x.exchanges_silent, a.requests.completed),
+            per(y.exchanges_silent, b.requests.completed),
+        ));
+    }
+    out
+}
+
 pub fn compare(a: &LoadReport, b: &LoadReport) -> Comparison {
+    // Two runs of different protocols measure different units: the comparison
+    // is refused outright, not merely flagged (LOAD-013).
+    let (ua, ub) = (unit(a), unit(b));
+    if ua != ub {
+        let reason = format!(
+            "load unit differs ({} vs {}): the runs count different things (e.g. requests vs sessions vs datagram exchanges), so no count, rate or latency is comparable",
+            crate::protocol::label(ua),
+            crate::protocol::label(ub)
+        );
+        return Comparison {
+            run_a: a.run_id,
+            run_b: b.run_id,
+            compatible: false,
+            differences: vec![SemanticDifference {
+                aspect: "load unit".into(),
+                a: crate::protocol::label(ua).into(),
+                b: crate::protocol::label(ub).into(),
+                impact: Impact::Blocking,
+                explanation: "Runs of different protocols are never compared.".into(),
+            }],
+            latency: LatencyComparison::NotComparable { reasons: vec![reason] },
+            summary: "Refused: these runs load different protocols. Compare two runs of the same protocol.".into(),
+        };
+    }
     let mut d = Vec::new();
     let mut diff = |aspect: &str, va: String, vb: String, impact: Impact, why: &str| {
         if va != vb {
@@ -118,13 +196,16 @@ pub fn compare(a: &LoadReport, b: &LoadReport) -> Comparison {
         "Different warmup handling changes which samples (cold connections, caches, JIT) are in the distributions.",
     );
     diff("protocol", protocols(a), protocols(b), Blocking, "HTTP/1.1, HTTP/2 and HTTP/3 have different connection and multiplexing costs.");
+    let mode_applies = crate::protocol::connection_mode_applies(ua);
     diff(
         "connection mode",
         format!("{:?}", a.plan.connection_mode),
         format!("{:?}", b.plan.connection_mode),
-        Blocking,
-        if a.plan.connection_mode == ConnectionMode::Fresh || b.plan.connection_mode == ConnectionMode::Fresh {
-            "Fresh mode pays a connection (and TLS handshake) per send; persistent mode reuses connections."
+        if mode_applies { Blocking } else { Caution },
+        if !mode_applies {
+            "This unit opens its own connection in either mode, so the setting did not change how it connected."
+        } else if a.plan.connection_mode == ConnectionMode::Fresh || b.plan.connection_mode == ConnectionMode::Fresh {
+            "Fresh mode pays a connection (and TLS handshake) per unit; persistent mode reuses connections."
         } else {
             "Connection handling differs."
         },
@@ -190,19 +271,26 @@ pub fn compare(a: &LoadReport, b: &LoadReport) -> Comparison {
         let pct = |a: f64, b: f64| (a != 0.0).then(|| (b - a) / a * 100.0);
         let mk = |m: &str, va: f64, vb: f64| MetricDelta { metric: m.into(), a: va, b: vb, delta: vb - va, delta_percent: pct(va, vb) };
         let (la, lb) = (&a.latency_success, &b.latency_success);
-        LatencyComparison::Comparable {
-            deltas: vec![
+        let mut deltas = Vec::new();
+        // Percentiles exist only over successful units; with none on either
+        // side there is nothing to compare (never "0 µs").
+        if la.count > 0 && lb.count > 0 {
+            deltas.extend([
                 mk("success p50 (µs)", la.p50_us as f64, lb.p50_us as f64),
                 mk("success p90 (µs)", la.p90_us as f64, lb.p90_us as f64),
                 mk("success p95 (µs)", la.p95_us as f64, lb.p95_us as f64),
                 mk("success p99 (µs)", la.p99_us as f64, lb.p99_us as f64),
                 mk("success mean (µs)", la.mean_us as f64, lb.mean_us as f64),
-                mk("achieved rate (/s)", a.achieved_rate_per_sec, b.achieved_rate_per_sec),
-                mk("failed-send ratio", failure_ratio(a), failure_ratio(b)),
-                mk("timeouts (censored)", a.timeouts_censored.count as f64, b.timeouts_censored.count as f64),
-                mk("dropped arrivals", a.counts.dropped as f64, b.counts.dropped as f64),
-            ],
+            ]);
         }
+        deltas.extend([
+            mk("achieved rate (/s)", a.achieved_rate_per_sec, b.achieved_rate_per_sec),
+            mk("failed-unit ratio", failure_ratio(a), failure_ratio(b)),
+            mk("timeouts (censored)", a.timeouts_censored.count as f64, b.timeouts_censored.count as f64),
+            mk("dropped arrivals", a.counts.dropped as f64, b.counts.dropped as f64),
+        ]);
+        deltas.extend(protocol_deltas(a, b, &mk));
+        LatencyComparison::Comparable { deltas }
     } else {
         LatencyComparison::NotComparable { reasons: blocking.clone() }
     };

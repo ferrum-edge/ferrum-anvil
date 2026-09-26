@@ -9,6 +9,9 @@
 //! * [`executor`]: closed (virtual users), open (arrival rate) and iteration
 //!   workloads; weighted mixes, sequential chains with extraction, datasets,
 //!   warmup exclusion, abort rules, connection modes; bounded everywhere.
+//! * [`protocol`]: per-protocol load units (HTTP requests, gRPC calls and
+//!   streams, SSE streams, WebSocket sessions, TCP and UDP/DTLS exchanges)
+//!   and the combinations refused before traffic (LOAD-013).
 //! * [`metrics`]: mergeable HDR histograms per shard, merged before any
 //!   percentile is computed; censored timeouts; bounded failure samples.
 //! * [`worker`] / [`controller`]: the `anvil-load-worker` process (job on
@@ -28,6 +31,7 @@ pub mod health;
 pub mod html;
 pub mod job;
 pub mod metrics;
+pub mod protocol;
 pub mod report;
 pub mod schedule;
 pub mod worker;
@@ -37,6 +41,7 @@ pub use controller::LoadController;
 pub use dataset::{Dataset, DatasetFormat};
 pub use executor::{LoadJob, LoadRun, Progress, ProgressSink, RunOptions, validate_plan};
 pub use job::WorkerJob;
+pub use protocol::{Refusal, RefusalCode};
 
 /// Engine identifier recorded in every report.
 pub const ENGINE_NAME: &str = "anvil-native";
@@ -59,6 +64,10 @@ pub enum LoadError {
     /// A requested capability is not implemented; refused rather than faked.
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// The plan's requests have no load unit (LOAD-013): refused, typed,
+    /// before any traffic.
+    #[error("not supported for load: {0}")]
+    Refused(Refusal),
     #[error("worker I/O: {0}")]
     Io(String),
     #[error("worker protocol: {0}")]

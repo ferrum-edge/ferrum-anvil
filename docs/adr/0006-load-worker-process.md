@@ -20,5 +20,5 @@
 
 ## Consequences
 - An unresponsive or crashing worker cannot freeze or corrupt the UI.
-- Load of non-HTTP protocols is refused at validation until per-protocol
-  denominators exist (documented in `docs/load.md`).
+- Load of non-HTTP protocols was refused at validation until per-protocol
+  denominators existed; ADR 0011 adds them (one load unit per protocol).

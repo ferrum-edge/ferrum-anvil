@@ -167,6 +167,7 @@ pub fn run() {
             cmd_load::load_plan_save,
             cmd_load::load_plan_delete,
             cmd_load::load_preflight,
+            cmd_load::load_plan_check,
             cmd_load::load_run_start,
             cmd_load::load_run_cancel,
             cmd_load::load_reports,

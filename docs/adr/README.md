@@ -12,3 +12,4 @@
 | [0008](0008-licensing-and-dependencies.md) | Licensing, dependency and native-library decisions | Accepted |
 | [0009](0009-test-hooks-excluded-from-release.md) | Test-only WebDriver and unlock hooks behind a cargo feature | Accepted |
 | [0010](0010-identity-separation.md) | Three identities; app login is never a vault key | Accepted |
+| [0011](0011-per-protocol-load-units.md) | Per-protocol load units with typed denominators; one unit kind per plan | Accepted |

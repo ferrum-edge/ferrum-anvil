@@ -10,7 +10,7 @@ use crate::job::WorkerJob;
 use crate::report::{self, RunMeta};
 use crate::worker::{MAX_MESSAGE_BYTES, WorkerMessage};
 use anvil_domain::Id;
-use anvil_domain::load::{LoadPlan, LoadReport, RunCompletion, TimeBucket};
+use anvil_domain::load::{LoadPlan, LoadReport, LoadUnitKind, RunCompletion, TimeBucket};
 use chrono::Utc;
 use std::path::Path;
 use std::process::Stdio;
@@ -77,7 +77,9 @@ impl LoadController {
         let (ptx, prx) = mpsc::channel(PROGRESS_QUEUE);
         let (rtx, rrx) = oneshot::channel();
         let kill = CancellationToken::new();
-        tokio::spawn(supervise(child, stdout, job.plan.clone(), ptx, rtx, kill.clone()));
+        // The unit kind labels a crash report whose worker never announced its run.
+        let unit = job.requests.first().map(|r| crate::protocol::unit_of_spec(&r.spec)).unwrap_or_default();
+        tokio::spawn(supervise(child, stdout, job.plan.clone(), unit, ptx, rtx, kill.clone()));
         let cancel_deadline = Duration::from_millis(job.options.cancel_drain_ms) + HARD_CANCEL_GRACE + KILL_MARGIN;
         Ok(LoadController {
             pid,
@@ -158,8 +160,10 @@ impl Drop for LoadController {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn crash_report(
     plan: &LoadPlan,
+    unit: LoadUnitKind,
     meta: Option<RunMeta>,
     last: Option<Progress>,
     timeline: Vec<TimeBucket>,
@@ -174,6 +178,7 @@ fn crash_report(
         request_revisions: vec![],
         dataset_sha256: None,
         started_at: Utc::now(),
+        unit,
     });
     let (snap, at) = match last {
         Some(p) => (p.snapshot, format!("{:.1} s", p.elapsed_secs)),
@@ -181,8 +186,10 @@ fn crash_report(
     };
     let in_flight = snap.requests.in_flight_at_end;
     let mut notes = vec![format!(
-        "The load worker exited without a final report ({status}){}. Metrics come from the last progress snapshot ({at}); sends after that snapshot are not included, and the outcome of the {in_flight} send(s) in flight at that moment is unknown (reported as in flight at end).",
-        if killed_by_controller { " after it was stopped by the controller" } else { "" }
+        "The load worker exited without a final report ({status}){}. Metrics come from the last progress snapshot ({at}); {units} after that snapshot are not included, and the outcome of the {in_flight} {unit}(s) in flight at that moment is unknown (reported as in flight at end).",
+        if killed_by_controller { " after it was stopped by the controller" } else { "" },
+        units = crate::protocol::semantics(meta.unit, plan.connection_mode).unit_plural,
+        unit = crate::protocol::semantics(meta.unit, plan.connection_mode).unit_singular
     )];
     notes.push("This is an incomplete report: do not read it as a full-duration result.".into());
     report::assemble(&meta, snap, timeline, RunCompletion::WorkerCrashed, Utc::now(), notes)
@@ -192,6 +199,7 @@ async fn supervise(
     mut child: Child,
     stdout: ChildStdout,
     plan: LoadPlan,
+    unit: LoadUnitKind,
     ptx: mpsc::Sender<Progress>,
     rtx: oneshot::Sender<Result<LoadReport, LoadError>>,
     kill: CancellationToken,
@@ -248,7 +256,7 @@ async fn supervise(
     let result = match (final_report, refused, meta.is_some()) {
         (Some(r), _, _) => Ok(r),
         (None, Some(msg), false) => Err(LoadError::Invalid(msg)),
-        _ => Ok(crash_report(&plan, meta, last, timeline, status, killed)),
+        _ => Ok(crash_report(&plan, unit, meta, last, timeline, status, killed)),
     };
     let _ = rtx.send(result);
 }

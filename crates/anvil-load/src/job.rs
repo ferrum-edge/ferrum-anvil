@@ -17,7 +17,7 @@ use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::load::LoadPlan;
-use anvil_domain::request::{AttachmentRef, Body, MultipartContent, RequestSpec};
+use anvil_domain::request::{AttachmentRef, Body, GrpcSchemaSource, MultipartContent, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::tls::{ClientIdentity, ProxyProfile, TlsProfile};
@@ -215,7 +215,8 @@ pub fn secret_refs(ctx: &ExecutionContext) -> Vec<SecretRef> {
     out
 }
 
-/// Stored attachments a request body references.
+/// Stored attachments a request references: its body files and, for gRPC,
+/// the `.proto` files or descriptor set of its schema.
 pub fn attachment_refs(spec: &RequestSpec) -> Vec<AttachmentRef> {
     let mut out = Vec::new();
     match &spec.body {
@@ -228,6 +229,13 @@ pub fn attachment_refs(spec: &RequestSpec) -> Vec<AttachmentRef> {
             }
         }
         _ => {}
+    }
+    if let Some(g) = &spec.grpc {
+        match &g.schema {
+            GrpcSchemaSource::ProtoFiles { files } => out.extend(files.iter().cloned()),
+            GrpcSchemaSource::DescriptorSet { attachment } => out.push(attachment.clone()),
+            GrpcSchemaSource::Reflection => {}
+        }
     }
     out.retain(|a| matches!(a, AttachmentRef::Stored { .. }));
     out

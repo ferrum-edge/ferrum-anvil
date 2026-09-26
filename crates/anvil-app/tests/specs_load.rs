@@ -174,3 +174,38 @@ async fn load_plan_requires_acknowledgement_runs_and_stores_report() {
     app.delete_load_report(&report.run_id).unwrap();
     assert!(app.load_reports(&ws.meta.id).unwrap().is_empty());
 }
+
+/// LOAD-013 at the app boundary: the editor's plan check names the unit (or
+/// the typed refusal) and the preflight shows protocol destinations and
+/// refuses unsupported plans before the user can start traffic.
+#[tokio::test]
+async fn load_plan_check_names_the_unit_and_preflight_refuses_mixed_protocols() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let mut s = RequestSpec::http("GET", &format!("ws://{}/ws", fx.addr));
+    s.protocol = anvil_domain::request::Protocol::WebSocket;
+    let wsreq = app.create_request(&ws.meta.id, None, "socket", s).unwrap();
+    let http = app.create_request(&ws.meta.id, None, "echo", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
+
+    let p = app.save_load_plan(plan(ws.meta.id, wsreq.meta.id)).unwrap();
+    let check = app.load_plan_check(&p).unwrap();
+    assert_eq!(check.unit, Some(anvil_domain::load::LoadUnitKind::WebsocketSession));
+    assert!(check.refusal.is_none());
+    assert_eq!(check.semantics.unwrap().unit_plural, "sessions");
+    let pre = app.load_preflight(&p).unwrap();
+    assert_eq!(pre.destinations, vec![format!("WebSocket ws://{}", fx.addr)]);
+    assert_eq!(pre.unit_label, "WebSocket sessions");
+    assert!(pre.warnings.iter().any(|w| w.contains("connection mode does not apply")), "{:?}", pre.warnings);
+
+    let mixed = app.save_load_plan(LoadPlan { chain: vec![http.meta.id, wsreq.meta.id], ..plan(ws.meta.id, http.meta.id) }).unwrap();
+    let check = app.load_plan_check(&mixed).unwrap();
+    assert_eq!(check.unit, None);
+    assert_eq!(check.refusal.as_ref().unwrap().code, anvil_load::RefusalCode::MixedUnitKinds);
+    assert_eq!(check.protocols.len(), 2);
+    let err = app.load_preflight(&mixed).unwrap_err().to_string();
+    assert!(err.contains("LOAD-013"), "{err}");
+    assert!(fx.log.entries().is_empty(), "checks and preflights send nothing");
+}

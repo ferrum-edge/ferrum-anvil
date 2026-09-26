@@ -48,9 +48,11 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
     See `docs/diagnostics.md`.
 - **Test under load**: open (arrival rate), closed (virtual users) and
   iteration workloads run in a separate worker process with the same
-  request preparation as Send. Reports include balanced ledgers, HDR
-  percentiles, a timeline, generator health, exports (HTML, JSON, CSV) and
-  run comparison.
+  request preparation as Send, for HTTP (including HTTP/3), gRPC, SSE,
+  WebSocket, TCP and UDP/DTLS, each with its own load unit and
+  denominators (a UDP datagram sent is never counted as delivered). Reports
+  include balanced ledgers, HDR percentiles, a timeline, generator health,
+  exports (HTML, JSON, CSV) and run comparison.
 - **Import and share**:
   - Import OpenAPI 2.0–3.2, WSDL 1.1, Postman, Insomnia, cURL and HAR with a
     preview report.

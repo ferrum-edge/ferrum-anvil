@@ -253,7 +253,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     };
     let mut record = record;
     record.outcome.completeness = record.response.as_ref().map(|r| r.body.completeness);
-    ExecutionOutput { record, body: raw_body, decoded_body: decoded, extracted: extracted_values }
+    ExecutionOutput { record, body: raw_body, decoded_body: decoded, extracted: extracted_values, session_facts: None }
 }
 
 pub fn summary_line(
@@ -380,5 +380,5 @@ pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: Da
         extracted: vec![],
         findings: diag.findings,
     };
-    ExecutionOutput { record, body: Bytes::new(), decoded_body: None, extracted: vec![] }
+    ExecutionOutput { record, body: Bytes::new(), decoded_body: None, extracted: vec![], session_facts: None }
 }

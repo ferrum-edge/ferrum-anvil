@@ -468,6 +468,7 @@ dependencies = [
  "anvil-domain",
  "anvil-engine",
  "anvil-fixtures",
+ "anvil-load",
  "anvil-transport",
  "anyhow",
  "base64 0.23.1",

@@ -27,6 +27,7 @@ use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides, TimeoutOverri
 use anvil_domain::tls::{HostBinding, TlsMinVersion, TlsProfile};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::GroundTruth;
+use anvil_load::{Dataset, DatasetFormat};
 use anvil_transport::recorder::EventCtx;
 use std::future::Future;
 use std::pin::Pin;
@@ -2411,6 +2412,195 @@ fn proto022_wrong_root(env: &Env) -> Fut<'_> {
     })
 }
 
+// ------------------------------------------------------ protocol load ---
+
+/// A short, low-rate load run (LOAD-013) of one request through the gateway,
+/// on the load engine's own per-virtual-user engines — the same preparation
+/// path as a manual Send. Loopback only.
+async fn run_load(ctx: ExecutionContext, iterations: u64, concurrency: u64, dataset: Option<Dataset>) -> anvil_domain::load::LoadReport {
+    use anvil_domain::load::{ConnectionMode, LoadPlan, Workload};
+    let id = Id::new();
+    let plan = LoadPlan {
+        id: Id::new(),
+        workspace_id: Id::new(),
+        name: "lab protocol load".into(),
+        workload: Workload::Iterations { iterations, concurrency },
+        chain: vec![id],
+        mix: vec![],
+        dataset_id: dataset.as_ref().map(|_| Id::new()),
+        environment_id: None,
+        connection_mode: ConnectionMode::Persistent,
+        warmup_secs: 0,
+        abort: None,
+        seed: 1,
+        trusted: true,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let job = anvil_load::LoadJob { requests: std::collections::HashMap::from([(id, ctx)]), dataset };
+    let opts = anvil_load::RunOptions { acknowledged: true, ..Default::default() };
+    anvil_load::LoadRun::prepare(plan, job, opts).expect("valid lab load plan").execute(CancellationToken::new(), None).await
+}
+
+/// Both ledgers and the protocol denominators balance.
+fn load_balanced(c: &mut Checks, r: &anvil_domain::load::LoadReport) {
+    let ok = anvil_load::report::check_balance(&r.counts)
+        .and_then(|_| anvil_load::report::check_request_balance(&r.requests))
+        .and_then(|_| anvil_load::report::check_protocol_balance(r));
+    c.add(CheckKind::Diagnosis, "unit ledger and protocol denominators balance", ok.is_ok(), format!("{ok:?}"));
+}
+
+/// Gateway transaction-log lines of one proxy since `from` (all of them).
+fn op_lines(env: &Env, from: usize, proxy_id: &str) -> Vec<serde_json::Value> {
+    env.gateway
+        .log_lines()
+        .into_iter()
+        .skip(from)
+        .filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\"")))
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect()
+}
+
+fn load013_grpc(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let unary = |env: &Env| env.fx.grpc.log.requests().iter().filter(|(_, p)| p == "/anvil.lab.v1.Echo/Unary").count();
+        let before = unary(env);
+        // Dataset rows pick the backend's answer per call: OK, OK, PERMISSION_DENIED.
+        let data = Dataset::parse(DatasetFormat::Csv, b"fail\n0\n0\n7\n".to_vec()).expect("dataset");
+        let ctx = grpc_ctx(env, &format!("grpc://{HTTP}"), "Unary", GrpcMode::Unary, &[r#"{"message":"load","failWith":{{fail}}}"#], None);
+        let r = run_load(ctx, 30, 3, Some(data)).await;
+        load_balanced(&mut c, &r);
+        let g = r.protocol_metrics.as_ref().and_then(|p| p.grpc.clone()).unwrap_or_default();
+        c.add(
+            CheckKind::Diagnosis,
+            "30 calls: 20 OK and 10 PERMISSION_DENIED by code, none successful by HTTP status alone",
+            g.status_codes == vec![(0, 20), (7, 10)] && r.requests.completed == 30 && r.requests.application_failures == 10,
+            format!("{:?} / {:?}", g.status_codes, r.requests),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "percentiles cover the 20 OK calls only",
+            r.latency_success.count == 20,
+            format!("{:?}", r.latency_success),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "calls reuse a pooled channel per virtual user (at most 3 connections for 3 virtual users)",
+            r.requests.connections_opened <= 3 && r.requests.connections_opened + r.requests.connections_reused == 30,
+            format!("opened {} reused {}", r.requests.connections_opened, r.requests.connections_reused),
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend received exactly 30 unary calls",
+            unary(env) - before == 30,
+            format!("{}", unary(env) - before),
+        );
+        let lines: Vec<serde_json::Value> =
+            op_lines(env, from, "proto014-grpc").into_iter().filter(|v| v["request_path"] == "/anvil.lab.v1.Echo/Unary").collect();
+        let by_status = |code: i64| lines.iter().filter(|v| v["grpc_status"].as_i64() == Some(code)).count();
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway's transaction log agrees: 20 × grpc_status 0, 10 × grpc_status 7",
+            lines.len() == 30 && by_status(0) == 20 && by_status(7) == 10,
+            format!("{} lines, 0×{} 7×{}", lines.len(), by_status(0), by_status(7)),
+        );
+        let operator_log = lines.iter().take(3).map(|v| v.to_string()).collect();
+        Outcome { main: None, recovery: None, checks: c, operator_log }
+    })
+}
+
+fn load013_ws(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let received =
+            |env: &Env| env.fx.ws.log.entries().iter().filter(|e| matches!(e.event, GroundTruth::MessageReceived { .. })).count();
+        let before = received(env);
+        let mut ctx = ws_ctx(env, &format!("ws://{HTTP}/ws"), WsBootstrap::Http1Upgrade, &["alpha", "beta"], 3_000);
+        if let Some(w) = ctx.spec.websocket.as_mut() {
+            w.expect_messages = 2;
+        }
+        let r = run_load(ctx, 10, 2, None).await;
+        load_balanced(&mut c, &r);
+        let w = r.protocol_metrics.as_ref().and_then(|p| p.websocket.clone()).unwrap_or_default();
+        c.add(
+            CheckKind::Diagnosis,
+            "10 sessions opened and closed cleanly by Anvil (1000) after the 2 expected replies",
+            w.opened == 10
+                && w.closed_cleanly == 10
+                && w.close_codes.iter().all(|x| x.closed_by == ClosedBy::Client && x.code == Some(1000)),
+            format!("{w:?}"),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "20 messages each way, paired into 20 round trips",
+            w.messages_sent == 20 && w.messages_received == 20 && w.rtt_defined && w.rtt_pairs == 20,
+            format!("sent {} received {} pairs {}", w.messages_sent, w.messages_received, w.rtt_pairs),
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend received exactly 20 messages",
+            received(env) - before == 20,
+            format!("{}", received(env) - before),
+        );
+        // The gateway logs a session's end when it tears the session down.
+        let mut ends = 0;
+        for _ in 0..30 {
+            ends = op_lines(env, from, "proto012-ws-echo")
+                .iter()
+                .filter(|v| v["metadata"]["websocket.termination_reason"].is_string())
+                .count();
+            if ends >= 10 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let lines = op_lines(env, from, "proto012-ws-echo");
+        let upgrades = lines.iter().filter(|v| v["response_status_code"] == 101 && v["request_user_agent"].is_string()).count();
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway's transaction log shows 10 upgrades and 10 session ends",
+            upgrades == 10 && ends == 10,
+            format!("upgrades {upgrades} ends {ends}"),
+        );
+        Outcome { main: None, recovery: None, checks: c, operator_log: lines.iter().take(4).map(|v| v.to_string()).collect() }
+    })
+}
+
+fn load013_udp(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let before = datagrams(&env.fx.udp_lossy.log);
+        // The backend behind 18403 answers every other datagram it receives.
+        let ctx = udp_ctx(env, "udp://127.0.0.1:18403", &["d0", "d1", "d2", "d3"], 400, None);
+        let r = run_load(ctx, 5, 1, None).await;
+        load_balanced(&mut c, &r);
+        let d = r.protocol_metrics.as_ref().and_then(|p| p.datagram.clone()).unwrap_or_default();
+        let arrived = datagrams(&env.fx.udp_lossy.log) - before;
+        c.add(
+            CheckKind::Diagnosis,
+            "20 sent and 10 received, kept as separate counts; every exchange saw a response",
+            d.datagrams_sent == 20 && d.datagrams_received == 10 && d.exchanges_with_response == 5 && d.exchanges_silent == 0,
+            format!("{d:?}"),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "no delivery is inferred: the report states the ratio is an observation",
+            r.notes.iter().any(|n| n.contains("never a delivery or loss rate")) && r.requests.transport_failures == 0,
+            "",
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway relayed all 20 datagrams to the backend (which Anvil does not claim)",
+            arrived == 20,
+            format!("{arrived}"),
+        );
+        Outcome { main: None, recovery: None, checks: c, operator_log: vec![] }
+    })
+}
+
 // ----------------------------------------------------------------- wiring ---
 
 pub fn all() -> Vec<Def> {
@@ -2473,6 +2663,9 @@ pub fn all() -> Vec<Def> {
         Def { id: "PROTO-021", title: "UDP lossy backend: partial responses", run: proto021 },
         Def { id: "PROTO-022", title: "DTLS terminated at the gateway (verified) to a UDP echo", run: proto022 },
         Def { id: "PROTO-022-wrong-root", title: "DTLS with the wrong trust root fails on the client side", run: proto022_wrong_root },
+        Def { id: "LOAD-013-grpc", title: "Unary gRPC load through the gateway: status codes vs the operator log", run: load013_grpc },
+        Def { id: "LOAD-013-ws", title: "WebSocket session load through the gateway: sessions and messages", run: load013_ws },
+        Def { id: "LOAD-013-udp", title: "UDP load through the gateway: sent ≠ received, no delivery inferred", run: load013_udp },
     ]
 }
 

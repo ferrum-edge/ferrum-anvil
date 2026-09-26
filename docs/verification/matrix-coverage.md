@@ -6,8 +6,8 @@ A skip or block is never counted as a pass.
 
 | Status | Cases |
 |---|---|
-| ✅ live (real gateway) | 96 |
-| ✅ automated test | 75 |
+| ✅ live (real gateway) | 97 |
+| ✅ automated test | 74 |
 | ✅ executed check script | 1 |
 | ⛔ blocked — see reason | 6 |
 | ➖ not applicable — see reason | 2 |
@@ -59,15 +59,15 @@ A skip or block is never counted as a pass.
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
 | UP-001 | Backend DNS failure | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core` — passed UP-001; `crates/anvil-lab/src/core.rs` |
-| UP-002 | Backend connect refused | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core`, `results/lab/20260926T025713Z-streams` — passed UP-002, UP-002-tcp; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
+| UP-002 | Backend connect refused | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core`, `results/lab/20260926T044038Z-streams` — passed UP-002, UP-002-tcp; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
 | UP-003 | Backend connect deadline | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core` — passed UP-003; `crates/anvil-lab/src/core.rs` |
-| UP-004 | Backend untrusted certificate | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams`, `results/lab/20260926T025632Z-tls` — passed UP-004, UP-004-tcps, UP-004.expired; `crates/anvil-lab/src/streams.rs`, `crates/anvil-lab/src/tls.rs` |
+| UP-004 | Backend untrusted certificate | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams`, `results/lab/20260926T025632Z-tls` — passed UP-004, UP-004-tcps, UP-004.expired; `crates/anvil-lab/src/streams.rs`, `crates/anvil-lab/src/tls.rs` |
 | UP-005 | Backend certificate name mismatch | ✅ live (real gateway) | lab `results/lab/20260926T025632Z-tls` — passed UP-005; `crates/anvil-lab/src/tls.rs` |
 | UP-006 | Backend mTLS missing identity | ✅ live (real gateway) | lab `results/lab/20260926T025632Z-tls` — passed UP-006, UP-006.tls12; `crates/anvil-lab/src/tls.rs` |
 | UP-007 | Backend TLS stall | ✅ live (real gateway) | lab `results/lab/20260926T025632Z-tls` — passed UP-007; `crates/anvil-lab/src/tls.rs` |
 | UP-008 | Backend HTTP to HTTPS mismatch | ✅ live (real gateway) | lab `results/lab/20260926T025632Z-tls` — passed UP-008, UP-008.http-to-tls; `crates/anvil-lab/src/tls.rs` |
 | UP-009 | Backend upload stall | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core` — passed UP-009; `crates/anvil-lab/src/core.rs` |
-| UP-010 | Backend first-header stall | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core`, `results/lab/20260926T025713Z-streams` — passed UP-010, UP-010-grpc; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
+| UP-010 | Backend first-header stall | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core`, `results/lab/20260926T044038Z-streams` — passed UP-010, UP-010-grpc; `crates/anvil-lab/src/core.rs`, `crates/anvil-lab/src/streams.rs` |
 | UP-011 | Backend body idle stall | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core` — passed UP-011; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
 | UP-012 | Backend mid-body reset | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core` — passed UP-012; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
 | UP-013 | Backend short Content-Length body | ✅ live (real gateway) | lab `results/lab/20260926T025501Z-core` — passed UP-013; `crates/anvil-lab/src/core.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
@@ -145,28 +145,28 @@ A skip or block is never counted as a pass.
 
 | ID | Scenario | Status | Evidence |
 |---|---|---|---|
-| PROTO-001 | HTTP1 keepalive reuse | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-001; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| PROTO-002 | HTTP2 trailers | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-002; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| PROTO-001 | HTTP1 keepalive reuse | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-001; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| PROTO-002 | HTTP2 trailers | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-002; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-003 | HTTP2 stream reset | ✅ automated test | `crates/anvil-transport/tests/http_evidence.rs` |
 | PROTO-004 | HTTP2 GOAWAY | ✅ automated test — HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet. | `crates/anvil-engine/tests/matrix_local_tls.rs` |
-| PROTO-005 | h2c mismatch | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-005; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
-| PROTO-006 | H3 forced success | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-006; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-007 | H3 UDP unavailable | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-007; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-008 | H3 automatic fallback | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-008; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-009 | WS normal close | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-009, PROTO-009-client-close; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-010 | WS abnormal close | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-010; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-005 | h2c mismatch | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-005; `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/http_evidence.rs` |
+| PROTO-006 | H3 forced success | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-006; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-007 | H3 UDP unavailable | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-007; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-008 | H3 automatic fallback | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-008; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-009 | WS normal close | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-009, PROTO-009-client-close; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-010 | WS abnormal close | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-010; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
 | PROTO-011 | WS oversized message | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |
-| PROTO-012 | WS H2 extended CONNECT | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-012; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-013 | WS H3 extended CONNECT | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-013, PROTO-013-blocked; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-014 | gRPC HTTP200 error | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-014, PROTO-014-down, PROTO-014-h3, PROTO-014-h3-down; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-015 | gRPC missing terminal status | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-015; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-016 | gRPC four modes | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-016, PROTO-016-deadline, PROTO-016-h3, PROTO-016-h3-blocked, PROTO-016-h3-fallback; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-012 | WS H2 extended CONNECT | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-012; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-013 | WS H3 extended CONNECT | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-013, PROTO-013-blocked; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-014 | gRPC HTTP200 error | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-014, PROTO-014-down, PROTO-014-h3, PROTO-014-h3-down; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-015 | gRPC missing terminal status | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-015; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-016 | gRPC four modes | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-016, PROTO-016-deadline, PROTO-016-h3, PROTO-016-h3-blocked, PROTO-016-h3-fallback; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
 | PROTO-017 | gRPC reflection denied | ✅ automated test | `crates/anvil-engine/tests/sessions.rs` |
-| PROTO-018 | SSE cancellation | ✅ live (real gateway) | lab `results/lab/20260926T025828Z-h3x`, `results/lab/20260926T025713Z-streams` — passed PROTO-018, PROTO-018-h3, PROTO-018-h3-blocked, PROTO-018-h3-cancel, PROTO-018-h3-idle, PROTO-018-h3-reconnect, PROTO-018-idle; `crates/anvil-engine/tests/h3_sse_masque.rs`, `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/h3x.rs` |
-| PROTO-019 | TCP half-close | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-019, PROTO-019-echo, PROTO-019-tls; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-020 | UDP silent peer | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-020; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
-| PROTO-021 | UDP loss/reorder | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams` — passed PROTO-021; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
-| PROTO-022 | DTLS handshake/mTLS | ✅ live (real gateway) | lab `results/lab/20260926T025713Z-streams`, `results/lab/20260926T025632Z-tls` — passed PROTO-022, PROTO-022-wrong-root, PROTO-022.nocert, PROTO-022.rogue, PROTO-022.root; `crates/anvil-diagnostics/tests/lab_dtls_close.rs`, `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-018 | SSE cancellation | ✅ live (real gateway) | lab `results/lab/20260926T025828Z-h3x`, `results/lab/20260926T044038Z-streams` — passed PROTO-018, PROTO-018-h3, PROTO-018-h3-blocked, PROTO-018-h3-cancel, PROTO-018-h3-idle, PROTO-018-h3-reconnect, PROTO-018-idle; `crates/anvil-engine/tests/h3_sse_masque.rs`, `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/h3x.rs` |
+| PROTO-019 | TCP half-close | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-019, PROTO-019-echo, PROTO-019-tls; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-020 | UDP silent peer | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-020; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs`, `crates/anvil-transport/tests/sessions_streams.rs` |
+| PROTO-021 | UDP loss/reorder | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed PROTO-021; `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
+| PROTO-022 | DTLS handshake/mTLS | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams`, `results/lab/20260926T025632Z-tls` — passed PROTO-022, PROTO-022-wrong-root, PROTO-022.nocert, PROTO-022.rogue, PROTO-022.root; `crates/anvil-diagnostics/tests/lab_dtls_close.rs`, `crates/anvil-engine/tests/sessions.rs`, `crates/anvil-lab/src/streams.rs` |
 | PROTO-023 | SOAP fault HTTP200 | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | PROTO-024 | GraphQL errors HTTP200 | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | PROTO-025 | Compressed/binary body | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
@@ -181,7 +181,7 @@ A skip or block is never counted as a pass.
 | TRUST-004 | Conflicting duplicate headers | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-005 | Coarse-equivalent causes | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-006 | 403 indistinguishable origins | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
-| TRUST-007 | Post-header failure | ✅ live (real gateway) | lab `results/lab/20260926T025828Z-h3x`, `results/lab/20260926T025713Z-streams` — passed TRUST-007-sse, TRUST-007-sse-h3; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-engine/tests/h3_sse_masque.rs`, `crates/anvil-lab/src/h3x.rs` |
+| TRUST-007 | Post-header failure | ✅ live (real gateway) | lab `results/lab/20260926T025828Z-h3x`, `results/lab/20260926T044038Z-streams` — passed TRUST-007-sse, TRUST-007-sse-h3; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-engine/tests/h3_sse_masque.rs`, `crates/anvil-lab/src/h3x.rs` |
 | TRUST-008 | Multi-attempt provenance | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
 | TRUST-009 | Cross-tenant lookup | ⛔ blocked — see reason — Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable. | — |
 | TRUST-010 | Diagnostic retention expired | ⛔ blocked — see reason — Depends on G01 detail retention; not available in any gateway release. | — |
@@ -230,7 +230,7 @@ A skip or block is never counted as a pass.
 | LOAD-010 | Bounded error sampling | ✅ automated test | `crates/anvil-load/src/metrics.rs`, `crates/anvil-load/tests/load_scenarios.rs` |
 | LOAD-011 | Report export/reimport | ✅ automated test | `crates/anvil-load/src/html.rs`, `crates/anvil-load/src/report.rs`, `crates/anvil-load/tests/load_scenarios.rs` |
 | LOAD-012 | JMeter parity gate | ➖ not applicable — see reason — The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md. | — |
-| LOAD-013 | Datagram accounting | ✅ automated test | `crates/anvil-load/tests/load_scenarios.rs` |
+| LOAD-013 | Datagram accounting | ✅ live (real gateway) | lab `results/lab/20260926T044038Z-streams` — passed LOAD-013-grpc, LOAD-013-udp, LOAD-013-ws; `apps/desktop/src/LoadView.test.tsx`, `crates/anvil-app/tests/specs_load.rs`, `crates/anvil-cli/tests/cli_load.rs` |
 | LOAD-014 | Warmup and run comparison | ✅ automated test | `crates/anvil-load/src/compare.rs` |
 
 ## Installer, updater and website release

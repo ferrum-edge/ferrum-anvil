@@ -8,12 +8,16 @@
 //! least the elapsed time) and are summarised separately, never mixed into
 //! either latency distribution (LOAD-004). Failure samples are bounded per
 //! category and come from the engine's already-redacted execution record
-//! (LOAD-010).
+//! (LOAD-010). Protocol denominators (messages, sessions, frames, datagrams,
+//! handshakes) come from the same typed record and session facts and are
+//! accumulated in [`ProtoAccum`] (LOAD-013).
 
+use crate::protocol::StepUnit;
 use anvil_domain::diagnostics::Severity;
-use anvil_domain::execution::{ExecutionRecord, FailureKind};
-use anvil_domain::load::{FailureSample, LatencySummary};
-use anvil_domain::outcome::{ApplicationState, AssertionState, TransportState};
+use anvil_domain::execution::{AttemptReason, Direction, ExecutionRecord, FailureKind, Phase, PhaseStatus};
+use anvil_domain::load::*;
+use anvil_domain::outcome::{ApplicationState, AssertionState, ClosedBy, GrpcStatusSource, ProtocolStatus, TransportState};
+use anvil_engine::ExecutionOutput;
 use base64::Engine as _;
 use hdrhistogram::Histogram;
 use hdrhistogram::serialization::{Deserializer, Serializer, V2DeflateSerializer};
@@ -147,6 +151,9 @@ pub struct SendObservation {
     pub terminal: Terminal,
     pub application_failure: bool,
     pub assertion_failure: bool,
+    /// A completed UDP/DTLS exchange in which no datagram was received: "no
+    /// response observed" — neither a success nor a failure, and no latency.
+    pub no_response: bool,
     /// Sum of attempt durations (connect … last body byte), µs.
     pub latency_us: u64,
     /// Local time outside the attempts: preparation, token acquisition,
@@ -162,11 +169,37 @@ pub struct SendObservation {
     pub category: Option<String>,
     pub example: Option<String>,
     pub destination: Option<String>,
+    /// Protocol facts for the unit's denominators.
+    pub proto: ProtoObs,
+}
+
+impl Default for SendObservation {
+    fn default() -> Self {
+        SendObservation {
+            terminal: Terminal::Completed,
+            application_failure: false,
+            assertion_failure: false,
+            no_response: false,
+            latency_us: 0,
+            setup_us: 0,
+            deadline_ms: None,
+            status: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+            connections_opened: 0,
+            connections_reused: 0,
+            protocol: None,
+            category: None,
+            example: None,
+            destination: None,
+            proto: ProtoObs::default(),
+        }
+    }
 }
 
 impl SendObservation {
     pub fn is_success(&self) -> bool {
-        self.terminal == Terminal::Completed && !self.application_failure && !self.assertion_failure
+        self.terminal == Terminal::Completed && !self.application_failure && !self.assertion_failure && !self.no_response
     }
 
     /// Counts toward the failure distribution / failure ratio.
@@ -217,9 +250,41 @@ fn origin(url: &str) -> Option<String> {
     })
 }
 
-/// Classify one engine execution. Uses only the engine's typed outcome and
-/// its (already redacted) record; never re-parses message text.
-pub fn observe(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
+/// Classify one engine execution. Uses only the engine's typed outcome, its
+/// (already redacted) record and the adapter's typed session facts; never
+/// re-parses message text. `step` says which unit the send is and which
+/// request settings define its expectations.
+pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObservation {
+    let rec = &out.record;
+    let mut obs = observe_record(rec, wall_us);
+    obs.proto = protocol_obs(out, step, obs.terminal);
+    if obs.terminal == Terminal::Completed {
+        match step.kind {
+            // Fewer framed replies than the request expects: the exchange
+            // completed at the transport level, but not as specified.
+            LoadUnitKind::TcpExchange if obs.proto.tcp.as_ref().and_then(|t| t.expectation) == Some(false) => {
+                obs.application_failure = true;
+            }
+            LoadUnitKind::UdpExchange | LoadUnitKind::DtlsExchange => match &obs.proto.dgram {
+                Some(d) if d.received == 0 => obs.no_response = true,
+                // The latency of an exchange is the observed time to first
+                // response, not its duration (which includes the fixed window).
+                Some(DgramObs { ttfr_us: Some(t), .. }) => obs.latency_us = *t,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    if obs.is_failure() && obs.category.is_none() {
+        describe_failure(&mut obs, rec, step);
+    }
+    obs
+}
+
+/// The unit-independent part of [`observe`]: terminal class, application and
+/// assertion state, attempt latency, bytes and connections. Failure samples
+/// are added by [`observe`].
+pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
     let last_failure = rec.attempts.last().and_then(|a| a.failure.as_ref());
     let terminal = match rec.outcome.transport {
         TransportState::Completed => Terminal::Completed,
@@ -237,6 +302,7 @@ pub fn observe(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
         terminal,
         application_failure,
         assertion_failure,
+        no_response: false,
         latency_us,
         setup_us: wall_us.saturating_sub(latency_us),
         deadline_ms: if terminal == Terminal::Timeout { last_failure.and_then(|f| f.deadline_ms) } else { None },
@@ -249,6 +315,7 @@ pub fn observe(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
         category: None,
         example: None,
         destination: origin(&rec.prepared.url),
+        proto: ProtoObs::default(),
     };
     for a in &rec.attempts {
         obs.bytes_sent += a.bytes.request_headers_logical + a.bytes.request_body;
@@ -261,45 +328,600 @@ pub fn observe(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
             }
         }
     }
-    if obs.is_failure() {
-        let top = rec
-            .findings
-            .iter()
-            .filter(|f| f.severity >= Severity::Warning)
-            .max_by_key(|f| f.severity)
-            .or(rec.findings.first())
-            .map(|f| f.code.clone());
-        let kind = last_failure.map(|f| snake(&f.kind));
-        let class = match terminal {
-            Terminal::Timeout => "timeout",
-            Terminal::TransportFailure => "transport_failure",
-            _ if application_failure => "application_failure",
-            _ => "assertion_failure",
-        };
-        let detail = match terminal {
-            Terminal::Timeout => kind.clone().unwrap_or_else(|| "deadline".into()),
-            _ if assertion_failure && !application_failure => rec
-                .assertion_results
-                .iter()
-                .find(|r| !r.passed)
-                .map(|r| r.label.clone())
-                .filter(|l| !l.is_empty())
-                .unwrap_or_else(|| "assertion".into()),
-            _ => top.clone().or(kind.clone()).or(obs.status.map(|s| format!("http_{s}"))).unwrap_or_else(|| "unknown".into()),
-        };
-        obs.category = Some(truncate_chars(&format!("{class}: {detail}"), 120));
-        let mut example = format!("{} {} → {}", rec.prepared.method, rec.prepared.url, rec.outcome.summary);
-        if let Some(f) = last_failure
-            && terminal != Terminal::Completed
-        {
-            example.push_str(&format!(" [{}: {}]", snake(&f.kind), f.message));
-        }
-        if assertion_failure && let Some(r) = rec.assertion_results.iter().find(|r| !r.passed) {
-            example.push_str(&format!(" [assertion: {}]", r.message));
-        }
-        obs.example = Some(truncate_chars(&example, MAX_EXAMPLE_CHARS));
-    }
     obs
+}
+
+/// Failure category (class + top finding / failure kind / status / assertion
+/// label) and one bounded, redacted example.
+fn describe_failure(obs: &mut SendObservation, rec: &ExecutionRecord, step: &StepUnit) {
+    let terminal = obs.terminal;
+    let (application_failure, assertion_failure) = (obs.application_failure, obs.assertion_failure);
+    let last_failure = rec.attempts.last().and_then(|a| a.failure.as_ref());
+    let expectation_short = obs.proto.tcp.as_ref().and_then(|t| t.expectation) == Some(false);
+    let top = rec
+        .findings
+        .iter()
+        .filter(|f| f.severity >= Severity::Warning)
+        .max_by_key(|f| f.severity)
+        .or(rec.findings.first())
+        .map(|f| f.code.clone());
+    let kind = last_failure.map(|f| snake(&f.kind));
+    let class = match terminal {
+        Terminal::Timeout => "timeout",
+        Terminal::TransportFailure => "transport_failure",
+        _ if application_failure => "application_failure",
+        _ => "assertion_failure",
+    };
+    let detail = match terminal {
+        Terminal::Timeout => kind.clone().unwrap_or_else(|| "deadline".into()),
+        Terminal::Completed if expectation_short => "tcp.expected_frames_not_received".into(),
+        _ if assertion_failure && !application_failure => rec
+            .assertion_results
+            .iter()
+            .find(|r| !r.passed)
+            .map(|r| r.label.clone())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| "assertion".into()),
+        _ => top.clone().or(kind.clone()).or(obs.status.map(|s| format!("http_{s}"))).unwrap_or_else(|| "unknown".into()),
+    };
+    obs.category = Some(truncate_chars(&format!("{class}: {detail}"), 120));
+    let mut example = format!("{} {} → {}", rec.prepared.method, rec.prepared.url, rec.outcome.summary);
+    if let Some(f) = last_failure
+        && terminal != Terminal::Completed
+    {
+        example.push_str(&format!(" [{}: {}]", snake(&f.kind), f.message));
+    }
+    if expectation_short && let Some(t) = &obs.proto.tcp {
+        example.push_str(&format!(" [expected {} frame(s), received {}]", step.tcp_expect_frames.unwrap_or(0), t.frames_received));
+    }
+    if assertion_failure && let Some(r) = rec.assertion_results.iter().find(|r| !r.passed) {
+        example.push_str(&format!(" [assertion: {}]", r.message));
+    }
+    obs.example = Some(truncate_chars(&example, MAX_EXAMPLE_CHARS));
+}
+
+// ------------------------------------------------------ protocol facts ---
+
+/// WebSocket session facts.
+#[derive(Debug, Clone, Default)]
+pub struct WsObs {
+    pub opened: bool,
+    pub rejected: bool,
+    /// Who closed and the close code, for opened sessions.
+    pub close: Option<(ClosedBy, Option<u16>)>,
+    pub sent: u64,
+    pub received: u64,
+    /// Round trips (µs) when the request defines `expect_messages`.
+    pub rtts: Vec<u64>,
+    /// Pairing was expected but impossible for this session.
+    pub unpaired: bool,
+}
+
+/// TCP exchange facts.
+#[derive(Debug, Clone, Default)]
+pub struct TcpObs {
+    pub connected: bool,
+    pub frames_sent: u64,
+    pub frames_received: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub partial: bool,
+    pub peer_close: bool,
+    /// `Some(met)` for a completed exchange whose request expects frames.
+    pub expectation: Option<bool>,
+}
+
+/// UDP/DTLS exchange facts.
+#[derive(Debug, Clone, Default)]
+pub struct DgramObs {
+    pub sent: u64,
+    pub received: u64,
+    pub repeated: u64,
+    pub echoed: u64,
+    pub icmp: bool,
+    /// First datagram sent → first received (µs).
+    pub ttfr_us: Option<u64>,
+    /// DTLS handshake phase status and duration, when it started.
+    pub handshake: Option<(PhaseStatus, Option<u64>)>,
+}
+
+/// Protocol facts of one unit; only the family of its kind is filled.
+#[derive(Debug, Clone, Default)]
+pub struct ProtoObs {
+    /// Attempts made after an HTTP/3 → TCP fallback.
+    pub fallback_attempts: u64,
+    pub final_h3: bool,
+    pub grpc_status: Option<i32>,
+    /// A gRPC response without a terminal status (not canceled).
+    pub grpc_missing_status: bool,
+    pub stream_opened: bool,
+    pub messages_received: u64,
+    /// Unit start → first message/event (µs).
+    pub first_message_us: Option<u64>,
+    /// SSE: how an opened stream ended.
+    pub stream_end: Option<ClosedBy>,
+    pub ws: Option<WsObs>,
+    pub tcp: Option<TcpObs>,
+    pub dgram: Option<DgramObs>,
+}
+
+fn first_offset(rec: &ExecutionRecord, dir: Direction, kinds: &[&str]) -> Option<u64> {
+    rec.stream.as_ref()?.messages.iter().find(|m| m.direction == dir && kinds.contains(&m.kind.as_str())).map(|m| m.offset_us)
+}
+
+fn protocol_obs(out: &ExecutionOutput, step: &StepUnit, terminal: Terminal) -> ProtoObs {
+    let rec = &out.record;
+    let tr = rec.stream.as_ref();
+    let status = &rec.outcome.protocol_status;
+    let mut p = ProtoObs {
+        fallback_attempts: rec.attempts.iter().filter(|a| matches!(a.reason, AttemptReason::ProtocolFallback { .. })).count() as u64,
+        final_h3: rec.attempts.last().and_then(|a| a.connection.as_ref()).and_then(|c| c.protocol.as_deref()) == Some("h3"),
+        ..Default::default()
+    };
+    match step.kind {
+        LoadUnitKind::HttpRequest => {}
+        LoadUnitKind::GrpcCall | LoadUnitKind::GrpcStream => {
+            if let ProtocolStatus::Grpc { http_status, grpc_status, source, .. } = status {
+                p.grpc_status = *grpc_status;
+                p.grpc_missing_status = *source == GrpcStatusSource::Missing && http_status.is_some() && terminal != Terminal::Canceled;
+                p.stream_opened = *http_status == Some(200);
+            }
+            p.messages_received = tr.map(|t| t.received_count).unwrap_or(0);
+            // The transcript clock starts with the attempt that carried the
+            // call; earlier (failed HTTP/3) attempts come before it.
+            let prior: u64 = rec.attempts.iter().rev().skip(1).map(|a| a.duration_us).sum();
+            p.first_message_us = first_offset(rec, Direction::Received, &["grpc_message"]).map(|o| o + prior);
+        }
+        LoadUnitKind::SseStream => {
+            // A transcript exists only for a stream that opened (2xx).
+            p.stream_opened = tr.is_some();
+            if let ProtocolStatus::Sse { events, closed_by, .. } = status {
+                p.messages_received = *events;
+                if p.stream_opened {
+                    p.stream_end = Some(*closed_by);
+                }
+            }
+            // The SSE transcript clock starts with the stream request.
+            p.first_message_us = first_offset(rec, Direction::Received, &["event"]);
+        }
+        LoadUnitKind::WebsocketSession => {
+            let (handshake, code, by) = match status {
+                ProtocolStatus::WebSocket { handshake_status, close_code, closed_by, .. } => (*handshake_status, *close_code, *closed_by),
+                _ => (None, None, ClosedBy::NotClosed),
+            };
+            // A transcript exists only once the session opened.
+            let opened = tr.is_some();
+            let mut ws = WsObs {
+                opened,
+                rejected: !opened && handshake.is_some_and(|s| s != 101 && s != 200),
+                close: opened.then_some((by, code)),
+                sent: tr.map(|t| t.sent_count).unwrap_or(0),
+                received: tr.map(|t| t.received_count).unwrap_or(0),
+                ..Default::default()
+            };
+            if let Some(t) = tr.filter(|_| step.ws_expect_messages > 0) {
+                if t.dropped_messages > 0 {
+                    ws.unpaired = true;
+                } else {
+                    let data = |d: Direction| -> Vec<u64> {
+                        t.messages
+                            .iter()
+                            .filter(|m| m.direction == d && matches!(m.kind.as_str(), "text" | "binary"))
+                            .map(|m| m.offset_us)
+                            .collect()
+                    };
+                    let (sent_at, recv_at) = (data(Direction::Sent), data(Direction::Received));
+                    let n = sent_at.len().min(recv_at.len()).min(step.ws_expect_messages as usize);
+                    for i in 0..n {
+                        if recv_at[i] < sent_at[i] {
+                            // A reply before its message: the exchange is not
+                            // echo-shaped, so no round trip is claimed from it.
+                            ws.unpaired = true;
+                            ws.rtts.clear();
+                            break;
+                        }
+                        ws.rtts.push(recv_at[i] - sent_at[i]);
+                    }
+                }
+            }
+            p.ws = Some(ws);
+        }
+        LoadUnitKind::TcpExchange => {
+            let (bytes_sent, bytes_received, by) = match status {
+                ProtocolStatus::Tcp { bytes_sent, bytes_received, closed_by, .. } => (*bytes_sent, *bytes_received, *closed_by),
+                _ => (0, 0, ClosedBy::NotClosed),
+            };
+            let frames_received = tr.map(|t| t.received_count).unwrap_or(0);
+            p.tcp = Some(TcpObs {
+                connected: tr.is_some(),
+                frames_sent: tr.map(|t| t.sent_count).unwrap_or(0),
+                frames_received,
+                bytes_sent,
+                bytes_received,
+                partial: tr.is_some_and(|t| t.messages.iter().any(|m| m.kind == "partial_frame")),
+                peer_close: tr.is_some() && by == ClosedBy::Peer,
+                expectation: step.tcp_expect_frames.filter(|_| terminal == Terminal::Completed).map(|n| frames_received >= n as u64),
+            });
+        }
+        LoadUnitKind::UdpExchange | LoadUnitKind::DtlsExchange => {
+            let (sent, received) = match status {
+                ProtocolStatus::Udp { datagrams_sent, datagrams_received, .. } => (*datagrams_sent, *datagrams_received),
+                _ => (0, 0),
+            };
+            let facts = out.session_facts.as_ref();
+            let first_sent = first_offset(rec, Direction::Sent, &["datagram"]);
+            let first_received = first_offset(rec, Direction::Received, &["datagram"]);
+            p.dgram = Some(DgramObs {
+                sent,
+                received,
+                repeated: facts.map(|f| f.repeated_datagrams).unwrap_or(0),
+                echoed: facts.map(|f| f.echoed_datagrams).unwrap_or(0),
+                icmp: facts.is_some_and(|f| f.icmp_port_unreachable),
+                ttfr_us: match (first_sent, first_received) {
+                    (Some(s), Some(r)) => Some(r.saturating_sub(s)),
+                    _ => None,
+                },
+                handshake: if step.kind == LoadUnitKind::DtlsExchange {
+                    rec.attempts.last().and_then(|a| a.phase(Phase::DtlsHandshake)).map(|ph| (ph.status, ph.duration_us()))
+                } else {
+                    None
+                },
+            });
+        }
+    }
+    p
+}
+
+fn closed_key(c: ClosedBy) -> u8 {
+    match c {
+        ClosedBy::Peer => 0,
+        ClosedBy::Client => 1,
+        ClosedBy::Abnormal => 2,
+        ClosedBy::Timeout => 3,
+        ClosedBy::NotClosed => 4,
+    }
+}
+
+fn closed_from(k: u8) -> ClosedBy {
+    match k {
+        0 => ClosedBy::Peer,
+        1 => ClosedBy::Client,
+        2 => ClosedBy::Abnormal,
+        3 => ClosedBy::Timeout,
+        _ => ClosedBy::NotClosed,
+    }
+}
+
+/// Mergeable protocol denominators of the measured window (one shard).
+#[derive(Debug, Clone)]
+pub struct ProtoAccum {
+    pub fallback_attempts: u64,
+    pub units_with_fallback: u64,
+    pub units_over_h3: u64,
+    pub grpc_codes: BTreeMap<i32, u64>,
+    pub grpc_missing_status: u64,
+    pub streams_opened: u64,
+    pub messages_received: u64,
+    pub with_messages: u64,
+    pub first_message: LatencyStat,
+    /// (closed-by key, close code) → units: SSE stream ends, WebSocket closes.
+    pub ends: BTreeMap<(u8, Option<u16>), u64>,
+    pub ws_opened: u64,
+    pub ws_rejected: u64,
+    pub ws_not_opened: u64,
+    pub ws_clean: u64,
+    pub ws_sent: u64,
+    pub ws_received: u64,
+    pub rtt: LatencyStat,
+    pub rtt_unpaired: u64,
+    pub tcp_connected: u64,
+    pub frames_sent: u64,
+    pub frames_received: u64,
+    pub tcp_bytes_sent: u64,
+    pub tcp_bytes_received: u64,
+    pub partial_frames: u64,
+    pub peer_closes: u64,
+    pub expectation_met: u64,
+    pub expectation_short: u64,
+    pub dg_sent: u64,
+    pub dg_received: u64,
+    pub with_response: u64,
+    pub silent: u64,
+    pub repeated: u64,
+    pub echoed: u64,
+    pub icmp: u64,
+    pub first_response: LatencyStat,
+    pub hs_attempted: u64,
+    pub hs_completed: u64,
+    pub hs_failed: u64,
+    pub hs_timed_out: u64,
+    pub hs_duration: LatencyStat,
+}
+
+impl Default for ProtoAccum {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProtoAccum {
+    pub fn new() -> Self {
+        ProtoAccum {
+            fallback_attempts: 0,
+            units_with_fallback: 0,
+            units_over_h3: 0,
+            grpc_codes: BTreeMap::new(),
+            grpc_missing_status: 0,
+            streams_opened: 0,
+            messages_received: 0,
+            with_messages: 0,
+            first_message: LatencyStat::new(SECONDARY_SIGFIG),
+            ends: BTreeMap::new(),
+            ws_opened: 0,
+            ws_rejected: 0,
+            ws_not_opened: 0,
+            ws_clean: 0,
+            ws_sent: 0,
+            ws_received: 0,
+            rtt: LatencyStat::new(SECONDARY_SIGFIG),
+            rtt_unpaired: 0,
+            tcp_connected: 0,
+            frames_sent: 0,
+            frames_received: 0,
+            tcp_bytes_sent: 0,
+            tcp_bytes_received: 0,
+            partial_frames: 0,
+            peer_closes: 0,
+            expectation_met: 0,
+            expectation_short: 0,
+            dg_sent: 0,
+            dg_received: 0,
+            with_response: 0,
+            silent: 0,
+            repeated: 0,
+            echoed: 0,
+            icmp: 0,
+            first_response: LatencyStat::new(SECONDARY_SIGFIG),
+            hs_attempted: 0,
+            hs_completed: 0,
+            hs_failed: 0,
+            hs_timed_out: 0,
+            hs_duration: LatencyStat::new(SECONDARY_SIGFIG),
+        }
+    }
+
+    pub fn record(&mut self, o: &SendObservation) {
+        let p = &o.proto;
+        let completed = o.terminal == Terminal::Completed;
+        self.fallback_attempts += p.fallback_attempts;
+        self.units_with_fallback += (p.fallback_attempts > 0) as u64;
+        self.units_over_h3 += p.final_h3 as u64;
+        if completed && let Some(c) = p.grpc_status {
+            *self.grpc_codes.entry(c).or_default() += 1;
+        }
+        self.grpc_missing_status += p.grpc_missing_status as u64;
+        self.streams_opened += p.stream_opened as u64;
+        self.messages_received += p.messages_received;
+        if p.stream_opened && p.messages_received > 0 {
+            self.with_messages += 1;
+            if let Some(t) = p.first_message_us {
+                self.first_message.record(t);
+            }
+        }
+        if let Some(by) = p.stream_end {
+            *self.ends.entry((closed_key(by), None)).or_default() += 1;
+        }
+        if let Some(w) = &p.ws {
+            if w.opened {
+                self.ws_opened += 1;
+                self.ws_clean += completed as u64;
+                if let Some((by, code)) = w.close {
+                    *self.ends.entry((closed_key(by), code)).or_default() += 1;
+                }
+            } else if w.rejected {
+                self.ws_rejected += 1;
+            } else {
+                self.ws_not_opened += 1;
+            }
+            self.ws_sent += w.sent;
+            self.ws_received += w.received;
+            for r in &w.rtts {
+                self.rtt.record(*r);
+            }
+            self.rtt_unpaired += w.unpaired as u64;
+        }
+        if let Some(t) = &p.tcp {
+            self.tcp_connected += t.connected as u64;
+            self.frames_sent += t.frames_sent;
+            self.frames_received += t.frames_received;
+            self.tcp_bytes_sent += t.bytes_sent;
+            self.tcp_bytes_received += t.bytes_received;
+            self.partial_frames += t.partial as u64;
+            self.peer_closes += t.peer_close as u64;
+            match t.expectation {
+                Some(true) => self.expectation_met += 1,
+                Some(false) => self.expectation_short += 1,
+                None => {}
+            }
+        }
+        if let Some(d) = &p.dgram {
+            self.dg_sent += d.sent;
+            self.dg_received += d.received;
+            if completed {
+                if d.received > 0 {
+                    self.with_response += 1;
+                    if let Some(t) = d.ttfr_us {
+                        self.first_response.record(t);
+                    }
+                } else {
+                    self.silent += 1;
+                }
+            }
+            self.repeated += d.repeated;
+            self.echoed += d.echoed;
+            self.icmp += d.icmp as u64;
+            if let Some((status, dur)) = d.handshake {
+                self.hs_attempted += 1;
+                match status {
+                    PhaseStatus::Completed => {
+                        self.hs_completed += 1;
+                        if let Some(us) = dur {
+                            self.hs_duration.record(us);
+                        }
+                    }
+                    PhaseStatus::Failed => self.hs_failed += 1,
+                    PhaseStatus::TimedOut => self.hs_timed_out += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub fn merge(&mut self, o: &ProtoAccum) {
+        self.fallback_attempts += o.fallback_attempts;
+        self.units_with_fallback += o.units_with_fallback;
+        self.units_over_h3 += o.units_over_h3;
+        for (c, n) in &o.grpc_codes {
+            *self.grpc_codes.entry(*c).or_default() += n;
+        }
+        self.grpc_missing_status += o.grpc_missing_status;
+        self.streams_opened += o.streams_opened;
+        self.messages_received += o.messages_received;
+        self.with_messages += o.with_messages;
+        self.first_message.merge(&o.first_message);
+        for (k, n) in &o.ends {
+            *self.ends.entry(*k).or_default() += n;
+        }
+        self.ws_opened += o.ws_opened;
+        self.ws_rejected += o.ws_rejected;
+        self.ws_not_opened += o.ws_not_opened;
+        self.ws_clean += o.ws_clean;
+        self.ws_sent += o.ws_sent;
+        self.ws_received += o.ws_received;
+        self.rtt.merge(&o.rtt);
+        self.rtt_unpaired += o.rtt_unpaired;
+        self.tcp_connected += o.tcp_connected;
+        self.frames_sent += o.frames_sent;
+        self.frames_received += o.frames_received;
+        self.tcp_bytes_sent += o.tcp_bytes_sent;
+        self.tcp_bytes_received += o.tcp_bytes_received;
+        self.partial_frames += o.partial_frames;
+        self.peer_closes += o.peer_closes;
+        self.expectation_met += o.expectation_met;
+        self.expectation_short += o.expectation_short;
+        self.dg_sent += o.dg_sent;
+        self.dg_received += o.dg_received;
+        self.with_response += o.with_response;
+        self.silent += o.silent;
+        self.repeated += o.repeated;
+        self.echoed += o.echoed;
+        self.icmp += o.icmp;
+        self.first_response.merge(&o.first_response);
+        self.hs_attempted += o.hs_attempted;
+        self.hs_completed += o.hs_completed;
+        self.hs_failed += o.hs_failed;
+        self.hs_timed_out += o.hs_timed_out;
+        self.hs_duration.merge(&o.hs_duration);
+    }
+
+    fn ends(&self) -> Vec<ClosedCount> {
+        self.ends.iter().map(|((by, code), n)| ClosedCount { closed_by: closed_from(*by), code: *code, count: *n }).collect()
+    }
+
+    /// The report block for the plan's unit kind. `steps` are the plan's
+    /// classified steps (they carry the request-level expectations).
+    pub fn summary(&self, kind: LoadUnitKind, mode: ConnectionMode, steps: &[StepUnit]) -> ProtocolLoadMetrics {
+        let mut m = ProtocolLoadMetrics {
+            version: PROTOCOL_METRICS_VERSION,
+            unit: kind,
+            semantics: crate::protocol::semantics(kind, mode),
+            ..Default::default()
+        };
+        let grpc = || {
+            let ok = self.grpc_codes.get(&0).copied().unwrap_or(0);
+            GrpcLoadMetrics {
+                status_codes: self.grpc_codes.iter().map(|(c, n)| (*c, *n)).collect(),
+                ok,
+                non_ok: self.grpc_codes.values().sum::<u64>() - ok,
+                missing_status: self.grpc_missing_status,
+                protocol_fallback_attempts: self.fallback_attempts,
+            }
+        };
+        let stream = |ended_by: Vec<ClosedCount>| StreamLoadMetrics {
+            opened: self.streams_opened,
+            messages_received: self.messages_received,
+            with_messages: self.with_messages,
+            time_to_first_message: self.first_message.summary(),
+            ended_by,
+        };
+        match kind {
+            LoadUnitKind::HttpRequest => {
+                m.http = Some(HttpLoadMetrics {
+                    protocol_fallback_attempts: self.fallback_attempts,
+                    units_with_fallback: self.units_with_fallback,
+                    units_over_h3: self.units_over_h3,
+                })
+            }
+            LoadUnitKind::GrpcCall => m.grpc = Some(grpc()),
+            LoadUnitKind::GrpcStream => {
+                m.grpc = Some(grpc());
+                m.stream = Some(stream(vec![]));
+            }
+            LoadUnitKind::SseStream => m.stream = Some(stream(self.ends())),
+            LoadUnitKind::WebsocketSession => {
+                let rtt_defined = steps.iter().any(|s| s.ws_expect_messages > 0);
+                m.websocket = Some(WebSocketLoadMetrics {
+                    opened: self.ws_opened,
+                    handshake_rejected: self.ws_rejected,
+                    not_opened: self.ws_not_opened,
+                    closed_cleanly: self.ws_clean,
+                    messages_sent: self.ws_sent,
+                    messages_received: self.ws_received,
+                    rtt_defined,
+                    rtt_pairs: self.rtt.count(),
+                    rtt: self.rtt.summary(),
+                    rtt_unpaired_sessions: self.rtt_unpaired,
+                    close_codes: self.ends(),
+                })
+            }
+            LoadUnitKind::TcpExchange => {
+                let expected: Vec<u32> = steps.iter().filter_map(|s| s.tcp_expect_frames).collect();
+                m.tcp = Some(TcpLoadMetrics {
+                    connected: self.tcp_connected,
+                    frames_sent: self.frames_sent,
+                    frames_received: self.frames_received,
+                    payload_bytes_sent: self.tcp_bytes_sent,
+                    payload_bytes_received: self.tcp_bytes_received,
+                    partial_frames: self.partial_frames,
+                    peer_closes: self.peer_closes,
+                    // One value when every step expects the same count.
+                    expected_frames: expected.first().copied().filter(|f| expected.len() == steps.len() && expected.iter().all(|e| e == f)),
+                    expectation_met: self.expectation_met,
+                    expectation_short: self.expectation_short,
+                })
+            }
+            LoadUnitKind::UdpExchange | LoadUnitKind::DtlsExchange => {
+                m.datagram = Some(DatagramLoadMetrics {
+                    datagrams_sent: self.dg_sent,
+                    datagrams_received: self.dg_received,
+                    exchanges_with_response: self.with_response,
+                    exchanges_silent: self.silent,
+                    repeated_payloads: self.repeated,
+                    echoed_payloads: self.echoed,
+                    icmp_unreachable_exchanges: self.icmp,
+                    time_to_first_datagram: self.first_response.summary(),
+                    dtls_handshakes: (kind == LoadUnitKind::DtlsExchange).then(|| HandshakeMetrics {
+                        attempted: self.hs_attempted,
+                        completed: self.hs_completed,
+                        failed: self.hs_failed,
+                        timed_out: self.hs_timed_out,
+                        duration: self.hs_duration.summary(),
+                    }),
+                })
+            }
+        }
+        m
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -326,6 +948,8 @@ pub struct Metrics {
     pub bytes_received: u64,
     pub protocols: BTreeMap<String, u64>,
     pub destinations: BTreeSet<String>,
+    /// Protocol denominators (messages, sessions, frames, datagrams).
+    pub proto: ProtoAccum,
 }
 
 impl Default for Metrics {
@@ -350,6 +974,7 @@ impl Metrics {
             bytes_received: 0,
             protocols: BTreeMap::new(),
             destinations: BTreeSet::new(),
+            proto: ProtoAccum::new(),
         }
     }
 
@@ -364,8 +989,11 @@ impl Metrics {
                 }
             }
             _ if o.is_success() => self.success.record(o.latency_us),
-            _ => self.failure.record(o.latency_us),
+            _ if o.is_failure() => self.failure.record(o.latency_us),
+            // Completed without a response observed (UDP/DTLS): no latency exists.
+            _ => {}
         }
+        self.proto.record(o);
         if o.terminal != Terminal::Canceled {
             self.setup.record(o.setup_us);
         }
@@ -408,6 +1036,7 @@ impl Metrics {
     /// Merge another shard: histograms are added, counters summed, bounded
     /// collections stay bounded.
     pub fn merge(&mut self, o: &Metrics) {
+        self.proto.merge(&o.proto);
         self.success.merge(&o.success);
         self.failure.merge(&o.failure);
         self.setup.merge(&o.setup);
@@ -485,6 +1114,7 @@ mod tests {
             category: None,
             example: None,
             destination: None,
+            ..Default::default()
         };
         for i in 0..10_000u64 {
             let v = 1_000 + (i * 7919) % 1_000; // 1.000–1.999 ms, shuffled
@@ -545,6 +1175,7 @@ mod tests {
             category: Some("timeout: total_timeout".into()),
             example: Some("GET … → no response".into()),
             destination: None,
+            ..Default::default()
         };
         m.record(&o);
         o.terminal = Terminal::Completed;
@@ -577,6 +1208,7 @@ mod tests {
                 category: Some(format!("transport_failure: kind_{}", i % 100)),
                 example: Some("x".repeat(MAX_EXAMPLE_CHARS)),
                 destination: Some(format!("http://h{i}:1")),
+                ..Default::default()
             };
             shards[(i % 4) as usize].record(&o);
         }

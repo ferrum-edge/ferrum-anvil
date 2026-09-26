@@ -33,6 +33,9 @@ pub struct RunMeta {
     pub request_revisions: Vec<Id>,
     pub dataset_sha256: Option<String>,
     pub started_at: DateTime<Utc>,
+    /// The plan's unit kind (known before traffic starts).
+    #[serde(default)]
+    pub unit: LoadUnitKind,
 }
 
 pub fn workload_label(w: &Workload) -> String {
@@ -158,18 +161,30 @@ pub fn assemble(
             plan.warmup_secs, snap.warmup_iterations_excluded, snap.warmup_sends_excluded
         ));
     }
-    notes.push(match plan.connection_mode {
-        ConnectionMode::Persistent => {
-            "Connection mode persistent: each virtual user / slot keeps its own pooled connections (keep-alive forced on for this run)."
-                .into()
-        }
-        ConnectionMode::Fresh => {
-            "Connection mode fresh: keep-alive is disabled for this run, so every send opens a new connection (and TLS handshake).".into()
-        }
-    });
-    notes.push("Latency is the sum of attempt durations (connect … last body byte) measured by the shared engine; local preparation and token acquisition are reported separately as setup time. Bytes are logical request/response header+body sizes (HTTP/2 header sizes are estimates), not wire bytes.".into());
+    let protocol = snap.protocol.clone().unwrap_or_else(|| crate::metrics::ProtoAccum::new().summary(meta.unit, plan.connection_mode, &[]));
+    let sem = &protocol.semantics;
+    notes.push(format!(
+        "Unit: {} — every count, rate and latency in this report is per {}. Completed: {} Success: {}",
+        crate::protocol::label(protocol.unit),
+        sem.unit_singular,
+        sem.completed_means,
+        sem.success_means
+    ));
+    notes.push(format!(
+        "Connection mode {}: {}",
+        match plan.connection_mode {
+            ConnectionMode::Persistent => "persistent",
+            ConnectionMode::Fresh => "fresh",
+        },
+        sem.connection_mode_means
+    ));
+    notes.push(format!(
+        "Latency: {} Local preparation and token acquisition are reported separately as setup time. Bytes are logical header+payload sizes (HTTP/2 and HTTP/3 header sizes are estimates), not wire bytes.",
+        sem.latency_means
+    ));
+    notes.extend(protocol_notes(&protocol, &snap.requests));
     if snap.timeouts_censored.count > 0 {
-        notes.push(format!("{} send(s) timed out. {}", snap.timeouts_censored.count, CENSORED_LABEL));
+        notes.push(format!("{} {}(s) timed out. {}", snap.timeouts_censored.count, sem.unit_singular, CENSORED_LABEL));
     }
     if snap.counts.started == 0 && snap.warmup_iterations_excluded > 0 {
         notes.push(format!(
@@ -222,10 +237,240 @@ pub fn assemble(
         protocols: snap.protocols,
         warmup_iterations_excluded: snap.warmup_iterations_excluded,
         warmup_sends_excluded: snap.warmup_sends_excluded,
+        protocol_metrics: Some(protocol),
         integrity_sha256: None,
     };
     seal(&mut report);
     report
+}
+
+/// Plain statements about the protocol denominators that a reader must not
+/// misread (delivery, pairing, fallback, unknown status).
+fn protocol_notes(p: &ProtocolLoadMetrics, q: &RequestCounts) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(h) = &p.http
+        && h.protocol_fallback_attempts > 0
+    {
+        notes.push(format!(
+            "{} request(s) needed an HTTP/3 → TCP fallback ({} extra attempt(s)). The failed HTTP/3 attempt is part of each such request's latency; the requests are not counted twice.",
+            h.units_with_fallback, h.protocol_fallback_attempts
+        ));
+    }
+    if let Some(g) = &p.grpc {
+        if g.missing_status > 0 {
+            notes.push(format!(
+                "{} {}(s) got a response but no terminal grpc-status: the RPC result is unknown, so they are incomplete (transport failures or timeouts), never successes.",
+                g.missing_status, p.semantics.unit_singular
+            ));
+        }
+        if g.protocol_fallback_attempts > 0 {
+            notes.push(format!("{} attempt(s) fell back from HTTP/3 to TCP before the call was sent.", g.protocol_fallback_attempts));
+        }
+        if q.timeouts > 0 {
+            notes.push("A timed-out call reached its local deadline (the request's gRPC deadline or total timeout) before any status: its status is unknown, not DEADLINE_EXCEEDED. A DEADLINE_EXCEEDED sent by the server is counted under status code 4.".into());
+        }
+    }
+    if let Some(w) = &p.websocket {
+        if !w.rtt_defined {
+            notes.push(
+                "No round-trip time is reported: the request does not set expect_messages, so sent and received messages are not paired."
+                    .into(),
+            );
+        } else {
+            notes.push("Round-trip times pair the i-th scripted message sent with the i-th message received (an echo-style exchange); they are not protocol acknowledgements.".into());
+            if w.rtt_unpaired_sessions > 0 {
+                notes.push(format!(
+                    "{} session(s) could not be paired (transcript bound reached, or a reply arrived before its message was sent); no round trip was taken from them.",
+                    w.rtt_unpaired_sessions
+                ));
+            }
+        }
+    }
+    if let Some(d) = &p.datagram {
+        notes.push(format!(
+            "Datagrams: {} sent and {} received are separate counts. UDP has no acknowledgement, so the received/sent ratio is an observation, never a delivery or loss rate, and received datagrams are not attributed to sent ones. {} exchange(s) observed no response; silence proves only that no response was observed.",
+            d.datagrams_sent, d.datagrams_received, d.exchanges_silent
+        ));
+        if d.icmp_unreachable_exchanges > 0 {
+            notes.push(format!(
+                "In {} exchange(s) the OS reported ICMP port unreachable for the destination (often: nothing is listening on that UDP port; a firewall can also send it).",
+                d.icmp_unreachable_exchanges
+            ));
+        }
+    }
+    if let Some(t) = &p.tcp
+        && t.expectation_short > 0
+    {
+        notes.push(format!(
+            "{} exchange(s) completed with fewer frames than the request expects; they are counted as application failures.",
+            t.expectation_short
+        ));
+    }
+    notes
+}
+
+fn us_or_dash(l: &LatencySummary, v: u64) -> String {
+    if l.count == 0 { "—".into() } else { format!("{v} µs") }
+}
+
+/// One-line plain-text summaries of the protocol denominators (CLI output).
+pub fn protocol_lines(p: &ProtocolLoadMetrics) -> Vec<String> {
+    let mut out = vec![format!("unit: {} (per {})", crate::protocol::label(p.unit), p.semantics.unit_singular)];
+    if let Some(h) = &p.http {
+        out.push(format!(
+            "http: {} over HTTP/3; {} request(s) needed an HTTP/3 → TCP fallback ({} extra attempt(s))",
+            h.units_over_h3, h.units_with_fallback, h.protocol_fallback_attempts
+        ));
+    }
+    if let Some(g) = &p.grpc {
+        let codes: Vec<String> = g.status_codes.iter().map(|(c, n)| format!("{c}×{n}")).collect();
+        out.push(format!(
+            "grpc: {} OK, {} non-OK [{}], {} without a terminal status (incomplete)",
+            g.ok,
+            g.non_ok,
+            codes.join(", "),
+            g.missing_status
+        ));
+    }
+    if let Some(s) = &p.stream {
+        out.push(format!(
+            "streams: {} opened, {} message(s)/event(s) received, {} with at least one; first message p50 {} p99 {}",
+            s.opened,
+            s.messages_received,
+            s.with_messages,
+            us_or_dash(&s.time_to_first_message, s.time_to_first_message.p50_us),
+            us_or_dash(&s.time_to_first_message, s.time_to_first_message.p99_us)
+        ));
+    }
+    if let Some(w) = &p.websocket {
+        out.push(format!(
+            "websocket: {} opened, {} handshake rejected, {} not opened, {} closed cleanly; messages {} sent / {} received",
+            w.opened, w.handshake_rejected, w.not_opened, w.closed_cleanly, w.messages_sent, w.messages_received
+        ));
+        out.push(if w.rtt_defined {
+            format!(
+                "websocket rtt: {} pair(s), p50 {} p99 {}",
+                w.rtt_pairs,
+                us_or_dash(&w.rtt, w.rtt.p50_us),
+                us_or_dash(&w.rtt, w.rtt.p99_us)
+            )
+        } else {
+            "websocket rtt: not defined (the request sets no expect_messages)".into()
+        });
+    }
+    if let Some(t) = &p.tcp {
+        out.push(format!(
+            "tcp: {} connected; frames {} sent / {} received; {} partial frame(s); {} peer close(s); expected frames met {} / short {}",
+            t.connected, t.frames_sent, t.frames_received, t.partial_frames, t.peer_closes, t.expectation_met, t.expectation_short
+        ));
+    }
+    if let Some(d) = &p.datagram {
+        out.push(format!(
+            "datagrams: {} sent / {} received (separate counts; no delivery is inferred); {} exchange(s) with a response, {} with no response observed; {} repeated, {} echoed payload(s); ICMP unreachable in {}",
+            d.datagrams_sent,
+            d.datagrams_received,
+            d.exchanges_with_response,
+            d.exchanges_silent,
+            d.repeated_payloads,
+            d.echoed_payloads,
+            d.icmp_unreachable_exchanges
+        ));
+        if let Some(h) = &d.dtls_handshakes {
+            out.push(format!(
+                "dtls handshakes: {} attempted, {} completed, {} failed, {} timed out; p50 {}",
+                h.attempted,
+                h.completed,
+                h.failed,
+                h.timed_out,
+                us_or_dash(&h.duration, h.duration.p50_us)
+            ));
+        }
+    }
+    out
+}
+
+/// The protocol denominators agree with the unit ledger (LOAD-013). Exact
+/// in every report and progress snapshot: the snapshot is one consistent cut.
+pub fn check_protocol_balance(r: &LoadReport) -> Result<(), String> {
+    let Some(p) = &r.protocol_metrics else { return Ok(()) };
+    let q = &r.requests;
+    let settled = q.started - q.in_flight_at_end.min(q.started);
+    let ensure = |ok: bool, what: String| if ok { Ok(()) } else { Err(what) };
+    if let Some(h) = &p.http {
+        ensure(
+            h.units_with_fallback <= settled && h.protocol_fallback_attempts >= h.units_with_fallback,
+            format!("HTTP fallback counts {h:?}"),
+        )?;
+        ensure(h.units_over_h3 <= settled, format!("HTTP/3 requests {} > settled {settled}", h.units_over_h3))?;
+    }
+    if let Some(g) = &p.grpc {
+        let sum: u64 = g.status_codes.iter().map(|(_, n)| n).sum();
+        ensure(sum == q.completed, format!("gRPC status codes sum {sum} ≠ completed {}", q.completed))?;
+        ensure(g.ok + g.non_ok == q.completed, format!("gRPC ok {} + non-OK {} ≠ completed {}", g.ok, g.non_ok, q.completed))?;
+        ensure(g.non_ok == q.application_failures, format!("gRPC non-OK {} ≠ application failures {}", g.non_ok, q.application_failures))?;
+        ensure(
+            g.missing_status <= q.transport_failures + q.timeouts,
+            format!("gRPC missing status {} exceeds transport failures + timeouts", g.missing_status),
+        )?;
+    }
+    if let Some(s) = &p.stream {
+        ensure(
+            s.opened <= settled && s.with_messages <= s.opened,
+            format!("streams opened {} / with messages {}", s.opened, s.with_messages),
+        )?;
+        ensure(s.time_to_first_message.count <= s.with_messages, "time-to-first-message samples exceed streams with messages".into())?;
+        if p.unit == LoadUnitKind::SseStream {
+            let ends: u64 = s.ended_by.iter().map(|c| c.count).sum();
+            ensure(ends == s.opened, format!("SSE stream ends {ends} ≠ opened {}", s.opened))?;
+        }
+    }
+    if let Some(w) = &p.websocket {
+        ensure(
+            w.opened + w.handshake_rejected + w.not_opened == settled,
+            format!(
+                "WebSocket opened {} + rejected {} + not opened {} ≠ settled sessions {settled}",
+                w.opened, w.handshake_rejected, w.not_opened
+            ),
+        )?;
+        ensure(w.closed_cleanly <= w.opened, format!("sessions closed cleanly {} > opened {}", w.closed_cleanly, w.opened))?;
+        let closes: u64 = w.close_codes.iter().map(|c| c.count).sum();
+        ensure(closes == w.opened, format!("close codes {closes} ≠ opened sessions {}", w.opened))?;
+        ensure(w.rtt_pairs == w.rtt.count && (w.rtt_defined || w.rtt_pairs == 0), "RTT pairs without a defined pairing".into())?;
+    }
+    if let Some(t) = &p.tcp {
+        ensure(t.connected <= settled, format!("TCP connections {} > settled {settled}", t.connected))?;
+        let judged = t.expectation_met + t.expectation_short;
+        ensure(judged <= q.completed, format!("TCP expectation outcomes {judged} > completed {}", q.completed))?;
+        ensure(
+            t.expected_frames.is_none() || judged == q.completed,
+            format!("TCP expectation outcomes {judged} ≠ completed {}", q.completed),
+        )?;
+        ensure(t.expectation_short <= q.application_failures, "TCP short exchanges are application failures".into())?;
+    }
+    if let Some(d) = &p.datagram {
+        ensure(
+            d.exchanges_with_response + d.exchanges_silent == q.completed,
+            format!(
+                "datagram exchanges with response {} + silent {} ≠ completed {}",
+                d.exchanges_with_response, d.exchanges_silent, q.completed
+            ),
+        )?;
+        ensure(
+            d.time_to_first_datagram.count <= d.exchanges_with_response,
+            "time-to-first-response samples exceed responding exchanges".into(),
+        )?;
+        ensure(
+            d.echoed_payloads <= d.datagrams_received && d.repeated_payloads <= d.datagrams_received,
+            "payload observations exceed datagrams received".into(),
+        )?;
+        if let Some(h) = &d.dtls_handshakes {
+            ensure(
+                h.completed + h.failed + h.timed_out <= h.attempted && h.attempted <= settled,
+                format!("DTLS handshakes {h:?} vs settled {settled}"),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------------------- JSON
@@ -363,6 +608,9 @@ pub fn summary_csv(r: &LoadReport) -> String {
     for f in &r.failure_categories {
         add("failure_category", &f.category, f.count.to_string());
     }
+    if let Some(p) = &r.protocol_metrics {
+        protocol_csv(p, &mut add);
+    }
     add("bytes", "sent", r.bytes_sent.to_string());
     add("bytes", "received", r.bytes_received.to_string());
     let g = &r.generator;
@@ -374,6 +622,104 @@ pub fn summary_csv(r: &LoadReport) -> String {
     add("generator", "target_not_achieved", g.target_not_achieved.to_string());
     add("integrity", "sha256", opt(r.integrity_sha256.clone()));
     csv_string(rows)
+}
+
+fn snake<T: Serialize>(v: &T) -> String {
+    serde_json::to_value(v).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+}
+
+fn latency_csv(section: &str, l: &LatencySummary, add: &mut impl FnMut(&str, &str, String)) {
+    for (k, v) in [("count", l.count), ("min", l.min_us), ("p50", l.p50_us), ("p90", l.p90_us), ("p99", l.p99_us), ("max", l.max_us)] {
+        // A distribution without samples has no values, never zeros.
+        add(section, k, if l.count == 0 && k != "count" { String::new() } else { v.to_string() });
+    }
+}
+
+/// `section,metric,value` rows for the protocol denominators.
+fn protocol_csv(p: &ProtocolLoadMetrics, add: &mut impl FnMut(&str, &str, String)) {
+    add("unit", "kind", snake(&p.unit));
+    add("unit", "metrics_version", p.version.to_string());
+    add("unit", "completed_means", p.semantics.completed_means.clone());
+    add("unit", "success_means", p.semantics.success_means.clone());
+    add("unit", "latency_means", p.semantics.latency_means.clone());
+    add("unit", "connection_mode_means", p.semantics.connection_mode_means.clone());
+    if let Some(h) = &p.http {
+        add("http", "protocol_fallback_attempts", h.protocol_fallback_attempts.to_string());
+        add("http", "requests_with_fallback", h.units_with_fallback.to_string());
+        add("http", "requests_over_h3", h.units_over_h3.to_string());
+    }
+    if let Some(g) = &p.grpc {
+        add("grpc", "ok", g.ok.to_string());
+        add("grpc", "non_ok", g.non_ok.to_string());
+        add("grpc", "missing_status", g.missing_status.to_string());
+        add("grpc", "protocol_fallback_attempts", g.protocol_fallback_attempts.to_string());
+        for (code, n) in &g.status_codes {
+            add("grpc_status", &code.to_string(), n.to_string());
+        }
+    }
+    if let Some(s) = &p.stream {
+        add("stream", "opened", s.opened.to_string());
+        add("stream", "messages_received", s.messages_received.to_string());
+        add("stream", "with_messages", s.with_messages.to_string());
+        latency_csv("stream_time_to_first_message_us", &s.time_to_first_message, add);
+        for c in &s.ended_by {
+            add("stream_ended_by", &snake(&c.closed_by), c.count.to_string());
+        }
+    }
+    if let Some(w) = &p.websocket {
+        add("websocket", "opened", w.opened.to_string());
+        add("websocket", "handshake_rejected", w.handshake_rejected.to_string());
+        add("websocket", "not_opened", w.not_opened.to_string());
+        add("websocket", "closed_cleanly", w.closed_cleanly.to_string());
+        add("websocket", "messages_sent", w.messages_sent.to_string());
+        add("websocket", "messages_received", w.messages_received.to_string());
+        add("websocket", "rtt_defined", w.rtt_defined.to_string());
+        add("websocket", "rtt_pairs", w.rtt_pairs.to_string());
+        add("websocket", "rtt_unpaired_sessions", w.rtt_unpaired_sessions.to_string());
+        if w.rtt_defined {
+            latency_csv("websocket_rtt_us", &w.rtt, add);
+        }
+        for c in &w.close_codes {
+            let code = c.code.map(|c| c.to_string()).unwrap_or_else(|| "none".into());
+            add("websocket_close", &format!("{}:{code}", snake(&c.closed_by)), c.count.to_string());
+        }
+    }
+    if let Some(t) = &p.tcp {
+        add("tcp", "connected", t.connected.to_string());
+        add("tcp", "frames_sent", t.frames_sent.to_string());
+        add("tcp", "frames_received", t.frames_received.to_string());
+        add("tcp", "payload_bytes_sent", t.payload_bytes_sent.to_string());
+        add("tcp", "payload_bytes_received", t.payload_bytes_received.to_string());
+        add("tcp", "partial_frames", t.partial_frames.to_string());
+        add("tcp", "peer_closes", t.peer_closes.to_string());
+        add("tcp", "expected_frames", opt(t.expected_frames));
+        add("tcp", "expectation_met", t.expectation_met.to_string());
+        add("tcp", "expectation_short", t.expectation_short.to_string());
+    }
+    if let Some(d) = &p.datagram {
+        add("datagram", "sent", d.datagrams_sent.to_string());
+        add("datagram", "received", d.datagrams_received.to_string());
+        // An observation only: never a delivery rate.
+        add(
+            "datagram",
+            "observed_received_per_sent",
+            if d.datagrams_sent == 0 { String::new() } else { format!("{:.4}", d.datagrams_received as f64 / d.datagrams_sent as f64) },
+        );
+        add("datagram", "exchanges_with_response", d.exchanges_with_response.to_string());
+        add("datagram", "exchanges_no_response_observed", d.exchanges_silent.to_string());
+        add("datagram", "repeated_payloads", d.repeated_payloads.to_string());
+        add("datagram", "echoed_payloads", d.echoed_payloads.to_string());
+        add("datagram", "other_payloads", d.datagrams_received.saturating_sub(d.echoed_payloads).to_string());
+        add("datagram", "icmp_unreachable_exchanges", d.icmp_unreachable_exchanges.to_string());
+        latency_csv("datagram_time_to_first_response_us", &d.time_to_first_datagram, add);
+        if let Some(h) = &d.dtls_handshakes {
+            add("dtls_handshake", "attempted", h.attempted.to_string());
+            add("dtls_handshake", "completed", h.completed.to_string());
+            add("dtls_handshake", "failed", h.failed.to_string());
+            add("dtls_handshake", "timed_out", h.timed_out.to_string());
+            latency_csv("dtls_handshake_duration_us", &h.duration, add);
+        }
+    }
 }
 
 /// Per-bucket timeline CSV.
@@ -450,6 +796,7 @@ pub(crate) mod tests {
             request_revisions: vec![Id::new()],
             dataset_sha256: Some("ab".repeat(32)),
             started_at: Utc::now(),
+            unit: LoadUnitKind::HttpRequest,
         };
         let mut m = crate::metrics::Metrics::new();
         for v in [1_000u64, 2_000, 3_000] {

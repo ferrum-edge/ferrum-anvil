@@ -3,7 +3,7 @@
 use anvil_app::App;
 use anvil_app::specs::SpecTarget;
 use anvil_domain::Id;
-use anvil_domain::load::{AbortRule, LoadPlan, RunCompletion, Stage, Workload};
+use anvil_domain::load::{AbortRule, ConnectionMode, LoadPlan, RunCompletion, Stage, Workload};
 use anvil_import::{GroupBy, ImportOptions, SampleMode};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
@@ -106,6 +106,9 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
 #[derive(Subcommand)]
 pub enum LoadCmd {
     /// Create a load plan over saved requests (a chain executed per iteration).
+    /// Every request must produce the same load unit (HTTP requests, unary gRPC
+    /// calls, gRPC or SSE streams, WebSocket sessions, TCP or UDP/DTLS
+    /// exchanges); unsupported combinations are refused before any traffic.
     Create {
         workspace: String,
         name: String,
@@ -132,7 +135,13 @@ pub enum LoadCmd {
         /// Abort when failures exceed this percentage over a 10 s window.
         #[arg(long)]
         abort_failure_pct: Option<u32>,
+        /// Open a new connection for every unit (default: reuse per virtual
+        /// user where the protocol allows it — HTTP and gRPC).
+        #[arg(long)]
+        fresh: bool,
     },
+    /// Show what a plan measures (its load unit) or why it is refused; nothing is sent.
+    Check { workspace: String, plan: String },
     /// List load plans.
     List { workspace: String },
     /// Show the destinations and planned load (nothing is sent).
@@ -176,6 +185,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             max_in_flight,
             warmup,
             abort_failure_pct,
+            fresh,
         } => {
             let ws = app.find_workspace(workspace)?.meta.id;
             let mut chain = Vec::new();
@@ -199,7 +209,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 mix: vec![],
                 dataset_id: None,
                 environment_id: None,
-                connection_mode: Default::default(),
+                connection_mode: if *fresh { ConnectionMode::Fresh } else { ConnectionMode::Persistent },
                 warmup_secs: *warmup,
                 abort: abort_failure_pct.map(|p| AbortRule { max_failure_permille: p * 10, window_secs: 10 }),
                 seed: 1,
@@ -209,7 +219,20 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             };
             let p = app.save_load_plan(p)?;
             println!("created load plan {} ({})", p.name, p.id);
+            let check = app.load_plan_check(&p)?;
+            match (&check.unit_label, &check.refusal) {
+                (_, Some(r)) => println!("  refused for load: {r}"),
+                (Some(label), None) => println!("  load unit: {label}"),
+                _ => {}
+            }
             Ok(0)
+        }
+        LoadCmd::Check { workspace, plan } => {
+            let ws = app.find_workspace(workspace)?.meta.id;
+            let p = find_plan(app, &ws, plan)?;
+            let check = app.load_plan_check(&p)?;
+            println!("{}", serde_json::to_string_pretty(&check)?);
+            Ok(if check.refusal.is_some() { 3 } else { 0 })
         }
         LoadCmd::List { workspace } => {
             let ws = app.find_workspace(workspace)?.meta.id;
@@ -230,6 +253,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             let pre = app.load_preflight(&p)?;
             eprintln!("destinations: {}", pre.destinations.join(", "));
             eprintln!("workload: {}", pre.workload);
+            eprintln!("load unit: {} — {}", pre.unit_label, pre.semantics.completed_means);
             for w in &pre.warnings {
                 eprintln!("warning: {w}");
             }
@@ -250,13 +274,14 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 }
             });
             let mut stopping = false;
+            let units = pre.semantics.unit_plural.clone();
             loop {
                 tokio::select! {
                     p = c.next_progress() => match p {
                         Some(p) => {
-                            let k = &p.snapshot.counts;
+                            let k = &p.snapshot.requests;
                             eprintln!(
-                                "{:>5.0}s {:>9} started {:>9} completed {:>6} failed {:>8.1}/s p95 {}",
+                                "{:>5.0}s {units}: {:>9} started {:>9} completed {:>6} failed {:>8.1} iterations/s p95 {}",
                                 p.elapsed_secs,
                                 k.started,
                                 k.completed,
@@ -302,6 +327,11 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 us_or_none(report.latency_success.count, report.latency_success.p95_us),
                 us_or_none(report.latency_success.count, report.latency_success.p99_us)
             );
+            if let Some(m) = &report.protocol_metrics {
+                for l in anvil_load::report::protocol_lines(m) {
+                    println!("  {l}");
+                }
+            }
             for n in &report.notes {
                 println!("  note: {n}");
             }
@@ -318,14 +348,15 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             let ws = app.find_workspace(workspace)?.meta.id;
             for r in app.load_reports(&ws)? {
                 println!(
-                    "{}  {}  {}  {:?}{}  {:.1}/s  p95 {}  {} failed",
+                    "{}  {}  {}  {}  {:?}{}  {:.1}/s  p95 {}  {} failed",
                     r.run_id,
                     r.started_at.format("%Y-%m-%d %H:%M:%S"),
                     r.plan_name,
+                    anvil_load::protocol::label(r.unit),
                     r.completion,
                     if r.partial { " (partial)" } else { "" },
                     r.achieved_rate_per_sec,
-                    r.p95_us.map(|v| format!("{v} µs")).unwrap_or_else(|| "— (no successful sends)".into()),
+                    r.p95_us.map(|v| format!("{v} µs")).unwrap_or_else(|| "— (no successful units)".into()),
                     r.failures
                 );
             }

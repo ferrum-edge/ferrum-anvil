@@ -18,6 +18,7 @@ anvil-engine.workspace = true
 anvil-transport.workspace = true
 anvil-diagnostics.workspace = true
 anvil-fixtures = { path = "../anvil-fixtures" }
+anvil-load.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true

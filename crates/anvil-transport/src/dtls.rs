@@ -36,8 +36,6 @@ use anvil_domain::settings::Timeouts;
 use bytes::Bytes;
 use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
-use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -557,17 +555,18 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
     let mut peer_closed = false;
-    let mut seen: HashSet<[u8; 32]> = HashSet::new();
-    let mut record_inbound = |outs: &[Out], tr: &mut Transcript, received: &mut u64, peer_closed: &mut bool, facts: &mut SessionFacts| {
+    let mut tally = crate::udp::PayloadTally::default();
+    let record_inbound = |outs: &[Out],
+                          tr: &mut Transcript,
+                          received: &mut u64,
+                          peer_closed: &mut bool,
+                          facts: &mut SessionFacts,
+                          tally: &mut crate::udp::PayloadTally| {
         for o in outs {
             match o {
                 Out::App(d) => {
                     *received += 1;
-                    let mut digest = [0u8; 32];
-                    digest.copy_from_slice(&Sha256::digest(d));
-                    if !seen.insert(digest) {
-                        facts.repeated_datagrams += 1;
-                    }
+                    tally.received(d, facts);
                     tr.data(Direction::Received, "datagram", d);
                 }
                 Out::Close => {
@@ -590,8 +589,9 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
         let outs = drain(&mut dtls, &mut next_timeout);
         send_all(&sock, &outs, &mut env).await;
         sent += 1;
+        tally.sent(d);
         tr.data(Direction::Sent, "datagram", d);
-        record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
+        record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts, &mut tally);
     }
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
     let window = Duration::from_millis(plan.response_window_ms);
@@ -624,7 +624,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                 }
                 let outs = drain(&mut dtls, &mut next_timeout);
                 send_all(&sock, &outs, &mut env).await;
-                record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
+                record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts, &mut tally);
             }
             Ev::Recv(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 if !facts.icmp_port_unreachable {
@@ -638,7 +638,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                 if dtls.handle_timeout(Instant::now()).is_ok() {
                     let outs = drain(&mut dtls, &mut next_timeout);
                     send_all(&sock, &outs, &mut env).await;
-                    record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
+                    record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts, &mut tally);
                 }
             }
             Ev::Cmd(c) => {
@@ -662,8 +662,9 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                         let outs = drain(&mut dtls, &mut next_timeout);
                         send_all(&sock, &outs, &mut env).await;
                         sent += 1;
+                        tally.sent(&p);
                         tr.data(Direction::Sent, "datagram", &p);
-                        record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
+                        record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts, &mut tally);
                     }
                     window_end = Instant::now() + window;
                 }

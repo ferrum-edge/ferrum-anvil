@@ -8,7 +8,7 @@ use anvil_domain::Id;
 use anvil_domain::assertions::{Assertion, AssertionKind, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::load::*;
-use anvil_domain::request::{Body, KeyValue, Protocol, RequestSpec};
+use anvil_domain::request::{Body, KeyValue, PayloadEncoding, Protocol, RequestSpec, StreamPayload, UdpSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::TlsProfile;
@@ -16,7 +16,7 @@ use anvil_engine::context::MemorySecrets;
 use anvil_engine::{Engine, ExecutionContext};
 use anvil_fixtures::GroundTruth;
 use anvil_fixtures::http as fx;
-use anvil_load::report::{check_balance, check_request_balance};
+use anvil_load::report::{check_balance, check_protocol_balance, check_request_balance};
 use anvil_load::worker::WorkerMessage;
 use anvil_load::{Dataset, DatasetFormat, LoadController, LoadJob, LoadRun, RunOptions, WorkerJob};
 use anvil_transport::recorder::EventCtx;
@@ -87,6 +87,7 @@ async fn run(plan: LoadPlan, requests: Vec<(Id, ExecutionContext)>, dataset: Opt
 fn assert_balanced(r: &LoadReport) {
     check_balance(&r.counts).unwrap_or_else(|e| panic!("iteration ledger: {e}: {:?}", r.counts));
     check_request_balance(&r.requests).unwrap_or_else(|e| panic!("send ledger: {e}: {:?}", r.requests));
+    check_protocol_balance(r).unwrap_or_else(|e| panic!("protocol denominators: {e}: {:?}", r.protocol_metrics));
 }
 
 fn received(f: &fx::Fixture, prefix: &str) -> Vec<Vec<(String, String)>> {
@@ -561,18 +562,97 @@ async fn load_011_report_roundtrip_and_html_escape_response_content() {
     assert!(csv.contains("sends,assertion_failures,5"));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn load_013_datagram_requests_are_refused_not_counted_as_delivered() {
-    let _g = serial().await;
-    let mut s = RequestSpec::http("GET", "udp://127.0.0.1:9");
+fn udp_ctx(addr: std::net::SocketAddr, datagrams: &[&str], window_ms: u64) -> ExecutionContext {
+    let mut s = RequestSpec::http("GET", &format!("udp://{addr}"));
     s.protocol = Protocol::Udp;
+    s.udp = Some(UdpSpec {
+        dtls: false,
+        datagrams: datagrams.iter().map(|d| StreamPayload { data: d.to_string(), encoding: PayloadEncoding::Text }).collect(),
+        response_window_ms: window_ms,
+        max_datagrams: 100,
+        masque: None,
+        proxy_protocol: None,
+    });
+    ctx(s)
+}
+
+fn datagrams_received(log: &anvil_fixtures::GroundTruthLog) -> u64 {
+    log.entries().iter().filter(|e| matches!(e.event, GroundTruth::DatagramReceived { .. })).count() as u64
+}
+
+fn datagram_metrics(r: &LoadReport) -> DatagramLoadMetrics {
+    let p = r.protocol_metrics.as_ref().expect("protocol metrics");
+    assert_eq!(p.unit, LoadUnitKind::UdpExchange);
+    p.datagram.clone().expect("datagram block")
+}
+
+/// LOAD-013: a UDP load that sends more than it receives keeps sent and
+/// received as separate counts, infers no acknowledgement, and never claims
+/// that sent equals delivered — nor that silence is a failure or a loss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_013_udp_sends_more_than_it_receives_and_never_claims_delivery() {
+    let _g = serial().await;
+    // The fixture answers every other datagram it receives.
+    let lossy = anvil_fixtures::streams::udp("127.0.0.1:0", anvil_fixtures::streams::UdpMode::DropEveryOther).await.unwrap();
     let id = Id::new();
-    let job = LoadJob { requests: HashMap::from([(id, ctx(s))]), dataset: None };
-    match LoadRun::prepare(plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]), job, opts()) {
-        Err(anvil_load::LoadError::Unsupported(m)) => assert!(m.contains("LOAD-013")),
-        Err(e) => panic!("wrong refusal: {e}"),
-        Ok(_) => panic!("UDP load must be refused until datagram denominators exist"),
-    }
+    let r = run(
+        plan(Workload::Iterations { iterations: 6, concurrency: 1 }, vec![id]),
+        vec![(id, udp_ctx(lossy.addr, &["d0", "d1", "d2", "d3"], 300))],
+        None,
+    )
+    .await;
+    let d = datagram_metrics(&r);
+    assert_eq!(d.datagrams_sent, 24);
+    assert_eq!(datagrams_received(&lossy.log), 24, "ground truth: the fixture got every datagram — Anvil must not claim so");
+    assert_eq!(d.datagrams_received, 12, "received is its own count, never inferred from sent");
+    assert_eq!((d.exchanges_with_response, d.exchanges_silent, d.echoed_payloads), (6, 0, 12));
+    assert_eq!((r.requests.completed, r.requests.transport_failures, r.requests.application_failures), (6, 0, 0));
+    assert_eq!(r.latency_success.count, 6, "time to first response of each responding exchange");
+    assert!(r.latency_success.max_us < 300_000, "the response window is not a latency: {:?}", r.latency_success);
+    assert!(r.notes.iter().any(|n| n.contains("never a delivery or loss rate")), "{:?}", r.notes);
+    let html = anvil_load::html::to_html(&r);
+    assert!(html.contains("Received per sent (observed ratio, not a delivery rate)"));
+    let csv = anvil_load::report::summary_csv(&r);
+    assert!(
+        csv.contains("datagram,sent,24")
+            && csv.contains("datagram,received,12")
+            && csv.contains("datagram,observed_received_per_sent,0.5000")
+    );
+
+    // Silence: completed exchanges with no response observed — neither
+    // successes nor failures, with no latency and no percentile.
+    let silent = anvil_fixtures::streams::udp("127.0.0.1:0", anvil_fixtures::streams::UdpMode::Silent).await.unwrap();
+    let id = Id::new();
+    let r =
+        run(plan(Workload::Iterations { iterations: 4, concurrency: 2 }, vec![id]), vec![(id, udp_ctx(silent.addr, &["?"], 150))], None)
+            .await;
+    let d = datagram_metrics(&r);
+    assert_eq!((d.datagrams_sent, d.datagrams_received, d.exchanges_silent), (4, 0, 4));
+    assert_eq!(datagrams_received(&silent.log), 4);
+    assert_eq!((r.requests.completed, r.requests.transport_failures, r.requests.application_failures), (4, 0, 0));
+    assert_eq!((r.latency_success.count, r.latency_failure.count), (0, 0));
+    assert!(r.failure_categories.is_empty(), "silence is not a failure: {:?}", r.failure_categories);
+    assert!(anvil_load::html::to_html(&r).contains("<div class=\"value\">—</div>"), "no response → no percentile, never 0 µs");
+
+    // Duplicated replies are counted as repeated payloads (an observation).
+    let dup = anvil_fixtures::streams::udp("127.0.0.1:0", anvil_fixtures::streams::UdpMode::Duplicate).await.unwrap();
+    let id = Id::new();
+    let r = run(
+        plan(Workload::Iterations { iterations: 3, concurrency: 1 }, vec![id]),
+        vec![(id, udp_ctx(dup.addr, &["u0", "u1"], 200))],
+        None,
+    )
+    .await;
+    let d = datagram_metrics(&r);
+    assert_eq!((d.datagrams_sent, d.datagrams_received, d.repeated_payloads, d.echoed_payloads), (6, 12, 6, 12));
+
+    // Nothing listening: the OS reports ICMP port unreachable (counted), and
+    // the exchange still makes no delivery claim.
+    let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let id = Id::new();
+    let r = run(plan(Workload::Iterations { iterations: 2, concurrency: 1 }, vec![id]), vec![(id, udp_ctx(port, &["x"], 150))], None).await;
+    let d = datagram_metrics(&r);
+    assert_eq!((d.datagrams_received, d.icmp_unreachable_exchanges), (0, 2), "{d:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
