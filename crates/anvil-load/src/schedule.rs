@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn total_secs_uses_checked_addition() {
         assert_eq!(total_secs(&[st(u64::MAX, 1), st(2, 1)]), None, "overflow is refused, not wrapped");
-        assert_eq!(total_secs(&[st(u64::MAX, 1), st(1, 1)]), Some(u64::MAX), "the last in-range value is kept");
+        assert_eq!(total_secs(&[st(u64::MAX - 1, 1), st(1, 1)]), Some(u64::MAX), "the last in-range value is kept");
         assert_eq!(total_secs(&[]), Some(0));
     }
 
