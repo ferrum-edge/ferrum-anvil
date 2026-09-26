@@ -700,6 +700,7 @@ async fn chain_extraction_feeds_next_step_with_dataset_rows() {
         assert_eq!(counters.get(k), Some(&10), "{counters:?}");
     }
     assert_eq!(r.dataset_sha256, Some(sha));
+    assert!(!r.notes.iter().any(|n| n.as_str() == anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT), "{:?}", r.notes);
 }
 
 fn extracting_tok(url: &str) -> RequestSpec {
@@ -766,6 +767,7 @@ async fn a_step_under_an_import_root_never_sends_a_workspace_value() {
         p.dataset_id = Some(Id::new());
         let r = run(p, requests.clone(), Some(data)).await;
         assert_eq!(r.counts.started, 4);
+        assert!(r.notes.iter().any(|n| n.as_str() == anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT), "{:?}", r.notes);
     }
     assert_eq!(received(&f, "/status/").len(), 4, "the workspace's own step ran");
     assert!(received(&f, "/count/").is_empty(), "{:?}", f.state.counters.lock());

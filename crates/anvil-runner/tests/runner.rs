@@ -196,6 +196,9 @@ async fn extracted_values_and_dataset_rows_stay_on_their_side_of_an_import_root(
     let expected =
         [("imported".to_string(), some("tok-imported-0002"), None), ("me".to_string(), some("tok-user-0001"), some("pw-row-secret-1"))];
     assert_eq!(received_steps(&f), expected);
+    // The report says why the root's steps got no dataset row.
+    let skipped = anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
+    assert_eq!(r.notes.iter().filter(|n| n.as_str() == skipped).count(), 1, "{:?}", r.notes);
 }
 
 #[tokio::test]
@@ -233,6 +236,7 @@ async fn csv_and_json_datasets_drive_iterations_and_sensitive_columns_stay_out_o
         assert_eq!(r.totals.transport_failures + r.totals.application_failures, 0);
         let ds = r.dataset.as_ref().unwrap();
         assert_eq!((ds.rows, ds.sensitive_columns.clone()), (2, vec!["password".to_string()]));
+        assert!(!r.notes.iter().any(|n| n.as_str() == anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT), "{:?}", r.notes);
 
         // Ground truth: each row reached the fixture with its real values.
         let reqs = f.log.requests();

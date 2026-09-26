@@ -111,12 +111,16 @@ the runner and the load executor hand a step only the extracted values of
 its own scope and, outside an import root only, the dataset row. It works
 the other way too: a value extracted under the import root is not visible
 to the workspace's own requests. Runs of requests that are not under an
-import root are unchanged.
+import root are unchanged. When a run or load test with a dataset includes
+a request under an import root that is not opened, the dataset rows are
+not applied to it and the run report says so in a note.
 
 A JWT-SVID drawn from this device's SPIFFE Workload API or from a token file
-is refused, and so is a TLS profile whose client identity (a certificate or
-this device's X.509-SVID) is bound to no host, since it would be presented
-to any host the collection names. So an imported `Bearer {{token}}` can
+is refused, and so is a request whose effective settings select a TLS
+profile with a client identity (a certificate or this device's X.509-SVID)
+bound to no host, since it would be presented to any host the collection
+names. Only the request's own selected profile is checked: a proxy profile's
+TLS profile still applies to the connection to that proxy (see below). So an imported `Bearer {{token}}` can
 never pick up the destination's `token`, whether it is a variable of the
 destination or a value its own login request extracted earlier in the same
 run: it stays unresolved and the request is not sent.
@@ -145,6 +149,17 @@ selected by the destination workspace or an outer folder. A TLS profile with
 a client identity applies only when it is bound to hosts, and then the
 identity is presented only to those hosts. A proxy carries the connection
 and its own TLS profile is used only for the connection to the proxy.
+
+Cookies and cached OAuth tokens are kept per workspace, not per import root.
+Every request of the workspace, under an import root or not, shares the
+workspace's cookie jar: a cookie set in response to one request is sent with
+another to a host the cookie matches, following the usual domain, path and
+`Secure` rules, so a cookie never reaches a host it was not set for. An OAuth
+token is cached under the workspace, every setting that decides what it
+authorizes (issuer, client, grant, audience, scope) and the workspace, folder
+or request that defines the profile (`token_cache_id`). An imported profile
+is therefore cached apart from the workspace's own, and opening or closing
+the import root does not drop a token already acquired.
 
 ## Reimport (DATA-012)
 
