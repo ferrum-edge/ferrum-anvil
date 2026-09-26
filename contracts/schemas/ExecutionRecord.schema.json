@@ -145,7 +145,7 @@
       "format": "uuid"
     },
     "PreparedSummary": {
-      "description": "Summary of the prepared request as it was actually sent (redacted).",
+      "description": "Summary of the prepared request as it was actually sent (redacted).\n\n`method`, `url`, `headers`, the body fields, `content_type` and\n`auth_label` describe the original request as prepared; each attempt\nrecords what it sent to its own target. `tls_profile`, `proxy` and\n`tls_verification_enabled` describe the connection that produced the\nfinal response (the last redirect hop when redirects were followed).",
       "type": "object",
       "properties": {
         "protocol": {
@@ -185,18 +185,21 @@
           "type": "string"
         },
         "tls_profile": {
+          "description": "TLS profile of the connection that produced the final response (the last redirect\nhop when redirects were followed).",
           "type": [
             "string",
             "null"
           ]
         },
         "proxy": {
+          "description": "Proxy route of the connection that produced the final response (the last redirect\nhop when redirects were followed).",
           "type": [
             "string",
             "null"
           ]
         },
         "tls_verification_enabled": {
+          "description": "Whether TLS verification was on for the connection that produced the\nfinal response (the last redirect hop when redirects were followed).\n`true` when that connection was plain HTTP: verification was not\nturned off, there was no TLS to verify.",
           "type": "boolean"
         },
         "settings": {
@@ -488,7 +491,7 @@
           "maximum": 255
         },
         "forward_credentials_cross_origin": {
-          "description": "Forward `Authorization`/cookies/client identity to a different origin.\nOff by default; the target's own configuration applies otherwise.",
+          "description": "Forward the request's credentials to a different origin: auth, a manual\n`Cookie` header, credential or sensitive headers, headers holding a secret,\nand a 307/308 body holding a secret. Off by default. The TLS client\nidentity is never forwarded: only a TLS profile bound to the new origin\npresents one.",
           "type": "boolean"
         }
       },

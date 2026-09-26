@@ -69,6 +69,19 @@ pub fn is_sensitive_name(name: &str, extra: &[String]) -> bool {
     SENSITIVE_NAME_PARTS.iter().any(|p| n == *p || n.contains(p) && n.len() <= 48)
 }
 
+/// Whether a configured header name marks a credential that must not follow
+/// a redirect to another origin. Broader than [`is_sensitive_name`], which
+/// decides redaction: no length limit, and names ending in `-key` / `_key`
+/// (`X-Master-Key`, `Subscription-Key`, ...) count too.
+pub fn is_credential_name(name: &str, extra: &[String]) -> bool {
+    let n = name.to_ascii_lowercase();
+    SENSITIVE_HEADERS.contains(&n.as_str())
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(&n))
+        || SENSITIVE_NAME_PARTS.iter().any(|p| n.contains(p))
+        || n.ends_with("-key")
+        || n.ends_with("_key")
+}
+
 #[derive(Clone, Default)]
 pub struct Redactor {
     /// Secret values, longest first (compared against decoded URL components).
@@ -453,5 +466,24 @@ mod tests {
         let out = r.json_text(r#"{"password":"hunter2","nested":{"customer_ssn":"123"},"note":"value-in-body-xyz","ok":"fine"}"#);
         assert!(!out.contains("hunter2") && !out.contains("123\"") && !out.contains("value-in-body-xyz"));
         assert!(out.contains("fine"));
+    }
+
+    #[test]
+    fn credential_names_for_redirect_stripping() {
+        assert!(is_credential_name("X-Master-Key", &[]));
+        assert!(is_credential_name("X-Client-Key", &[]));
+        assert!(is_credential_name("Subscription-Key", &[]));
+        assert!(is_credential_name("tenant_key", &[]));
+        assert!(is_credential_name("X-API-Key", &[]) && is_credential_name("Cookie", &[]));
+        let long = "X-Vendor-Specific-Upstream-Gateway-Routing-Session-Token";
+        assert!(long.len() > 48);
+        assert!(is_credential_name(long, &[]));
+        assert!(is_credential_name("X-Customer-Ssn", &["x-customer-ssn".into()]));
+        for n in ["X-Plain", "Accept", "Content-Type", "X-Keyboard"] {
+            assert!(!is_credential_name(n, &[]), "{n}");
+        }
+        // Redaction keeps its own rules.
+        assert!(!is_sensitive_name("X-Master-Key", &[]));
+        assert!(!is_sensitive_name(long, &[]));
     }
 }
