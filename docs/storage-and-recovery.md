@@ -24,6 +24,20 @@ columns needed for listing (ids, kinds, parent ids, sort keys, timestamps) are
 stored in the clear. The plaintext-leak test searches the database, its WAL and
 journal, and blobs for known secret and body values.
 
+Each vault secret belongs to one workspace. A request resolves a secret
+reference only when its own workspace owns that secret, whether the reference
+is in its auth, a variable, an environment or a profile. A reference to any
+other secret (another workspace's, or one no workspace owns) fails as if the
+secret were not stored, and nothing is sent. A saved request is prepared
+only in its own workspace, and only with folders of that workspace; a scenario
+or load plan runs only requests and a dataset of its own workspace. Creating a
+secret requires the workspace that will own it.
+
+A secret stored with no owning workspace (possible only through older builds)
+no longer resolves for any request. Store its value again from the workspace
+that uses it: open the field, choose **Replace**, and keep the value in the
+vault again.
+
 ## Unlocking
 
 | Protection | How the data key is obtained |
@@ -103,9 +117,46 @@ Import is preview-then-apply with conflict policies (duplicate, merge, replace).
 Duplicate gives every imported object, request revision and secret a new id and
 makes each copied secret belong to the copied workspace, so the copy never
 overwrites or depends on its source: deleting either leaves the other working.
-Merge keeps objects, revisions and secrets that already exist. A bundle whose
-secrets belong to a workspace it does not contain, or that gives two objects
-one id, is refused.
+A copy whose bundle left a secret out does not use the source's secret either.
+Merge keeps objects, revisions and secrets that already exist. Replace
+overwrites them, but never a secret that a workspace outside the bundle (or no
+workspace) owns, and never an object stored in a different workspace from the
+one the bundle gives it: the preview lists both, and a Replace import that
+would overwrite one is refused and changes nothing. The preview lists every
+object and secret that shares an id with one already stored.
+
+Workspace ids travel in every bundle, so a bundle can claim a workspace that is
+already stored here, such as a re-imported backup. Under Merge or Replace the
+import then writes into that workspace, and whatever it adds there (a request
+to any URL, a variable, an auth setting) can use that workspace's vault
+secrets. The preview lists every such workspace as an error, and applying is
+refused unless the user confirms each one after the preview (the desktop's
+checkbox; `anvil import --into-existing <WORKSPACE_ID>`). Confirm only for a
+bundle you trust: a passphrase shows the bundle was not altered after it was
+encrypted, not who wrote it. Duplicate never writes into a stored workspace.
+
+A bundle is refused when any workspace-scoped object (folder, request,
+environment, TLS, proxy or integration profile, dataset, scenario, load plan)
+belongs to a workspace it does not contain; when a folder's parent, a
+request's folder, or a request, dataset or environment that a scenario or load
+plan names is missing from it or in another of its workspaces; when a secret
+belongs to a workspace it does not contain; or when it gives two objects one
+id. These checks are about the bundle's own consistency: "a workspace it
+contains" can be one already stored here, as above. A request keeps its
+current-revision link only when the bundle carries that revision of it.
+
+Stored attachments (a binary or multipart body file, a gRPC schema file, a
+dataset's data) are found by their content hash alone. Exports include the
+bytes of every stored attachment their requests and datasets use, as long as
+its content can be read on the exporting device; one whose content is missing
+there (a blob lost to retention, or a request created without its file) travels
+without it, and the export lists that request or dataset among its excluded
+items. On import or restore, a request or dataset that names a stored
+attachment without its bytes would resolve to content already stored on this
+device, which may belong to another workspace. So the whole file is refused,
+and nothing is written, when content with that hash is stored here. Otherwise
+the reference is accepted, and the preview and report name the item: it will
+fail until the file is attached again.
 
 An encrypted bundle's vault key is derived with the Argon2id costs its manifest
 names, before the vault can be authenticated. Those costs are refused, before
@@ -169,17 +220,38 @@ in it can be read or changed without the export passphrase:
   compares the whole inventory of a restored profile with its source.
 
 Restore is preview-then-apply. Every item is checked against its schema
-version, its type and the rest of the backup (ids, owning workspaces,
-attachment hashes), the import trust normalisation above applies (an
-imported collection opened to its workspace is closed again), and
-everything is written in one
-transaction after a checkpoint. A request revision is restored under its
-request, in that request's workspace: revisions whose request is not in the
-backup (it was deleted) are left out with a warning, and one stored under
-another request or workspace is refused. Replace overwrites items that have
-the same id; Merge keeps them, including this profile's settings; Duplicate is refused,
-because a backup restores items under their own ids. Nothing else in the
-profile is deleted.
+version, its type and the rest of the backup (ids, owning workspaces and
+attachment hashes), stored attachments named without their bytes are handled
+as for bundles (above), the import trust normalisation above applies (an
+imported collection opened to its workspace is closed again; the backup's app
+settings are normalised like workspace, folder and request settings), and
+everything is written in one transaction after a checkpoint. A request
+revision is restored under its request, in that request's workspace:
+revisions whose request is not in the backup (it was deleted) are left out
+with a warning, and one stored under another request or workspace is refused.
+History records of a workspace that is not in the backup (it was deleted) are
+left out with a warning. Replace overwrites items that have the same id; Merge
+keeps them, including this profile's settings; Duplicate is refused, because a
+backup restores items under their own ids. Nothing else in the profile is
+deleted.
+
+App settings are the lowest settings layer of every workspace's requests, so
+Replace restores the backup's app settings only when every workspace stored
+here is one the backup claims: into an empty profile, or over the backup's
+own workspaces once they are approved (below). While the profile holds any
+other workspace, Replace keeps this profile's app settings; the preview and
+the report say so, and the plan counts them as kept.
+
+Restore only a full backup that is your own or that you otherwise trust. Like
+a bundle, a backup can claim a workspace already stored here, and what it
+writes there can use that workspace's vault secrets. The preview lists every
+such workspace, and the restore is refused, changing nothing, unless the user
+confirms each one after the preview (the desktop's checkbox;
+`anvil import --into-existing <WORKSPACE_ID>`). Replace is also refused when it
+would overwrite an object, history record or load report stored in a
+different workspace from the one the backup gives it, or a secret stored here
+under a different owner; Merge keeps those. A restore into an empty profile
+needs no confirmation.
 
 ## Schema versions and migration
 

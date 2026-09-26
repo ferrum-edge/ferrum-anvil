@@ -130,9 +130,40 @@ against it).
   (memory, passes, lanes, memory × passes, salt length; see
   [storage-and-recovery.md](storage-and-recovery.md#export-and-import)) are
   refused before any derivation.
-- **Bundle identities:** bundle secrets must belong to a workspace in the
-  bundle, object ids must be unique, and a Duplicate import gives every object,
-  revision and secret a new id.
+- **Bundle identities:** bundle secrets and every workspace-scoped object
+  must belong to a workspace in the bundle, and references between objects
+  must stay within their workspace; object ids must be unique, and a Duplicate
+  import gives every object, revision and secret a new id. A Replace import
+  never overwrites or re-owns a secret that a workspace outside the bundle
+  owns, nor overwrites an object stored in another workspace; it is refused
+  instead.
+- **Attachments named without their bytes:** stored attachments are found by
+  content hash alone, so a reference whose bytes a bundle or full backup does
+  not carry would resolve to content already stored on this device, possibly
+  another workspace's. Such a file is refused when content with that hash is
+  stored here. Otherwise it is accepted, and the preview and report name each
+  request or dataset that will fail until its file is attached again: the
+  reference is legitimate after a stored blob was lost, or for a request
+  created without its file. If content with that hash is stored later, the
+  reference resolves to it.
+- **Bundle writing into an existing workspace:** workspace ids are not
+  secret, so any bundle can claim a workspace already stored here. Merge and
+  Replace into a stored workspace assume the bundle is trusted: what they write
+  there can use that workspace's vault secrets. The preview lists each such
+  workspace as an error and the import is refused unless the user confirms each
+  one after the preview. Encryption proves nothing about who wrote a bundle; it
+  only shows the bundle was not altered after it was encrypted. Duplicate never
+  writes into a stored workspace and is the safe choice for untrusted bundles.
+- **Secret scope:** a request resolves only secrets its own workspace owns; a
+  reference to any other stored secret fails before anything is sent. A saved
+  request is prepared only in its own workspace and with folders of that
+  workspace, and a scenario or load plan runs only requests and a dataset of
+  its own workspace. A Merge import keeps a stored object whose id a bundle
+  reuses in another workspace, and imported items never use it; imported
+  requests and datasets use only attachment bytes their bundle carried. This
+  scope is the workspace boundary: it does not separate items inside one
+  workspace, so anything imported into a workspace (see above) can use its
+  secrets.
 - **Lock bypass:** backend refuses privileged commands while locked; key dropped;
   sessions/executions/load runs stopped.
 - **Reading or altering a full backup:** the whole payload (objects, bodies,
@@ -141,8 +172,33 @@ against it).
   reveals nothing and any change to it is refused before anything is restored.
   Only the header (at most 4 KiB of JSON) is parsed before authentication, to
   bound its key-derivation costs before derivation. Authentic contents are
-  still type-checked, confined to the backup's own workspaces (revisions to
-  their request's) and trust-normalised like any import.
+  still type-checked; every workspace-scoped object, workspace secret and
+  load report must belong to one of the backup's own workspaces (revisions to
+  their request's), and history records of any other workspace are left out
+  with a warning; stored attachments named without their bytes are checked as
+  above.
+  The import trust normalisation applies to the backup's app settings as to
+  workspace, folder and request settings: cross-origin credential forwarding
+  and 0-RTT early data are turned off, like TLS bypasses, plain-HTTP marker
+  trust, legacy HMAC and scenario and load plan trust.
+- **App settings from a backup:** app settings are the lowest settings layer
+  of every workspace's requests, and their DNS overrides, resolver and other
+  defaults are not something normalisation can judge. Replace therefore
+  restores the backup's app settings only when every workspace stored here
+  is one the backup claims (each of which the user must approve); while the
+  profile holds any other workspace, Replace keeps this profile's app
+  settings and says so in the preview and the report. Merge always keeps
+  them.
+- **Restoring into existing workspaces:** a full backup must be your own or
+  otherwise trusted. Its passphrase proves only that the file was not
+  altered, not who made it, and a restore writes every item under its own
+  id. Restoring into a workspace already stored here (Merge or Replace) is
+  refused unless the user approves each such workspace after the preview,
+  as for bundles (desktop checkbox, `anvil import --into-existing`), because
+  what it writes there can use that workspace's vault secrets. Replace also
+  refuses a backup that would overwrite an object, history record or load
+  report stored in another workspace, or a secret stored here under another
+  owner.
 - **Legacy full backups:** full backups written as zip bundles, whose vault
   authenticated nothing else in the archive, are refused on import (manifest
   kind `backup`, mode `full_backup`, or app settings in the archive), so
@@ -154,6 +210,12 @@ against it).
 
 ## Residual risks
 
+- A bundle the user confirms writing into an existing workspace is trusted
+  with that workspace's secrets (see "Bundle writing into an existing
+  workspace").
+- A secret's owning workspace is stored as plaintext metadata next to the
+  encrypted record and is not authenticated with it; changing it needs local
+  write access to the database.
 - Keychain-protected profiles are as strong as the OS session.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.

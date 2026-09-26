@@ -96,7 +96,7 @@ async fn no_plaintext_user_data_in_profile_files_side_files_or_temp() {
     let app = App::open(s.dir.clone(), h, dek).unwrap();
 
     let ws = app.create_workspace("CANARY-WORKSPACE-4343").unwrap();
-    let secret = app.set_secret(Some(&ws.meta.id), "token", "CANARY-SECRET-8383").unwrap();
+    let secret = app.set_secret(&ws.meta.id, "token", "CANARY-SECRET-8383").unwrap();
     let env = app
         .create_environment(
             &ws.meta.id,

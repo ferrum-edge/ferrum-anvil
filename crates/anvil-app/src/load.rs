@@ -77,6 +77,7 @@ impl App {
     /// it. Imported plans keep `trusted = false` until saved deliberately.
     pub fn save_load_plan(&self, mut p: LoadPlan) -> Result<LoadPlan> {
         validate_plan(&p)?;
+        self.check_plan_requests(&p)?;
         p.updated_at = chrono::Utc::now();
         self.store.put(kind::LOAD_PLAN, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
         Ok(p)
@@ -97,9 +98,22 @@ impl App {
         ids
     }
 
+    /// Every request a plan runs must be saved in the plan's own workspace:
+    /// it is prepared with that workspace's variables, profiles and secrets.
+    fn check_plan_requests(&self, p: &LoadPlan) -> Result<()> {
+        for id in Self::plan_requests(p) {
+            let r = self.request(&id)?;
+            if r.workspace_id != p.workspace_id {
+                return Err(AppError::Invalid(format!("request '{}' in this load plan belongs to another workspace", r.name)));
+            }
+        }
+        Ok(())
+    }
+
     /// Freeze every request the plan references (same preparation as Send)
     /// and resolve the dataset.
     pub fn load_job(&self, p: &LoadPlan) -> Result<LoadJob> {
+        self.check_plan_requests(p)?;
         let opts = SendOptions { environment: p.environment_id, ..Default::default() };
         let mut requests = HashMap::new();
         for id in Self::plan_requests(p) {

@@ -381,6 +381,14 @@ impl Store {
         Records { key, conn: &conn }.get_secret(id)
     }
 
+    /// Returns (label, value) of secret `id` only if workspace `ws` owns it;
+    /// `None` for a secret another workspace, or none, owns.
+    pub fn get_workspace_secret(&self, id: &Id, ws: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
+        let key = self.key()?;
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.get_workspace_secret(id, ws)
+    }
+
     pub fn list_secret_ids(&self, workspace_id: Option<&Id>) -> Result<Vec<String>> {
         let _ = self.key()?;
         let conn = self.conn()?;
@@ -745,6 +753,16 @@ impl StoreRead<'_> {
         self.records()?.get_secret(id)
     }
 
+    /// Every stored secret's id with the workspace that owns it (`None`: no
+    /// workspace does).
+    pub fn secret_owners(&self) -> Result<Vec<(String, Option<String>)>> {
+        let _ = self.store.key()?;
+        let mut st = self.conn.prepare("SELECT id, workspace_id FROM secrets")?;
+        let owners = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let owners: Vec<(String, Option<String>)> = owners.collect::<std::result::Result<_, _>>()?;
+        Ok(owners)
+    }
+
     /// Every vault secret, decrypted, with its owner.
     pub fn secrets(&self) -> Result<Vec<SecretRecord>> {
         self.records()?.secrets()
@@ -767,12 +785,12 @@ impl StoreRead<'_> {
         self.records()?.list_load_reports(workspace_id)
     }
 
-    /// Ids of every stored load report.
-    pub fn load_report_ids(&self) -> Result<Vec<String>> {
+    /// Id and workspace of every stored load report.
+    pub fn load_report_entries(&self) -> Result<Vec<(String, Option<String>)>> {
         let _ = self.store.key()?;
-        let mut st = self.conn.prepare("SELECT id FROM load_reports")?;
-        let ids = st.query_map([], |r| r.get(0))?.collect::<std::result::Result<Vec<String>, _>>()?;
-        Ok(ids)
+        let mut st = self.conn.prepare("SELECT id,workspace_id FROM load_reports")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<Vec<(String, Option<String>)>, _>>()?;
+        Ok(rows)
     }
 }
 
@@ -874,8 +892,20 @@ impl Records<'_> {
         let id_s = id.to_string();
         let env: Option<Vec<u8>> =
             self.conn.query_row("SELECT payload FROM secrets WHERE id=?1", params![id_s], |r| r.get(0)).optional()?;
+        self.open_secret(&id_s, env)
+    }
+
+    fn get_workspace_secret(&self, id: &Id, ws: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
+        let id_s = id.to_string();
+        let sql = "SELECT payload FROM secrets WHERE id=?1 AND workspace_id=?2";
+        let env: Option<Vec<u8>> = self.conn.query_row(sql, params![id_s, ws.to_string()], |r| r.get(0)).optional()?;
+        self.open_secret(&id_s, env)
+    }
+
+    /// Decrypt a secret row's payload into (label, value).
+    fn open_secret(&self, id_s: &str, env: Option<Vec<u8>>) -> Result<Option<(String, Zeroizing<String>)>> {
         let Some(env) = env else { return Ok(None) };
-        let pt = crypto::open(&self.key, &aad("secrets", "secret", &id_s), &env).map_err(|_| StoreError::Integrity)?;
+        let pt = crypto::open(&self.key, &aad("secrets", "secret", id_s), &env).map_err(|_| StoreError::Integrity)?;
         let v: serde_json::Value = serde_json::from_slice(&pt)?;
         Ok(Some((
             v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string(),
