@@ -394,7 +394,7 @@ function Connection({ attempt }: { attempt?: AttemptObservation }) {
           ))}
         </tbody>
       </table>
-      {c.tunnel && <TunnelView t={c.tunnel} />}
+      {c.tunnel && <TunnelView t={c.tunnel} dtls={(c.tls?.version ?? "").startsWith("DTLS")} />}
       {c.tls && <TlsView t={c.tls} title={innerTlsTitle(c.tunnel?.kind, c.tls.version)} />}
       {attempt?.early_data && <EarlyDataEvidence e={attempt.early_data} />}
       {c.proxy_header && <ProxyHeaderEvidence h={c.proxy_header} />}
@@ -408,7 +408,8 @@ function innerTlsTitle(kind: TunnelObservation["kind"] | undefined, version?: st
   return `${dtls ? "DTLS" : "TLS"} with the destination (inside the tunnel)`;
 }
 
-function TunnelView({ t }: { t: TunnelObservation }) {
+/** `dtls`: a DTLS session runs inside the tunnel, so its records are DTLS records. */
+function TunnelView({ t, dtls = false }: { t: TunnelObservation; dtls?: boolean }) {
   const d = t.datagrams;
   const udp = t.kind === "connect_udp";
   return (
@@ -419,7 +420,7 @@ function TunnelView({ t }: { t: TunnelObservation }) {
           <tr><td className="k">{udp ? "Proxy" : "Endpoint"}</td><td className="v">{t.endpoint}</td></tr>
           {d && (
             <>
-              <tr><td className="k">Datagram records</td><td className="v">{d.records_sent} sent · {d.records_received} received ([u16 length][payload] on the CONNECT stream)</td></tr>
+              <tr><td className="k">{dtls ? "DTLS records" : "Datagram records"}</td><td className="v">{d.records_sent} sent · {d.records_received} received ([u16 length][payload] on the CONNECT stream{dtls ? "; handshake flights included" : ""})</td></tr>
               <tr><td className="k">Tunnel ended</td><td className="v">{humanize(d.closed_by)}{d.reset_code ? ` (${d.reset_code})` : ""}</td></tr>
               {(d.oversize_refused ?? 0) > 0 && <tr><td className="k">Refused locally</td><td className="v">{d.oversize_refused} datagram(s) over 65,535 bytes, not sent</td></tr>}
               {(d.truncated_tail_bytes ?? 0) > 0 && <tr><td className="k">Truncated record</td><td className="v">{d.truncated_tail_bytes} byte(s) of an incomplete record discarded</td></tr>}

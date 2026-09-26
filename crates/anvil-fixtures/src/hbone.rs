@@ -20,10 +20,12 @@
 //! relay destination not allowed`, `503 UDP egress relay session capacity
 //! exhausted`). An admitted one relays `[u16 big-endian length][payload]`
 //! records to a UDP socket connected to the authority and frames every reply
-//! the same way (its own codec, independent of Anvil's). Per authority, a
-//! [`UdpTunnelFault`] ends the tunnel the way a relay can: `END_STREAM`, a
-//! dropped connection, a truncated record, or replies packed with
-//! zero-length records into one DATA frame. [`serve_resetting`] is a raw-h2
+//! the same way (its own codec, independent of Anvil's). Records are opaque:
+//! DTLS records inside the tunnel are relayed like any UDP payload. Per
+//! authority, a [`UdpTunnelFault`] ends the tunnel the way a relay can:
+//! `END_STREAM` (after some replies or after a delay), a dropped connection,
+//! a truncated record, or replies packed with zero-length records into one
+//! DATA frame. [`serve_resetting`] is a raw-h2
 //! variant that resets the tunnel stream (`RST_STREAM(CANCEL)`), which a
 //! hyper-based endpoint cannot do.
 //!
@@ -60,6 +62,10 @@ pub enum UdpTunnelFault {
     /// hyper-based relay such as Ferrum Edge's sends whenever its relay
     /// ends: hyper turns a dropped upgraded stream into `END_STREAM`).
     EndAfter(usize),
+    /// `ms` after the tunnel opened, end the stream with `END_STREAM`
+    /// (whatever was relayed by then): for sessions whose reply count is not
+    /// fixed, such as a DTLS handshake inside the tunnel.
+    EndAfterMs(u64),
     /// After `n` replies, drop the whole HTTP/2 connection (TLS and TCP)
     /// without GOAWAY: the endpoint vanishing mid-session.
     DropConnectionAfter(usize),
@@ -440,8 +446,33 @@ async fn relay_udp<S>(
     let mut dgram = vec![0u8; 65_535];
     let mut replies = 0usize;
     let end = |why: &str| log.udp_tunnel_ends.lock().push(why.to_string());
+    let end_at = match fault {
+        Some(UdpTunnelFault::EndAfterMs(ms)) => Some(tokio::time::Instant::now() + Duration::from_millis(ms)),
+        _ => None,
+    };
+    let timer = async move {
+        match end_at {
+            Some(t) => tokio::time::sleep_until(t).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(timer);
     loop {
         tokio::select! {
+            _ = &mut timer => {
+                end("fault:end_stream");
+                let _ = wr.shutdown().await;
+                // Keep the stream until the client ends its side.
+                let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Ok(n) = rd.read(&mut chunk).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                return;
+            }
             r = rd.read(&mut chunk) => match r {
                 Ok(0) | Err(_) => {
                     end("client_end");

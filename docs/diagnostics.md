@@ -118,7 +118,7 @@ failures carry their own failure kinds and `hbone.*` findings, dispatch is
 | `hbone.tunnel_refused` | the endpoint answered `CONNECT` with a non-2xx, non-5xx status | confirmed that the endpoint refused (likely when its identity was not verified) |
 | `hbone.tunnel_unavailable` | the endpoint answered `CONNECT` with a 5xx; no leg claim | confirmed that it answered, cause unknown |
 | `hbone.tunnel_protocol_error` | HTTP/2 failure before a `CONNECT` answer (no `h2`, reset, GOAWAY, deadline) | unknown (deadline confirmed) |
-| `hbone.udp_tunnel_ended` | UDP tunnel: the endpoint ended the datagram tunnel before Anvil did (`END_STREAM`: warning; `RST_STREAM`/`GOAWAY` or a lost connection: error) | confirmed that the endpoint sent the frame over a verified endpoint (likely otherwise); unknown for a lost connection; never why |
+| `hbone.udp_tunnel_ended` | UDP tunnel: the endpoint ended the datagram tunnel before Anvil did (`END_STREAM`: warning; `RST_STREAM`/`GOAWAY` or a lost connection: error; any end during a DTLS handshake inside the tunnel: error, it failed the handshake) | confirmed that the endpoint sent the frame over a verified endpoint (likely otherwise); unknown for a lost connection; never why |
 | `hbone.udp_record_truncated` | UDP tunnel: the stream ended inside a `[u16 length][payload]` record; the partial record was discarded | confirmed (likely over an unverified endpoint) |
 | `hbone.udp_datagram_too_large` | UDP tunnel: Anvil refused a datagram over the 65,535 bytes one record carries (scope `local_client`) | confirmed |
 
@@ -144,7 +144,13 @@ The endpoint sends no reason when it ends a tunnel (Ferrum Edge ends its relay
 with `END_STREAM` after an ICMP error on its socket, at its idle limit, on a
 revoked admission), so `hbone.udp_tunnel_ended` keeps those as alternatives
 and says it does not prove the destination is down. An end mid-session never
-produces an `exchange.*` finding: the stream is the endpoint's.
+produces an `exchange.*` finding: the stream is the endpoint's. With DTLS inside
+the tunnel, the channel counts DTLS records (the finding says so), an end
+during the DTLS handshake is what failed it (no `client.dtls.*` or `exchange.*`
+finding about the DTLS peer), and a DTLS handshake timeout lists the relay's
+missing acknowledgement as an alternative. DTLS verification failures and peer
+alerts stay findings about the DTLS peer (`client.tls.*`,
+`client.dtls.handshake_failed`), never about the endpoint.
 
 The untrusted-destination rule is unchanged: Ferrum markers are only
 interpreted for a destination declared as a Ferrum gateway, and the `hbone.*`

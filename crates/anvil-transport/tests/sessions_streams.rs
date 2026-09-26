@@ -218,6 +218,7 @@ async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
         redact: None,
         envelope: None,
         masque: None,
+        hbone: None,
     };
     let out = dtls::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     let f = out.attempts[0].observation.failure.as_ref().unwrap();

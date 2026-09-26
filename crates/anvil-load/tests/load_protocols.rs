@@ -558,6 +558,27 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
         let id = Id::new();
         (plan(iterations(1, 1), vec![id], mode), vec![(id, c)])
     };
+    // A UDP or DTLS request through a mesh HBONE proxy profile.
+    let via_hbone = |url: &str| {
+        let mut c = ctx(Protocol::Udp, url);
+        let pid = Id::new();
+        c.proxy_profiles.push(ProxyProfile {
+            id: pid,
+            workspace_id: Id::new(),
+            name: "mesh".into(),
+            kind: ProxyKind::Hbone,
+            address: "127.0.0.1:15008".into(),
+            username: None,
+            password: None,
+            no_proxy: String::new(),
+            tls_profile_id: None,
+            hbone: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
+        c
+    };
     let cases: Vec<(RefusalCode, ExecutionContext, ConnectionMode)> = vec![
         (
             RefusalCode::GrpcClientStreaming,
@@ -627,30 +648,10 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
             },
             ConnectionMode::Persistent,
         ),
-        (
-            RefusalCode::UdpHbone,
-            {
-                let mut c = ctx(Protocol::Udp, "udp://127.0.0.1:9");
-                let pid = Id::new();
-                c.proxy_profiles.push(ProxyProfile {
-                    id: pid,
-                    workspace_id: Id::new(),
-                    name: "mesh".into(),
-                    kind: ProxyKind::Hbone,
-                    address: "127.0.0.1:15008".into(),
-                    username: None,
-                    password: None,
-                    no_proxy: String::new(),
-                    tls_profile_id: None,
-                    hbone: None,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                });
-                layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
-                c
-            },
-            ConnectionMode::Fresh,
-        ),
+        (RefusalCode::UdpHbone, via_hbone("udp://127.0.0.1:9"), ConnectionMode::Fresh),
+        // DTLS through HBONE is refused the same way: its handshake would run
+        // in a fresh tunnel per exchange.
+        (RefusalCode::UdpHbone, via_hbone("dtls://127.0.0.1:9"), ConnectionMode::Fresh),
     ];
     for (code, c, mode) in cases {
         let (p, reqs) = one(c, mode);
@@ -658,6 +659,9 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
         assert_eq!(r.code, code, "{}", r.message);
         assert!(r.to_string().contains("LOAD-013"));
     }
+    let (p, reqs) = one(via_hbone("dtls://127.0.0.1:9"), ConnectionMode::Fresh);
+    let r = refused(p, reqs);
+    assert!(r.message.starts_with("DTLS through an HBONE tunnel"), "{}", r.message);
     // One plan, one unit kind: mixing HTTP requests with WebSocket sessions is refused.
     let (a, b) = (Id::new(), Id::new());
     let r = refused(

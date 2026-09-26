@@ -11,10 +11,12 @@
 //!   prepending a PROXY v2 `DGRAM` envelope to every datagram.
 //! * [`crate::masque::MasqueChannel`]: an open RFC 9298 CONNECT-UDP tunnel
 //!   through an HTTP/3 proxy (QUIC DATAGRAM frames or DATAGRAM capsules).
+//! * [`crate::hbone_udp::HboneChannel`]: an open Ferrum Mesh HBONE datagram
+//!   tunnel (`[u16 length][payload]` records on an HTTP/2 `CONNECT` stream).
 //!
-//! Another path that carries datagrams (for example UDP inside an HBONE
-//! tunnel) plugs in by implementing the trait and recording its outer leg as
-//! a `TunnelObservation`, as the MASQUE channel does.
+//! Another path that carries datagrams plugs in by implementing the trait
+//! and recording its outer leg as a `TunnelObservation`, as the tunnel
+//! channels do.
 
 use crate::proxy_protocol::Enveloper;
 use anvil_domain::execution::TransportFailure;

@@ -23,11 +23,15 @@
 //!   is recorded as not observed.
 //! * The handshake and session run over a [`DatagramChannel`]: a UDP socket
 //!   connected to the destination (optionally with a PROXY v2 envelope on
-//!   every datagram), or an RFC 9298 CONNECT-UDP tunnel through an HTTP/3
-//!   MASQUE proxy, where every DTLS record is one HTTP Datagram. Through a
-//!   tunnel, the proxy leg is the connection's `tunnel` evidence and the
-//!   DTLS evidence stays the connection's `tls`; a tunnel that never opens
-//!   leaves the attempt as the proxy's CONNECT, with no DTLS attempted.
+//!   every datagram), an RFC 9298 CONNECT-UDP tunnel through an HTTP/3
+//!   MASQUE proxy, where every DTLS record is one HTTP Datagram, or a Ferrum
+//!   Mesh HBONE datagram tunnel, where every DTLS record is one
+//!   `[u16 length][payload]` record. Through a tunnel, the proxy or endpoint
+//!   leg is the connection's `tunnel` evidence and the DTLS evidence stays
+//!   the connection's `tls`. A MASQUE tunnel that never opens leaves the
+//!   attempt as the proxy's CONNECT; an HBONE tunnel that never opens is
+//!   recorded exactly as for UDP through HBONE (the attempt addresses the
+//!   destination, the outer leg failed). Either way no DTLS is attempted.
 
 use crate::certs::summarize;
 use crate::datagram::{DatagramChannel, Inbound, Sent, SocketChannel};
@@ -151,6 +155,11 @@ pub struct DtlsPlan {
     /// MASQUE proxy instead of over a direct UDP socket (`host`/`port` are
     /// then the tunnel's target, and `dns` is not used).
     pub masque: Option<crate::masque::MasqueTunnelPlan>,
+    /// Run the session inside a Ferrum Mesh HBONE datagram tunnel through
+    /// this endpoint (whose `connect_headers` carry the `udp` marker):
+    /// `host`/`port` are then the `CONNECT` authority, and `dns` resolves the
+    /// endpoint.
+    pub hbone: Option<crate::connector::ProxyPlan>,
 }
 
 /// dimpl's default record size limit (its MTU).
@@ -392,9 +401,10 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
             .push(format!("DTLS sends only the client leaf certificate; {} chain certificate(s) were not sent", identity.unsent_chain));
     }
     let id = Identity { identity: &identity, ephemeral };
-    match &plan.masque {
-        None => run_direct(plan, rec, facts, id, events, cancel, commands).await,
-        Some(m) => run_tunneled(plan, m, rec, facts, id, events, cancel, commands).await,
+    match (&plan.masque, &plan.hbone) {
+        (Some(m), _) => run_tunneled(plan, m, rec, facts, id, events, cancel, commands).await,
+        (None, Some(p)) => run_hbone(plan, p, rec, facts, id, events, cancel, commands).await,
+        (None, None) => run_direct(plan, rec, facts, id, events, cancel, commands).await,
     }
 }
 
@@ -500,6 +510,63 @@ async fn run_tunneled(
         masque: Some(tunnel),
     };
     SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, transcript, status, facts)
+}
+
+/// DTLS inside a Ferrum Mesh HBONE datagram tunnel. The attempt addresses
+/// the DTLS target throughout, as UDP through HBONE does: DNS and connect
+/// are `not_applicable` and the whole endpoint leg is one `proxy_tunnel`
+/// phase. A tunnel that never opens ends the attempt with the tunnel-leg
+/// failure (no DTLS attempted); once it opens, every DTLS record is one
+/// `[u16 length][payload]` record and the endpoint leg is the connection's
+/// HBONE `tunnel`, with its datagram channel counting DTLS records.
+#[allow(clippy::too_many_arguments)]
+async fn run_hbone(
+    plan: &DtlsPlan,
+    p: &crate::connector::ProxyPlan,
+    mut rec: Recorder,
+    mut facts: SessionFacts,
+    id: Identity<'_>,
+    events: &EventCtx,
+    cancel: &CancellationToken,
+    commands: Option<CommandRx>,
+) -> SessionOutput {
+    let mut obs = new_attempt(0, AttemptReason::Initial, "DTLS", &plan.display_url);
+    let total_deadline = if commands.is_some() { None } else { deadline_from(plan.timeouts.total_ms) };
+    let status = |sent: u64, received: u64| ProtocolStatus::Udp {
+        datagrams_sent: sent,
+        datagrams_received: received,
+        window_ms: plan.response_window_ms,
+        masque: None,
+    };
+    let opened =
+        crate::hbone_udp::open_channel(&mut rec, &mut obs, p, &plan.host, plan.port, &plan.dns, &plan.timeouts, total_deadline, cancel)
+            .await;
+    let mut chan = match opened {
+        Ok(c) => c,
+        Err(f) => return SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, status(0, 0), facts),
+    };
+    let note = format!(
+        "DTLS with {} inside the HBONE datagram tunnel through {} (CONNECT with {}; each DTLS record is one [u16 length][payload] record on the CONNECT stream)",
+        chan.authority(),
+        p.label,
+        chan.marker()
+    );
+    facts.notes.push(note.clone());
+    let session = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &[("tunnel", note)], events, cancel, commands).await;
+    let failure_kind = obs.failure.as_ref().map(|f| f.kind);
+    chan.set_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
+    let (channel, written, read) = chan.close(matches!(failure_kind, Some(FailureKind::Canceled | FailureKind::TotalTimeout))).await;
+    obs.bytes.connection_bytes_written = Some(written);
+    obs.bytes.connection_bytes_read = Some(read);
+    if let Some(t) = obs.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
+        t.datagrams = Some(channel);
+    }
+    let obs = finish_attempt(rec, obs, events);
+    let (transcript, sent, received) = match session {
+        Some(s) => (Some(s.transcript), s.sent, s.received),
+        None => (None, 0, 0),
+    };
+    SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, transcript, status(sent, received), facts)
 }
 
 /// An application-data session after a completed handshake.

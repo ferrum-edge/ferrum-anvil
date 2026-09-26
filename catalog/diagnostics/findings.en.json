@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.26-5",
+  "version": "2026.09.26-6",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2614,7 +2614,7 @@
     },
     "hbone.udp_tunnel_ended": {
       "title": "The UDP tunnel through the HBONE endpoint ended early",
-      "explanation": "The datagram tunnel to {authority} through the HBONE endpoint {endpoint} ended before Anvil closed it: {how}. {received} datagram(s) had been received and {sent} sent; they are kept. No datagram can travel on this tunnel any more.",
+      "explanation": "The datagram tunnel to {authority} through the HBONE endpoint {endpoint} ended before Anvil closed it: {how}. {counts} No datagram can travel on this tunnel any more.",
       "alternatives": [
         "The endpoint's UDP socket toward {authority} failed, for example after an ICMP port-unreachable (a Ferrum Mesh relay ends the tunnel when that socket reports an error).",
         "The endpoint's idle limit for the datagram relay elapsed.",

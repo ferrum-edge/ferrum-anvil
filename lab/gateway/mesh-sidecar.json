@@ -35,6 +35,16 @@
             "port": 17805,
             "protocol": "udp",
             "name": "udp-unbound"
+          },
+          {
+            "port": 17806,
+            "protocol": "udp",
+            "name": "dtls-echo"
+          },
+          {
+            "port": 17807,
+            "protocol": "udp",
+            "name": "dtls-untrusted"
           }
         ],
         "selector": {

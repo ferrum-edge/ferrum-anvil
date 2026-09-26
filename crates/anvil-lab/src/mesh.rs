@@ -41,6 +41,7 @@ use anvil_domain::tls::{
     ClientIdentity, HboneMarker, HboneOptions, HostBinding, ProxyKind, ProxyProfile, ServerSpiffeIdentity, TlsMinVersion, TlsProfile,
 };
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
+use anvil_fixtures::dtls::{self, DtlsFixture, DtlsServerOptions};
 use anvil_fixtures::http as fx;
 use anvil_fixtures::mesh_pki::{self as ids, MeshPki};
 use anvil_fixtures::pki::Pem;
@@ -65,6 +66,12 @@ pub const UDP_ECHO_PORT: u16 = 17802;
 pub const UDP_SILENT_PORT: u16 = 17803;
 pub const UDP_CLOSING_PORT: u16 = 17804;
 pub const UDP_UNBOUND_PORT: u16 = 17805;
+/// The workload's DTLS applications (mesh-sidecar.json `udp` ports, reached
+/// through the datagram relay): a DTLS echo presenting the workload's SVID
+/// and requiring a mesh client certificate, and one presenting an SVID from
+/// a root the mesh does not trust (mesh_dtls.rs).
+pub const DTLS_ECHO_PORT: u16 = 17806;
+pub const DTLS_UNTRUSTED_PORT: u16 = 17807;
 /// A port no workload declares (relay destination guard stimulus; unbound).
 const UNDECLARED_PORT: u16 = 17899;
 const SIDECAR_ADMIN: u16 = 17690;
@@ -85,6 +92,9 @@ pub struct Env {
     /// The workload's UDP applications (mesh_udp.rs): echo and silent.
     pub udp_echo: StreamFixture,
     pub udp_silent: StreamFixture,
+    /// The workload's DTLS applications (mesh_dtls.rs): echo and untrusted.
+    pub dtls_echo: DtlsFixture,
+    pub dtls_untrusted: DtlsFixture,
     pub sidecar: Gateway,
     pub ambient: Gateway,
     pub permissive: Gateway,
@@ -257,6 +267,26 @@ impl Env {
         c.proxy_profiles.push(proxy);
         c.tls_profiles.push(tls);
         c.settings_layers.push(("run".into(), o));
+        c
+    }
+
+    /// `dtls://<authority>` through an HBONE proxy at 127.0.0.1:`endpoint`:
+    /// the datagram tunnel of [`Self::via_hbone_udp`] with DTLS inside it.
+    /// `hbone_tls` is the proxy profile's (the endpoint leg), `dtls_tls` the
+    /// request's (the DTLS peer).
+    pub(crate) fn via_hbone_dtls(
+        &self,
+        endpoint: u16,
+        authority: &str,
+        datagrams: &[&str],
+        window_ms: u64,
+        hbone_tls: TlsProfile,
+        dtls_tls: TlsProfile,
+    ) -> ExecutionContext {
+        let mut c = self.via_hbone_udp(endpoint, authority, datagrams, window_ms, hbone_tls, HboneMarker::None);
+        c.spec.url = format!("dtls://{authority}");
+        c.settings_layers.push(("dtls".into(), SettingsOverrides { tls_profile_id: Some(dtls_tls.id), ..Default::default() }));
+        c.tls_profiles.push(dtls_tls);
         c
     }
 }
@@ -796,6 +826,7 @@ fn all() -> Vec<Def> {
         Def { id: "MESH-015", title: "PERMISSIVE sidecar: marker-only unauthenticated CONNECT refused 403", run: mesh015 },
     ];
     v.extend(crate::mesh_udp::defs());
+    v.extend(crate::mesh_dtls::defs());
     v
 }
 
@@ -825,7 +856,7 @@ const SKIPPED: &[(&str, &str, &str)] = &[
 pub fn profile() -> Profile {
     Profile {
         name: "mesh",
-        about: "Mesh client: SPIFFE-verified sidecar mTLS 17606 (STRICT) / 17626 (PERMISSIVE), HBONE ambient 17618, workload 17801 (UDP 17802-17805)",
+        about: "Mesh client: SPIFFE-verified sidecar mTLS 17606 (STRICT) / 17626 (PERMISSIVE), HBONE ambient 17618, workload 17801 (UDP 17802-17805, DTLS 17806-17807)",
         scenarios: || {
             let mut v: Vec<(&'static str, &'static str)> = all().into_iter().map(|d| (d.id, d.title)).collect();
             v.extend(SKIPPED.iter().chain(crate::mesh_udp::SKIPPED).map(|(id, t, _)| (*id, *t)));
@@ -889,6 +920,15 @@ async fn start() -> anyhow::Result<Env> {
     let backend = fx::serve(&format!("127.0.0.1:{BACKEND_PORT}"), None).await?;
     let udp_echo = streams::udp(&format!("127.0.0.1:{UDP_ECHO_PORT}"), UdpMode::Echo).await?;
     let udp_silent = streams::udp(&format!("127.0.0.1:{UDP_SILENT_PORT}"), UdpMode::Silent).await?;
+    // DTLS workloads (dimpl: ECDSA only, as the lab SVIDs are): the echo
+    // presents the workload's SVID and requires a mesh client certificate.
+    let dtls_opts = |leaf: &Pem, client_ca: Option<&Pem>| DtlsServerOptions {
+        cert_pem: leaf.cert.clone(),
+        key_pem: leaf.key.clone(),
+        client_ca_pem: client_ca.map(|ca| ca.cert.clone()),
+    };
+    let dtls_echo = dtls::serve(&format!("127.0.0.1:{DTLS_ECHO_PORT}"), dtls_opts(&pki.svc, Some(&pki.ca))).await?;
+    let dtls_untrusted = dtls::serve(&format!("127.0.0.1:{DTLS_UNTRUSTED_PORT}"), dtls_opts(&pki.foreign_server, None)).await?;
     let sidecar = launch(
         "mesh-sidecar",
         "mesh-sidecar.conf",
@@ -937,7 +977,20 @@ async fn start() -> anyhow::Result<Env> {
         }
     };
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    Ok(Env { engine: Engine::new(), pki, backend, udp_echo, udp_silent, sidecar, ambient, permissive, trusted: true, n: AtomicU64::new(0) })
+    Ok(Env {
+        engine: Engine::new(),
+        pki,
+        backend,
+        udp_echo,
+        udp_silent,
+        dtls_echo,
+        dtls_untrusted,
+        sidecar,
+        ambient,
+        permissive,
+        trusted: true,
+        n: AtomicU64::new(0),
+    })
 }
 
 async fn stop(env: Env) {
@@ -973,6 +1026,10 @@ async fn up() -> anyhow::Result<()> {
     println!("  sidecar inbound PERMISSIVE https://127.0.0.1:{PERMISSIVE_PORT}");
     println!("  workload echo         http://127.0.0.1:{BACKEND_PORT}");
     println!("  workload UDP          echo udp://127.0.0.1:{UDP_ECHO_PORT}, silent udp://127.0.0.1:{UDP_SILENT_PORT} (through HBONE)");
+    println!(
+        "  workload DTLS         echo dtls://127.0.0.1:{DTLS_ECHO_PORT} (server SPIFFE {}, client SVID required), untrusted dtls://127.0.0.1:{DTLS_UNTRUSTED_PORT} (through HBONE)",
+        ids::SVC_SPIFFE_ID
+    );
     println!("  client SVID {}/client.pem + client.key, trust bundle {}/ca.pem", pki.display(), pki.display());
     harness::wait_for_shutdown().await?;
     stop(env).await;
