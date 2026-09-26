@@ -79,7 +79,7 @@ CLI (`anvil`) = same anvil-app services without a webview.
   total (one cap for both versions), and the QUIC pool at most N idle
   connections. These caps leave out connections carrying a request, the
   connection kept for the one retry after `425 Too Early` (at most one per
-  key: HTTP for up to the idle TTL, QUIC for up to 10 s) and the slot's gRPC
+  key: HTTP and QUIC for up to 10 s, or the shorter idle TTL) and the slot's gRPC
   channels (one per destination).
 - **The workbench shows the selected workspace's state only.** Its lists
   (collection tree, history, TLS/proxy/gateway profiles, environments) are

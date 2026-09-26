@@ -370,6 +370,10 @@ impl PoolShared {
     /// Close closed, expired and over-cap idle connections. Returns whether
     /// the pool still holds any; the sweeper stops otherwise.
     fn sweep(&self, now: Instant) -> bool {
+        self.sweep_at(now, true)
+    }
+
+    fn sweep_at(&self, now: Instant, forget_sweeper_when_empty: bool) -> bool {
         let ttl = self.limits.idle_ttl;
         let too_early_ttl = ttl.min(TOO_EARLY_TTL);
         let (more, closing) = {
@@ -378,7 +382,7 @@ impl PoolShared {
             evict_over_cap(&mut state.conns, self.limits.max_idle_total, &mut removed);
             removed.extend(state.too_early.extract_if(|_, c| c.expired(now, too_early_ttl)));
             let more = !state.conns.is_empty() || !state.too_early.is_empty();
-            if !more {
+            if !more && forget_sweeper_when_empty {
                 state.sweeper = None;
             }
             (more, state.to_close(removed))
@@ -1016,7 +1020,7 @@ impl H3Transport {
     /// test can check expiry without waiting for it; not part of the API.
     #[doc(hidden)]
     pub fn sweep_pool_at(&self, now: Instant) {
-        self.pool.shared.sweep(now);
+        self.pool.shared.sweep_at(now, false);
     }
 
     /// Drop pooled connections and every session ticket.
