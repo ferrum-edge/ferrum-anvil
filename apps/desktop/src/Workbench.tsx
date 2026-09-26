@@ -279,7 +279,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     try {
       await api.sessionOpen({ workspace_id: t.wsId, request_id: t.req.id, spec: t.req.spec, environment_id: envOf(t.wsId), send_anyway: false }, execId);
     } catch (e) {
-      updateTab(t.req.id, { session: null });
+      // Only this open's session: the tab may hold a newer one by now.
+      setTabs((ts) => ts.map((x) => (x.session?.execId === execId ? { ...x, session: null } : x)));
       if (!stopped.current.delete(execId)) fail(e);
     }
   };
@@ -294,9 +295,21 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     if (tab?.execId) await api.cancel(tab.execId);
   };
 
+  // The session console's Cancel: an open it abandons is not an error to report.
+  const cancelSession = async (sid: string) => {
+    stopped.current.add(sid);
+    try {
+      await api.sessionCancel(sid);
+    } catch (e) {
+      stopped.current.delete(sid);
+      // Already over (its end event is on the way): nothing is left to stop.
+      if (String((e as Error).message ?? e) !== "the session is no longer open") fail(e);
+    }
+  };
+
   // Stop what a tab still runs in the backend: the tab is its only control, so
   // it must stay open when this fails. Returns whether nothing is left running.
-  const stopWork = async (t: OpenTab): Promise<boolean> => {
+  const stopWork = async (t: OpenTab, outcome = "so its tab stays open"): Promise<boolean> => {
     const sid = t.session?.execId;
     try {
       if (sid) {
@@ -310,7 +323,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       return true;
     } catch (e) {
       if (sid) stopped.current.delete(sid);
-      notify(`Could not stop “${t.req.name}”, so its tab stays open: ${String((e as Error).message ?? e)}`);
+      notify(`Could not stop “${t.req.name}”, ${outcome}: ${String((e as Error).message ?? e)}`);
       return false;
     }
   };
@@ -351,7 +364,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     try {
       // Stop first: a tab whose work could not be stopped stays, and so does its request.
       const gone = tabsRef.current.filter((t) => ids.has(t.req.id));
-      const results = await Promise.all(gone.map(stopWork));
+      const results = await Promise.all(gone.map((t) => stopWork(t, "so the delete was abandoned and its tab stays open")));
       if (results.includes(false)) return;
       if (n.kind === "folder") await api.deleteFolder(n.id);
       else await api.deleteRequest(n.id);
@@ -659,7 +672,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   protocol={tab.req.spec.protocol ?? "http"}
                   messages={tab.session.messages}
                   onSend={(c) => api.sessionSend(tab.session!.execId, c)}
-                  onCancel={() => void api.sessionCancel(tab.session!.execId)}
+                  onCancel={() => void cancelSession(tab.session!.execId)}
                 />
               ) : (
                 <ResponsePanel view={tab.view} running={tab.running} progressBytes={tab.progress} onCancel={() => void cancel()} />
