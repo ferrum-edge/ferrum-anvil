@@ -167,6 +167,7 @@ fn masque_ctx(env: &Env, m: Masque<'_>) -> ExecutionContext {
     let mut s = RequestSpec::http("GET", &format!("{scheme}://{}", m.target));
     s.protocol = Protocol::Udp;
     s.udp = Some(UdpSpec {
+        proxy_protocol: None,
         dtls: m.dtls,
         datagrams: m.datagrams.iter().map(|d| StreamPayload { data: d.to_string(), encoding: PayloadEncoding::Text }).collect(),
         response_window_ms: m.window_ms,

@@ -76,6 +76,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
             }),
             prior_requests: if s.reused { 3 } else { 0 },
             tunnel: None,
+            proxy_header: None,
         }),
         phases: vec![],
         dispatch: DispatchState::NotDispatched,

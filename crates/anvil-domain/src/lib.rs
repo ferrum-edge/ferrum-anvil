@@ -24,6 +24,7 @@ pub mod ids;
 pub mod integration;
 pub mod load;
 pub mod outcome;
+pub mod proxy_protocol;
 pub mod request;
 pub mod runner;
 pub mod schema;

@@ -138,6 +138,9 @@ pub struct DtlsPlan {
     pub display_url: String,
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
+    /// PROXY v2 `DGRAM` envelope prepended to every UDP datagram, outside the
+    /// DTLS records (handshake flights included).
+    pub envelope: Option<crate::proxy_protocol::EnvelopePlan>,
 }
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
@@ -316,10 +319,10 @@ fn version_label(v: Option<ProtocolVersion>) -> Option<String> {
     }
 }
 
-async fn send_all(sock: &UdpSocket, outs: &[Out]) {
+async fn send_all(sock: &UdpSocket, outs: &[Out], env: &mut Option<crate::proxy_protocol::Enveloper>) {
     for o in outs {
         if let Out::Packet(p) = o {
-            let _ = sock.send(p).await;
+            let _ = sock.send(&crate::udp::wire(env, p)).await;
         }
     }
 }
@@ -350,7 +353,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
             .notes
             .push(format!("DTLS sends only the client leaf certificate; {} chain certificate(s) were not sent", identity.unsent_chain));
     }
-    let (sock, _addr, mut cobs) = match crate::udp::open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "dtls").await {
+    let (sock, addr, mut cobs) = match crate::udp::open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "dtls").await {
         Ok(x) => x,
         Err((f, cobs)) => {
             obs.connection = Some(cobs);
@@ -362,6 +365,21 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
             );
         }
     };
+    let mut env = match crate::udp::start_envelope(plan.envelope.as_ref(), &sock, addr, plan.redact.clone()) {
+        Ok(e) => e,
+        Err(f) => {
+            obs.connection = Some(cobs);
+            return SessionOutput::single(
+                fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
+                None,
+                ProtocolStatus::None,
+                facts,
+            );
+        }
+    };
+    if let Some(e) = &env {
+        facts.notes.push(e.summary());
+    }
     let hs_ms = plan.timeouts.tls_handshake_ms.or(plan.timeouts.connect_ms).unwrap_or(10_000);
     let config = match Config::builder()
         .with_crypto_provider(dimpl::crypto::rust_crypto::default_provider())
@@ -422,7 +440,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                 }
             }
         }
-        send_all(&sock, &outs).await;
+        send_all(&sock, &outs, &mut env).await;
         if outs.iter().any(|o| matches!(o, Out::Connected)) {
             break Ok(());
         }
@@ -520,6 +538,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     if let Some(v) = &version {
         cobs.protocol = Some(v.to_ascii_lowercase());
     }
+    cobs.proxy_header = env.as_ref().map(|e| e.observation());
     obs.connection = Some(cobs);
     if let Err(f) = hs {
         rec.finish(hs_idx, phase_status_for(f.kind));
@@ -531,6 +550,9 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     // ---- application datagrams ----
     let s_idx = rec.start(Phase::Session);
     let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
+    if let Some(e) = &env {
+        tr.note("proxy_protocol_envelope", &e.summary());
+    }
     let mut sent = 0u64;
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
@@ -566,7 +588,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
             break;
         }
         let outs = drain(&mut dtls, &mut next_timeout);
-        send_all(&sock, &outs).await;
+        send_all(&sock, &outs, &mut env).await;
         sent += 1;
         tr.data(Direction::Sent, "datagram", d);
         record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
@@ -601,7 +623,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                     break;
                 }
                 let outs = drain(&mut dtls, &mut next_timeout);
-                send_all(&sock, &outs).await;
+                send_all(&sock, &outs, &mut env).await;
                 record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
             }
             Ev::Recv(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
@@ -615,7 +637,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                 next_timeout = None;
                 if dtls.handle_timeout(Instant::now()).is_ok() {
                     let outs = drain(&mut dtls, &mut next_timeout);
-                    send_all(&sock, &outs).await;
+                    send_all(&sock, &outs, &mut env).await;
                     record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
                 }
             }
@@ -638,7 +660,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
                 if let Some(p) = payload {
                     if dtls.send_application_data(&p).is_ok() {
                         let outs = drain(&mut dtls, &mut next_timeout);
-                        send_all(&sock, &outs).await;
+                        send_all(&sock, &outs, &mut env).await;
                         sent += 1;
                         tr.data(Direction::Sent, "datagram", &p);
                         record_inbound(&outs, &mut tr, &mut received, &mut peer_closed, &mut facts);
@@ -659,7 +681,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     // Graceful close_notify (not retransmitted per RFC 6347 §4.2.7).
     if !peer_closed && dtls.close().is_ok() {
         let outs = drain(&mut dtls, &mut next_timeout);
-        send_all(&sock, &outs).await;
+        send_all(&sock, &outs, &mut env).await;
         tr.control(Direction::Sent, "close_notify", b"");
     }
     if facts.repeated_datagrams > 0 {
@@ -685,6 +707,9 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     obs.failure = failure;
     obs.bytes.request_body = tr.sent_bytes();
     obs.bytes.response_body_wire = Some(tr.received_bytes());
+    if let (Some(e), Some(c)) = (&env, obs.connection.as_mut()) {
+        c.proxy_header = Some(e.observation());
+    }
     let obs = finish_attempt(rec, obs, events);
     let ps = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: plan.response_window_ms, masque: None };
     SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, Some(tr.finish()), ps, facts)

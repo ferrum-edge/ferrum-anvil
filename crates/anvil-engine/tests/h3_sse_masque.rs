@@ -235,6 +235,7 @@ fn masque_spec(target: &str, proxy: &str, template: Option<&str>, mode: MasqueDa
         datagrams: datagrams.iter().map(|d| StreamPayload { data: d.to_string(), encoding: PayloadEncoding::Text }).collect(),
         response_window_ms: 400,
         max_datagrams: 100,
+        proxy_protocol: None,
         masque: Some(MasqueSpec {
             proxy_url: proxy.to_string(),
             uri_template: template.unwrap_or(MASQUE_DEFAULT_TEMPLATE).to_string(),

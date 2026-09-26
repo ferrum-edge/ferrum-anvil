@@ -318,6 +318,7 @@ async fn websocket_and_raw_tcp_run_over_the_hbone_tunnel() {
     let mut s = RequestSpec::http("GET", &format!("tcp://{}", tcp.addr));
     s.protocol = Protocol::Tcp;
     s.tcp = Some(TcpSpec {
+        proxy_protocol: None,
         tls: false,
         framing: TcpFraming::None,
         payloads: vec![StreamPayload { data: "ping-through-hbone".into(), encoding: PayloadEncoding::Text }],

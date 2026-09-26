@@ -240,6 +240,11 @@
           "const": "proxy_tunnel"
         },
         {
+          "description": "PROXY protocol header written at the head of the connection (after\nconnect, before TLS).",
+          "type": "string",
+          "const": "proxy_protocol_header"
+        },
+        {
           "description": "Protocol handshake above TLS (HTTP/2 preface, WebSocket upgrade, ...).",
           "type": "string",
           "const": "protocol_handshake"

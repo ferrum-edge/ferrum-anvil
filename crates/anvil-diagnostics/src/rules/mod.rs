@@ -9,6 +9,7 @@ mod http_status;
 mod mesh;
 mod network;
 mod protocols;
+mod proxy_header;
 mod tls;
 mod transport;
 
@@ -184,6 +185,12 @@ pub const RULES: &[RuleMeta] = &[
         fixtures: &["MASQUE-003", "MASQUE-004", "MASQUE-005", "MASQUE-006", "MASQUE-007"],
     },
     RuleMeta {
+        id: "protocol.proxy_header",
+        version: 1,
+        summary: "PROXY protocol header / datagram envelope: closes and silence after (or without) the header, never a confirmed cause",
+        fixtures: &["PP-001", "PP-003", "PP-004", "PP-006", "PP-008", "PP-011"],
+    },
+    RuleMeta {
         id: "protocol.http3",
         version: 1,
         summary: "HTTP/3 forced mode and fallback reporting",
@@ -207,5 +214,7 @@ pub fn run_all(ctx: &Ctx<'_>, drafts: &mut Vec<Draft>, warnings: &mut Vec<Outcom
     ferrum_rules::rules(ctx, drafts, warnings);
     application::rules(ctx, drafts, warnings);
     protocols::rules(ctx, drafts, warnings);
+    proxy_header::rules(ctx, drafts);
     auth_session::rules(ctx, drafts);
+    proxy_header::annotate(ctx, drafts);
 }

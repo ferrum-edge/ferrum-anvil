@@ -232,6 +232,7 @@ export type Phase =
   | "queue"
   | "connect"
   | "proxy_tunnel"
+  | "proxy_protocol_header"
   | "protocol_handshake"
   | "session";
 /**
@@ -411,6 +412,27 @@ export type TlsVerification =
   | {
       result: "not_reached";
     };
+/**
+ * Which framing was written.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProxyHeaderFormat".
+ */
+export type ProxyHeaderFormat = ("v1" | "v2") | "raw" | "v2_datagram";
+/**
+ * PROXY v2 command.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProxyCommand".
+ */
+export type ProxyCommand = "proxy" | "local";
+/**
+ * Where a declared address came from.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "AddressOrigin".
+ */
+export type AddressOrigin = "socket" | "configured";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "TunnelKind".
@@ -884,6 +906,14 @@ export type WsMessage =
       kind: "close";
     };
 /**
+ * The receive boundary a datagram listener authenticates envelopes at. Part
+ * of the listener identity bound into every authentication tag.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DatagramListenerProtocol".
+ */
+export type DatagramListenerProtocol = "udp" | "dtls";
+/**
  * Bounded, throttled live events of a collection run. The final
  * [`RunReport`] is authoritative; events may be coalesced under load
  * (failure events are preferred, `run_started` / `run_finished` are never
@@ -1222,6 +1252,20 @@ export type TcpFraming = "none" | "newline_delimited" | "length_prefixed_u16" | 
  * via the `definition` "PayloadEncoding".
  */
 export type PayloadEncoding = "text" | "hex" | "base64";
+/**
+ * Which connection header Anvil writes.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProxyHeaderVersion".
+ */
+export type ProxyHeaderVersion = "v1" | "v2" | "raw";
+/**
+ * Address family of the header.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProxyAddressFamily".
+ */
+export type ProxyAddressFamily = "auto" | "unspec";
 /**
  * How HTTP Datagrams (RFC 9297) are carried through the tunnel.
  *
@@ -1740,6 +1784,10 @@ export interface ConnectionObservation {
    */
   prior_requests: number;
   /**
+   * PROXY protocol header / datagram envelope Anvil sent, when enabled.
+   */
+  proxy_header?: ProxyHeaderObservation | null;
+  /**
    * The mesh tunnel (HBONE) the connection runs through. Its outer phases,
    * mTLS identities and `CONNECT` status are kept here, separate from the
    * inner connection's phases and TLS (`tls` above is the inner TLS with
@@ -1822,6 +1870,61 @@ export interface CertificateSummary {
   sha256_fingerprint: string;
   is_ca: boolean;
   key_algorithm: string;
+}
+/**
+ * Exactly what PROXY protocol framing Anvil sent. Secrets never appear: the
+ * authentication tag bytes are elided from `hex`, and any header bytes that
+ * contain a redacted value are replaced as a whole.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProxyHeaderObservation".
+ */
+export interface ProxyHeaderObservation {
+  format: ProxyHeaderFormat;
+  command?: ProxyCommand | null;
+  /**
+   * `TCP4`, `TCP6`, `UNKNOWN`, `AF_INET`, `AF_INET6`, `AF_UNSPEC`, or `unparsed`.
+   */
+  family: string;
+  source?: string | null;
+  source_origin?: AddressOrigin | null;
+  destination?: string | null;
+  destination_origin?: AddressOrigin | null;
+  /**
+   * Header length in bytes (for envelopes: of the first datagram's envelope).
+   */
+  length: number;
+  /**
+   * The header bytes as hex (for envelopes: the first datagram's envelope
+   * with the 32 tag bytes replaced by `‹tag›`).
+   */
+  hex: string;
+  /**
+   * The v1 line without CRLF.
+   */
+  text?: string | null;
+  /**
+   * TLVs after the address block, summarized.
+   */
+  tlvs?: string[];
+  /**
+   * The bytes satisfy the PROXY protocol specification as Anvil checks it.
+   */
+  well_formed: boolean;
+  problem?: string | null;
+  authenticated?: boolean;
+  /**
+   * `udp|dtls <bind address>:<port>` the tags were bound to.
+   */
+  listener_binding?: string | null;
+  sender_id?: number | null;
+  epoch?: number | null;
+  first_sequence?: number | null;
+  last_sequence?: number | null;
+  /**
+   * Datagrams sent with the envelope (handshake records included for DTLS).
+   */
+  datagrams?: number;
 }
 /**
  * Evidence for the outer tunnel leg (Anvil ↔ tunnel endpoint).
@@ -3176,6 +3279,10 @@ export interface TcpSpec {
    * Stop reading after this many frames (0 = until idle/close/max bytes).
    */
   expect_frames?: number;
+  /**
+   * PROXY protocol header written after TCP connect, before any TLS.
+   */
+  proxy_protocol?: ProxyHeaderSpec | null;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -3184,6 +3291,63 @@ export interface TcpSpec {
 export interface StreamPayload {
   data: string;
   encoding?: "text" | "hex" | "base64";
+}
+/**
+ * PROXY protocol connection header for a TCP / TCP+TLS session.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProxyHeaderSpec".
+ */
+export interface ProxyHeaderSpec {
+  /**
+   * Which connection header Anvil writes.
+   */
+  version?: "v1" | "v2" | "raw";
+  /**
+   * PROXY v2 command.
+   */
+  command?: "proxy" | "local";
+  /**
+   * Address family of the header.
+   */
+  family?: "auto" | "unspec";
+  /**
+   * Declared source `ip:port` (the "original client"). Default: the real
+   * local socket address of this connection.
+   */
+  source?: string | null;
+  /**
+   * Declared destination `ip:port`. Default: the real remote socket address.
+   */
+  destination?: string | null;
+  /**
+   * v2 `PP2_TYPE_AUTHORITY` (0x02) TLV, e.g. the SNI host name.
+   */
+  authority?: string | null;
+  /**
+   * Further v2 TLVs, written in order after `authority`.
+   */
+  tlvs?: ProxyTlv[];
+  /**
+   * `version: raw` only: the exact header bytes as hex.
+   */
+  raw_hex?: string | null;
+}
+/**
+ * One PROXY v2 TLV (type-length-value) after the address block.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProxyTlv".
+ */
+export interface ProxyTlv {
+  /**
+   * TLV type code (for example `0x02` authority, `0x05` unique id).
+   */
+  tlv_type: number;
+  /**
+   * Value bytes as hex.
+   */
+  value_hex: string;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -3201,11 +3365,107 @@ export interface UdpSpec {
   response_window_ms?: number;
   max_datagrams?: number;
   /**
+   * PROXY v2 `DGRAM` envelope prepended to every datagram (DTLS: outside
+   * the DTLS records, handshake included).
+   */
+  proxy_protocol?: DatagramEnvelopeSpec | null;
+  /**
    * Send the datagrams through an HTTP/3 MASQUE proxy (RFC 9298
    * CONNECT-UDP) instead of directly. The request URL stays the UDP
    * target (`udp://host:port`); the proxy only relays. `None` = direct.
    */
   masque?: MasqueSpec | null;
+}
+/**
+ * PROXY v2 `DGRAM` envelope prepended to every UDP/DTLS datagram.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DatagramEnvelopeSpec".
+ */
+export interface DatagramEnvelopeSpec {
+  /**
+   * PROXY v2 command.
+   */
+  command?: "proxy" | "local";
+  /**
+   * Address family of the header.
+   */
+  family?: "auto" | "unspec";
+  /**
+   * Declared source `ip:port`. Default: the real local socket address.
+   */
+  source?: string | null;
+  /**
+   * Declared destination `ip:port`. Default: the real remote socket address.
+   */
+  destination?: string | null;
+  /**
+   * Authenticated envelope (tag + freshness). `None` = the unauthenticated
+   * address-trust posture.
+   */
+  authentication?: DatagramAuthSpec | null;
+}
+/**
+ * Authentication and freshness for the PROXY v2 `DGRAM` envelope.
+ *
+ * The tag is HMAC-SHA-256 keyed with the shared secret over the receiving
+ * listener's canonical identity plus the whole datagram (tag elided). The
+ * listener identity is **(receive protocol, bind address, port)** exactly as
+ * the gateway bound it: a wildcard bind (`0.0.0.0`, `::`) and a specific
+ * address are different identities.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DatagramAuthSpec".
+ */
+export interface DatagramAuthSpec {
+  /**
+   * A field that may carry sensitive material (password, token, key).
+   *
+   * * `Template` — text that may contain `{{variable}}` references. A literal
+   *   (non-variable) template in a sensitive field is itself treated as
+   *   sensitive: it is masked in the UI, redacted in history, and replaced by a
+   *   placeholder in safe-share exports.
+   * * `Secret` — a vault reference.
+   */
+  secret:
+    | {
+        value: string;
+        kind: "template";
+      }
+    | {
+        secret: SecretRef;
+        kind: "secret";
+      };
+  /**
+   * Default: `dtls` when Anvil speaks DTLS, otherwise `udp`.
+   */
+  listener_protocol?: DatagramListenerProtocol | null;
+  /**
+   * The listener's bind address (Ferrum: `FERRUM_STREAM_PROXY_BIND_ADDRESS`, default `0.0.0.0`).
+   */
+  listener_bind_address?: string;
+  /**
+   * The listener's port. Default: the destination port.
+   */
+  listener_port?: number | null;
+  /**
+   * Stable sender id (the balancer's own identity).
+   */
+  sender_id?: number;
+  /**
+   * Sender epoch. Default: Unix milliseconds when the run starts, so every
+   * run is a new epoch. Pin it to replay a sequence on purpose.
+   */
+  epoch?: number | null;
+  /**
+   * Sequence of the first datagram; each further datagram adds one.
+   */
+  first_sequence?: number;
+  /**
+   * Added to the send-time timestamp (negative = in the past), to test the
+   * receiver's freshness horizon.
+   */
+  timestamp_offset_ms?: number;
 }
 /**
  * RFC 9298 UDP proxying over HTTP/3 ("MASQUE" CONNECT-UDP). Belongs to

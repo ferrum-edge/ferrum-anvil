@@ -22,6 +22,7 @@ pub mod hbone;
 pub mod http;
 pub mod masque;
 pub mod net;
+pub mod proxy_protocol;
 pub mod rawtcp;
 pub mod recorder;
 pub mod session;

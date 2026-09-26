@@ -37,7 +37,14 @@ and worded from `catalog/diagnostics/findings.en.json`. Each finding has:
   headers, body, timing, local config);
 - **does not prove**, **alternatives**, **remediation** and **confirm with**.
 
-The catalog has 139 finding codes (catalog version shown in the app status
+Wording shared by several findings lives in the catalog's `fragments` map. A
+rule attaches a fragment to a finding's alternatives only when the evidence
+calls for it (for example "the listener may require a PROXY protocol header"
+on a TCP close when Anvil sent no header; see
+[protocols.md §3.10](protocols.md)); a fragment never changes a finding's
+confidence.
+
+The catalog has 147 finding codes (catalog version shown in the app status
 bar and in every record):
 
 | Family | Codes | Examples |

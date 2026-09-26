@@ -26,6 +26,9 @@ pub enum Phase {
     Connect,
     /// Proxy tunnel establishment (HTTP CONNECT / SOCKS handshake).
     ProxyTunnel,
+    /// PROXY protocol header written at the head of the connection (after
+    /// connect, before TLS).
+    ProxyProtocolHeader,
     TlsHandshake,
     QuicHandshake,
     DtlsHandshake,
@@ -467,6 +470,9 @@ pub struct ConnectionObservation {
     pub tls: Option<TlsObservation>,
     /// Requests previously served on this connection (0 = fresh).
     pub prior_requests: u32,
+    /// PROXY protocol header / datagram envelope Anvil sent, when enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_header: Option<crate::proxy_protocol::ProxyHeaderObservation>,
     /// The mesh tunnel (HBONE) the connection runs through. Its outer phases,
     /// mTLS identities and `CONNECT` status are kept here, separate from the
     /// inner connection's phases and TLS (`tls` above is the inner TLS with

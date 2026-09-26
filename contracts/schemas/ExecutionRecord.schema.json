@@ -997,6 +997,17 @@
           "format": "uint32",
           "minimum": 0
         },
+        "proxy_header": {
+          "description": "PROXY protocol header / datagram envelope Anvil sent, when enabled.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyHeaderObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "tunnel": {
           "description": "The mesh tunnel (HBONE) the connection runs through. Its outer phases,\nmTLS identities and `CONNECT` status are kept here, separate from the\ninner connection's phases and TLS (`tls` above is the inner TLS with\nthe destination).",
           "anyOf": [
@@ -1334,6 +1345,202 @@
         "key_algorithm"
       ]
     },
+    "ProxyHeaderObservation": {
+      "description": "Exactly what PROXY protocol framing Anvil sent. Secrets never appear: the\nauthentication tag bytes are elided from `hex`, and any header bytes that\ncontain a redacted value are replaced as a whole.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/ProxyHeaderFormat"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "family": {
+          "description": "`TCP4`, `TCP6`, `UNKNOWN`, `AF_INET`, `AF_INET6`, `AF_UNSPEC`, or `unparsed`.",
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AddressOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination_origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AddressOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "length": {
+          "description": "Header length in bytes (for envelopes: of the first datagram's envelope).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hex": {
+          "description": "The header bytes as hex (for envelopes: the first datagram's envelope\nwith the 32 tag bytes replaced by `‹tag›`).",
+          "type": "string"
+        },
+        "text": {
+          "description": "The v1 line without CRLF.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tlvs": {
+          "description": "TLVs after the address block, summarized.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "well_formed": {
+          "description": "The bytes satisfy the PROXY protocol specification as Anvil checks it.",
+          "type": "boolean"
+        },
+        "problem": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authenticated": {
+          "type": "boolean"
+        },
+        "listener_binding": {
+          "description": "`udp|dtls <bind address>:<port>` the tags were bound to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sender_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "epoch": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "first_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "last_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "datagrams": {
+          "description": "Datagrams sent with the envelope (handshake records included for DTLS).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "format",
+        "family",
+        "length",
+        "hex",
+        "well_formed"
+      ]
+    },
+    "ProxyHeaderFormat": {
+      "description": "Which framing was written.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "v1",
+            "v2"
+          ]
+        },
+        {
+          "description": "User-supplied bytes.",
+          "type": "string",
+          "const": "raw"
+        },
+        {
+          "description": "PROXY v2 `DGRAM` envelope on every datagram.",
+          "type": "string",
+          "const": "v2_datagram"
+        }
+      ]
+    },
+    "ProxyCommand": {
+      "description": "PROXY v2 command.",
+      "oneOf": [
+        {
+          "description": "A relayed connection: the address block names the original client.",
+          "type": "string",
+          "const": "proxy"
+        },
+        {
+          "description": "The balancer speaking for itself (health checks): no addresses are\nsent and the receiver keeps the socket peer as the client.",
+          "type": "string",
+          "const": "local"
+        }
+      ]
+    },
+    "AddressOrigin": {
+      "description": "Where a declared address came from.",
+      "oneOf": [
+        {
+          "description": "The real socket address of this connection.",
+          "type": "string",
+          "const": "socket"
+        },
+        {
+          "description": "Set explicitly in the request.",
+          "type": "string",
+          "const": "configured"
+        }
+      ]
+    },
     "TunnelObservation": {
       "description": "Evidence for the outer tunnel leg (Anvil ↔ tunnel endpoint).",
       "type": "object",
@@ -1533,6 +1740,11 @@
           "description": "Proxy tunnel establishment (HTTP CONNECT / SOCKS handshake).",
           "type": "string",
           "const": "proxy_tunnel"
+        },
+        {
+          "description": "PROXY protocol header written at the head of the connection (after\nconnect, before TLS).",
+          "type": "string",
+          "const": "proxy_protocol_header"
         },
         {
           "description": "Protocol handshake above TLS (HTTP/2 preface, WebSocket upgrade, ...).",

@@ -79,6 +79,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
             connect_attempts: vec![],
             via_proxy: Some(ENDPOINT.into()),
             tls: None,
+            proxy_header: None,
             prior_requests: 0,
             tunnel: Some(TunnelObservation {
                 kind: TunnelKind::Hbone,

@@ -19,7 +19,7 @@ function grpcSpec(grpc: Partial<GrpcSpec>): RequestSpec {
 describe("gRPC protocol editor", () => {
   it("offers native gRPC and gRPC-Web wire formats, defaulting to native for older records", () => {
     const set = vi.fn();
-    render(<ProtocolEditor spec={grpcSpec({})} set={set} />);
+    render(<ProtocolEditor spec={grpcSpec({})} set={set} workspaceId="ws" />);
     const wire = screen.getByLabelText("Wire format") as HTMLSelectElement;
     expect(wire.value).toBe("grpc");
     expect(Array.from(wire.options).map((o) => o.value)).toEqual(["grpc", "grpc_web", "grpc_web_text"]);
@@ -28,7 +28,7 @@ describe("gRPC protocol editor", () => {
   });
 
   it("explains the HTTP versions for native gRPC, including HTTP/3 and the HTTP/1.1 refusal", () => {
-    render(<ProtocolEditor spec={grpcSpec({ wire: "grpc" })} set={() => {}} />);
+    render(<ProtocolEditor spec={grpcSpec({ wire: "grpc" })} set={() => {}} workspaceId="ws" />);
     const help = screen.getByTestId("grpc-http-version-help").textContent ?? "";
     expect(help).toContain("HTTP/3");
     expect(help).toContain("HTTP/1.1-only is refused");
@@ -36,7 +36,7 @@ describe("gRPC protocol editor", () => {
   });
 
   it("explains gRPC-Web versions and framing, and hides the native-only h2c switch", () => {
-    render(<ProtocolEditor spec={grpcSpec({ wire: "grpc_web_text" })} set={() => {}} />);
+    render(<ProtocolEditor spec={grpcSpec({ wire: "grpc_web_text" })} set={() => {}} workspaceId="ws" />);
     const help = screen.getByTestId("grpc-http-version-help").textContent ?? "";
     expect(help).toContain("HTTP/1.1");
     expect(help).toContain("trailer frame");
@@ -48,7 +48,7 @@ describe("gRPC protocol editor", () => {
   });
 
   it("warns that gRPC-Web cannot carry client or bidirectional streaming", () => {
-    render(<ProtocolEditor spec={grpcSpec({ wire: "grpc_web", mode: "bidirectional" })} set={() => {}} />);
+    render(<ProtocolEditor spec={grpcSpec({ wire: "grpc_web", mode: "bidirectional" })} set={() => {}} workspaceId="ws" />);
     expect(screen.getByRole("alert").textContent).toContain("only unary and server-streaming");
   });
 });

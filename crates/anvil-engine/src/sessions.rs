@@ -619,6 +619,7 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
         read_idle_ms: 2_000,
         max_read_bytes: 1024 * 1024,
         expect_frames: 0,
+        proxy_protocol: None,
     });
     let mut b = base(engine, ctx, r, &["tcp", "tls"])?;
     no_auth(&b.prep, "TCP")?;
@@ -635,7 +636,12 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     for (i, p) in payloads.iter().enumerate() {
         rawtcp::encode_frame(spec.framing, p).map_err(|e| local(FailureKind::BodySerialization, e, &format!("tcp.payloads[{i}]")))?;
     }
+    let proxy_header =
+        spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some())).transpose()?;
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
+    if let Some(p) = &spec.proxy_protocol {
+        b.inferred.push(crate::proxy_protocol::header_note(p));
+    }
     let scheme = if use_tls { "tls" } else { "tcp" };
     let url = format!("{scheme}://{}", target.authority);
     let plan = rawtcp::TcpPlan {
@@ -655,6 +661,7 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
         display_url: b.redactor.url(&url),
         transcript: TranscriptLimits::default(),
         redact: Some(redact_fn(&b.redactor)),
+        proxy_header,
     };
     let body = concat(&payloads);
     let mut p = finish_prep(b, Plan::Tcp(plan), scheme.to_ascii_uppercase(), url, vec![], body, vec![]);
@@ -669,6 +676,7 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
         response_window_ms: 1_000,
         max_datagrams: 1_000,
         masque: None,
+        proxy_protocol: None,
     });
     let mut b = base(engine, ctx, r, &["udp", "dtls"])?;
     if spec.masque.is_none() {
@@ -685,8 +693,16 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     let target = b.prep.http.target.clone();
     let use_dtls = target.scheme == "dtls" || spec.dtls;
     let datagrams = decode_payloads(r, &spec.datagrams, "udp.datagrams")?;
+    let envelope =
+        spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::envelope_plan(p, ctx, r, &mut b.redactor, use_dtls)).transpose()?;
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(m) = &spec.masque {
+        if envelope.is_some() {
+            return Err(unsupported(
+                "a PROXY protocol datagram envelope cannot be combined with a CONNECT-UDP (MASQUE) tunnel: the envelope is for a UDP listener behind a load balancer, and the proxy would relay it to the target as payload",
+                "udp.proxy_protocol",
+            ));
+        }
         if use_dtls {
             return Err(unsupported(
                 "DTLS inside a CONNECT-UDP tunnel is not implemented: the MASQUE proxy relays UDP payloads, and Anvil does not run a DTLS handshake through it. Use udp:// through the proxy, or dtls:// without it",
@@ -694,6 +710,9 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
             ));
         }
         return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams).await;
+    }
+    if let Some(e) = &envelope {
+        b.inferred.push(crate::proxy_protocol::envelope_note(e));
     }
     let scheme = if use_dtls { "dtls" } else { "udp" };
     let url = format!("{scheme}://{}", target.authority);
@@ -720,6 +739,7 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
             display_url,
             transcript: TranscriptLimits::default(),
             redact: Some(redact_fn(&b.redactor)),
+            envelope,
         })
     } else {
         Plan::Udp(udp::UdpPlan {
@@ -733,6 +753,7 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
             display_url,
             transcript: TranscriptLimits::default(),
             redact: Some(redact_fn(&b.redactor)),
+            envelope,
         })
     };
     let body = concat(&datagrams);

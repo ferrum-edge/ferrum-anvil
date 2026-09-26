@@ -33,6 +33,7 @@ base64.workspace = true
 anyhow.workspace = true
 url.workspace = true
 sha2.workspace = true
+hmac.workspace = true
 prost.workspace = true
 protox.workspace = true
 prost-reflect.workspace = true

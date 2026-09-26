@@ -1341,6 +1341,7 @@ async fn proto_019_tcp_half_close_keeps_the_reply() {
         read_idle_ms: 2_000,
         max_read_bytes: 4096,
         expect_frames: 0,
+        proxy_protocol: None,
     });
     let o = run(&e, &ctx(s)).await;
     match &o.record.outcome.protocol_status {
@@ -1378,6 +1379,7 @@ async fn tcp_framing_presets_hex_payloads_and_tls_with_client_identity() {
         read_idle_ms: 3_000,
         max_read_bytes: 4096,
         expect_frames: 2,
+        proxy_protocol: None,
     });
     let mut c = ctx(s);
     with_profile(&mut c, profile(&[&pki().ca.cert], Some(&pki().client_a), true));
@@ -1402,6 +1404,7 @@ async fn tcp_framing_presets_hex_payloads_and_tls_with_client_identity() {
         read_idle_ms: 500,
         max_read_bytes: 4096,
         expect_frames: 0,
+        proxy_protocol: None,
     });
     let o = run(&e, &ctx(s)).await;
     assert_eq!(last(&o).failure.as_ref().unwrap().kind, FailureKind::BodySerialization);
@@ -1422,6 +1425,7 @@ async fn tcp_interactive_session_and_auth_is_rejected_before_traffic() {
         read_idle_ms: 200,
         max_read_bytes: 4096,
         expect_frames: 0,
+        proxy_protocol: None,
     });
     let h = e.open_session(ctx(s.clone()), EventCtx::none()).await;
     h.send(SessionCommand::SendText { text: "ping-1".into() }).await.unwrap();
@@ -1449,6 +1453,7 @@ fn udp_spec(datagrams: &[&str], window_ms: u64) -> UdpSpec {
         response_window_ms: window_ms,
         max_datagrams: 100,
         masque: None,
+        proxy_protocol: None,
     }
 }
 
@@ -1557,6 +1562,7 @@ fn dtls_ctx(url: &str, p: TlsProfile) -> ExecutionContext {
         response_window_ms: 500,
         max_datagrams: 10,
         masque: None,
+        proxy_protocol: None,
     });
     let mut c = ctx(s);
     with_profile(&mut c, p);

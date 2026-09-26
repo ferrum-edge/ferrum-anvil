@@ -209,6 +209,7 @@ fn tcp_ctx(env: &Env, url: &str, framing: TcpFraming, payloads: &[&str], half_cl
         read_idle_ms: 2_000,
         max_read_bytes: 64 * 1024,
         expect_frames,
+        proxy_protocol: None,
     });
     ctx_with(env, s, if tls { lab_root(env) } else { None }, None)
 }
@@ -221,6 +222,7 @@ fn udp_ctx(env: &Env, url: &str, datagrams: &[&str], window_ms: u64, root_pem: O
         response_window_ms: window_ms,
         max_datagrams: 100,
         masque: None,
+        proxy_protocol: None,
     });
     ctx_with(env, s, root_pem, None)
 }

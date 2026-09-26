@@ -175,6 +175,7 @@ async fn proto_020_udp_icmp_unreachable_is_recorded_as_such() {
         display_url: format!("udp://127.0.0.1:{port}"),
         transcript: TranscriptLimits::default(),
         redact: None,
+        envelope: None,
     };
     let out = udp::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     assert!(matches!(out.status, ProtocolStatus::Udp { datagrams_received: 0, .. }));
@@ -214,6 +215,7 @@ async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
         display_url: format!("dtls://{}", silent.addr),
         transcript: TranscriptLimits::default(),
         redact: None,
+        envelope: None,
     };
     let out = dtls::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     let f = out.attempts[0].observation.failure.as_ref().unwrap();

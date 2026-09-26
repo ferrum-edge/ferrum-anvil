@@ -264,6 +264,7 @@ fn tcp_tls(env: &Env, client: &Client<'_>, payload: &str) -> ExecutionContext {
         read_idle_ms: 1_000,
         max_read_bytes: 64 * 1024,
         expect_frames: 0,
+        proxy_protocol: None,
     });
     base(env, s, Some(client), "lab-tls")
 }
@@ -277,6 +278,7 @@ fn dtls(env: &Env, client: &Client<'_>, payload: &str) -> ExecutionContext {
         response_window_ms: 1_000,
         max_datagrams: 10,
         masque: None,
+        proxy_protocol: None,
     });
     base(env, s, Some(client), "lab-tls")
 }

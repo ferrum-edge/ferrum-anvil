@@ -42,6 +42,30 @@ pub struct UdpPlan {
     pub display_url: String,
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
+    /// PROXY v2 `DGRAM` envelope prepended to every datagram.
+    pub envelope: Option<crate::proxy_protocol::EnvelopePlan>,
+}
+
+/// Start the datagram envelope for an open socket (a local, typed refusal
+/// when it cannot be built; nothing has been sent yet).
+pub(crate) fn start_envelope(
+    plan: Option<&crate::proxy_protocol::EnvelopePlan>,
+    sock: &UdpSocket,
+    remote: SocketAddr,
+    redact: Option<RedactFn>,
+) -> Result<Option<crate::proxy_protocol::Enveloper>, TransportFailure> {
+    let Some(p) = plan else { return Ok(None) };
+    p.start(sock.local_addr().ok(), Some(remote))
+        .map(|e| Some(e.with_redact(redact)))
+        .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::BodySerialization, e).with_field("udp.proxy_protocol"))
+}
+
+/// The bytes put on the wire for one datagram.
+pub(crate) fn wire<'a>(env: &mut Option<crate::proxy_protocol::Enveloper>, d: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+    match env {
+        Some(e) => std::borrow::Cow::Owned(e.wrap(d)),
+        None => std::borrow::Cow::Borrowed(d),
+    }
 }
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
@@ -114,7 +138,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
     let mut obs = new_attempt(0, AttemptReason::Initial, "UDP", &plan.display_url);
     let mut facts = SessionFacts::default();
-    let (sock, _addr, cobs) = match open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "udp").await {
+    let (sock, addr, cobs) = match open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "udp").await {
         Ok(x) => x,
         Err((f, cobs)) => {
             obs.connection = Some(cobs);
@@ -127,7 +151,21 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
         }
     };
     obs.connection = Some(cobs);
+    let mut env = match start_envelope(plan.envelope.as_ref(), &sock, addr, plan.redact.clone()) {
+        Ok(e) => e,
+        Err(f) => {
+            return SessionOutput::single(
+                fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
+                None,
+                ProtocolStatus::None,
+                facts,
+            );
+        }
+    };
     let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
+    if let Some(e) = &env {
+        tr.note("proxy_protocol_envelope", &e.summary());
+    }
     let s_idx = rec.start(Phase::Session);
     let mut sent = 0u64;
     let mut received = 0u64;
@@ -136,7 +174,8 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
     for d in &plan.datagrams {
-        match sock.send(d).await {
+        let w = wire(&mut env, d);
+        match sock.send(&w).await {
             Ok(_) => {
                 sent += 1;
                 tr.data(Direction::Sent, "datagram", d);
@@ -145,7 +184,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                 facts.icmp_port_unreachable = true;
                 tr.note("icmp_port_unreachable", "the OS reported ICMP port unreachable for the destination before this datagram was sent");
                 // The error is consumed by this call; retry once so the datagram is still offered.
-                if sock.send(d).await.is_ok() {
+                if sock.send(&w).await.is_ok() {
                     sent += 1;
                     tr.data(Direction::Sent, "datagram", d);
                 }
@@ -217,7 +256,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
             }
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    if sock.send(text.as_bytes()).await.is_ok() {
+                    if sock.send(&wire(&mut env, text.as_bytes())).await.is_ok() {
                         sent += 1;
                         tr.data(Direction::Sent, "datagram", text.as_bytes());
                     }
@@ -225,7 +264,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                     Ok(b) => {
-                        if sock.send(&b).await.is_ok() {
+                        if sock.send(&wire(&mut env, &b)).await.is_ok() {
                             sent += 1;
                             tr.data(Direction::Sent, "datagram", &b);
                         }
@@ -271,6 +310,9 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     obs.failure = failure;
     obs.bytes.request_body = tr.sent_bytes();
     obs.bytes.response_body_wire = Some(tr.received_bytes());
+    if let (Some(e), Some(c)) = (&env, obs.connection.as_mut()) {
+        c.proxy_header = Some(e.observation());
+    }
     let obs = finish_attempt(rec, obs, events);
     let ps = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: plan.response_window_ms, masque: None };
     SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, Some(tr.finish()), ps, facts)

@@ -1,0 +1,36 @@
+# Ferrum Anvil failure lab - profile "proxyproto", untrusted-peer instance
+# (ferrum-edge v0.9.7, file mode). Gateway: HTTP 127.0.0.1:18984, admin 18992,
+# streams [::1]:18921 (tcp) and [::1]:18923 (udp). Fixtures: 127.0.0.1:19921, 19923 — they must
+# never see traffic: the trust gate refuses the ::1 peer first.
+version: "1"
+
+resource_counts:
+  proxies: 2
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  - id: pp-v6-tcp
+    listen_port: 18921
+    backend_scheme: tcp
+    backend_host: 127.0.0.1
+    backend_port: 19921
+    stream_proxy_protocol: true
+    backend_proxy_protocol: v2
+    tcp_idle_timeout_seconds: 30
+
+  - id: pp-v6-udp
+    listen_port: 18923
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19923
+    stream_proxy_protocol: true
+    udp_idle_timeout_seconds: 2
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}

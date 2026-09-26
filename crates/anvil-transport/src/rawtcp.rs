@@ -50,6 +50,8 @@ pub struct TcpPlan {
     pub display_url: String,
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
+    /// PROXY protocol header written after connect, before TLS.
+    pub proxy_header: Option<crate::proxy_protocol::HeaderPlan>,
 }
 
 /// Apply a framing preset to one payload.
@@ -192,24 +194,38 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
 
     let alpn: Vec<&str> = plan.alpn.iter().map(|s| s.as_str()).collect();
     let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn: &alpn, http_forward_via_proxy: false };
-    let est = match establish_guarded(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline).await {
-        Ok(e) => e,
-        Err((f, o)) => {
-            obs.connection = o;
-            return SessionOutput::single(
-                fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
-                None,
-                ProtocolStatus::None,
-                facts,
-            );
-        }
-    };
+    let redact = plan.redact.clone();
+    let header = plan.proxy_header.as_ref().map(|p| crate::connector::PreTlsHeader {
+        plan: p,
+        redact: redact.as_deref().map(|r| r as &(dyn Fn(&str) -> String + Send + Sync)),
+    });
+    let est =
+        match establish_guarded_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline, header)
+            .await
+        {
+            Ok(e) => e,
+            Err((f, o)) => {
+                obs.connection = o;
+                return SessionOutput::single(
+                    fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
+                    None,
+                    ProtocolStatus::None,
+                    facts,
+                );
+            }
+        };
     let mut cobs = est.observation;
     cobs.protocol = Some(if plan.tls.is_some() { "tls".into() } else { "tcp".into() });
     obs.connection = Some(cobs);
     let stats = est.stats;
     let (mut rd, mut wr) = tokio::io::split(est.io);
     let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
+    if let Some(h) = obs.connection.as_ref().and_then(|c| c.proxy_header.as_ref()) {
+        match hex::decode(&h.hex) {
+            Ok(bytes) => tr.control(Direction::Sent, "proxy_protocol_header", &bytes),
+            Err(_) => tr.note("proxy_protocol_header", &crate::proxy_protocol::header_summary(h)),
+        }
+    }
     let s_idx = rec.start(Phase::Session);
     let kind = if plan.framing == TcpFraming::None { "bytes" } else { "frame" };
     let mut bytes_sent = 0u64;
