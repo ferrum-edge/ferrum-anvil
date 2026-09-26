@@ -158,8 +158,8 @@ pub(crate) fn cache_key(ctx: &ExecutionContext, resolved: &OAuthResolved) -> Tok
 /// caller's wait at once. A client-credentials request is abandoned with it
 /// and caches nothing. A refresh keeps running on the token cache's own task
 /// (the issuer may already have rotated the refresh token) and its token is
-/// cached for the next send, unless a lock, sign-out or newer sign-in came
-/// first.
+/// cached for the next send, unless a newer sign-in came first; a lock or a
+/// sign-out aborts it.
 pub(crate) async fn acquire(
     engine: &Engine,
     ctx: &ExecutionContext,
@@ -309,7 +309,7 @@ pub async fn redeem_authorization_code(
     let summary = TokenSummary::of(&t);
     if !engine.tokens.store_sign_in(&target.key, generation, t) {
         return Err(AuthError::Canceled(
-            "the OAuth token cache was cleared (lock or sign-out) during this sign-in; the redeemed token was discarded".into(),
+            "a lock, a sign-out or another sign-in superseded this sign-in while it was in flight; the redeemed token was discarded".into(),
         ));
     }
     Ok(summary)

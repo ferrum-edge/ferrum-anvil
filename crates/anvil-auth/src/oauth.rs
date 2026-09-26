@@ -16,10 +16,15 @@
 //!   token-cache identity;
 //! * clearing the cache (lock), forgetting a token (sign-out) or storing a
 //!   new sign-in starts a new generation: an acquisition, refresh or code
-//!   redemption that began before it can no longer store or return its token;
+//!   redemption that began before it can no longer store or return its token.
+//!   When a newer sign-in is all that happened, the send is served with that
+//!   sign-in's token instead of failing;
 //! * a refresh runs to completion on a task of its own, so a caller that
 //!   stops waiting never abandons a refresh token the issuer may already have
-//!   rotated.
+//!   rotated. A lock or a sign-out of its key aborts it;
+//! * every cached token expires: a response without `expires_in` is given
+//!   [`DEFAULT_EXPIRES_IN_SECS`], and an `expires_in` that is not a whole
+//!   number of seconds up to [`MAX_EXPIRES_IN_SECS`] fails the acquisition.
 
 use crate::AuthError;
 use anvil_domain::Id;
@@ -33,9 +38,19 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::OwnedMutexGuard;
+use tokio::task::AbortHandle;
 use zeroize::Zeroizing;
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Lifetime given to a token whose response has no `expires_in` (RFC 6749
+/// §5.1 makes it optional): the token is refreshed or acquired again after
+/// an hour instead of being reused for the rest of the session.
+pub const DEFAULT_EXPIRES_IN_SECS: u64 = 3600;
+
+/// Longest `expires_in` accepted (ten years). A token response claiming a
+/// longer lifetime is rejected as malformed.
+pub const MAX_EXPIRES_IN_SECS: u64 = 10 * 365 * 24 * 60 * 60;
 
 /// Minimal HTTP capability for token endpoints, implemented by the engine.
 pub trait TokenHttp: Send + Sync {
@@ -113,13 +128,18 @@ impl TokenKey {
 pub struct CachedToken {
     pub access_token: Zeroizing<String>,
     pub token_type: String,
+    /// Always set for a token-endpoint response (see
+    /// [`DEFAULT_EXPIRES_IN_SECS`]). A token without one is never reused.
     pub expires_at: Option<DateTime<Utc>>,
     pub refresh_token: Option<Zeroizing<String>>,
 }
 
 impl CachedToken {
+    /// Whether the token is still valid `skew` seconds from `now`. A token
+    /// without an expiry, or whose expiry cannot be compared, is not.
     pub fn usable(&self, now: DateTime<Utc>, skew: i64) -> bool {
-        self.expires_at.map(|e| now + Duration::seconds(skew) < e).unwrap_or(true)
+        let horizon = Duration::try_seconds(skew).and_then(|skew| now.checked_add_signed(skew));
+        matches!((horizon, self.expires_at), (Some(h), Some(e)) if h < e)
     }
 }
 
@@ -130,7 +150,8 @@ impl CachedToken {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Generation {
     cache: u64,
-    key: u64,
+    removal: u64,
+    sign_in: u64,
 }
 
 #[derive(Default)]
@@ -138,19 +159,46 @@ struct CacheState {
     entries: HashMap<TokenKey, CachedToken>,
     /// Bumped by [`TokenCache::clear`].
     generation: u64,
-    /// Bumped per key by [`TokenCache::remove`] and
-    /// [`TokenCache::store_sign_in`].
-    key_generations: HashMap<TokenKey, u64>,
+    /// Bumped per key by [`TokenCache::remove`].
+    removals: HashMap<TokenKey, u64>,
+    /// Bumped per key by [`TokenCache::store_sign_in`]. Counted apart from
+    /// removals: a send overtaken only by a sign-in can use its token.
+    sign_ins: HashMap<TokenKey, u64>,
+    /// The refresh in flight per key (with its sequence number), aborted by
+    /// [`TokenCache::clear`] and [`TokenCache::remove`].
+    refreshes: HashMap<TokenKey, (u64, AbortHandle)>,
+    next_refresh: u64,
 }
 
 impl CacheState {
     fn generation(&self, key: &TokenKey) -> Generation {
-        Generation { cache: self.generation, key: self.key_generations.get(key).copied().unwrap_or(0) }
+        let of = |counts: &HashMap<TokenKey, u64>| counts.get(key).copied().unwrap_or(0);
+        Generation { cache: self.generation, removal: of(&self.removals), sign_in: of(&self.sign_ins) }
     }
 
-    fn bump(&mut self, key: &TokenKey) {
-        let g = self.key_generations.entry(key.clone()).or_insert(0);
+    fn bump(counts: &mut HashMap<TokenKey, u64>, key: &TokenKey) {
+        let g = counts.entry(key.clone()).or_insert(0);
         *g = g.wrapping_add(1);
+    }
+
+    /// The answer of an acquisition that started in `generation` and can no
+    /// longer store its own token. When a newer sign-in is all that happened
+    /// since, a valid token is cached and the caller gets it; after a lock or
+    /// a sign-out it gets [`superseded`].
+    fn superseded_answer(&self, key: &TokenKey, generation: Generation, skew: i64) -> Result<CachedToken, AuthError> {
+        let current = self.generation(key);
+        let only_signed_in = current.cache == generation.cache && current.removal == generation.removal;
+        match self.entries.get(key) {
+            Some(t) if only_signed_in && t.usable(Utc::now(), skew) => Ok(t.clone()),
+            _ => Err(superseded()),
+        }
+    }
+
+    /// Forget the registration of refresh `id` once it is over.
+    fn refresh_finished(&mut self, key: &TokenKey, id: u64) {
+        if self.refreshes.get(key).is_some_and(|(current, _)| *current == id) {
+            self.refreshes.remove(key);
+        }
     }
 
     fn insert_if_current(&mut self, key: &TokenKey, generation: Generation, t: CachedToken) -> bool {
@@ -239,26 +287,33 @@ impl TokenCache {
         if st.generation(key) != generation {
             return false;
         }
-        st.bump(key);
+        CacheState::bump(&mut st.sign_ins, key);
         st.entries.insert(key.clone(), t);
         true
     }
 
-    /// Forget one cached token (explicit sign-out) and invalidate every
-    /// acquisition of that key still in flight. Returns whether an entry
-    /// existed.
+    /// Forget one cached token (explicit sign-out), invalidate every
+    /// acquisition of that key still in flight and abort its refresh.
+    /// Returns whether an entry existed.
     pub fn remove(&self, key: &TokenKey) -> bool {
         let mut st = self.state.lock();
-        st.bump(key);
+        CacheState::bump(&mut st.removals, key);
+        if let Some((_, refresh)) = st.refreshes.remove(key) {
+            refresh.abort();
+        }
         st.entries.remove(key).is_some()
     }
 
-    /// Forget every cached token (lock) and invalidate every acquisition
-    /// still in flight.
+    /// Forget every cached token (lock), invalidate every acquisition still
+    /// in flight and abort every refresh.
     pub fn clear(&self) {
         let mut st = self.state.lock();
         st.entries.clear();
-        st.key_generations.clear();
+        st.removals.clear();
+        st.sign_ins.clear();
+        for (_, (_, refresh)) in st.refreshes.drain() {
+            refresh.abort();
+        }
         st.generation = st.generation.wrapping_add(1);
     }
 
@@ -277,15 +332,17 @@ impl TokenCache {
     ///   [`AuthError::InteractionRequired`]. No other grant is ever tried.
     ///
     /// The call belongs to the cache generation current when it starts. If
-    /// the cache is cleared, `key` is forgotten or a new sign-in is stored
-    /// before it finishes, it fails with [`AuthError::Canceled`] and caches
-    /// nothing.
+    /// the cache is cleared or `key` is forgotten before it finishes, it
+    /// fails with [`AuthError::Canceled`] and caches nothing. If a new
+    /// sign-in is stored meanwhile, what it obtained is discarded as well,
+    /// and it answers with the sign-in's token while that is usable.
     ///
     /// Dropping the future abandons a client-credentials request. A refresh
     /// runs on a task of its own that keeps the single-flight lock until the
     /// issuer answers and stores the result (under the same generation
     /// rule), so a caller that stops waiting cannot lose a refresh token the
-    /// issuer rotated, and nobody retries the old one meanwhile.
+    /// issuer rotated, and nobody retries the old one meanwhile. A lock or a
+    /// sign-out of `key` aborts that task.
     pub async fn get_or_acquire(
         &self,
         key: &TokenKey,
@@ -303,7 +360,7 @@ impl TokenCache {
         // One read: the generation check and the entry it guards.
         let (current, cached) = self.snapshot(key);
         if current != generation {
-            return Err(superseded());
+            return self.state.lock().superseded_answer(key, generation, cfg.refresh_skew_secs);
         }
         // Another caller may have refreshed while we waited.
         if let Some(t) = &cached
@@ -325,14 +382,16 @@ impl TokenCache {
             None => single_flight,
         };
         let t = client_credentials(cfg, http).await?;
-        if !self.insert_if_current(key, generation, t.clone()) {
-            return Err(superseded());
+        let mut st = self.state.lock();
+        if !st.insert_if_current(key, generation, t.clone()) {
+            return st.superseded_answer(key, generation, cfg.refresh_skew_secs);
         }
         Ok(t)
     }
 
     /// Run a refresh on its own task, which holds `single_flight` and stores
-    /// the refreshed token (or forgets a rejected refresh token) itself.
+    /// the refreshed token (or forgets a rejected refresh token) itself. The
+    /// task is registered under `key` so a lock or a sign-out aborts it.
     async fn refresh_detached(
         &self,
         key: &TokenKey,
@@ -345,37 +404,57 @@ impl TokenCache {
         let mut form = refresh_form(&rt);
         let basic = client_auth(cfg, &mut form);
         let request = http.post_form(&cfg.token_url, form, basic);
-        let (state, key, grant) = (self.state.clone(), key.clone(), cfg.grant);
-        let task = tokio::spawn(async move {
-            let answer = match request.await {
-                Ok((status, body)) => parse_token_response(status, &body),
-                Err(e) => Err(TokenFailure::Transport(e)),
-            };
-            // `single_flight` is released only when this task ends, after the
-            // outcome is stored: a waiter never refreshes with the old token.
-            match answer {
-                // RFC 6749 §6: when no new refresh token is issued the old one stays valid.
-                Ok(mut t) => {
-                    if t.refresh_token.is_none() {
-                        t.refresh_token = Some(rt);
+        let (state, task_key, grant, skew) = (self.state.clone(), key.clone(), cfg.grant, cfg.refresh_skew_secs);
+        // Spawned and registered under the state lock: the task cannot finish
+        // before it is registered, and a lock or a sign-out from now on
+        // aborts it.
+        let task = {
+            let mut st = self.state.lock();
+            st.next_refresh = st.next_refresh.wrapping_add(1);
+            let id = st.next_refresh;
+            let task = tokio::spawn(async move {
+                let key = task_key;
+                let answer = match request.await {
+                    Ok((status, body)) => parse_token_response(status, &body),
+                    Err(e) => Err(TokenFailure::Transport(e)),
+                };
+                state.lock().refresh_finished(&key, id);
+                // `single_flight` is released only when this task ends, after the
+                // outcome is stored: a waiter never refreshes with the old token.
+                match answer {
+                    // RFC 6749 §6: when no new refresh token is issued the old one stays valid.
+                    Ok(mut t) => {
+                        if t.refresh_token.is_none() {
+                            t.refresh_token = Some(rt);
+                        }
+                        let mut st = state.lock();
+                        let stored = st.insert_if_current(&key, generation, t.clone());
+                        Refreshed::Done(if stored { Ok(t) } else { st.superseded_answer(&key, generation, skew) })
                     }
-                    let stored = state.lock().insert_if_current(&key, generation, t.clone());
-                    Refreshed::Done(if stored { Ok(t) } else { Err(superseded()) })
+                    Err(_) if grant == OAuthGrant::ClientCredentials => Refreshed::Fallback(single_flight),
+                    Err(TokenFailure::Rejected { error, .. }) if error == "invalid_grant" => {
+                        // Expired or revoked refresh token: forget it so the next
+                        // send does not retry it, and ask for a new sign-in.
+                        state.lock().forget_rejected_refresh(&key, generation, &rt);
+                        Refreshed::Done(Err(AuthError::InteractionRequired(interaction_message(grant, Some(&error)))))
+                    }
+                    // Issuer unreachable or failing: keep the refresh token for a
+                    // later attempt and report the dependency failure.
+                    Err(other) => Refreshed::Done(Err(other.into())),
                 }
-                Err(_) if grant == OAuthGrant::ClientCredentials => Refreshed::Fallback(single_flight),
-                Err(TokenFailure::Rejected { error, .. }) if error == "invalid_grant" => {
-                    // Expired or revoked refresh token: forget it so the next
-                    // send does not retry it, and ask for a new sign-in.
-                    state.lock().forget_rejected_refresh(&key, generation, &rt);
-                    Refreshed::Done(Err(AuthError::InteractionRequired(interaction_message(grant, Some(&error)))))
-                }
-                // Issuer unreachable or failing: keep the refresh token for a
-                // later attempt and report the dependency failure.
-                Err(other) => Refreshed::Done(Err(other.into())),
+            });
+            if st.generation(key) == generation {
+                st.refreshes.insert(key.clone(), (id, task.abort_handle()));
+            } else {
+                // Superseded before it started: nothing is sent.
+                task.abort();
             }
-        });
+            task
+        };
         match task.await {
             Ok(r) => r,
+            // Aborted by a lock or a sign-out of this key.
+            Err(e) if e.is_cancelled() => Refreshed::Done(Err(superseded())),
             Err(e) => Refreshed::Done(Err(AuthError::Acquisition(format!("the token refresh ended unexpectedly: {e}")))),
         }
     }
@@ -458,13 +537,31 @@ fn parse_token_response(status: u16, body: &[u8]) -> Result<CachedToken, TokenFa
         .get("access_token")
         .and_then(|t| t.as_str())
         .ok_or_else(|| TokenFailure::Malformed("token response has no access_token".into()))?;
-    let expires_at = v.get("expires_in").and_then(|e| e.as_i64()).map(|s| Utc::now() + Duration::seconds(s));
+    let expires_at = expiry(v.get("expires_in"), Utc::now())?;
     Ok(CachedToken {
         access_token: Zeroizing::new(access.to_string()),
         token_type: v.get("token_type").and_then(|t| t.as_str()).unwrap_or("Bearer").to_string(),
-        expires_at,
+        expires_at: Some(expires_at),
         refresh_token: v.get("refresh_token").and_then(|t| t.as_str()).map(|s| Zeroizing::new(s.to_string())),
     })
+}
+
+/// When a token issued at `now` expires. An omitted (or null) `expires_in`
+/// gets [`DEFAULT_EXPIRES_IN_SECS`]; a present one must be a whole number of
+/// seconds up to [`MAX_EXPIRES_IN_SECS`], as a JSON number or a decimal
+/// string (some issuers send `"3600"`). Anything else is malformed, never a
+/// token without an expiry.
+fn expiry(expires_in: Option<&serde_json::Value>, now: DateTime<Utc>) -> Result<DateTime<Utc>, TokenFailure> {
+    let secs = match expires_in {
+        None | Some(serde_json::Value::Null) => Some(DEFAULT_EXPIRES_IN_SECS),
+        Some(serde_json::Value::Number(n)) => n.as_u64(),
+        Some(serde_json::Value::String(s)) if s.bytes().all(|b| b.is_ascii_digit()) => s.parse().ok(),
+        Some(_) => None,
+    };
+    secs.filter(|s| *s <= MAX_EXPIRES_IN_SECS)
+        .and_then(|s| Duration::try_seconds(s as i64))
+        .and_then(|d| now.checked_add_signed(d))
+        .ok_or_else(|| TokenFailure::Malformed("token response has an invalid expires_in (whole seconds, up to ten years)".into()))
 }
 
 fn client_auth(cfg: &OAuthResolved, form: &mut Vec<(String, String)>) -> Option<(String, String)> {

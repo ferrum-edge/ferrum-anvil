@@ -44,6 +44,13 @@ errors), the send fails with `local.auth_preparation_failed` and the refresh
 token is kept for a later attempt (matrix AUTH-015). Client-credentials profiles
 behave as before. WebSocket, gRPC, SSE, TCP and UDP sessions behave the same way.
 
+Every cached token expires. A token response without `expires_in` (or with
+`null`) is treated as valid for one hour. An `expires_in` that is not a whole
+number of seconds up to ten years (a JSON number, or a decimal string such as
+`"3600"`) fails the acquisition with `local.auth_preparation_failed`, and nothing
+is cached. A refresh answered that way keeps the refresh token for a later
+attempt.
+
 Tokens are cached per **token identity**: the workspace isolation, token URL,
 authorization URL (interactive grants; its query, such as an organization,
 connection or identity-provider hint, included), client id,
@@ -64,9 +71,11 @@ may already have rotated the refresh token), and its token is cached for the
 next send; sends that arrive meanwhile wait for it rather than presenting the
 old refresh token again. Locking (which clears the token cache) or signing out
 of a profile invalidates every acquisition, refresh and code redemption still
-in flight for it, and a completed sign-in invalidates every acquisition and
-refresh that began before it: a token that arrives afterwards is discarded,
-never cached and never sent, and that send ends as `canceled`.
+in flight for it, and aborts its refresh: a token that arrives afterwards is
+discarded, never cached and never sent, and that send ends as `canceled`. A
+completed sign-in also invalidates every acquisition and refresh that began
+before it, and their tokens are discarded the same way. Sends waiting on them
+use the new sign-in's token instead of ending as `canceled`.
 
 ### The sign-in flow (RFC 8252 native app, RFC 7636 S256)
 
@@ -313,7 +322,8 @@ The webview only ever sees `IdentitySummary`.
 | Area | Tests | Matrix |
 |---|---|---|
 | Token cache: no client-credentials fallback, refresh, `invalid_grant`, issuer outage, single-flight | `crates/anvil-auth/src/oauth.rs` | AUTH-014, AUTH-015 |
-| Token identity (grant, audience, authorization URL, token-cache id, …); lock, sign-out and a newer sign-in win over in-flight acquisitions and refreshes; dropped client-credentials acquisitions cache nothing; a refresh whose caller stops waiting still stores the rotated refresh token | `crates/anvil-auth/tests/oauth_cache.rs` | — |
+| Token identity (grant, audience, authorization URL, token-cache id, …); lock, sign-out and a newer sign-in win over in-flight acquisitions and refreshes; a send overtaken only by a sign-in uses its token; lock and sign-out abort a refresh; dropped client-credentials acquisitions cache nothing; a refresh whose caller stops waiting still stores the rotated refresh token | `crates/anvil-auth/tests/oauth_cache.rs` | — |
+| Token lifetime: omitted `expires_in` gets the one-hour default; unrepresentable, negative, fractional and wrongly typed values fail the acquisition without a panic and are never cached | `crates/anvil-auth/tests/oauth_expiry.rs` | — |
 | Grant, audience and authorization-URL switches through `Engine::execute`; cancel and lock while the issuer holds its answer; a send canceled during a refresh keeps the rotated refresh token | `crates/anvil-engine/tests/oauth_cache.rs` | — |
 | Callback binding, duplicates, bounded error codes | `crates/anvil-auth/src/oauth.rs` | AUTH-012, AUTH-013 |
 | Full browser round trip, then a real API request with the token; forged state; stray paths and DNS-rebinding Host; timeout; cancellation; denial; refresh; revoked refresh; issuer outage and recovery; the exchange uses the request's TLS profile; refused configurations; WebSocket parity | `crates/anvil-identity/tests/api_oauth.rs` | AUTH-011–015 |
