@@ -47,10 +47,17 @@ commands return `LOCKED` until unlock.
 - **Lost machine / reinstall:** restore a **full backup** (encrypted with an
   export passphrase) into a new profile. It does not need the original OS
   keychain or data key.
-- **Bad import:** every import takes a checkpoint first (`VACUUM INTO`) and runs
-  in one transaction; a failure rolls back that transaction only. Changes saved
-  meanwhile by other commands are kept, so the checkpoint is not restored
-  automatically; it stays on disk for a manual restore.
+- **Bad import:** every import takes a checkpoint (`VACUUM INTO`) before its
+  transaction, and a failure rolls back that transaction only. Not every write
+  is inside it:
+  - A bundle import writes its objects and secrets in the transaction; its
+    attachments are stored after the commit and stay if storing one fails.
+  - A spec import writes its folders, requests, environments and source record
+    in the transaction; the new workspace or root folder and the stored
+    original file are written before it and stay if the transaction fails.
+
+  Changes saved meanwhile by other commands are kept, so the checkpoint is not
+  restored automatically; it stays on disk for a manual restore.
 
 ## Export and import
 

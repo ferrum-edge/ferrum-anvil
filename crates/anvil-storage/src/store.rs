@@ -46,6 +46,10 @@ pub enum StoreError {
     /// nested transactions are not supported.
     #[error("store called directly from inside its own transaction; use the transaction handle")]
     TransactionActive,
+    /// A transaction could not be rolled back, so the connection is still
+    /// inside it. Nothing further runs on the connection until it has ended.
+    #[error("a store transaction could not be rolled back")]
+    TransactionNotEnded,
     #[error("database: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("serialization: {0}")]
@@ -232,7 +236,11 @@ impl Store {
         if *self.tx_owner.lock() == Some(std::thread::current().id()) {
             return Err(StoreError::TransactionActive);
         }
-        Ok(self.conn.lock())
+        let conn = self.conn.lock();
+        // A transaction still open here was left by a failed rollback and
+        // belongs to no caller: end it rather than run inside it.
+        end_transaction(&conn)?;
+        Ok(conn)
     }
 
     pub fn is_locked(&self) -> bool {
@@ -309,22 +317,9 @@ impl Store {
     }
 
     pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
-        let _ = self.key()?;
+        let key = self.key()?;
         let conn = self.conn()?;
-        let mut st = conn.prepare("SELECT kind,id,workspace_id,parent_id,sort_key,updated_at FROM objects WHERE kind=?1")?;
-        let rows = st
-            .query_map(params![kind], |r| {
-                Ok(RowMeta {
-                    kind: r.get(0)?,
-                    id: r.get(1)?,
-                    workspace_id: r.get(2)?,
-                    parent_id: r.get(3)?,
-                    sort_key: r.get(4)?,
-                    updated_at: r.get(5)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Records { key, conn: &conn }.object_meta(kind)
     }
 
     // ------------------------------------------------------------ secrets
@@ -567,9 +562,18 @@ impl Store {
         // released, and before `tx` so the transaction ends first.
         let _owner = TxOwner::claim(&self.tx_owner);
         let tx = StoreTx { store: self, tx: conn.transaction_with_behavior(TransactionBehavior::Immediate)? };
-        let r = f(&tx)?;
-        tx.tx.commit()?;
-        Ok(r)
+        let r = match f(&tx) {
+            Ok(r) => tx.tx.commit().map(|()| r).map_err(StoreError::from),
+            Err(e) => {
+                // A failed rollback is caught and reported just below.
+                let _ = tx.tx.rollback();
+                Err(e)
+            }
+        };
+        // A failed commit or rollback can leave the transaction open; never
+        // release the connection inside it.
+        end_transaction(&conn)?;
+        r
     }
 
     /// Consistent copy of the database (ciphertext) for restore checkpoints.
@@ -584,7 +588,8 @@ impl Store {
         Ok(path)
     }
 
-    /// Replace the live database with a checkpoint (used after a failed import).
+    /// Replace the live database with a checkpoint, discarding every change
+    /// made since it was taken. Nothing calls this automatically.
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
         let _ = self.key()?;
         let mut conn = self.conn()?;
@@ -593,6 +598,20 @@ impl Store {
         backup.run_to_completion(256, std::time::Duration::from_millis(0), None)?;
         Ok(())
     }
+}
+
+/// Roll back any transaction still open on `conn` and confirm it ended, so a
+/// connection is never handed on inside a transaction.
+fn end_transaction(conn: &Connection) -> Result<()> {
+    if conn.is_autocommit() {
+        return Ok(());
+    }
+    let r = conn.execute_batch("ROLLBACK");
+    if conn.is_autocommit() {
+        return Ok(());
+    }
+    r?;
+    Err(StoreError::TransactionNotEnded)
 }
 
 /// Marks the current thread as the transaction owner until dropped. Claimed
@@ -647,6 +666,10 @@ impl StoreTx<'_> {
 
     pub fn delete(&self, kind: &str, id: &Id) -> Result<bool> {
         self.records()?.delete(kind, id)
+    }
+
+    pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
+        self.records()?.object_meta(kind)
     }
 
     pub fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
@@ -728,6 +751,23 @@ impl Records<'_> {
         Ok(self.conn.execute("DELETE FROM objects WHERE kind=?1 AND id=?2", params![kind, id.to_string()])? > 0)
     }
 
+    fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
+        let mut st = self.conn.prepare("SELECT kind,id,workspace_id,parent_id,sort_key,updated_at FROM objects WHERE kind=?1")?;
+        let rows = st
+            .query_map(params![kind], |r| {
+                Ok(RowMeta {
+                    kind: r.get(0)?,
+                    id: r.get(1)?,
+                    workspace_id: r.get(2)?,
+                    parent_id: r.get(3)?,
+                    sort_key: r.get(4)?,
+                    updated_at: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
         let payload = Zeroizing::new(serde_json::to_vec(&serde_json::json!({"label": label, "value": value}))?);
         let id_s = id.to_string();
@@ -741,7 +781,8 @@ impl Records<'_> {
 
     fn get_secret(&self, id: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
         let id_s = id.to_string();
-        let env: Option<Vec<u8>> = self.conn.query_row("SELECT payload FROM secrets WHERE id=?1", params![id_s], |r| r.get(0)).optional()?;
+        let env: Option<Vec<u8>> =
+            self.conn.query_row("SELECT payload FROM secrets WHERE id=?1", params![id_s], |r| r.get(0)).optional()?;
         let Some(env) = env else { return Ok(None) };
         let pt = crypto::open(&self.key, &aad("secrets", "secret", &id_s), &env).map_err(|_| StoreError::Integrity)?;
         let v: serde_json::Value = serde_json::from_slice(&pt)?;

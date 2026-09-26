@@ -3,9 +3,10 @@
 //! reading its uncommitted rows, or being committed or rolled back with it.
 
 use anvil_domain::Id;
-use anvil_storage::store::StoreError;
+use anvil_storage::store::{DB_FILE, StoreError};
 use anvil_storage::{KdfParams, Key, Store, kind, vault};
 use serde_json::{Value, json};
+use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -28,6 +29,14 @@ fn name(store: &Store, id: &Id) -> Option<String> {
 
 fn injected() -> StoreError {
     StoreError::NotFound("injected failure".into())
+}
+
+/// The store's connection holds no transaction: another connection can take
+/// the database write lock at once.
+fn assert_no_open_transaction(dir: &Path) {
+    let other = rusqlite::Connection::open(dir.join(DB_FILE)).unwrap();
+    other.busy_timeout(Duration::ZERO).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").expect("the store's connection was left inside a transaction");
 }
 
 #[test]
@@ -184,4 +193,31 @@ fn locking_mid_transaction_fails_its_remaining_writes() {
     assert!(matches!(r, Err(StoreError::Locked)));
     store.unlock(dek).unwrap();
     assert_eq!(name(&store, &id), None, "the locked transaction rolled back");
+}
+
+#[test]
+fn every_transaction_ends_before_the_connection_is_released() {
+    let (dir, store, _dek) = open();
+    let id = Id::new();
+
+    let r: Result<(), StoreError> = store.atomically(|tx| {
+        tx.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "failed"}))?;
+        Err(injected())
+    });
+    assert!(matches!(r, Err(StoreError::NotFound(_))), "the closure's own error is returned");
+    assert_no_open_transaction(dir.path());
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.atomically(|tx| -> Result<(), StoreError> {
+            tx.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "panicked"}))?;
+            panic!("injected panic");
+        })
+    }));
+    assert!(panicked.is_err());
+    assert_no_open_transaction(dir.path());
+    assert_eq!(name(&store, &id), None);
+
+    store.atomically(|tx| tx.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "committed"}))).unwrap();
+    assert_no_open_transaction(dir.path());
+    assert_eq!(name(&store, &id).as_deref(), Some("committed"));
 }

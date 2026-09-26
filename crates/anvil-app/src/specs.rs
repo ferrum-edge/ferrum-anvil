@@ -80,8 +80,11 @@ impl App {
         })
     }
 
-    /// Persist an import atomically. Imported requests are ordinary saved
-    /// requests (with an import link for reimport diffs); nothing is sent.
+    /// Persist an import. Folders, requests, environments and the source
+    /// record are written in one transaction; the new workspace or root
+    /// folder and the stored original file are written before it and stay if
+    /// it fails. Imported requests are ordinary saved requests (with an
+    /// import link for reimport diffs); nothing is sent.
     pub fn spec_import(&self, bytes: &[u8], file_name: &str, opts: &ImportOptions, target: SpecTarget) -> Result<SpecImported> {
         let mut r = run(bytes, opts)?;
         let (workspace_id, root_folder_id) = match target {

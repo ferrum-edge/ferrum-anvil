@@ -161,16 +161,18 @@ impl App {
     /// Delete a folder, its subfolders and their requests.
     pub fn delete_folder(&self, id: &Id) -> Result<()> {
         let f = self.folder(id)?;
-        let all = self.folders(&f.workspace_id)?;
-        let mut doomed = vec![*id];
-        let mut i = 0;
-        while i < doomed.len() {
-            let cur = doomed[i];
-            doomed.extend(all.iter().filter(|x| x.parent_id == Some(cur)).map(|x| x.meta.id));
-            i += 1;
-        }
-        let reqs = self.requests(&f.workspace_id)?;
+        // Read the tree inside the transaction, so a folder or request created
+        // under a doomed folder meanwhile is deleted with it, not orphaned.
         self.store.atomically(|s| {
+            let all: Vec<Folder> = s.list(kind::FOLDER, Some(&f.workspace_id))?;
+            let mut doomed = vec![*id];
+            let mut i = 0;
+            while i < doomed.len() {
+                let cur = doomed[i];
+                doomed.extend(all.iter().filter(|x| x.parent_id == Some(cur)).map(|x| x.meta.id));
+                i += 1;
+            }
+            let reqs: Vec<RequestDefinition> = s.list(kind::REQUEST, Some(&f.workspace_id))?;
             for r in reqs.iter().filter(|r| r.folder_id.map(|fid| doomed.contains(&fid)).unwrap_or(false)) {
                 s.delete(kind::REQUEST, &r.meta.id)?;
             }
