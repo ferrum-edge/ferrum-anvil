@@ -18,9 +18,9 @@ use anvil_fixtures::dtls::{self as fxdtls, DtlsServerOptions};
 use anvil_fixtures::http as fx;
 use anvil_fixtures::streams::{self, TcpMode};
 use anvil_fixtures::{GroundTruth, GroundTruthLog, LabPki, TlsServerOptions, h3server};
-use anvil_load::report::{check_balance, check_protocol_balance, check_request_balance};
 #[cfg(unix)]
 use anvil_load::LoadController;
+use anvil_load::report::{check_balance, check_protocol_balance, check_request_balance};
 use anvil_load::{Dataset, DatasetFormat, LoadError, LoadJob, LoadRun, RefusalCode, RunOptions, WorkerJob};
 use bytes::Bytes;
 use chrono::Utc;
