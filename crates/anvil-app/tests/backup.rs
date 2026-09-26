@@ -445,6 +445,11 @@ fn authentic_contents_are_still_validated_and_normalised() {
         c.attachments.push(backup::AttachmentRow { sha256: "0".repeat(64), content_b64: "aGVsbG8=".into() });
     });
     assert_refused(&b, &bad_attachment, "an attachment that does not match its hash");
+    let newer_object = resealed(&bytes, |_, c| {
+        let i = obj(c, kind::REQUEST);
+        c.objects[i].value["schema_version"] = json!(anvil_domain::SCHEMA_VERSION + 1);
+    });
+    assert_refused(&b, &newer_object, "an object written by a newer schema");
     assert_refused(&b, &resealed(&bytes, |m, _| m.schema_version += 1), "a newer object schema");
     assert_refused(&b, &resealed(&bytes, |m, _| m.mode = ExportMode::EncryptedTransfer), "a manifest for another mode");
 

@@ -110,9 +110,8 @@ in it can be read or changed without the export passphrase:
   costs, salt or payload) makes the restore fail before anything is parsed or
   written.
 - The Argon2id costs are read before anything can be authenticated, so they
-  are refused, before any derivation runs, unless they are within: memory 8 KiB
-  per lane up to 256 MiB, 1 to 10 passes, 1 to 4 lanes, memory x passes at most
-  1 GiB, and a salt of 8 to 64 bytes. Exports use 64 MiB, 3 passes and 1 lane.
+  are held to the same bounds as a bundle vault's (above) before any
+  derivation runs. Exports use 64 MiB, 3 passes and 1 lane.
 - It carries every row of every stored object kind (workspaces, folders,
   requests and all their revisions, environments, TLS, proxy and gateway
   profiles, datasets, scenarios, load plans, app settings, user profiles,
@@ -127,9 +126,10 @@ in it can be read or changed without the export passphrase:
   object kind that a full backup neither carries nor lists as left out, and
   compares the whole inventory of a restored profile with its source.
 
-Restore is preview-then-apply. Every item is checked against its type and
-against the rest of the backup (ids, owning workspaces, attachment hashes), the
-import trust normalisation above applies, and everything is written in one
+Restore is preview-then-apply. Every item is checked against its schema
+version, its type and the rest of the backup (ids, owning workspaces,
+attachment hashes), the import trust normalisation above applies, and
+everything is written in one
 transaction after a checkpoint. Replace overwrites items that have the same id;
 Merge keeps them, including this profile's settings; Duplicate is refused,
 because a backup restores items under their own ids. Nothing else in the

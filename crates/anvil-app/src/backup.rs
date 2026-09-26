@@ -35,7 +35,7 @@ use anvil_domain::settings::AppSettings;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, UserProfile, Workspace};
 use anvil_portability::PortableGraph;
-use anvil_portability::bundle::{BundleKind, ExportMode, Placeholder};
+use anvil_portability::bundle::{BundleError, BundleKind, ExportMode, MIN_SCHEMA_VERSION, Placeholder};
 use anvil_portability::plan::{ConflictPolicy, ImportPlan};
 use anvil_portability::sanitize::ContentWarning;
 use anvil_storage::crypto::{self, KdfParams};
@@ -58,18 +58,14 @@ const MAX_HEADER_BYTES: usize = 4096;
 /// Largest backup file written or opened.
 pub const MAX_BACKUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MIN_PASSPHRASE_LEN: usize = 8;
-/// Largest Argon2id memory cost (KiB) a backup may ask for.
-pub const MAX_KDF_MEMORY_KIB: u32 = 256 * 1024;
-/// Largest Argon2id pass count a backup may ask for.
-pub const MAX_KDF_ITERATIONS: u32 = 10;
-/// Largest Argon2id lane count a backup may ask for.
-pub const MAX_KDF_PARALLELISM: u32 = 4;
-/// Largest memory x passes product (KiB-passes): 1 GiB in total.
-pub const MAX_KDF_WORK: u64 = 1024 * 1024;
 const SALT_LEN: usize = 16;
 const MIN_SALT_LEN: usize = 8;
 const MAX_SALT_LEN: usize = 64;
 const MAX_LISTED_CONFLICTS: usize = 50;
+
+/// Bounds on the Argon2id costs a backup may name: the same as for bundle
+/// vaults.
+pub use anvil_portability::bundle::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM, MAX_KDF_WORK};
 
 /// Plan labels of the items that are not objects.
 const SECRET: &str = "secret";
@@ -264,24 +260,27 @@ pub fn is_backup(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Refuse Argon2id costs outside the bounds above. A backup's costs are read
-/// before anything can be authenticated, so they are checked before any
-/// derivation runs.
+/// Refuse Argon2id costs outside the bundle-vault bounds. A backup's costs
+/// are read before anything can be authenticated, so they are checked before
+/// any derivation runs.
 pub fn check_kdf(p: &KdfParams) -> std::result::Result<(), BackupError> {
-    let refuse = |why: String| Err(BackupError::UnsupportedKdf(why));
-    if !(1..=MAX_KDF_ITERATIONS).contains(&p.t_cost) {
-        return refuse(format!("{} passes; allowed 1 to {MAX_KDF_ITERATIONS}", p.t_cost));
+    anvil_portability::bundle::check_kdf(p).map_err(|e| match e {
+        BundleError::UnsupportedKdf(why) => BackupError::UnsupportedKdf(why),
+        other => BackupError::UnsupportedKdf(other.to_string()),
+    })
+}
+
+/// Refuse a record whose `schema_version` this build cannot read: serde
+/// would silently drop the fields a newer schema added.
+fn check_record_schema(record: &Value, what: &str, id: &str) -> std::result::Result<(), BackupError> {
+    let Some(v) = record.get("schema_version") else { return Ok(()) };
+    let found = v.as_u64().ok_or_else(|| invalid(format!("{what} {id} has an invalid schema_version")))?;
+    if found > u64::from(anvil_domain::SCHEMA_VERSION) {
+        let (found, supported) = (i64::try_from(found).unwrap_or(i64::MAX), i64::from(anvil_domain::SCHEMA_VERSION));
+        return Err(BackupError::FutureSchema { what: "object schema", found, supported });
     }
-    if !(1..=MAX_KDF_PARALLELISM).contains(&p.p_cost) {
-        return refuse(format!("{} lanes; allowed 1 to {MAX_KDF_PARALLELISM}", p.p_cost));
-    }
-    // Argon2 needs at least 8 KiB per lane.
-    let min_memory = 8 * p.p_cost;
-    if !(min_memory..=MAX_KDF_MEMORY_KIB).contains(&p.m_cost) {
-        return refuse(format!("{} KiB of memory; allowed {min_memory} to {MAX_KDF_MEMORY_KIB} KiB", p.m_cost));
-    }
-    if u64::from(p.m_cost) * u64::from(p.t_cost) > MAX_KDF_WORK {
-        return refuse(format!("{} KiB for {} passes exceeds the budget of {MAX_KDF_WORK} KiB-passes", p.m_cost, p.t_cost));
+    if found < u64::from(MIN_SCHEMA_VERSION) {
+        return Err(invalid(format!("{what} {id} uses schema {found}, which this version cannot read")));
     }
     Ok(())
 }
@@ -364,6 +363,9 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<(Back
     if m.schema_version > anvil_domain::SCHEMA_VERSION {
         let (found, supported) = (i64::from(m.schema_version), i64::from(anvil_domain::SCHEMA_VERSION));
         return Err(BackupError::FutureSchema { what: "object schema", found, supported });
+    }
+    if m.schema_version < MIN_SCHEMA_VERSION {
+        return Err(BackupError::Invalid(format!("schema {} is older than this version can read", m.schema_version)));
     }
     if m.db_schema_version > DB_SCHEMA_VERSION {
         return Err(BackupError::FutureSchema { what: "database schema", found: m.db_schema_version, supported: DB_SCHEMA_VERSION });
@@ -619,6 +621,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
         if !seen.insert((o.kind.as_str(), o.id.as_str())) {
             return Err(invalid(format!("{} {} appears twice", o.kind, o.id)));
         }
+        check_record_schema(&o.value, &o.kind, &o.id)?;
         match o.kind.as_str() {
             kind::WORKSPACE => g.workspaces.push(typed(o, |x: &Workspace| x.meta.id)?),
             kind::FOLDER => g.folders.push(typed(o, |x: &Folder| x.meta.id)?),
@@ -695,6 +698,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     }
     let mut history_ids = HashSet::new();
     for h in &c.history {
+        check_record_schema(&h.record, "history record", &h.id)?;
         let rec: ExecutionRecord = serde_json::from_value(h.record.clone()).map_err(|e| invalid(format!("history record {}: {e}", h.id)))?;
         if rec.id.to_string() != h.id || !history_ids.insert(rec.id) {
             return Err(invalid(format!("history record {} is not unique or holds another record", h.id)));
@@ -708,6 +712,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     }
     let mut report_ids = HashSet::new();
     for v in &c.load_reports {
+        check_record_schema(v, "load report", run_id(v))?;
         let r: LoadReport = serde_json::from_value(v.clone()).map_err(|e| invalid(format!("load report {}: {e}", run_id(v))))?;
         if !report_ids.insert(r.run_id) {
             return Err(invalid(format!("load report {} appears twice", r.run_id)));
