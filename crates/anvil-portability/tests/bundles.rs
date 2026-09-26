@@ -349,7 +349,7 @@ fn data_006_conflict_policies_and_duplicate_remap() {
     let replace = plan::plan(&g, &existing, ConflictPolicy::Replace);
     assert_eq!(replace.to_replace, 2);
     let mut dup = g.clone();
-    plan::remap_all(&mut dup);
+    plan::remap_all(&mut dup).unwrap();
     let new_ids: HashSet<Id> = dup.requests.iter().map(|r| r.meta.id).collect();
     assert!(new_ids.is_disjoint(&existing));
     // References follow the remap.
@@ -360,10 +360,10 @@ fn data_006_conflict_policies_and_duplicate_remap() {
     assert_eq!(dup.object_count(), g.object_count());
 }
 
-#[test]
-fn future_format_is_refused() {
-    let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::ShareSafely, None)).unwrap();
-    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..])).unwrap();
+/// Re-pack a bundle after `edit` has changed its entries, recomputing the
+/// checksums (they detect corruption, not deliberate edits).
+fn repack(bytes: &[u8], edit: impl Fn(&str, &mut Vec<u8>)) -> Vec<u8> {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let mut entries = Vec::new();
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
@@ -372,12 +372,8 @@ fn future_format_is_refused() {
         entries.push((f.name().to_string(), b));
     }
     let mut checks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    for (n, b) in entries.iter_mut() {
-        if n == "manifest.json" {
-            let mut m: serde_json::Value = serde_json::from_slice(b).unwrap();
-            m["format_version"] = 99.into();
-            *b = serde_json::to_vec(&m).unwrap();
-        }
+    for (n, b) in &mut entries {
+        edit(n.as_str(), b);
         if n != "checksums.json" {
             checks.insert(n.clone(), hex_sha(b));
         }
@@ -391,6 +387,232 @@ fn future_format_is_refused() {
             w.write_all(b).unwrap();
         }
     }
-    let fut = w.finish().unwrap().into_inner();
+    w.finish().unwrap().into_inner()
+}
+
+/// Re-pack a bundle after editing one JSON entry.
+fn edit_json(bytes: &[u8], entry: &str, edit: impl Fn(&mut serde_json::Value)) -> Vec<u8> {
+    repack(bytes, |n, b| {
+        if n == entry {
+            let mut v: serde_json::Value = serde_json::from_slice(b).unwrap();
+            edit(&mut v);
+            *b = serde_json::to_vec(&v).unwrap();
+        }
+    })
+}
+
+#[test]
+fn future_format_is_refused() {
+    let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::ShareSafely, None)).unwrap();
+    let fut = edit_json(&bytes, "manifest.json", |m| m["format_version"] = 99.into());
     assert!(matches!(bundle::open(&fut, None), Err(BundleError::FutureFormat { found: 99, .. })));
+}
+
+#[test]
+fn bundles_written_at_a_newer_schema_are_refused() {
+    let supported = anvil_domain::SCHEMA_VERSION;
+    let future = supported + 100;
+    let (bytes, preview) = bundle::write(&sample(), &opts(ExportMode::ShareSafely, None)).unwrap();
+    assert_eq!(preview.manifest.schema_version, supported);
+    bundle::open(&bytes, None).expect("the current schema opens");
+
+    let fut = edit_json(&bytes, "manifest.json", |m| m["schema_version"] = future.into());
+    let e = bundle::open(&fut, None).unwrap_err();
+    assert!(matches!(e, BundleError::FutureSchema { found, supported: s } if found == future && s == supported), "{e}");
+    assert!(e.to_string().contains("newer Anvil"), "{e}");
+
+    // Older than any schema this build can read or migrate.
+    let old = edit_json(&bytes, "manifest.json", |m| m["schema_version"] = 0.into());
+    let e = bundle::open(&old, None).unwrap_err();
+    assert!(matches!(e, BundleError::UnsupportedSchema { found: 0, .. }), "{e}");
+
+    // One object written at a newer schema is enough to refuse the bundle.
+    let obj = edit_json(&bytes, "workspace/objects.json", |o| o["workspaces"][0]["schema_version"] = future.into());
+    let e = bundle::open(&obj, None).unwrap_err();
+    assert!(matches!(e, BundleError::FutureSchema { found, .. } if found == future), "{e}");
+
+    // Encrypted bundles are refused before a passphrase is asked for.
+    let (enc, _) = bundle::write(&sample(), &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    let fut = edit_json(&enc, "manifest.json", |m| m["schema_version"] = future.into());
+    assert!(matches!(bundle::open(&fut, None), Err(BundleError::FutureSchema { .. })));
+    assert!(matches!(bundle::open(&fut, Some("correct horse battery")), Err(BundleError::FutureSchema { .. })));
+}
+
+#[test]
+fn out_of_range_kdf_costs_are_refused_before_deriving() {
+    use bundle::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM};
+    let pass = "correct horse battery";
+    let (bytes, preview) = bundle::write(&sample(), &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    assert!(preview.secrets_included > 0);
+    let with_costs = |m: u32, t: u32, p: u32| {
+        edit_json(&bytes, "manifest.json", move |v| {
+            v["vault"]["kdf"]["m_cost"] = m.into();
+            v["vault"]["kdf"]["t_cost"] = t.into();
+            v["vault"]["kdf"]["p_cost"] = p.into();
+        })
+    };
+    let refused = [
+        (u32::MAX, 1, 1),
+        (MAX_KDF_MEMORY_KIB + 1, 1, 1),
+        (1024, MAX_KDF_ITERATIONS + 1, 1),
+        (1024, u32::MAX, 1),
+        (1024, 1, MAX_KDF_PARALLELISM + 1),
+        (1024, 1, u32::MAX),
+        // Within each bound, but over the memory x passes budget.
+        (MAX_KDF_MEMORY_KIB, 5, 1),
+        (0, 1, 1),
+        (1024, 0, 1),
+        (1024, 1, 0),
+        // Argon2 needs 8 KiB per lane.
+        (31, 1, 4),
+    ];
+    for (m, t, p) in refused {
+        let b = with_costs(m, t, p);
+        // Refused without deriving: the result is not a wrong-passphrase
+        // failure, and no passphrase is needed to get it.
+        let e = bundle::open(&b, Some(pass)).unwrap_err();
+        assert!(matches!(e, BundleError::UnsupportedKdf(_)), "m={m} t={t} p={p}: {e}");
+        assert!(matches!(bundle::open(&b, None), Err(BundleError::UnsupportedKdf(_))), "m={m} t={t} p={p}");
+    }
+    // A salt outside 8..=64 bytes is refused the same way.
+    use base64::Engine;
+    for len in [4, 65, 256] {
+        let salt = base64::engine::general_purpose::STANDARD.encode(vec![7u8; len]);
+        let b = edit_json(&bytes, "manifest.json", move |v| v["vault"]["salt_b64"] = salt.clone().into());
+        assert!(matches!(bundle::open(&b, Some(pass)), Err(BundleError::UnsupportedKdf(_))), "salt of {len} bytes");
+    }
+    // The bounds themselves, the export defaults and the test costs are allowed.
+    for ok in [
+        KdfParams::interactive(),
+        KdfParams::testing(),
+        KdfParams { m_cost: MAX_KDF_MEMORY_KIB, t_cost: 4, p_cost: 1, ..KdfParams::interactive() },
+        KdfParams { m_cost: 1024, t_cost: MAX_KDF_ITERATIONS, p_cost: MAX_KDF_PARALLELISM, ..KdfParams::interactive() },
+        KdfParams { m_cost: 32, t_cost: 1, p_cost: 4, ..KdfParams::interactive() },
+    ] {
+        bundle::check_kdf(&ok).unwrap_or_else(|e| panic!("{ok:?}: {e}"));
+    }
+    // In-range costs other than the ones written still reach the vault (and
+    // fail its authentication, since the key differs).
+    let b = with_costs(2048, 1, 1);
+    assert!(matches!(bundle::open(&b, Some(pass)), Err(BundleError::WrongPassphrase)));
+    // Exports refuse costs they could not open again.
+    let too_costly = KdfParams { m_cost: MAX_KDF_MEMORY_KIB + 1, ..KdfParams::interactive() };
+    let e = bundle::write(&sample(), &ExportOptions { kdf: too_costly, ..opts(ExportMode::EncryptedTransfer, Some(pass)) }).unwrap_err();
+    assert!(matches!(e, BundleError::UnsupportedKdf(_)), "{e}");
+}
+
+fn with_revision(g: &mut PortableGraph) -> RequestRevision {
+    let r = &mut g.requests[0];
+    let rev = RequestRevision {
+        id: Id::new(),
+        request_id: r.meta.id,
+        created_at: chrono::Utc::now(),
+        spec_sha256: "0".repeat(64),
+        spec: r.spec.clone(),
+    };
+    r.revision_id = Some(rev.id);
+    g.revisions.push(rev.clone());
+    rev
+}
+
+#[test]
+fn duplicate_remap_gives_revisions_and_secrets_fresh_identities() {
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    let ws_id = g.workspaces[0].meta.id;
+    let req_id = g.requests[0].meta.id;
+    let secret_id = g.secrets.keys().next().unwrap().clone();
+    // Text that only looks like an id is user data, not a reference.
+    g.requests[0].description = req_id.to_string();
+    g.requests[0].spec.headers.push(KeyValue::new("X-Workspace", ws_id.to_string()));
+
+    let mut dup = g.clone();
+    let map = plan::remap_all(&mut dup).unwrap();
+    let new_ws = dup.workspaces[0].meta.id;
+    assert_ne!(new_ws, ws_id);
+    let copy = dup.requests.iter().find(|r| r.name == "Create order").unwrap();
+    assert_ne!(copy.meta.id, req_id);
+
+    // The revision is a new object that belongs to the copied request.
+    assert_eq!(dup.revisions.len(), 1);
+    let copy_rev = &dup.revisions[0];
+    assert_ne!(copy_rev.id, rev.id, "a copied revision never reuses the source's id");
+    assert_eq!(copy_rev.request_id, copy.meta.id);
+    assert_eq!(copy.revision_id, Some(copy_rev.id));
+    assert_eq!(map.get(&rev.id), Some(&copy_rev.id));
+
+    // The secret gets a new id, the copied workspace owns it, and references follow.
+    assert_eq!(dup.secrets.len(), 1);
+    let (new_secret, value) = dup.secrets.iter().next().unwrap();
+    assert_ne!(*new_secret, secret_id);
+    assert_eq!(value.workspace_id, Some(new_ws.to_string()));
+    assert_eq!(value.value, "VAULT-SECRET-999");
+    let list = dup.requests.iter().find(|r| r.name == "List").unwrap();
+    let AuthConfig::ApiKey { value: SensitiveValue::Secret { secret }, .. } = &list.spec.auth else { panic!("{:?}", list.spec.auth) };
+    assert_eq!(secret.id.to_string(), *new_secret);
+
+    // User text is left alone.
+    assert_eq!(copy.description, req_id.to_string());
+    assert!(copy.spec.headers.iter().any(|h| h.name == "X-Workspace" && h.value == ws_id.to_string()));
+
+    // The remapped graph passes the same validation an opened bundle does.
+    anvil_portability::validate::validate_and_normalize(&mut dup).unwrap();
+}
+
+#[test]
+fn encrypted_bundle_keeps_revisions_and_secret_owners_through_a_round_trip() {
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    let opened = bundle::open(&bytes, Some("correct horse battery")).unwrap();
+    assert_eq!(opened.graph.revisions.len(), 1);
+    assert_eq!(opened.graph.revisions[0].id, rev.id);
+    let ws = g.workspaces[0].meta.id.to_string();
+    assert!(opened.graph.secrets.values().all(|s| s.workspace_id.as_deref() == Some(ws.as_str())));
+}
+
+#[test]
+fn validation_refuses_foreign_secret_owners_and_reused_ids() {
+    use anvil_portability::validate::validate_and_normalize;
+    let invalid = |g: &mut PortableGraph, needle: &str| match validate_and_normalize(g) {
+        Err(BundleError::Invalid(m)) => assert!(m.contains(needle), "{m}"),
+        other => panic!("expected an invalid bundle ({needle}), got {other:?}"),
+    };
+    // A secret owned by a workspace that is not in the bundle.
+    let mut g = sample();
+    g.secrets.values_mut().for_each(|s| s.workspace_id = Some(Id::new().to_string()));
+    invalid(&mut g, "belongs to a workspace that is not in the bundle");
+    let mut g = sample();
+    g.secrets.values_mut().for_each(|s| s.workspace_id = None);
+    invalid(&mut g, "belongs to a workspace that is not in the bundle");
+    // A secret whose id is not an id.
+    let mut g = sample();
+    let v = g.secrets.values().next().unwrap().clone();
+    g.secrets.insert("not-an-id".into(), v);
+    invalid(&mut g, "invalid id");
+    // Two objects with one id.
+    let mut g = sample();
+    g.environments[0].meta.id = g.requests[0].meta.id;
+    invalid(&mut g, "reuses the id");
+    // A revision repeated with different contents.
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    g.revisions.push(RequestRevision { spec_sha256: "1".repeat(64), ..rev.clone() });
+    invalid(&mut g, "appears twice");
+    // A revision that reuses another object's id.
+    let mut g = sample();
+    with_revision(&mut g);
+    g.revisions[0].id = g.folders[0].meta.id;
+    invalid(&mut g, "reuses the id");
+}
+
+#[test]
+fn validation_collapses_repeated_revisions_and_drops_orphans() {
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    g.revisions.push(rev.clone());
+    g.revisions.push(RequestRevision { id: Id::new(), request_id: Id::new(), ..rev.clone() });
+    let warnings = anvil_portability::validate::validate_and_normalize(&mut g).unwrap();
+    assert_eq!(g.revisions, vec![rev]);
+    assert!(warnings.iter().any(|w| w.contains("1 request revision(s)")), "{warnings:?}");
 }

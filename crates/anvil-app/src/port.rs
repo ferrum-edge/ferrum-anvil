@@ -8,7 +8,7 @@ use anvil_portability::plan::{self, ConflictPolicy, ImportPlan};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::{KdfParams, StoreRead, kind};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
@@ -38,6 +38,7 @@ impl App {
             for r in &reqs {
                 if let Some(rid) = r.revision_id
                     && let Ok(rev) = self.revision(&rid)
+                    && rev.request_id == r.meta.id
                 {
                     g.revisions.push(rev);
                 }
@@ -147,7 +148,9 @@ impl App {
             let existing = existing_ids(&s.as_read())?;
             let plan = plan::plan(&g, &existing, policy);
             if policy == ConflictPolicy::Duplicate {
-                plan::remap_all(&mut g);
+                // Fresh ids for every object, revision and secret: the copy
+                // can never overwrite or share anything with its source.
+                plan::remap_all(&mut g)?;
             }
             // A different workspace with the same name would be
             // indistinguishable in the UI; label the incoming copy.
@@ -173,8 +176,12 @@ impl App {
                     s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, r)?;
                 }
             }
+            // Validation guarantees each revision's request is in the bundle.
+            let request_ws: HashMap<Id, Id> = g.requests.iter().map(|q| (q.meta.id, q.workspace_id)).collect();
             for r in &g.revisions {
-                s.put(kind::REVISION, &r.id, None, Some(&r.request_id), 0.0, r)?;
+                if !skip(&r.id) {
+                    s.put(kind::REVISION, &r.id, request_ws.get(&r.request_id), Some(&r.request_id), 0.0, r)?;
+                }
             }
             for e in &g.environments {
                 if !skip(&e.meta.id) {
@@ -208,6 +215,10 @@ impl App {
             }
             for (id, v) in &g.secrets {
                 if let Ok(sid) = id.parse::<Id>() {
+                    if policy == ConflictPolicy::Merge && s.as_read().get_secret(&sid)?.is_some() {
+                        continue;
+                    }
+                    // Owned by a workspace of this import (remapped for Duplicate).
                     let ws = v.workspace_id.as_deref().and_then(|w| w.parse::<Id>().ok());
                     s.put_secret(&sid, ws.as_ref(), &v.label, &v.value)?;
                 }
