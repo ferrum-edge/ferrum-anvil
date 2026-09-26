@@ -251,7 +251,7 @@ impl App {
         if self.is_locked() {
             return Err(AppError::Locked);
         }
-        let ctx = self.build_context(request_id, ws, draft, opts)?;
+        let ctx = self.build_context_off_runtime(request_id, *ws, draft, opts.clone(), cancel).await?;
         let auth = anvil_identity::authorize_api(&self.engine, &ctx, opener, observer, flow, cancel).await?;
         if self.is_locked() {
             let _ = anvil_identity::api_oauth::sign_out(&self.engine, &ctx);

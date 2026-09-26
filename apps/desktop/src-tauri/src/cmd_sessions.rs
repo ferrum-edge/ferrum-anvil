@@ -4,6 +4,7 @@
 
 use crate::commands::{ExecutionView, R, SendInput, body_view, e, id};
 use crate::state::{DesktopState, PendingEntry, cancel_pending};
+use anvil_app::AppError;
 use anvil_app::exec::SendOptions;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_engine::sessions::SessionHandle;
@@ -14,6 +15,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub type SessionSlot = Arc<tokio::sync::Mutex<Option<SessionHandle>>>;
+
+const CANCELED_BEFORE_OPEN: &str = "the session was canceled before it opened";
 
 #[derive(Serialize, Clone)]
 pub struct SessionEnded {
@@ -34,7 +37,7 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
     // registering: only a registered open publishes a session, so none can
     // appear under this id before this one does.
     if st.sessions.lock().contains_key(&execution_id) {
-        return Err(format!("execution {execution_id} is already running"));
+        return Err(format!("attempt {execution_id} is already running"));
     }
     let app = st.app()?;
     let ws = id(&input.workspace_id)?;
@@ -47,7 +50,11 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
         record_history: true,
         ..Default::default()
     };
-    let ctx = app.build_context(rid, &ws, input.spec, &opts).map_err(e)?;
+    // Built on a blocking thread; a cancel meanwhile ends the open at once.
+    let ctx = match app.build_context_off_runtime(rid, ws, input.spec, opts, pending.token()).await {
+        Err(AppError::Canceled) => return Err(CANCELED_BEFORE_OPEN.into()),
+        built => built.map_err(e)?,
+    };
     let h2 = handle.clone();
     let owner = app.clone();
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
@@ -63,7 +70,7 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
         slot
     };
     let Some((slot, canceled)) = pending.open(open, publish).await else {
-        return Err("the session was canceled before it opened".into());
+        return Err(CANCELED_BEFORE_OPEN.into());
     };
     if canceled && let Some(s) = slot.lock().await.as_ref() {
         s.cancel();
@@ -90,7 +97,8 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
                 let out = s.finish().await;
                 // Into the profile the session was opened under, never the
                 // one open now; refused while that profile is locked.
-                let recorded = app.record(&out).map_err(e);
+                let (out, recorded) = app.record_off_runtime(out).await;
+                let recorded = recorded.map_err(e);
                 if st.is_current(&app) {
                     let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
                     let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());

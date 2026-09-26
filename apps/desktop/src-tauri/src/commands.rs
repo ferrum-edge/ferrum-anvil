@@ -46,6 +46,16 @@ pub(crate) fn id(s: &str) -> R<Id> {
     s.parse().map_err(|_| format!("invalid id '{s}'"))
 }
 
+/// Run a command's work with the desktop state on a blocking worker thread.
+/// A synchronous command runs on the UI thread, an async one on an async
+/// runtime worker; neither should derive a key (Argon2id) or wait on the
+/// store, which another command's long transaction (an import, a folder
+/// delete) can hold for a while.
+pub(crate) async fn blocking<T: Send + 'static>(handle: &AppHandle, f: impl FnOnce(&DesktopState) -> R<T> + Send + 'static) -> R<T> {
+    let handle = handle.clone();
+    tauri::async_runtime::spawn_blocking(move || f(&handle.state::<DesktopState>())).await.map_err(|x| x.to_string())?
+}
+
 // ------------------------------------------------------------------ status
 
 #[derive(Serialize)]
@@ -84,56 +94,65 @@ pub struct Created {
     pub recovery_key: Option<String>,
 }
 
+/// The key derivation, and opening and migrating the store, run on a
+/// blocking thread (see [`blocking`]), as for every command below that
+/// derives a key.
 #[tauri::command]
-pub fn profile_create(st: State<'_, DesktopState>, name: String, passphrase: Option<String>, keychain: bool) -> R<Created> {
-    let (summary, key, recovery) = if keychain {
-        let (s, k) = st.profiles.create_keychain(&name).map_err(e)?;
-        (s, k, None)
-    } else {
-        let p = passphrase.ok_or("a passphrase is required")?;
-        let (s, k, r) = st.profiles.create_passphrase(&name, &p, KdfParams::interactive()).map_err(e)?;
-        (s, k, Some(r.to_string()))
-    };
-    let header = anvil_storage::vault::read_header(&summary.dir).map_err(|x| x.to_string())?;
-    let app = App::open(summary.dir.clone(), header, key).map_err(e)?;
-    st.set_app(app);
-    st.touch();
-    Ok(Created { profile_id: summary.profile_id, recovery_key: recovery })
+pub async fn profile_create(handle: AppHandle, name: String, passphrase: Option<String>, keychain: bool) -> R<Created> {
+    blocking(&handle, move |st| {
+        let (summary, key, recovery) = if keychain {
+            let (s, k) = st.profiles.create_keychain(&name).map_err(e)?;
+            (s, k, None)
+        } else {
+            let p = passphrase.ok_or("a passphrase is required")?;
+            let (s, k, r) = st.profiles.create_passphrase(&name, &p, KdfParams::interactive()).map_err(e)?;
+            (s, k, Some(r.to_string()))
+        };
+        let header = anvil_storage::vault::read_header(&summary.dir).map_err(|x| x.to_string())?;
+        let app = App::open(summary.dir.clone(), header, key).map_err(e)?;
+        st.set_app(app);
+        st.touch();
+        Ok(Created { profile_id: summary.profile_id, recovery_key: recovery })
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn profile_unlock(st: State<'_, DesktopState>, profile_id: String, passphrase: Option<String>, recovery_key: Option<String>) -> R<()> {
-    let p = st.profiles.find(&profile_id).map_err(e)?;
-    let how = match (&passphrase, &recovery_key) {
-        (Some(pw), _) => Unlock::Passphrase(pw),
-        (None, Some(rk)) => Unlock::RecoveryKey(rk),
-        (None, None) => Unlock::Keychain,
-    };
-    let (header, key) = anvil_app::profiles::ProfileManager::unlock(&p.dir, how).map_err(e)?;
-    {
-        let g = st.app.read();
-        if let Some(a) = g.as_ref()
-            && a.header.profile_id == header.profile_id
+pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: Option<String>, recovery_key: Option<String>) -> R<()> {
+    blocking(&handle, move |st| {
+        let p = st.profiles.find(&profile_id).map_err(e)?;
+        let how = match (&passphrase, &recovery_key) {
+            (Some(pw), _) => Unlock::Passphrase(pw),
+            (None, Some(rk)) => Unlock::RecoveryKey(rk),
+            (None, None) => Unlock::Keychain,
+        };
+        let (header, key) = anvil_app::profiles::ProfileManager::unlock(&p.dir, how).map_err(e)?;
         {
-            a.unlock(key).map_err(e)?;
-            st.touch();
-            drop(g);
-            st.flush_pending_reports();
-            return Ok(());
+            let g = st.app.read();
+            if let Some(a) = g.as_ref()
+                && a.header.profile_id == header.profile_id
+            {
+                a.unlock(key).map_err(e)?;
+                st.touch();
+                drop(g);
+                st.flush_pending_reports();
+                return Ok(());
+            }
         }
-    }
-    let app = App::open(p.dir, header, key).map_err(e)?;
-    st.set_app(app);
-    st.touch();
-    st.flush_pending_reports();
-    Ok(())
+        let app = App::open(p.dir, header, key).map_err(e)?;
+        st.set_app(app);
+        st.touch();
+        st.flush_pending_reports();
+        Ok(())
+    })
+    .await
 }
 
 /// Re-wrap the data key under a new passphrase (the app must be unlocked;
 /// passphrase profiles only).
 #[tauri::command]
-pub fn profile_change_passphrase(st: State<'_, DesktopState>, new_passphrase: String) -> R<()> {
-    st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)
+pub async fn profile_change_passphrase(handle: AppHandle, new_passphrase: String) -> R<()> {
+    blocking(&handle, move |st| st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)).await
 }
 
 #[derive(Serialize)]
@@ -148,9 +167,12 @@ pub struct Converted {
 /// Protect an OS-keychain profile with a passphrase instead (the app must be
 /// unlocked). Afterwards the keychain no longer opens it.
 #[tauri::command]
-pub fn profile_convert_to_passphrase(st: State<'_, DesktopState>, new_passphrase: String) -> R<Converted> {
-    let c = st.app()?.convert_to_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)?;
-    Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
+pub async fn profile_convert_to_passphrase(handle: AppHandle, new_passphrase: String) -> R<Converted> {
+    blocking(&handle, move |st| {
+        let c = st.app()?.convert_to_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)?;
+        Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -204,9 +226,11 @@ pub fn workspace_save(st: State<'_, DesktopState>, workspace: Workspace) -> R<Wo
     st.app()?.save_workspace(workspace).map_err(e)
 }
 
+/// One transaction over the whole workspace, on a blocking thread (see
+/// [`blocking`]).
 #[tauri::command]
-pub fn workspace_delete(st: State<'_, DesktopState>, workspace_id: String) -> R<()> {
-    st.app()?.delete_workspace(&id(&workspace_id)?).map_err(e)
+pub async fn workspace_delete(handle: AppHandle, workspace_id: String) -> R<()> {
+    blocking(&handle, move |st| st.app()?.delete_workspace(&id(&workspace_id)?).map_err(e)).await
 }
 
 /// Whether a bundle import or backup restore sealed the workspace from this
@@ -259,9 +283,11 @@ pub fn folder_move(st: State<'_, DesktopState>, folder_id: String, parent_id: Op
     st.app()?.move_folder(&id(&folder_id)?, parent, sort_key).map_err(e)
 }
 
+/// One transaction over the whole subtree, on a blocking thread (see
+/// [`blocking`]).
 #[tauri::command]
-pub fn folder_delete(st: State<'_, DesktopState>, folder_id: String) -> R<()> {
-    st.app()?.delete_folder(&id(&folder_id)?).map_err(e)
+pub async fn folder_delete(handle: AppHandle, folder_id: String) -> R<()> {
+    blocking(&handle, move |st| st.app()?.delete_folder(&id(&folder_id)?).map_err(e)).await
 }
 
 /// A spec from the webview references only stored attachments, never a
@@ -473,14 +499,9 @@ pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) ->
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
-    let ctx = app
-        .build_context(
-            rid,
-            &ws,
-            input.spec,
-            &SendOptions { environment: env, run_override: input.run_override, send_anyway: input.send_anyway, ..Default::default() },
-        )
-        .map_err(e)?;
+    let opts = SendOptions { environment: env, run_override: input.run_override, send_anyway: input.send_anyway, ..Default::default() };
+    let builder = app.clone();
+    let ctx = anvil_app::off_runtime(move || builder.build_context(rid, &ws, input.spec, &opts)).await.map_err(e)?;
     app.engine.preview(&ctx).map_err(|f| format!("{:?}: {}", f.kind, f.message))
 }
 
@@ -544,50 +565,57 @@ pub struct HistoryItem {
     pub request_id: Option<String>,
 }
 
+/// Decrypts up to 500 records, on a blocking thread (see [`blocking`]).
 #[tauri::command]
-pub fn history_list(st: State<'_, DesktopState>, workspace_id: String, request_id: Option<String>, limit: usize) -> R<Vec<HistoryItem>> {
-    let app = st.app()?;
-    let ws = id(&workspace_id)?;
-    let rid = request_id.as_deref().map(id).transpose()?;
-    let mut out = Vec::new();
-    for h in app.store.list_history(Some(&ws), rid.as_ref(), limit.min(500)).map_err(|x| x.to_string())? {
-        if let Ok(Some((rec, _))) = app.store.get_history::<ExecutionRecord>(&h.id) {
-            out.push(HistoryItem {
-                id: h.id,
-                started_at: h.started_at,
-                method: rec.prepared.method.clone(),
-                url: rec.prepared.url.clone(),
-                summary: rec.outcome.summary.clone(),
-                status: rec.response.as_ref().map(|r| r.status),
-                request_id: rec.request_id.map(|r| r.to_string()),
-            });
+pub async fn history_list(handle: AppHandle, workspace_id: String, request_id: Option<String>, limit: usize) -> R<Vec<HistoryItem>> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let ws = id(&workspace_id)?;
+        let rid = request_id.as_deref().map(id).transpose()?;
+        let mut out = Vec::new();
+        for h in app.store.list_history(Some(&ws), rid.as_ref(), limit.min(500)).map_err(|x| x.to_string())? {
+            if let Ok(Some((rec, _))) = app.store.get_history::<ExecutionRecord>(&h.id) {
+                out.push(HistoryItem {
+                    id: h.id,
+                    started_at: h.started_at,
+                    method: rec.prepared.method.clone(),
+                    url: rec.prepared.url.clone(),
+                    summary: rec.outcome.summary.clone(),
+                    status: rec.response.as_ref().map(|r| r.status),
+                    request_id: rec.request_id.map(|r| r.to_string()),
+                });
+            }
         }
-    }
-    Ok(out)
+        Ok(out)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn history_get(st: State<'_, DesktopState>, history_id: String) -> R<ExecutionView> {
-    let app = st.app()?;
-    let (rec, body): (ExecutionRecord, _) =
-        app.store.get_history(&history_id).map_err(|x| x.to_string())?.ok_or("history entry not found")?;
-    let raw = body.map(|b| b.to_vec()).unwrap_or_default();
-    let ct = rec.response.as_ref().and_then(|r| r.body.content_type.clone());
-    let enc = rec.response.as_ref().and_then(|r| r.body.content_encoding.clone());
-    // The recorded limit, so the viewer shows what assertions saw.
-    let limit = rec.prepared.settings.limits.max_decoded_bytes;
-    let decoded = match anvil_transport::decode::decode(enc.as_deref(), &raw, limit) {
-        anvil_transport::decode::DecodeOutcome::Decoded { bytes, .. } => Some(bytes),
-        _ => None,
-    };
-    let body = body_view(&raw, decoded.as_deref(), ct.as_deref());
-    Ok(ExecutionView { record: rec, body })
+pub async fn history_get(handle: AppHandle, history_id: String) -> R<ExecutionView> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let (rec, body): (ExecutionRecord, _) =
+            app.store.get_history(&history_id).map_err(|x| x.to_string())?.ok_or("history entry not found")?;
+        let raw = body.map(|b| b.to_vec()).unwrap_or_default();
+        let ct = rec.response.as_ref().and_then(|r| r.body.content_type.clone());
+        let enc = rec.response.as_ref().and_then(|r| r.body.content_encoding.clone());
+        // The recorded limit, so the viewer shows what assertions saw.
+        let limit = rec.prepared.settings.limits.max_decoded_bytes;
+        let decoded = match anvil_transport::decode::decode(enc.as_deref(), &raw, limit) {
+            anvil_transport::decode::DecodeOutcome::Decoded { bytes, .. } => Some(bytes),
+            _ => None,
+        };
+        let body = body_view(&raw, decoded.as_deref(), ct.as_deref());
+        Ok(ExecutionView { record: rec, body })
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn history_clear(st: State<'_, DesktopState>, workspace_id: Option<String>) -> R<()> {
+pub async fn history_clear(handle: AppHandle, workspace_id: Option<String>) -> R<()> {
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.store.clear_history(ws.as_ref()).map_err(|x| x.to_string())
+    blocking(&handle, move |st| st.app()?.store.clear_history(ws.as_ref()).map_err(|x| x.to_string())).await
 }
 
 #[tauri::command]
@@ -653,15 +681,19 @@ fn full_backup(ws: Option<&Id>, m: ExportMode) -> R<bool> {
     }
 }
 
+/// Reads every exported item, on a blocking thread (see [`blocking`]).
 #[tauri::command]
-pub fn export_preview(st: State<'_, DesktopState>, workspace_id: Option<String>, export_mode: String) -> R<ExportPreview> {
+pub async fn export_preview(handle: AppHandle, workspace_id: Option<String>, export_mode: String) -> R<ExportPreview> {
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
     let m = mode(&export_mode)?;
-    let app = st.app()?;
-    if full_backup(ws.as_ref(), m)? {
-        return app.backup_preview().map(ExportPreview::Backup).map_err(e);
-    }
-    app.export_preview(ws.as_ref(), m, false).map(ExportPreview::Bundle).map_err(e)
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        if full_backup(ws.as_ref(), m)? {
+            return app.backup_preview().map(ExportPreview::Backup).map_err(e);
+        }
+        app.export_preview(ws.as_ref(), m, false).map(ExportPreview::Bundle).map_err(e)
+    })
+    .await
 }
 
 /// Run `f` on a blocking worker thread. Writing or opening an encrypted
@@ -828,46 +860,54 @@ pub fn import_cancel(st: State<'_, DesktopState>, attempt: String) -> R<bool> {
 
 /// Store a file the user picked in the native open dialog (purpose
 /// `attachment`) as a portable, content-addressed attachment (bounded size).
+/// Read and stored on a blocking thread (see [`blocking`]).
 #[tauri::command]
-pub fn attachment_add(st: State<'_, DesktopState>, grant: String, media_type: Option<String>) -> R<anvil_domain::request::AttachmentRef> {
-    let app = st.app()?;
-    let file = st.file_grants.read(&grant, FilePurpose::Attachment).map_err(|x| x.to_string())?;
-    app.put_attachment(&file.file_name, &file.bytes, media_type).map_err(e)
+pub async fn attachment_add(handle: AppHandle, grant: String, media_type: Option<String>) -> R<anvil_domain::request::AttachmentRef> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let file = st.file_grants.read(&grant, FilePurpose::Attachment).map_err(|x| x.to_string())?;
+        app.put_attachment(&file.file_name, &file.bytes, media_type).map_err(e)
+    })
+    .await
 }
 
 /// Read a small file the user picked in the native open dialog: a PEM
 /// certificate/key (purpose `pem_file`) or, with `base64`, a PKCS#12
 /// keystore (purpose `pkcs12_file`, which must be stored). The content goes
 /// straight into the vault when `store_as_secret` is set, so a private key
-/// never round-trips through the webview.
+/// never round-trips through the webview. Read and stored on a blocking
+/// thread (see [`blocking`]).
 #[tauri::command]
-pub fn read_text_file(
-    st: State<'_, DesktopState>,
+pub async fn read_text_file(
+    handle: AppHandle,
     grant: String,
     workspace_id: Option<String>,
     store_as_secret: Option<String>,
     base64: Option<bool>,
 ) -> R<TextFile> {
     use base64::Engine as _;
-    let app = st.app()?;
-    let binary = base64.unwrap_or(false);
-    if binary && store_as_secret.is_none() {
-        return Err("a PKCS#12 keystore is only read into the vault; give it a label".into());
-    }
-    let purpose = if binary { FilePurpose::Pkcs12File } else { FilePurpose::PemFile };
-    let file = st.file_grants.read(&grant, purpose).map_err(|x| x.to_string())?;
-    // Binary keystores (PKCS#12) are carried as base64 text in the vault.
-    let text = if binary {
-        base64::engine::general_purpose::STANDARD.encode(&file.bytes)
-    } else {
-        String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())?
-    };
-    if let Some(label) = store_as_secret {
-        let ws = workspace_id.ok_or_else(|| "a secret must belong to a workspace; open one first".to_string())?;
-        let r = app.set_secret(&id(&ws)?, &label, &text).map_err(e)?;
-        return Ok(TextFile { text: None, secret: Some(r) });
-    }
-    Ok(TextFile { text: Some(text), secret: None })
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let binary = base64.unwrap_or(false);
+        if binary && store_as_secret.is_none() {
+            return Err("a PKCS#12 keystore is only read into the vault; give it a label".into());
+        }
+        let purpose = if binary { FilePurpose::Pkcs12File } else { FilePurpose::PemFile };
+        let file = st.file_grants.read(&grant, purpose).map_err(|x| x.to_string())?;
+        // Binary keystores (PKCS#12) are carried as base64 text in the vault.
+        let text = if binary {
+            base64::engine::general_purpose::STANDARD.encode(&file.bytes)
+        } else {
+            String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())?
+        };
+        if let Some(label) = store_as_secret {
+            let ws = workspace_id.ok_or_else(|| "a secret must belong to a workspace; open one first".to_string())?;
+            let r = app.set_secret(&id(&ws)?, &label, &text).map_err(e)?;
+            return Ok(TextFile { text: None, secret: Some(r) });
+        }
+        Ok(TextFile { text: Some(text), secret: None })
+    })
+    .await
 }
 
 #[derive(Serialize)]

@@ -73,16 +73,31 @@ pub struct App {
     pub engine: Arc<Engine>,
     /// Set by the desktop shell: a JWT-SVID token file is read only if the
     /// user bound it in the native dialog (see [`App::confine_token_files`]).
-    confined_token_files: AtomicBool,
+    /// Shared with every [`App::shared`] handle.
+    confined_token_files: Arc<AtomicBool>,
 }
 
 impl App {
     pub fn open(dir: PathBuf, header: ProfileHeader, key: Key) -> Result<App> {
         let store = Arc::new(Store::open(&dir, key)?);
-        let app = App { header, dir, store, engine: Arc::new(Engine::new()), confined_token_files: AtomicBool::new(false) };
+        let confined_token_files = Arc::new(AtomicBool::new(false));
+        let app = App { header, dir, store, engine: Arc::new(Engine::new()), confined_token_files };
         app.ensure_settings()?;
         app.pin_attachment_blobs()?;
         Ok(app)
+    }
+
+    /// Another handle on this opened profile: the same store, engine and
+    /// token-file confinement. Work moved to a blocking thread (see
+    /// [`off_runtime`]) runs on one.
+    pub(crate) fn shared(&self) -> App {
+        App {
+            header: self.header.clone(),
+            dir: self.dir.clone(),
+            store: self.store.clone(),
+            engine: self.engine.clone(),
+            confined_token_files: self.confined_token_files.clone(),
+        }
     }
 
     pub fn is_locked(&self) -> bool {
@@ -115,6 +130,33 @@ impl App {
             self.save_settings(&Default::default())?;
         }
         Ok(())
+    }
+}
+
+/// Run `f`, which waits on the store or derives a key, on a blocking thread,
+/// so it never holds an async runtime worker: a long store transaction on
+/// another thread (an import, a folder delete) then delays only the work
+/// that waits for it, and the task awaiting `f` can still see a cancel. A
+/// panic in `f` resumes in the caller; `Canceled` means the runtime shut down
+/// before `f` started.
+pub async fn off_runtime<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(r) => r,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(_) => Err(AppError::Canceled),
+    }
+}
+
+/// Run `f`, which waits on the store, from synchronous code that an async
+/// task calls (a runner step's history record, a secret lookup): on a
+/// worker of a multi-thread runtime, the worker first hands its other tasks
+/// to another thread ([`tokio::task::block_in_place`]), so they keep running;
+/// anywhere else `f` runs as it is.
+pub(crate) fn blocking_in_place<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
     }
 }
 

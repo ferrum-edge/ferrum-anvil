@@ -247,6 +247,23 @@ fn a_checkpoint_sealed_with_another_key_is_refused_before_the_live_database_is_t
 }
 
 #[test]
+fn a_checkpoint_set_back_to_schema_1_is_refused_before_the_live_database_is_touched() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek).unwrap();
+    let (ws, id) = (Id::new(), Id::new());
+    store.put_secret(&id, Some(&ws), "token", "sealed-at-v2").unwrap();
+    // A checkpoint whose secrets schema 2 sealed, with its version set back.
+    let checkpoint = store.checkpoint("set-back").unwrap();
+    Connection::open(&checkpoint).unwrap().execute("UPDATE meta SET value='1' WHERE key='schema_version'", []).unwrap();
+    store.put_secret(&id, Some(&ws), "token", "after-checkpoint").unwrap();
+
+    assert!(matches!(store.restore_checkpoint(&checkpoint), Err(StoreError::Integrity)));
+    assert!(!store.is_locked(), "a refused checkpoint leaves the store unlocked");
+    assert_eq!(stored_version(dir.path()), DB_SCHEMA_VERSION.to_string());
+    assert_eq!(store.get_workspace_secret(&id, &ws).unwrap().unwrap().1.as_str(), "after-checkpoint");
+}
+
+#[test]
 fn a_restored_checkpoint_from_schema_1_is_resealed() {
     let (dir, dek) = profile();
     drop(Store::open(dir.path(), dek.clone()).unwrap());

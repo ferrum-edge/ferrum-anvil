@@ -5,7 +5,8 @@
 //! (snapshotted once at run start, so a run uses a frozen environment), is
 //! executed by the shared engine and recorded in history like a normal send.
 //! The finished [`RunReport`] is stored encrypted (`run_report` objects,
-//! newest [`MAX_RUN_REPORTS`] per workspace kept).
+//! newest [`MAX_RUN_REPORTS`] per workspace kept). A run reads and writes
+//! the store off the async runtime (see [`crate::off_runtime`]).
 
 use crate::exec::SendOptions;
 use crate::{App, AppError, Result};
@@ -64,10 +65,13 @@ impl Default for RunSettings {
     }
 }
 
+/// Each step's request name and frozen context, or why it cannot run.
+type Steps = HashMap<Id, std::result::Result<(String, ExecutionContext), String>>;
+
 /// Frozen per-run contexts built from the store at run start.
 struct AppProvider<'a> {
     app: &'a App,
-    steps: HashMap<Id, std::result::Result<(String, ExecutionContext), String>>,
+    steps: Steps,
     record_history: bool,
 }
 
@@ -87,7 +91,8 @@ impl StepProvider for AppProvider<'_> {
         if !self.record_history {
             return Ok(());
         }
-        self.app.record(out).map_err(|e| match e {
+        // The runner calls this from its task, between two steps.
+        crate::blocking_in_place(|| self.app.record(out)).map_err(|e| match e {
             AppError::Locked => StepError::Fatal("Anvil was locked; the run stopped (runs stop on lock)".into()),
             other => StepError::Step(other.to_string()),
         })
@@ -107,15 +112,21 @@ impl App {
         if self.is_locked() {
             return Err(AppError::Locked);
         }
+        let (app, scenario_id, dataset) = (self.shared(), *scenario_id, settings.dataset.clone());
+        let plan = crate::off_runtime(move || app.scenario_plan(&scenario_id, dataset)).await?;
+        self.run_plan(plan, settings, cancel).await
+    }
+
+    /// The plan of a saved scenario, with `dataset` in place of its own.
+    fn scenario_plan(&self, scenario_id: &Id, dataset: Option<RunDataset>) -> Result<RunPlan> {
         let s = self.scenario(scenario_id)?;
-        let dataset = match (&settings.dataset, s.dataset_id) {
-            (Some(d), _) => Some(d.clone()),
+        let dataset = match (dataset, s.dataset_id) {
+            (Some(d), _) => Some(d),
             (None, Some(did)) => Some(self.run_dataset(&self.workspace_dataset(&s.workspace_id, &did)?)?),
             (None, None) => None,
         };
         let names = self.request_names(&s.workspace_id)?;
-        let plan = RunPlan::from_scenario(&s, &|id| names.get(id).cloned().unwrap_or_else(|| format!("missing request {id}")), dataset);
-        self.run_plan(plan, settings, cancel).await
+        Ok(RunPlan::from_scenario(&s, &|id| names.get(id).cloned().unwrap_or_else(|| format!("missing request {id}")), dataset))
     }
 
     /// Ad-hoc run of every request in a folder subtree (`None` = the whole
@@ -125,19 +136,60 @@ impl App {
         if self.is_locked() {
             return Err(AppError::Locked);
         }
+        let (app, ws, dataset) = (self.shared(), *ws, settings.dataset.clone());
+        let plan = crate::off_runtime(move || app.folder_plan(&ws, folder, dataset)).await?;
+        self.run_plan(plan, settings, cancel).await
+    }
+
+    /// The plan of an ad-hoc folder run, with `dataset`.
+    fn folder_plan(&self, ws: &Id, folder: Option<Id>, dataset: Option<RunDataset>) -> Result<RunPlan> {
         let requests = self.folder_run_requests(ws, folder)?;
         if requests.is_empty() {
             return Err(AppError::Invalid(format!("folder '{}' contains no requests", self.folder_path(ws, folder)?)));
         }
         let mut plan = RunPlan::folder(*ws, folder, &self.folder_path(ws, folder)?, requests);
-        plan.dataset = settings.dataset.clone();
-        self.run_plan(plan, settings, cancel).await
+        plan.dataset = dataset;
+        Ok(plan)
     }
 
     /// Run a prepared plan against this workspace's store.
-    pub async fn run_plan(&self, mut plan: RunPlan, settings: RunSettings, cancel: CancellationToken) -> Result<RunReport> {
+    pub async fn run_plan(&self, plan: RunPlan, settings: RunSettings, cancel: CancellationToken) -> Result<RunReport> {
+        let (app, environment, seed) = (self.shared(), settings.environment, settings.seed);
+        let (plan, steps) = crate::off_runtime(move || app.run_steps(plan, environment, seed)).await?;
+        let provider = AppProvider { app: self, steps, record_history: settings.record_history };
+        let run_opts = RunOptions {
+            iterations: settings.iterations,
+            stop_on_failure: settings.stop_on_failure,
+            fail_on: settings.fail_on,
+            allow_untrusted: settings.allow_untrusted,
+            events: settings.events.clone(),
+            run_id: settings.run_id,
+            max_report_steps: None,
+        };
+        let report = anvil_runner::run(&self.engine, &provider, plan, run_opts, cancel).await.map_err(run_error)?;
+        if !settings.persist_report {
+            return Ok(report);
+        }
+        let app = self.shared();
+        let (mut report, saved) = crate::off_runtime(move || {
+            let saved = app.save_run_report(&report);
+            Ok((report, saved))
+        })
+        .await?;
+        match saved {
+            Ok(()) => {}
+            // A run aborted by a lock still returns its partial report.
+            Err(AppError::Locked) => report.notes.push("This report was not saved: Anvil is locked.".into()),
+            Err(e) => return Err(e),
+        }
+        Ok(report)
+    }
+
+    /// Name the plan's environment (`environment`, else the workspace's
+    /// active one) and snapshot every request it runs.
+    fn run_steps(&self, mut plan: RunPlan, environment: Option<Id>, seed: Option<u64>) -> Result<(RunPlan, Steps)> {
         let ws = self.workspace(&plan.workspace_id)?;
-        let env_id = settings.environment.or(ws.active_environment_id);
+        let env_id = environment.or(ws.active_environment_id);
         if let Some(eid) = env_id {
             let env = self
                 .environments(&ws.meta.id)?
@@ -149,7 +201,7 @@ impl App {
         }
         // Snapshot every request once: the run uses a frozen environment and
         // request state even if they are edited while it runs.
-        let opts = SendOptions { environment: env_id, seed: settings.seed, ..Default::default() };
+        let opts = SendOptions { environment: env_id, seed, ..Default::default() };
         let mut steps = HashMap::new();
         for st in plan.steps.iter().filter(|s| s.enabled) {
             if steps.contains_key(&st.request_id) {
@@ -168,26 +220,7 @@ impl App {
             };
             steps.insert(st.request_id, built);
         }
-        let provider = AppProvider { app: self, steps, record_history: settings.record_history };
-        let run_opts = RunOptions {
-            iterations: settings.iterations,
-            stop_on_failure: settings.stop_on_failure,
-            fail_on: settings.fail_on,
-            allow_untrusted: settings.allow_untrusted,
-            events: settings.events.clone(),
-            run_id: settings.run_id,
-            max_report_steps: None,
-        };
-        let mut report = anvil_runner::run(&self.engine, &provider, plan, run_opts, cancel).await.map_err(run_error)?;
-        if settings.persist_report {
-            match self.save_run_report(&report) {
-                Ok(()) => {}
-                // A run aborted by a lock still returns its partial report.
-                Err(AppError::Locked) => report.notes.push("This report was not saved: Anvil is locked.".into()),
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(report)
+        Ok((plan, steps))
     }
 
     /// Requests of a folder subtree in tree order, as `(id, name)`.

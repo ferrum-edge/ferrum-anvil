@@ -74,3 +74,27 @@
   warning, as a history record already was, instead of refusing the
   restore, and a restored history record dated after the restore is stored
   with the restore time.
+- Desktop: long store work no longer stalls the async runtime or the UI
+  thread. Spec imports and re-imports, folder and workspace deletes, profile
+  creation, unlock and passphrase changes (their key derivation), history
+  lists, views and clears, export previews, and reading an attachment, a
+  PEM/PKCS#12 file or a dataset now run on a worker thread. A send, session
+  open, collection run, load run and OAuth sign-in prepare the request, look
+  up the vault secrets it names, and record their history or report on a
+  worker thread, so they no longer hold the runtime while an import holds
+  the database. A send or session open canceled while it waits for that
+  returns at once, with nothing sent or recorded. Shorter commands still
+  wait for a long import to finish.
+- Database schema 3 adds an index on the response body of each history
+  record, so releasing a replaced body and history retention no longer scan
+  whole tables; it is added once when a profile is opened or unlocked.
+  Earlier builds refuse a schema 3 database, and a full backup made from one
+  (backups record the database schema version, now 3), as newer. Restoring a
+  checkpoint whose recorded version was set back below schema 2 after its
+  secrets were re-sealed is now refused before the profile is touched,
+  instead of leaving it locked. Deleting an attachment's last use checks
+  for other references and deletes it in one transaction, and the pins
+  re-applied when a profile opens are written in one transaction. Deletes,
+  blob pins and releases, and history and load-report clean-up check the
+  lock only once they hold the database, so one that raced a failed
+  checkpoint restore fails as locked.

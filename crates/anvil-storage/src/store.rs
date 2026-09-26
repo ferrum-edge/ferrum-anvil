@@ -39,7 +39,7 @@ pub const DB_FILE: &str = "anvil.db";
 /// before failing with `SQLITE_BUSY`.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Current on-disk schema version. Increase only with a migration below.
-pub const DB_SCHEMA_VERSION: i64 = 2;
+pub const DB_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -211,6 +211,9 @@ const MIGRATIONS: &[Migration] = &[
     Migration::Sql(BASELINE),
     // v2 — vault secrets bind their owner.
     Migration::SecretOwners,
+    // v3 — history bodies are looked up by index when a blob is released or
+    // retention runs.
+    Migration::Sql(HISTORY_BODY_INDEX),
 ];
 
 const BASELINE: &str = r#"
@@ -234,6 +237,10 @@ const BASELINE: &str = r#"
     CREATE INDEX history_ws ON history(workspace_id, started_at);
     CREATE TABLE load_reports (id TEXT PRIMARY KEY, workspace_id TEXT, started_at INTEGER NOT NULL, payload BLOB NOT NULL);
     "#;
+
+/// `IF NOT EXISTS`: a database whose recorded version was set back below 3
+/// already has the index, and the step runs again without failing.
+const HISTORY_BODY_INDEX: &str = "CREATE INDEX IF NOT EXISTS history_body_blob ON history(body_blob);";
 
 /// The schema version recorded in `meta` (0 for a new database).
 fn stored_schema_version(conn: &Connection) -> Result<i64> {
@@ -345,6 +352,29 @@ fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
     Ok(())
 }
 
+/// Refuse the database on `conn` when its recorded version was set back below
+/// 2 after the v2 step ran: a vault secret in it opens under [`secret_aad`],
+/// which only schema 2 seals with, so that step would fail on it (see
+/// [`reseal_secret_owners`]). Reads only.
+fn check_not_set_back(conn: &Connection, key: &Key) -> Result<()> {
+    if stored_schema_version(conn)? >= 2 {
+        return Ok(());
+    }
+    let sql = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='secrets')";
+    if !conn.query_row(sql, [], |r| r.get::<_, bool>(0))? {
+        return Ok(());
+    }
+    let mut st = conn.prepare("SELECT id, workspace_id, payload FROM secrets")?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Vec<u8>>(2)?)))?;
+    for row in rows {
+        let (id, owner, env) = row?;
+        if crypto::open(key, &secret_aad(&id, owner.as_deref()), &env).is_ok() {
+            return Err(StoreError::Integrity);
+        }
+    }
+    Ok(())
+}
+
 /// Copy the database `src` over the one on `conn`, then check `key` against
 /// the copy and migrate it.
 fn restore_on(conn: &mut Connection, src: &Connection, key: &Key) -> Result<()> {
@@ -404,6 +434,18 @@ impl Store {
         let conn = self.conn()?;
         let key = self.key()?;
         Ok((conn, key))
+    }
+
+    /// The connection for an operation that writes without sealing. As in
+    /// [`Store::sealing`], whether the store is locked is read only once the
+    /// connection is held, so a call that raced a failed
+    /// [`Store::restore_checkpoint`] never writes to the database it copied.
+    fn writing(&self) -> Result<MutexGuard<'_, Connection>> {
+        let conn = self.conn()?;
+        if self.is_locked() {
+            return Err(StoreError::Locked);
+        }
+        Ok(conn)
     }
 
     /// The connection for one ordinary operation. It waits for a transaction
@@ -482,15 +524,13 @@ impl Store {
     }
 
     pub fn delete(&self, kind: &str, id: &Id) -> Result<bool> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.delete(kind, id)
     }
 
     /// Delete every object belonging to a workspace (and the workspace).
     pub fn delete_workspace(&self, ws: &Id) -> Result<()> {
-        let _ = self.key()?;
-        let mut conn = self.conn()?;
+        let mut conn = self.writing()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM objects WHERE workspace_id=?1", params![ws.to_string()])?;
         tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws.to_string()])?;
@@ -546,8 +586,7 @@ impl Store {
     }
 
     pub fn delete_secret(&self, id: &Id) -> Result<()> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.delete_secret(id)
     }
 
@@ -567,20 +606,13 @@ impl Store {
     /// encrypted objects that `prune_history` cannot see. The pin row holds
     /// only the keyed blob id, never content.
     pub fn pin_blob(&self, id: &str) -> Result<()> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.pin_blob(id)
     }
 
     /// Drop a blob's pin and delete it unless a history body still uses it.
     pub fn release_blob(&self, id: &str) -> Result<()> {
-        let _ = self.key()?;
-        let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM meta WHERE key=?1", params![format!("pin:{id}")])?;
-        tx.execute("DELETE FROM blobs WHERE id=?1 AND id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL)", params![id])?;
-        tx.commit()?;
-        Ok(())
+        self.atomically(|tx| tx.release_blob(id))
     }
 
     pub fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -621,8 +653,7 @@ impl Store {
 
     /// Enforce history retention by age and total bytes; removes orphaned blobs.
     pub fn prune_history(&self, max_age_days: u32, max_total_bytes: u64) -> Result<usize> {
-        let _ = self.key()?;
-        let mut conn = self.conn()?;
+        let mut conn = self.writing()?;
         // Take the write lock up front: blobs are collected against one state
         // of `history` and the pins, never against a snapshot another
         // connection has since written past.
@@ -645,7 +676,7 @@ impl Store {
         // pinned (see `pin_blob`) because the objects referencing them are
         // encrypted and invisible to this query.
         tx.execute(
-            "DELETE FROM blobs WHERE id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL) AND id NOT IN (SELECT value FROM meta WHERE key LIKE 'pin:%')",
+            "DELETE FROM blobs WHERE NOT EXISTS (SELECT 1 FROM history WHERE body_blob=blobs.id) AND NOT EXISTS (SELECT 1 FROM meta WHERE key='pin:'||blobs.id)",
             [],
         )?;
         tx.commit()?;
@@ -653,8 +684,7 @@ impl Store {
     }
 
     pub fn clear_history(&self, workspace_id: Option<&Id>) -> Result<()> {
-        let _ = self.key()?;
-        let conn = self.conn()?;
+        let conn = self.writing()?;
         conn.execute("DELETE FROM history WHERE (?1 IS NULL OR workspace_id=?1)", params![workspace_id.map(|w| w.to_string())])?;
         Ok(())
     }
@@ -673,8 +703,7 @@ impl Store {
     }
 
     pub fn delete_load_report(&self, id: &Id) -> Result<bool> {
-        let _ = self.key()?;
-        Ok(self.conn()?.execute("DELETE FROM load_reports WHERE id=?1", params![id.to_string()])? > 0)
+        Ok(self.writing()?.execute("DELETE FROM load_reports WHERE id=?1", params![id.to_string()])? > 0)
     }
 
     // ------------------------------------------------------------ atomicity
@@ -701,8 +730,8 @@ impl Store {
     }
 
     fn transaction<R>(&self, behavior: TransactionBehavior, f: impl FnOnce(&StoreTx<'_>) -> Result<R>) -> Result<R> {
-        let _ = self.key()?;
-        let mut conn = self.conn()?;
+        // Also for a read: the lock state is read once the connection is held.
+        let mut conn = self.writing()?;
         // Declared after `conn` so the owner is cleared before the lock is
         // released.
         let _owner = TxOwner::claim(&self.tx_owner);
@@ -725,22 +754,23 @@ impl Store {
 
     /// Consistent copy of the database (ciphertext) for restore checkpoints.
     pub fn checkpoint(&self, label: &str) -> Result<PathBuf> {
-        let _ = self.key()?;
+        let conn = self.writing()?;
         let dir = self.dir.join("checkpoints");
         std::fs::create_dir_all(&dir)?;
         let safe: String = label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
         let path = dir.join(format!("{}-{safe}.db", chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ")));
-        let conn = self.conn()?;
         conn.execute("VACUUM INTO ?1", params![path.display().to_string()])?;
         Ok(path)
     }
 
     /// Replace the live database with a checkpoint, discarding every change
     /// made since it was taken. Nothing calls this automatically. A
-    /// checkpoint written by a newer schema, or sealed with another key, is
-    /// refused before the live database is touched; one taken before a
-    /// migration is migrated again, under the same hold of the connection as
-    /// the copy. A copy or migration that fails leaves the store locked.
+    /// checkpoint written by a newer schema, sealed with another key, or
+    /// whose recorded version was set back below schema 2 after it re-sealed
+    /// its vault secrets, is refused before the live database is touched; one
+    /// taken before a migration is migrated again, under the same hold of the
+    /// connection as the copy. A copy or migration that fails leaves the
+    /// store locked.
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
         let key = self.key()?;
         let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -749,6 +779,7 @@ impl Store {
             return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
         }
         check_canary(&src, &key)?;
+        check_not_set_back(&src, &key)?;
         let mut conn = self.conn()?;
         // Locked meanwhile (another restore failed): nothing is copied.
         let _ = self.key()?;
@@ -859,6 +890,11 @@ impl StoreTx<'_> {
     /// [`Store::pin_blob`] inside this transaction: rolled back with it.
     pub fn pin_blob(&self, id: &str) -> Result<()> {
         self.records()?.pin_blob(id)
+    }
+
+    /// [`Store::release_blob`] inside this transaction: rolled back with it.
+    pub fn release_blob(&self, id: &str) -> Result<()> {
+        self.records()?.release_blob(id)
     }
 
     /// See [`Store::add_history`].
@@ -1112,6 +1148,12 @@ impl Records<'_> {
         Ok(())
     }
 
+    fn release_blob(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM meta WHERE key=?1", params![format!("pin:{id}")])?;
+        self.conn.execute("DELETE FROM blobs WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM history WHERE body_blob=?1)", params![id])?;
+        Ok(())
+    }
+
     fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let env: Option<Vec<u8>> = self.conn.query_row("SELECT payload FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
         match env {
@@ -1147,10 +1189,11 @@ impl Records<'_> {
             params![id_s, workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), started_at_ms, size, body_blob, env],
         )?;
         // As `Store::release_blob`: the old body goes unless another history
-        // record still uses it. A pinned blob is an attachment's and stays.
+        // record, or this one again, still uses it. A pinned blob is an
+        // attachment's and stays.
         if let Some(old) = replaced {
             self.conn.execute(
-                "DELETE FROM blobs WHERE id=?1 AND id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL) AND id NOT IN (SELECT value FROM meta WHERE key LIKE 'pin:%')",
+                "DELETE FROM blobs WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM history WHERE body_blob=?1) AND NOT EXISTS (SELECT 1 FROM meta WHERE key='pin:'||?1)",
                 params![old],
             )?;
         }

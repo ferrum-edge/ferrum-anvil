@@ -1,14 +1,15 @@
 //! Spec and collection import commands. Sources are read from a file the
 //! user picked in the native dialog (by its grant, never by a path), or from
-//! pasted text (cURL); nothing imported is sent or run.
+//! pasted text (cURL); nothing imported is sent or run. A source is read,
+//! parsed and written on a blocking thread (see `commands::blocking`).
 
-use crate::commands::{R, e, id};
+use crate::commands::{R, blocking, e, id};
 use crate::state::DesktopState;
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::specs::{SpecImported, SpecPreview, SpecSourceRecord, SpecTarget};
 use anvil_import::{ImportOptions, ReimportApproval, ReimportPlan};
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 const MAX_SOURCE: u64 = 32 * 1024 * 1024;
 
@@ -43,17 +44,23 @@ impl SpecInput {
 }
 
 #[tauri::command]
-pub fn spec_preview(st: State<'_, DesktopState>, input: SpecInput, options: ImportOptions) -> R<SpecPreview> {
-    let app = st.app()?;
-    let (bytes, _) = input.load(&st.file_grants)?;
-    app.spec_preview(&bytes, &options).map_err(e)
+pub async fn spec_preview(handle: AppHandle, input: SpecInput, options: ImportOptions) -> R<SpecPreview> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let (bytes, _) = input.load(&st.file_grants)?;
+        app.spec_preview(&bytes, &options).map_err(e)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn spec_import(st: State<'_, DesktopState>, input: SpecInput, options: ImportOptions, target: SpecTarget) -> R<SpecImported> {
-    let app = st.app()?;
-    let (bytes, name) = input.load(&st.file_grants)?;
-    app.spec_import(&bytes, &name, &options, target).map_err(e)
+pub async fn spec_import(handle: AppHandle, input: SpecInput, options: ImportOptions, target: SpecTarget) -> R<SpecImported> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let (bytes, name) = input.load(&st.file_grants)?;
+        app.spec_import(&bytes, &name, &options, target).map_err(e)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -62,15 +69,21 @@ pub fn spec_sources(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec<
 }
 
 #[tauri::command]
-pub fn spec_reimport_plan(st: State<'_, DesktopState>, import_id: String, input: SpecInput) -> R<ReimportPlan> {
-    let app = st.app()?;
-    let (bytes, _) = input.load(&st.file_grants)?;
-    app.spec_reimport_plan(&id(&import_id)?, &bytes).map_err(e)
+pub async fn spec_reimport_plan(handle: AppHandle, import_id: String, input: SpecInput) -> R<ReimportPlan> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let (bytes, _) = input.load(&st.file_grants)?;
+        app.spec_reimport_plan(&id(&import_id)?, &bytes).map_err(e)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn spec_reimport_apply(st: State<'_, DesktopState>, import_id: String, input: SpecInput, approval: ReimportApproval) -> R<usize> {
-    let app = st.app()?;
-    let (bytes, _) = input.load(&st.file_grants)?;
-    app.spec_reimport_apply(&id(&import_id)?, &bytes, &approval).map_err(e)
+pub async fn spec_reimport_apply(handle: AppHandle, import_id: String, input: SpecInput, approval: ReimportApproval) -> R<usize> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let (bytes, _) = input.load(&st.file_grants)?;
+        app.spec_reimport_apply(&id(&import_id)?, &bytes, &approval).map_err(e)
+    })
+    .await
 }

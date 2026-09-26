@@ -16,9 +16,10 @@ use std::time::{Instant, SystemTime};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-/// Cancellation tokens of running executions, by execution id. Each
-/// registration has its own `Arc`, which identifies it: an entry is removed
-/// only by the registration that inserted it.
+/// Cancellation tokens of running attempts (executions, or imports and
+/// previews), by attempt id. Each registration has its own `Arc`, which
+/// identifies it: an entry is removed only by the registration that inserted
+/// it.
 pub type Running = Mutex<HashMap<Id, Arc<CancellationToken>>>;
 
 /// Load runs in worker processes, by run key: (user cancel, lock stop).
@@ -220,9 +221,10 @@ impl DesktopState {
     }
 }
 
-/// An execution's entry in [`DesktopState::running`], removed when this is
-/// dropped: on success, on an early return and on a panic alike. It owns a
-/// handle to the registry, so a spawned task can hold it.
+/// An attempt's entry in a registry ([`DesktopState::running`] or
+/// [`DesktopState::imports`]), removed when this is dropped: on success, on
+/// an early return and on a panic alike. It owns a handle to the registry,
+/// so a spawned task can hold it.
 pub struct PendingEntry {
     running: Arc<Running>,
     id: Id,
@@ -231,8 +233,8 @@ pub struct PendingEntry {
 
 impl PendingEntry {
     /// Register a fresh token for `id`, so a cancel (or a lock) can reach the
-    /// execution from now on. Refused while `id` is still registered: the
-    /// running execution keeps its token, and its entry is not removed by
+    /// attempt from now on. Refused while `id` is still registered: the
+    /// running attempt keeps its token, and its entry is not removed by
     /// anyone else.
     pub fn register(running: &Arc<Running>, id: Id) -> Result<Self, String> {
         let token = Arc::new(CancellationToken::new());
@@ -343,7 +345,7 @@ impl ImportGate {
     }
 }
 
-/// Cancel the running execution `id`. Returns whether it was registered.
+/// Cancel the running attempt `id`. Returns whether it was registered.
 pub fn cancel_pending(running: &Running, id: &Id) -> bool {
     match running.lock().get(id) {
         Some(t) => {
@@ -459,7 +461,7 @@ mod tests {
         let first = PendingEntry::register(&running, id).unwrap();
         let second = PendingEntry::register(&running, id).map(|_| ());
         assert_eq!(second, Err(format!("attempt {id} is already running")));
-        // The refusal leaves the first execution's entry and token in place.
+        // The refusal leaves the first attempt's entry and token in place.
         assert!(cancel_pending(&running, &id));
         assert!(first.token().is_cancelled());
         drop(first);

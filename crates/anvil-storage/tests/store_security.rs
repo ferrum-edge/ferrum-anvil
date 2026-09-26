@@ -192,6 +192,50 @@ fn replacing_a_history_record_releases_its_old_body() {
 }
 
 #[test]
+fn replacing_a_history_record_with_the_same_body_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let id = Id::new();
+    store.add_history(&id, None, None, 1, &serde_json::json!({"n": 1}), Some(b"same body")).unwrap();
+    store.add_history(&id, None, None, 2, &serde_json::json!({"n": 2}), Some(b"same body")).unwrap();
+    let (record, body) = store.get_history::<serde_json::Value>(&id.to_string()).unwrap().unwrap();
+    assert_eq!(record, serde_json::json!({"n": 2}));
+    assert_eq!(body.expect("the body is kept").as_slice(), b"same body");
+    // Retention does not collect it either.
+    store.prune_history(u32::MAX, u64::MAX).unwrap();
+    let (_, body) = store.get_history::<serde_json::Value>(&id.to_string()).unwrap().unwrap();
+    assert_eq!(body.expect("the body is kept").as_slice(), b"same body");
+}
+
+#[test]
+fn schema_3_indexes_history_bodies_and_the_step_runs_again_after_a_set_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let db = || rusqlite::Connection::open(dir.path().join("anvil.db")).unwrap();
+    let indexed = || -> bool {
+        let sql = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='history_body_blob')";
+        db().query_row(sql, [], |r| r.get(0)).unwrap()
+    };
+    let version = || db().query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).unwrap();
+    drop(Store::open(dir.path(), created.dek.clone()).unwrap());
+    assert!(indexed());
+    assert_eq!(version(), "3");
+
+    // A schema 2 database, as an earlier build left it, gets the index.
+    db().execute_batch("DROP INDEX history_body_blob; UPDATE meta SET value='2' WHERE key='schema_version';").unwrap();
+    drop(Store::open(dir.path(), created.dek.clone()).unwrap());
+    assert!(indexed());
+    assert_eq!(version(), "3");
+
+    // Set back with the index still in place: the step runs again.
+    db().execute("UPDATE meta SET value='2' WHERE key='schema_version'", []).unwrap();
+    drop(Store::open(dir.path(), created.dek.clone()).unwrap());
+    assert!(indexed());
+    assert_eq!(version(), "3");
+}
+
+#[test]
 fn unlock_refuses_key_derivation_settings_outside_the_bounds() {
     use anvil_storage::crypto::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM};
     let dir = tempfile::tempdir().unwrap();

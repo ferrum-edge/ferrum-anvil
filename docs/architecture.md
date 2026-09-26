@@ -50,6 +50,23 @@ CLI (`anvil`) = same anvil-app services without a webview.
   OAuth sign-in). An Abort that reaches the backend before the open has
   registered finds nothing to stop; the renderer cancels again once the open
   returns.
+- **Store work stays off the async runtime.** One SQLite connection serves a
+  profile, and a long transaction (an import, a spec import, a folder or
+  workspace delete) holds it until it ends. Commands that write in bulk, read
+  many records or derive a key run their work on a blocking thread
+  (`commands::blocking`): profile creation, unlock and passphrase changes,
+  bundle and spec imports, folder and workspace deletes, history lists,
+  views and clears, export previews, and attachment, PEM/PKCS#12 and dataset
+  reads. Async paths do the same with `anvil_app::off_runtime`: a send, a
+  session open and an OAuth sign-in build their context there, a send and a
+  session record their history there, a collection run prepares its steps
+  and saves its report there (and records each step through
+  `block_in_place`), and a load run prepares its job and saves its report
+  there. The engine then reads no store while it executes, since a context
+  carries its secrets already. A cancel while a send or a session open waits
+  for its context ends it at once, with nothing sent or recorded. Shorter
+  commands still run on the UI thread, in the order they were called, and
+  wait for a long transaction to end.
 - **File commands never take a path from the webview.** The backend shows
   the native open or save dialog itself (`file_choose`), keeps the chosen
   path and returns an opaque grant bound to one purpose (bundle import or
@@ -138,8 +155,10 @@ CLI (`anvil`) = same anvil-app services without a webview.
 1. **Freeze the context.** `anvil-app` freezes an `ExecutionContext`: the
    request spec (draft or saved revision), variable layers (workspace → environment → folders → request →
    iteration), settings layers (app → workspace → folders → request →
-   run), auth inheritance, TLS/proxy/integration profiles and a scoped
-   secret resolver.
+   run), auth inheritance, TLS/proxy/integration profiles and the vault
+   secrets they name, looked up in the workspace's own vault as the context
+   is frozen (`exec::ResolvedSecrets`; they fail closed once the profile
+   locks).
 2. **Prepare.** `anvil-engine` interpolates, lints the body (block or warn),
    serialises it, infers the content type, and then applies auth over the
    final bytes. HMAC digests and DPoP proofs are regenerated on every send.
