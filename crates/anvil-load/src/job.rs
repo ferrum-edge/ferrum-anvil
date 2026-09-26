@@ -22,7 +22,7 @@ use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::load::LoadPlan;
-use anvil_domain::request::{AttachmentRef, Body, GrpcSchemaSource, MultipartContent, RequestSpec};
+use anvil_domain::request::{AttachmentRef, Body, GrpcSchemaSource, MultipartContent, Protocol, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::tls::{ClientIdentity, ProxyProfile, TlsProfile};
@@ -218,7 +218,10 @@ fn selected_profiles(ctx: &ExecutionContext) -> (Vec<&TlsProfile>, Option<&Proxy
 }
 
 /// Vault references a context actually needs to execute (scoping): every
-/// `SensitiveValue` the engine resolves through `ctx.secrets`.
+/// `SensitiveValue` the engine resolves through `ctx.secrets`. The datagram
+/// PROXY-protocol secret counts only for a UDP request, the one protocol whose
+/// session reads it; a dormant `udp` section on another protocol neither
+/// ships its secret nor fails the run on a stale reference.
 pub fn secret_refs(ctx: &ExecutionContext) -> Vec<SecretRef> {
     let mut out = Vec::new();
     walk_auth(&ctx.effective_auth().1, &mut out);
@@ -237,7 +240,9 @@ pub fn secret_refs(ctx: &ExecutionContext) -> Vec<SecretRef> {
     if let Some(pw) = proxy.and_then(|p| p.password.as_ref()) {
         push_secret(pw, &mut out);
     }
-    if let Some(a) = ctx.spec.udp.as_ref().and_then(|u| u.proxy_protocol.as_ref()).and_then(|e| e.authentication.as_ref()) {
+    if ctx.spec.protocol == Protocol::Udp
+        && let Some(a) = ctx.spec.udp.as_ref().and_then(|u| u.proxy_protocol.as_ref()).and_then(|e| e.authentication.as_ref())
+    {
         push_secret(&a.secret, &mut out);
     }
     out
@@ -600,7 +605,8 @@ mod tests {
 
     /// A request that sets every field of `SENSITIVE_FIELDS` to its own vault
     /// reference: the parent scopes each one into the worker job, and the
-    /// worker resolves each one.
+    /// worker resolves each one. It is a UDP request, the one protocol whose
+    /// session resolves the datagram secret.
     #[test]
     fn every_vault_reference_a_request_resolves_is_scoped_into_the_job() {
         let mut refs: Vec<SecretRef> = Vec::new();
@@ -681,7 +687,7 @@ mod tests {
         unselected_tls.client_identity = Some(ClientIdentity::Pem { cert_chain_pem: String::new(), private_key_pem: key });
 
         let mut spec = RequestSpec::http("GET", "udp://127.0.0.1:9");
-        spec.protocol = anvil_domain::request::Protocol::Udp;
+        spec.protocol = Protocol::Udp;
         spec.udp = Some(udp);
         let mut ctx = ExecutionContext::standalone(spec);
         ctx.auth_layers = vec![("request".into(), auth)];
@@ -724,6 +730,38 @@ mod tests {
             assert_eq!(c.secrets.resolve(r).unwrap().as_str(), format!("value of {}", r.label));
         }
         assert!(c.secrets.resolve(&unselected).is_err());
+    }
+
+    /// The engine reads the datagram PROXY-protocol secret only in a UDP
+    /// session: another protocol's dormant `udp` section neither ships its
+    /// secret nor fails the run when the reference is gone from the vault.
+    #[test]
+    fn a_dormant_udp_section_on_another_protocol_ships_no_datagram_secret() {
+        let secret = SecretRef { id: Id::new(), label: "datagram secret".into() };
+        let value = SensitiveValue::Secret { secret: secret.clone() };
+        let udp: anvil_domain::request::UdpSpec = serde_json::from_value(serde_json::json!({
+            "datagrams": [],
+            "proxy_protocol": { "authentication": { "secret": value } },
+        }))
+        .unwrap();
+        let mut spec = RequestSpec::http("GET", "http://127.0.0.1:9/x");
+        assert_eq!(spec.protocol, Protocol::Http);
+        spec.udp = Some(udp);
+        let mut ctx = ExecutionContext::standalone(spec);
+        // The vault no longer holds the reference.
+        ctx.secrets = Arc::new(MemorySecrets(HashMap::new()));
+        assert!(secret_refs(&ctx).iter().all(|r| r.id != secret.id));
+
+        let rid = Id::new();
+        let job = LoadJob { requests: HashMap::from([(rid, ctx.clone())]), dataset: None };
+        let wj = WorkerJob::from_load_job(&plan(vec![rid]), &job, RunOptions::default()).unwrap();
+        assert!(wj.secrets.is_empty());
+
+        // The same section on a UDP request is scoped, and a stale reference fails.
+        ctx.spec.protocol = Protocol::Udp;
+        assert!(secret_refs(&ctx).iter().any(|r| r.id == secret.id));
+        let job = LoadJob { requests: HashMap::from([(rid, ctx)]), dataset: None };
+        assert!(WorkerJob::from_load_job(&plan(vec![rid]), &job, RunOptions::default()).is_err());
     }
 
     /// The parent's resolver for one linked file, as `anvil_app` builds it
