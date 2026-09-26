@@ -139,9 +139,11 @@ unsafe_code = "deny"
 result_large_err = "allow"
 
 # h3 0.0.8 plus the upstream RFC 9220 `Protocol::WEBSOCKET` commit
-# (hyperium/h3#236), unreleased as of 0.0.8; tungstenite 0.30.0 plus an RFC
-# 7692 permessage-deflate codec, which no tungstenite release has. See
-# vendor/README.md for the provenance and when to remove these.
+# (hyperium/h3#236), unreleased as of 0.0.8; h3-quinn 0.0.10 with
+# `stop_sending` applied while a read is outstanding (it panicked); tungstenite
+# 0.30.0 plus an RFC 7692 permessage-deflate codec, which no tungstenite release
+# has. See vendor/README.md for the provenance and when to remove these.
 [patch.crates-io]
 h3 = { path = "vendor/h3-0.0.8-rfc9220" }
+h3-quinn = { path = "vendor/h3-quinn-0.0.10-stop-sending" }
 tungstenite = { path = "vendor/tungstenite-0.30.0-deflate" }
