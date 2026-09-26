@@ -8,6 +8,10 @@
 //! * OS-keychain mode: the DEK lives in the OS credential store (Keychain,
 //!   Credential Manager, Secret Service). Data stays encrypted at rest, but an
 //!   unlocked OS session is the only barrier; this is stated in the UI.
+//! * An OS-keychain profile can be converted to passphrase mode. The new
+//!   header is published first; from then on only the passphrase or the new
+//!   recovery key unlocks, and the keychain entry is removed (retried at the
+//!   next unlock if the credential store refuses).
 //! * A linked provider identity (Google/GitHub/Facebook) is never a key.
 
 use crate::crypto::{self, CryptoError, KdfParams, Key};
@@ -19,6 +23,8 @@ use zeroize::Zeroizing;
 
 pub const PROFILE_FILE: &str = "profile.json";
 const KEYCHAIN_SERVICE: &str = "com.ferrumedge.anvil";
+const PASSPHRASE_LABEL: &[u8] = b"anvil-dek-passphrase-v1";
+const RECOVERY_LABEL: &[u8] = b"anvil-dek-recovery-v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
@@ -26,6 +32,8 @@ pub enum VaultError {
     WrongSecret,
     #[error("the OS credential store is unavailable ({0}); use a passphrase-protected profile instead")]
     KeychainUnavailable(String),
+    #[error("this profile is not protected by {0}")]
+    WrongProtection(&'static str),
     #[error("profile header is missing or unreadable: {0}")]
     Header(String),
     #[error("{0}")]
@@ -134,11 +142,37 @@ pub fn read_header(dir: &Path) -> Result<ProfileHeader, VaultError> {
     serde_json::from_str(&text).map_err(|e| VaultError::Header(e.to_string()))
 }
 
+/// Atomically replace the header: write a synced temporary file, rename it
+/// over the old one and (on Unix) sync the directory so the rename persists.
 pub fn write_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
+    use std::io::Write;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{PROFILE_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(h).map_err(|e| VaultError::Header(e.to_string()))?)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&serde_json::to_vec_pretty(h).map_err(|e| VaultError::Header(e.to_string()))?)?;
+    f.sync_all()?;
+    drop(f);
     std::fs::rename(tmp, header_path(dir))?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+fn require_protection(h: &ProfileHeader, mode: ProtectionMode) -> Result<(), VaultError> {
+    if h.protection == mode {
+        return Ok(());
+    }
+    Err(VaultError::WrongProtection(match mode {
+        ProtectionMode::Passphrase => "a passphrase",
+        ProtectionMode::OsKeychain => "the OS keychain",
+    }))
+}
+
+/// The unlocked data key must be this profile's before it is re-wrapped.
+fn require_profile_key(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
+    if key_check(dek) != h.key_check {
+        return Err(VaultError::WrongSecret);
+    }
     Ok(())
 }
 
@@ -153,8 +187,8 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
         profile_id: uuid::Uuid::now_v7().to_string(),
         display_name: display_name.into(),
         protection: ProtectionMode::Passphrase,
-        passphrase_wrap: Some(wrap_with_passphrase(&dek, passphrase, kdf, b"anvil-dek-passphrase-v1")?),
-        recovery_wrap: Some(wrap_with_passphrase(&dek, &normalize_recovery(&recovery), kdf, b"anvil-dek-recovery-v1")?),
+        passphrase_wrap: Some(wrap_with_passphrase(&dek, passphrase, kdf, PASSPHRASE_LABEL)?),
+        recovery_wrap: Some(wrap_with_passphrase(&dek, &normalize_recovery(&recovery), kdf, RECOVERY_LABEL)?),
         keychain_account: None,
         key_check: key_check(&dek),
         created_at: chrono::Utc::now(),
@@ -164,8 +198,9 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
 }
 
 pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key, VaultError> {
+    require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.passphrase_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
-    let k = unwrap_with_passphrase(w, passphrase, b"anvil-dek-passphrase-v1")?;
+    let k = unwrap_with_passphrase(w, passphrase, PASSPHRASE_LABEL)?;
     if key_check(&k) != h.key_check {
         return Err(VaultError::WrongSecret);
     }
@@ -173,19 +208,97 @@ pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key
 }
 
 pub fn unlock_with_recovery(h: &ProfileHeader, recovery: &str) -> Result<Key, VaultError> {
+    require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.recovery_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
-    let k = unwrap_with_passphrase(w, &normalize_recovery(recovery), b"anvil-dek-recovery-v1")?;
+    let k = unwrap_with_passphrase(w, &normalize_recovery(recovery), RECOVERY_LABEL)?;
     if key_check(&k) != h.key_check {
         return Err(VaultError::WrongSecret);
     }
     Ok(k)
 }
 
-/// Replace the passphrase wrap (requires the unlocked DEK).
+/// Replace the passphrase wrap of a passphrase profile (requires the
+/// unlocked DEK). The recovery key stays valid. An OS-keychain profile is
+/// refused; it changes mode with [`convert_keychain_to_passphrase`].
 pub fn change_passphrase(dir: &Path, h: &mut ProfileHeader, dek: &Key, new_passphrase: &str, kdf: KdfParams) -> Result<(), VaultError> {
-    h.passphrase_wrap = Some(wrap_with_passphrase(dek, new_passphrase, kdf, b"anvil-dek-passphrase-v1")?);
-    h.protection = ProtectionMode::Passphrase;
-    write_header(dir, h)
+    require_protection(h, ProtectionMode::Passphrase)?;
+    require_profile_key(h, dek)?;
+    let mut next = h.clone();
+    next.passphrase_wrap = Some(wrap_with_passphrase(dek, new_passphrase, kdf, PASSPHRASE_LABEL)?);
+    write_header(dir, &next)?;
+    *h = next;
+    Ok(())
+}
+
+/// Result of [`convert_keychain_to_passphrase`].
+#[cfg(feature = "os-keychain")]
+pub struct KeychainConversion {
+    /// The new recovery key. Shown to the user once; never stored.
+    pub recovery_key: Zeroizing<String>,
+    /// False when the OS credential store did not remove the old entry. The
+    /// profile no longer unlocks from the keychain either way, and removal is
+    /// retried by [`retire_keychain_entry`].
+    pub keychain_entry_removed: bool,
+}
+
+/// Convert an OS-keychain profile to passphrase protection (requires the
+/// unlocked DEK). The data key is unchanged, so nothing is re-encrypted.
+///
+/// The passphrase header, with a new recovery wrap, is durably written
+/// before the keychain entry is touched; from that point the keychain path
+/// is refused because the header's protection mode is `Passphrase`. The
+/// header keeps the old account name only until the entry is gone.
+#[cfg(feature = "os-keychain")]
+pub fn convert_keychain_to_passphrase(
+    dir: &Path,
+    h: &mut ProfileHeader,
+    dek: &Key,
+    new_passphrase: &str,
+    kdf: KdfParams,
+) -> Result<KeychainConversion, VaultError> {
+    require_protection(h, ProtectionMode::OsKeychain)?;
+    require_profile_key(h, dek)?;
+    let recovery = Zeroizing::new(format_recovery_key(&crypto::random_bytes(20)));
+    let mut next = h.clone();
+    next.protection = ProtectionMode::Passphrase;
+    next.passphrase_wrap = Some(wrap_with_passphrase(dek, new_passphrase, kdf, PASSPHRASE_LABEL)?);
+    next.recovery_wrap = Some(wrap_with_passphrase(dek, &normalize_recovery(&recovery), kdf, RECOVERY_LABEL)?);
+    write_header(dir, &next)?;
+    *h = next;
+    let keychain_entry_removed = retire_keychain_entry(dir, h).is_ok();
+    Ok(KeychainConversion { recovery_key: recovery, keychain_entry_removed })
+}
+
+/// Remove the keychain entry a converted (now passphrase) profile left
+/// behind, then forget its account name. A no-op when none is recorded.
+/// An entry holding a different key is not this profile's: it is forgotten,
+/// never deleted. Keychain profiles are refused (their entry is their key).
+#[cfg(feature = "os-keychain")]
+pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), VaultError> {
+    require_protection(h, ProtectionMode::Passphrase)?;
+    let Some(account) = h.keychain_account.as_deref() else {
+        return Ok(());
+    };
+    let entry = keychain_entry(account)?;
+    let unavailable = |e: keyring_core::Error| VaultError::KeychainUnavailable(e.to_string());
+    match entry.get_secret() {
+        Ok(secret) => {
+            let secret = Zeroizing::new(secret);
+            if Key::from_bytes(&secret).is_ok_and(|k| key_check(&k) == h.key_check) {
+                match entry.delete_credential() {
+                    Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+                    Err(e) => return Err(unavailable(e)),
+                }
+            }
+        }
+        Err(keyring_core::Error::NoEntry) => {}
+        Err(e) => return Err(unavailable(e)),
+    }
+    let mut next = h.clone();
+    next.keychain_account = None;
+    write_header(dir, &next)?;
+    *h = next;
+    Ok(())
 }
 
 /// The OS credential store entry holding a keychain profile's data key: the
@@ -195,12 +308,20 @@ pub fn change_passphrase(dir: &Path, h: &mut ProfileHeader, dek: &Key, new_passp
 #[cfg(feature = "os-keychain")]
 fn keychain_entry(account: &str) -> Result<keyring_core::Entry, VaultError> {
     let unavailable = |e: &dyn std::fmt::Display| VaultError::KeychainUnavailable(e.to_string());
-    keyring::Entry::store_status().as_ref().map_err(|e| unavailable(e))?;
+    // The platform store is installed on first use. A store installed
+    // earlier (the in-memory mock in tests) is kept.
+    if keyring_core::get_default_store().is_none() {
+        keyring::Entry::store_status().as_ref().map_err(|e| unavailable(e))?;
+    }
     // Windows defaults to "Enterprise" persistence, which roams with domain
     // user profiles. The key only unlocks files on this machine, so keep it here.
+    // The in-memory mock store used by tests accepts no modifiers.
     #[cfg(windows)]
-    let entry =
-        keyring_core::Entry::new_with_modifiers(KEYCHAIN_SERVICE, account, &std::collections::HashMap::from([("persistence", "local")]));
+    let entry = if keyring_core::get_default_store().is_some_and(|s| s.as_any().is::<keyring_core::mock::Store>()) {
+        keyring_core::Entry::new(KEYCHAIN_SERVICE, account)
+    } else {
+        keyring_core::Entry::new_with_modifiers(KEYCHAIN_SERVICE, account, &std::collections::HashMap::from([("persistence", "local")]))
+    };
     #[cfg(not(windows))]
     let entry = keyring_core::Entry::new(KEYCHAIN_SERVICE, account);
     entry.map_err(|e| unavailable(&e))
@@ -231,6 +352,9 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
 
 #[cfg(feature = "os-keychain")]
 pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
+    // Checked before the store is touched: a converted profile may still
+    // name its old account until that entry is removed.
+    require_protection(h, ProtectionMode::OsKeychain)?;
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
     let secret = entry.get_secret().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;

@@ -6,9 +6,9 @@
 
 use crate::identity::{self, IdentityPolicyError, UnlockRequirements};
 use crate::{AppError, Result};
-use anvil_domain::workspace::LinkedIdentity;
+use anvil_domain::workspace::{LinkedIdentity, ProtectionMode};
 use anvil_identity::VerifiedIdentity;
-use anvil_storage::vault::{self, ProfileHeader};
+use anvil_storage::vault::{self, KeychainConversion, ProfileHeader};
 use anvil_storage::{KdfParams, Key};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -137,7 +137,7 @@ impl ProfileManager {
         proof: Option<&VerifiedIdentity>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(ProfileHeader, Key)> {
-        let h = vault::read_header(dir)?;
+        let mut h = vault::read_header(dir)?;
         let recovery = matches!(how, Unlock::RecoveryKey(_));
         let binding = match identity::read_binding(dir) {
             Ok(b) => b,
@@ -167,6 +167,11 @@ impl ProfileManager {
             && !recovery
         {
             identity::verify_binding(b, &h, &k)?;
+        }
+        // A keychain entry left over from converting this profile to a
+        // passphrase. It no longer unlocks anything; retry removing it.
+        if h.protection == ProtectionMode::Passphrase && h.keychain_account.is_some() {
+            vault::retire_keychain_entry(dir, &mut h).ok();
         }
         Ok((h, k))
     }
@@ -236,16 +241,40 @@ impl ProfileManager {
     }
 }
 
+fn check_new_passphrase(p: &str) -> Result<()> {
+    if p.chars().count() < 8 {
+        return Err(AppError::Invalid("the passphrase needs at least 8 characters".into()));
+    }
+    Ok(())
+}
+
 impl crate::App {
-    /// Set a new unlock passphrase (e.g. after unlocking with the recovery
-    /// key). Re-wraps the existing data key; nothing is re-encrypted and the
-    /// recovery key stays valid.
+    /// Set a new unlock passphrase on a passphrase profile (e.g. after
+    /// unlocking with the recovery key). Re-wraps the existing data key;
+    /// nothing is re-encrypted and the recovery key stays valid. An
+    /// OS-keychain profile is refused: see [`crate::App::convert_to_passphrase`].
     pub fn change_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<()> {
-        if new_passphrase.chars().count() < 8 {
-            return Err(AppError::Invalid("the passphrase needs at least 8 characters".into()));
-        }
+        check_new_passphrase(new_passphrase)?;
         let mut h = vault::read_header(&self.dir)?;
+        if h.protection != ProtectionMode::Passphrase {
+            return Err(AppError::Invalid("this profile uses the OS keychain; convert it to passphrase protection instead".into()));
+        }
         self.store.with_key(|k| vault::change_passphrase(&self.dir, &mut h, k, new_passphrase, kdf))??;
         Ok(())
+    }
+
+    /// Convert an OS-keychain profile to passphrase protection. Returns the
+    /// new recovery key (shown once). Afterwards the profile unlocks only
+    /// with the passphrase or recovery key, and its keychain entry is
+    /// removed; if the credential store refuses, removal is retried at the
+    /// next unlock. A passphrase profile is refused.
+    pub fn convert_to_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<KeychainConversion> {
+        check_new_passphrase(new_passphrase)?;
+        let mut h = vault::read_header(&self.dir)?;
+        if h.protection != ProtectionMode::OsKeychain {
+            return Err(AppError::Invalid("this profile already uses a passphrase; change it instead".into()));
+        }
+        let conversion = self.store.with_key(|k| vault::convert_keychain_to_passphrase(&self.dir, &mut h, k, new_passphrase, kdf))??;
+        Ok(conversion)
     }
 }

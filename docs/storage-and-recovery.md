@@ -32,6 +32,28 @@ journal, and blobs for known secret and body values.
 | Recovery key | A random recovery key (shown once at creation of a passphrase profile) unwraps a second copy of the data key |
 | OS keychain | The data key is stored in the platform credential store: the macOS Keychain, the Windows Credential Manager (per user, "local machine" persistence, so it does not roam with domain profiles), or the freedesktop Secret Service on Linux and the BSDs (GNOME Keyring, KWallet). There is no in-memory fallback. `crates/anvil-storage/tests/os_keychain.rs` round-trips a real entry on all three in CI. This is the first-run default ("Start now — no password"): at launch a single keychain profile opens without any input, but never after a manual, idle or sleep lock. Where no credential store exists (e.g. Linux without a Secret Service) the app falls back to a passphrase; it never stores data unencrypted. A keychain profile has no recovery key: if the keychain item is lost, only a portable backup restores the data |
 
+The backend accepts only the unlock methods of the profile's protection mode
+(recorded in the plaintext header): the passphrase and recovery key for a
+passphrase profile, the OS keychain for a keychain profile.
+
+**Adding a passphrase to a keychain profile.** Settings → *Require an unlock
+passphrase* converts an unlocked keychain profile to passphrase protection
+(*Change unlock passphrase* is for passphrase profiles only). The data key is
+not changed, so nothing is re-encrypted. In order:
+
+1. The header is rewritten atomically (synced temporary file, rename, synced
+   directory) with the passphrase wrap, a wrap for a **new recovery key**
+   (shown once) and the passphrase mode. From here on the keychain no longer
+   opens the profile.
+2. The keychain entry is removed and its account name dropped from the header.
+   If the credential store refuses, or the app stops between the two steps,
+   the header keeps the account name and removal is retried after the next
+   successful unlock. An entry that holds a different key is left alone.
+
+`crates/anvil-storage/tests/keychain_conversion.rs` and
+`crates/anvil-app/tests/keychain_conversion.rs` cover this with keyring-core's
+in-memory mock credential store.
+
 A linked provider identity is **not** an unlock method; see `docs/identity.md`.
 
 Locking (button, ⌘/Ctrl+L, idle timeout, system sleep) drops the data key,
@@ -42,7 +64,8 @@ commands return `LOCKED` until unlock.
 ## Recovery
 
 - **Forgot the passphrase:** use the recovery key on the lock screen, then set a
-  new passphrase. Without the recovery key the data cannot be decrypted; Anvil
+  new passphrase. A keychain profile converted to a passphrase has the
+  recovery key shown at the conversion. Without the recovery key the data cannot be decrypted; Anvil
   will not pretend otherwise.
 - **Lost machine / reinstall:** restore a **full backup** (encrypted with an
   export passphrase) into a new profile. It does not need the original OS
