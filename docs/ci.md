@@ -20,7 +20,7 @@ are the required checks for a change.
 
 | Job | Steps |
 | --- | --- |
-| **Rust** (3 OSes) | `npm run build` (anvil-desktop embeds `apps/desktop/dist` at compile time) → `cargo fmt --all --check` (Linux) → `cargo clippy --locked --workspace --all-targets -- -D warnings` → `cargo check -p anvil-desktop` → `cargo check -p anvil-desktop --features e2e` → `cargo test --locked --workspace --exclude anvil-desktop` |
+| **Rust** (3 OSes) | `npm run build` (anvil-desktop embeds `apps/desktop/dist` at compile time) → `cargo fmt --all --check` (Linux) → `cargo clippy --locked --workspace --all-targets -- -D warnings` → `cargo check -p anvil-desktop` → `cargo check -p anvil-desktop --features e2e` → `cargo test --locked --workspace --exclude anvil-desktop` → `cargo test --locked -p anvil-desktop --lib` (Linux, macOS: the desktop shell's unit tests, such as the session open/cancel handshake) |
 | **Frontend** | `npm ci` → `npm run typecheck` → `npm run e2e:typecheck` → `npm test` (vitest, jsdom) → `npm run build` → `npm audit --omit=dev --audit-level=high` |
 | **Contract & catalog drift** | `cargo run -p anvil-cli -- schema --out contracts/schemas` and `npm run contracts`, then fail if `contracts/` or `apps/desktop/src/generated/` changed; `cargo test -p anvil-diagnostics --test catalog_drift` |
 | **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `scripts/release-check.sh` (dependency-graph check only) |
@@ -64,6 +64,7 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo check --locked -p anvil-desktop
 cargo check --locked -p anvil-desktop --features e2e
 ulimit -n 4096; cargo test --locked --workspace --exclude anvil-desktop
+cargo test --locked -p anvil-desktop --lib   # not on Windows
 
 # Frontend
 cd apps/desktop && npm run typecheck && npm run e2e:typecheck && npm test && npm run build; cd -
