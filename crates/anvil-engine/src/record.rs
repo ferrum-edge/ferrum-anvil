@@ -211,7 +211,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
     }
 
-    let latency_ms = final_attempt.map(|x| x.duration_us / 1000);
+    // Every attempt counts: a slow hop before a fast redirect or fallback is
+    // still time the request took.
+    let latency_ms = exchange_duration_us(&attempts).map(|us| us / 1000);
     let assertion_results = assertions::evaluate(
         &ctx.spec.assertions,
         &Observed {

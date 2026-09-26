@@ -4830,8 +4830,8 @@ export interface RunStep {
    */
   duration_ms?: number | null;
   /**
-   * Sum of the network attempt durations (what latency assertions see is
-   * the final attempt only).
+   * Sum of the network attempt durations (the same exchange time latency
+   * assertions evaluate).
    */
   exchange_ms?: number | null;
   /**
