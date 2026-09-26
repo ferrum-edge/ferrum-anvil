@@ -20,3 +20,18 @@
   window, and its sessions cannot be driven from there. A JWT-SVID token
   file is read through links (such as a Kubernetes projected token), but
   the file opened must be a regular file of at most 16 KiB.
+- Bundle imports now store the load plans and history records a bundle
+  carries (exports include load plans, and list a plan left out because it
+  names a deleted object among the excluded items), and a Duplicate import
+  gives them new ids. A history record that is not a valid execution record
+  is left out with a warning instead of refusing the bundle, one dated after
+  the import is stored with the import time, and a record overwritten under
+  Replace no longer leaves its old response body behind. Approving an import or restore into an existing workspace now names
+  the previewed file's `bundle_sha256`, and a file that changed since the
+  preview is refused (CLI: `--bundle-sha256`, which a `--dry-run` checks
+  too). Imported OAuth 2 profiles no
+  longer keep a token-cache id, a Duplicate preview no longer lists foreign
+  secrets, and profile headers with key-derivation costs outside the bundle
+  bounds are refused before unlocking. The CLI treats an empty
+  `ANVIL_EXPORT_PASSPHRASE` as unset and says to unset it when importing a
+  bundle that is not encrypted.

@@ -70,8 +70,6 @@ const MAX_HEADER_BYTES: usize = 4096;
 pub const MAX_BACKUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MIN_PASSPHRASE_LEN: usize = 8;
 const SALT_LEN: usize = 16;
-const MIN_SALT_LEN: usize = 8;
-const MAX_SALT_LEN: usize = 64;
 const MAX_LISTED_CONFLICTS: usize = 50;
 
 /// Bounds on the Argon2id costs a backup may name: the same as for bundle
@@ -363,9 +361,7 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<(Back
     }
     check_kdf(&header.kdf)?;
     let salt = B64.decode(&header.salt_b64).map_err(|_| BackupError::NotABackup("the salt is not base64".into()))?;
-    if !(MIN_SALT_LEN..=MAX_SALT_LEN).contains(&salt.len()) {
-        return Err(BackupError::UnsupportedKdf(format!("{}-byte salt; allowed {MIN_SALT_LEN} to {MAX_SALT_LEN} bytes", salt.len())));
-    }
+    crypto::check_salt(&salt).map_err(BackupError::UnsupportedKdf)?;
     let passphrase = passphrase.ok_or(BackupError::PassphraseRequired)?;
     let (aad, envelope) = bytes.split_at(header_end);
     let key = crypto::derive(passphrase.as_bytes(), &salt, &header.kdf).map_err(|e| BackupError::UnsupportedKdf(e.to_string()))?;
@@ -487,7 +483,7 @@ impl App {
         let local = self.store.read_consistently(|r| local(r, &d))?;
         let notes = restore_notes(&d, &local, policy)?;
         let plan = restore_plan(&d, &local, policy);
-        Ok(report(plan, &manifest, &d, notes, None))
+        Ok(report(plan, &manifest, &d, notes, None, port::file_sha256(bytes)))
     }
 
     /// [`App::restore_approved`] with nothing approved: a backup that claims
@@ -505,6 +501,8 @@ impl App {
     /// profile's too while it holds a workspace the backup does not claim.
     ///
     /// The whole restore is refused, before anything is written, when:
+    /// - `approval` was given for another file (its `bundle_sha256`), or
+    ///   names an existing workspace without naming a file;
     /// - a request or dataset names a stored attachment by content hash that
     ///   the backup does not carry, and content with that hash is stored
     ///   here: it would resolve to bytes the backup never carried. One whose
@@ -523,6 +521,7 @@ impl App {
         policy: ConflictPolicy,
         approval: &ImportApproval,
     ) -> Result<ImportReport> {
+        approval.check_file(bytes, "restored")?;
         let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         let checkpoint = self.store.checkpoint("before-restore")?;
         // A refusal returns before anything is written; the transaction then
@@ -539,7 +538,7 @@ impl App {
             write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
             Ok(Ok((plan, notes)))
         })??;
-        Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string())))
+        Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string()), port::file_sha256(bytes)))
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
@@ -1026,7 +1025,14 @@ fn refuse_unapproved(plan: &ImportPlan, approval: &ImportApproval) -> Result<()>
     Ok(())
 }
 
-fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, notes: Vec<String>, checkpoint: Option<String>) -> ImportReport {
+fn report(
+    plan: ImportPlan,
+    manifest: &BackupManifest,
+    d: &Decoded,
+    notes: Vec<String>,
+    checkpoint: Option<String>,
+    bundle_sha256: String,
+) -> ImportReport {
     let mut warnings = d.warnings.clone();
     warnings.extend(notes);
     if plan.policy == ConflictPolicy::Merge {
@@ -1044,6 +1050,7 @@ fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, notes: Vec<S
         workspaces: d.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
         workspace_ids: d.graph.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
         full_backup: true,
+        bundle_sha256,
     }
 }
 

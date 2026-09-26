@@ -50,6 +50,12 @@ The backend accepts only the unlock methods of the profile's protection mode
 (recorded in the plaintext header): the passphrase and recovery key for a
 passphrase profile, the OS keychain for a keychain profile.
 
+The header is plaintext, so its Argon2id costs and salts are checked before any
+derivation runs, against the same bounds as a bundle's or backup's
+([below](#export-and-import)). A header whose costs or salt are outside them is
+refused as unreadable, for the passphrase and the recovery key alike, and no
+key is ever wrapped with costs outside them.
+
 **Adding a passphrase to a keychain profile.** Settings → *Require an unlock
 passphrase* converts an unlocked keychain profile to passphrase protection
 (*Change unlock passphrase* is for passphrase profiles only). The data key is
@@ -93,8 +99,9 @@ commands return `LOCKED` until unlock.
 - **Bad import:** every import takes a checkpoint (`VACUUM INTO`) before its
   transaction, and a failure rolls back that transaction only. Not every write
   is inside it:
-  - A bundle import writes its objects and secrets in the transaction; its
-    attachments are stored after the commit and stay if storing one fails.
+  - A bundle import writes its objects, secrets, load plans and history
+    records in the transaction; its attachments are stored after the commit
+    and stay if storing one fails.
   - A spec import writes everything in the transaction: the new workspace or
     root folder, the stored original file, its folders, requests,
     environments and source record. A failure, including one taking the
@@ -116,6 +123,17 @@ commands return `LOCKED` until unlock.
 An export without a workspace (`anvil export` without `--workspace`) is a
 bundle of every workspace, not a backup: it carries no app settings, profiles,
 spec-import records or load reports, and its bundle kind is `workspace`.
+
+A bundle carries each workspace's load plans, except one that still names a
+request, dataset or environment deleted since (an import would refuse it; the
+export lists it among its excluded items), and, when history is included, the
+workspace's history records without their response bodies. An import stores
+both. A history record is kept only when it belongs to a workspace in the
+bundle, and keeps its request, revision and environment links only when the
+bundle carries that object in the record's workspace (a revision only as one
+of the linked request). A record that is not a valid execution record is left
+out with a warning, and one dated after the import is stored with the import
+time as its start, so history retention still ages it out.
 
 In either bundle mode only the vault is encrypted. The objects (names, URLs,
 header and body text), attachments and history are ordinary zip entries that
@@ -146,13 +164,16 @@ Import is preview-then-apply with conflict policies (duplicate, merge, replace).
 Duplicate gives every imported object, request revision and secret a new id and
 makes each copied secret belong to the copied workspace, so the copy never
 overwrites or depends on its source: deleting either leaves the other working.
+Load plans and history records get new ids too, and follow the copied
+requests, dataset, environment and workspace.
 A copy whose bundle left a secret out does not use the source's secret either.
 Merge keeps objects, revisions and secrets that already exist. Replace
 overwrites them, but never a secret that a workspace outside the bundle (or no
 workspace) owns, and never an object stored in a different workspace from the
-one the bundle gives it: the preview lists both, and a Replace import that
-would overwrite one is refused and changes nothing. The preview lists every
-object and secret that shares an id with one already stored.
+one the bundle gives it, and never a history record stored under another
+workspace (or none): the preview lists them, and a Replace import that would
+overwrite one is refused and changes nothing. The preview lists every object,
+secret and history record that shares an id with one already stored.
 
 Workspace ids travel in every bundle, so a bundle can claim a workspace that is
 already stored here, such as a re-imported backup. Under Merge or Replace the
@@ -166,6 +187,16 @@ shows the bundle was not altered after it was exported, not who wrote it; a
 share-safe bundle has no passphrase at all, and nothing shows it was not
 altered.
 Duplicate never writes into a stored workspace.
+
+The confirmation holds only for the file that was previewed. The preview
+reports the file's SHA-256 (`bundle_sha256`), an approval that names a stored
+workspace must name that digest too, and applying a file with any other digest
+(one replaced or changed since the preview) is refused before anything is
+read from it. The desktop passes the digest back itself; in the CLI,
+`--into-existing` approves the file as that command reads it, and
+`--bundle-sha256 <SHA256>` from a reviewed `--dry-run` pins the approval to
+that file (a `--dry-run` given it is refused for any other file). The same
+applies to full backups.
 
 A bundle is refused when any workspace-scoped object (folder, request,
 environment, TLS, proxy or integration profile, dataset, scenario, load plan)
@@ -202,7 +233,13 @@ any passphrase is asked for or any derivation runs, unless they are within:
 | Memory × passes | at most 1 GiB (e.g. 256 MiB for 4 passes) |
 | Salt | 8 to 64 bytes |
 
-Exports use 64 MiB, 3 passes and 1 lane.
+Exports use 64 MiB, 3 passes and 1 lane. The same bounds apply to a
+profile's own header ([Unlocking](#unlocking)) and to full backups.
+
+A passphrase given for a bundle without a vault (share safely) is refused; in
+the CLI, unset `ANVIL_EXPORT_PASSPHRASE` (an empty value counts as unset) to
+import one.
+
 Imports never send requests, run scripts or load plans, and never activate TLS
 bypasses, plain-HTTP marker trust, cross-origin credential forwarding or the
 legacy HMAC opt-in, and never open an imported collection's root folder to its
@@ -210,7 +247,10 @@ workspace; the preview lists what was normalised. Device-bound items
 (keychain entries, provider sessions, linked local files) are reported as
 needing rebinding, and the preview lists each linked local file with the
 request or dataset that names it. A bundle import drops this device's
-linked-file bindings for every request and dataset it overwrites.
+linked-file bindings for every request and dataset it overwrites. An OAuth 2
+profile imported from a bundle never keeps the token-cache id the bundle gives
+it, so it caches its token under the workspace, folder or request that defines
+it, never alongside a profile stored here that names the same id.
 
 ## Full backups
 
@@ -310,7 +350,9 @@ needs no confirmation.
 
 Configurable in Settings: enable/disable history, keep or drop response bodies,
 maximum age (days) and total size; pruning keeps the newest records within the
-budget. "Clear all history" deletes history records only.
+budget. "Clear all history" deletes history records only. A history record
+that is overwritten (an import under Replace) releases its old response body
+unless another record still uses it.
 
 Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so

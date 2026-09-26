@@ -90,7 +90,7 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
 
     // Restoring the same backup again with Merge is idempotent. It writes
     // into the restored workspace, which the user approves.
-    let approval = anvil_app::port::ImportApproval { existing_workspaces: vec![ws_b.meta.id] };
+    let approval = anvil_app::port::ImportApproval::for_file(&bytes, vec![ws_b.meta.id]);
     b.restore_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &approval).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
     // A full backup restores every item under its own id; it is never duplicated.
