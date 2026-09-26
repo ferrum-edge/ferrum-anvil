@@ -1,4 +1,4 @@
-# Failure lab: `h3x` profile (SSE over HTTP/3, CONNECT-UDP)
+# Failure lab: `h3x` profile (SSE over HTTP/3, CONNECT-UDP, DTLS in the tunnel)
 
 This profile runs Anvil's shared engine against the **real, pinned Ferrum Edge v0.9.7
 release binary** (`lab/gateway/RELEASE.lock`). It exercises two HTTP/3 extensions through
@@ -8,6 +8,9 @@ the gateway's QUIC listener:
   stream's DATA frames as they arrive (`docs/protocols.md` §3.3).
 - **RFC 9298 CONNECT-UDP (MASQUE).** UDP datagrams go through the gateway as HTTP
   Datagrams in an extended CONNECT tunnel (`docs/protocols.md` §3.8).
+- **DTLS inside the CONNECT-UDP tunnel.** Anvil's DTLS client runs end to end with a DTLS
+  echo behind the gateway; every DTLS record is one HTTP Datagram the gateway relays
+  verbatim (`docs/protocols.md` §3.6 and §3.8).
 
 Every scenario records the stimulus, the public evidence and what Anvil concluded, and
 independent ground truth: fixture logs and the gateway operator log. The ground truth is
@@ -16,7 +19,7 @@ never passed to the engine. Most scenarios also run a recovery request.
 Profile code: `crates/anvil-lab/src/{h3x,fixtures_h3x}.rs`.
 Gateway configuration: `lab/gateway/{h3x.conf,h3x-off.conf,h3x-noext.conf,h3x.yaml}`.
 Fixtures: `crates/anvil-fixtures/src/lab_streams.rs` (`sse_abort`, `sse_flaky`, the TCP
-relay), plus the HTTP and UDP stream fixtures.
+relay), plus the HTTP and UDP stream fixtures and the DTLS echo (`dtls.rs`).
 
 ## 1. Running
 
@@ -52,6 +55,8 @@ rendered configuration (`lab/.run/h3x*/`). All three pass on v0.9.7.
 | SSE: `/sse` fixture, `sse_abort`, `sse_flaky` | 19813, 19816, 19817 |
 | UDP echo, UDP silent (admitted MASQUE destinations) | 19805, 19806 |
 | UDP echo that is **not** admitted | 19807 |
+| DTLS 1.2 echoes (dimpl fixture), admitted: lab-CA certificate, untrusted-root certificate | 19808, 19809 |
+| DTLS echo that is **not** admitted | 19810 |
 | TCP-only relay to 18843 (models a UDP-blocked path) | 19820 |
 
 ## 2. Gateway configuration
@@ -61,7 +66,8 @@ rendered configuration (`lab/.run/h3x*/`). All three pass on v0.9.7.
   process-wide, so the gateway documentation recommends a **dedicated MASQUE route** and
   explicit `allowed_methods` on every other route. `h3x.yaml` does exactly that:
   - `h3x-masque` (`/.well-known/masque`) is the only route without a method filter;
-  - its destinations come from the `h3x-udp-targets` upstream (19805, 19806);
+  - its destinations come from the `h3x-udp-targets` upstream (19805, 19806, and the DTLS
+    echoes 19808, 19809);
   - `h3x-masque-get-only` shows the method policy refusing CONNECT.
 - Destinations are **admitted, not load balanced**. The requested
   `target_host:target_port` must be one of the route's configured targets, else 403
@@ -94,7 +100,10 @@ rendered configuration (`lab/.run/h3x*/`). All three pass on v0.9.7.
 | MASQUE-007 | To 18845 (no extended CONNECT) | `masque_unsupported` before any request; `masque.extended_connect_unavailable`; QUIC phases measured; no response; `not_dispatched`; no UDP finding | That gateway logged no request; target untouched |
 | MASQUE-008 | QUIC DATAGRAM frames required, 18843 | `masque_unsupported` before the request; `masque.no_datagram_support` with evidence `h3.settings.h3_datagram = not enabled` | The gateway logged no CONNECT-UDP request; target untouched. Recovery in `auto` mode uses capsules |
 | MASQUE-009 | MASQUE proxy URL on the TCP-only path | One attempt, `quic_handshake_timeout`, nothing dispatched, no tunnel/response/UDP finding | No fallback: the TCP path saw nothing, the target nothing |
-| MASQUE-010 | `dtls://` target with MASQUE | `unsupported_combination` in `prepare` (field `udp.masque`), `local.unsupported_combination`, nothing sent | The gateway saw no request; target untouched |
+| MASQUE-DTLS-001 | `dtls://` to the DTLS echo (19808) through the tunnel, 2 datagrams | DTLS 1.2 handshake completed; 2 sent, 2 echoed with boundaries; the target's certificate verified against the profile; the attempt is `DTLS dtls://…` with DNS/connect `not_applicable`, one `proxy_tunnel` phase and no QUIC phase; `connection.tunnel` is a `connect_udp` leg (200 over verified h3, QUIC phases); records as capsules both ways (≥ 4 each); no `response` (the 200 is tunnel evidence); no MASQUE/UDP/DTLS/TLS finding; dispatch `sent`, transport completed | The DTLS echo completed exactly one handshake and got both datagrams; operator log 200 and "tunnel established" |
+| MASQUE-DTLS-002 | To the DTLS echo with an untrusted-root certificate (19809) | `tls_untrusted_issuer` in `dtls_handshake`; the presented certificate kept; `client.tls.untrusted_issuer` names the target (not the gateway); the gateway leg verified and no MASQUE finding; nothing dispatched | The echo saw the handshake start through the gateway but never completed it or got data; operator log 200. Recovery to 19808 |
+| MASQUE-DTLS-003 | To a live DTLS echo that is not admitted (19810) | The same refusal checks as MASQUE-003 (403, body kept, `masque.proxy_refused` confirmed); the attempt stays the CONNECT with no `dtls_handshake` phase, no tunnel evidence and no DTLS/TLS finding: no DTLS was attempted | The unlisted echo saw nothing; operator log 403 and `connect_udp_target_not_allowed`. Recovery to 19808 |
+| MASQUE-DTLS-004 | To the silent target (19806), DTLS handshake deadline 1.5 s | `dtls_handshake_timeout` with `deadline_ms = 1500`; the tunnel was fine (200, ClientHello and retransmissions sent as capsules, none received, `closed_by = client`); `client.dtls.handshake_timeout` names the target and does not claim it is down; no MASQUE finding, no `udp.no_response`; nothing dispatched | The silent target received the handshake datagrams through the gateway; operator log 200. Recovery to 19808 |
 
 The harness adds its untrusted-pass checks on top: no `ferrum.token.*` and no
 `ferrum.outcome` finding without a trusted profile. In the trusted pass, the 405 of
@@ -109,6 +118,10 @@ v0.9.7 (sha256 `f3bd0027…`): **34 passed, 0 failed, 0 skipped** each time (17 
 × trusted and untrusted passes). After the merge into the main branch (2026-09-26), `run all`
 gave h3x **34/0/0 on both v0.9.7 and v0.9.5**.
 
+With DTLS inside the tunnel (2026-09-26; MASQUE-010, the former local refusal, replaced by
+MASQUE-DTLS-001…004): three consecutive runs on v0.9.7 gave **40 passed, 0 failed, 0 skipped**
+each time (20 scenarios × both passes), and one run on v0.9.5 (`--release v0.9.5`) **40/0/0**.
+
 Observations about v0.9.7 that the scenarios rely on, each confirmed by the operator log
 or the wire:
 
@@ -118,12 +131,23 @@ or the wire:
   (0x102), never a clean FIN.
 - CONNECT-UDP answers 200 with `capsule-protocol: ?1`. The gateway advertises extended
   CONNECT but not `SETTINGS_H3_DATAGRAM`, so Anvil's automatic mode uses DATAGRAM capsules.
+- DTLS records are relayed verbatim in both directions: the gateway treats them as ordinary
+  Context ID 0 UDP payloads (its `src/http3/connect_udp.rs` relays capsule payloads to a
+  connected UDP socket and never inspects them), so the DTLS session is end to end with the
+  target and the handshake completes with retransmission timers unaffected. The admission
+  check (403 `connect_udp_target_not_allowed` for a target that is not a configured
+  destination, `admit_connect_udp_destination`) runs before any socket exists, so a refused
+  DTLS target never sees a ClientHello. v0.9.5 behaves the same in these scenarios.
 
 ## 5. Limitations
 
 - One QUIC connection per SSE attempt or MASQUE tunnel; there is no pooling across sessions.
 - CONNECT-UDP runs over HTTP/3 only (no RFC 9298 over HTTP/2 or HTTP/1.1), so a UDP-blocked
-  path to the proxy has no fallback. DTLS inside the tunnel is refused, not implemented.
+  path to the proxy has no fallback.
+- DTLS inside the tunnel is exercised against Anvil's dimpl DTLS 1.2 echo behind the
+  gateway, not against a Ferrum `dtls` listener (a gateway-terminated DTLS listener behind a
+  gateway's own CONNECT-UDP route would test the same relay twice). Mutual TLS inside the
+  tunnel is covered by the engine tests (`crates/anvil-engine/tests/dtls_masque.rs`).
 - The gateway's QUIC-datagram path cannot be exercised live because v0.9.7 never negotiates
   `SETTINGS_H3_DATAGRAM`. QUIC DATAGRAM frames in both directions are covered by the
   `h3server` fixture tests (`crates/anvil-transport/tests/h3_sse_masque.rs`).

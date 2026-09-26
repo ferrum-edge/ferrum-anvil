@@ -198,6 +198,7 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
     let header = plan.proxy_header.as_ref().map(|p| crate::connector::PreTlsHeader {
         plan: p,
         redact: redact.as_deref().map(|r| r as &(dyn Fn(&str) -> String + Send + Sync)),
+        field: "tcp.proxy_protocol",
     });
     let est =
         match establish_guarded_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline, header)

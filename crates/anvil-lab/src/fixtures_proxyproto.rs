@@ -5,9 +5,11 @@
 //! `backend_proxy_protocol: v2` re-advertises the client identity it resolved
 //! from Anvil's header, so the backend records what the gateway concluded.
 //! The UDP backends are plain echoes that record every payload byte, so a
-//! backend that received envelope bytes would show them.
+//! backend that received envelope bytes would show them. The HTTP backend of
+//! `pp-http` records every request that reached it.
 
 use anvil_fixtures::LabPki;
+use anvil_fixtures::http::{self, Fixture};
 use anvil_fixtures::proxy_protocol::{self as pp, ProxyFixture};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -32,6 +34,8 @@ pub struct ProxyProtoFixtures {
     /// Backends of the untrusted-peer instance (`pp-v6-tcp`, `pp-v6-udp`): must stay silent.
     pub v6_tcp_backend: ProxyFixture,
     pub v6_udp_backend: ProxyFixture,
+    /// HTTP echo behind the gateway's HTTP route `pp-http` (HTTP 18980, HTTPS 18981).
+    pub http_backend: Fixture,
 }
 
 impl ProxyProtoFixtures {
@@ -49,6 +53,7 @@ impl ProxyProtoFixtures {
             dtls_auth_backend: pp::udp_plain_echo("127.0.0.1:19914").await?,
             v6_tcp_backend: pp::tcp_echo("127.0.0.1:19921", vec!["127.0.0.1".parse()?], None).await?,
             v6_udp_backend: pp::udp_plain_echo("127.0.0.1:19923").await?,
+            http_backend: http::serve("127.0.0.1:19930", None).await?,
             certs_dir: certs_dir.to_path_buf(),
             pki,
         })
@@ -67,5 +72,6 @@ impl ProxyProtoFixtures {
         ] {
             f.log.clear();
         }
+        self.http_backend.log.clear();
     }
 }

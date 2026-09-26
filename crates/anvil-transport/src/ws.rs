@@ -76,6 +76,9 @@ pub struct WsPlan {
     pub display_url: String,
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
+    /// PROXY protocol header written at the head of each new TCP connection,
+    /// before TLS (TCP legs only; HTTP/3 is refused before traffic).
+    pub proxy_header: Option<crate::proxy_protocol::ConnectionHeader>,
 }
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
@@ -527,13 +530,17 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
         _ => &[],
     };
     let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: false };
-    let est = match establish_guarded(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline).await {
-        Ok(e) => e,
-        Err((f, o)) => {
-            obs.connection = o;
-            return early(rec, obs, f, facts);
-        }
-    };
+    let header = plan.proxy_header.as_ref().map(crate::connector::PreTlsHeader::of);
+    let est =
+        match establish_guarded_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline, header)
+            .await
+        {
+            Ok(e) => e,
+            Err((f, o)) => {
+                obs.connection = o;
+                return early(rec, obs, f, facts);
+            }
+        };
     if h2 && plan.secure {
         let negotiated = est.observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone());
         if negotiated.as_deref() != Some("h2") {

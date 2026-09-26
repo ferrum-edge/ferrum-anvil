@@ -177,6 +177,9 @@ pub struct SsePlan {
     pub max_reconnects: u32,
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
+    /// PROXY protocol header written at the head of each new TCP connection,
+    /// before TLS (TCP legs only; HTTP/3 is refused before traffic).
+    pub proxy_header: Option<crate::proxy_protocol::ConnectionHeader>,
 }
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
@@ -376,13 +379,15 @@ async fn open_tcp(
         (true, _) => &["h2", "http/1.1"],
     };
     let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: false };
-    let est = match establish_guarded(rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline).await {
-        Ok(e) => e,
-        Err((f, o)) => {
-            obs.connection = o;
-            return Err((f, DispatchState::NotDispatched));
-        }
-    };
+    let header = plan.proxy_header.as_ref().map(crate::connector::PreTlsHeader::of);
+    let est =
+        match establish_guarded_with(rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline, header).await {
+            Ok(e) => e,
+            Err((f, o)) => {
+                obs.connection = o;
+                return Err((f, DispatchState::NotDispatched));
+            }
+        };
     let negotiated = est.observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone());
     let use_h2 = match plan.version {
         HttpVersionPolicy::H2c => true,

@@ -362,20 +362,27 @@ function Connection({ attempt }: { attempt?: AttemptObservation }) {
         </tbody>
       </table>
       {c.tunnel && <TunnelView t={c.tunnel} />}
-      {c.tls && <TlsView t={c.tls} title={c.tunnel ? "TLS with the destination (inside the tunnel)" : "TLS"} />}
+      {c.tls && <TlsView t={c.tls} title={innerTlsTitle(c.tunnel?.kind, c.tls.version)} />}
       {c.proxy_header && <ProxyHeaderEvidence h={c.proxy_header} />}
     </div>
   );
 }
 
+function innerTlsTitle(kind: TunnelObservation["kind"] | undefined, version?: string | null) {
+  const dtls = (version ?? "").startsWith("DTLS");
+  if (!kind) return dtls ? "DTLS" : "TLS";
+  return `${dtls ? "DTLS" : "TLS"} with the destination (inside the tunnel)`;
+}
+
 function TunnelView({ t }: { t: TunnelObservation }) {
   const d = t.datagrams;
+  const udp = t.kind === "connect_udp";
   return (
     <div className="col">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>{d ? "HBONE UDP tunnel (outer leg)" : "HBONE tunnel (outer leg)"}</h4>
+      <h4 className="faint" style={{ margin: "6px 0 0" }}>{udp ? "CONNECT-UDP (MASQUE) tunnel (outer leg)" : d ? "HBONE UDP tunnel (outer leg)" : "HBONE tunnel (outer leg)"}</h4>
       <table className="grid">
         <tbody>
-          <tr><td className="k">Endpoint</td><td className="v">{t.endpoint}</td></tr>
+          <tr><td className="k">{udp ? "Proxy" : "Endpoint"}</td><td className="v">{t.endpoint}</td></tr>
           {d && (
             <>
               <tr><td className="k">Datagram records</td><td className="v">{d.records_sent} sent · {d.records_received} received ([u16 length][payload] on the CONNECT stream)</td></tr>
@@ -385,7 +392,7 @@ function TunnelView({ t }: { t: TunnelObservation }) {
             </>
           )}
           <tr><td className="k">Remote / local</td><td className="v">{t.remote_address ?? "—"} / {t.local_address ?? "—"}</td></tr>
-          <tr><td className="k">CONNECT :authority</td><td className="v">{t.authority}</td></tr>
+          <tr><td className="k">{udp ? "UDP target (in the CONNECT :path)" : "CONNECT :authority"}</td><td className="v">{t.authority}</td></tr>
           <tr><td className="k">CONNECT status</td><td className="v">{t.connect_status ?? "no answer"}</td></tr>
           {t.connect_headers.map((h, i) => (
             <tr key={i}><td className="k">CONNECT header</td><td className="v">{h.name}: {h.value}</td></tr>
@@ -397,7 +404,7 @@ function TunnelView({ t }: { t: TunnelObservation }) {
           ))}
         </tbody>
       </table>
-      {t.tls && <TlsView t={t.tls} title="Mutual TLS with the HBONE endpoint" />}
+      {t.tls && <TlsView t={t.tls} title={udp ? "QUIC TLS with the MASQUE proxy" : "Mutual TLS with the HBONE endpoint"} />}
     </div>
   );
 }

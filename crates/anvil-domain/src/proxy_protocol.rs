@@ -61,7 +61,8 @@ pub struct ProxyTlv {
     pub value_hex: String,
 }
 
-/// PROXY protocol connection header for a TCP / TCP+TLS session.
+/// PROXY protocol connection header for a TCP / TCP+TLS session, or for the
+/// connections of an HTTP-family request (`RequestSpec::proxy_protocol`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProxyHeaderSpec {
     #[serde(default)]

@@ -47,6 +47,7 @@ fn timeouts() -> Timeouts {
 
 fn sse_plan(addr: SocketAddr, target: &str) -> sse::SsePlan {
     sse::SsePlan {
+        proxy_header: None,
         method: http::Method::GET,
         https: false,
         host: addr.ip().to_string(),
@@ -216,6 +217,7 @@ async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
         transcript: TranscriptLimits::default(),
         redact: None,
         envelope: None,
+        masque: None,
     };
     let out = dtls::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     let f = out.attempts[0].observation.failure.as_ref().unwrap();
@@ -246,6 +248,7 @@ async fn proto_016_grpc_adapter_with_a_compiled_proto_and_trailers() {
         .unwrap(),
     );
     let plan = grpc::GrpcPlan {
+        proxy_header: None,
         tls: Some(prepared),
         host: "127.0.0.1".into(),
         port: f.addr.port(),
@@ -314,6 +317,7 @@ fn echo_plan(
 ) -> grpc::GrpcPlan {
     let pool = grpc::pool_from_proto_sources(&[("echo.proto".into(), anvil_fixtures::grpc::ECHO_PROTO.into())]).unwrap();
     grpc::GrpcPlan {
+        proxy_header: None,
         tls: tls.then(lab_tls),
         host: "127.0.0.1".into(),
         port,

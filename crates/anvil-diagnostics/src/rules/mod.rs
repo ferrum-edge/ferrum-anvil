@@ -192,9 +192,9 @@ pub const RULES: &[RuleMeta] = &[
     },
     RuleMeta {
         id: "protocol.proxy_header",
-        version: 1,
-        summary: "PROXY protocol header / datagram envelope: closes and silence after (or without) the header, never a confirmed cause",
-        fixtures: &["PP-001", "PP-003", "PP-004", "PP-006", "PP-008", "PP-011"],
+        version: 2,
+        summary: "PROXY protocol header / datagram envelope: closes, refusals and silence after (or without) the header on stream sessions and new HTTP-family connections, never a confirmed cause",
+        fixtures: &["PP-001", "PP-003", "PP-004", "PP-006", "PP-008", "PP-011", "PP-HTTP-001", "PP-HTTP-002"],
     },
     RuleMeta {
         id: "protocol.http3",

@@ -63,6 +63,7 @@ fn timeouts() -> Timeouts {
 
 fn sse_plan(addr: SocketAddr, target: &str) -> sse::SsePlan {
     sse::SsePlan {
+        proxy_header: None,
         method: http::Method::GET,
         https: true,
         host: addr.ip().to_string(),
@@ -242,21 +243,23 @@ async fn automatic_h3_sse_falls_back_to_tcp_as_a_separate_attempt() {
 
 fn masque_plan(proxy: SocketAddr, target: SocketAddr, query: &str, datagrams: &[&str]) -> masque::MasquePlan {
     masque::MasquePlan {
-        proxy_host: proxy.ip().to_string(),
-        proxy_port: proxy.port(),
-        proxy_authority: proxy.to_string(),
-        request_target: format!("/.well-known/masque/udp/{}/{}/{query}", target.ip(), target.port()),
-        target: target.to_string(),
-        headers: vec![],
-        mode: MasqueDatagramMode::Auto,
-        tls: client_tls(),
-        dns: DnsConfig::default(),
-        timeouts: timeouts(),
-        limits: Limits::default(),
+        tunnel: masque::MasqueTunnelPlan {
+            proxy_host: proxy.ip().to_string(),
+            proxy_port: proxy.port(),
+            proxy_authority: proxy.to_string(),
+            request_target: format!("/.well-known/masque/udp/{}/{}/{query}", target.ip(), target.port()),
+            target: target.to_string(),
+            headers: vec![],
+            mode: MasqueDatagramMode::Auto,
+            tls: client_tls(),
+            dns: DnsConfig::default(),
+            timeouts: timeouts(),
+            limits: Limits::default(),
+            display_url: format!("https://{proxy}/.well-known/masque/udp/{}/{}/", target.ip(), target.port()),
+        },
         datagrams: datagrams.iter().map(|d| Bytes::copy_from_slice(d.as_bytes())).collect(),
         response_window_ms: 400,
         max_datagrams: 100,
-        display_url: format!("https://{proxy}/.well-known/masque/udp/{}/{}/", target.ip(), target.port()),
         transcript: TranscriptLimits::default(),
         redact: None,
     }
@@ -331,7 +334,7 @@ async fn connect_udp_with_quic_datagrams_when_both_sides_enable_them() {
     let proxy = h3server::serve_with("127.0.0.1:0", server_tls(), H3Options { h3_datagrams: true, ..Default::default() }).await.unwrap();
     let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
     let mut plan = masque_plan(proxy.addr, echo.addr, "", &["q1", "q2", "q3"]);
-    plan.mode = MasqueDatagramMode::QuicDatagrams;
+    plan.tunnel.mode = MasqueDatagramMode::QuicDatagrams;
     let out = masque::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     let (sent, got, m) = udp_state(&out);
     assert!(out.attempts[0].observation.failure.is_none(), "{:?}", out.attempts[0].observation.failure);
@@ -386,7 +389,7 @@ async fn connect_udp_fails_before_traffic_without_extended_connect_or_required_d
 
     let no_dgram = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
     let mut plan = masque_plan(no_dgram.addr, echo.addr, "", &["never"]);
-    plan.mode = MasqueDatagramMode::QuicDatagrams;
+    plan.tunnel.mode = MasqueDatagramMode::QuicDatagrams;
     let out = masque::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     let f = out.attempts[0].observation.failure.as_ref().unwrap();
     assert_eq!(f.kind, FailureKind::MasqueUnsupported);
@@ -453,7 +456,7 @@ async fn connect_udp_cancel_and_quic_blocked_path() {
     // No QUIC listener at the proxy address: a QUIC handshake timeout, nothing else.
     let tcp_only = anvil_fixtures::http::serve("127.0.0.1:0", Some(server_tls())).await.unwrap();
     let mut plan = masque_plan(tcp_only.addr, silent.addr, "", &["x"]);
-    plan.timeouts.tls_handshake_ms = Some(400);
+    plan.tunnel.timeouts.tls_handshake_ms = Some(400);
     let out = masque::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     assert_eq!(out.attempts[0].observation.failure.as_ref().unwrap().kind, FailureKind::QuicHandshakeTimeout);
     assert!(matches!(out.status, ProtocolStatus::None));

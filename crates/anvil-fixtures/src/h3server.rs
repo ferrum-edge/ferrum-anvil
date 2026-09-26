@@ -24,7 +24,9 @@
 //!   `SETTINGS_H3_DATAGRAM`, otherwise in capsules. Query options:
 //!   `refuse=<status>` answers that status with a JSON body;
 //!   `reset_after=N` / `fin_after=N` reset (`H3_INTERNAL_ERROR`) or finish
-//!   the stream after N replies. CONNECT-UDP while
+//!   the stream after N replies; `reset_after_ms=N` / `fin_after_ms=N` do so
+//!   N ms after the tunnel opened (independent of how many datagrams a
+//!   handshake inside the tunnel took). CONNECT-UDP while
 //!   [`H3Options::connect_udp`] is off gets `501`, a path that is not a
 //!   template expansion `400`.
 //!
@@ -537,6 +539,12 @@ async fn connect_udp(
     }
     let reset_after = query_u64(&qs, "reset_after");
     let fin_after = query_u64(&qs, "fin_after");
+    let opened = tokio::time::Instant::now();
+    let timed_end = match (query_u64(&qs, "reset_after_ms"), query_u64(&qs, "fin_after_ms")) {
+        (Some(ms), _) => Some((opened + std::time::Duration::from_millis(ms), true)),
+        (None, Some(ms)) => Some((opened + std::time::Duration::from_millis(ms), false)),
+        (None, None) => None,
+    };
     let quarter = stream.id().into_inner() / 4;
     let (tx_dgram, mut rx_dgram) = tokio::sync::mpsc::channel::<Bytes>(64);
     router.0.lock().insert(quarter, tx_dgram);
@@ -583,6 +591,17 @@ async fn connect_udp(
                 if let Some(p) = relay(&d, "quic_datagram") {
                     let _ = sock.send(&p).await;
                 }
+            }
+            _ = tokio::time::sleep_until(timed_end.map(|t| t.0).unwrap_or(opened)), if timed_end.is_some() => {
+                if timed_end.map(|t| t.1).unwrap_or(false) {
+                    log.push(GroundTruth::FaultApplied { fault: "masque_reset".into() });
+                    send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                } else {
+                    log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
+                    let _ = send.finish().await;
+                }
+                ended = true;
+                break;
             }
             r = sock.recv(&mut buf) => {
                 let Ok(n) = r else { break };

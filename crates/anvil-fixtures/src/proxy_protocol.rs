@@ -10,6 +10,11 @@
 //!   only from trusted peers), records it, then echoes the stream (optionally
 //!   after a TLS handshake that starts *after* the header). A missing, invalid
 //!   or untrusted header closes the connection without data, like Ferrum.
+//! * [`tcp_relay`]: the same header gate in front of any TCP server (for
+//!   example the HTTP fixture): after the header, the rest of the connection
+//!   is relayed byte for byte, so TLS, HTTP/1.1, HTTP/2, WebSocket and gRPC
+//!   run end to end with the server behind it, like a load-balanced listener
+//!   (HAProxy `accept-proxy`, nginx `listen … proxy_protocol`).
 //! * [`udp_echo`]: requires the PROXY v2 `DGRAM` envelope on every datagram
 //!   (optionally authenticated), echoes the payload unwrapped; refusals are
 //!   silent drops.
@@ -285,6 +290,61 @@ pub async fn tcp_echo(bind: &str, trusted_peers: Vec<IpAddr>, tls: Option<TlsSer
                         }
                     }
                     None => echo(stream, log).await,
+                }
+            });
+        }
+    });
+    Ok(ProxyFixture { addr, log, cancel })
+}
+
+/// PROXY-header-requiring TCP relay to `target`. Every accepted connection
+/// must start with a v1/v2 header (from a trusted peer when `trusted_peers`
+/// is not empty), which is recorded; the rest of the stream is relayed to
+/// `target` unchanged. A missing, invalid or untrusted header closes the
+/// connection without data and `target` never sees it.
+pub async fn tcp_relay(bind: &str, trusted_peers: Vec<IpAddr>, target: SocketAddr) -> anyhow::Result<ProxyFixture> {
+    let listener = TcpListener::bind(bind).await?;
+    let addr = listener.local_addr()?;
+    let log = ProxyLog::default();
+    let cancel = CancellationToken::new();
+    let (l2, c2) = (log.clone(), cancel.clone());
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, peer) = tokio::select! {
+                r = listener.accept() => match r { Ok(x) => x, Err(_) => continue },
+                _ = c2.cancelled() => break,
+            };
+            let (log, trusted_peers, cancel) = (l2.clone(), trusted_peers.clone(), c2.clone());
+            tokio::spawn(async move {
+                if !trusted(&peer, &trusted_peers) {
+                    log.push(ProxyEvent::Rejected { peer, reason: "untrusted peer".into() });
+                    return;
+                }
+                match tokio::time::timeout(Duration::from_secs(5), read_header(&mut stream)).await {
+                    Ok(Ok(h)) => log.push(ProxyEvent::Header {
+                        peer,
+                        v2: h.v2,
+                        local: h.local,
+                        source: h.source,
+                        destination: h.destination,
+                        tlvs: h.tlvs,
+                    }),
+                    Ok(Err(reason)) => {
+                        log.push(ProxyEvent::Rejected { peer, reason });
+                        return;
+                    }
+                    Err(_) => {
+                        log.push(ProxyEvent::Rejected { peer, reason: "timeout reading the PROXY header".into() });
+                        return;
+                    }
+                }
+                let Ok(mut backend) = tokio::net::TcpStream::connect(target).await else {
+                    log.push(ProxyEvent::Rejected { peer, reason: "the relay target is not reachable".into() });
+                    return;
+                };
+                tokio::select! {
+                    _ = tokio::io::copy_bidirectional(&mut stream, &mut backend) => {}
+                    _ = cancel.cancelled() => {}
                 }
             });
         }

@@ -655,7 +655,7 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
               <input className="field mono" aria-label="MASQUE URI template" value={m.uri_template ?? MASQUE_DEFAULT_TEMPLATE} onChange={(e) => setMasque({ uri_template: e.target.value })} />
             </label>
             <p className="hint">
-              The request URL stays the UDP target (udp://host:port); {"{target_host}"} and {"{target_port}"} are filled from it. Headers and auth go on the CONNECT request and the TLS profile applies to the proxy. A refusal is the proxy&apos;s answer, never evidence about the target. DTLS inside the tunnel is not supported.
+              The request URL stays the UDP target (udp://host:port); {"{target_host}"} and {"{target_port}"} are filled from it. Headers and auth go on the CONNECT request and the TLS profile applies to the proxy. A refusal is the proxy&apos;s answer, never evidence about the target. With dtls:// the DTLS handshake runs inside the tunnel: every DTLS record is one HTTP Datagram, and the TLS profile applies to both the proxy and the DTLS peer.
             </p>
           </div>
         )}
@@ -905,8 +905,20 @@ function fromTri(s: string): boolean | null {
   return s === "inherit" ? null : s === "on";
 }
 
-function SettingsEditor({ spec, set, profiles }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; profiles: Profiles }) {
-  return <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} protocol={spec.protocol} />;
+/** Request-level settings: the layered overrides, plus the PROXY header of
+ * an HTTP-family request (raw TCP and UDP configure theirs in the protocol tab). */
+export function SettingsEditor({ spec, set, profiles }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; profiles: Profiles }) {
+  const httpFamily = ["http", "web_socket", "grpc", "sse"].includes(spec.protocol ?? "http");
+  return (
+    <div className="col" style={{ gap: 14 }}>
+      <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} protocol={spec.protocol} />
+      {httpFamily && (
+        <div style={{ maxWidth: 860 }}>
+          <ProxyHeaderEditor value={spec.proxy_protocol} onChange={(proxy_protocol) => set({ proxy_protocol })} http />
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** How a proxy profile carries a UDP request: only an HBONE profile does (as a datagram tunnel). */
