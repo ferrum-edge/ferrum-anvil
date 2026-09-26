@@ -39,6 +39,9 @@ pub struct Resolver {
     pub used_secrets: Mutex<Vec<String>>,
     /// Names (and winning scope) of variables used.
     pub used: Mutex<Vec<(String, String)>>,
+    /// Names of request fields (headers, query parameters, form fields) the
+    /// user marked sensitive, for name-based redaction.
+    pub sensitive_names: Mutex<Vec<String>>,
 }
 
 impl Resolver {
@@ -47,7 +50,26 @@ impl Resolver {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
             None => rand::make_rng(),
         };
-        Resolver { layers, counter: AtomicU64::new(0), rng: Mutex::new(rng), used_secrets: Mutex::new(vec![]), used: Mutex::new(vec![]) }
+        Resolver {
+            layers,
+            counter: AtomicU64::new(0),
+            rng: Mutex::new(rng),
+            used_secrets: Mutex::new(vec![]),
+            used: Mutex::new(vec![]),
+            sensitive_names: Mutex::new(vec![]),
+        }
+    }
+
+    /// Record a request field the user marked sensitive: its resolved value
+    /// joins the exact-value secrets and its name the redacted names.
+    pub fn mark_sensitive(&self, name: &str, value: &str) {
+        if !value.is_empty() {
+            self.used_secrets.lock().push(value.to_string());
+        }
+        let mut names = self.sensitive_names.lock();
+        if !name.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            names.push(name.to_string());
+        }
     }
 
     pub fn with_counter_start(self, n: u64) -> Self {

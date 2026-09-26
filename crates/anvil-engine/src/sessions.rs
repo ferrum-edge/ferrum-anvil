@@ -235,7 +235,7 @@ struct Base {
 
 fn base(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, schemes: &[&str]) -> Result<Base, TransportFailure> {
     let prep = http_exec::prepare_all(engine, ctx, r, schemes)?;
-    let redactor = Redactor::new(r.used_secrets.lock().clone(), ctx.redaction_names.clone());
+    let redactor = Redactor::for_execution(r, &ctx.redaction_names);
     let mut inferred = prep.inferred.clone();
     if prep.settings.early_data.enabled {
         // The opt-in covers HTTP requests only; say so instead of ignoring it.
