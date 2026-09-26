@@ -66,3 +66,9 @@
   now cancellation is backend-only (the UI does not pass `attempt` yet), and
   a full-backup restore can be canceled only before it starts. The key a
   preview derives is not kept for the import that follows.
+- Full-backup restore: the preview now says when Replace restores the
+  backup's app settings, which then apply to every workspace in the profile.
+  A load report of a workspace that is not in the backup is left out with a
+  warning, as a history record already was, instead of refusing the
+  restore, and a restored history record dated after the restore is stored
+  with the restore time.
