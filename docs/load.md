@@ -39,7 +39,9 @@ pools, gRPC channels and cookie jars are per slot (like per-VU state in other
 tools), while all slots share **one** OAuth `TokenCache`. Token refresh is
 therefore single-flight across the whole run (LOAD-006). Open-workload slots
 are reused LIFO, so only as many engines exist as the peak concurrency
-actually needed.
+actually needed. A slot's pools keep as many idle connections as the plan has
+distinct requests (at least 4, at most 64), so a persistent chain reuses each
+step's connection across iterations (see `docs/architecture.md`).
 
 ## Load units per protocol (LOAD-013)
 

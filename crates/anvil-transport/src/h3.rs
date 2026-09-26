@@ -33,10 +33,12 @@ use tokio_util::sync::CancellationToken;
 pub(crate) type SendReq = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 /// A QUIC connection with HTTP/3 set up on it, shared by its clones.
-/// Dropping every clone does not close it: quinn keeps a connection open
-/// while any handle to it exists, and the spawned HTTP/3 driver task holds
-/// handles until the connection ends. A connection the pool gives up is
-/// closed explicitly ([`H3Conn::close`]).
+/// A connection the pool gives up is closed explicitly ([`H3Conn::close`]).
+/// While the HTTP/3 driver task runs, h3 would also close it with
+/// `H3_NO_ERROR` once the last `SendRequest` is dropped; closing explicitly
+/// does not rely on h3's internal count of senders, and it closes a
+/// connection whose early data was refused with `H3_NO_ERROR` instead of
+/// quinn's implicit code 0.
 #[derive(Clone)]
 struct H3Conn {
     send: SendReq,
@@ -306,13 +308,13 @@ impl Pool {
             return;
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
-        let pool = Arc::downgrade(&self.shared);
-        let every = sweep_interval(self.shared.limits.idle_ttl);
+        let weak = Arc::downgrade(&self.shared);
+        let every = self.shared.sweep_every();
         state.sweeper = Some(rt.spawn(async move {
             loop {
                 tokio::time::sleep(every).await;
-                let Some(pool) = pool.upgrade() else { return };
-                if !pool.sweep(Instant::now()) {
+                let Some(shared) = weak.upgrade() else { return };
+                if !shared.sweep(Instant::now()) {
                     return;
                 }
             }
@@ -347,7 +349,24 @@ impl Drop for Pool {
     }
 }
 
+impl Drop for PoolShared {
+    fn drop(&mut self) {
+        // The sweep holds only a weak reference and would end on its next
+        // tick; end it now instead.
+        if let Some(sweeper) = self.state.get_mut().sweeper.take() {
+            sweeper.abort();
+        }
+    }
+}
+
 impl PoolShared {
+    /// How often the sweep runs: often enough for the shorter of the idle
+    /// TTL and [`TOO_EARLY_TTL`], so the connection kept for the retry after
+    /// 425 is closed soon after its 10 s even when no retry takes it.
+    fn sweep_every(&self) -> Duration {
+        sweep_interval(self.limits.idle_ttl.min(TOO_EARLY_TTL))
+    }
+
     /// Close closed, expired and over-cap idle connections. Returns whether
     /// the pool still holds any; the sweeper stops otherwise.
     fn sweep(&self, now: Instant) -> bool {
@@ -977,6 +996,27 @@ impl H3Transport {
     /// What the connection pool holds right now.
     pub fn pool_stats(&self) -> PoolStats {
         self.pool.stats()
+    }
+
+    /// Whether the pool holds a connection and the peer's SETTINGS frame has
+    /// been taken in on every pooled one. Lets a test wait for the peer's
+    /// limits to apply; not part of the API.
+    #[doc(hidden)]
+    pub fn pooled_peer_settings_known(&self) -> bool {
+        use h3::ConnectionState;
+        let state = self.pool.shared.state.lock();
+        // The vendored h3 0.0.8 (`vendor/h3-0.0.8-rfc9220`,
+        // `ConnectionState::settings`) returns `Cow::Borrowed` of the peer's
+        // SETTINGS once they arrived and `Cow::Owned` defaults before. Recheck
+        // this when h3 is upgraded.
+        !state.conns.is_empty() && state.conns.values().all(|c| matches!(c.send.settings(), std::borrow::Cow::Borrowed(_)))
+    }
+
+    /// Run one sweep of the connection pool as if the clock read `now`, so a
+    /// test can check expiry without waiting for it; not part of the API.
+    #[doc(hidden)]
+    pub fn sweep_pool_at(&self, now: Instant) {
+        self.pool.shared.sweep(now);
     }
 
     /// Drop pooled connections and every session ticket.
@@ -1693,5 +1733,40 @@ impl H3Transport {
             },
         };
         AttemptOutput { observation: obs, response: Some(response), body: captured }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_transport_ends_the_sweeper_at_once() {
+        let t = H3Transport::new();
+        let task = {
+            let mut state = t.pool.shared.state.lock();
+            t.pool.ensure_sweeper(&mut state);
+            let task = state.sweeper.as_ref().map(|h| h.abort_handle());
+            task.expect("the sweeper runs")
+        };
+        drop(t);
+
+        // Time is paused and does not advance while this task yields, so the
+        // sweeper ends only because the drop aborted it, not on its next tick.
+        for _ in 0..100 {
+            if task.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(task.is_finished(), "the sweeper outlived its pool");
+    }
+
+    #[test]
+    fn the_sweep_runs_often_enough_for_the_connection_kept_after_425() {
+        let every = H3Transport::new().pool.shared.sweep_every();
+        assert!(every <= TOO_EARLY_TTL / 6, "{every:?}");
+        let short = H3Transport::with_pool_limits(PoolLimits { idle_ttl: Duration::from_secs(3), ..PoolLimits::default() });
+        assert_eq!(short.pool.shared.sweep_every(), sweep_interval(Duration::from_secs(3)));
     }
 }

@@ -804,6 +804,28 @@ async fn connection_modes_fresh_and_persistent() {
     }
 }
 
+/// A persistent chain over more destinations than the smallest per-slot
+/// idle cap (4) reuses every step's connection on the next iteration: the
+/// cap follows the plan, so no step's connection is closed just before its
+/// reuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persistent_chain_over_six_destinations_reuses_every_connection() {
+    let _g = serial().await;
+    let mut fixtures = Vec::new();
+    for _ in 0..6 {
+        fixtures.push(fx::serve("127.0.0.1:0", None).await.unwrap());
+    }
+    let requests: Vec<(Id, ExecutionContext)> = fixtures.iter().map(|f| (Id::new(), get(&f.url("/")))).collect();
+    let chain = requests.iter().map(|(id, _)| *id).collect();
+    let r = run(plan(Workload::Iterations { iterations: 5, concurrency: 1 }, chain), requests, None).await;
+    assert_eq!((r.counts.started, r.counts.completed), (5, 5));
+    for (i, f) in fixtures.iter().enumerate() {
+        assert_eq!(f.log.count_requests(), 5, "destination {i}");
+        assert_eq!(connections(f), 1, "destination {i}: its connection was not reused across iterations");
+    }
+    assert_eq!((r.requests.connections_opened, r.requests.connections_reused), (6, 24));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn warmup_is_excluded_from_metrics() {
     let _g = serial().await;
