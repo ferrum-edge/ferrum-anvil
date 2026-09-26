@@ -241,7 +241,7 @@ export interface FileGrant {
 /** A JWT-SVID token file bound on this device through the native dialog. */
 export interface TokenFileBinding {
   id: string;
-  /** Canonical absolute path of the chosen file. */
+  /** Absolute path of the chosen file, as chosen (links not resolved). */
   path: string;
   bound_at: string;
 }
@@ -480,6 +480,10 @@ export const api = {
   createWorkspace: (name: string) => call<Workspace>("workspace_create", { name }),
   saveWorkspace: (workspace: Workspace) => call<Workspace>("workspace_save", { workspace }),
   deleteWorkspace: (workspaceId: string) => call<void>("workspace_delete", { workspaceId }),
+  /** Whether a bundle import sealed the workspace from this device's workload identity (JWT-SVID). */
+  deviceIdentitySealed: (workspaceId: string) => call<boolean>("workspace_device_identity_sealed", { workspaceId }),
+  /** Let the workspace's requests use this device's workload identity again (an explicit user choice). */
+  allowDeviceIdentity: (workspaceId: string) => call<boolean>("workspace_allow_device_identity", { workspaceId }),
   tree: (workspaceId: string) => call<TreeNode[]>("tree_get", { workspaceId }),
   createFolder: (workspaceId: string, parentId: string | null, name: string) => call<Folder>("folder_create", { workspaceId, parentId, name }),
   getFolder: (folderId: string) => call<Folder>("folder_get", { folderId }),

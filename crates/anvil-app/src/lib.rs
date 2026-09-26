@@ -3,6 +3,7 @@
 //! `anvil-storage`; UI layers only call these services.
 
 pub mod backup;
+pub mod device_identity;
 pub mod exec;
 pub mod file_grants;
 pub mod identity;

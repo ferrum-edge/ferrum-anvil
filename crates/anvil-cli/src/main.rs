@@ -171,6 +171,10 @@ enum WorkspaceCmd {
     List,
     Create { name: String },
     Tree { workspace: String },
+    /// Let requests in a workspace that a bundle import wrote into use this
+    /// device's workload identity again (a JWT-SVID from the Workload API or
+    /// a token file). Only for workspaces you trust.
+    AllowDeviceIdentity { workspace: String },
 }
 
 #[derive(clap::Args)]
@@ -766,6 +770,15 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     }
                 }
                 print(&app.tree(&w.meta.id)?, 0);
+                Ok(0)
+            }
+            WorkspaceCmd::AllowDeviceIdentity { workspace } => {
+                let w = app.find_workspace(workspace)?;
+                if app.allow_device_identity(&w.meta.id)? {
+                    println!("requests in '{}' may now use this device's workload identity", w.name);
+                } else {
+                    println!("'{}' was not sealed from this device's workload identity", w.name);
+                }
                 Ok(0)
             }
         },

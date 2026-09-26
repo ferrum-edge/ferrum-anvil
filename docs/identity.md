@@ -367,7 +367,14 @@ a gateway's backend identity (#3). The protocol details are in
   profile would draw on *this* machine's identity. Imports therefore never
   activate "send despite failed checks" and name every imported profile that
   fetches a JWT-SVID or presents an X.509-SVID, so the user reviews their
-  audiences, destinations and host bindings before sending.
+  audiences, destinations and host bindings before sending. A bundle import
+  also seals, on this device only, every workspace it writes into (new,
+  merged, replaced or duplicated): its requests are refused this device's
+  JWT-SVID, from the Workload API or a token file, until the user allows it
+  there (**Allow on this device** in the workspace settings' Auth tab, or
+  `anvil workspace allow-device-identity <workspace>`). The seal is never
+  exported or backed up, and deleting the workspace removes it. A spec
+  import keeps the same stance under its import root (`docs/import.md`).
 - **Probe.** *Test the Workload API* in the editors and `anvil workload probe`
   show what the endpoint issues to Anvil (and, when refused, the uid it
   attested) without keeping a key or showing a token.

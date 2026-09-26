@@ -126,7 +126,7 @@ where
     let guard = slot.lock().await;
     match guard.as_ref() {
         Some(s) => f(s).await,
-        None => Err("the session is no longer open".into()),
+        None => Err(closed()),
     }
 }
 

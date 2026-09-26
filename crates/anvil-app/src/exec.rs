@@ -1,6 +1,7 @@
 //! Build frozen execution contexts from storage and run them through the
 //! shared engine, recording redacted history.
 
+use crate::device_identity::uses_device_identity;
 use crate::file_grants::FilePurpose;
 use crate::linked_files::{LinkedFileReferrer, read_bound_file};
 use crate::{App, AppError, Result};
@@ -9,7 +10,6 @@ use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
-use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::Variable;
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::{AttachmentResolver, ExecutionContext, SecretResolver};
@@ -97,7 +97,10 @@ impl App {
     /// from workspace → folders → request. A draft never names a linked
     /// local file, a saved request only ones chosen for it in the native
     /// dialog on this device, and (when confined) a JWT-SVID token file is
-    /// read only if it was bound in the native dialog.
+    /// read only if it was bound in the native dialog. In a workspace a
+    /// bundle import wrote into, a JWT-SVID from this device's Workload API
+    /// or a token file is refused until the user allows it on this device
+    /// (`crate::device_identity`).
     ///
     /// Under an import root (`Folder::import_root`) only the imported
     /// collection's own scope resolves: the root and the folders under it,
@@ -228,6 +231,7 @@ impl App {
             refuse_device_identity(&ctx.effective_auth().1)?;
             refuse_unbound_client_identity(&ctx)?;
         }
+        self.check_device_identity(&ws, &ctx.effective_auth().1)?;
         self.check_token_files(&ctx.effective_auth().1)?;
         Ok(ctx)
     }
@@ -276,12 +280,7 @@ impl App {
 /// JWT-SVID from the Workload API or a token file) for a request under an
 /// import root that the user has not opened to the workspace.
 fn refuse_device_identity(auth: &AuthConfig) -> Result<()> {
-    let device = match auth {
-        AuthConfig::JwtSvid { config } => !matches!(config.source, JwtSvidSource::Value { .. }),
-        AuthConfig::Multi { profiles } => return profiles.iter().try_for_each(refuse_device_identity),
-        _ => false,
-    };
-    if device {
+    if uses_device_identity(auth) {
         return Err(AppError::Invalid(
             "an imported collection does not use this device's workload identity or token files until opened to the workspace".into(),
         ));

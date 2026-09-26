@@ -200,6 +200,21 @@ pub fn workspace_delete(st: State<'_, DesktopState>, workspace_id: String) -> R<
     st.app()?.delete_workspace(&id(&workspace_id)?).map_err(e)
 }
 
+/// Whether a bundle import sealed the workspace from this device's workload
+/// identity (see `anvil_app::device_identity`).
+#[tauri::command]
+pub fn workspace_device_identity_sealed(st: State<'_, DesktopState>, workspace_id: String) -> R<bool> {
+    st.app()?.device_identity_sealed(&id(&workspace_id)?).map_err(e)
+}
+
+/// The user's explicit choice on this device to let the workspace's requests
+/// use this device's workload identity (a JWT-SVID from the Workload API or a
+/// token file) again. Returns whether it was sealed.
+#[tauri::command]
+pub fn workspace_allow_device_identity(st: State<'_, DesktopState>, workspace_id: String) -> R<bool> {
+    st.app()?.allow_device_identity(&id(&workspace_id)?).map_err(e)
+}
+
 #[tauri::command]
 pub fn tree_get(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec<anvil_app::workspace::TreeNode>> {
     st.app()?.tree(&id(&workspace_id)?).map_err(e)

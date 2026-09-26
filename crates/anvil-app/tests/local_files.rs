@@ -198,7 +198,8 @@ fn a_confined_app_reads_only_token_files_bound_in_the_dialog() {
     assert!(err.contains("not chosen") && !err.contains(CANARY), "{err}");
 
     let binding = app.bind_token_file(&token).unwrap();
-    assert_eq!(binding.path, canonical);
+    // The path as chosen, not its canonical form (see the projected token below).
+    assert_eq!(binding.path, token.to_str().unwrap());
     build(jwt_svid_file(&binding.path)).unwrap();
     build(jwt_svid_file(&format!("  {}\n", binding.path))).unwrap();
     // Binding the same file again keeps one binding.
@@ -538,4 +539,51 @@ fn a_linked_dataset_swapped_for_a_fifo_is_refused_without_blocking() {
     mkfifo(&rows);
     let err = within_seconds(move || app.run_dataset(&d).map(|_| ()).map_err(|e| e.to_string())).unwrap_err();
     assert!(err.contains("not a regular file"), "{err}");
+}
+
+/// A Kubernetes projected service-account token: `token` links to
+/// `..data/token`, `..data` links to a timestamped directory, and a rotation
+/// writes a new directory, repoints `..data` and deletes the old directory.
+#[cfg(unix)]
+#[test]
+fn a_bound_token_file_keeps_working_across_a_projected_token_rotation() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let dir = files.path();
+    let first = dir.join("..2026_01_01_00_00_00.000000001");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::write(first.join("token"), "first-token").unwrap();
+    symlink(first.file_name().unwrap(), dir.join("..data")).unwrap();
+    symlink("..data/token", dir.join("token")).unwrap();
+    let chosen = dir.join("token");
+
+    let app = new_app(root.path(), "projected");
+    app.confine_token_files();
+    let ws = app.create_workspace("W").unwrap();
+    let binding = app.bind_token_file(&chosen).unwrap();
+    // The link as chosen, not the timestamped file it leads to now.
+    assert_eq!(binding.path, chosen.to_str().unwrap());
+    let resolved = canonical(&chosen);
+    assert!(resolved.starts_with(canonical(&first)), "{}", resolved.display());
+    let r = app.create_request(&ws.meta.id, None, "svid", with_auth(jwt_svid_file(&binding.path))).unwrap();
+    app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).expect("bound");
+
+    // Rotate: the file the first bind resolved to is deleted.
+    let second = dir.join("..2026_01_01_01_00_00.000000001");
+    std::fs::create_dir(&second).unwrap();
+    std::fs::write(second.join("token"), "second-token").unwrap();
+    symlink(second.file_name().unwrap(), dir.join("..data_tmp")).unwrap();
+    std::fs::rename(dir.join("..data_tmp"), dir.join("..data")).unwrap();
+    std::fs::remove_dir_all(&first).unwrap();
+    assert!(!resolved.exists());
+
+    // The bound path leads to the new token, and the request still builds.
+    assert_eq!(std::fs::read_to_string(&binding.path).unwrap(), "second-token");
+    app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).expect("rotated");
+    // Only the chosen path is bound: the file it led to was never bound itself.
+    let draft = with_auth(jwt_svid_file(resolved.to_str().unwrap()));
+    let err = refused(app.build_context(None, &ws.meta.id, Some(draft), &SendOptions::default()), "resolved");
+    assert!(err.contains("not chosen"), "{err}");
+    assert_eq!(app.token_file_bindings().unwrap().len(), 1);
 }

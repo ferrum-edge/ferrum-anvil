@@ -124,6 +124,8 @@ pub fn run() {
             commands::workspace_create,
             commands::workspace_save,
             commands::workspace_delete,
+            commands::workspace_device_identity_sealed,
+            commands::workspace_allow_device_identity,
             commands::tree_get,
             commands::folder_create,
             commands::folder_get,
