@@ -369,7 +369,8 @@ a gateway's backend identity (#3). The protocol details are in
   fetches a JWT-SVID or presents an X.509-SVID, so the user reviews their
   audiences, destinations and host bindings before sending. A bundle import
   or full-backup restore also seals, on this device only, every workspace it
-  writes into (new, merged, replaced or duplicated): its requests are refused
+  writes into (new, merged or replaced, and for a bundle import also
+  duplicated; a restore refuses Duplicate): its requests are refused
   this device's workload identity (JWT-SVID or X.509-SVID), that is a
   JWT-SVID from the Workload API or a token file, and a TLS profile, the
   request's own or its proxy's, whose client identity is an X.509-SVID from

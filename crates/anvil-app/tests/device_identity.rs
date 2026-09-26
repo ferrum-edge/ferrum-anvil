@@ -12,6 +12,7 @@ use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::ProxySelection;
@@ -242,6 +243,54 @@ fn a_backup_restore_seals_every_workspace_it_writes_until_the_user_allows_it() {
         assert!(b.allow_device_identity(&ws).unwrap());
         assert!(b.allow_device_identity(&other).unwrap());
         assert_open(&b, &ws);
+    }
+}
+
+#[test]
+fn a_load_plan_in_a_sealed_workspace_is_refused_this_devices_workload_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "source");
+    let ws = source_workspace(&a);
+    // A plan that runs the request drawing its JWT-SVID from the Workload API.
+    let request = a.requests(&ws).unwrap().into_iter().find(|r| r.name == "workload api").unwrap();
+    let now = chrono::Utc::now();
+    let plan = LoadPlan {
+        id: Id::new(),
+        workspace_id: ws,
+        name: "svid load".into(),
+        workload: Workload::Iterations { iterations: 2, concurrency: 1 },
+        chain: vec![request.meta.id],
+        mix: vec![],
+        dataset_id: None,
+        environment_id: None,
+        connection_mode: Default::default(),
+        warmup_secs: 0,
+        abort: None,
+        seed: 1,
+        trusted: true,
+        created_at: now,
+        updated_at: now,
+    };
+    let plan = a.save_load_plan(plan).unwrap();
+    a.load_job(&plan).unwrap_or_else(|e| panic!("unsealed: {e}"));
+    let (bundle, _) = a.export(Some(&ws), ExportMode::ShareSafely, None, false).unwrap();
+    let (backup, _) = a.export_backup_with(BACKUP_PASS, KdfParams::testing()).unwrap();
+
+    let imported = new_app(root.path(), "imported");
+    imported.import(&bundle, None, ConflictPolicy::Merge).unwrap();
+    let restored = new_app(root.path(), "restored");
+    restored.restore(&backup, Some(BACKUP_PASS), ConflictPolicy::Merge).unwrap();
+    for (label, app) in [("import", &imported), ("restore", &restored)] {
+        assert!(app.device_identity_sealed(&ws).unwrap(), "{label}");
+        let plan = app.load_plans(&ws).unwrap().into_iter().find(|p| p.id == plan.id).unwrap_or_else(|| panic!("{label}: the plan"));
+        let calls = [("load_job", refused(app.load_job(&plan), label)), ("load_preflight", refused(app.load_preflight(&plan), label))];
+        for (call, err) in calls {
+            assert!(err.contains("a bundle import or backup restore wrote into"), "{label} {call}: {err}");
+            assert!(err.contains(&format!("anvil workspace allow-device-identity {ws}")), "{label} {call}: {err}");
+        }
+        // Allowed on this device, the plan's requests are prepared again.
+        assert!(app.allow_device_identity(&ws).unwrap(), "{label}");
+        app.load_job(&plan).unwrap_or_else(|e| panic!("{label}: {e}"));
     }
 }
 
