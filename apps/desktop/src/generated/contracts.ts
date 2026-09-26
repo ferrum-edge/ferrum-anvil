@@ -1544,8 +1544,11 @@ export interface RedirectPolicy {
   follow: boolean;
   max: number;
   /**
-   * Forward `Authorization`/cookies/client identity to a different origin.
-   * Off by default; the target's own configuration applies otherwise.
+   * Forward the request's credentials to a different origin: auth, a manual
+   * `Cookie` header, credential or sensitive headers, headers holding a secret,
+   * and a 307/308 body holding a secret. Off by default. The TLS client
+   * identity is never forwarded: only a TLS profile bound to the new origin
+   * presents one.
    */
   forward_credentials_cross_origin: boolean;
 }
@@ -1930,8 +1933,20 @@ export interface PreparedSummary {
    * `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.
    */
   auth_label: string;
+  /**
+   * TLS profile of the connection that produced the final response (the last redirect
+   * hop when redirects were followed).
+   */
   tls_profile?: string | null;
+  /**
+   * Proxy route of the connection that produced the final response (the last redirect
+   * hop when redirects were followed).
+   */
   proxy?: string | null;
+  /**
+   * Whether TLS verification was on for the connection that produced the
+   * final response (the last redirect hop when redirects were followed).
+   */
   tls_verification_enabled: boolean;
   settings: EffectiveSettings;
   /**

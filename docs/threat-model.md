@@ -41,12 +41,25 @@ against it).
   leaves the request's origin (scheme, host or port), unless
   `redirects.forward_credentials_cross_origin` is on, configured headers that
   carry credentials are dropped for the rest of the chain: known credential
-  names (`Authorization`, `Cookie`, `X-API-Key`, names containing `token`,
-  `secret`, `auth`, ...), headers marked sensitive, and headers whose value
-  holds a secret variable; auth (headers, API-key query parameters and cookies)
-  is no longer applied. The proxy route and NO_PROXY are decided for each
-  hop's host, and the TLS settings for each hop's target; a hop whose route or
+  names (`Authorization`, a manual `Cookie` header, `X-API-Key`, names
+  containing `token`, `secret`, `auth`, ... or ending in `-key` / `_key`),
+  headers marked sensitive, and headers whose value holds a secret variable.
+  The prepared request notes the names (never the values) of the headers
+  withheld. Auth (headers, API-key query parameters and API-key cookies) is no
+  longer applied. The workspace cookie jar is separate: on each hop it sends
+  the stored cookies that match that hop's target under cookie rules, which
+  do not separate ports (nor schemes, for cookies without `Secure`). A
+  307/308 that would resend a body holding a secret value to another origin
+  is not followed. The TLS client identity is never presented to another
+  origin unless a TLS profile is bound to it, whatever the redirect policy.
+  The TLS settings are prepared for each hop's target; a hop whose route or
   TLS settings cannot be prepared is not followed.
+- **Redirects and NO_PROXY:** the proxy route is decided for each hop's host
+  and port. A redirect from a NO_PROXY host to any other host goes through the
+  proxy, and a redirect to a NO_PROXY host goes direct, so a server can only
+  move a request onto or off the proxy within the NO_PROXY list the user
+  configured. Each attempt records its own route; the record's proxy and TLS
+  summary describe the hop that produced the final response.
 - **Replay by the client itself:** HMAC nonce, DPoP proof and JWT regenerated per
   send; no automatic retry of possibly-processed non-idempotent requests.
 - **Replay of 0-RTT early data by the network:** data sent before a TLS 1.3 / QUIC

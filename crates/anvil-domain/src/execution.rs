@@ -876,10 +876,16 @@ pub struct PreparedSummary {
     pub content_type: Option<String>,
     /// `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.
     pub auth_label: String,
+    /// TLS profile of the connection that produced the final response (the last redirect
+    /// hop when redirects were followed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_profile: Option<String>,
+    /// Proxy route of the connection that produced the final response (the last redirect
+    /// hop when redirects were followed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Whether TLS verification was on for the connection that produced the
+    /// final response (the last redirect hop when redirects were followed).
     pub tls_verification_enabled: bool,
     pub settings: EffectiveSettings,
     /// Headers Anvil added or inferred, and why.
