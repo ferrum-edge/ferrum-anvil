@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Instant, SystemTime};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 /// Cancellation tokens of running executions, by execution id. Each
@@ -69,6 +71,15 @@ pub struct DesktopState {
     pub app: RwLock<Option<Arc<App>>>,
     /// Running executions (for cancel and lock-time stop).
     pub running: Arc<Running>,
+    /// Bundle imports and previews started with an attempt id (for
+    /// `import_cancel` and lock-time stop). Apart from `running`, so an
+    /// import's id never cancels an execution, nor an execution's an import.
+    pub imports: Arc<Running>,
+    /// The one import worker allowed at a time. A canceled import's worker
+    /// keeps deriving its key (within the header's memory bound) until the
+    /// derivation ends, so a new import is refused until it has, rather than
+    /// run beside it; the worker holds the permit until it has ended.
+    pub import_worker: Arc<Semaphore>,
     /// Load runs in worker processes (for cancel and lock-time stop).
     pub load_runs: Arc<LoadRuns>,
     /// Load reports that finished while their profile was locked
@@ -79,8 +90,9 @@ pub struct DesktopState {
     /// opened under.
     pub sessions: Mutex<HashMap<String, (Arc<App>, crate::cmd_sessions::SessionSlot)>>,
     /// Files the user chose in native dialogs this session; file commands
-    /// accept only these grants, never a path from the webview.
-    pub file_grants: FileGrants,
+    /// accept only these grants, never a path from the webview. Shared with
+    /// the worker threads that read a chosen file.
+    pub file_grants: Arc<FileGrants>,
     pub last_activity: Mutex<Instant>,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
@@ -92,10 +104,12 @@ impl DesktopState {
             profiles: ProfileManager::new(root),
             app: RwLock::new(None),
             running: Arc::new(Mutex::new(HashMap::new())),
+            imports: Arc::new(Mutex::new(HashMap::new())),
+            import_worker: Arc::new(Semaphore::new(1)),
             load_runs: Arc::new(Mutex::new(HashMap::new())),
             sessions: Mutex::new(HashMap::new()),
             pending_load_reports: PendingReports::default(),
-            file_grants: FileGrants::default(),
+            file_grants: Arc::default(),
             last_activity: Mutex::new(Instant::now()),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
         }
@@ -180,9 +194,13 @@ impl DesktopState {
         self.stop_work();
     }
 
-    /// Cancel registered executions, stop load workers and abort sessions.
+    /// Cancel registered executions and imports, stop load workers and abort
+    /// sessions.
     fn stop_work(&self) {
         for (_, t) in self.running.lock().drain() {
+            t.cancel();
+        }
+        for (_, t) in self.imports.lock().drain() {
             t.cancel();
         }
         // Load workers are asked to stop and finalize a partial report
@@ -300,6 +318,28 @@ impl Drop for LoadRunEntry {
     }
 }
 
+/// Settles the race between canceling a bundle import and its writes:
+/// whichever claims the gate first wins. A canceled import never writes, and
+/// one whose writes have begun is never reported as canceled.
+#[derive(Default)]
+pub struct ImportGate(AtomicU8);
+
+impl ImportGate {
+    const OPEN: u8 = 0;
+    const WRITING: u8 = 1;
+    const ABANDONED: u8 = 2;
+
+    /// Claim the writes for the import; `false` once it was abandoned.
+    pub fn begin_writes(&self) -> bool {
+        self.0.compare_exchange(Self::OPEN, Self::WRITING, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    /// Abandon the import; `false` once its writes have begun.
+    pub fn abandon(&self) -> bool {
+        self.0.compare_exchange(Self::OPEN, Self::ABANDONED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+}
+
 /// Cancel the running execution `id`. Returns whether it was registered.
 pub fn cancel_pending(running: &Running, id: &Id) -> bool {
     match running.lock().get(id) {
@@ -391,6 +431,22 @@ mod tests {
         };
         assert!(fails().is_err());
         assert!(running.lock().is_empty());
+    }
+
+    #[test]
+    fn an_abandoned_import_never_begins_its_writes() {
+        let gate = ImportGate::default();
+        assert!(gate.abandon());
+        assert!(!gate.begin_writes());
+        assert!(gate.abandon(), "abandoning again changes nothing");
+    }
+
+    #[test]
+    fn an_import_whose_writes_began_is_not_abandoned() {
+        let gate = ImportGate::default();
+        assert!(gate.begin_writes());
+        assert!(!gate.abandon());
+        assert!(!gate.begin_writes(), "the writes are claimed once");
     }
 
     #[test]
@@ -494,6 +550,28 @@ mod tests {
         // Work started from now on is not stopped by the earlier switch.
         let later = PendingEntry::register(&st.running, Id::new()).unwrap();
         assert!(!later.token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn imports_and_executions_are_canceled_in_their_own_registries() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let id = Id::new();
+        let execution = PendingEntry::register(&st.running, id).unwrap();
+        let import = PendingEntry::register(&st.imports, id).unwrap();
+        // The same id in the other registry is another entry.
+        assert!(cancel_pending(&st.imports, &id));
+        assert!(import.token().is_cancelled());
+        assert!(!execution.token().is_cancelled());
+        drop(import);
+        assert!(!cancel_pending(&st.imports, &id));
+        assert!(!execution.token().is_cancelled());
+        // A lock stops both.
+        let later = PendingEntry::register(&st.imports, Id::new()).unwrap();
+        st.lock();
+        assert!(execution.token().is_cancelled());
+        assert!(later.token().is_cancelled());
+        assert!(st.imports.lock().is_empty());
     }
 
     #[tokio::test]

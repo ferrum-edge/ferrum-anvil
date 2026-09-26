@@ -49,6 +49,9 @@ pub enum AppError {
     /// Interactive sign-in (browser flow) failures.
     #[error("{0}")]
     SignIn(#[from] anvil_identity::FlowError),
+    /// The caller canceled the operation before it wrote anything.
+    #[error("canceled; nothing was written")]
+    Canceled,
 }
 
 impl From<StoreError> for AppError {
