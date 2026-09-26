@@ -44,13 +44,20 @@ function sockets(pid: string): Socket[] {
       { encoding: "utf8" },
     );
     if (r.status !== 0) throw new Error(`socket query failed (${r.status}): ${r.stderr}`);
-    return r.stdout
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => {
-        const [local, remote] = line.split(" ");
-        return { line, local, remote: remote === "-" || remote.startsWith("0.0.0.0:") || remote.startsWith(":::") ? null : remote };
-      });
+    return (
+      r.stdout
+        .split(/\r?\n/)
+        .filter(Boolean)
+        // "Bound" is Windows' listing of a socket that has a local port but no
+        // connection yet (an outgoing connect shows up this way next to its
+        // Established entry). It carries no traffic; a real connection from
+        // it still appears as Established with its remote address.
+        .filter((line) => line.split(" ")[2] !== "Bound")
+        .map((line) => {
+          const [local, remote] = line.split(" ");
+          return { line, local, remote: remote === "-" || remote.startsWith("0.0.0.0:") || remote.startsWith(":::") ? null : remote };
+        })
+    );
   }
   let out = "";
   try {

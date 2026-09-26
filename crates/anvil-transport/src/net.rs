@@ -14,60 +14,88 @@ pub struct ConnectResult {
     pub remote: SocketAddr,
 }
 
-/// Try each address in order within one overall connect deadline.
+/// RFC 8305 "Connection Attempt Delay": how long an attempt may run before
+/// the next address is tried in parallel.
+const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Connect to the first reachable address within one overall deadline, in
+/// the resolver's order, Happy-Eyeballs style (RFC 8305 §5): the next address
+/// starts when the current attempt fails or has not finished within
+/// [`ATTEMPT_DELAY`], and the first connection wins. An unreachable first
+/// address (for example `::1` when only IPv4 listens; Windows retries a
+/// refused loopback SYN for about two seconds) therefore does not consume the
+/// whole connect budget. Every attempt is recorded in start order; attempts
+/// still in flight when another address won are recorded as `canceled`.
 pub async fn connect_tcp(
     addrs: &[SocketAddr],
     deadline: Option<Duration>,
 ) -> Result<ConnectResult, (TransportFailure, Vec<ConnectAttempt>)> {
+    use futures::stream::{FuturesUnordered, StreamExt};
     let started = Instant::now();
-    let mut attempts = Vec::new();
+    let overall = deadline.map(|d| tokio::time::Instant::now() + d);
+    let mut attempts: Vec<ConnectAttempt> = Vec::with_capacity(addrs.len());
+    let mut in_flight = FuturesUnordered::new();
+    let mut next = 0usize;
     let mut last: Option<TransportFailure> = None;
-    for addr in addrs {
-        let remaining = match deadline {
-            Some(d) => match d.checked_sub(started.elapsed()) {
-                Some(r) if !r.is_zero() => Some(r),
-                _ => break,
-            },
-            None => None,
-        };
-        let t = Instant::now();
-        let fut = TcpStream::connect(*addr);
-        let res = match remaining {
-            Some(r) => match tokio::time::timeout(r, fut).await {
-                Ok(r) => r.map_err(Some),
-                Err(_) => Err(None),
-            },
-            None => fut.await.map_err(Some),
-        };
-        let dur = t.elapsed().as_micros() as u64;
-        match res {
-            Ok(stream) => {
-                let _ = stream.set_nodelay(true);
-                attempts.push(ConnectAttempt { address: addr.to_string(), failure: None, duration_us: Some(dur) });
-                return Ok(ConnectResult { stream, attempts, remote: *addr });
+    let launch = |i: usize, attempts: &mut Vec<ConnectAttempt>| {
+        let addr = addrs[i];
+        attempts.push(ConnectAttempt { address: addr.to_string(), failure: None, duration_us: None });
+        let slot = attempts.len() - 1;
+        async move {
+            let t = Instant::now();
+            let r = TcpStream::connect(addr).await;
+            (slot, addr, r, t.elapsed().as_micros() as u64)
+        }
+    };
+    loop {
+        if in_flight.is_empty() {
+            if next >= addrs.len() {
+                break;
             }
-            Err(Some(e)) => {
-                let kind = classify_connect_io(&e);
-                attempts.push(ConnectAttempt { address: addr.to_string(), failure: Some(kind), duration_us: Some(dur) });
-                let mut f = TransportFailure::new(Phase::Connect, kind, format!("connect to {addr} failed: {}", display_chain(&e)));
-                f.io_error_kind = Some(io_kind_name(e.kind()));
-                f.os_error_code = e.raw_os_error();
-                last = Some(f);
+            in_flight.push(launch(next, &mut attempts));
+            next += 1;
+        }
+        let stagger = if next < addrs.len() { Some(tokio::time::sleep(ATTEMPT_DELAY)) } else { None };
+        tokio::select! {
+            Some((slot, addr, res, dur)) = in_flight.next() => match res {
+                Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    attempts[slot].duration_us = Some(dur);
+                    for (k, a) in attempts.iter_mut().enumerate() {
+                        if k != slot && a.failure.is_none() && a.duration_us.is_none() {
+                            a.failure = Some(FailureKind::Canceled);
+                            a.duration_us = Some(started.elapsed().as_micros() as u64);
+                        }
+                    }
+                    return Ok(ConnectResult { stream, attempts, remote: addr });
+                }
+                Err(e) => {
+                    let kind = classify_connect_io(&e);
+                    attempts[slot].failure = Some(kind);
+                    attempts[slot].duration_us = Some(dur);
+                    let mut f = TransportFailure::new(Phase::Connect, kind, format!("connect to {addr} failed: {}", display_chain(&e)));
+                    f.io_error_kind = Some(io_kind_name(e.kind()));
+                    f.os_error_code = e.raw_os_error();
+                    last = Some(f);
+                }
+            },
+            _ = async { stagger.expect("guarded").await }, if stagger.is_some() => {
+                in_flight.push(launch(next, &mut attempts));
+                next += 1;
             }
-            Err(None) => {
-                attempts.push(ConnectAttempt {
-                    address: addr.to_string(),
-                    failure: Some(FailureKind::ConnectTimeout),
-                    duration_us: Some(dur),
-                });
-                last = Some(
-                    TransportFailure::new(
-                        Phase::Connect,
-                        FailureKind::ConnectTimeout,
-                        format!("TCP connect to {addr} did not complete before the connect deadline"),
-                    )
-                    .with_deadline(deadline.map(|d| d.as_millis() as u64)),
-                );
+            _ = async { tokio::time::sleep_until(overall.expect("guarded")).await }, if overall.is_some() => {
+                for a in attempts.iter_mut().filter(|a| a.failure.is_none()) {
+                    a.failure = Some(FailureKind::ConnectTimeout);
+                    a.duration_us = Some(started.elapsed().as_micros() as u64);
+                }
+                let tried = attempts.iter().map(|a| a.address.as_str()).collect::<Vec<_>>().join(", ");
+                let f = TransportFailure::new(
+                    Phase::Connect,
+                    FailureKind::ConnectTimeout,
+                    format!("TCP connect did not complete before the connect deadline (tried {tried})"),
+                )
+                .with_deadline(deadline.map(|d| d.as_millis() as u64));
+                return Err((f, attempts));
             }
         }
     }
@@ -334,5 +362,53 @@ mod tests {
         assert!(no_proxy_matches("localhost:8080", "localhost", 8080));
         assert!(!no_proxy_matches("localhost:8080", "localhost", 9090));
         assert!(no_proxy_matches("::1", "[::1]", 80));
+    }
+}
+
+#[cfg(test)]
+mod happy_eyeballs_tests {
+    use super::*;
+
+    /// An address that never answers (TEST-NET-1, RFC 5737), so its attempt
+    /// hangs like a refused `::1` on Windows or a black-holed IPv6 route.
+    fn black_hole() -> SocketAddr {
+        "192.0.2.1:9".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_hanging_first_address_does_not_consume_the_connect_budget() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = l.local_addr().unwrap();
+        let t = Instant::now();
+        let r = connect_tcp(&[black_hole(), live], Some(Duration::from_secs(5))).await.map_err(|(f, _)| f).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
+        assert_eq!(r.remote, live);
+        assert_eq!(r.attempts.len(), 2);
+        assert_eq!(r.attempts[0].failure, Some(FailureKind::Canceled), "superseded, not connected: {:?}", r.attempts);
+        assert_eq!(r.attempts[1].failure, None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_first_address_moves_on_immediately() {
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = l.local_addr().unwrap();
+        let r = connect_tcp(&[closed, live], Some(Duration::from_secs(5))).await.map_err(|(f, _)| f).unwrap();
+        assert_eq!(r.remote, live);
+        assert_eq!(r.attempts[0].failure, Some(FailureKind::ConnectRefused), "{:?}", r.attempts);
+    }
+
+    #[tokio::test]
+    async fn the_overall_deadline_covers_every_address() {
+        let t = Instant::now();
+        let (f, attempts) =
+            connect_tcp(&[black_hole(), "192.0.2.2:9".parse().unwrap()], Some(Duration::from_millis(600))).await.err().unwrap();
+        assert!(t.elapsed() < Duration::from_millis(1_500));
+        assert_eq!(f.kind, FailureKind::ConnectTimeout);
+        assert_eq!(attempts.len(), 2, "both addresses were tried within the budget");
+        assert!(attempts.iter().all(|a| a.failure == Some(FailureKind::ConnectTimeout)));
     }
 }
