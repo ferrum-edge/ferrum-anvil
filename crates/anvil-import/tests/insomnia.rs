@@ -123,3 +123,100 @@ fn deterministic() {
     assert_eq!(run(V4, &opts()), run(V4, &opts()));
     assert_eq!(run(V5, &opts()), run(V5, &opts()));
 }
+
+fn v4_request(mut request: serde_json::Value) -> anvil_import::ImportResult {
+    request["_id"] = "req_1".into();
+    request["_type"] = "request".into();
+    request["parentId"] = "wrk_1".into();
+    request["name"] = "R".into();
+    request["method"] = "POST".into();
+    let doc = serde_json::json!({
+        "_type": "export",
+        "__export_format": 4,
+        "resources": [{ "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" }, request],
+    });
+    anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap()
+}
+
+fn v5_request(mut request: serde_json::Value) -> anvil_import::ImportResult {
+    request["name"] = "R".into();
+    request["meta"] = serde_json::json!({ "id": "req_1" });
+    request["method"] = "POST".into();
+    let doc = serde_json::json!({ "type": "collection.insomnia.rest/5.0", "name": "W", "collection": [request] });
+    anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap()
+}
+
+fn content_type(r: &anvil_import::ImportResult) -> Option<&str> {
+    header(&r.requests[0].spec, "Content-Type").map(|h| h.value.as_str())
+}
+
+#[test]
+fn declared_body_media_type_is_kept() {
+    for (mime, text, json) in [
+        ("application/vnd.api+json", "{}", true),
+        ("application/json; charset=utf-8", "{}", true),
+        ("text/xml; charset=utf-8", "<root/>", false),
+        ("text/xml", "<root/>", false),
+        ("application/atom+xml", "<feed/>", false),
+    ] {
+        let body = serde_json::json!({ "url": "https://example.test/x", "headers": [], "body": { "mimeType": mime, "text": text } });
+        for r in [v4_request(body.clone()), v5_request(body)] {
+            let s = &r.requests[0].spec;
+            assert_eq!(matches!(s.body, Body::Json { .. }), json, "{mime}: {:?}", s.body);
+            assert_eq!(matches!(s.body, Body::Xml { .. }), !json, "{mime}: {:?}", s.body);
+            assert_eq!(content_type(&r), Some(mime), "{mime}");
+        }
+    }
+    // Canonical types stay inferred from the body variant (no header).
+    for (mime, text) in [("application/json", "{}"), ("application/xml", "<root/>")] {
+        let r = v4_request(serde_json::json!({ "url": "https://example.test/x", "body": { "mimeType": mime, "text": text } }));
+        assert_eq!(content_type(&r), None, "{mime}");
+    }
+    // An explicit header keeps precedence and is not duplicated.
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "headers": [{ "name": "Content-Type", "value": "application/problem+json" }],
+        "body": { "mimeType": "application/vnd.api+json", "text": "{}" },
+    }));
+    let cts: Vec<&str> =
+        r.requests[0].spec.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("content-type")).map(|h| h.value.as_str()).collect();
+    assert_eq!(cts, vec!["application/problem+json"]);
+}
+
+fn url_with(params: serde_json::Value, url: &str) -> (String, String) {
+    let request = serde_json::json!({ "url": url, "pathParameters": params });
+    (v4_request(request.clone()).requests[0].spec.url.clone(), v5_request(request).requests[0].spec.url.clone())
+}
+
+#[test]
+fn path_parameters_match_whole_segments_and_are_encoded() {
+    let first = serde_json::json!({ "name": "id", "value": "first" });
+    let second = serde_json::json!({ "name": "id2", "value": "second" });
+    for params in [serde_json::json!([first.clone(), second.clone()]), serde_json::json!([second, first])] {
+        let (v4, v5) = url_with(params, "https://example.test/:id/:id2");
+        assert_eq!(v4, "https://example.test/first/second");
+        assert_eq!(v5, v4);
+    }
+    // Reserved characters stay data.
+    let (v4, v5) = url_with(serde_json::json!([{ "name": "id", "value": "a/b?admin=true#x" }]), "https://example.test/users/:id");
+    assert_eq!(v4, "https://example.test/users/a%2Fb%3Fadmin%3Dtrue%23x");
+    assert_eq!(v5, v4);
+    let (v4, _) = url_with(serde_json::json!([{ "name": "n", "value": "é ok-_.!~*'()" }]), "https://example.test/:n");
+    assert_eq!(v4, "https://example.test/%C3%A9%20ok-_.!~*'()");
+    // Repeated segments; the query, fragment, host/port and partial matches
+    // are left alone; undeclared segments stay literal.
+    let (v4, _) = url_with(
+        serde_json::json!([{ "name": "id", "value": "7" }, { "name": "q", "value": "nope" }]),
+        "http://host:8080/a/:id/b/:id/:idx/c:id/:other?x=:id&q=:q#:id",
+    );
+    assert_eq!(v4, "http://host:8080/a/7/b/7/:idx/c:id/:other?x=:id&q=:q#:id");
+    // Variable references are kept as references; literal parts around them
+    // are encoded. An empty value becomes a required variable.
+    let (v4, _) = url_with(
+        serde_json::json!([{ "name": "id", "value": "{{ _.userId }}/x" }, { "name": "rev", "value": "" }]),
+        "{{ _.baseUrl }}/users/:id/:rev",
+    );
+    assert_eq!(v4, "{{baseUrl}}/users/{{userId}}%2Fx/{{rev}}");
+    let r = v4_request(serde_json::json!({ "url": "https://example.test/:rev", "pathParameters": [{ "name": "rev", "value": "" }] }));
+    assert!(r.report.required_variables.iter().any(|v| v.name == "rev"));
+}

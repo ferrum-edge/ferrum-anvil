@@ -208,6 +208,17 @@ pub fn header_content_type(headers: &[KeyValue]) -> Option<String> {
     headers.iter().rev().find(|h| h.enabled && h.name.eq_ignore_ascii_case("content-type")).map(|h| h.value.clone())
 }
 
+/// Keep the media type a body mapping could not express in its variant (the
+/// second value of [`body_from_text`]) as an explicit `Content-Type` header,
+/// unless the source already sets one: an explicit header takes precedence.
+pub fn keep_declared_content_type(headers: &mut Vec<KeyValue>, declared: Option<String>) {
+    if let Some(ct) = declared
+        && header_content_type(headers).is_none()
+    {
+        headers.push(KeyValue::new("Content-Type", ct));
+    }
+}
+
 /// Drop an explicit `Content-Type` header when the body variant infers the
 /// same type, so the engine's inference and the header never disagree.
 pub fn dedupe_content_type(headers: &mut Vec<KeyValue>, body: &Body) {
