@@ -327,7 +327,9 @@ export type FailureKind =
       | "internal"
     )
   | "oauth_interaction_required"
-  | "tls_alert_after_handshake";
+  | "tls_alert_after_handshake"
+  | "masque_unsupported"
+  | "masque_refused";
 /**
  * Wire protocol family of a saved request. SOAP and GraphQL are HTTP body
  * kinds, not separate transports.
@@ -463,6 +465,11 @@ export type ProtocolStatus =
       datagrams_sent: number;
       datagrams_received: number;
       window_ms: number;
+      /**
+       * Present when the datagrams went through an RFC 9298 CONNECT-UDP
+       * (MASQUE) proxy.
+       */
+      masque?: MasqueTunnel | null;
       protocol: "udp";
     };
 /**
@@ -475,6 +482,13 @@ export type GrpcStatusSource = "trailers" | "trailers_only" | "missing";
  * via the `definition` "ClosedBy".
  */
 export type ClosedBy = ("peer" | "client" | "timeout" | "not_closed") | "abnormal";
+/**
+ * How HTTP Datagrams travelled through a CONNECT-UDP tunnel.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "MasqueEncoding".
+ */
+export type MasqueEncoding = "quic_datagram" | "capsule";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "WarningCode".
@@ -1159,6 +1173,13 @@ export type TcpFraming = "none" | "newline_delimited" | "length_prefixed_u16" | 
  * via the `definition` "PayloadEncoding".
  */
 export type PayloadEncoding = "text" | "hex" | "base64";
+/**
+ * How HTTP Datagrams (RFC 9297) are carried through the tunnel.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "MasqueDatagramMode".
+ */
+export type MasqueDatagramMode = "auto" | "quic_datagrams" | "capsules";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "TlsMinVersion".
@@ -1878,6 +1899,55 @@ export interface ExecutionOutcome {
    * One-line human summary (derived; not authoritative).
    */
   summary: string;
+}
+/**
+ * Evidence about an RFC 9298 CONNECT-UDP tunnel through an HTTP/3 proxy.
+ * Counts cover only what Anvil sent and received; delivery to the target
+ * is never inferred.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "MasqueTunnel".
+ */
+export interface MasqueTunnel {
+  /**
+   * `host:port` of the proxy.
+   */
+  proxy: string;
+  /**
+   * `host:port` the tunnel was requested for.
+   */
+  target: string;
+  /**
+   * Whether the proxy's HTTP/3 SETTINGS enabled extended CONNECT
+   * (`None`: no SETTINGS were received).
+   */
+  extended_connect?: boolean | null;
+  /**
+   * Whether HTTP/3 datagrams were available: the proxy's SETTINGS enabled
+   * `SETTINGS_H3_DATAGRAM` and QUIC negotiated DATAGRAM frames.
+   */
+  h3_datagrams?: boolean | null;
+  /**
+   * The proxy's HTTP status for the CONNECT-UDP request (`None`: no answer).
+   */
+  connect_status?: number | null;
+  /**
+   * The encoding chosen for sending (`None`: the tunnel never opened).
+   */
+  encoding?: MasqueEncoding | null;
+  sent_quic_datagrams: number;
+  sent_capsules: number;
+  received_quic_datagrams: number;
+  received_capsules: number;
+  /**
+   * HTTP Datagrams with an unregistered context ID and capsules of
+   * unknown type, dropped as RFC 9298 §4 / RFC 9297 §3.1 require.
+   */
+  dropped?: number;
+  /**
+   * How the CONNECT stream (the tunnel) ended.
+   */
+  closed_by: ("peer" | "client" | "timeout" | "not_closed") | "abnormal";
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -2966,6 +3036,38 @@ export interface UdpSpec {
    */
   response_window_ms?: number;
   max_datagrams?: number;
+  /**
+   * Send the datagrams through an HTTP/3 MASQUE proxy (RFC 9298
+   * CONNECT-UDP) instead of directly. The request URL stays the UDP
+   * target (`udp://host:port`); the proxy only relays. `None` = direct.
+   */
+  masque?: MasqueSpec | null;
+}
+/**
+ * RFC 9298 UDP proxying over HTTP/3 ("MASQUE" CONNECT-UDP). Belongs to
+ * the UDP request rather than to a proxy profile: the proxy is addressed by
+ * a URI Template (not `host:port`), carries only UDP, and its datagram
+ * encoding is part of the exchange's evidence (docs/protocols.md).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "MasqueSpec".
+ */
+export interface MasqueSpec {
+  /**
+   * The proxy's `https://host:port` origin (variables allowed). HTTP/3
+   * needs TLS, so any other scheme is refused before traffic; the TLS
+   * profile setting applies to the QUIC handshake with the proxy.
+   */
+  proxy_url: string;
+  /**
+   * RFC 9298 §2 URI Template path (and optional query) on the proxy.
+   * `{target_host}` and `{target_port}` are expanded from the request URL.
+   */
+  uri_template?: string;
+  /**
+   * How HTTP Datagrams (RFC 9297) are carried through the tunnel.
+   */
+  datagrams?: "auto" | "quic_datagrams" | "capsules";
 }
 /**
  * Link from a request to the spec/collection it was imported from, used for

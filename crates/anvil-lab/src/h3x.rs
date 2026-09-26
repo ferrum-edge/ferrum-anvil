@@ -262,6 +262,16 @@ fn operator_status(c: &mut Checks, lines: &[String], status: u16) {
     );
 }
 
+/// Operator-side ground truth: a gateway log line (for this proxy) mentions `needle`.
+fn operator_says(c: &mut Checks, lines: &[String], needle: &str) {
+    c.add(
+        CheckKind::GroundTruth,
+        format!("gateway operator log mentions {needle}"),
+        lines.iter().any(|l| l.contains(needle)),
+        format!("{} lines", lines.len()),
+    );
+}
+
 fn datagrams(log: &anvil_fixtures::GroundTruthLog) -> usize {
     log.entries().iter().filter(|e| matches!(e.event, GroundTruth::DatagramReceived { .. })).count()
 }
@@ -652,6 +662,7 @@ fn masque001(env: &Env) -> Fut<'_> {
         );
         let lines = op_log(env, from, MASQUE_PROXY_ID);
         operator_status(&mut c, &lines, 200);
+        operator_says(&mut c, &lines, "CONNECT-UDP (RFC 9298) tunnel established");
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
     })
 }
@@ -744,6 +755,7 @@ fn masque003(env: &Env) -> Fut<'_> {
         );
         let lines = op_log(env, from, MASQUE_PROXY_ID);
         operator_status(&mut c, &lines, 403);
+        operator_says(&mut c, &lines, "connect_udp_target_not_allowed");
         let r = masque_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
@@ -761,6 +773,7 @@ fn masque004(env: &Env) -> Fut<'_> {
         c.add(CheckKind::GroundTruth, "the target received nothing", datagrams(&env.fx.udp_echo.log) == before, "");
         let lines = op_log(env, from, MASQUE_PROXY_ID);
         operator_status(&mut c, &lines, 400);
+        operator_says(&mut c, &lines, "template_anchor_missing");
         let r = masque_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
@@ -778,6 +791,7 @@ fn masque005(env: &Env) -> Fut<'_> {
         refusal_checks(&mut c, &o, 405, "", UDP_ECHO);
         c.add(CheckKind::GroundTruth, "the target received nothing", datagrams(&env.fx.udp_echo.log) == before, "");
         let lines = op_log(env, from, "h3x-masque-get-only");
+        operator_status(&mut c, &lines, 405);
         let r = masque_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
@@ -787,6 +801,7 @@ fn masque006(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let before = datagrams(&env.fx.udp_echo.log);
+        let off_from = env.gw_off.log_lines().len();
         let o = send(env, &masque_ctx(env, Masque { proxy: HTTPS_OFF, ..Default::default() })).await;
         refusal_checks(&mut c, &o, 501, "CONNECT-UDP over HTTP/3 is disabled", UDP_ECHO);
         c.add(
@@ -796,8 +811,10 @@ fn masque006(env: &Env) -> Fut<'_> {
             "",
         );
         c.add(CheckKind::GroundTruth, "the target received nothing", datagrams(&env.fx.udp_echo.log) == before, "");
+        let off: Vec<String> = env.gw_off.log_lines().into_iter().skip(off_from).filter(|l| l.contains("CONNECT-UDP")).take(5).collect();
+        operator_says(&mut c, &off, "profile not available on this gateway");
         let r = masque_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: off }
     })
 }
 

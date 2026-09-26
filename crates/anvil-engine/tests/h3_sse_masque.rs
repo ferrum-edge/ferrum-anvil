@@ -419,6 +419,34 @@ async fn masque_abnormal_end_is_incomplete_and_silence_is_only_no_response() {
 }
 
 #[tokio::test]
+async fn interactive_udp_through_a_masque_proxy_sends_on_command_until_close() {
+    init();
+    let proxy = h3server::serve_with("127.0.0.1:0", server_tls(), H3Options { h3_datagrams: true, ..Default::default() }).await.unwrap();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let e = Engine::new();
+    let s = masque_spec(
+        &format!("udp://{}", echo.addr),
+        &format!("https://127.0.0.1:{}", proxy.addr.port()),
+        None,
+        MasqueDatagramMode::Auto,
+        &["scripted"],
+    );
+    let h = e.open_session(lab_ctx(s, None), EventCtx::none()).await;
+    h.send(SessionCommand::SendText { text: "live".into() }).await.unwrap();
+    h.send(SessionCommand::SendBinaryHex { hex: "6865780a".into() }).await.unwrap();
+    assert!(h.send(SessionCommand::Ping).await.is_err(), "UDP has no ping");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    h.close().await.unwrap();
+    let o = h.finish().await;
+    assert_eq!(previews(&o, Direction::Received, "datagram"), vec!["scripted", "live", "hex\n"]);
+    let (sent, got, m) = tunnel(&o);
+    assert_eq!((sent, got), (3, 3));
+    assert_eq!((m.encoding, m.sent_quic_datagrams, m.received_quic_datagrams), (Some(MasqueEncoding::QuicDatagram), 3, 3));
+    assert_eq!(m.closed_by, ClosedBy::Client);
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+}
+
+#[tokio::test]
 async fn masque_settings_are_validated_before_traffic() {
     init();
     let e = Engine::new();

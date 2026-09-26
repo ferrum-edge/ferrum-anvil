@@ -178,6 +178,7 @@ pub struct SsePlan {
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
 }
+
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
     match rx {
         Some(r) => r.recv().await,

@@ -18,9 +18,10 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 | WebSocket over HTTP/3 extended CONNECT (RFC 9220) | **Yes**, same commands | **Yes** | Not built | A separate bootstrap on a fresh QUIC connection. The client waits for the server's `SETTINGS_ENABLE_CONNECT_PROTOCOL` before sending `:protocol = websocket`. A 200 is success. Needs `wss://` and no proxy. QUIC phases as for HTTP/3 (no TCP phase). See §3.1. |
 | gRPC unary / server streaming (`grpc://`, `grpcs://`, `http(s)://`) | No, by design. Use `execute`. `open_session` returns `unsupported_combination`. | **Yes** | Not built (one connection per call, no channel reuse) | HTTP status and gRPC status reported separately. Trailers vs trailers-only vs missing. `grpc-message` is percent-decoded. `grpc-status-details-bin` is decoded. Message boundaries are kept, each shown as JSON. |
 | gRPC client streaming / bidirectional | **Yes.** `SendText` sends a JSON message, `SendBinaryHex` sends pre-encoded protobuf. `HalfClose` or `Close` ends the client stream. | **Yes.** Scripted messages, then a half-close. | Not built | As above. The half-close is recorded in the transcript. |
-| SSE (`http(s)://`) | **Receive-only.** Close or cancel. Other commands are rejected. | **Yes.** Stops on `max_events`, idle, the deadline, cancel or the peer's end. Optional reconnect. | Not built | Every event is recorded with its id, type and data. `closed_by` is Client, Timeout, Peer or Abnormal. The raw stream is kept up to the capture limit. |
+| SSE (`http(s)://`) over HTTP/1.1, HTTP/2 or HTTP/3 | **Receive-only.** Close or cancel. Other commands are rejected. | **Yes.** Stops on `max_events`, idle, the deadline, cancel or the peer's end. Optional reconnect. | Not built | Every event is recorded with its id, type and data. `closed_by` is Client, Timeout, Peer or Abnormal. The raw stream is kept up to the capture limit. Over HTTP/3: QUIC phases (no TCP phase), events parsed from DATA frames, a fresh QUIC connection per attempt. See §3.3. |
 | Raw TCP (`tcp://`) / TCP+TLS (`tls://`) | **Yes.** Send text or hex frames. `HalfClose` (FIN). `Close`. | **Yes.** Stops on expected frames, max bytes, read-idle, the peer's close or the deadline. | Not built | The same connector phases and TLS/mTLS evidence as HTTP. Framing presets. Half-close semantics. Bytes sent and received. Partial trailing frames. |
 | UDP (`udp://`) | **Yes.** Send datagrams. `Close`. | **Yes.** Sends datagrams, then waits out the response window. | Not built | A per-datagram transcript. Sent and received counts. ICMP port-unreachable when the OS reports it. A count of repeated payloads. It never infers delivery. |
+| UDP through an HTTP/3 MASQUE proxy (RFC 9298 CONNECT-UDP, `udp.masque`) | **Yes**, like UDP | **Yes**, like UDP | Not built | The direct UDP evidence (per-datagram transcript, counts, window) plus the tunnel: QUIC phases to the proxy, the proxy's SETTINGS, its status for the CONNECT (refusal body kept), the datagram encoding (QUIC DATAGRAM frames or DATAGRAM capsules) with per-encoding counts, and how the tunnel ended. See §3.8. |
 | DTLS 1.2/1.3 (`dtls://`) | **Yes**, like UDP | **Yes** | Not built | A separate `dtls_handshake` phase. Peer leaf verified against the TLS profile. Client identity, and whether a CertificateRequest was seen (DTLS 1.2). The alert name when a peer rejects the handshake. |
 | HTTP/3 forced / automatic fallback | n/a (request/response) | **Yes.** From the existing H3 transport, now covered by tests. | Load runs use the same HTTP engine path, so a forced-H3 request is accepted, but H3 has not been exercised under load (see load.md). | Measured QUIC phases, and no TCP phase. Forced H3 never falls back. Automatic fallback records both attempts and the `client.h3.fallback_used` finding. |
 
@@ -32,12 +33,13 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 - **Auth.** Auth is applied per send, as headers or query parameters, for WebSocket, gRPC and SSE. OAuth tokens come from the shared token cache. A few combinations fail before any traffic with `unsupported_combination`:
   - an auth profile that rewrites the body (WS-Security);
   - query-parameter auth on gRPC;
-  - any auth profile on raw TCP/UDP, because payloads are sent verbatim. Client certificates come from the TLS profile instead.
+  - any auth profile on raw TCP/UDP, because payloads are sent verbatim. Client certificates come from the TLS profile instead. UDP through a MASQUE proxy is the exception: auth and the request's headers go on the CONNECT-UDP request to the proxy (§3.8).
 - **Combinations refused before traffic** (`unsupported_combination`, `phase = prepare`, `dispatch = not_dispatched`):
-  - a proxy with UDP/DTLS (HTTP CONNECT and SOCKS5 CONNECT carry only TCP);
+  - a proxy with UDP/DTLS (HTTP CONNECT and SOCKS5 CONNECT carry only TCP), including UDP through a MASQUE proxy, whose QUIC connection they cannot carry either;
   - WebSocket over HTTP/3 with `ws://` (QUIC is always encrypted) or through a proxy;
   - gRPC with the HTTP/1.1-only or HTTP/3 policies, or `plaintext` with a TLS URL;
-  - SSE over HTTP/3;
+  - SSE with the forced HTTP/3 policy and an `http://` URL or a proxy (the automatic HTTP/3 policy records the refused HTTP/3 attempt and falls back to TCP instead);
+  - a MASQUE proxy URL that is not `https://`, or not an origin; a URI Template without both `{target_host}` and `{target_port}`; DTLS inside the tunnel (§3.8);
   - a gRPC call mode that does not match the method descriptor. Unary alone never proves streaming.
 - **Proxies.** TCP-based sessions go through the configured HTTP or SOCKS5 proxy as a CONNECT tunnel. This includes `ws://` and cleartext SSE.
 - **Transcripts.** Every message, event, frame or datagram becomes a `StreamMessage` and is also emitted live as `ExecutionEvent::Message`. The transcript is bounded:
@@ -109,7 +111,13 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
   - Partial event data from the broken stream is discarded.
   - Each reconnection is its own attempt, with reason `retry{after: <kind>}`.
   - A clean end of stream is recorded as the server closing and is **not** reconnected. That is a deliberate difference from browser `EventSource`.
-- **Not implemented.** SSE over HTTP/3, and decompression of compressed event streams.
+- **HTTP/3.** With `http3_only` or `http3_with_fallback`, an `https://` stream runs over QUIC: `quic_connect` measures DNS and the QUIC handshake (TLS 1.3 inside; connect is `not_applicable`), the request is sent on an HTTP/3 request stream, and the event stream is parsed from the stream's DATA frames as they arrive, with every semantic above unchanged.
+  - A reset stream (for example `H3_INTERNAL_ERROR` from a gateway whose backend aborted) is a `body_reset` in the `session` phase with the peer's HTTP/3 error code in `quic_error_code`. Transport is `incomplete` and `closed_by = abnormal`, never success.
+  - Every attempt, including each reconnection, uses a new QUIC connection.
+  - Forced HTTP/3 never touches TCP. With `http3_with_fallback`, an HTTP/3 attempt that produced no response is recorded and followed by a separate TCP attempt with reason `protocol_fallback{from: h3}`, and `client.h3.fallback_used` is reported.
+  - The connection byte counters are QUIC UDP payload bytes. Anvil ends an HTTP/3 stream by closing its QUIC connection with `H3_NO_ERROR` (h3-quinn 0.0.10 panics on `stop_sending` after a canceled read, so the stream is not stopped on its own).
+  - Live against Ferrum Edge 0.9.7 in the `h3x` lab (`docs/lab/h3x.md`).
+- **Not implemented.** Decompression of compressed event streams.
 
 ### 3.4 Raw TCP / TLS
 
@@ -156,6 +164,36 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 - **PROTO-007, no UDP listener.** The result is `quic_handshake_timeout`, with a single attempt, and the TCP fixture on the same port sees no connection.
 - **PROTO-008, automatic fallback.** Two attempts are recorded, the second with reason `protocol_fallback{from: h3}`. The response is not HTTP/3, and there is a `client.h3.fallback_used` finding plus a `protocol_fallback` warning. The fallback finding previously never fired, because the engine did not pass `protocol_fallback_from`. That is fixed.
 
+### 3.8 UDP through an HTTP/3 MASQUE proxy (RFC 9298 CONNECT-UDP)
+
+- **Setting.** `udp.masque = { proxy_url, uri_template, datagrams }` on a UDP request. The request URL stays the UDP target (`udp://host:port`). `proxy_url` is the proxy's `https://host:port` origin and `uri_template` its RFC 9298 §2 URI Template path, default `/.well-known/masque/udp/{target_host}/{target_port}/`. `{target_host}` and `{target_port}` use RFC 6570 simple expansion (IPv6 colons become `%3A`); form-style `{?…}`/`{&…}` expansion is accepted too.
+- **Why a UDP option and not a proxy profile.**
+  - A MASQUE proxy is addressed by a URI Template, not a `host:port`, and it carries only UDP.
+  - Proxy profiles are `host:port` HTTP/SOCKS tunnels inherited through settings layers by every protocol. A UDP-only kind would have to be refused for every HTTP, WebSocket, gRPC, SSE and TCP request that inherited it, and would still need a template.
+  - The proxy's SETTINGS, answer and datagram encoding are evidence about this one exchange, and the target stays in the URL, where the rest of the UDP evidence refers to it.
+  - Templates can use variables, so one proxy definition is still reusable across requests.
+- **Bootstrap.** A fresh QUIC connection to the proxy, on which Anvil advertises `SETTINGS_H3_DATAGRAM`. Nothing is sent on a request stream until the proxy's SETTINGS arrive (up to the response-header timeout, at most 5 s) and enable extended CONNECT. Then Anvil sends `:method = CONNECT`, `:protocol = connect-udp`, `:scheme = https`, `:authority` = the proxy, `:path` = the expanded template and `capsule-protocol: ?1`, plus the request's own headers, a User-Agent and the auth headers (none of the HTTP body defaults).
+- **Datagrams.** UDP payloads are HTTP Datagrams with Context ID 0.
+  - `datagrams = auto` (default) uses QUIC DATAGRAM frames (quarter stream ID, context ID, payload) when the proxy's SETTINGS enable `SETTINGS_H3_DATAGRAM` and QUIC negotiated DATAGRAM frames. Otherwise it uses RFC 9297 DATAGRAM capsules on the CONNECT stream (§3.5).
+  - `quic_datagrams` requires frames and fails before the request without them. `capsules` always uses capsules.
+  - Both encodings are accepted on receive. Unknown capsule types are skipped without buffering their value; unregistered context IDs are dropped and counted.
+  - The framing is implemented directly on quinn datagrams. The `h3-datagram` crate is not needed and the vendored h3 is unchanged.
+- **Ferrum Edge.** The gateway's profile (its docs/http3.md, "CONNECT-UDP over HTTP/3") never negotiates `SETTINGS_H3_DATAGRAM` and carries HTTP Datagrams as DATAGRAM capsules. So `auto` uses capsules, and `quic_datagrams` fails before traffic with `masque.no_datagram_support`.
+- **Evidence.**
+  - The attempt is the CONNECT (method `CONNECT`, the proxy URL): DNS and QUIC phases to the proxy, a `protocol_handshake` detail naming the SETTINGS and the chosen encoding, and the proxy's status and headers.
+  - The transcript, counts, window, repeated-payload count and dispatch rules are the direct UDP adapter's.
+  - `ProtocolStatus::Udp.masque` records the proxy, target, SETTINGS (`extended_connect`, `h3_datagrams`), `connect_status`, the encoding, datagrams sent and received per encoding, dropped datagrams and the tunnel's `closed_by`.
+  - TLS, trust and the Ferrum integration profile follow the proxy, the only HTTP peer.
+- **Outcomes and findings.**
+  - SETTINGS without extended CONNECT: `masque_unsupported` and `masque.extended_connect_unavailable` (confirmed). No SETTINGS in time: `masque.settings_not_received` (unknown). QUIC datagrams required but not offered: `masque.no_datagram_support`. Nothing is sent in any of these.
+  - A non-2xx answer: `masque_refused` with the status, the (bounded) body kept, no datagram sent (`not_dispatched`), application `failure`, and `masque.proxy_refused` (confirmed; `Proxy-Status` and a JSON `error` are evidence) next to the generic HTTP status finding. Its explanation and "does not prove" say the refusal is the proxy's answer and not evidence that the target is down.
+  - An open tunnel: silence is `udp.no_response`, exactly as for direct UDP. Anvil ends the tunnel after the window (FIN on the stream, `closed_by = client`). A proxy FIN is `closed_by = peer`.
+  - A stream reset, a lost QUIC connection or a FIN inside a capsule is `closed_by = abnormal` with a typed failure (the peer's HTTP/3 code kept), transport `incomplete`, and `masque.tunnel_ended_abnormally`.
+  - Every `masque.*` finding has scope `forward_proxy` and names the target only in "does not prove".
+- **Refused before traffic.** A non-`https://` proxy URL or one with a path; a template without both variables or with other variables; an HTTP/SOCKS proxy setting; a datagram over the 65,527-byte RFC 9298 limit; DTLS inside the tunnel (`dtls://` with `masque`), because Anvil does not run a DTLS handshake through the proxy.
+- **Not implemented.** DTLS over the tunnel; CONNECT-UDP over HTTP/2 or HTTP/1.1 (there is no fallback: a UDP-blocked path to the proxy is a `quic_handshake_timeout`); several tunnels on one QUIC connection; RFC 9298 context-ID extensions.
+- **Live.** `docs/lab/h3x.md`: echo, silent target, 403/400/405/501 refusals, no extended CONNECT, required QUIC datagrams, a UDP-blocked path and DTLS in the tunnel, against Ferrum Edge 0.9.7.
+
 ## 4. Failure-matrix coverage
 
 | Case | Test (real sockets) |
@@ -172,9 +210,9 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 | PROTO-015 | `…::proto_015_grpc_missing_terminal_status_is_incomplete_not_success` |
 | PROTO-016 | `…::proto_016_grpc_four_modes_with_message_boundaries`, `…_deadline_is_sent_and_enforced_without_fabricating_a_status`, `…_cancellation_and_mode_mismatch`, `…_interactive_bidi_session`; `anvil-transport/tests/sessions_streams.rs::proto_016_grpc_adapter_with_a_compiled_proto_and_trailers` |
 | PROTO-017 | `…::proto_017_reflection_denied_but_local_proto_works` |
-| PROTO-018 | `…::proto_018_sse_cancel_is_expected_and_keeps_bounded_history`; `sessions_streams.rs::proto_018_sse_history_is_bounded_but_counted` |
+| PROTO-018 | `…::proto_018_sse_cancel_is_expected_and_keeps_bounded_history`; `sessions_streams.rs::proto_018_sse_history_is_bounded_but_counted`; over HTTP/3: `anvil-engine/tests/h3_sse_masque.rs` and `anvil-transport/tests/h3_sse_masque.rs` (events, abort, reconnect, idle, max events, cancel, forced and automatic policies); live in the h3x lab |
 | PROTO-019 | `…::proto_019_tcp_half_close_keeps_the_reply` |
-| PROTO-020 | `…::proto_020_udp_silence_is_only_no_response_observed`; `sessions_streams.rs::proto_020_udp_icmp_unreachable_is_recorded_as_such` |
+| PROTO-020 | `…::proto_020_udp_silence_is_only_no_response_observed`; `sessions_streams.rs::proto_020_udp_icmp_unreachable_is_recorded_as_such`; through a MASQUE proxy: the `h3_sse_masque.rs` tests (capsules, QUIC datagrams, refusal, missing capabilities, silence, reset, proxy close, cancel); live in the h3x lab |
 | PROTO-021 | `…::proto_021_udp_loss_and_repeats_are_counted_not_explained` |
 | PROTO-022 | `…::proto_022_dtls_handshake_with_verified_peer`, `…_wrong_root_is_a_typed_client_side_verification_failure`, `…_mutual_tls_positive_and_negative`; `sessions_streams.rs::proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline` |
 
@@ -182,7 +220,7 @@ Other tests cover SSE reconnect with `Last-Event-ID`, WebSocket handshake reject
 
 New fixtures, all lab-only in `anvil-fixtures`:
 
-- `h3server`: HTTP/3 over quinn and h3.
+- `h3server`: HTTP/3 over quinn and h3, with SSE routes (`/sse`, `/sse-abort`, `/sse-flaky`) and an RFC 9298 CONNECT-UDP proxy that relays to a local UDP target, with refusal (`refuse=`), reset and FIN modes and optional `SETTINGS_H3_DATAGRAM`.
 - `dtls`: a dimpl DTLS 1.2 echo server that validates client certificates itself and rejects an untrusted identity with a plaintext `unknown_ca` alert.
 - The gRPC echo `fail_with = -1` sentinel: reply once, then reset the stream before any status.
 
@@ -194,7 +232,8 @@ The HTTP fixture's WebSocket route now flushes its Close reply, so a client-init
 2. **Load generation.** `anvil-load` drives HTTP-family requests only (see `docs/load.md`). Plan validation refuses every session protocol in this document, and HTTP/3 has not been exercised under load.
 3. **DTLS.** dimpl validates only the leaf and sends only the leaf. It is ECDSA-only, and it presents an ephemeral certificate when an identity is requested but none is configured. It does not expose the cipher suite. CertificateRequest cannot be observed for DTLS 1.3.
 4. **gRPC.** No gRPC-Web, no HTTP/3, no outbound compression, and no retry or service-config semantics. Proto imports resolve by attachment file name only.
-5. **SSE.** No reconnect after a clean end of stream, which differs from browser behavior. Compressed streams are not supported.
+5. **SSE.** No reconnect after a clean end of stream, which differs from browser behavior. Compressed streams are not supported. Over HTTP/3 each attempt opens its own QUIC connection (no pooling).
 6. **UDP.** Connected-socket mode only. Replies from a different address or port are not accepted.
 7. **Connections.** Session adapters open a fresh connection per execution or session. Unlike HTTP/1.1, HTTP/2 and HTTP/3, they do not use the pool.
 8. **Diagnostic wording.** Three findings (`grpc.reflection_unavailable`, `udp.icmp_port_unreachable`, `udp.repeated_payloads`) carry their wording inline in the engine, not in `catalog/diagnostics/findings.en.json`. They should move into the catalog once the catalog owners agree.
+9. **CONNECT-UDP (MASQUE).** HTTP/3 only, one tunnel per QUIC connection, no DTLS inside the tunnel, and Context ID 0 only.

@@ -473,12 +473,19 @@ function ProtocolBadge({ p }: { p?: ProtocolStatus | null }) {
           {p.half_closed ? " · half-closed" : ""} · {humanize(p.closed_by)}
         </span>
       );
-    case "udp":
+    case "udp": {
+      const m = p.masque;
+      const via = m
+        ? m.connect_status != null && (m.connect_status < 200 || m.connect_status > 299)
+          ? ` · MASQUE proxy ${m.proxy} refused (${m.connect_status})`
+          : ` · via MASQUE ${m.proxy}${m.encoding ? ` (${m.encoding === "capsule" ? "capsules" : "QUIC datagrams"})` : ""}`
+        : "";
       return (
-        <span className="badge">
-          UDP · {p.datagrams_sent} sent · {p.datagrams_received} received in {p.window_ms} ms
+        <span className={`badge${m && m.closed_by === "abnormal" ? " bad" : ""}`} title={m ? `CONNECT-UDP tunnel to ${m.target}; closed by ${humanize(m.closed_by)}` : undefined}>
+          UDP · {p.datagrams_sent} sent · {p.datagrams_received} received in {p.window_ms} ms{via}
         </span>
       );
+    }
     default:
       return null;
   }
