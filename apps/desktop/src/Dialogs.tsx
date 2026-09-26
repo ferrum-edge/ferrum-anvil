@@ -824,7 +824,11 @@ export function ImportDialog(props: {
     setErr(null);
     setBusy(true);
     try {
-      setPreview(await api.importPreview(file.token, pass || null, policy));
+      const r = await api.importPreview(file.token, pass || null, policy);
+      // A full backup cannot be imported as copies; its preview comes back as
+      // Merge, and Import then uses that.
+      setPolicy(r.plan.policy);
+      setPreview(r);
     } catch (e) {
       setPreview(null);
       setErr(String((e as Error).message));

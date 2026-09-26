@@ -33,8 +33,9 @@ pub struct PortableGraph {
     pub scenarios: Vec<Scenario>,
     #[serde(default)]
     pub load_plans: Vec<LoadPlan>,
-    /// Portable app settings (full backups only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// App settings, carried only by full backups (ANVILBAK files). Never
+    /// written to or read from a bundle.
+    #[serde(skip)]
     pub app_settings: Option<AppSettings>,
     /// Stored attachments by content sha256 (plaintext inside the bundle).
     #[serde(skip)]

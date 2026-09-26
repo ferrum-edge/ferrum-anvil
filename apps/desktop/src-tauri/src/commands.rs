@@ -600,14 +600,32 @@ fn policy(p: &str) -> R<ConflictPolicy> {
     })
 }
 
+/// A bundle preview, or a full-backup preview (same shape for the renderer).
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ExportPreview {
+    Bundle(anvil_portability::bundle::ExportPreview),
+    Backup(anvil_app::backup::BackupPreview),
+}
+
+/// A full backup always covers the whole profile.
+fn full_backup(ws: Option<&Id>, m: ExportMode) -> R<bool> {
+    match (m, ws) {
+        (ExportMode::FullBackup, Some(_)) => Err("a full backup covers every workspace; export a workspace with another mode".into()),
+        (ExportMode::FullBackup, None) => Ok(true),
+        _ => Ok(false),
+    }
+}
+
 #[tauri::command]
-pub fn export_preview(
-    st: State<'_, DesktopState>,
-    workspace_id: Option<String>,
-    export_mode: String,
-) -> R<anvil_portability::bundle::ExportPreview> {
+pub fn export_preview(st: State<'_, DesktopState>, workspace_id: Option<String>, export_mode: String) -> R<ExportPreview> {
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.export_preview(ws.as_ref(), mode(&export_mode)?, false).map_err(e)
+    let m = mode(&export_mode)?;
+    let app = st.app()?;
+    if full_backup(ws.as_ref(), m)? {
+        return app.backup_preview().map(ExportPreview::Backup).map_err(e);
+    }
+    app.export_preview(ws.as_ref(), m, false).map(ExportPreview::Bundle).map_err(e)
 }
 
 /// Write to the destination the user picked in the native save dialog
@@ -621,7 +639,14 @@ pub fn export_to_path(
     grant: String,
 ) -> R<usize> {
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    let (bytes, _) = st.app()?.export(ws.as_ref(), mode(&export_mode)?, passphrase.as_deref(), false).map_err(e)?;
+    let m = mode(&export_mode)?;
+    let app = st.app()?;
+    let bytes = if full_backup(ws.as_ref(), m)? {
+        let pass = passphrase.as_deref().ok_or("a full backup needs a passphrase")?;
+        app.export_backup(pass).map_err(e)?.0
+    } else {
+        app.export(ws.as_ref(), m, passphrase.as_deref(), false).map_err(e)?.0
+    };
     st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
 }
 
@@ -631,6 +656,7 @@ fn read_bundle(st: &DesktopState, grant: &str) -> R<Vec<u8>> {
     Ok(st.file_grants.read(grant, FilePurpose::BundleImport).map_err(|x| x.to_string())?.bytes)
 }
 
+/// A full backup is restored; anything else is imported as a bundle.
 #[tauri::command]
 pub fn import_preview(
     st: State<'_, DesktopState>,
@@ -640,7 +666,14 @@ pub fn import_preview(
 ) -> R<anvil_app::port::ImportReport> {
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
-    app.import_preview(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let (pass, pol) = (passphrase.as_deref(), policy(&conflict_policy)?);
+    if anvil_app::backup::is_backup(&bytes) {
+        // A full backup restores every item under its own id, so "copies" is
+        // previewed as Merge; the report's policy tells the dialog to switch.
+        let pol = if pol == ConflictPolicy::Duplicate { ConflictPolicy::Merge } else { pol };
+        return app.restore_preview(&bytes, pass, pol).map_err(e);
+    }
+    app.import_preview(&bytes, pass, pol).map_err(e)
 }
 
 #[tauri::command]
@@ -652,7 +685,11 @@ pub fn import_apply(
 ) -> R<anvil_app::port::ImportReport> {
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
-    app.import(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let (pass, pol) = (passphrase.as_deref(), policy(&conflict_policy)?);
+    if anvil_app::backup::is_backup(&bytes) {
+        return app.restore(&bytes, pass, pol).map_err(e);
+    }
+    app.import(&bytes, pass, pol).map_err(e)
 }
 
 // ------------------------------------------------------------- attachments

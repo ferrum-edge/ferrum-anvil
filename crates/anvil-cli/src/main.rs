@@ -900,6 +900,29 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 Mode::Encrypted => ExportMode::EncryptedTransfer,
                 Mode::Backup => ExportMode::FullBackup,
             };
+            if matches!(m, ExportMode::FullBackup) {
+                if ws.is_some() {
+                    bail!("a full backup covers every workspace; drop --workspace or choose another --mode");
+                }
+                if *preview {
+                    println!("{}", serde_json::to_string_pretty(&app.backup_preview()?)?);
+                    return Ok(0);
+                }
+                let Some(pass) = std::env::var("ANVIL_EXPORT_PASSPHRASE").ok().map(Zeroizing::new) else {
+                    bail!("encrypted exports need ANVIL_EXPORT_PASSPHRASE (the recipient needs it to restore)");
+                };
+                let (bytes, p) = app.export_backup(&pass)?;
+                std::fs::write(out, &bytes)?;
+                println!(
+                    "wrote {} ({} bytes, encrypted): {} items, {} secrets, {} excluded",
+                    out.display(),
+                    bytes.len(),
+                    p.manifest.counts.values().sum::<usize>(),
+                    p.secrets_included,
+                    p.manifest.excluded.len()
+                );
+                return Ok(0);
+            }
             if *preview {
                 let p = app.export_preview(ws.as_ref(), m, false)?;
                 println!("{}", serde_json::to_string_pretty(&p)?);
@@ -932,7 +955,13 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 Policy::Replace => ConflictPolicy::Replace,
                 Policy::Duplicate => ConflictPolicy::Duplicate,
             };
-            let rep = if *dry_run { app.import_preview(&bytes, pass.as_deref(), pol)? } else { app.import(&bytes, pass.as_deref(), pol)? };
+            // A full backup is restored; anything else is imported as a bundle.
+            let rep = match (anvil_app::backup::is_backup(&bytes), *dry_run) {
+                (true, true) => app.restore_preview(&bytes, pass.as_deref(), pol)?,
+                (true, false) => app.restore(&bytes, pass.as_deref(), pol)?,
+                (false, true) => app.import_preview(&bytes, pass.as_deref(), pol)?,
+                (false, false) => app.import(&bytes, pass.as_deref(), pol)?,
+            };
             println!("{}", serde_json::to_string_pretty(&rep)?);
             Ok(0)
         }

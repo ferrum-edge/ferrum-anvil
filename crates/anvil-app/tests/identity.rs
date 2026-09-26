@@ -15,7 +15,6 @@ use anvil_domain::workspace::Folder;
 use anvil_fixtures::idp::{IdpFixture, IdpOptions, simulate_browser};
 use anvil_identity::mock::{MockProvider, MockProviderConfig};
 use anvil_identity::{Availability, FlowOptions, IdentityProvider, NoEvents, VerifiedIdentity};
-use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_storage::vault::VaultError;
@@ -230,7 +229,7 @@ async fn restoring_someone_elses_backup_keeps_the_local_identity() {
     let (h, key) = ProfileManager::unlock(&a_dir, Unlock::Passphrase(PASS)).unwrap();
     let alice = App::open(a_dir.clone(), h, key).unwrap();
     alice.create_workspace("Alice's work").unwrap();
-    let (backup, _) = alice.export(None, ExportMode::FullBackup, Some("backup passphrase"), false).unwrap();
+    let (backup, _) = alice.export_backup_with("backup passphrase", KdfParams::testing()).unwrap();
 
     // Bob has his own account linked with the fresh-login policy.
     idp.set_subject("fixture-user-bob", None);
@@ -239,7 +238,7 @@ async fn restoring_someone_elses_backup_keeps_the_local_identity() {
     let before = std::fs::read(b_dir.join(IDENTITY_FILE)).unwrap();
     let (h, key) = ProfileManager::unlock_with_fresh_login(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await).unwrap();
     let bob = App::open(b_dir.clone(), h, key).unwrap();
-    bob.import(&backup, Some("backup passphrase"), ConflictPolicy::Duplicate).unwrap();
+    bob.restore(&backup, Some("backup passphrase"), ConflictPolicy::Merge).unwrap();
     assert!(bob.find_workspace("Alice's work").is_ok(), "the backup's data was restored");
 
     // Bob's binding and policy are untouched; Alice's account gained nothing.
