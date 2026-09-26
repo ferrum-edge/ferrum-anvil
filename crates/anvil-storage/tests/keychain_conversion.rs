@@ -164,10 +164,165 @@ fn retry_with_a_stale_header_keeps_a_newer_passphrase() {
     assert!(vault::unlock_with_passphrase(&h, "changed elsewhere 1").is_ok(), "the newer passphrase is kept");
     assert!(matches!(vault::unlock_with_passphrase(&h, PASS), Err(VaultError::WrongSecret)));
 
-    // A header that no longer names the account is left untouched.
+    // A header that no longer names the account is left untouched, and the
+    // caller's stale copy becomes the header on disk.
     let mut named = h.clone();
     named.keychain_account = Some(account.clone());
+    named.passphrase_wrap = None;
     let before = std::fs::read(vault::header_path(dir.path())).unwrap();
     vault::retire_keychain_entry(dir.path(), &mut named).unwrap();
     assert_eq!(std::fs::read(vault::header_path(dir.path())).unwrap(), before);
+    assert!(named.keychain_account.is_none());
+    assert!(vault::unlock_with_passphrase(&named, "changed elsewhere 1").is_ok());
+}
+
+/// Strip the protection MAC, as a header written by an earlier build has none.
+fn strip_mac(dir: &std::path::Path) -> vault::ProfileHeader {
+    let mut h = vault::read_header(dir).unwrap();
+    h.protection_mac = None;
+    vault::write_header(dir, &h).unwrap();
+    h
+}
+
+#[test]
+fn a_header_edited_back_to_keychain_mode_does_not_unlock_from_the_leftover_entry() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+    fail_next(&account);
+    let conv = vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    assert!(!conv.keychain_entry_removed);
+    assert!(entry(&account).get_secret().is_ok(), "the old entry is still in the store");
+
+    // The mode is authenticated: flipping it back breaks the MAC.
+    let mut flipped = vault::read_header(dir.path()).unwrap();
+    flipped.protection = ProtectionMode::OsKeychain;
+    assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
+    // Without a MAC it would pass for an earlier build's header, but the
+    // entry was written for a MAC'd header.
+    flipped.protection_mac = None;
+    assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
+    // A MAC that is not even hex is refused as well.
+    flipped.protection_mac = Some("zz".into());
+    assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
+
+    // The genuine passphrase header still opens, and its MAC is checked too.
+    let h = vault::read_header(dir.path()).unwrap();
+    assert!(vault::unlock_with_passphrase(&h, PASS).is_ok());
+    let mut forged = h.clone();
+    forged.profile_id = "another profile".into();
+    assert!(matches!(vault::unlock_with_passphrase(&forged, PASS), Err(VaultError::HeaderTampered)));
+    assert!(matches!(vault::unlock_with_recovery(&forged, &conv.recovery_key), Err(VaultError::HeaderTampered)));
+}
+
+#[test]
+fn a_keychain_profile_from_an_earlier_build_is_upgraded_at_unlock() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    // Earlier builds stored the bare key and wrote no MAC.
+    entry(&account).set_secret(created.dek.as_bytes()).unwrap();
+    let mut h = strip_mac(dir.path());
+
+    let dek = vault::unlock_with_keychain(&h).unwrap();
+    assert_eq!(dek.as_bytes(), created.dek.as_bytes(), "still opens");
+    vault::upgrade_header(dir.path(), &mut h, &dek).unwrap();
+    assert!(h.protection_mac.is_some());
+    assert_eq!(vault::read_header(dir.path()).unwrap().protection_mac, h.protection_mac);
+    assert_ne!(entry(&account).get_secret().unwrap(), created.dek.as_bytes(), "the entry is tagged");
+    assert_eq!(vault::unlock_with_keychain(&h).unwrap().as_bytes(), created.dek.as_bytes());
+
+    // From now on a header without a MAC does not unlock from the entry.
+    let stripped = strip_mac(dir.path());
+    assert!(matches!(vault::unlock_with_keychain(&stripped), Err(VaultError::HeaderTampered)));
+}
+
+#[test]
+fn an_untagged_entry_is_tagged_at_the_next_unlock_once_the_header_has_a_mac() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    // The MAC was written but tagging the entry failed.
+    entry(&account).set_secret(created.dek.as_bytes()).unwrap();
+    let h = vault::read_header(dir.path()).unwrap();
+    assert!(h.protection_mac.is_some());
+
+    assert_eq!(vault::unlock_with_keychain(&h).unwrap().as_bytes(), created.dek.as_bytes());
+    assert_ne!(entry(&account).get_secret().unwrap(), created.dek.as_bytes(), "the entry is tagged");
+    assert!(matches!(vault::unlock_with_keychain(&strip_mac(dir.path())), Err(VaultError::HeaderTampered)));
+}
+
+#[test]
+fn a_converted_header_from_an_earlier_build_is_sealed_at_the_next_unlock() {
+    mock_store();
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_keychain_profile(dir.path(), "local").unwrap();
+    let account = created.header.keychain_account.clone().unwrap();
+    let mut h = vault::read_header(dir.path()).unwrap();
+    fail_next(&account);
+    vault::convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, PASS, KdfParams::testing()).unwrap();
+    // As an earlier build left it: no MAC, the bare key still in the store.
+    entry(&account).set_secret(created.dek.as_bytes()).unwrap();
+    let mut h = strip_mac(dir.path());
+
+    let dek = vault::unlock_with_passphrase(&h, PASS).unwrap();
+    vault::upgrade_header(dir.path(), &mut h, &dek).unwrap();
+    assert!(h.protection_mac.is_some());
+    assert_eq!(h.keychain_account.as_deref(), Some(account.as_str()), "the upgrade leaves the leftover entry to retiring");
+
+    // Once sealed, the header cannot be turned back to keychain mode.
+    let mut flipped = vault::read_header(dir.path()).unwrap();
+    flipped.protection = ProtectionMode::OsKeychain;
+    assert!(matches!(vault::unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
+
+    // Upgrading an up-to-date header changes nothing.
+    let before = std::fs::read(vault::header_path(dir.path())).unwrap();
+    vault::upgrade_header(dir.path(), &mut h, &dek).unwrap();
+    assert_eq!(std::fs::read(vault::header_path(dir.path())).unwrap(), before);
+}
+
+#[test]
+fn a_passphrase_profile_from_an_earlier_build_is_sealed_at_unlock() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "pw", PASS, KdfParams::testing()).unwrap();
+    assert!(created.header.protection_mac.is_some(), "new headers are sealed");
+    let mut h = strip_mac(dir.path());
+    let dek = vault::unlock_with_passphrase(&h, PASS).unwrap();
+    // Another key cannot seal it.
+    let other = vault::create_passphrase_profile(tempfile::tempdir().unwrap().path(), "other", PASS, KdfParams::testing()).unwrap();
+    assert!(matches!(vault::upgrade_header(dir.path(), &mut h, &other.dek), Err(VaultError::WrongSecret)));
+    assert!(vault::read_header(dir.path()).unwrap().protection_mac.is_none());
+
+    vault::upgrade_header(dir.path(), &mut h, &dek).unwrap();
+    let sealed = vault::read_header(dir.path()).unwrap();
+    assert!(sealed.protection_mac.is_some());
+    assert!(vault::unlock_with_passphrase(&sealed, PASS).is_ok());
+    assert!(vault::unlock_with_recovery(&sealed, created.recovery_key.as_ref().unwrap()).is_ok());
+}
+
+#[test]
+fn concurrent_header_writers_do_not_share_a_temporary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    vault::create_passphrase_profile(dir.path(), "pw", PASS, KdfParams::testing()).unwrap();
+    let h = vault::read_header(dir.path()).unwrap();
+    std::thread::scope(|s| {
+        for i in 0..8 {
+            let (path, mut h) = (dir.path(), h.clone());
+            s.spawn(move || {
+                for j in 0..25 {
+                    h.display_name = format!("writer {i} write {j}");
+                    vault::write_header(path, &h).unwrap();
+                }
+            });
+        }
+    });
+    assert!(vault::read_header(dir.path()).unwrap().display_name.starts_with("writer "));
+    let mut left: Vec<String> =
+        std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, ["profile.json", "profile.lock"], "no temporary file is left behind");
 }

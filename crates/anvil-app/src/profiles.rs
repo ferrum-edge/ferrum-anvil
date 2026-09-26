@@ -21,6 +21,23 @@ pub struct ProfileSummary {
     pub protection: anvil_domain::workspace::ProtectionMode,
     pub dir: PathBuf,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The OS credential store entry a profile converted to a passphrase
+    /// left behind because the store refused to delete it. It no longer
+    /// unlocks the profile; its removal is retried at each unlock until it is
+    /// gone, and it can be removed by hand.
+    pub leftover_keychain_entry: Option<KeychainEntryName>,
+}
+
+/// Where an OS credential store entry is: its service and account names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeychainEntryName {
+    pub service: String,
+    pub account: String,
+}
+
+fn leftover_keychain_entry(h: &ProfileHeader) -> Option<KeychainEntryName> {
+    let account = h.keychain_account.as_ref().filter(|_| h.protection == ProtectionMode::Passphrase)?;
+    Some(KeychainEntryName { service: vault::KEYCHAIN_SERVICE.into(), account: account.clone() })
 }
 
 pub struct ProfileManager {
@@ -48,6 +65,7 @@ impl ProfileManager {
             for e in rd.flatten() {
                 if let Ok(h) = vault::read_header(&e.path()) {
                     out.push(ProfileSummary {
+                        leftover_keychain_entry: leftover_keychain_entry(&h),
                         profile_id: h.profile_id,
                         display_name: h.display_name,
                         protection: h.protection,
@@ -86,6 +104,7 @@ impl ProfileManager {
             protection: c.header.protection,
             dir,
             created_at: c.header.created_at,
+            leftover_keychain_entry: None,
         };
         Ok((s, c.dek, c.recovery_key.unwrap_or_default()))
     }
@@ -99,6 +118,7 @@ impl ProfileManager {
             protection: c.header.protection,
             dir,
             created_at: c.header.created_at,
+            leftover_keychain_entry: None,
         };
         Ok((s, c.dek))
     }
@@ -168,8 +188,12 @@ impl ProfileManager {
         {
             identity::verify_binding(b, &h, &k)?;
         }
+        // A header written by an earlier build gets its protection MAC (and
+        // a keychain profile's entry its tag) now that the key is proven.
+        vault::upgrade_header(dir, &mut h, &k).ok();
         // A keychain entry left over from converting this profile to a
-        // passphrase. It no longer unlocks anything; retry removing it.
+        // passphrase. It no longer unlocks anything; removing it is retried
+        // at each unlock until it is gone.
         if h.protection == ProtectionMode::Passphrase && h.keychain_account.is_some() {
             vault::retire_keychain_entry(dir, &mut h).ok();
         }
@@ -266,8 +290,10 @@ impl crate::App {
     /// Convert an OS-keychain profile to passphrase protection. Returns the
     /// new recovery key (shown once). Afterwards the profile unlocks only
     /// with the passphrase or recovery key, and its keychain entry is
-    /// removed; if the credential store refuses, removal is retried at the
-    /// next unlock. A passphrase profile is refused.
+    /// removed; if the credential store refuses, removal is retried at each
+    /// unlock until the entry is removed (see
+    /// [`ProfileSummary::leftover_keychain_entry`]). A passphrase profile is
+    /// refused.
     pub fn convert_to_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<KeychainConversion> {
         check_new_passphrase(new_passphrase)?;
         let mut h = vault::read_header(&self.dir)?;

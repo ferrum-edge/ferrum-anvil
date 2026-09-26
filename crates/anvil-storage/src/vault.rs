@@ -12,6 +12,12 @@
 //!   header is published first; from then on only the passphrase or the new
 //!   recovery key unlocks, and the keychain entry is removed (retried at
 //!   each unlock until it is gone if the credential store refuses).
+//! * The header's protection mode is authenticated by a MAC under the DEK
+//!   and checked at every unlock, so editing `profile.json` cannot turn a
+//!   converted profile back into a keychain one while its old entry is still
+//!   in the credential store. Keychain entries written with a MAC'd header
+//!   are tagged, so a header whose MAC was removed is refused too. Headers
+//!   and entries written by earlier builds get both at their next unlock.
 //! * A linked provider identity (Google/GitHub/Facebook) is never a key.
 
 use crate::crypto::{self, CryptoError, KdfParams, Key};
@@ -22,9 +28,18 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 pub const PROFILE_FILE: &str = "profile.json";
-const KEYCHAIN_SERVICE: &str = "com.ferrumedge.anvil";
+/// Advisory lock file serialising header writers across processes.
+const LOCK_FILE: &str = "profile.lock";
+/// Service name of the profiles' OS credential store entries.
+pub const KEYCHAIN_SERVICE: &str = "com.ferrumedge.anvil";
 const PASSPHRASE_LABEL: &[u8] = b"anvil-dek-passphrase-v1";
 const RECOVERY_LABEL: &[u8] = b"anvil-dek-recovery-v1";
+const PROTECTION_MAC_LABEL: &[u8] = b"anvil-profile-protection-v1";
+/// Prefix of a keychain entry written for a header with a protection MAC.
+/// An untagged entry holds the bare key (earlier builds) and still unlocks
+/// a header without a MAC; a tagged one never does.
+#[cfg(feature = "os-keychain")]
+const KEYCHAIN_SECRET_TAG: &[u8] = b"anvil-dek-v2:";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
@@ -36,6 +51,8 @@ pub enum VaultError {
     WrongProtection(&'static str),
     #[error("profile header is missing or unreadable: {0}")]
     Header(String),
+    #[error("the profile header was changed outside Anvil and does not match its data key")]
+    HeaderTampered,
     #[error("{0}")]
     Crypto(#[from] CryptoError),
     #[error("io: {0}")]
@@ -71,6 +88,10 @@ pub struct ProfileHeader {
     /// keychain entry that belongs to a different profile.
     pub key_check: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Hex HMAC-SHA256 under the DEK of the profile id, protection mode and
+    /// key check. Absent only in headers written by earlier builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection_mac: Option<String>,
 }
 
 fn key_check(k: &Key) -> String {
@@ -79,6 +100,37 @@ fn key_check(k: &Key) -> String {
     h.update(b"anvil-dek-check-v1");
     h.update(k.as_bytes());
     hex::encode(&h.finalize()[..16])
+}
+
+fn protection_mac_state(dek: &Key, h: &ProfileHeader) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::{KeyInit, Mac};
+    let mode: &[u8] = match h.protection {
+        ProtectionMode::Passphrase => b"passphrase",
+        ProtectionMode::OsKeychain => b"os_keychain",
+    };
+    let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(dek.as_bytes()).expect("HMAC accepts any key length");
+    for part in [PROTECTION_MAC_LABEL, h.profile_id.as_bytes(), mode, h.key_check.as_bytes()] {
+        m.update(&(part.len() as u64).to_be_bytes());
+        m.update(part);
+    }
+    m
+}
+
+/// The protection MAC of `h` under `dek`.
+fn protection_mac(dek: &Key, h: &ProfileHeader) -> String {
+    use hmac::Mac;
+    hex::encode(&protection_mac_state(dek, h).finalize().into_bytes()[..])
+}
+
+/// A header's protection MAC, when it has one, must be `dek`'s MAC of it.
+/// Headers written by earlier builds have none until [`upgrade_header`].
+fn check_protection_mac(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
+    use hmac::Mac;
+    let Some(mac) = h.protection_mac.as_deref() else {
+        return Ok(());
+    };
+    let tag = hex::decode(mac).map_err(|_| VaultError::HeaderTampered)?;
+    protection_mac_state(dek, h).verify_slice(&tag).map_err(|_| VaultError::HeaderTampered)
 }
 
 fn b64(b: &[u8]) -> String {
@@ -155,25 +207,65 @@ pub fn read_header(dir: &Path) -> Result<ProfileHeader, VaultError> {
     serde_json::from_str(&text).map_err(|e| VaultError::Header(e.to_string()))
 }
 
-/// Atomically replace the header: write a synced temporary file, rename it
-/// over the old one and sync the directory so the rename persists.
+/// Atomically replace the header, under the profile's header lock.
+pub fn write_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
+    let _lock = lock_header(dir);
+    replace_header(dir, h)
+}
+
+/// Take the advisory lock that serialises header writers across processes;
+/// it is released when the returned file is dropped. Best effort: on a file
+/// system without locks the header is still replaced atomically.
+fn lock_header(dir: &Path) -> Option<std::fs::File> {
+    open_locked(dir).inspect_err(|e| tracing::warn!(dir = %dir.display(), error = %e, "profile header lock unavailable")).ok()
+}
+
+fn open_locked(dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(dir)?;
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE))?;
+    f.lock()?;
+    Ok(f)
+}
+
+/// Edit the header on disk under the header lock, so no other writer lands
+/// between the read and the write. `edit` returns whether it changed
+/// anything; the result is the header as it now is on disk.
+fn update_header(dir: &Path, edit: impl FnOnce(&mut ProfileHeader) -> Result<bool, VaultError>) -> Result<ProfileHeader, VaultError> {
+    let _lock = lock_header(dir);
+    let mut h = read_header(dir)?;
+    if edit(&mut h)? {
+        replace_header(dir, &h)?;
+    }
+    Ok(h)
+}
+
+/// Write a synced temporary file of this writer's own, rename it over the
+/// header and sync the directory so the rename persists.
 ///
 /// Once the rename has succeeded the new header is live, so the directory
 /// sync is best effort: some file systems (FUSE, SMB) refuse it, and failing
 /// there would report an error for a header that was in fact written.
-pub fn write_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
-    use std::io::Write;
+fn replace_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
+    let bytes = serde_json::to_vec_pretty(h).map_err(|e| VaultError::Header(e.to_string()))?;
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{PROFILE_FILE}.tmp"));
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&serde_json::to_vec_pretty(h).map_err(|e| VaultError::Header(e.to_string()))?)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(tmp, header_path(dir))?;
+    let tmp = dir.join(format!("{PROFILE_FILE}.{}.{}.tmp", std::process::id(), hex::encode(crypto::random_bytes(8))));
+    let written = write_new_synced(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, header_path(dir)));
+    if let Err(e) = written {
+        std::fs::remove_file(&tmp).ok();
+        return Err(e.into());
+    }
     if let Err(e) = sync_dir(dir) {
         tracing::warn!(dir = %dir.display(), error = %e, "profile directory sync failed after the header was replaced");
     }
     Ok(())
+}
+
+/// Create `path` (never an existing file), write `bytes` and sync them.
+fn write_new_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 /// Flush a directory so a rename inside it survives a power loss.
@@ -219,7 +311,7 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
     let dek = Key::random();
     let recovery_raw = crypto::random_bytes(20);
     let recovery = format_recovery_key(&recovery_raw);
-    let header = ProfileHeader {
+    let mut header = ProfileHeader {
         format: "anvil-profile".into(),
         schema_version: anvil_domain::SCHEMA_VERSION,
         profile_id: uuid::Uuid::now_v7().to_string(),
@@ -230,7 +322,9 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
         keychain_account: None,
         key_check: key_check(&dek),
         created_at: chrono::Utc::now(),
+        protection_mac: None,
     };
+    header.protection_mac = Some(protection_mac(&dek, &header));
     write_header(dir, &header)?;
     Ok(CreatedProfile { header, dek, recovery_key: Some(Zeroizing::new(recovery)) })
 }
@@ -239,9 +333,8 @@ pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key
     require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.passphrase_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
     let k = unwrap_with_passphrase(w, passphrase, PASSPHRASE_LABEL)?;
-    if key_check(&k) != h.key_check {
-        return Err(VaultError::WrongSecret);
-    }
+    require_profile_key(h, &k)?;
+    check_protection_mac(h, &k)?;
     Ok(k)
 }
 
@@ -249,10 +342,40 @@ pub fn unlock_with_recovery(h: &ProfileHeader, recovery: &str) -> Result<Key, Va
     require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.recovery_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
     let k = unwrap_with_passphrase(w, &normalize_recovery(recovery), RECOVERY_LABEL)?;
-    if key_check(&k) != h.key_check {
-        return Err(VaultError::WrongSecret);
-    }
+    require_profile_key(h, &k)?;
+    check_protection_mac(h, &k)?;
     Ok(k)
+}
+
+/// Bring the header of a profile just unlocked with `dek` up to date: add
+/// the protection MAC a header written by an earlier build lacks and, for a
+/// keychain profile, tag its entry so a header without a MAC no longer
+/// unlocks from it. The header on disk is edited, as in
+/// [`retire_keychain_entry`], and adopted into `h` once its MAC verifies.
+pub fn upgrade_header(dir: &Path, h: &mut ProfileHeader, dek: &Key) -> Result<(), VaultError> {
+    require_profile_key(h, dek)?;
+    if h.protection_mac.is_some() {
+        return Ok(());
+    }
+    let next = update_header(dir, |next| {
+        let same = next.profile_id == h.profile_id && next.key_check == h.key_check && next.protection == h.protection;
+        if !same || next.protection_mac.is_some() {
+            return Ok(false);
+        }
+        next.protection_mac = Some(protection_mac(dek, next));
+        Ok(true)
+    })?;
+    if next.profile_id != h.profile_id || next.key_check != h.key_check || next.protection_mac.is_none() {
+        return Ok(());
+    }
+    check_protection_mac(&next, dek)?;
+    *h = next;
+    // The MAC is on disk first: a tagged entry refuses a header without one.
+    #[cfg(feature = "os-keychain")]
+    if h.protection == ProtectionMode::OsKeychain {
+        tag_keychain_entry(h, dek)?;
+    }
+    Ok(())
 }
 
 /// Replace the passphrase wrap of a passphrase profile (requires the
@@ -263,6 +386,7 @@ pub fn change_passphrase(dir: &Path, h: &mut ProfileHeader, dek: &Key, new_passp
     require_profile_key(h, dek)?;
     let mut next = h.clone();
     next.passphrase_wrap = Some(wrap_with_passphrase(dek, new_passphrase, kdf, PASSPHRASE_LABEL)?);
+    next.protection_mac = Some(protection_mac(dek, &next));
     write_header(dir, &next)?;
     *h = next;
     Ok(())
@@ -275,17 +399,19 @@ pub struct KeychainConversion {
     pub recovery_key: Zeroizing<String>,
     /// False when the OS credential store did not remove the old entry. The
     /// profile no longer unlocks from the keychain either way, and removal is
-    /// retried by [`retire_keychain_entry`].
+    /// retried by [`retire_keychain_entry`]. True once the entry is gone, even
+    /// if forgetting its account name in the header failed (also retried).
     pub keychain_entry_removed: bool,
 }
 
 /// Convert an OS-keychain profile to passphrase protection (requires the
 /// unlocked DEK). The data key is unchanged, so nothing is re-encrypted.
 ///
-/// The passphrase header, with a new recovery wrap, is durably written
-/// before the keychain entry is touched; from that point the keychain path
-/// is refused because the header's protection mode is `Passphrase`. The
-/// header keeps the old account name only until the entry is gone.
+/// The passphrase header, with a new recovery wrap and its protection MAC,
+/// is durably written before the keychain entry is touched; from that point
+/// the keychain path is refused because the header's authenticated mode is
+/// `Passphrase`. The header keeps the old account name only until the entry
+/// is gone.
 #[cfg(feature = "os-keychain")]
 pub fn convert_keychain_to_passphrase(
     dir: &Path,
@@ -301,9 +427,16 @@ pub fn convert_keychain_to_passphrase(
     next.protection = ProtectionMode::Passphrase;
     next.passphrase_wrap = Some(wrap_with_passphrase(dek, new_passphrase, kdf, PASSPHRASE_LABEL)?);
     next.recovery_wrap = Some(wrap_with_passphrase(dek, &normalize_recovery(&recovery), kdf, RECOVERY_LABEL)?);
+    next.protection_mac = Some(protection_mac(dek, &next));
     write_header(dir, &next)?;
     *h = next;
-    let keychain_entry_removed = retire_keychain_entry(dir, h).is_ok();
+    let Some(account) = h.keychain_account.clone() else {
+        return Ok(KeychainConversion { recovery_key: recovery, keychain_entry_removed: true });
+    };
+    let keychain_entry_removed = delete_retired_entry(h, &account).is_ok();
+    if keychain_entry_removed && let Err(e) = forget_keychain_account(dir, h, &account) {
+        tracing::warn!(dir = %dir.display(), error = %e, "the old keychain entry was removed but the header still names it");
+    }
     Ok(KeychainConversion { recovery_key: recovery, keychain_entry_removed })
 }
 
@@ -314,15 +447,23 @@ pub fn convert_keychain_to_passphrase(
 #[cfg(feature = "os-keychain")]
 pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), VaultError> {
     require_protection(h, ProtectionMode::Passphrase)?;
-    let Some(account) = h.keychain_account.as_deref() else {
+    let Some(account) = h.keychain_account.clone() else {
         return Ok(());
     };
+    delete_retired_entry(h, &account)?;
+    forget_keychain_account(dir, h, &account)
+}
+
+/// Delete `account`'s entry if it holds this profile's key. Succeeds when
+/// the entry is gone or is not this profile's.
+#[cfg(feature = "os-keychain")]
+fn delete_retired_entry(h: &ProfileHeader, account: &str) -> Result<(), VaultError> {
     let entry = keychain_entry(account)?;
     let unavailable = |e: keyring_core::Error| VaultError::KeychainUnavailable(e.to_string());
     match entry.get_secret() {
         Ok(secret) => {
             let secret = Zeroizing::new(secret);
-            if Key::from_bytes(&secret).is_ok_and(|k| key_check(&k) == h.key_check) {
+            if parse_keychain_secret(&secret).is_ok_and(|(k, _)| key_check(&k) == h.key_check) {
                 #[cfg(test)]
                 if let Some(hook) = BEFORE_DELETE.get() {
                     hook(&entry);
@@ -332,23 +473,68 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
                     Err(e) => return Err(unavailable(e)),
                 }
             }
+            Ok(())
         }
-        Err(keyring_core::Error::NoEntry) => {}
-        Err(e) => return Err(unavailable(e)),
+        Err(keyring_core::Error::NoEntry) => Ok(()),
+        Err(e) => Err(unavailable(e)),
     }
-    // `h` may have been read long before (an unlock runs the KDF first), so
-    // edit the header on disk now rather than write `h` back: a passphrase
-    // changed meanwhile by another process must not be undone. If the header
-    // no longer names this account in passphrase mode, leave it alone.
-    let mut next = read_header(dir)?;
-    let same_profile = next.protection == ProtectionMode::Passphrase && next.key_check == h.key_check;
-    if !same_profile || next.keychain_account.as_deref() != Some(account) {
+}
+
+/// Drop `account` from the header once its entry is gone.
+///
+/// `h` may have been read long before (an unlock runs the KDF first), so
+/// the header on disk is edited under the lock rather than `h` written
+/// back: a passphrase changed meanwhile by another process must not be
+/// undone. If the header no longer names this account in passphrase mode it
+/// is left alone. Either way `h` becomes the header on disk when that is
+/// still this profile's passphrase header.
+#[cfg(feature = "os-keychain")]
+fn forget_keychain_account(dir: &Path, h: &mut ProfileHeader, account: &str) -> Result<(), VaultError> {
+    let same_profile =
+        |x: &ProfileHeader| x.protection == ProtectionMode::Passphrase && x.profile_id == h.profile_id && x.key_check == h.key_check;
+    let next = update_header(dir, |next| {
+        if !same_profile(next) || next.keychain_account.as_deref() != Some(account) {
+            return Ok(false);
+        }
+        next.keychain_account = None;
+        Ok(true)
+    })?;
+    if same_profile(&next) {
+        *h = next;
+    }
+    Ok(())
+}
+
+/// The keychain secret stored for `dek`: tagged, see [`KEYCHAIN_SECRET_TAG`].
+#[cfg(feature = "os-keychain")]
+fn keychain_secret(dek: &Key) -> Zeroizing<Vec<u8>> {
+    let mut secret = Zeroizing::new(Vec::with_capacity(KEYCHAIN_SECRET_TAG.len() + crypto::KEY_LEN));
+    secret.extend_from_slice(KEYCHAIN_SECRET_TAG);
+    secret.extend_from_slice(dek.as_bytes());
+    secret
+}
+
+/// The key in a keychain secret, and whether the secret is tagged.
+#[cfg(feature = "os-keychain")]
+fn parse_keychain_secret(secret: &[u8]) -> Result<(Key, bool), VaultError> {
+    match secret.strip_prefix(KEYCHAIN_SECRET_TAG) {
+        Some(key) => Ok((Key::from_bytes(key)?, true)),
+        None => Ok((Key::from_bytes(secret)?, false)),
+    }
+}
+
+/// Tag the untagged entry of a keychain profile whose header has a MAC.
+#[cfg(feature = "os-keychain")]
+fn tag_keychain_entry(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
+    let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
+    let entry = keychain_entry(account)?;
+    let unavailable = |e: keyring_core::Error| VaultError::KeychainUnavailable(e.to_string());
+    let (k, tagged) = parse_keychain_secret(&Zeroizing::new(entry.get_secret().map_err(unavailable)?))?;
+    if tagged {
         return Ok(());
     }
-    next.keychain_account = None;
-    write_header(dir, &next)?;
-    *h = next;
-    Ok(())
+    require_profile_key(h, &k)?;
+    entry.set_secret(&keychain_secret(dek)).map_err(unavailable)
 }
 
 #[cfg(all(test, feature = "os-keychain"))]
@@ -390,8 +576,8 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
     let profile_id = uuid::Uuid::now_v7().to_string();
     let account = format!("profile-{profile_id}");
     let entry = keychain_entry(&account)?;
-    entry.set_secret(dek.as_bytes()).map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
-    let header = ProfileHeader {
+    entry.set_secret(&keychain_secret(&dek)).map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
+    let mut header = ProfileHeader {
         format: "anvil-profile".into(),
         schema_version: anvil_domain::SCHEMA_VERSION,
         profile_id,
@@ -402,11 +588,16 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
         keychain_account: Some(account),
         key_check: key_check(&dek),
         created_at: chrono::Utc::now(),
+        protection_mac: None,
     };
+    header.protection_mac = Some(protection_mac(&dek, &header));
     write_header(dir, &header)?;
     Ok(CreatedProfile { header, dek, recovery_key: None })
 }
 
+/// Unlock a keychain profile. An entry written by an earlier build is
+/// tagged here once its header has a protection MAC (best effort; retried
+/// at each unlock).
 #[cfg(feature = "os-keychain")]
 pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
     // Checked before the store is touched: a converted profile may still
@@ -414,10 +605,20 @@ pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
     require_protection(h, ProtectionMode::OsKeychain)?;
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
-    let secret = entry.get_secret().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
-    let k = Key::from_bytes(&secret)?;
-    if key_check(&k) != h.key_check {
-        return Err(VaultError::WrongSecret);
+    let secret = Zeroizing::new(entry.get_secret().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?);
+    let (k, tagged) = parse_keychain_secret(&secret)?;
+    require_profile_key(h, &k)?;
+    // A tagged entry was written with a MAC'd header: one without a MAC was
+    // edited, e.g. to reopen a converted profile from its leftover entry.
+    if tagged && h.protection_mac.is_none() {
+        return Err(VaultError::HeaderTampered);
+    }
+    check_protection_mac(h, &k)?;
+    if !tagged
+        && h.protection_mac.is_some()
+        && let Err(e) = entry.set_secret(&keychain_secret(&k))
+    {
+        tracing::warn!(error = %e, "could not tag the keychain entry; retried at the next unlock");
     }
     Ok(k)
 }
@@ -462,6 +663,16 @@ mod tests {
         assert!(unlock_with_passphrase(&h2, "pw1").is_err());
     }
 
+    /// Install keyring-core's in-memory mock as the credential store, once
+    /// for every test in this binary.
+    #[cfg(feature = "os-keychain")]
+    fn mock_store() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap()));
+        let store = keyring_core::get_default_store().expect("a default store is installed");
+        assert!(store.as_any().is::<keyring_core::mock::Store>(), "tests must only use the mock credential store");
+    }
+
     #[cfg(feature = "os-keychain")]
     #[test]
     fn keychain_delete_refused_after_a_successful_read_is_retried() {
@@ -470,10 +681,7 @@ mod tests {
             cred.set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
         }
 
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        INSTALL.call_once(|| keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap()));
-        let store = keyring_core::get_default_store().expect("a default store is installed");
-        assert!(store.as_any().is::<keyring_core::mock::Store>(), "tests must only use the mock credential store");
+        mock_store();
 
         let dir = tempfile::tempdir().unwrap();
         let created = create_keychain_profile(dir.path(), "local").unwrap();
@@ -497,5 +705,36 @@ mod tests {
         retire_keychain_entry(dir.path(), &mut h).unwrap();
         assert!(matches!(entry.get_secret(), Err(keyring_core::Error::NoEntry)));
         assert!(read_header(dir.path()).unwrap().keychain_account.is_none());
+    }
+
+    #[cfg(feature = "os-keychain")]
+    thread_local! {
+        static PROFILE_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(feature = "os-keychain")]
+    #[test]
+    fn a_removed_entry_is_reported_even_if_the_header_update_fails() {
+        fn break_header(_: &keyring_core::Entry) {
+            let dir = PROFILE_DIR.with_borrow(|d| d.clone()).unwrap();
+            std::fs::write(header_path(&dir), b"{").unwrap();
+        }
+
+        mock_store();
+
+        let dir = tempfile::tempdir().unwrap();
+        let created = create_keychain_profile(dir.path(), "local").unwrap();
+        let account = created.header.keychain_account.clone().unwrap();
+        let mut h = read_header(dir.path()).unwrap();
+
+        // The delete succeeds, then the header cannot be read back.
+        PROFILE_DIR.set(Some(dir.path().to_path_buf()));
+        BEFORE_DELETE.set(Some(break_header));
+        let conv = convert_keychain_to_passphrase(dir.path(), &mut h, &created.dek, "pw", KdfParams::testing());
+        BEFORE_DELETE.set(None);
+        PROFILE_DIR.set(None);
+        assert!(conv.unwrap().keychain_entry_removed, "the entry is gone");
+        assert!(matches!(keychain_entry(&account).unwrap().get_secret(), Err(keyring_core::Error::NoEntry)));
+        assert_eq!(h.protection, ProtectionMode::Passphrase);
     }
 }
