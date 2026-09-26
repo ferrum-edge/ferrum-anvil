@@ -16,10 +16,10 @@ use std::time::{Instant, SystemTime};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-/// Cancellation tokens of running attempts (executions, or imports and
-/// previews), by attempt id. Each registration has its own `Arc`, which
-/// identifies it: an entry is removed only by the registration that inserted
-/// it.
+/// Cancellation tokens of running attempts (executions, imports and
+/// previews, or sign-ins), by attempt id. Each registration has its own
+/// `Arc`, which identifies it: an entry is removed only by the registration
+/// that inserted it.
 pub type Running = Mutex<HashMap<Id, Arc<CancellationToken>>>;
 
 /// Load runs in worker processes, by run key: (user cancel, lock stop).
@@ -82,6 +82,9 @@ pub struct DesktopState {
     /// `import_cancel` and lock-time stop). Apart from `running`, so an
     /// import's id never cancels an execution, nor an execution's an import.
     pub imports: Arc<Running>,
+    /// OAuth sign-ins (for `oauth_cancel` and lock-time stop). Apart from
+    /// `running` and `imports`, for the same reason.
+    pub sign_ins: Arc<Running>,
     /// The one import worker allowed at a time. A canceled import's worker
     /// keeps deriving its key (within the header's memory bound) until the
     /// derivation ends, so a new import is refused until it has, rather than
@@ -113,6 +116,7 @@ impl DesktopState {
             lock_epoch: AtomicU64::new(0),
             running: Arc::new(Mutex::new(HashMap::new())),
             imports: Arc::new(Mutex::new(HashMap::new())),
+            sign_ins: Arc::new(Mutex::new(HashMap::new())),
             import_worker: Arc::new(Semaphore::new(1)),
             load_runs: Arc::new(Mutex::new(HashMap::new())),
             sessions: Mutex::new(HashMap::new()),
@@ -244,14 +248,13 @@ impl DesktopState {
         self.stop_work();
     }
 
-    /// Cancel registered executions and imports, stop load workers and abort
-    /// sessions.
+    /// Cancel registered executions, imports and sign-ins, stop load workers
+    /// and abort sessions.
     fn stop_work(&self) {
-        for (_, t) in self.running.lock().drain() {
-            t.cancel();
-        }
-        for (_, t) in self.imports.lock().drain() {
-            t.cancel();
+        for registry in [&self.running, &self.imports, &self.sign_ins] {
+            for (_, t) in registry.lock().drain() {
+                t.cancel();
+            }
         }
         // Load workers are asked to stop and finalize a partial report
         // (completion `stopped_by_lock` is recorded by the run policy).
@@ -270,10 +273,10 @@ impl DesktopState {
     }
 }
 
-/// An attempt's entry in a registry ([`DesktopState::running`] or
-/// [`DesktopState::imports`]), removed when this is dropped: on success, on
-/// an early return and on a panic alike. It owns a handle to the registry,
-/// so a spawned task can hold it.
+/// An attempt's entry in a registry ([`DesktopState::running`],
+/// [`DesktopState::imports`] or [`DesktopState::sign_ins`]), removed when
+/// this is dropped: on success, on an early return and on a panic alike. It
+/// owns a handle to the registry, so a spawned task can hold it.
 pub struct PendingEntry {
     running: Arc<Running>,
     id: Id,
@@ -369,7 +372,8 @@ impl Drop for LoadRunEntry {
     }
 }
 
-/// Settles the race between canceling a bundle import and its writes:
+/// Settles the race between canceling a bundle import or backup restore and its
+/// writes:
 /// whichever claims the gate first wins. A canceled import never writes, and
 /// one whose writes have begun is never reported as canceled.
 #[derive(Default)]
@@ -406,7 +410,7 @@ pub fn cancel_pending(running: &Running, id: &Id) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tokio::sync::oneshot;
 
@@ -540,10 +544,10 @@ mod tests {
     }
 
     /// A data folder removed when the test ends.
-    struct TempRoot(PathBuf);
+    pub(crate) struct TempRoot(pub(crate) PathBuf);
 
     impl TempRoot {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             TempRoot(std::env::temp_dir().join(format!("anvil-desktop-state-{}", Id::new())))
         }
     }
@@ -554,9 +558,9 @@ mod tests {
         }
     }
 
-    const PASSPHRASE: &str = "correct horse battery";
+    pub(crate) const PASSPHRASE: &str = "correct horse battery";
 
-    fn create(st: &DesktopState, name: &str) -> (App, PathBuf) {
+    pub(crate) fn create(st: &DesktopState, name: &str) -> (App, PathBuf) {
         let (summary, key, _) = st.profiles.create_passphrase(name, PASSPHRASE, anvil_storage::KdfParams::testing()).unwrap();
         let header = anvil_storage::vault::read_header(&summary.dir).unwrap();
         (App::open(summary.dir.clone(), header, key).unwrap(), summary.dir)
@@ -693,6 +697,35 @@ mod tests {
         assert!(execution.token().is_cancelled());
         assert!(later.token().is_cancelled());
         assert!(st.imports.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_ins_and_executions_are_canceled_in_their_own_registries() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let id = Id::new();
+        let execution = PendingEntry::register(&st.running, id).unwrap();
+        let import = PendingEntry::register(&st.imports, id).unwrap();
+        let sign_in = PendingEntry::register(&st.sign_ins, id).unwrap();
+        // A sign-in's cancel reaches only the sign-in...
+        assert!(cancel_pending(&st.sign_ins, &id));
+        assert!(sign_in.token().is_cancelled());
+        assert!(!execution.token().is_cancelled());
+        assert!(!import.token().is_cancelled());
+        drop(sign_in);
+        assert!(!cancel_pending(&st.sign_ins, &id));
+        // ...and an execution's never reaches a sign-in.
+        let sign_in = PendingEntry::register(&st.sign_ins, id).unwrap();
+        assert!(cancel_pending(&st.running, &id));
+        assert!(execution.token().is_cancelled());
+        assert!(!sign_in.token().is_cancelled());
+        assert!(!import.token().is_cancelled());
+        // A lock stops every one of them.
+        st.lock();
+        assert!(sign_in.token().is_cancelled());
+        assert!(import.token().is_cancelled());
+        assert!(st.sign_ins.lock().is_empty());
+        assert!(st.running.lock().is_empty());
     }
 
     #[tokio::test]

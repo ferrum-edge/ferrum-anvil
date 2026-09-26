@@ -106,6 +106,23 @@ fn an_unlock_whose_gate_refuses_never_sets_the_key() {
 }
 
 #[test]
+fn an_unlock_whose_gate_refuses_never_clears_a_newer_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let s = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let id = Id::new();
+    s.put(kind::WORKSPACE, &id, None, None, 0.0, &serde_json::json!({"name": "w"})).unwrap();
+    // The key is set, as by a newer unlock that its own gate allowed after the
+    // lock that makes this older one refuse.
+    assert!(matches!(s.unlock_if(created.dek.clone(), || false), Err(StoreError::Locked)));
+    assert!(!s.is_locked(), "a refused unlock leaves the newer unlock's key in place");
+    assert!(s.get::<serde_json::Value>(kind::WORKSPACE, &id).unwrap().is_some());
+    // A wrong key still leaves the store locked.
+    assert!(s.unlock_if(Key::random(), || true).is_err());
+    assert!(s.is_locked());
+}
+
+#[test]
 fn rel_004_future_schema_is_refused_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
