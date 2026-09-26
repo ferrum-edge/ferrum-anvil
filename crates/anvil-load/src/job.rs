@@ -5,6 +5,9 @@
 //! plan's requests reference (effective auth, the selected TLS profile's
 //! client identity, the selected proxy's password) into a scoped map, and the
 //! worker rebuilds contexts over [`MemorySecrets`] / [`MemoryAttachments`].
+//! A linked local file is read once, by the parent through the request's own
+//! resolver (and its checks), and travels as stored bytes: the worker never
+//! opens a local path, and the body cannot change during the run.
 //!
 //! The job travels over the worker's **stdin** only — never argv or the
 //! environment, which other local users can read from the process table.
@@ -22,7 +25,7 @@ use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::tls::{ClientIdentity, ProxyProfile, TlsProfile};
 use anvil_engine::ExecutionContext;
-use anvil_engine::context::{MemoryAttachments, MemorySecrets};
+use anvil_engine::context::{AttachmentResolver, MemoryAttachments, MemorySecrets};
 use anvil_engine::vars::{VarEntry, VarLayer};
 use base64::Engine as _;
 use bytes::Bytes;
@@ -109,6 +112,10 @@ pub struct WorkerRequest {
     pub seed: Option<u64>,
     #[serde(default)]
     pub redaction_names: Vec<String>,
+    /// The sealed import root the request was prepared under
+    /// (`ExecutionContext::scope`).
+    #[serde(default)]
+    pub scope: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,30 +228,43 @@ pub fn secret_refs(ctx: &ExecutionContext) -> Vec<SecretRef> {
     out
 }
 
-/// Stored attachments a request references: its body files and, for gRPC,
-/// the `.proto` files or descriptor set of its schema.
-pub fn attachment_refs(spec: &RequestSpec) -> Vec<AttachmentRef> {
+/// Every attachment a request uses, stored or linked: its body files and,
+/// for gRPC, the `.proto` files or descriptor set of its schema.
+fn attachment_refs_mut(spec: &mut RequestSpec) -> Vec<&mut AttachmentRef> {
     let mut out = Vec::new();
-    match &spec.body {
-        Body::Binary { attachment, .. } => out.push(attachment.clone()),
+    match &mut spec.body {
+        Body::Binary { attachment, .. } => out.push(attachment),
         Body::Multipart { parts } => {
-            for p in parts.iter().filter(|p| p.enabled) {
-                if let MultipartContent::File { attachment, .. } = &p.content {
-                    out.push(attachment.clone());
+            for p in parts.iter_mut().filter(|p| p.enabled) {
+                if let MultipartContent::File { attachment, .. } = &mut p.content {
+                    out.push(attachment);
                 }
             }
         }
         _ => {}
     }
-    if let Some(g) = &spec.grpc {
-        match &g.schema {
-            GrpcSchemaSource::ProtoFiles { files } => out.extend(files.iter().cloned()),
-            GrpcSchemaSource::DescriptorSet { attachment } => out.push(attachment.clone()),
+    if let Some(g) = &mut spec.grpc {
+        match &mut g.schema {
+            GrpcSchemaSource::ProtoFiles { files } => out.extend(files.iter_mut()),
+            GrpcSchemaSource::DescriptorSet { attachment } => out.push(attachment),
             GrpcSchemaSource::Reflection => {}
         }
     }
-    out.retain(|a| matches!(a, AttachmentRef::Stored { .. }));
     out
+}
+
+/// The worker's attachments: only the bytes the parent sent. A linked local
+/// file arrives as stored bytes, so a linked reference is refused here and
+/// the worker never opens a path.
+struct WorkerAttachments(MemoryAttachments);
+
+impl AttachmentResolver for WorkerAttachments {
+    fn load(&self, a: &AttachmentRef) -> Result<Bytes, String> {
+        match a {
+            AttachmentRef::Stored { .. } => self.0.load(a),
+            AttachmentRef::LinkedFile { path } => Err(format!("the linked local file '{path}' was not sent to the load worker")),
+        }
+    }
 }
 
 fn plan_request_ids(plan: &LoadPlan) -> Vec<Id> {
@@ -275,14 +295,27 @@ impl WorkerJob {
                 let v = ctx.secrets.resolve(&r).map_err(|e| LoadError::Invalid(format!("secret '{}': {e}", r.label)))?;
                 secrets.push(ScopedSecret { id: r.id, value: SecretString(v) });
             }
-            for a in attachment_refs(&ctx.spec) {
-                let AttachmentRef::Stored { sha256, .. } = &a else { continue };
-                if attachments.iter().any(|x| &x.sha256 == sha256) {
+            let mut spec = ctx.spec.clone();
+            for a in attachment_refs_mut(&mut spec) {
+                if let AttachmentRef::Stored { sha256, .. } = &*a
+                    && attachments.iter().any(|x| &x.sha256 == sha256)
+                {
                     continue;
                 }
-                let bytes = ctx.attachments.load(&a).map_err(LoadError::Invalid)?;
-                attachments
-                    .push(WireAttachment { sha256: sha256.clone(), data_b64: base64::engine::general_purpose::STANDARD.encode(&bytes) });
+                let bytes = ctx.attachments.load(a).map_err(LoadError::Invalid)?;
+                // Read once, here, through the parent's checks; the worker
+                // gets the bytes as a stored attachment.
+                if let AttachmentRef::LinkedFile { path } = &*a {
+                    let name = std::path::Path::new(path).file_name();
+                    let file_name = name.map_or_else(|| "file".into(), |f| f.to_string_lossy().into_owned());
+                    let sha256 = hex::encode(Sha256::digest(&bytes));
+                    *a = AttachmentRef::Stored { sha256, size: bytes.len() as u64, file_name, media_type: None };
+                }
+                let AttachmentRef::Stored { sha256, .. } = &*a else { continue };
+                if !attachments.iter().any(|x| &x.sha256 == sha256) {
+                    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    attachments.push(WireAttachment { sha256: sha256.clone(), data_b64 });
+                }
             }
             let (tls, proxy) = selected_profiles(ctx);
             requests.push(WorkerRequest {
@@ -290,7 +323,7 @@ impl WorkerJob {
                 workspace_id: ctx.workspace_id,
                 revision_id: ctx.revision_id,
                 environment_id: ctx.environment_id,
-                spec: ctx.spec.clone(),
+                spec,
                 settings_layers: ctx.settings_layers.clone(),
                 auth_layers: vec![ctx.effective_auth()],
                 var_layers: ctx
@@ -321,6 +354,7 @@ impl WorkerJob {
                 send_anyway: ctx.send_anyway,
                 seed: ctx.seed,
                 redaction_names: ctx.redaction_names.clone(),
+                scope: ctx.scope,
             });
         }
         let dataset = job.dataset.as_ref().map(|d| WireDataset {
@@ -351,7 +385,7 @@ impl WorkerJob {
             }
             files.insert(a.sha256, Bytes::from(bytes));
         }
-        let attachments = Arc::new(MemoryAttachments(files));
+        let attachments = Arc::new(WorkerAttachments(MemoryAttachments(files)));
         let mut requests = HashMap::new();
         for r in self.requests {
             let mut ctx = ExecutionContext::standalone(r.spec);
@@ -382,6 +416,7 @@ impl WorkerJob {
             ctx.send_anyway = r.send_anyway;
             ctx.seed = r.seed;
             ctx.redaction_names = r.redaction_names;
+            ctx.scope = r.scope;
             requests.insert(r.request_id, ctx);
         }
         let dataset = match self.dataset {
@@ -470,6 +505,52 @@ mod tests {
         assert!(c.secrets.resolve(&SecretRef { id: unused, label: "old".into() }).is_err());
         assert_eq!(c.var_layers[0].vars[0].value, "var-secret-value");
         assert!(c.var_layers[0].vars[0].secret);
+    }
+
+    /// The parent's resolver for one linked file, as `anvil_app` builds it
+    /// after its checks.
+    struct Linked(String);
+
+    impl AttachmentResolver for Linked {
+        fn load(&self, a: &AttachmentRef) -> Result<Bytes, String> {
+            match a {
+                AttachmentRef::LinkedFile { path } if *path == self.0 => Ok(Bytes::from_static(b"read-by-the-parent")),
+                _ => Err("not available".into()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_linked_file_is_read_by_the_parent_and_never_by_the_worker() {
+        // A file that exists, so a worker reading the path would succeed.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").to_string();
+        let linked = AttachmentRef::LinkedFile { path: path.clone() };
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/x");
+        spec.body = Body::Binary { attachment: linked.clone(), content_type: None };
+        let mut ctx = ExecutionContext::standalone(spec);
+        ctx.attachments = Arc::new(Linked(path.clone()));
+        let rid = Id::new();
+        let job = LoadJob { requests: HashMap::from([(rid, ctx)]), dataset: None };
+        let wj = WorkerJob::from_load_job(&plan(vec![rid]), &job, RunOptions::default()).unwrap();
+        let Body::Binary { attachment: AttachmentRef::Stored { sha256, file_name, .. }, .. } = &wj.requests[0].spec.body else {
+            panic!("the worker's request names a stored attachment");
+        };
+        assert_eq!(*sha256, hex::encode(Sha256::digest(b"read-by-the-parent")));
+        assert_eq!(file_name, "Cargo.toml");
+        assert_eq!(wj.attachments.len(), 1);
+        assert!(!serde_json::to_string(&wj).unwrap().contains(&path), "the worker job names no local path");
+
+        let (_, lj, _) = wj.clone().into_load_job().unwrap();
+        let c = &lj.requests[&rid];
+        let Body::Binary { attachment, .. } = &c.spec.body else { panic!("binary body") };
+        assert_eq!(c.attachments.load(attachment).unwrap().as_ref(), b"read-by-the-parent");
+        assert!(c.attachments.load(&linked).is_err(), "the worker never opens a linked path");
+
+        // Nor does it for a job that names one directly.
+        let mut crafted = wj;
+        crafted.requests[0].spec.body = Body::Binary { attachment: linked.clone(), content_type: None };
+        let (_, lj, _) = crafted.into_load_job().unwrap();
+        assert!(lj.requests[&rid].attachments.load(&linked).is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! stores plans and reports in the encrypted store.
 
 use crate::exec::SendOptions;
+use crate::file_grants::FilePurpose;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport, LoadUnitKind, UnitSemantics};
@@ -118,7 +119,7 @@ impl App {
             AttachmentRef::Stored { sha256, .. } => {
                 self.get_attachment(sha256)?.ok_or_else(|| AppError::NotFound(format!("dataset attachment {sha256}")))?
             }
-            AttachmentRef::LinkedFile { path } => read_linked_dataset(path)?,
+            AttachmentRef::LinkedFile { path } => self.read_linked_dataset(d.meta.id, path, FilePurpose::Dataset.max_read_bytes())?,
         };
         let fmt = match d.format {
             DomainDatasetFormat::Csv => DatasetFormat::Csv,
@@ -269,35 +270,6 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
         Protocol::Http => "HTTP",
     };
     format!("{label} {}", url_origin(&url))
-}
-
-/// A dataset stored as a linked file, bounded like a dataset chosen in the
-/// desktop's dialog; only a regular file is opened.
-fn read_linked_dataset(path: &str) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let max = crate::file_grants::FilePurpose::Dataset.max_read_bytes();
-    let too_large = || AppError::Invalid(format!("the linked dataset is larger than {} MiB", max >> 20));
-    let not_regular = || AppError::Invalid("the linked dataset is not a regular file".into());
-    // Checked before opening, so a FIFO or device is never opened.
-    if !std::fs::metadata(path)?.is_file() {
-        return Err(not_regular());
-    }
-    let file = std::fs::File::open(path)?;
-    // The checks that count are on the opened handle, not on the path.
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(not_regular());
-    }
-    if meta.len() > max {
-        return Err(too_large());
-    }
-    let mut bytes = Vec::new();
-    file.take(max + 1).read_to_end(&mut bytes)?;
-    // Bounded even if the file grows while it is read.
-    if bytes.len() as u64 > max {
-        return Err(too_large());
-    }
-    Ok(bytes)
 }
 
 fn url_origin(url: &str) -> String {

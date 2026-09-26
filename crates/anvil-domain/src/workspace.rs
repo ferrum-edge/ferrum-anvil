@@ -88,6 +88,21 @@ pub struct Folder {
     pub auth: AuthConfig,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The top-level folder a spec import into an existing workspace creates.
+    /// Requests under it resolve only the imported collection's own scope:
+    /// no variables, environment or auth from outside it, and no workload
+    /// identity or token file of this device.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub import_root: bool,
+    /// Environments the import brought with it. They may resolve under the
+    /// import root, as the collection's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub import_environment_ids: Vec<Id>,
+    /// Set only by the user on this device, never by an import: requests
+    /// under this import root also resolve the workspace's variables, its
+    /// active environment and auth, and this device's workload identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_workspace_scope: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -61,6 +61,12 @@ run-local layers, which therefore always win:
    same iteration (a later extraction of the same name replaces the earlier
    one). Extracted values never cross iterations and are never persisted.
 
+A step under an imported collection's import root that the user has not
+opened to the workspace (see [import.md](import.md#persisting-an-import-anvil-app))
+gets neither the dataset row nor values extracted by steps outside that
+root, and values it extracts are handed only to later steps under the same
+root (`ExecutionContext::scope`). Runs without import roots are unchanged.
+
 Unresolved variables still fail preparation (`unresolved_variable`, nothing
 sent) — for example when an earlier extraction matched nothing. The step
 then fails on the transport dimension and its record says which variable
