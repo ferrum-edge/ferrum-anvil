@@ -137,7 +137,18 @@ pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<Stri
         "https" | "wss" | "grpcs" => Some(443),
         _ => None,
     };
-    let port = match u.port().or(default_port) {
+    // `url` drops a port equal to the parse scheme's default, so an explicit `:80`/`:443` on a raw
+    // scheme (which has no implicit default) reads back as `None`. Re-parse under the other special
+    // scheme, whose default differs, to recover the port that was actually written.
+    let explicit_port = match u.port() {
+        Some(p) => Some(p),
+        None if default_port.is_none() => {
+            let alt_scheme = if parse_scheme == "https" { "http" } else { "https" };
+            url::Url::parse(&format!("{alt_scheme}://{authority}/")).ok().and_then(|alt| alt.port())
+        }
+        None => None,
+    };
+    let port = match explicit_port.or(default_port) {
         Some(p) => p,
         None => return Err(local(FailureKind::InvalidUrl, format!("{scheme}:// URLs need an explicit port"), "url")),
     };
