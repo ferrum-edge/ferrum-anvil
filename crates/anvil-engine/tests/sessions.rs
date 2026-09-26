@@ -661,7 +661,7 @@ fn header_of<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
 fn grpc_status(o: &ExecutionOutput) -> (Option<u16>, Option<i32>, GrpcStatusSource) {
     match &o.record.outcome.protocol_status {
         ProtocolStatus::Grpc { http_status, grpc_status, source, .. } => (*http_status, *grpc_status, *source),
-        other => panic!("not gRPC: {other:?}"),
+        other => panic!("not gRPC: {other:?}; failure: {:?}", last(o).failure),
     }
 }
 

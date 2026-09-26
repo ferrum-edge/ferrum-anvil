@@ -1,0 +1,6 @@
+# Exact-fingerprint ignore for a dummy X-API-Key test value in
+# crates/anvil-engine/tests/redirect_policy.rs, first pushed in commit fa40c8bc on
+# branch fix/redirect-hop-policy-reevaluation. The value is fake; later commits use the
+# allowlisted tok-SENSITIVE- canary prefix. CI scans full history, so the original
+# commit stays visible without a history rewrite, hence this single fingerprint.
+fa40c8bc7e0dd5f62b2f36ead7f7c67b5c7a80a8:crates/anvil-engine/tests/redirect_policy.rs:generic-api-key:76
