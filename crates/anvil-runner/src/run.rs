@@ -6,7 +6,7 @@ use crate::provider::{StepError, StepProvider};
 use crate::redact::RunSecrets;
 use crate::{MAX_ASSERTIONS_PER_STEP, MAX_EXTRA_FAILED_STEPS, MAX_FINDINGS_PER_STEP, MAX_NOTES, MAX_REPORT_STEPS, RunError, clip};
 use anvil_domain::Id;
-use anvil_domain::execution::{DispatchState, ExecutionRecord};
+use anvil_domain::execution::{DispatchState, ExecutionRecord, exchange_duration_us};
 use anvil_domain::outcome::{ApplicationState, AssertionState, ProtocolStatus, TransportState};
 use anvil_domain::runner::*;
 use anvil_engine::Engine;
@@ -507,7 +507,7 @@ impl Run {
             summary: clip(&sec.text(&o.summary), MAX_SUMMARY),
             message,
             duration_ms: Some((rec.finished_at - rec.started_at).num_milliseconds().max(0) as u64),
-            exchange_ms: if rec.attempts.is_empty() { None } else { Some(rec.attempts.iter().map(|a| a.duration_us).sum::<u64>() / 1000) },
+            exchange_ms: exchange_duration_us(&rec.attempts).map(|us| us / 1000),
             delay_ms: step.delay_ms,
             assertion_results,
             assertion_results_omitted: rec.assertion_results.len().saturating_sub(MAX_ASSERTIONS_PER_STEP) as u32,
