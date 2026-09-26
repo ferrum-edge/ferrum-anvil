@@ -238,6 +238,13 @@ export interface FileGrant {
   /** Only for `jwt_svid_file` and `linked_file`: the path the backend bound in the vault. */
   path?: string;
 }
+/** A JWT-SVID token file bound on this device through the native dialog. */
+export interface TokenFileBinding {
+  id: string;
+  /** Canonical absolute path of the chosen file. */
+  path: string;
+  bound_at: string;
+}
 /** The saved request or dataset a linked local file is chosen for. */
 export type LinkedFileReferrer = { kind: "request"; id: string } | { kind: "dataset"; id: string };
 export interface FileDialogOptions {
@@ -525,6 +532,10 @@ export const api = {
   /** Bind, in the native open dialog, the linked local file a saved request or dataset names; null when the user cancels. */
   chooseLinkedFile: async (referrer: LinkedFileReferrer): Promise<FileGrant | null> =>
     (await call<FileGrant[]>("file_choose", { purpose: "linked_file", options: { multiple: false }, referrer }))[0] ?? null,
+  /** JWT-SVID token files bound on this device, oldest first. */
+  tokenFiles: () => call<TokenFileBinding[]>("token_files_list"),
+  /** Stop reading a bound token file until it is chosen again. */
+  removeTokenFile: (bindingId: string) => call<void>("token_file_remove", { bindingId }),
   exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
     call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
   importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),

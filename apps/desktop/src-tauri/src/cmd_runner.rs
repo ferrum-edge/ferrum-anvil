@@ -1,7 +1,7 @@
 //! Collection-runner commands: scenarios, folder runs, reports.
 
 use crate::commands::{R, e, id};
-use crate::state::DesktopState;
+use crate::state::{DesktopState, PendingEntry, cancel_pending};
 use anvil_app::file_grants::FilePurpose;
 use anvil_app::runner::RunSettings;
 use anvil_domain::Id;
@@ -10,7 +10,6 @@ use anvil_domain::workspace::{Scenario, ScenarioStep};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio_util::sync::CancellationToken;
 
 #[tauri::command]
 pub fn scenarios_list(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec<Scenario>> {
@@ -64,10 +63,11 @@ pub struct RunFinished {
 /// Start a run; progress arrives as `run-event`, the end as `run-finished`.
 #[tauri::command]
 pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: RunTarget, input: RunInput) -> R<String> {
-    let app = st.app()?;
     let run_id = Id::new();
-    let cancel = CancellationToken::new();
-    st.running.lock().insert(run_id, cancel.clone());
+    // Registered before the app is read (see `DesktopState::lock`). The run's
+    // task owns the entry; an early return below retires it.
+    let pending = PendingEntry::register(&st.running, run_id)?;
+    let app = st.app()?;
     let h2 = handle.clone();
     let sink: anvil_runner::RunEventSink = Arc::new(move |ev: RunEvent| {
         let _ = h2.emit("run-event", &ev);
@@ -90,17 +90,14 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
         RunTarget::Folder { workspace_id, folder_id } => Some((id(workspace_id)?, folder_id.as_deref().map(id).transpose()?)),
         RunTarget::Scenario { .. } => None,
     };
-    let st_running = handle.clone();
     tauri::async_runtime::spawn(async move {
+        let cancel = pending.token().clone();
         let res = match (target_scenario, folder) {
             (Some(sid), _) => app.run_scenario(&sid, settings, cancel).await,
             (None, Some((ws, f))) => app.run_folder(&ws, f, settings, cancel).await,
             _ => unreachable!(),
         };
-        {
-            use tauri::Manager;
-            st_running.state::<DesktopState>().running.lock().remove(&run_id);
-        }
+        drop(pending);
         let ev = match res {
             Ok(r) => RunFinished { run_id: r.run_id.to_string(), error: None },
             Err(err) => RunFinished { run_id: run_id.to_string(), error: Some(e(err)) },
@@ -112,13 +109,7 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
 
 #[tauri::command]
 pub fn run_cancel(st: State<'_, DesktopState>, run_id: String) -> R<bool> {
-    Ok(match st.running.lock().get(&id(&run_id)?) {
-        Some(t) => {
-            t.cancel();
-            true
-        }
-        None => false,
-    })
+    Ok(cancel_pending(&st.running, &id(&run_id)?))
 }
 
 #[tauri::command]

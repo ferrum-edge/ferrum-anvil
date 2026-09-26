@@ -33,11 +33,17 @@ CLI (`anvil`) = same anvil-app services without a webview.
   only a view of that state.
 - **A session open is cancelable from its first moment.** `session_open`
   registers its cancellation token before it reads the profile or builds the
-  request, so a cancel or lock that lands while it connects stops it. A session is published to the open sessions
-  before its pending token is retired, so a concurrent cancel always finds one
-  of the two; a cancel that lands in between aborts the new session. The
-  pending token is removed on every path, a panic included
-  (`state::PendingEntry`, also used by `send_request`).
+  request. Locking locks the profile before it cancels the registered tokens,
+  so an open that registered earlier is stopped while it connects, and one
+  that registers later is refused when it reads the profile. A session is
+  published to the open sessions before its pending token is retired, so a
+  concurrent cancel always finds one of the two; a cancel that lands in
+  between aborts the new session. The pending token is removed on every path,
+  a panic included, and an id that is still registered is refused
+  (`state::PendingEntry`, also used by `send_request`, collection runs and
+  OAuth sign-in). An Abort that reaches the backend before the open has
+  registered finds nothing to stop; the renderer cancels again once the open
+  returns.
 - **File commands never take a path from the webview.** The backend shows
   the native open or save dialog itself (`file_choose`), keeps the chosen
   path and returns an opaque grant bound to one purpose (bundle import or
@@ -47,8 +53,8 @@ CLI (`anvil`) = same anvil-app services without a webview.
   on its path was replaced after the choice; a write goes to a new temporary
   file that is renamed over the chosen name, and spends the grant (a bundle
   or backup is created readable only by its owner on Unix). Grants expire
-  after 30 minutes, are capped at 32 and are revoked on lock; a dialog that
-  was open when the app locked grants nothing.
+  after 30 minutes, are capped at 32 and are revoked on lock and when another
+  profile is opened; a dialog that was open then grants nothing.
 - **Request specs from the webview name no local file.** `build_context`
   refuses an unsaved draft that references a linked file
   (`AttachmentRef::LinkedFile`), and the desktop refuses to create or save
@@ -57,8 +63,11 @@ CLI (`anvil`) = same anvil-app services without a webview.
   `jwt_svid_file` records the chosen canonical path in the vault
   (`anvil_app::token_files`, never exported or imported), and the desktop
   confines the app so a token-file path that is not bound is refused before
-  anything is read. A linked file that a saved request, gRPC schema or
-  dataset names is bound the same way, for that request or dataset
+  anything is read. The JWT-SVID editor lists the bound token files and
+  removes one (`token_files_list`, `token_file_remove`); an auth setting that
+  names a removed file is refused until it is chosen again. A linked file
+  that a saved request, gRPC schema or dataset names is bound the same way,
+  for that request or dataset
   (`file_choose` with purpose `linked_file` and the referrer,
   `anvil_app::linked_files`; the desktop control that opens this dialog is
   pending); until then it is refused before anything is read, in the

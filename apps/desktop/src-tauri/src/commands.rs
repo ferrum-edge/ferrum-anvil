@@ -462,13 +462,15 @@ pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) ->
 
 #[tauri::command]
 pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input: SendInput, execution_id: String) -> R<ExecutionView> {
-    let app = st.app()?;
     let exec_id = id(&execution_id)?;
+    // Registered before the app is read, so a lock from now on either refuses
+    // `app()` or cancels this token. Retired when dropped, also if the send
+    // fails early or panics.
+    let pending = crate::state::PendingEntry::register(&st.running, exec_id)?;
+    let app = st.app()?;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
-    // Retired when dropped, also if the send panics.
-    let pending = crate::state::PendingEntry::register(&st.running, exec_id);
     let h2 = handle.clone();
     let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
@@ -499,14 +501,7 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
 
 #[tauri::command]
 pub fn cancel_execution(st: State<'_, DesktopState>, execution_id: String) -> R<bool> {
-    let exec_id = id(&execution_id)?;
-    Ok(match st.running.lock().get(&exec_id) {
-        Some(t) => {
-            t.cancel();
-            true
-        }
-        None => false,
-    })
+    Ok(crate::state::cancel_pending(&st.running, &id(&execution_id)?))
 }
 
 #[derive(Serialize)]

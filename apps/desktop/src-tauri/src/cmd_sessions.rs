@@ -29,7 +29,13 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
     // Registered first, so `session_cancel` (and locking) can stop an open that
     // has not finished yet: the tab that started it may already be gone. Every
     // early return below retires it.
-    let pending = PendingEntry::register(&st.running, exec_id);
+    let pending = PendingEntry::register(&st.running, exec_id)?;
+    // A session already open under this id is not replaced. Checked after
+    // registering: only a registered open publishes a session, so none can
+    // appear under this id before this one does.
+    if st.sessions.lock().contains_key(&execution_id) {
+        return Err(format!("execution {execution_id} is already running"));
+    }
     let app = st.app()?;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;

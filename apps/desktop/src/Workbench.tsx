@@ -89,6 +89,10 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const viewWs = ws ?? lastWs.current;
   // Sessions this window canceled: their failed open is not an error to report.
   const stopped = useRef(new Set<string>());
+  // Opens whose `session_open` call has not returned yet.
+  const opening = useRef(new Set<string>());
+  // Opens aborted before the backend registered them: canceled again once they open.
+  const earlyAborts = useRef(new Set<string>());
 
   const notify = (m: string) => setToast(m);
   const fail = (e: unknown) => setToast(String((e as Error).message ?? e));
@@ -276,13 +280,19 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     if (!t || !ws || t.running || t.session) return;
     const execId = uid();
     updateTab(t.req.id, { session: { execId, messages: [] }, view: null });
+    opening.current.add(execId);
     try {
       await api.sessionOpen({ workspace_id: t.wsId, request_id: t.req.id, spec: t.req.spec, environment_id: envOf(t.wsId), send_anyway: false }, execId);
     } catch (e) {
+      opening.current.delete(execId);
+      earlyAborts.current.delete(execId);
       // Only this open's session: the tab may hold a newer one by now.
       setTabs((ts) => ts.map((x) => (x.session?.execId === execId ? { ...x, session: null } : x)));
       if (!stopped.current.delete(execId)) fail(e);
+      return;
     }
+    opening.current.delete(execId);
+    if (earlyAborts.current.delete(execId)) await cancelSession(execId);
   };
 
   const show = (v: View) => {
@@ -295,15 +305,33 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     if (tab?.execId) await api.cancel(tab.execId);
   };
 
-  // The session console's Cancel: an open it abandons is not an error to report.
-  const cancelSession = async (sid: string) => {
+  // Abort a session, or an open still connecting; an open it abandons is not an
+  // error to report. The backend finds nothing to stop both for a session that
+  // is already over (its end event is on the way) and for an open it has not
+  // registered yet. The latter is canceled again once it opens (`connect`), or
+  // right away if it opened while this cancel was on its way.
+  const abortSession = async (sid: string, retry = true): Promise<void> => {
+    const wasOpening = opening.current.has(sid);
     stopped.current.add(sid);
     try {
       await api.sessionCancel(sid);
     } catch (e) {
-      stopped.current.delete(sid);
-      // Already over (its end event is on the way): nothing is left to stop.
-      if (String((e as Error).message ?? e) !== "the session is no longer open") fail(e);
+      if (String((e as Error).message ?? e) !== "the session is no longer open") {
+        stopped.current.delete(sid);
+        throw e;
+      }
+      if (!wasOpening) stopped.current.delete(sid);
+      else if (opening.current.has(sid)) earlyAborts.current.add(sid);
+      else if (retry) await abortSession(sid, false);
+    }
+  };
+
+  // The session console's Cancel.
+  const cancelSession = async (sid: string) => {
+    try {
+      await abortSession(sid);
+    } catch (e) {
+      fail(e);
     }
   };
 
@@ -312,17 +340,10 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const stopWork = async (t: OpenTab, outcome = "so its tab stays open"): Promise<boolean> => {
     const sid = t.session?.execId;
     try {
-      if (sid) {
-        stopped.current.add(sid);
-        // Already over (its end event is on the way): nothing is left to stop.
-        await api.sessionCancel(sid).catch((e) => {
-          if (String((e as Error).message ?? e) !== "the session is no longer open") throw e;
-        });
-      }
+      if (sid) await abortSession(sid);
       if (t.running && t.execId) await api.cancel(t.execId);
       return true;
     } catch (e) {
-      if (sid) stopped.current.delete(sid);
       notify(`Could not stop “${t.req.name}”, ${outcome}: ${String((e as Error).message ?? e)}`);
       return false;
     }

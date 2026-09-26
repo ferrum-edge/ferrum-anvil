@@ -7,7 +7,8 @@
 //! ([`App::confine_token_files`]), a JWT-SVID `file` source is honoured only
 //! if its path is bound, so a path the webview wrote into an auth setting is
 //! never read. Bindings are device-specific: they are not exported, and an
-//! import cannot create one.
+//! import cannot create one. The user lists them and removes one that should
+//! no longer be read ([`App::remove_token_file_binding`]).
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
@@ -47,8 +48,21 @@ impl App {
         Ok(b)
     }
 
+    /// Every bound token file, oldest first.
     pub fn token_file_bindings(&self) -> Result<Vec<TokenFileBinding>> {
-        Ok(self.store.list(kind::TOKEN_FILE, None)?)
+        let mut bindings: Vec<TokenFileBinding> = self.store.list(kind::TOKEN_FILE, None)?;
+        bindings.sort_by(|a, b| a.bound_at.cmp(&b.bound_at).then_with(|| a.path.cmp(&b.path)));
+        Ok(bindings)
+    }
+
+    /// Remove a binding. From the next send on, an auth setting that names its
+    /// file is refused (when token files are confined) until the user chooses
+    /// the file again.
+    pub fn remove_token_file_binding(&self, id: &Id) -> Result<()> {
+        if !self.store.delete(kind::TOKEN_FILE, id)? {
+            return Err(AppError::NotFound(format!("token file binding {id}")));
+        }
+        Ok(())
     }
 
     /// Refuse an auth setting that would read a token file that is not

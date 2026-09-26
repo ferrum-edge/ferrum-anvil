@@ -26,6 +26,11 @@ use anvil_transport::recorder::EventCtx;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+mod fifo;
+#[cfg(unix)]
+use fifo::{mkfifo, within_seconds};
+
 const CANARY: &str = "anvil-local-file-canary";
 const URL: &str = "http://127.0.0.1:9/x";
 
@@ -261,6 +266,49 @@ fn token_file_bindings_stay_on_this_device() {
     assert!(b.build_context(Some(req.meta.id), &ws_b.meta.id, None, &SendOptions::default()).is_err());
 }
 
+#[test]
+fn the_user_lists_and_removes_token_file_bindings() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let first = canary_file(files.path(), "first.token");
+    let second = canary_file(files.path(), "second.token");
+    let app = new_app(root.path(), "remove");
+    app.confine_token_files();
+    let ws = app.create_workspace("W").unwrap();
+    let build = |path: &str| app.build_context(None, &ws.meta.id, Some(with_auth(jwt_svid_file(path))), &SendOptions::default());
+    let listed = |app: &App| app.token_file_bindings().unwrap().into_iter().map(|b| (b.id, b.path)).collect::<Vec<_>>();
+
+    let a = app.bind_token_file(&first).unwrap();
+    let b = app.bind_token_file(&second).unwrap();
+    assert_eq!(listed(&app), vec![(a.id, a.path.clone()), (b.id, b.path.clone())]);
+    build(&a.path).unwrap();
+
+    // A file chosen by mistake stops being read from the next send on.
+    app.remove_token_file_binding(&a.id).unwrap();
+    assert_eq!(listed(&app), vec![(b.id, b.path.clone())]);
+    let err = refused(build(&a.path), "removed");
+    assert!(err.contains("not chosen") && !err.contains(CANARY), "{err}");
+    let multi = AuthConfig::Multi { profiles: vec![jwt_svid_file(&b.path), jwt_svid_file(&a.path)] };
+    assert!(app.build_context(None, &ws.meta.id, Some(with_auth(multi)), &SendOptions::default()).is_err());
+    // The other binding is untouched.
+    build(&b.path).unwrap();
+
+    // Removing it again, or an id that was never bound, finds nothing.
+    assert!(matches!(app.remove_token_file_binding(&a.id), Err(AppError::NotFound(_))));
+    assert!(matches!(app.remove_token_file_binding(&Id::new()), Err(AppError::NotFound(_))));
+    assert_eq!(listed(&app), vec![(b.id, b.path.clone())]);
+
+    // Choosing the file again binds it anew.
+    let again = app.bind_token_file(&first).unwrap();
+    assert_ne!(again.id, a.id);
+    build(&again.path).unwrap();
+
+    // Locked: nothing is listed or removed.
+    app.lock();
+    assert!(app.token_file_bindings().is_err());
+    assert!(app.remove_token_file_binding(&b.id).is_err());
+}
+
 fn load_plan(ws: Id, chain: Vec<Id>, dataset_id: Option<Id>) -> LoadPlan {
     LoadPlan {
         id: Id::new(),
@@ -469,4 +517,25 @@ fn only_a_regular_file_is_bound_as_a_linked_file() {
     let token = canary_file(files.path(), "jwt_svid.token");
     app.bind_token_file(&token).unwrap();
     assert!(app.linked_file_bindings().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_dataset_swapped_for_a_fifo_is_refused_without_blocking() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let rows = files.path().join("rows.csv");
+    std::fs::write(&rows, "id\n1\n").unwrap();
+    let app = new_app(root.path(), "fifo");
+    let ws = app.create_workspace("W").unwrap();
+    let d = app.save_dataset(linked_dataset(ws.meta.id, &canonical(&rows))).unwrap();
+    app.bind_linked_file(LinkedFileReferrer::Dataset { id: d.meta.id }, &rows).unwrap();
+    assert_eq!(app.run_dataset(&d).unwrap().rows.len(), 1);
+
+    // The same path, now a FIFO with no writer: opening it for reading would
+    // wait for one.
+    std::fs::remove_file(&rows).unwrap();
+    mkfifo(&rows);
+    let err = within_seconds(move || app.run_dataset(&d).map(|_| ()).map_err(|e| e.to_string())).unwrap_err();
+    assert!(err.contains("not a regular file"), "{err}");
 }

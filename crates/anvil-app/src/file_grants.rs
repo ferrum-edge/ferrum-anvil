@@ -13,8 +13,9 @@
 //!   goes to a newly created temporary file in that folder (never through an
 //!   existing file or link) that is then renamed over the chosen name. A
 //!   successful write spends the grant.
-//! - Grants expire, are bounded in number and are all revoked on lock. A
-//!   choice that was still in progress when the app locked grants nothing.
+//! - Grants expire, are bounded in number and are all revoked on lock and
+//!   when the desktop opens another profile. A choice that was still in
+//!   progress then grants nothing.
 //!
 //! A JWT-SVID token file (`jwt_svid_file`) is different: it is re-read at
 //! every send, so the choice is kept as a persistent binding in the vault
@@ -243,15 +244,9 @@ impl FileGrants {
             return Err(GrantError::Invalid("the chosen file has no absolute path".into()));
         }
         let path = std::fs::canonicalize(picked).map_err(io)?;
-        // Checked before opening, so a FIFO or device is never opened.
-        if !std::fs::metadata(&path).map_err(io)?.is_file() {
+        let Some((file, meta)) = open_regular(&path).map_err(io)? else {
             return Err(GrantError::Invalid("not a regular file".into()));
-        }
-        let file = File::open(&path).map_err(io)?;
-        let meta = file.metadata().map_err(io)?;
-        if !meta.is_file() {
-            return Err(GrantError::Invalid("not a regular file".into()));
-        }
+        };
         let id = file_id(&file, &meta).map_err(io)?;
         let file_name = display_name(path.file_name());
         self.insert(purpose, Target::Read { id, path }, file_name, generation)
@@ -295,13 +290,14 @@ impl FileGrants {
             return Err(GrantError::WrongPurpose);
         };
         // A folder on the path (or the file itself) swapped for a link now
-        // resolves somewhere else; anything but a regular file is not opened.
-        if std::fs::canonicalize(&path).map_err(io)? != path || !std::fs::metadata(&path).map_err(io)?.is_file() {
+        // resolves somewhere else.
+        if std::fs::canonicalize(&path).map_err(io)? != path {
             return Err(GrantError::Changed);
         }
-        let file = File::open(&path).map_err(io)?;
-        let meta = file.metadata().map_err(io)?;
-        if !meta.is_file() || file_id(&file, &meta).map_err(io)? != id {
+        let Some((file, meta)) = open_regular(&path).map_err(io)? else {
+            return Err(GrantError::Changed);
+        };
+        if file_id(&file, &meta).map_err(io)? != id {
             return Err(GrantError::Changed);
         }
         let max = purpose.max_read_bytes();
@@ -403,6 +399,31 @@ impl FileGrants {
     }
 }
 
+/// Open `path` for reading if it is a regular file; `None` when it is not.
+/// `path` is canonical, so it ends in no link. A FIFO or device found at the
+/// path never blocks the open, even one swapped in just before it: on Unix the
+/// file is opened non-blocking (which does not change how a regular file
+/// reads), never as a controlling terminal and without following a link swapped
+/// in for the last component, and the opened handle is checked. The path is
+/// checked first as a cheap filter; elsewhere that check is also what keeps a
+/// folder out, as one cannot be opened there.
+pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadata)>> {
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Ok(None);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    // The check that counts is on the opened handle, not on the path.
+    let meta = file.metadata()?;
+    Ok(meta.is_file().then_some((file, meta)))
+}
+
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
     let Target::Write { dir, name } = target else {
         return Err(GrantError::WrongPurpose);
@@ -457,4 +478,21 @@ fn display_name(name: Option<&std::ffi::OsStr>) -> String {
 fn size_label(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     if bytes.is_multiple_of(GIB) { format!("{} GiB", bytes / GIB) } else { format!("{} MiB", bytes >> 20) }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::open_regular;
+
+    #[test]
+    fn a_link_at_the_last_component_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("rows.csv");
+        std::fs::write(&target, "id\n1\n").unwrap();
+        let (_, meta) = open_regular(&target).unwrap().unwrap();
+        assert_eq!(meta.len(), 5);
+        let link = dir.path().join("link.csv");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_regular(&link).unwrap().is_none());
+    }
 }
