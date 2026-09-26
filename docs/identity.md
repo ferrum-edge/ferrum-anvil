@@ -44,6 +44,19 @@ errors), the send fails with `local.auth_preparation_failed` and the refresh
 token is kept for a later attempt (matrix AUTH-015). Client-credentials profiles
 behave as before. WebSocket, gRPC, SSE, TCP and UDP sessions behave the same way.
 
+Tokens are cached per **token identity**: the workspace isolation, token URL,
+client id, client-authentication method, grant, audience, scope and the
+profile's `token_cache_id`. A change to any of them needs its own token: a
+token acquired with client credentials is never sent for an
+authorization-code profile, and a token for one audience is never sent to
+another. Sends, sign-in, token status and sign-out all use the same key.
+
+Canceling an execution abandons its token request at once; the send ends as
+`canceled`, not dispatched. Locking (which clears the token cache) or signing
+out of a profile invalidates every acquisition, refresh and code redemption
+still in flight for it: a token that arrives afterwards is discarded, never
+cached and never sent, and that send ends as `canceled`.
+
 ### The sign-in flow (RFC 8252 native app, RFC 7636 S256)
 
 `anvil_identity::authorize_api` (or `App::oauth_sign_in` from the app layer):
@@ -83,8 +96,10 @@ behave as before. WebSocket, gRPC, SSE, TCP and UDP sessions behave the same way
    timeouts. A confidential client's secret, if the profile has one, is sent
    according to the profile's client-authentication setting.
 10. Stores the token in the engine token cache under the same key sends use
-    (`<workspace>|<token URL>|<client id>|<scope>`). Tokens are held in memory
-    only: they are cleared on lock, not written to disk and never exported.
+    (the token identity above). If the app was locked, or the user signed out
+    of this profile, since the attempt began, the redeemed token is discarded
+    and the attempt ends as canceled. Tokens are held in memory only: they are
+    cleared on lock, not written to disk and never exported.
 
 Codes, verifiers and tokens are zeroized on drop, are never part of an event,
 an error message, a log line or an execution record, and are never returned to
@@ -286,6 +301,8 @@ The webview only ever sees `IdentitySummary`.
 | Area | Tests | Matrix |
 |---|---|---|
 | Token cache: no client-credentials fallback, refresh, `invalid_grant`, issuer outage, single-flight | `crates/anvil-auth/src/oauth.rs` | AUTH-014, AUTH-015 |
+| Token identity (grant, audience, token-cache id, …); lock and sign-out win over in-flight acquisitions; dropped acquisitions cache nothing | `crates/anvil-auth/tests/oauth_cache.rs` | — |
+| Grant and audience switches through `Engine::execute`; cancel and lock while the issuer holds its answer | `crates/anvil-engine/tests/oauth_cache.rs` | — |
 | Callback binding, duplicates, bounded error codes | `crates/anvil-auth/src/oauth.rs` | AUTH-012, AUTH-013 |
 | Full browser round trip, then a real API request with the token; forged state; stray paths and DNS-rebinding Host; timeout; cancellation; denial; refresh; revoked refresh; issuer outage and recovery; the exchange uses the request's TLS profile; refused configurations; WebSocket parity | `crates/anvil-identity/tests/api_oauth.rs` | AUTH-011–015 |
 | Real providers typed unavailable; mock provider round trip and denial | `crates/anvil-identity/src/{provider,mock}.rs` | — |

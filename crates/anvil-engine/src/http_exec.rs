@@ -38,7 +38,7 @@ pub struct Prepared {
     pub proxy: Option<ProxyPlan>,
     pub trust: FerrumTrust,
     pub require_verified_tls: bool,
-    pub oauth_key: Option<(String, anvil_auth::oauth::OAuthResolved)>,
+    pub oauth_key: Option<(anvil_auth::oauth::TokenKey, anvil_auth::oauth::OAuthResolved)>,
     pub inferred: Vec<String>,
     /// The request's PROXY header (HTTP-family requests), for connections to
     /// the request's own `host:port`.
@@ -64,7 +64,7 @@ pub(crate) fn resolve_auth(
     auth: &AuthConfig,
     ctx: &ExecutionContext,
     r: &Resolver,
-    oauth_key: &mut Option<(String, anvil_auth::oauth::OAuthResolved)>,
+    oauth_key: &mut Option<(anvil_auth::oauth::TokenKey, anvil_auth::oauth::OAuthResolved)>,
 ) -> Result<ResolvedAuth, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     let sens = |v: &anvil_domain::secret::SensitiveValue, field: &str| -> Result<Zeroizing<String>, TransportFailure> {
@@ -516,10 +516,10 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
 
     // OAuth: acquire/refresh through the same transport before sending.
     // Interactive grants without a usable token fail here, typed, before the
-    // API request exists on the wire.
+    // API request exists on the wire. Canceling the execution abandons the
+    // token request.
     if let Some((key, cfg)) = &prep.oauth_key {
-        let http = crate::oauth_http::EngineTokenHttp { engine, ctx, settings: &prep.settings };
-        match engine.tokens.get_or_acquire(key, cfg, &http, Utc::now()).await {
+        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, &cancel).await {
             Ok(t) => {
                 replace_oauth(&mut prep.auth, &t);
             }

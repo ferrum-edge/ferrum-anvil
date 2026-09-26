@@ -3,13 +3,18 @@
 //! client), plus the engine half of the interactive authorization-code + PKCE
 //! flow: resolving the profile in effect, redeeming a code through this
 //! transport and caching the token under the key the engine sends with.
+//!
+//! Every acquisition is bound to the execution's cancellation token and to
+//! the token-cache generation it started in: a canceled execution abandons
+//! the token request at once, and a token that arrives after a lock or a
+//! sign-out is discarded rather than cached or sent.
 
 use crate::Engine;
 use crate::context::{ExecutionContext, resolve_sensitive};
 use crate::prepare;
 use crate::vars::Resolver;
 use anvil_auth::AuthError;
-use anvil_auth::oauth::{BoxFut, CachedToken, OAuthResolved, TokenHttp};
+use anvil_auth::oauth::{BoxFut, CachedToken, Generation, OAuthResolved, TokenHttp, TokenKey};
 use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::execution::{AttemptReason, FailureKind, Phase, TransportFailure};
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
@@ -27,6 +32,8 @@ pub struct EngineTokenHttp<'a> {
     pub engine: &'a Engine,
     pub ctx: &'a ExecutionContext,
     pub settings: &'a EffectiveSettings,
+    /// Cancels the token-endpoint request (the caller's execution or flow).
+    pub cancel: &'a CancellationToken,
 }
 
 impl TokenHttp for EngineTokenHttp<'_> {
@@ -88,7 +95,7 @@ impl TokenHttp for EngineTokenHttp<'_> {
                 proxy_header_withheld: None,
                 early_data: anvil_transport::http::EarlyDataIntent::Off,
             };
-            let mut outs = self.engine.http.execute(&plan, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+            let mut outs = self.engine.http.execute(&plan, 0, AttemptReason::Initial, &EventCtx::none(), self.cancel).await;
             let out = outs.pop().ok_or("no attempt")?;
             match (out.response, out.observation.failure) {
                 (Some(r), None) => Ok((r.status, out.body.to_vec())),
@@ -112,14 +119,36 @@ pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &R
         scope: r.resolve(&config.scope, "auth.scope")?,
         audience: r.resolve(&config.audience, "auth.audience")?,
         basic_client_auth: config.client_auth == OAuthClientAuth::BasicHeader,
+        token_cache_id: config.token_cache_id,
         refresh_skew_secs: config.refresh_skew_secs as i64,
     })
 }
 
-/// Token-cache key: one token per workspace isolation, issuer, client and
-/// scope. The interactive sign-in stores its token under this same key.
-pub(crate) fn cache_key(ctx: &ExecutionContext, resolved: &OAuthResolved) -> String {
-    format!("{}|{}|{}|{}", ctx.isolation, resolved.token_url, resolved.client_id, resolved.scope)
+/// Token-cache key: the workspace isolation plus every setting that decides
+/// what the token authorizes (issuer, client and its authentication, grant,
+/// audience, scope, token-cache id). Sends, the interactive sign-in, status
+/// and sign-out all use this same key.
+pub(crate) fn cache_key(ctx: &ExecutionContext, resolved: &OAuthResolved) -> TokenKey {
+    TokenKey::new(&ctx.isolation, resolved)
+}
+
+/// Reuse, refresh or acquire the token for `key`, abandoning the attempt as
+/// soon as `cancel` fires: the token request is dropped and nothing is
+/// cached.
+pub(crate) async fn acquire(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    settings: &EffectiveSettings,
+    key: &TokenKey,
+    cfg: &OAuthResolved,
+    cancel: &CancellationToken,
+) -> Result<CachedToken, AuthError> {
+    let http = EngineTokenHttp { engine, ctx, settings, cancel };
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(AuthError::Canceled("the execution was canceled while its OAuth token was being acquired".into())),
+        r = engine.tokens.get_or_acquire(key, cfg, &http, Utc::now()) => r,
+    }
 }
 
 /// Typed local failure for a token that could not be obtained before sending.
@@ -127,6 +156,9 @@ pub(crate) fn acquisition_failure(cfg: &OAuthResolved, e: AuthError, not_sent: &
     match e {
         AuthError::InteractionRequired(m) => {
             TransportFailure::new(Phase::Prepare, FailureKind::OAuthInteractionRequired, format!("{m} {not_sent}")).with_field("auth")
+        }
+        AuthError::Canceled(m) => {
+            TransportFailure::new(Phase::Prepare, FailureKind::Canceled, format!("{m}. {not_sent}")).with_field("auth")
         }
         other => TransportFailure::new(
             Phase::Prepare,
@@ -155,14 +187,14 @@ pub struct InteractiveOAuth {
     pub token_url: String,
     pub client_id: String,
     pub scope: String,
-    key: String,
+    key: TokenKey,
     resolved: OAuthResolved,
     settings: EffectiveSettings,
 }
 
 impl InteractiveOAuth {
     /// The engine token-cache key (contains no secret).
-    pub fn cache_key(&self) -> &str {
+    pub fn cache_key(&self) -> &TokenKey {
         &self.key
     }
 }
@@ -215,22 +247,38 @@ pub fn interactive_oauth(ctx: &ExecutionContext) -> Result<InteractiveOAuth, Tra
     })
 }
 
+/// The token-cache generation a sign-in starts in. Take it before the
+/// browser step and pass it to [`redeem_authorization_code`]: a lock or a
+/// sign-out in between then discards the redeemed token.
+pub fn sign_in_generation(engine: &Engine, target: &InteractiveOAuth) -> Generation {
+    engine.tokens.generation(&target.key)
+}
+
 /// Redeem an authorization code at the token endpoint through the engine
 /// transport (the request's TLS profile, proxy, DNS and timeouts) and cache
-/// the token where [`Engine::execute`] will find it.
+/// the token where [`Engine::execute`] will find it — only if the cache is
+/// still in `generation`; otherwise the token is dropped and the call fails
+/// with [`AuthError::Canceled`].
+#[allow(clippy::too_many_arguments)]
 pub async fn redeem_authorization_code(
     engine: &Engine,
     ctx: &ExecutionContext,
     target: &InteractiveOAuth,
+    generation: Generation,
     code: &str,
     verifier: &str,
     redirect_uri: &str,
+    cancel: &CancellationToken,
 ) -> Result<TokenSummary, AuthError> {
-    let http = EngineTokenHttp { engine, ctx, settings: &target.settings };
+    let http = EngineTokenHttp { engine, ctx, settings: &target.settings, cancel };
     engine.tokens.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t = anvil_auth::oauth::exchange_code(&target.resolved, code, verifier, redirect_uri, &http).await?;
     let summary = TokenSummary::of(&t);
-    engine.tokens.insert(&target.key, t);
+    if !engine.tokens.insert_if_current(&target.key, generation, t) {
+        return Err(AuthError::Canceled(
+            "the OAuth token cache was cleared (lock or sign-out) during this sign-in; the redeemed token was discarded".into(),
+        ));
+    }
     Ok(summary)
 }
 

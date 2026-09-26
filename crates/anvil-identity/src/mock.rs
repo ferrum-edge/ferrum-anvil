@@ -95,7 +95,7 @@ impl MockProvider {
         observer.event(FlowEvent::ExchangingCode);
         let ctx = ExecutionContext::standalone(RequestSpec::http("POST", &self.cfg.token_endpoint));
         let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
-        let http = EngineTokenHttp { engine: &self.engine, ctx: &ctx, settings: &settings };
+        let http = EngineTokenHttp { engine: &self.engine, ctx: &ctx, settings: &settings, cancel };
         let resolved = OAuthResolved {
             grant: OAuthGrant::AuthorizationCodePkce,
             token_url: self.cfg.token_endpoint.clone(),
@@ -104,6 +104,7 @@ impl MockProvider {
             scope: self.cfg.scope.clone(),
             audience: String::new(),
             basic_client_auth: false,
+            token_cache_id: None,
             refresh_skew_secs: 30,
         };
         let token = tokio::select! {

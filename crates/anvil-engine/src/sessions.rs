@@ -131,8 +131,9 @@ async fn apply_auth(
     body: &[u8],
 ) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
-        let http = crate::oauth_http::EngineTokenHttp { engine, ctx, settings: &prep.settings };
-        match engine.tokens.get_or_acquire(key, cfg, &http, Utc::now()).await {
+        // Canceling the execution drops the whole preparation (see
+        // `execute`), and the token request with it.
+        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, &CancellationToken::new()).await {
             Ok(t) => replace_oauth(&mut prep.auth, &t),
             Err(e) => return Err(crate::oauth_http::acquisition_failure(cfg, e, "Nothing was sent.")),
         }
@@ -1372,7 +1373,16 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     };
     let workload = (!workload.is_empty()).then_some(workload);
     let ctx = materialized.as_ref().unwrap_or(ctx);
-    match prepare_session(engine, ctx, &resolver, false).await {
+    // Preparation can wait on the network (an OAuth token request): a
+    // cancellation abandons it and nothing is sent.
+    let prepared = tokio::select! {
+        biased;
+        p = prepare_session(engine, ctx, &resolver, false) => p,
+        _ = cancel.cancelled() => {
+            Err(TransportFailure::new(Phase::Prepare, FailureKind::Canceled, "the execution was canceled before anything was sent"))
+        }
+    };
+    match prepared {
         Ok(prep) => run_prepared(prep, ctx, &resolver, started_at, events, cancel, None, workload).await,
         Err(f) => record::local_failure_with(ctx, &resolver, started_at, f, workload),
     }

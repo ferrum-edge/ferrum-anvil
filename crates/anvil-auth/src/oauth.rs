@@ -9,9 +9,16 @@
 //! * interactive grants (authorization code + PKCE, refresh token) never fall
 //!   back to client credentials: without a usable access or refresh token the
 //!   cache answers [`AuthError::InteractionRequired`] and nothing is sent
-//!   until the user signs in.
+//!   until the user signs in;
+//! * tokens are cached under a [`TokenKey`] made of every input that decides
+//!   what the token authorizes, so a profile never reuses a token issued for
+//!   another grant, audience, client, scope, issuer or token-cache identity;
+//! * clearing the cache (lock) or forgetting a token (sign-out) starts a new
+//!   generation: an acquisition, refresh or code redemption that began
+//!   before it can no longer store or return its token.
 
 use crate::AuthError;
+use anvil_domain::Id;
 use anvil_domain::auth::OAuthGrant;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
@@ -47,7 +54,42 @@ pub struct OAuthResolved {
     pub scope: String,
     pub audience: String,
     pub basic_client_auth: bool,
+    /// Token-cache identity of the profile: profiles with different ids
+    /// never share a token, even with otherwise identical settings.
+    pub token_cache_id: Option<Id>,
     pub refresh_skew_secs: i64,
+}
+
+/// Identity of a cached token: every input that changes what the token
+/// authorizes or whom it was issued to. Two sends share a token only when
+/// all of them are equal. Holds no secret.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TokenKey {
+    /// Cache partition chosen by the caller (the engine uses the workspace
+    /// isolation key).
+    pub partition: String,
+    pub token_url: String,
+    pub client_id: String,
+    pub basic_client_auth: bool,
+    pub grant: OAuthGrant,
+    pub audience: String,
+    pub scope: String,
+    pub token_cache_id: Option<Id>,
+}
+
+impl TokenKey {
+    pub fn new(partition: &str, cfg: &OAuthResolved) -> Self {
+        TokenKey {
+            partition: partition.to_string(),
+            token_url: cfg.token_url.clone(),
+            client_id: cfg.client_id.clone(),
+            basic_client_auth: cfg.basic_client_auth,
+            grant: cfg.grant,
+            audience: cfg.audience.clone(),
+            scope: cfg.scope.clone(),
+            token_cache_id: cfg.token_cache_id,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -64,10 +106,35 @@ impl CachedToken {
     }
 }
 
+/// The cache generation an acquisition started in, for one key. A token
+/// obtained under it may be stored only while it is still current, i.e. no
+/// [`TokenCache::clear`] and no [`TokenCache::remove`] of that key happened
+/// since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Generation {
+    cache: u64,
+    key: u64,
+}
+
+#[derive(Default)]
+struct CacheState {
+    entries: HashMap<TokenKey, CachedToken>,
+    /// Bumped by [`TokenCache::clear`].
+    generation: u64,
+    /// Bumped per key by [`TokenCache::remove`].
+    key_generations: HashMap<TokenKey, u64>,
+}
+
+impl CacheState {
+    fn generation(&self, key: &TokenKey) -> Generation {
+        Generation { cache: self.generation, key: self.key_generations.get(key).copied().unwrap_or(0) }
+    }
+}
+
 #[derive(Default)]
 pub struct TokenCache {
-    entries: Mutex<HashMap<String, CachedToken>>,
-    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    state: Mutex<CacheState>,
+    locks: Mutex<HashMap<TokenKey, Arc<tokio::sync::Mutex<()>>>>,
     /// Token endpoint requests performed (observability / storm tests).
     pub requests: std::sync::atomic::AtomicU64,
 }
@@ -77,26 +144,69 @@ impl TokenCache {
         Self::default()
     }
 
-    pub fn insert(&self, key: &str, t: CachedToken) {
-        self.entries.lock().insert(key.to_string(), t);
+    /// Store a token unconditionally. Token-endpoint results go through
+    /// [`insert_if_current`](Self::insert_if_current) instead.
+    pub fn insert(&self, key: &TokenKey, t: CachedToken) {
+        self.state.lock().entries.insert(key.clone(), t);
     }
 
-    pub fn get(&self, key: &str) -> Option<CachedToken> {
-        self.entries.lock().get(key).cloned()
+    pub fn get(&self, key: &TokenKey) -> Option<CachedToken> {
+        self.state.lock().entries.get(key).cloned()
     }
 
-    /// Forget one cached token (explicit sign-out, or a refresh token the
-    /// issuer rejected). Returns whether an entry existed.
-    pub fn remove(&self, key: &str) -> bool {
-        self.entries.lock().remove(key).is_some()
+    /// The current generation for `key`. Take it before starting a token
+    /// request whose result is to be cached.
+    pub fn generation(&self, key: &TokenKey) -> Generation {
+        self.state.lock().generation(key)
     }
 
+    /// Store `t` only if `generation` is still current for `key`; returns
+    /// whether it was stored. The check and the insert are atomic with
+    /// respect to [`clear`](Self::clear) and [`remove`](Self::remove), so a
+    /// token acquired before a lock or sign-out can never repopulate the
+    /// cache after it.
+    pub fn insert_if_current(&self, key: &TokenKey, generation: Generation, t: CachedToken) -> bool {
+        let mut st = self.state.lock();
+        if st.generation(key) != generation {
+            return false;
+        }
+        st.entries.insert(key.clone(), t);
+        true
+    }
+
+    /// Forget one cached token (explicit sign-out) and invalidate every
+    /// acquisition of that key still in flight. Returns whether an entry
+    /// existed.
+    pub fn remove(&self, key: &TokenKey) -> bool {
+        let mut st = self.state.lock();
+        let g = st.key_generations.entry(key.clone()).or_insert(0);
+        *g = g.wrapping_add(1);
+        st.entries.remove(key).is_some()
+    }
+
+    /// Forget every cached token (lock) and invalidate every acquisition
+    /// still in flight.
     pub fn clear(&self) {
-        self.entries.lock().clear();
+        let mut st = self.state.lock();
+        st.entries.clear();
+        st.key_generations.clear();
+        st.generation = st.generation.wrapping_add(1);
     }
 
-    fn lock_for(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.locks.lock().entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    /// Drop the entry holding a refresh token the issuer rejected, unless
+    /// the entry was replaced (a new sign-in) or the generation moved on.
+    fn forget_rejected_refresh(&self, key: &TokenKey, generation: Generation, rejected: &str) {
+        let mut st = self.state.lock();
+        if st.generation(key) != generation {
+            return;
+        }
+        if st.entries.get(key).and_then(|t| t.refresh_token.as_ref()).is_some_and(|rt| rt.as_str() == rejected) {
+            st.entries.remove(key);
+        }
+    }
+
+    fn lock_for(&self, key: &TokenKey) -> Arc<tokio::sync::Mutex<()>> {
+        self.locks.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 
     /// Return a usable token, refreshing or acquiring at most once for
@@ -108,27 +218,40 @@ impl TokenCache {
     ///   when a refresh token is cached; otherwise — or when the issuer
     ///   rejects the refresh token with `invalid_grant` — fail with
     ///   [`AuthError::InteractionRequired`]. No other grant is ever tried.
+    ///
+    /// The call belongs to the cache generation current when it starts. If
+    /// the cache is cleared or `key` is forgotten before it finishes, it
+    /// fails with [`AuthError::Canceled`] and caches nothing. Dropping the
+    /// future abandons the token request.
     pub async fn get_or_acquire(
         &self,
-        key: &str,
+        key: &TokenKey,
         cfg: &OAuthResolved,
         http: &dyn TokenHttp,
         now: DateTime<Utc>,
     ) -> Result<CachedToken, AuthError> {
-        if let Some(t) = self.get(key)
+        let (generation, cached) = {
+            let st = self.state.lock();
+            (st.generation(key), st.entries.get(key).cloned())
+        };
+        if let Some(t) = cached
             && t.usable(now, cfg.refresh_skew_secs)
         {
             return Ok(t);
         }
         let lock = self.lock_for(key);
         let _g = lock.lock().await;
+        if self.generation(key) != generation {
+            return Err(superseded());
+        }
         // Another caller may have refreshed while we waited.
-        if let Some(t) = self.get(key)
+        let cached = self.get(key);
+        if let Some(t) = &cached
             && t.usable(Utc::now(), cfg.refresh_skew_secs)
         {
-            return Ok(t);
+            return Ok(t.clone());
         }
-        let prior_refresh = self.get(key).and_then(|t| t.refresh_token.clone());
+        let prior_refresh = cached.and_then(|t| t.refresh_token);
         let interactive = cfg.grant != OAuthGrant::ClientCredentials;
         if prior_refresh.is_none() && interactive {
             return Err(AuthError::InteractionRequired(interaction_message(cfg.grant, None)));
@@ -147,7 +270,7 @@ impl TokenCache {
                 Err(TokenFailure::Rejected { error, .. }) if error == "invalid_grant" => {
                     // Expired or revoked refresh token: forget it so the next
                     // send does not retry it, and ask for a new sign-in.
-                    self.remove(key);
+                    self.forget_rejected_refresh(key, generation, &rt);
                     return Err(AuthError::InteractionRequired(interaction_message(cfg.grant, Some(&error))));
                 }
                 // Issuer unreachable or failing: keep the refresh token for a
@@ -156,9 +279,17 @@ impl TokenCache {
             },
             None => client_credentials(cfg, http).await?,
         };
-        self.insert(key, t.clone());
+        if !self.insert_if_current(key, generation, t.clone()) {
+            return Err(superseded());
+        }
         Ok(t)
     }
+}
+
+fn superseded() -> AuthError {
+    AuthError::Canceled(
+        "the OAuth token cache was cleared (lock or sign-out) while this token was being acquired; the token was discarded".into(),
+    )
 }
 
 fn interaction_message(grant: OAuthGrant, refresh_error: Option<&str>) -> String {
@@ -432,12 +563,17 @@ mod tests {
             scope: String::new(),
             audience: String::new(),
             basic_client_auth: true,
+            token_cache_id: None,
             refresh_skew_secs: 30,
         }
     }
 
     fn pkce_cfg() -> OAuthResolved {
         OAuthResolved { grant: OAuthGrant::AuthorizationCodePkce, client_secret: Zeroizing::new(String::new()), ..cfg() }
+    }
+
+    fn key(c: &OAuthResolved) -> TokenKey {
+        TokenKey::new("p", c)
     }
 
     fn expired_with_refresh(rt: &str) -> CachedToken {
@@ -457,7 +593,7 @@ mod tests {
         for _ in 0..50 {
             let (c, i) = (cache.clone(), issuer.clone());
             handles.push(tokio::spawn(async move {
-                c.get_or_acquire("k", &cfg(), i.as_ref(), Utc::now()).await.map(|t| t.access_token.to_string())
+                c.get_or_acquire(&key(&cfg()), &cfg(), i.as_ref(), Utc::now()).await.map(|t| t.access_token.to_string())
             }));
         }
         let mut tokens = Vec::new();
@@ -474,7 +610,7 @@ mod tests {
             let issuer = FakeIssuer::new();
             let cache = TokenCache::new();
             let c = OAuthResolved { grant, ..pkce_cfg() };
-            let e = cache.get_or_acquire("k", &c, &issuer, Utc::now()).await.err().expect("must not acquire");
+            let e = cache.get_or_acquire(&key(&c), &c, &issuer, Utc::now()).await.err().expect("must not acquire");
             assert!(matches!(e, AuthError::InteractionRequired(_)), "{e:?}");
             assert_eq!(issuer.calls.load(Ordering::SeqCst), 0, "no token request of any grant");
         }
@@ -485,13 +621,13 @@ mod tests {
         let issuer = FakeIssuer::new();
         *issuer.refresh_reply.lock() = Some((200, r#"{"access_token":"fresh","token_type":"Bearer","expires_in":60}"#.into()));
         let cache = TokenCache::new();
-        cache.insert("k", expired_with_refresh("rt-1"));
-        let t = cache.get_or_acquire("k", &pkce_cfg(), &issuer, Utc::now()).await.unwrap();
+        cache.insert(&key(&pkce_cfg()), expired_with_refresh("rt-1"));
+        let t = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.unwrap();
         assert_eq!(t.access_token.as_str(), "fresh");
         assert_eq!(t.refresh_token.as_deref().map(|s| s.as_str()), Some("rt-1"), "old refresh token stays valid when none is re-issued");
         assert_eq!(*issuer.grants.lock(), vec!["refresh_token".to_string()]);
         // Usable now: no further request.
-        cache.get_or_acquire("k", &pkce_cfg(), &issuer, Utc::now()).await.unwrap();
+        cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.unwrap();
         assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
     }
 
@@ -500,10 +636,10 @@ mod tests {
         let issuer = FakeIssuer::new();
         *issuer.refresh_reply.lock() = Some((400, r#"{"error":"invalid_grant"}"#.into()));
         let cache = TokenCache::new();
-        cache.insert("k", expired_with_refresh("rt-revoked"));
-        let e = cache.get_or_acquire("k", &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
+        cache.insert(&key(&pkce_cfg()), expired_with_refresh("rt-revoked"));
+        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
         assert!(matches!(&e, AuthError::InteractionRequired(m) if m.contains("invalid_grant")), "{e:?}");
-        assert!(cache.get("k").is_none(), "a rejected refresh token is not retried");
+        assert!(cache.get(&key(&pkce_cfg())).is_none(), "a rejected refresh token is not retried");
         assert_eq!(*issuer.grants.lock(), vec!["refresh_token".to_string()], "never falls back to client credentials");
     }
 
@@ -511,12 +647,12 @@ mod tests {
     async fn auth_015_issuer_outage_on_refresh_is_a_dependency_failure() {
         let issuer = FakeIssuer::new(); // refresh → transport failure
         let cache = TokenCache::new();
-        cache.insert("k", expired_with_refresh("rt-1"));
-        let e = cache.get_or_acquire("k", &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
+        cache.insert(&key(&pkce_cfg()), expired_with_refresh("rt-1"));
+        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
         assert!(matches!(e, AuthError::Acquisition(_)), "{e:?}");
-        assert!(cache.get("k").is_some(), "refresh token kept for a later attempt");
+        assert!(cache.get(&key(&pkce_cfg())).is_some(), "refresh token kept for a later attempt");
         *issuer.refresh_reply.lock() = Some((503, r#"{"error":"temporarily_unavailable"}"#.into()));
-        let e = cache.get_or_acquire("k", &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
+        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
         assert!(matches!(e, AuthError::Acquisition(_)), "{e:?}");
         assert!(issuer.grants.lock().iter().all(|g| g == "refresh_token"));
     }
@@ -525,8 +661,8 @@ mod tests {
     async fn client_credentials_refresh_failure_still_falls_back() {
         let issuer = FakeIssuer::new(); // refresh fails
         let cache = TokenCache::new();
-        cache.insert("k", expired_with_refresh("rt-1"));
-        let t = cache.get_or_acquire("k", &cfg(), &issuer, Utc::now()).await.unwrap();
+        cache.insert(&key(&cfg()), expired_with_refresh("rt-1"));
+        let t = cache.get_or_acquire(&key(&cfg()), &cfg(), &issuer, Utc::now()).await.unwrap();
         assert!(t.access_token.starts_with('t'));
         assert_eq!(*issuer.grants.lock(), vec!["refresh_token".to_string(), "client_credentials".to_string()]);
     }
