@@ -431,7 +431,7 @@ describe("Runner and Load tests keep their runs across navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Runner" }));
     fireEvent.click(await screen.findByRole("button", { name: "Run folder" }));
     await screen.findByRole("button", { name: "Stop run" });
-    expect(screen.getByRole("button", { name: "Runner (run in progress)" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Runner (run in progress)" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Requests" }));
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
@@ -482,7 +482,7 @@ describe("Runner and Load tests keep their runs across navigation", () => {
     fireEvent.click(await screen.findByLabelText(/I own these destinations/));
     fireEvent.click(screen.getByRole("button", { name: "Start load" }));
     await screen.findByRole("button", { name: "Stop run" });
-    expect(screen.getByRole("button", { name: "Load tests (run in progress)" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Load tests (run in progress)" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Requests" }));
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
