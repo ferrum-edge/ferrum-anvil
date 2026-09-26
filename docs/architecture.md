@@ -31,6 +31,13 @@ CLI (`anvil`) = same anvil-app services without a webview.
   key, clears token caches, pooled connections and TLS/QUIC session tickets,
   cancels executions and sessions, and stops load workers. The lock screen is
   only a view of that state.
+- **Pooled HTTP connections are bounded.** Each engine keeps at most 8 idle
+  HTTP/1.1 or HTTP/2 connections per pool key (isolation, destination and
+  security context) and 64 in total; one more closes the connection idle
+  longest. A background sweep closes connections idle for 90 s even when their
+  destination is never used again, and stops while the pool is empty. An
+  HTTP/2 connection counts as idle only with no request in flight, so neither
+  expiry nor eviction cuts a request short.
 - **Load traffic never runs in the UI process.** The desktop re-launches its
   own executable with a fixed, non-secret flag and sends the job over stdin.
   The job carries only the secrets its requests reference.
