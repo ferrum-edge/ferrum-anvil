@@ -20,6 +20,7 @@ pub mod log;
 pub mod mesh_pki;
 pub mod pki;
 pub mod policy;
+pub mod proxy_protocol;
 pub mod raw;
 pub mod streams;
 pub mod tlsserver;

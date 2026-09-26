@@ -359,13 +359,28 @@ pub async fn establish_guarded(
     cancel: &CancellationToken,
     total_deadline: Option<Instant>,
 ) -> Result<Established, (TransportFailure, Option<ConnectionObservation>)> {
+    establish_guarded_with(rec, target, dns, timeouts, proxy, cancel, total_deadline, None).await
+}
+
+/// [`establish_guarded`] with an optional PROXY protocol header before TLS.
+#[allow(clippy::too_many_arguments)]
+pub async fn establish_guarded_with(
+    rec: &mut Recorder,
+    target: &Target<'_>,
+    dns: &DnsConfig,
+    timeouts: &Timeouts,
+    proxy: Option<&ProxyPlan>,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
+    header: Option<connector::PreTlsHeader<'_>>,
+) -> Result<Established, (TransportFailure, Option<ConnectionObservation>)> {
     enum Ev<T> {
         Done(T),
         Canceled,
         Deadline,
     }
     let ev = {
-        let fut = connector::establish(rec, target, dns, timeouts, proxy);
+        let fut = connector::establish_with(rec, target, dns, timeouts, proxy, header);
         tokio::select! {
             r = fut => Ev::Done(r),
             _ = cancel.cancelled() => Ev::Canceled,

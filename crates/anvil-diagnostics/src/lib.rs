@@ -39,6 +39,9 @@ pub struct Draft {
     pub evidence: Vec<Evidence>,
     pub vars: Vec<(&'static str, String)>,
     pub extra_alternatives: Vec<String>,
+    /// Keys of catalog `fragments` appended to the alternatives (wording
+    /// shared by several findings, selected by evidence).
+    pub alt_fragments: Vec<&'static str>,
     pub extra_does_not_prove: Vec<String>,
     pub extra_remediation: Vec<Remediation>,
     pub extra_confirm_with: Vec<String>,
@@ -66,6 +69,7 @@ impl Draft {
             evidence: vec![],
             vars: vec![],
             extra_alternatives: vec![],
+            alt_fragments: vec![],
             extra_does_not_prove: vec![],
             extra_remediation: vec![],
             extra_confirm_with: vec![],
@@ -90,6 +94,14 @@ impl Draft {
 
     pub fn alt(mut self, s: impl Into<String>) -> Self {
         self.extra_alternatives.push(s.into());
+        self
+    }
+
+    /// Append the catalog fragment `key` to the alternatives.
+    pub fn alt_fragment(mut self, key: &'static str) -> Self {
+        if !self.alt_fragments.contains(&key) {
+            self.alt_fragments.push(key);
+        }
         self
     }
 

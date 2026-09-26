@@ -79,7 +79,15 @@ pub fn blank_observation(id: u64) -> ConnectionObservation {
         via_proxy: None,
         tls: None,
         prior_requests: 0,
+        proxy_header: None,
     }
+}
+
+/// A PROXY protocol header to write at the head of the connection, after
+/// TCP connect (and any forward-proxy tunnel) and before TLS.
+pub struct PreTlsHeader<'a> {
+    pub plan: &'a crate::proxy_protocol::HeaderPlan,
+    pub redact: crate::proxy_protocol::Redact<'a>,
 }
 
 /// Establish a stream to `target`, optionally through `proxy`.
@@ -89,6 +97,18 @@ pub async fn establish(
     dns_cfg: &DnsConfig,
     timeouts: &Timeouts,
     proxy: Option<&ProxyPlan>,
+) -> Result<Established, (TransportFailure, ConnectionObservation)> {
+    establish_with(rec, target, dns_cfg, timeouts, proxy, None).await
+}
+
+/// [`establish`] with an optional PROXY protocol header written before TLS.
+pub async fn establish_with(
+    rec: &mut Recorder,
+    target: &Target<'_>,
+    dns_cfg: &DnsConfig,
+    timeouts: &Timeouts,
+    proxy: Option<&ProxyPlan>,
+    header: Option<PreTlsHeader<'_>>,
 ) -> Result<Established, (TransportFailure, ConnectionObservation)> {
     let mut obs = blank_observation(next_connection_id());
     let stats = ConnStats::new();
@@ -146,7 +166,9 @@ pub async fn establish(
     rec.finish(conn_idx, PhaseStatus::Completed);
     obs.connect_attempts = connected.attempts;
     obs.remote_address = Some(connected.remote.to_string());
-    obs.local_address = connected.stream.local_addr().ok().map(|a| a.to_string());
+    let local_addr = connected.stream.local_addr().ok();
+    obs.local_address = local_addr.map(|a| a.to_string());
+    let remote_addr = connected.remote;
 
     let mut io: BoxIo = Box::new(CountingIo::new(connected.stream, stats.clone()));
 
@@ -184,6 +206,51 @@ pub async fn establish(
                 return Err((f, obs));
             }
             rec.finish(idx, PhaseStatus::Completed);
+        }
+    }
+
+    // ---- PROXY protocol header (head of the stream, before any TLS) ----
+    if let Some(h) = header {
+        use tokio::io::AsyncWriteExt;
+        let idx = rec.start(Phase::ProxyProtocolHeader);
+        // Behind a forward-proxy tunnel the socket addresses describe the
+        // proxy hop, not this stream; only configured addresses apply.
+        let (local, remote) = if proxy.is_some() { (None, None) } else { (local_addr, Some(remote_addr)) };
+        let built = match h.plan.build(local, remote, h.redact) {
+            Ok(b) => b,
+            Err(e) => {
+                rec.finish(idx, PhaseStatus::Failed);
+                let f =
+                    TransportFailure::new(Phase::ProxyProtocolHeader, FailureKind::BodySerialization, e).with_field("tcp.proxy_protocol");
+                return Err((f, obs));
+            }
+        };
+        let write = async {
+            io.write_all(&built.bytes).await?;
+            io.flush().await
+        };
+        let r = match ms(timeouts.request_write_ms) {
+            Some(d) => tokio::time::timeout(d, write).await.unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into())),
+            None => write.await,
+        };
+        match r {
+            Ok(()) => {
+                rec.finish_with(idx, PhaseStatus::Completed, crate::proxy_protocol::header_summary(&built.observation));
+                obs.proxy_header = Some(built.observation);
+            }
+            Err(e) => {
+                let timed_out = e.kind() == std::io::ErrorKind::TimedOut;
+                rec.finish(idx, if timed_out { PhaseStatus::TimedOut } else { PhaseStatus::Failed });
+                let mut f = TransportFailure::new(
+                    Phase::ProxyProtocolHeader,
+                    if timed_out { FailureKind::RequestWriteTimeout } else { FailureKind::RequestWriteFailed },
+                    format!("writing the PROXY protocol header failed: {e}"),
+                );
+                f.io_error_kind = Some(format!("{:?}", e.kind()));
+                f.os_error_code = e.raw_os_error();
+                obs.proxy_header = Some(built.observation);
+                return Err((f, obs));
+            }
         }
     }
 

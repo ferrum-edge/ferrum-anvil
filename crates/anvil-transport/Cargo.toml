@@ -32,6 +32,7 @@ hickory-resolver.workspace = true
 dns-lookup.workspace = true
 socket2.workspace = true
 sha2.workspace = true
+hmac.workspace = true
 base64.workspace = true
 hex.workspace = true
 flate2.workspace = true

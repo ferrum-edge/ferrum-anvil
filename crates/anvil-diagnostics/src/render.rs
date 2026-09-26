@@ -13,6 +13,10 @@ pub struct FindingsCatalog {
     pub version: String,
     pub locale: String,
     pub findings: HashMap<String, Template>,
+    /// Shared wording that rules attach to findings by evidence
+    /// ([`crate::Draft::alt_fragment`]).
+    #[serde(default)]
+    pub fragments: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -108,6 +112,7 @@ pub fn render(d: Draft) -> DiagnosticFinding {
     };
     let mut alternatives: Vec<String> = tpl.alternatives.iter().map(|a| fill(a, &d.vars)).collect();
     alternatives.extend(d.extra_alternatives);
+    alternatives.extend(d.alt_fragments.iter().filter_map(|k| cat.fragments.get(*k)).map(|t| fill(t, &d.vars)));
     let mut does_not_prove: Vec<String> = tpl.does_not_prove.iter().map(|a| fill(a, &d.vars)).collect();
     does_not_prove.extend(d.extra_does_not_prove);
     let mut remediation: Vec<Remediation> =

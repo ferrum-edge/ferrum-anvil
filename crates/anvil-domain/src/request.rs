@@ -318,6 +318,9 @@ pub struct TcpSpec {
     /// Stop reading after this many frames (0 = until idle/close/max bytes).
     #[serde(default)]
     pub expect_frames: u32,
+    /// PROXY protocol header written after TCP connect, before any TLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<crate::proxy_protocol::ProxyHeaderSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -331,6 +334,10 @@ pub struct UdpSpec {
     pub response_window_ms: u64,
     #[serde(default = "default_udp_max")]
     pub max_datagrams: u32,
+    /// PROXY v2 `DGRAM` envelope prepended to every datagram (DTLS: outside
+    /// the DTLS records, handshake included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<crate::proxy_protocol::DatagramEnvelopeSpec>,
 }
 
 fn default_stream_idle() -> u64 {

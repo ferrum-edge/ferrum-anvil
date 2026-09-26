@@ -1,7 +1,11 @@
 {
-  "version": "2026.09.25-7",
+  "version": "2026.09.25-8",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
+  "fragments": {
+    "alt.proxy_protocol.header_may_be_required": "The listener may require a PROXY protocol header, which Anvil did not send: a stream listener with PROXY protocol enabled (for example Ferrum Edge stream_proxy_protocol: true) closes a connection that does not begin with a valid header, without sending anything back.",
+    "alt.proxy_protocol.envelope_may_be_dropped": "The listener may have dropped the PROXY v2 envelope Anvil sent on each datagram. Envelope checks fail silently: an untrusted source address, an authentication tag that does not verify (wrong secret or listener identity), a sequence already used, or a timestamp outside the listener's freshness horizon."
+  },
   "findings": {
     "local.invalid_url": {
       "title": "The request URL is not valid",
@@ -2132,6 +2136,34 @@
       ],
       "confirm_with": [
         "Operator logs of the peer or the stream proxy at this time."
+      ]
+    },
+    "tcp.proxy_header_maybe_rejected": {
+      "title": "The PROXY protocol header may have been rejected",
+      "explanation": "Anvil wrote a {format} header ({length} bytes) at the head of the connection to {host}, and the peer then {how} without sending any data. A listener that requires PROXY protocol closes the connection this way when the header is malformed or arrives from a peer it does not trust, but the same close also happens for causes unrelated to the header. {malformed}",
+      "alternatives": [
+        "The address Anvil connected from is not a trusted proxy for this listener (for Ferrum Edge: not inside FERRUM_TRUSTED_PROXIES), so the listener closed before reading the header.",
+        "The listener does not accept this header version or form.",
+        "The header was accepted, and a proxy or gateway on the path then could not reach, or was refused by, its own upstream.",
+        "The listener does not expect a PROXY header and treated it as application data it could not use."
+      ],
+      "does_not_prove": [
+        "That the header was rejected: a layer-4 listener sends no reason when it closes.",
+        "Which check failed (the source trust, the header format, or something after the header).",
+        "That the connection from Anvil failed: its TCP setup completed and the header was written."
+      ],
+      "remediation": [
+        {
+          "text": "Compare the header recorded in the connection evidence with the listener's PROXY protocol settings, and check that the address Anvil connects from is a trusted proxy for the listener.",
+          "owner": "caller"
+        },
+        {
+          "text": "Check the stream listener's logs for this connection; Ferrum Edge logs a warning that names an untrusted peer or an invalid PROXY header.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "Operator logs for the stream listener at this time (Ferrum Edge: \"socket peer is not in FERRUM_TRUSTED_PROXIES\" or \"did not start with a valid PROXY header\")."
       ]
     },
     "auth.browser_session_required": {

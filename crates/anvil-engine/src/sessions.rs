@@ -585,6 +585,7 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
         read_idle_ms: 2_000,
         max_read_bytes: 1024 * 1024,
         expect_frames: 0,
+        proxy_protocol: None,
     });
     let mut b = base(engine, ctx, r, &["tcp", "tls"])?;
     no_auth(&b.prep, "TCP")?;
@@ -601,7 +602,12 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     for (i, p) in payloads.iter().enumerate() {
         rawtcp::encode_frame(spec.framing, p).map_err(|e| local(FailureKind::BodySerialization, e, &format!("tcp.payloads[{i}]")))?;
     }
+    let proxy_header =
+        spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some())).transpose()?;
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
+    if let Some(p) = &spec.proxy_protocol {
+        b.inferred.push(crate::proxy_protocol::header_note(p));
+    }
     let scheme = if use_tls { "tls" } else { "tcp" };
     let url = format!("{scheme}://{}", target.authority);
     let plan = rawtcp::TcpPlan {
@@ -621,6 +627,7 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
         display_url: b.redactor.url(&url),
         transcript: TranscriptLimits::default(),
         redact: Some(redact_fn(&b.redactor)),
+        proxy_header,
     };
     let body = concat(&payloads);
     let mut p = finish_prep(b, Plan::Tcp(plan), scheme.to_ascii_uppercase(), url, vec![], body, vec![]);
@@ -629,7 +636,13 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
 }
 
 fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
-    let spec = ctx.spec.udp.clone().unwrap_or(UdpSpec { dtls: false, datagrams: vec![], response_window_ms: 1_000, max_datagrams: 1_000 });
+    let spec = ctx.spec.udp.clone().unwrap_or(UdpSpec {
+        dtls: false,
+        datagrams: vec![],
+        response_window_ms: 1_000,
+        max_datagrams: 1_000,
+        proxy_protocol: None,
+    });
     let mut b = base(engine, ctx, r, &["udp", "dtls"])?;
     no_auth(&b.prep, "UDP")?;
     if let Some(p) = &b.prep.proxy {
@@ -641,7 +654,12 @@ fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     let target = b.prep.http.target.clone();
     let use_dtls = target.scheme == "dtls" || spec.dtls;
     let datagrams = decode_payloads(r, &spec.datagrams, "udp.datagrams")?;
+    let envelope =
+        spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::envelope_plan(p, ctx, r, &mut b.redactor, use_dtls)).transpose()?;
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
+    if let Some(e) = &envelope {
+        b.inferred.push(crate::proxy_protocol::envelope_note(e));
+    }
     let scheme = if use_dtls { "dtls" } else { "udp" };
     let url = format!("{scheme}://{}", target.authority);
     let display_url = b.redactor.url(&url);
@@ -667,6 +685,7 @@ fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
             display_url,
             transcript: TranscriptLimits::default(),
             redact: Some(redact_fn(&b.redactor)),
+            envelope,
         })
     } else {
         Plan::Udp(udp::UdpPlan {
@@ -680,6 +699,7 @@ fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
             display_url,
             transcript: TranscriptLimits::default(),
             redact: Some(redact_fn(&b.redactor)),
+            envelope,
         })
     };
     let body = concat(&datagrams);

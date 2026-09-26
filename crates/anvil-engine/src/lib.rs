@@ -17,6 +17,7 @@ pub mod oauth_http;
 mod pkcs12;
 pub mod prepare;
 pub mod preview;
+mod proxy_protocol;
 pub mod record;
 pub mod redact;
 pub mod sessions;

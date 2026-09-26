@@ -19,6 +19,7 @@ pub mod grpc;
 pub mod h3;
 pub mod http;
 pub mod net;
+pub mod proxy_protocol;
 pub mod rawtcp;
 pub mod recorder;
 pub mod session;
