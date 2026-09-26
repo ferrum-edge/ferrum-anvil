@@ -218,7 +218,7 @@ pub fn prepare_http(
     }
 
     // ---- body ----
-    let secrets_before_body = r.used_secrets.lock().len();
+    let secret_substitutions_before_body = r.secret_substitutions();
     let (body, inferred_ct, lint_target): (Vec<u8>, Option<String>, Option<(&str, String)>) = match &spec.body {
         Body::None => (vec![], None, None),
         Body::Raw { text, content_type } => {
@@ -358,7 +358,7 @@ pub fn prepare_http(
             (t.clone().into_bytes(), Some(ct), Some(("xml", t)))
         }
     };
-    let body_uses_secret = r.used_secrets.lock().len() > secrets_before_body;
+    let body_uses_secret = r.secret_substitutions() > secret_substitutions_before_body;
 
     // ---- lint ----
     let mut lint_bypassed = None;
@@ -447,6 +447,7 @@ mod tests {
     fn prepared(spec: &RequestSpec) -> PreparedHttp {
         let vars = vec![
             crate::vars::VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true },
+            crate::vars::VarEntry { name: "password_ref".into(), value: "{{password}}".into(), secret: false },
             crate::vars::VarEntry {
                 name: "credentials".into(),
                 value: r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#.into(),
@@ -486,6 +487,25 @@ mod tests {
         spec.headers.push(KeyValue::new("Authorization", "Basic {{password}}"));
         spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "{{user}}")] };
         assert!(!prepared(&spec).body_uses_secret);
+
+        // Reusing a secret already resolved in a header still marks the body.
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("password", "{{password}}")] };
+        assert!(prepared(&spec).body_uses_secret);
+
+        // Indirect expansion resolves the secret variable in the body.
+        spec.body = Body::Raw { text: "{{password_ref}}".into(), content_type: None };
+        assert!(prepared(&spec).body_uses_secret);
+
+        // Multipart text parts are resolved before their bytes are assembled.
+        spec.body = Body::Multipart {
+            parts: vec![anvil_domain::request::MultipartPart {
+                name: "password".into(),
+                enabled: true,
+                content: MultipartContent::Text { value: "{{password}}".into() },
+                content_type: None,
+            }],
+        };
+        assert!(prepared(&spec).body_uses_secret);
     }
 
     #[test]
