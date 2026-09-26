@@ -7,14 +7,20 @@
 //! parent ids, kinds, timestamps, sizes). While locked, the store has no key
 //! and every data operation fails with `Locked` — enforcement lives here, not
 //! in the UI.
+//!
+//! One connection serves the whole profile. Ordinary operations lock it per
+//! statement; [`Store::atomically`] holds it for its whole transaction and
+//! hands the closure a [`StoreTx`], so no other caller can write into, read
+//! from, commit or roll back a transaction it does not own.
 
 use crate::crypto::{self, Key};
 use anvil_domain::Id;
-use parking_lot::{Mutex, RwLock};
-use rusqlite::{Connection, OptionalExtension, params};
+use parking_lot::{Mutex, MutexGuard, RwLock};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
+use std::thread::ThreadId;
 use zeroize::Zeroizing;
 
 /// A decrypted history record and its optional stored response body.
@@ -35,6 +41,11 @@ pub enum StoreError {
     FutureSchema { found: i64, supported: i64 },
     #[error("stored data could not be decrypted (wrong key or corruption)")]
     Integrity,
+    /// A `Store` method was called from inside that store's own
+    /// [`Store::atomically`] closure. The closure must use its [`StoreTx`];
+    /// nested transactions are not supported.
+    #[error("store called directly from inside its own transaction; use the transaction handle")]
+    TransactionActive,
     #[error("database: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("serialization: {0}")]
@@ -107,6 +118,10 @@ pub struct HistoryEntry {
 pub struct Store {
     dir: PathBuf,
     conn: Mutex<Connection>,
+    /// Thread running an [`Store::atomically`] closure, set and cleared only
+    /// while that thread holds `conn`. A match means re-locking `conn` would
+    /// self-deadlock, so such calls fail with `TransactionActive` instead.
+    tx_owner: Mutex<Option<ThreadId>>,
     key: RwLock<Option<Key>>,
 }
 
@@ -156,7 +171,7 @@ impl Store {
         if found > DB_SCHEMA_VERSION {
             return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
         }
-        let store = Store { dir: dir.to_path_buf(), conn: Mutex::new(conn), key: RwLock::new(Some(key)) };
+        let store = Store { dir: dir.to_path_buf(), conn: Mutex::new(conn), tx_owner: Mutex::new(None), key: RwLock::new(Some(key)) };
         store.migrate(found)?;
         store.verify_key()?;
         Ok(store)
@@ -183,7 +198,7 @@ impl Store {
     /// A sealed canary proves the key matches this database.
     fn verify_key(&self) -> Result<()> {
         let key = self.key()?;
-        let conn = self.conn.lock();
+        let conn = self.conn()?;
         let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
         match canary {
             Some(c) => {
@@ -208,6 +223,16 @@ impl Store {
 
     fn key(&self) -> Result<Key> {
         self.key.read().clone().ok_or(StoreError::Locked)
+    }
+
+    /// The connection for one ordinary operation. It waits for a transaction
+    /// open on another thread to finish, so it never runs inside a
+    /// transaction it does not own.
+    fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        if *self.tx_owner.lock() == Some(std::thread::current().id()) {
+            return Err(StoreError::TransactionActive);
+        }
+        Ok(self.conn.lock())
     }
 
     pub fn is_locked(&self) -> bool {
@@ -247,65 +272,32 @@ impl Store {
         value: &T,
     ) -> Result<()> {
         let key = self.key()?;
-        let json = Zeroizing::new(serde_json::to_vec(value)?);
-        let id_s = id.to_string();
-        let env = crypto::seal(&key, &aad("objects", kind, &id_s), &json);
-        self.conn.lock().execute(
-            "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(kind,id) DO UPDATE SET workspace_id=excluded.workspace_id, parent_id=excluded.parent_id, sort_key=excluded.sort_key, updated_at=excluded.updated_at, payload=excluded.payload",
-            params![kind, id_s, workspace_id.map(|w| w.to_string()), parent_id.map(|p| p.to_string()), sort_key, chrono::Utc::now().timestamp_millis(), env],
-        )?;
-        Ok(())
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.put(kind, id, workspace_id, parent_id, sort_key, value)
     }
 
     pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
         let key = self.key()?;
-        let id_s = id.to_string();
-        let env: Option<Vec<u8>> = self
-            .conn
-            .lock()
-            .query_row("SELECT payload FROM objects WHERE kind=?1 AND id=?2", params![kind, id_s], |r| r.get(0))
-            .optional()?;
-        match env {
-            None => Ok(None),
-            Some(e) => {
-                let pt = crypto::open(&key, &aad("objects", kind, &id_s), &e).map_err(|_| StoreError::Integrity)?;
-                Ok(Some(serde_json::from_slice(&pt)?))
-            }
-        }
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.get(kind, id)
     }
 
     pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         let key = self.key()?;
-        let conn = self.conn.lock();
-        let mut out = Vec::new();
-        let rows: Vec<(String, Vec<u8>)> = match workspace_id {
-            Some(w) => {
-                let mut st =
-                    conn.prepare("SELECT id, payload FROM objects WHERE kind=?1 AND workspace_id=?2 ORDER BY sort_key, updated_at")?;
-                st.query_map(params![kind, w.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
-            }
-            None => {
-                let mut st = conn.prepare("SELECT id, payload FROM objects WHERE kind=?1 ORDER BY sort_key, updated_at")?;
-                st.query_map(params![kind], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
-            }
-        };
-        for (id, env) in rows {
-            let pt = crypto::open(&key, &aad("objects", kind, &id), &env).map_err(|_| StoreError::Integrity)?;
-            out.push(serde_json::from_slice(&pt)?);
-        }
-        Ok(out)
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.list(kind, workspace_id)
     }
 
     pub fn delete(&self, kind: &str, id: &Id) -> Result<bool> {
-        let _ = self.key()?;
-        Ok(self.conn.lock().execute("DELETE FROM objects WHERE kind=?1 AND id=?2", params![kind, id.to_string()])? > 0)
+        let key = self.key()?;
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.delete(kind, id)
     }
 
     /// Delete every object belonging to a workspace (and the workspace).
     pub fn delete_workspace(&self, ws: &Id) -> Result<()> {
         let _ = self.key()?;
-        let mut conn = self.conn.lock();
+        let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM objects WHERE workspace_id=?1", params![ws.to_string()])?;
         tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws.to_string()])?;
@@ -318,7 +310,7 @@ impl Store {
 
     pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
         let _ = self.key()?;
-        let conn = self.conn.lock();
+        let conn = self.conn()?;
         let mut st = conn.prepare("SELECT kind,id,workspace_id,parent_id,sort_key,updated_at FROM objects WHERE kind=?1")?;
         let rows = st
             .query_map(params![kind], |r| {
@@ -339,34 +331,20 @@ impl Store {
 
     pub fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
         let key = self.key()?;
-        let payload = Zeroizing::new(serde_json::to_vec(&serde_json::json!({"label": label, "value": value}))?);
-        let id_s = id.to_string();
-        let env = crypto::seal(&key, &aad("secrets", "secret", &id_s), &payload);
-        self.conn.lock().execute(
-            "INSERT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
-            params![id_s, workspace_id.map(|w| w.to_string()), chrono::Utc::now().timestamp_millis(), env],
-        )?;
-        Ok(())
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.put_secret(id, workspace_id, label, value)
     }
 
     /// Returns (label, value).
     pub fn get_secret(&self, id: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
         let key = self.key()?;
-        let id_s = id.to_string();
-        let env: Option<Vec<u8>> =
-            self.conn.lock().query_row("SELECT payload FROM secrets WHERE id=?1", params![id_s], |r| r.get(0)).optional()?;
-        let Some(env) = env else { return Ok(None) };
-        let pt = crypto::open(&key, &aad("secrets", "secret", &id_s), &env).map_err(|_| StoreError::Integrity)?;
-        let v: serde_json::Value = serde_json::from_slice(&pt)?;
-        Ok(Some((
-            v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            Zeroizing::new(v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string()),
-        )))
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.get_secret(id)
     }
 
     pub fn list_secret_ids(&self, workspace_id: Option<&Id>) -> Result<Vec<String>> {
         let _ = self.key()?;
-        let conn = self.conn.lock();
+        let conn = self.conn()?;
         let ids = match workspace_id {
             Some(w) => {
                 let mut st = conn.prepare("SELECT id FROM secrets WHERE workspace_id=?1")?;
@@ -381,9 +359,9 @@ impl Store {
     }
 
     pub fn delete_secret(&self, id: &Id) -> Result<()> {
-        let _ = self.key()?;
-        self.conn.lock().execute("DELETE FROM secrets WHERE id=?1", params![id.to_string()])?;
-        Ok(())
+        let key = self.key()?;
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.delete_secret(id)
     }
 
     // ------------------------------------------------------------ blobs
@@ -397,10 +375,13 @@ impl Store {
         m.update(b"anvil-blob-id-v1");
         m.update(bytes);
         let id = hex::encode(&m.finalize().into_bytes()[..20]);
-        let exists: Option<i64> = self.conn.lock().query_row("SELECT 1 FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        // One lock for check and insert: a concurrent put of the same bytes
+        // cannot slip in between and trip the primary key.
+        let conn = self.conn()?;
+        let exists: Option<i64> = conn.query_row("SELECT 1 FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
         if exists.is_none() {
             let env = crypto::seal(&key, &aad("blobs", "blob", &id), bytes);
-            self.conn.lock().execute(
+            conn.execute(
                 "INSERT INTO blobs(id,size,created_at,payload) VALUES(?1,?2,?3,?4)",
                 params![id, bytes.len() as i64, chrono::Utc::now().timestamp_millis(), env],
             )?;
@@ -414,16 +395,15 @@ impl Store {
     /// only the keyed blob id, never content.
     pub fn pin_blob(&self, id: &str) -> Result<()> {
         let _ = self.key()?;
-        self.conn
-            .lock()
-            .execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
+        let conn = self.conn()?;
+        conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
         Ok(())
     }
 
     /// Drop a blob's pin and delete it unless a history body still uses it.
     pub fn release_blob(&self, id: &str) -> Result<()> {
         let _ = self.key()?;
-        let mut conn = self.conn.lock();
+        let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM meta WHERE key=?1", params![format!("pin:{id}")])?;
         tx.execute("DELETE FROM blobs WHERE id=?1 AND id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL)", params![id])?;
@@ -433,8 +413,7 @@ impl Store {
 
     pub fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let key = self.key()?;
-        let env: Option<Vec<u8>> =
-            self.conn.lock().query_row("SELECT payload FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        let env: Option<Vec<u8>> = self.conn()?.query_row("SELECT payload FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
         match env {
             None => Ok(None),
             Some(e) => Ok(Some(crypto::open(&key, &aad("blobs", "blob", id), &e).map_err(|_| StoreError::Integrity)?)),
@@ -461,7 +440,7 @@ impl Store {
         let id_s = id.to_string();
         let env = crypto::seal(&key, &aad("history", "record", &id_s), &json);
         let size = env.len() as i64 + body.map(|b| b.len() as i64).unwrap_or(0);
-        self.conn.lock().execute(
+        self.conn()?.execute(
             "INSERT OR REPLACE INTO history(id,workspace_id,request_id,started_at,size,body_blob,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![id_s, workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), started_at_ms, size, body_blob, env],
         )?;
@@ -470,7 +449,7 @@ impl Store {
 
     pub fn list_history(&self, workspace_id: Option<&Id>, request_id: Option<&Id>, limit: usize) -> Result<Vec<HistoryEntry>> {
         let _ = self.key()?;
-        let conn = self.conn.lock();
+        let conn = self.conn()?;
         let mut st = conn.prepare(
             "SELECT id,workspace_id,request_id,started_at,size FROM history WHERE (?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR request_id=?2) ORDER BY started_at DESC LIMIT ?3",
         )?;
@@ -485,8 +464,7 @@ impl Store {
     pub fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
         let key = self.key()?;
         let row: Option<(Vec<u8>, Option<String>)> = self
-            .conn
-            .lock()
+            .conn()?
             .query_row("SELECT payload, body_blob FROM history WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         let Some((env, blob)) = row else { return Ok(None) };
@@ -502,7 +480,7 @@ impl Store {
     /// Enforce history retention by age and total bytes; removes orphaned blobs.
     pub fn prune_history(&self, max_age_days: u32, max_total_bytes: u64) -> Result<usize> {
         let _ = self.key()?;
-        let mut conn = self.conn.lock();
+        let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         let cutoff = chrono::Utc::now().timestamp_millis() - (max_age_days as i64) * 86_400_000;
         let mut removed = tx.execute("DELETE FROM history WHERE started_at < ?1", params![cutoff])?;
@@ -531,9 +509,8 @@ impl Store {
 
     pub fn clear_history(&self, workspace_id: Option<&Id>) -> Result<()> {
         let _ = self.key()?;
-        self.conn
-            .lock()
-            .execute("DELETE FROM history WHERE (?1 IS NULL OR workspace_id=?1)", params![workspace_id.map(|w| w.to_string())])?;
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM history WHERE (?1 IS NULL OR workspace_id=?1)", params![workspace_id.map(|w| w.to_string())])?;
         Ok(())
     }
 
@@ -544,7 +521,7 @@ impl Store {
         let json = serde_json::to_vec(report)?;
         let id_s = id.to_string();
         let env = crypto::seal(&key, &aad("load_reports", "report", &id_s), &json);
-        self.conn.lock().execute(
+        self.conn()?.execute(
             "INSERT OR REPLACE INTO load_reports(id,workspace_id,started_at,payload) VALUES(?1,?2,?3,?4)",
             params![id_s, workspace_id.map(|w| w.to_string()), started_at_ms, env],
         )?;
@@ -553,7 +530,7 @@ impl Store {
 
     pub fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         let key = self.key()?;
-        let conn = self.conn.lock();
+        let conn = self.conn()?;
         let mut st = conn.prepare("SELECT id,payload FROM load_reports WHERE (?1 IS NULL OR workspace_id=?1) ORDER BY started_at DESC")?;
         let rows: Vec<(String, Vec<u8>)> = st
             .query_map(params![workspace_id.map(|w| w.to_string())], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -568,27 +545,31 @@ impl Store {
 
     pub fn delete_load_report(&self, id: &Id) -> Result<bool> {
         let _ = self.key()?;
-        Ok(self.conn.lock().execute("DELETE FROM load_reports WHERE id=?1", params![id.to_string()])? > 0)
+        Ok(self.conn()?.execute("DELETE FROM load_reports WHERE id=?1", params![id.to_string()])? > 0)
     }
 
     // ------------------------------------------------------------ atomicity
 
-    /// Run `f` inside one SQLite transaction; any error rolls everything back.
-    pub fn atomically<R>(&self, f: impl FnOnce(&Store) -> Result<R>) -> Result<R> {
-        {
-            let conn = self.conn.lock();
-            conn.execute_batch("BEGIN IMMEDIATE")?;
-        }
-        match f(self) {
-            Ok(r) => {
-                self.conn.lock().execute_batch("COMMIT")?;
-                Ok(r)
-            }
-            Err(e) => {
-                let _ = self.conn.lock().execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+    /// Run `f` inside one SQLite transaction owned by this call. An error or
+    /// panic in `f` rolls back `f`'s writes and nothing else.
+    ///
+    /// The connection stays locked from `BEGIN` to `COMMIT`/`ROLLBACK`, so
+    /// every other operation, on any thread, waits for the transaction to end
+    /// instead of joining it or reading its uncommitted rows. `f` works through
+    /// the [`StoreTx`] it is given: calling this `Store` from inside `f`,
+    /// including a nested `atomically`, fails with
+    /// [`StoreError::TransactionActive`] instead of deadlocking. `f` must not
+    /// wait on another thread that uses this store.
+    pub fn atomically<R>(&self, f: impl FnOnce(&StoreTx<'_>) -> Result<R>) -> Result<R> {
+        let _ = self.key()?;
+        let mut conn = self.conn()?;
+        // Declared after `conn` so the owner is cleared before the lock is
+        // released, and before `tx` so the transaction ends first.
+        let _owner = TxOwner::claim(&self.tx_owner);
+        let tx = StoreTx { store: self, tx: conn.transaction_with_behavior(TransactionBehavior::Immediate)? };
+        let r = f(&tx)?;
+        tx.tx.commit()?;
+        Ok(r)
     }
 
     /// Consistent copy of the database (ciphertext) for restore checkpoints.
@@ -598,7 +579,7 @@ impl Store {
         std::fs::create_dir_all(&dir)?;
         let safe: String = label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
         let path = dir.join(format!("{}-{safe}.db", chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ")));
-        let conn = self.conn.lock();
+        let conn = self.conn()?;
         conn.execute("VACUUM INTO ?1", params![path.display().to_string()])?;
         Ok(path)
     }
@@ -606,10 +587,172 @@ impl Store {
     /// Replace the live database with a checkpoint (used after a failed import).
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
         let _ = self.key()?;
-        let mut conn = self.conn.lock();
+        let mut conn = self.conn()?;
         let src = Connection::open(path)?;
         let backup = rusqlite::backup::Backup::new(&src, &mut conn)?;
         backup.run_to_completion(256, std::time::Duration::from_millis(0), None)?;
+        Ok(())
+    }
+}
+
+/// Marks the current thread as the transaction owner until dropped. Claimed
+/// and dropped only while the connection lock is held.
+struct TxOwner<'a>(&'a Mutex<Option<ThreadId>>);
+
+impl<'a> TxOwner<'a> {
+    fn claim(slot: &'a Mutex<Option<ThreadId>>) -> TxOwner<'a> {
+        *slot.lock() = Some(std::thread::current().id());
+        TxOwner(slot)
+    }
+}
+
+impl Drop for TxOwner<'_> {
+    fn drop(&mut self) {
+        *self.0.lock() = None;
+    }
+}
+
+/// The open transaction of one [`Store::atomically`] call. It owns the
+/// store's connection until the call returns; nothing else can use it.
+/// Every operation still fails with `Locked` once the store is locked.
+pub struct StoreTx<'a> {
+    store: &'a Store,
+    tx: Transaction<'a>,
+}
+
+impl StoreTx<'_> {
+    fn records(&self) -> Result<Records<'_>> {
+        Ok(Records { key: self.store.key()?, conn: &self.tx })
+    }
+
+    pub fn put<T: Serialize>(
+        &self,
+        kind: &str,
+        id: &Id,
+        workspace_id: Option<&Id>,
+        parent_id: Option<&Id>,
+        sort_key: f64,
+        value: &T,
+    ) -> Result<()> {
+        self.records()?.put(kind, id, workspace_id, parent_id, sort_key, value)
+    }
+
+    pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
+        self.records()?.get(kind, id)
+    }
+
+    pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+        self.records()?.list(kind, workspace_id)
+    }
+
+    pub fn delete(&self, kind: &str, id: &Id) -> Result<bool> {
+        self.records()?.delete(kind, id)
+    }
+
+    pub fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
+        self.records()?.put_secret(id, workspace_id, label, value)
+    }
+
+    /// Returns (label, value).
+    pub fn get_secret(&self, id: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
+        self.records()?.get_secret(id)
+    }
+
+    pub fn delete_secret(&self, id: &Id) -> Result<()> {
+        self.records()?.delete_secret(id)
+    }
+}
+
+/// Object and secret operations on one connection: a `Store`'s (autocommit)
+/// or a `StoreTx`'s (inside its transaction).
+struct Records<'c> {
+    key: Key,
+    conn: &'c Connection,
+}
+
+impl Records<'_> {
+    fn put<T: Serialize>(
+        &self,
+        kind: &str,
+        id: &Id,
+        workspace_id: Option<&Id>,
+        parent_id: Option<&Id>,
+        sort_key: f64,
+        value: &T,
+    ) -> Result<()> {
+        let json = Zeroizing::new(serde_json::to_vec(value)?);
+        let id_s = id.to_string();
+        let env = crypto::seal(&self.key, &aad("objects", kind, &id_s), &json);
+        self.conn.execute(
+            "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(kind,id) DO UPDATE SET workspace_id=excluded.workspace_id, parent_id=excluded.parent_id, sort_key=excluded.sort_key, updated_at=excluded.updated_at, payload=excluded.payload",
+            params![kind, id_s, workspace_id.map(|w| w.to_string()), parent_id.map(|p| p.to_string()), sort_key, chrono::Utc::now().timestamp_millis(), env],
+        )?;
+        Ok(())
+    }
+
+    fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
+        let id_s = id.to_string();
+        let env: Option<Vec<u8>> =
+            self.conn.query_row("SELECT payload FROM objects WHERE kind=?1 AND id=?2", params![kind, id_s], |r| r.get(0)).optional()?;
+        match env {
+            None => Ok(None),
+            Some(e) => {
+                let pt = crypto::open(&self.key, &aad("objects", kind, &id_s), &e).map_err(|_| StoreError::Integrity)?;
+                Ok(Some(serde_json::from_slice(&pt)?))
+            }
+        }
+    }
+
+    fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        let rows: Vec<(String, Vec<u8>)> = match workspace_id {
+            Some(w) => {
+                let mut st =
+                    self.conn.prepare("SELECT id, payload FROM objects WHERE kind=?1 AND workspace_id=?2 ORDER BY sort_key, updated_at")?;
+                st.query_map(params![kind, w.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
+            }
+            None => {
+                let mut st = self.conn.prepare("SELECT id, payload FROM objects WHERE kind=?1 ORDER BY sort_key, updated_at")?;
+                st.query_map(params![kind], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
+            }
+        };
+        for (id, env) in rows {
+            let pt = crypto::open(&self.key, &aad("objects", kind, &id), &env).map_err(|_| StoreError::Integrity)?;
+            out.push(serde_json::from_slice(&pt)?);
+        }
+        Ok(out)
+    }
+
+    fn delete(&self, kind: &str, id: &Id) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM objects WHERE kind=?1 AND id=?2", params![kind, id.to_string()])? > 0)
+    }
+
+    fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
+        let payload = Zeroizing::new(serde_json::to_vec(&serde_json::json!({"label": label, "value": value}))?);
+        let id_s = id.to_string();
+        let env = crypto::seal(&self.key, &aad("secrets", "secret", &id_s), &payload);
+        self.conn.execute(
+            "INSERT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
+            params![id_s, workspace_id.map(|w| w.to_string()), chrono::Utc::now().timestamp_millis(), env],
+        )?;
+        Ok(())
+    }
+
+    fn get_secret(&self, id: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
+        let id_s = id.to_string();
+        let env: Option<Vec<u8>> = self.conn.query_row("SELECT payload FROM secrets WHERE id=?1", params![id_s], |r| r.get(0)).optional()?;
+        let Some(env) = env else { return Ok(None) };
+        let pt = crypto::open(&self.key, &aad("secrets", "secret", &id_s), &env).map_err(|_| StoreError::Integrity)?;
+        let v: serde_json::Value = serde_json::from_slice(&pt)?;
+        Ok(Some((
+            v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            Zeroizing::new(v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string()),
+        )))
+    }
+
+    fn delete_secret(&self, id: &Id) -> Result<()> {
+        self.conn.execute("DELETE FROM secrets WHERE id=?1", params![id.to_string()])?;
         Ok(())
     }
 }

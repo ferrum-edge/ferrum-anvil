@@ -160,7 +160,10 @@ impl App {
         }
         let checkpoint = self.store.checkpoint("before-import")?;
         let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.contains(id);
-        let res = self.store.atomically(|s| {
+        // A failure rolls back this import's own transaction and nothing else.
+        // The checkpoint is never restored automatically: that would also
+        // erase whatever other callers saved since it was taken.
+        self.store.atomically(|s| {
             for w in &g.workspaces {
                 if !skip(&w.meta.id) {
                     s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, w)?;
@@ -216,12 +219,7 @@ impl App {
                 }
             }
             Ok(())
-        });
-        if let Err(e) = res {
-            // Belt and braces: the transaction rolled back; also restore the checkpoint.
-            let _ = self.store.restore_checkpoint(&checkpoint);
-            return Err(e.into());
-        }
+        })?;
         for (sha, bytes) in &g.attachments {
             let r = self.put_attachment(sha, bytes, None)?;
             if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = r

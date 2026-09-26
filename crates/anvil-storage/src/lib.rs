@@ -11,7 +11,7 @@ pub mod store;
 pub mod vault;
 
 pub use crypto::{KdfParams, Key};
-pub use store::{Store, StoreError, kind};
+pub use store::{Store, StoreError, StoreTx, kind};
 pub use vault::{ProfileHeader, VaultError};
 
 /// Default platform data directory for Anvil profiles.

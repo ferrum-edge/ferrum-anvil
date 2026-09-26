@@ -48,7 +48,9 @@ commands return `LOCKED` until unlock.
   export passphrase) into a new profile. It does not need the original OS
   keychain or data key.
 - **Bad import:** every import takes a checkpoint first (`VACUUM INTO`) and runs
-  in one transaction; a failure rolls back and restores the checkpoint.
+  in one transaction; a failure rolls back that transaction only. Changes saved
+  meanwhile by other commands are kept, so the checkpoint is not restored
+  automatically; it stays on disk for a manual restore.
 
 ## Export and import
 
