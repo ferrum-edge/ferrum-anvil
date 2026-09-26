@@ -178,6 +178,13 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
     let mut objects = serde_json::to_value(graph)?;
     let san = sanitize::sanitize(&mut objects);
     let mut excluded = Vec::new();
+    // Stored files whose content could not be read here travel without it.
+    for u in crate::validate::uncarried_attachments(graph)? {
+        let entry = format!("a stored file of {} (its content could not be read; it fails until the file is attached again)", u.item);
+        if !excluded.contains(&entry) {
+            excluded.push(entry);
+        }
+    }
     let encrypted = !matches!(opts.mode, ExportMode::ShareSafely);
     if encrypted && opts.passphrase.map(|p| p.len() < 8).unwrap_or(true) {
         return Err(BundleError::Invalid("encrypted exports need an export passphrase of at least 8 characters".into()));

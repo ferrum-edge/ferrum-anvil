@@ -2,12 +2,15 @@
 
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
-use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
+use anvil_domain::request::{
+    AttachmentRef, Body, GrpcMode, GrpcSchemaSource, GrpcSpec, GrpcWire, KeyValue, MultipartContent, MultipartPart, Protocol, RequestSpec,
+};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::TlsProfile;
 use anvil_domain::workspace::*;
 use anvil_portability::bundle::{self, BundleError, BundleKind, ExportMode, ExportOptions};
-use anvil_portability::plan::{self, ConflictPolicy};
+use anvil_portability::plan::{self, ConflictPolicy, Existing, ExistingWorkspace};
+use anvil_portability::validate::{self, UncarriedAttachment};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::KdfParams;
 use std::collections::HashSet;
@@ -298,6 +301,28 @@ fn data_008_imports_never_activate_bypass_or_trust() {
     assert!(opened.warnings.iter().any(|w| w.contains("0-RTT early data")));
 }
 
+/// App settings travel only in a full backup, whose restore runs the same
+/// normalisation: they are the lowest settings layer of every workspace's
+/// requests, so they are normalised like workspace, folder and request
+/// settings.
+#[test]
+fn data_008_app_settings_are_normalised_like_other_settings() {
+    use anvil_domain::settings::{AppSettings, EarlyDataPolicy, RedirectPolicy, SettingsOverrides};
+    let mut g = sample();
+    let defaults = SettingsOverrides {
+        redirects: Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true }),
+        early_data: Some(EarlyDataPolicy { enabled: true, extra_methods: vec![] }),
+        ..Default::default()
+    };
+    g.app_settings = Some(AppSettings { defaults, ..Default::default() });
+    let warnings = validate::validate_and_normalize(&mut g).unwrap();
+    let defaults = g.app_settings.unwrap().defaults;
+    assert!(defaults.redirects.is_some_and(|r| !r.forward_credentials_cross_origin), "{:?}", defaults.redirects);
+    assert!(defaults.early_data.as_ref().is_some_and(|e| !e.enabled), "{:?}", defaults.early_data);
+    assert!(warnings.iter().any(|w| w.contains("other origins")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("0-RTT early data")), "{warnings:?}");
+}
+
 /// SPIFFE Workload API sources need no secret, so an import draws on the
 /// importing machine's identity: "send a failing JWT-SVID" is never
 /// imported, and the profiles that use the identity are named. A JWT-SVID
@@ -385,7 +410,7 @@ fn imports_never_open_an_import_root_and_list_every_linked_file() {
 #[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();
-    let existing: HashSet<Id> = g.requests.iter().map(|r| r.meta.id).collect();
+    let existing = Existing { objects: g.requests.iter().map(|r| r.meta.id).collect(), ..Default::default() };
     let merge = plan::plan(&g, &existing, ConflictPolicy::Merge);
     assert_eq!(merge.skipped_existing, 2);
     let replace = plan::plan(&g, &existing, ConflictPolicy::Replace);
@@ -393,7 +418,7 @@ fn data_006_conflict_policies_and_duplicate_remap() {
     let mut dup = g.clone();
     plan::remap_all(&mut dup).unwrap();
     let new_ids: HashSet<Id> = dup.requests.iter().map(|r| r.meta.id).collect();
-    assert!(new_ids.is_disjoint(&existing));
+    assert!(new_ids.is_disjoint(&existing.objects));
     // References follow the remap.
     let folder_ids: HashSet<Id> = dup.folders.iter().map(|f| f.meta.id).collect();
     assert!(dup.requests.iter().all(|r| r.folder_id.map(|f| folder_ids.contains(&f)).unwrap_or(true)));
@@ -673,6 +698,341 @@ fn validation_collapses_repeated_revisions_and_drops_orphans() {
     let warnings = anvil_portability::validate::validate_and_normalize(&mut g).unwrap();
     assert_eq!(g.revisions, vec![rev]);
     assert!(warnings.iter().any(|w| w.contains("1 request revision(s)")), "{warnings:?}");
+}
+
+#[test]
+fn plan_lists_secret_conflicts_and_secrets_owned_outside_the_bundle() {
+    let g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let secret: Id = g.secrets.keys().next().unwrap().parse().unwrap();
+    let listed = format!("secret 'orders key' ({secret})");
+    let stored = |owner: Option<Id>| Existing { secrets: [(secret, owner)].into_iter().collect(), ..Default::default() };
+
+    // Nothing stored: nothing conflicts, and the secret counts as created.
+    let fresh = plan::plan(&g, &Existing::default(), ConflictPolicy::Replace);
+    assert!(fresh.conflicts.is_empty() && fresh.foreign_secrets.is_empty(), "{fresh:?}");
+    assert_eq!(fresh.to_create, g.object_count() + 1);
+
+    // Stored under a workspace of the bundle: a conflict Replace may overwrite.
+    let own = plan::plan(&g, &stored(Some(ws)), ConflictPolicy::Replace);
+    assert_eq!(own.conflicts, vec![listed.clone()]);
+    assert_eq!(own.to_replace, 1);
+    assert!(own.foreign_secrets.is_empty(), "{own:?}");
+
+    // Stored under another workspace, or under none: listed as foreign for every policy.
+    for owner in [Some(Id::new()), None] {
+        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+            let p = plan::plan(&g, &stored(owner), policy);
+            assert_eq!(p.conflicts, vec![listed.clone()], "{policy:?}");
+            assert_eq!(p.foreign_secrets, vec![listed.clone()], "{policy:?}");
+        }
+    }
+    let merge = plan::plan(&g, &stored(Some(Id::new())), ConflictPolicy::Merge);
+    assert_eq!(merge.skipped_existing, 1);
+}
+
+#[test]
+fn plan_lists_stored_workspaces_the_bundle_claims_and_objects_stored_in_another_workspace() {
+    let g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let folder = &g.folders[0];
+
+    // A workspace stored here under a bundle workspace's id is listed with its
+    // local name for Merge and Replace; a Duplicate copy claims none.
+    let claimed = Existing { workspaces: [(ws, "Local payments".to_string())].into_iter().collect(), ..Default::default() };
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        let p = plan::plan(&g, &claimed, policy);
+        assert_eq!(p.existing_workspaces, vec![ExistingWorkspace { id: ws, name: "Local payments".into() }], "{policy:?}");
+    }
+    assert!(plan::plan(&g, &claimed, ConflictPolicy::Duplicate).existing_workspaces.is_empty());
+    assert!(plan::plan(&g, &Existing::default(), ConflictPolicy::Merge).existing_workspaces.is_empty());
+
+    // A folder stored in its own workspace is an ordinary conflict.
+    let stored = |kind: &str, owner: Option<Id>| Existing {
+        owners: [((kind.to_string(), folder.meta.id), owner)].into_iter().collect(),
+        ..Default::default()
+    };
+    assert!(plan::plan(&g, &stored("folder", Some(ws)), ConflictPolicy::Replace).foreign_objects.is_empty());
+    // Stored in another workspace, or in none: listed for Merge and Replace.
+    // A Duplicate copy gets a fresh id, so it lands on nothing stored.
+    let listed = format!("folder 'Orders' ({})", folder.meta.id);
+    for owner in [Some(Id::new()), None] {
+        for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+            assert_eq!(plan::plan(&g, &stored("folder", owner), policy).foreign_objects, vec![listed.clone()], "{policy:?}");
+        }
+        assert!(plan::plan(&g, &stored("folder", owner), ConflictPolicy::Duplicate).foreign_objects.is_empty());
+    }
+    // The same id under another kind is a different stored object.
+    assert!(plan::plan(&g, &stored("request", Some(Id::new())), ConflictPolicy::Replace).foreign_objects.is_empty());
+}
+
+fn proxy(workspace_id: Id) -> anvil_domain::tls::ProxyProfile {
+    anvil_domain::tls::ProxyProfile {
+        id: Id::new(),
+        workspace_id,
+        name: "corp".into(),
+        kind: Default::default(),
+        address: "proxy.example.com:3128".into(),
+        username: None,
+        password: None,
+        no_proxy: String::new(),
+        tls_profile_id: None,
+        hbone: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn integration(workspace_id: Id) -> anvil_domain::integration::IntegrationProfile {
+    anvil_domain::integration::IntegrationProfile {
+        id: Id::new(),
+        workspace_id,
+        name: "lab gateway".into(),
+        kind: anvil_domain::integration::IntegrationKind::FerrumGateway {
+            hosts: vec![],
+            compatibility_id: "ferrum-edge-0.9.5".into(),
+            require_verified_tls: true,
+            detail: None,
+            console_url: None,
+        },
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn dataset(workspace_id: Id) -> Dataset {
+    Dataset {
+        meta: Meta::new(),
+        workspace_id,
+        name: "rows".into(),
+        format: DatasetFormat::Csv,
+        attachment: stored(&hex_sha(b"attachment bytes")),
+        sensitive_columns: vec![],
+    }
+}
+
+fn scenario(workspace_id: Id, requests: &[Id]) -> Scenario {
+    Scenario {
+        meta: Meta::new(),
+        workspace_id,
+        name: "smoke".into(),
+        description: String::new(),
+        steps: requests.iter().map(|r| ScenarioStep { request_id: *r, enabled: true, delay_ms: 0 }).collect(),
+        dataset_id: None,
+        iterations: 1,
+        stop_on_failure: false,
+        trusted: false,
+    }
+}
+
+fn load_plan(workspace_id: Id, chain: &[Id]) -> anvil_domain::load::LoadPlan {
+    serde_json::from_value(serde_json::json!({
+        "id": Id::new(),
+        "workspace_id": workspace_id,
+        "name": "soak",
+        "workload": { "model": "iterations", "iterations": 1, "concurrency": 1 },
+        "chain": chain,
+        "created_at": chrono::Utc::now(),
+        "updated_at": chrono::Utc::now(),
+    }))
+    .unwrap()
+}
+
+#[test]
+fn validation_refuses_objects_and_references_outside_their_workspace() {
+    use anvil_portability::validate::validate_and_normalize;
+    let invalid = |mut g: PortableGraph, needle: &str| match validate_and_normalize(&mut g) {
+        Err(BundleError::Invalid(m)) => assert!(m.contains(needle), "{needle}: {m}"),
+        other => panic!("expected an invalid bundle ({needle}), got {other:?}"),
+    };
+    let foreign = Id::new();
+    let base = sample();
+    let ws = base.workspaces[0].meta.id;
+    let request = base.requests[0].meta.id;
+    // A second workspace in the same bundle: references may not cross into it.
+    let mut two = base.clone();
+    let mut other = two.workspaces[0].clone();
+    other.meta = Meta::new();
+    other.name = "Other".into();
+    let other_ws = other.meta.id;
+    two.workspaces.push(other);
+    let mut other_req = two.requests[0].clone();
+    other_req.meta = Meta::new();
+    other_req.workspace_id = other_ws;
+    other_req.folder_id = None;
+    let other_req_id = other_req.meta.id;
+    two.requests.push(other_req);
+    let mut other_env = two.environments[0].clone();
+    other_env.meta = Meta::new();
+    other_env.workspace_id = other_ws;
+    let other_env_id = other_env.meta.id;
+    two.environments.push(other_env);
+    let other_data = dataset(other_ws);
+    let other_data_id = other_data.meta.id;
+    two.datasets.push(other_data);
+    let mut ok = two.clone();
+    ok.scenarios.push(scenario(other_ws, &[other_req_id]));
+    ok.load_plans.push(load_plan(ws, &[request]));
+    validate_and_normalize(&mut ok).expect("references within their own workspace are valid");
+
+    // Workspace-scoped objects of a workspace that is not in the bundle.
+    let with = |edit: &dyn Fn(&mut PortableGraph)| {
+        let mut g = base.clone();
+        edit(&mut g);
+        g
+    };
+    let outside = "belongs to a workspace that is not in the bundle";
+    invalid(with(&|g| g.tls_profiles[0].workspace_id = foreign), outside);
+    invalid(with(&|g| g.proxy_profiles.push(proxy(foreign))), outside);
+    invalid(with(&|g| g.integrations.push(integration(foreign))), outside);
+    invalid(with(&|g| g.datasets.push(dataset(foreign))), outside);
+    invalid(with(&|g| g.scenarios.push(scenario(foreign, &[]))), outside);
+    invalid(with(&|g| g.load_plans.push(load_plan(foreign, &[]))), outside);
+
+    // Folder and request references into another workspace of the bundle.
+    let mut g = two.clone();
+    g.folders[1].workspace_id = other_ws;
+    invalid(g, "has a parent that is not in the bundle or its workspace");
+    let mut g = two.clone();
+    g.requests[0].workspace_id = other_ws;
+    invalid(g, "is in a folder that is not in the bundle or its workspace");
+
+    // Scenario and load plan references outside the bundle or into another workspace.
+    for step in [Id::new(), other_req_id] {
+        let mut g = two.clone();
+        g.scenarios.push(scenario(ws, &[request, step]));
+        invalid(g, "scenario 'smoke' runs a request that is not in the bundle or its workspace");
+        let mut g = two.clone();
+        g.load_plans.push(load_plan(ws, &[step]));
+        invalid(g, "load plan 'soak' runs a request that is not in the bundle or its workspace");
+        let mut g = two.clone();
+        let mut p = load_plan(ws, &[]);
+        p.mix.push(anvil_domain::load::WeightedStep { request_id: step, weight: 1 });
+        g.load_plans.push(p);
+        invalid(g, "load plan 'soak' runs a request that is not in the bundle or its workspace");
+    }
+    for data in [Id::new(), other_data_id] {
+        let mut g = two.clone();
+        g.scenarios.push(Scenario { dataset_id: Some(data), ..scenario(ws, &[request]) });
+        invalid(g, "scenario 'smoke' uses a dataset that is not in the bundle or its workspace");
+        let mut g = two.clone();
+        g.load_plans.push(anvil_domain::load::LoadPlan { dataset_id: Some(data), ..load_plan(ws, &[request]) });
+        invalid(g, "load plan 'soak' uses a dataset that is not in the bundle or its workspace");
+    }
+    for env in [Id::new(), other_env_id] {
+        let mut g = two.clone();
+        g.load_plans.push(anvil_domain::load::LoadPlan { environment_id: Some(env), ..load_plan(ws, &[request]) });
+        invalid(g, "load plan 'soak' uses an environment that is not in the bundle or its workspace");
+    }
+}
+
+#[test]
+fn a_request_keeps_only_a_revision_of_its_own_from_the_bundle() {
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    let owner = rev.request_id;
+    // One request names a revision of a different request, another one a
+    // revision the bundle does not carry.
+    g.requests[1].revision_id = Some(rev.id);
+    let borrowed = g.requests[1].meta.id;
+    let mut third = g.requests[0].clone();
+    third.meta = Meta::new();
+    third.name = "Third".into();
+    third.revision_id = Some(Id::new());
+    let third_id = third.meta.id;
+    g.requests.push(third);
+
+    anvil_portability::validate::validate_and_normalize(&mut g).unwrap();
+    let revision_of = |id: Id| g.requests.iter().find(|r| r.meta.id == id).unwrap().revision_id;
+    assert_eq!(revision_of(owner), Some(rev.id), "a request keeps its own revision");
+    assert_eq!(revision_of(borrowed), None, "another request's revision is dropped");
+    assert_eq!(revision_of(third_id), None, "a revision the bundle does not carry is dropped");
+
+    // A Duplicate copy therefore never points at a revision outside itself.
+    let mut dup = g.clone();
+    plan::remap_all(&mut dup).unwrap();
+    let copied: HashSet<Id> = dup.revisions.iter().map(|r| r.id).collect();
+    assert!(dup.requests.iter().filter_map(|r| r.revision_id).all(|r| copied.contains(&r)));
+}
+
+fn stored(sha256: &str) -> AttachmentRef {
+    AttachmentRef::Stored { sha256: sha256.into(), size: 16, file_name: "upload.bin".into(), media_type: None }
+}
+
+fn file_part(attachment: AttachmentRef, enabled: bool) -> MultipartPart {
+    MultipartPart { name: "file".into(), enabled, content: MultipartContent::File { attachment, file_name: None }, content_type: None }
+}
+
+fn grpc(schema: GrpcSchemaSource) -> RequestSpec {
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9");
+    spec.protocol = Protocol::Grpc;
+    spec.grpc = Some(GrpcSpec {
+        service: "lab.Echo".into(),
+        method: "Say".into(),
+        mode: GrpcMode::Unary,
+        schema,
+        messages: vec!["{}".into()],
+        metadata: vec![],
+        deadline_ms: None,
+        plaintext: true,
+        wire: GrpcWire::Grpc,
+    });
+    spec
+}
+
+/// Every place a request names a stored attachment, next to one the bundle
+/// carries (`carried`), with `sha256` as the other.
+fn stored_specs(carried: &str, sha256: &str) -> Vec<(&'static str, RequestSpec)> {
+    let with_body = |body: Body| RequestSpec { body, ..RequestSpec::http("POST", "http://127.0.0.1:9/upload") };
+    vec![
+        ("binary body", with_body(Body::Binary { attachment: stored(sha256), content_type: None })),
+        ("multipart part", with_body(Body::Multipart { parts: vec![file_part(stored(carried), true), file_part(stored(sha256), true)] })),
+        ("disabled multipart part", with_body(Body::Multipart { parts: vec![file_part(stored(sha256), false)] })),
+        ("gRPC proto file", grpc(GrpcSchemaSource::ProtoFiles { files: vec![stored(carried), stored(sha256)] })),
+        ("gRPC descriptor set", grpc(GrpcSchemaSource::DescriptorSet { attachment: stored(sha256) })),
+    ]
+}
+
+#[test]
+fn a_stored_attachment_without_its_bytes_is_listed_with_the_item_that_names_it() {
+    let carried = hex_sha(b"attachment bytes");
+    let elsewhere = hex_sha(b"bytes the bundle does not carry");
+    let reopen = |g: &PortableGraph| bundle::open(&bundle::write(g, &opts(ExportMode::ShareSafely, None)).unwrap().0, None);
+    let uncarried = |g: &PortableGraph| validate::uncarried_attachments(&reopen(g).unwrap().graph).unwrap();
+    // A request or dataset naming stored bytes the bundle does not carry
+    // opens; the importer checks each listed hash against its own device.
+    for (label, spec) in stored_specs(&carried, &elsewhere) {
+        let mut g = sample();
+        g.requests[0].spec = spec;
+        let expected = vec![UncarriedAttachment { item: "request 'Create order'".into(), sha256: elsewhere.clone() }];
+        assert_eq!(uncarried(&g), expected, "{label}");
+        // The export lists it among its excluded items.
+        let excluded = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap().manifest.excluded;
+        assert!(excluded.iter().any(|x| x.contains("a stored file of request 'Create order'")), "{label}: {excluded:?}");
+    }
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    g.datasets.push(Dataset { attachment: stored(&elsewhere), ..dataset(ws) });
+    let expected = vec![UncarriedAttachment { item: "dataset 'rows'".into(), sha256: elsewhere.clone() }];
+    assert_eq!(uncarried(&g), expected);
+
+    // With their bytes in the bundle, nothing is listed.
+    let mut g = sample();
+    let base = g.requests[0].clone();
+    for (label, spec) in stored_specs(&carried, &carried) {
+        g.requests.push(RequestDefinition { meta: Meta::new(), name: label.into(), spec, ..base.clone() });
+    }
+    g.datasets.push(dataset(g.workspaces[0].meta.id));
+    assert!(uncarried(&g).is_empty());
+    let excluded = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap().manifest.excluded;
+    assert!(excluded.iter().all(|x| !x.contains("stored file")), "{excluded:?}");
+    let opened = reopen(&g).expect("every stored attachment travels with its bytes");
+    assert_eq!(opened.graph.requests.len(), 2 + stored_specs(&carried, &carried).len());
+    assert_eq!(opened.graph.attachments.get(&carried).map(Vec::as_slice), Some(&b"attachment bytes"[..]));
+    // A linked local file names no stored bytes.
+    let mut g = sample();
+    g.requests[0].spec.body = Body::Binary { attachment: AttachmentRef::LinkedFile { path: "/tmp/a.bin".into() }, content_type: None };
+    reopen(&g).expect("a linked local file is not a stored attachment");
 }
 
 #[test]

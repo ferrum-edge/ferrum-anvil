@@ -8,6 +8,7 @@
 
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::linked_files::LinkedFileReferrer;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
@@ -415,11 +416,13 @@ fn an_import_that_overwrites_a_request_drops_its_linked_file_binding() {
     app.bind_linked_file(request(&r), &path).unwrap();
     app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).expect("bound");
 
+    // The bundle is this workspace's own backup: writing into it is approved.
+    let approval = ImportApproval { existing_workspaces: vec![ws.meta.id] };
     // Merging leaves the stored request, and its binding, alone.
-    app.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    app.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &approval).unwrap();
     assert_eq!(app.linked_file_bindings().unwrap().len(), 1);
     // A bundle that replaces the request is not what the user chose the file for.
-    app.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Replace).unwrap();
+    app.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Replace, &approval).unwrap();
     assert!(app.linked_file_bindings().unwrap().is_empty());
     let err = refused(app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()), "replaced");
     assert!(err.contains("not chosen on this device") && !err.contains(CANARY), "{err}");

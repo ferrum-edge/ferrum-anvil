@@ -417,7 +417,9 @@ function DpopFields({ c, onChange, workspaceId }: { c: DpopConfig; onChange: (c:
       <div className="row">
         <button
           className="btn small"
+          disabled={!workspaceId}
           onClick={async () => {
+            if (!workspaceId) return;
             const g = await api.generateDpopKey(workspaceId, "DPoP proof key");
             setJkt(g.jkt);
             onChange({ ...c, private_key_pem: { kind: "secret", secret: g.secret } });
@@ -470,12 +472,16 @@ export function PemFromFile(props: { label: string; workspaceId: string | null; 
     <div className="row">
       <button
         className="btn small"
+        disabled={!props.workspaceId}
+        title={props.workspaceId ? undefined : "Open a workspace to keep values in its vault"}
         onClick={async () => {
+          const workspaceId = props.workspaceId;
+          if (!workspaceId) return;
           setErr(null);
           try {
             const file = await api.chooseFile("pem_file");
             if (!file) return;
-            const r = await api.readTextFile(file.token, props.workspaceId, file.file_name || "key");
+            const r = await api.readTextFile(file.token, workspaceId, file.file_name || "key");
             if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
           } catch (e) {
             setErr(String((e as Error).message));

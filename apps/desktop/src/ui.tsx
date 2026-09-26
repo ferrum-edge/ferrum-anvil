@@ -157,12 +157,14 @@ export function SecretField(props: { label: string; value: SensitiveValue | unde
         )}
         <button
           className="btn small"
-          disabled={!v.value || /^\s*\{\{.*\}\}\s*$/.test(v.value) || storing}
-          title="Move this value into the encrypted vault and keep only a reference"
+          disabled={!props.workspaceId || !v.value || /^\s*\{\{.*\}\}\s*$/.test(v.value) || storing}
+          title={props.workspaceId ? "Move this value into the encrypted vault and keep only a reference" : "Open a workspace to keep values in its vault"}
           onClick={async () => {
+            const workspaceId = props.workspaceId;
+            if (!workspaceId) return;
             setStoring(true);
             try {
-              const ref = await api.createSecret(props.workspaceId, props.label, v.value);
+              const ref = await api.createSecret(workspaceId, props.label, v.value);
               props.onChange({ kind: "secret", secret: ref });
             } finally {
               setStoring(false);

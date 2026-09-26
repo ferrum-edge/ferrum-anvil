@@ -164,7 +164,18 @@ export interface ExportPreview {
   literals_moved: number;
 }
 export interface ImportReport {
-  plan: { policy: string; to_create: number; to_replace: number; skipped_existing: number; conflicts: string[] };
+  plan: {
+    policy: string;
+    to_create: number;
+    to_replace: number;
+    skipped_existing: number;
+    conflicts: string[];
+    foreign_secrets: string[];
+    /** Objects stored here in another workspace under the same id; Replace refuses the bundle while any is listed. */
+    foreign_objects: string[];
+    /** Workspaces stored here that the bundle or full backup writes into (Merge/Replace); applying needs each one approved. */
+    existing_workspaces: { id: string; name: string }[];
+  };
   warnings: string[];
   secrets_restored: boolean;
   missing_secrets: string[];
@@ -173,6 +184,8 @@ export interface ImportReport {
   checkpoint?: string | null;
   workspaces: string[];
   workspace_ids: string[];
+  /** A full backup (restored) rather than a bundle. */
+  full_backup: boolean;
 }
 export interface JwtInspection {
   header: unknown;
@@ -480,9 +493,9 @@ export const api = {
   environments: (workspaceId: string) => call<Environment[]>("environments_list", { workspaceId }),
   saveEnvironment: (environment: Environment) => call<Environment>("environment_save", { environment }),
   deleteEnvironment: (environmentId: string) => call<void>("environment_delete", { environmentId }),
-  createSecret: (workspaceId: string | null, label: string, value: string) => call<SecretRef>("secret_create", { workspaceId, label, value }),
-  updateSecret: (secret: SecretRef, workspaceId: string | null, value: string) => call<void>("secret_update", { secret, workspaceId, value }),
-  generateDpopKey: (workspaceId: string | null, label: string) => call<{ secret: SecretRef; jkt: string }>("dpop_generate_key", { workspaceId, label }),
+  /** A secret always belongs to a workspace: only that workspace's requests resolve it. */
+  createSecret: (workspaceId: string, label: string, value: string) => call<SecretRef>("secret_create", { workspaceId, label, value }),
+  generateDpopKey: (workspaceId: string, label: string) => call<{ secret: SecretRef; jkt: string }>("dpop_generate_key", { workspaceId, label }),
 
   tlsProfiles: (workspaceId: string) => call<TlsProfile[]>("tls_profiles_list", { workspaceId }),
   saveTlsProfile: (profile: TlsProfile) => call<TlsProfile>("tls_profile_save", { profile }),
@@ -515,7 +528,9 @@ export const api = {
   exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
     call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
   importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),
-  importApply: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_apply", { grant, passphrase, conflictPolicy }),
+  /** `existingWorkspaces`: ids from the preview's `plan.existing_workspaces` the user confirmed writing into. */
+  importApply: (grant: string, passphrase: string | null, conflictPolicy: string, existingWorkspaces: string[] = []) =>
+    call<ImportReport>("import_apply", { grant, passphrase, conflictPolicy, approval: { existing_workspaces: existingWorkspaces } }),
   attachmentAdd: (grant: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { grant, mediaType }),
 
   loadPlans: (workspaceId: string) => call<LoadPlan[]>("load_plans", { workspaceId }),

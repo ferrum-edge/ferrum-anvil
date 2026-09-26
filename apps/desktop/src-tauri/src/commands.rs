@@ -310,15 +310,8 @@ pub fn environment_delete(st: State<'_, DesktopState>, environment_id: String) -
 
 /// Store a secret; only the reference comes back to the UI.
 #[tauri::command]
-pub fn secret_create(st: State<'_, DesktopState>, workspace_id: Option<String>, label: String, value: String) -> R<SecretRef> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.set_secret(ws.as_ref(), &label, &value).map_err(e)
-}
-
-#[tauri::command]
-pub fn secret_update(st: State<'_, DesktopState>, secret: SecretRef, workspace_id: Option<String>, value: String) -> R<()> {
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    st.app()?.update_secret(&secret, ws.as_ref(), &value).map_err(e)
+pub fn secret_create(st: State<'_, DesktopState>, workspace_id: String, label: String, value: String) -> R<SecretRef> {
+    st.app()?.set_secret(&id(&workspace_id)?, &label, &value).map_err(e)
 }
 
 /// Generate a DPoP P-256 key inside the vault; returns only its reference and public thumbprint.
@@ -329,11 +322,11 @@ pub struct GeneratedKey {
 }
 
 #[tauri::command]
-pub fn dpop_generate_key(st: State<'_, DesktopState>, workspace_id: Option<String>, label: String) -> R<GeneratedKey> {
+pub fn dpop_generate_key(st: State<'_, DesktopState>, workspace_id: String, label: String) -> R<GeneratedKey> {
+    let ws = id(&workspace_id)?;
     let pem = anvil_auth::dpop::generate_key_pem().map_err(|x| x.to_string())?;
     let (x, y) = anvil_auth::dpop::public_jwk(&pem).map_err(|x| x.to_string())?;
-    let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    let secret = st.app()?.set_secret(ws.as_ref(), &label, &pem).map_err(e)?;
+    let secret = st.app()?.set_secret(&ws, &label, &pem).map_err(e)?;
     Ok(GeneratedKey { secret, jkt: anvil_auth::dpop::thumbprint(&x, &y) })
 }
 
@@ -648,24 +641,31 @@ pub fn export_preview(st: State<'_, DesktopState>, workspace_id: Option<String>,
     app.export_preview(ws.as_ref(), m, false).map(ExportPreview::Bundle).map_err(e)
 }
 
+/// Run `f` on a blocking worker thread. Writing or opening an encrypted
+/// bundle derives its vault key (Argon2id), which must not stall the UI
+/// thread that runs synchronous commands.
+async fn off_ui_thread<T: Send + 'static>(f: impl FnOnce() -> anvil_app::Result<T> + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|x| x.to_string())?.map_err(e)
+}
+
 /// Write to the destination the user picked in the native save dialog
 /// (`file_choose` with purpose `bundle_export`); `grant` is that selection.
 #[tauri::command]
-pub fn export_to_path(
+pub async fn export_to_path(
     st: State<'_, DesktopState>,
     workspace_id: Option<String>,
     export_mode: String,
     passphrase: Option<String>,
     grant: String,
 ) -> R<usize> {
+    let app = st.app()?;
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
     let m = mode(&export_mode)?;
-    let app = st.app()?;
     let bytes = if full_backup(ws.as_ref(), m)? {
-        let pass = passphrase.as_deref().ok_or("a full backup needs a passphrase")?;
-        app.export_backup(pass).map_err(e)?.0
+        let pass = passphrase.ok_or("a full backup needs a passphrase")?;
+        off_ui_thread(move || app.export_backup(&pass)).await?.0
     } else {
-        app.export(ws.as_ref(), m, passphrase.as_deref(), false).map_err(e)?.0
+        off_ui_thread(move || app.export(ws.as_ref(), m, passphrase.as_deref(), false)).await?.0
     };
     st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
 }
@@ -678,7 +678,7 @@ fn read_bundle(st: &DesktopState, grant: &str) -> R<Vec<u8>> {
 
 /// A full backup is restored; anything else is imported as a bundle.
 #[tauri::command]
-pub fn import_preview(
+pub async fn import_preview(
     st: State<'_, DesktopState>,
     grant: String,
     passphrase: Option<String>,
@@ -686,30 +686,34 @@ pub fn import_preview(
 ) -> R<anvil_app::port::ImportReport> {
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
-    let (pass, pol) = (passphrase.as_deref(), policy(&conflict_policy)?);
+    let policy = policy(&conflict_policy)?;
     if anvil_app::backup::is_backup(&bytes) {
         // A full backup restores every item under its own id, so "copies" is
         // previewed as Merge; the report's policy tells the dialog to switch.
-        let pol = if pol == ConflictPolicy::Duplicate { ConflictPolicy::Merge } else { pol };
-        return app.restore_preview(&bytes, pass, pol).map_err(e);
+        let policy = if policy == ConflictPolicy::Duplicate { ConflictPolicy::Merge } else { policy };
+        return off_ui_thread(move || app.restore_preview(&bytes, passphrase.as_deref(), policy)).await;
     }
-    app.import_preview(&bytes, pass, pol).map_err(e)
+    off_ui_thread(move || app.import_preview(&bytes, passphrase.as_deref(), policy)).await
 }
 
 #[tauri::command]
-pub fn import_apply(
+pub async fn import_apply(
     st: State<'_, DesktopState>,
     grant: String,
     passphrase: Option<String>,
     conflict_policy: String,
+    approval: Option<anvil_app::port::ImportApproval>,
 ) -> R<anvil_app::port::ImportReport> {
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
-    let (pass, pol) = (passphrase.as_deref(), policy(&conflict_policy)?);
+    let policy = policy(&conflict_policy)?;
+    // Only the workspaces the user confirmed after the preview's warning,
+    // for a full backup as for a bundle.
+    let approval = approval.unwrap_or_default();
     if anvil_app::backup::is_backup(&bytes) {
-        return app.restore(&bytes, pass, pol).map_err(e);
+        return off_ui_thread(move || app.restore_approved(&bytes, passphrase.as_deref(), policy, &approval)).await;
     }
-    app.import(&bytes, pass, pol).map_err(e)
+    off_ui_thread(move || app.import_approved(&bytes, passphrase.as_deref(), policy, &approval)).await
 }
 
 // ------------------------------------------------------------- attachments
@@ -751,8 +755,8 @@ pub fn read_text_file(
         String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())?
     };
     if let Some(label) = store_as_secret {
-        let ws = workspace_id.map(|w| id(&w)).transpose()?;
-        let r = app.set_secret(ws.as_ref(), &label, &text).map_err(e)?;
+        let ws = workspace_id.ok_or_else(|| "a secret must belong to a workspace; open one first".to_string())?;
+        let r = app.set_secret(&id(&ws)?, &label, &text).map_err(e)?;
         return Ok(TextFile { text: None, secret: Some(r) });
     }
     Ok(TextFile { text: Some(text), secret: None })
