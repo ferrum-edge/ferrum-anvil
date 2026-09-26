@@ -6,11 +6,12 @@
 //!   parents, request folders and the requests, datasets and environments a
 //!   scenario or load plan names must be in the bundle and in the same
 //!   workspace; folder parents form no cycle; every secret must be owned by a
-//!   workspace in the bundle; no two objects share an id; every stored
-//!   attachment a request or dataset names travels with its bytes in the
-//!   bundle. Revisions of requests outside the bundle are left out, and a
-//!   request keeps its `revision_id` only when that revision of it is in the
-//!   bundle.
+//!   workspace in the bundle; no two objects share an id. Revisions of
+//!   requests outside the bundle are left out, and a request keeps its
+//!   `revision_id` only when that revision of it is in the bundle.
+//! * Stored attachments a request or dataset names without their bytes are
+//!   listed by [`uncarried_attachments`]; the importer checks them against
+//!   what its device stores.
 //! * Safety: imports never activate a TLS verification bypass, never mark
 //!   scenarios or load plans as trusted, never enable legacy HMAC, and never
 //!   open an imported collection's root folder to its workspace. Linked
@@ -100,25 +101,6 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
                 "load plan '{}' uses an environment that is not in the bundle or its workspace",
                 p.name
             )));
-        }
-    }
-    // Stored attachments are found by content hash alone, and import stores
-    // only the bytes the bundle carries: a reference without its bytes here
-    // would name an attachment already stored on this device. Exports always
-    // carry the bytes their requests and datasets use. Revisions are never
-    // sent or run, and exports do not carry their attachments.
-    for r in &g.requests {
-        let mut hashes = Vec::new();
-        stored_hashes(&serde_json::to_value(&r.spec)?, &mut hashes);
-        if hashes.iter().any(|h| !g.attachments.contains_key(h)) {
-            return Err(BundleError::Invalid(format!("request '{}' uses a stored attachment that the bundle does not carry", r.name)));
-        }
-    }
-    for d in &g.datasets {
-        if let AttachmentRef::Stored { sha256, .. } = &d.attachment
-            && !g.attachments.contains_key(sha256)
-        {
-            return Err(BundleError::Invalid(format!("dataset '{}' uses a stored attachment that the bundle does not carry", d.name)));
         }
     }
     // Two requests can name the same revision, so a backup may carry it
@@ -313,6 +295,46 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         ));
     }
     Ok(warnings)
+}
+
+/// A stored attachment that a request or dataset names by content hash and
+/// whose bytes the file does not carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncarriedAttachment {
+    /// The item that names it: `request 'name'` or `dataset 'name'`.
+    pub item: String,
+    pub sha256: String,
+}
+
+/// Every stored attachment the graph's requests and datasets name without
+/// carrying its bytes, in graph order.
+///
+/// Stored attachments are found by content hash alone, and an import stores
+/// only the bytes the file carries. A reference without its bytes therefore
+/// resolves to whatever content with that hash is already stored on the
+/// importing device, which may belong to another workspace: the importer
+/// refuses the file when that content is stored, and otherwise accepts the
+/// reference with a warning (it fails until the file is attached again).
+/// Exports carry the bytes of every stored attachment their requests and
+/// datasets use that is readable on the exporting device. Revisions are
+/// never sent or run, and exports do not carry their attachments.
+pub fn uncarried_attachments(g: &PortableGraph) -> Result<Vec<UncarriedAttachment>, serde_json::Error> {
+    let mut out = Vec::new();
+    for r in &g.requests {
+        let mut hashes = Vec::new();
+        stored_hashes(&serde_json::to_value(&r.spec)?, &mut hashes);
+        for sha256 in hashes.into_iter().filter(|h| !g.attachments.contains_key(h)) {
+            out.push(UncarriedAttachment { item: format!("request '{}'", r.name), sha256 });
+        }
+    }
+    for d in &g.datasets {
+        if let AttachmentRef::Stored { sha256, .. } = &d.attachment
+            && !g.attachments.contains_key(sha256)
+        {
+            out.push(UncarriedAttachment { item: format!("dataset '{}'", d.name), sha256: sha256.clone() });
+        }
+    }
+    Ok(out)
 }
 
 /// The content hash of every stored attachment `v` names, wherever it sits

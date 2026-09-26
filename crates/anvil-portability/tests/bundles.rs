@@ -10,6 +10,7 @@ use anvil_domain::tls::TlsProfile;
 use anvil_domain::workspace::*;
 use anvil_portability::bundle::{self, BundleError, BundleKind, ExportMode, ExportOptions};
 use anvil_portability::plan::{self, ConflictPolicy, Existing, ExistingWorkspace};
+use anvil_portability::validate::{self, UncarriedAttachment};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::KdfParams;
 use std::collections::HashSet;
@@ -971,32 +972,38 @@ fn stored_specs(carried: &str, sha256: &str) -> Vec<(&'static str, RequestSpec)>
 }
 
 #[test]
-fn a_stored_attachment_is_imported_only_with_its_bytes() {
+fn a_stored_attachment_without_its_bytes_is_listed_with_the_item_that_names_it() {
     let carried = hex_sha(b"attachment bytes");
     let elsewhere = hex_sha(b"bytes the bundle does not carry");
     let reopen = |g: &PortableGraph| bundle::open(&bundle::write(g, &opts(ExportMode::ShareSafely, None)).unwrap().0, None);
-    let refused = |g: &PortableGraph, needle: &str, label: &str| match reopen(g) {
-        Err(BundleError::Invalid(m)) => assert!(m.contains(needle), "{label}: {m}"),
-        other => panic!("{label}: expected the bundle to be refused, got {other:?}"),
-    };
-    // A request or dataset naming stored bytes the bundle does not carry.
+    let uncarried = |g: &PortableGraph| validate::uncarried_attachments(&reopen(g).unwrap().graph).unwrap();
+    // A request or dataset naming stored bytes the bundle does not carry
+    // opens; the importer checks each listed hash against its own device.
     for (label, spec) in stored_specs(&carried, &elsewhere) {
         let mut g = sample();
         g.requests[0].spec = spec;
-        refused(&g, "request 'Create order' uses a stored attachment that the bundle does not carry", label);
+        let expected = vec![UncarriedAttachment { item: "request 'Create order'".into(), sha256: elsewhere.clone() }];
+        assert_eq!(uncarried(&g), expected, "{label}");
+        // The export lists it among its excluded items.
+        let excluded = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap().manifest.excluded;
+        assert!(excluded.iter().any(|x| x.contains("a stored file of request 'Create order'")), "{label}: {excluded:?}");
     }
     let mut g = sample();
     let ws = g.workspaces[0].meta.id;
     g.datasets.push(Dataset { attachment: stored(&elsewhere), ..dataset(ws) });
-    refused(&g, "dataset 'rows' uses a stored attachment that the bundle does not carry", "dataset");
+    let expected = vec![UncarriedAttachment { item: "dataset 'rows'".into(), sha256: elsewhere.clone() }];
+    assert_eq!(uncarried(&g), expected);
 
-    // With their bytes in the bundle, the same references import.
+    // With their bytes in the bundle, nothing is listed.
     let mut g = sample();
     let base = g.requests[0].clone();
     for (label, spec) in stored_specs(&carried, &carried) {
         g.requests.push(RequestDefinition { meta: Meta::new(), name: label.into(), spec, ..base.clone() });
     }
     g.datasets.push(dataset(g.workspaces[0].meta.id));
+    assert!(uncarried(&g).is_empty());
+    let excluded = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap().manifest.excluded;
+    assert!(excluded.iter().all(|x| !x.contains("stored file")), "{excluded:?}");
     let opened = reopen(&g).expect("every stored attachment travels with its bytes");
     assert_eq!(opened.graph.requests.len(), 2 + stored_specs(&carried, &carried).len());
     assert_eq!(opened.graph.attachments.get(&carried).map(Vec::as_slice), Some(&b"attachment bytes"[..]));

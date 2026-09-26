@@ -23,13 +23,10 @@ use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
-use sha2::Digest;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 const CANARY: &str = "anvil-local-file-canary";
-/// The stored file part next to the linked one in [`linked_specs`].
-const STORED_PART: &[u8] = b"stored part";
 const URL: &str = "http://127.0.0.1:9/x";
 
 /// The error of a refused call (an `ExecutionContext` is not `Debug`).
@@ -74,8 +71,7 @@ fn linked_specs(path: &Path) -> Vec<(&'static str, RequestSpec)> {
         content: MultipartContent::File { attachment, file_name: None },
         content_type: None,
     };
-    let sha256 = hex::encode(sha2::Sha256::digest(STORED_PART));
-    let stored = AttachmentRef::Stored { sha256, size: STORED_PART.len() as u64, file_name: "a".into(), media_type: None };
+    let stored = AttachmentRef::Stored { sha256: "0".repeat(64), size: 1, file_name: "a".into(), media_type: None };
     vec![
         ("binary body", with_body(Body::Binary { attachment: linked(path), content_type: None })),
         ("multipart part", with_body(Body::Multipart { parts: vec![part(stored), part(linked(path))] })),
@@ -365,8 +361,6 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
     let path = canonical(&canary_file(files.path(), "secret.txt"));
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("W").unwrap();
-    // An export carries the bytes of every stored attachment it names.
-    a.put_attachment("a", STORED_PART, None).unwrap();
     for (label, spec) in saved_linked_specs(&path) {
         let r = a.create_request(&ws.meta.id, None, label, spec).unwrap();
         // A binding on the exporting device does not travel with the bundle.

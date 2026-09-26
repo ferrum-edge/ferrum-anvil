@@ -173,7 +173,7 @@ export interface ImportReport {
     foreign_secrets: string[];
     /** Objects stored here in another workspace under the same id; Replace refuses the bundle while any is listed. */
     foreign_objects: string[];
-    /** Workspaces stored here that the bundle writes into (Merge/Replace); applying needs each one approved. */
+    /** Workspaces stored here that the bundle or full backup writes into (Merge/Replace); applying needs each one approved. */
     existing_workspaces: { id: string; name: string }[];
   };
   warnings: string[];
@@ -184,6 +184,8 @@ export interface ImportReport {
   checkpoint?: string | null;
   workspaces: string[];
   workspace_ids: string[];
+  /** A full backup (restored) rather than a bundle. */
+  full_backup: boolean;
 }
 export interface JwtInspection {
   header: unknown;

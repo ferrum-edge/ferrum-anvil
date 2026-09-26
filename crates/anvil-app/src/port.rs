@@ -1,11 +1,13 @@
 //! Export/import between the encrypted store and portable bundles.
 
 use crate::linked_files::LinkedFileBinding;
+use crate::workspace::attachment_index_id;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::workspace::Workspace;
 use anvil_portability::bundle::{self, BundleKind, ExportMode, ExportOptions, ExportPreview};
 use anvil_portability::plan::{self, ConflictPolicy, Existing, ImportPlan};
+use anvil_portability::validate::{self, UncarriedAttachment};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::{KdfParams, StoreRead, kind};
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,8 @@ pub struct ImportReport {
     pub workspaces: Vec<String>,
     /// Ids of the imported workspaces (after any duplicate remap); empty for a preview.
     pub workspace_ids: Vec<String>,
+    /// Whether the file is a full backup (restored) rather than a bundle.
+    pub full_backup: bool,
 }
 
 /// What the user confirmed after reading an import preview.
@@ -83,7 +87,9 @@ impl App {
             }
         }
         g.workspaces = wss;
-        // Attachments referenced anywhere in the graph.
+        // Attachments referenced anywhere in the graph. One whose content
+        // cannot be read here travels without it, and the export lists it
+        // among its excluded items.
         let text = serde_json::to_string(&g.requests)? + &serde_json::to_string(&g.datasets)?;
         for cap in text.split("\"sha256\":\"").skip(1) {
             let sha: String = cap.chars().take(64).collect();
@@ -139,16 +145,21 @@ impl App {
     /// [`App::restore`].
     pub fn import_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
-        let plan = plan::plan(&opened.graph, &self.store.read_consistently(existing)?, policy);
+        let uncarried = validate::uncarried_attachments(&opened.graph)?;
+        let (existing, stored) = self.store.read_consistently(|r| Ok((existing(r)?, stored_among(r, &uncarried)?)))?;
+        let mut warnings = opened.warnings;
+        warnings.extend(uncarried_warnings(&uncarried, &stored, "bundle", "imported")?);
+        let plan = plan::plan(&opened.graph, &existing, policy);
         Ok(ImportReport {
             plan,
-            warnings: opened.warnings,
+            warnings,
             secrets_restored: opened.secrets_restored,
             missing_secrets: missing_secrets(&opened.graph),
             linked_files: opened.graph.linked_files(),
             checkpoint: None,
             workspaces: opened.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: vec![],
+            full_backup: false,
         })
     }
 
@@ -165,6 +176,10 @@ impl App {
     /// anything is written.
     ///
     /// The whole import is refused, before anything is written, when:
+    /// - a request or dataset names a stored attachment by content hash that
+    ///   the bundle does not carry, and content with that hash is stored
+    ///   here: it would resolve to bytes the bundle never carried. One whose
+    ///   content is not stored here is accepted with a warning;
     /// - under Merge or Replace, the bundle claims a workspace stored here
     ///   that `approval` does not name: what it writes there could use that
     ///   workspace's vault secrets, and a bundle's encryption says nothing
@@ -182,14 +197,20 @@ impl App {
     ) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
         let mut g = opened.graph;
+        let uncarried = validate::uncarried_attachments(&g)?;
         let checkpoint = self.store.checkpoint("before-import")?;
         // A failure rolls back this import's own transaction and nothing else.
         // The checkpoint is never restored automatically: that would also
         // erase whatever other callers saved since it was taken.
-        let plan = self.store.atomically(|s| {
+        let (plan, notes) = self.store.atomically(|s| {
             // Read inside the transaction, so merge and naming decisions see
             // exactly what the writes below land on.
             let existing = existing(&s.as_read())?;
+            let stored = stored_among(&s.as_read(), &uncarried)?;
+            let notes = match uncarried_warnings(&uncarried, &stored, "bundle", "imported") {
+                Ok(notes) => notes,
+                Err(e) => return Ok(Err(e)),
+            };
             let plan = plan::plan(&g, &existing, policy);
             let unapproved: Vec<String> = plan
                 .existing_workspaces
@@ -298,7 +319,7 @@ impl App {
                     s.put_secret(&sid, ws.as_ref(), &v.label, &v.value)?;
                 }
             }
-            Ok(Ok(plan))
+            Ok(Ok((plan, notes)))
         })??;
         for (sha, bytes) in &g.attachments {
             let r = self.put_attachment(sha, bytes, None)?;
@@ -308,15 +329,18 @@ impl App {
                 return Err(AppError::Invalid(format!("attachment {sha} failed its integrity check")));
             }
         }
+        let mut warnings = opened.warnings;
+        warnings.extend(notes);
         Ok(ImportReport {
             plan,
-            warnings: opened.warnings,
+            warnings,
             secrets_restored: opened.secrets_restored,
             missing_secrets: missing_secrets(&g),
             linked_files: g.linked_files(),
             checkpoint: Some(checkpoint.display().to_string()),
             workspaces: g.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: g.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
+            full_backup: false,
         })
     }
 }
@@ -332,7 +356,7 @@ fn refuse_full_backup(mode: ExportMode) -> Result<()> {
 
 /// Every stored object and secret with its owner, and every stored
 /// workspace with its name, read through `s`.
-fn existing(s: &StoreRead<'_>) -> anvil_storage::store::Result<Existing> {
+pub(crate) fn existing(s: &StoreRead<'_>) -> anvil_storage::store::Result<Existing> {
     let mut e = Existing::default();
     for k in kind::ALL {
         for m in s.object_meta(k)? {
@@ -351,6 +375,54 @@ fn existing(s: &StoreRead<'_>) -> anvil_storage::store::Result<Existing> {
         }
     }
     Ok(e)
+}
+
+/// The content hashes among `uncarried` whose content is stored here, read
+/// through `r`: each resolves, as a stored attachment of any request or
+/// dataset would.
+pub(crate) fn stored_among(r: &StoreRead<'_>, uncarried: &[UncarriedAttachment]) -> anvil_storage::store::Result<HashSet<String>> {
+    let mut out = HashSet::new();
+    for u in uncarried {
+        if out.contains(&u.sha256) {
+            continue;
+        }
+        let index: Option<serde_json::Value> = r.get(kind::IMPORT_SOURCE, &attachment_index_id(&u.sha256))?;
+        let blob = index.as_ref().and_then(|i| i.get("blob")).and_then(|b| b.as_str());
+        if let Some(blob) = blob
+            && r.get_blob(blob)?.is_some()
+        {
+            out.insert(u.sha256.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Check the stored attachments a bundle or backup (`file`) names without
+/// their bytes against `stored`, the hashes whose content is stored here.
+/// One that is stored refuses the whole file, since the reference would
+/// resolve to bytes the file never carried, possibly another workspace's.
+/// Otherwise returns one warning per item that names any of them.
+pub(crate) fn uncarried_warnings(
+    uncarried: &[UncarriedAttachment],
+    stored: &HashSet<String>,
+    file: &str,
+    done: &str,
+) -> Result<Vec<String>> {
+    if let Some(u) = uncarried.iter().find(|u| stored.contains(&u.sha256)) {
+        return Err(AppError::Invalid(format!(
+            "{} uses a stored attachment that the {file} does not carry, and content with that hash is already stored on this device; nothing was {done}.",
+            u.item
+        )));
+    }
+    let mut warnings: Vec<String> = Vec::new();
+    for u in uncarried {
+        let warning =
+            format!("{} uses a stored file that the {file} does not include; it will fail until the file is attached again.", u.item);
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
+    }
+    Ok(warnings)
 }
 
 /// Secret references in the graph whose values were not included.

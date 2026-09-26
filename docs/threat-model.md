@@ -133,11 +133,19 @@ against it).
 - **Bundle identities:** bundle secrets and every workspace-scoped object
   must belong to a workspace in the bundle, and references between objects
   must stay within their workspace; object ids must be unique, and a Duplicate
-  import gives every object, revision and secret a new id. Stored attachments
-  are found by content hash, so every attachment a request or dataset names
-  must travel with its bytes in the bundle. A Replace import never overwrites
-  or re-owns a secret that a workspace outside the bundle owns, nor overwrites
-  an object stored in another workspace; it is refused instead.
+  import gives every object, revision and secret a new id. A Replace import
+  never overwrites or re-owns a secret that a workspace outside the bundle
+  owns, nor overwrites an object stored in another workspace; it is refused
+  instead.
+- **Attachments named without their bytes:** stored attachments are found by
+  content hash alone, so a reference whose bytes a bundle or full backup does
+  not carry would resolve to content already stored on this device, possibly
+  another workspace's. Such a file is refused when content with that hash is
+  stored here. Otherwise it is accepted, and the preview and report name each
+  request or dataset that will fail until its file is attached again: the
+  reference is legitimate after a stored blob was lost, or for a request
+  created without its file. If content with that hash is stored later, the
+  reference resolves to it.
 - **Bundle writing into an existing workspace:** workspace ids are not
   secret, so any bundle can claim a workspace already stored here. Merge and
   Replace into a stored workspace assume the bundle is trusted: what they write
@@ -165,8 +173,17 @@ against it).
   Only the header (at most 4 KiB of JSON) is parsed before authentication, to
   bound its key-derivation costs before derivation. Authentic contents are
   still type-checked, confined to the backup's own workspaces (revisions to
-  their request's), refused when a request or dataset names a stored
-  attachment the backup does not carry, and trust-normalised like any import.
+  their request's), checked for stored attachments named without their bytes
+  as above, and trust-normalised like any import.
+- **Restoring into existing workspaces:** a full backup must be your own or
+  otherwise trusted. Its passphrase proves only that the file was not
+  altered, not who made it, and a restore writes every item under its own
+  id. Restoring into a workspace already stored here (Merge or Replace) is
+  refused unless the user approves each such workspace after the preview,
+  as for bundles (desktop checkbox, `anvil import --into-existing`), because
+  what it writes there can use that workspace's vault secrets. Replace also
+  refuses a backup that would overwrite an object stored in another
+  workspace, or a secret stored here under another owner.
 - **Legacy full backups:** full backups written as zip bundles, whose vault
   authenticated nothing else in the archive, are refused on import (manifest
   kind `backup`, mode `full_backup`, or app settings in the archive), so

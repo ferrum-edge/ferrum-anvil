@@ -112,9 +112,9 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
         /// Write into this workspace stored here (repeatable). Merge and
-        /// Replace refuse a bundle that claims a stored workspace unless it
-        /// is named here; `--dry-run` lists them under
-        /// `plan.existing_workspaces`. Only for bundles you trust.
+        /// Replace refuse a bundle or full backup that claims a stored
+        /// workspace unless it is named here; `--dry-run` lists them under
+        /// `plan.existing_workspaces`. Only for files you trust.
         #[arg(long = "into-existing", value_name = "WORKSPACE_ID")]
         into_existing: Vec<String>,
     },
@@ -969,7 +969,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             // A full backup is restored; anything else is imported as a bundle.
             let rep = match (anvil_app::backup::is_backup(&bytes), *dry_run) {
                 (true, true) => app.restore_preview(&bytes, pass.as_deref(), pol)?,
-                (true, false) => app.restore(&bytes, pass.as_deref(), pol)?,
+                (true, false) => app.restore_approved(&bytes, pass.as_deref(), pol, &approval)?,
                 (false, true) => app.import_preview(&bytes, pass.as_deref(), pol)?,
                 (false, false) => app.import_approved(&bytes, pass.as_deref(), pol, &approval)?,
             };

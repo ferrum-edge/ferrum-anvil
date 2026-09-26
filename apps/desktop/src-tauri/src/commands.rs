@@ -707,11 +707,12 @@ pub async fn import_apply(
     let app = st.app()?;
     let bytes = read_bundle(&st, &grant)?;
     let policy = policy(&conflict_policy)?;
-    if anvil_app::backup::is_backup(&bytes) {
-        return off_ui_thread(move || app.restore(&bytes, passphrase.as_deref(), policy)).await;
-    }
-    // Only the workspaces the user confirmed after the preview's warning.
+    // Only the workspaces the user confirmed after the preview's warning,
+    // for a full backup as for a bundle.
     let approval = approval.unwrap_or_default();
+    if anvil_app::backup::is_backup(&bytes) {
+        return off_ui_thread(move || app.restore_approved(&bytes, passphrase.as_deref(), policy, &approval)).await;
+    }
     off_ui_thread(move || app.import_approved(&bytes, passphrase.as_deref(), policy, &approval)).await
 }
 

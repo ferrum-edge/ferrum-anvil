@@ -809,11 +809,15 @@ export function ImportDialog(props: {
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
   const [preview, setPreview] = useState<ImportReport | null>(null);
-  // Set only after the preview named the existing workspaces the bundle writes into.
+  // Set only after the preview named the existing workspaces the bundle or backup writes into.
   const [intoExisting, setIntoExisting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const existing = preview?.plan.existing_workspaces ?? [];
+  // A full backup restores every item under its own id, so it has no copies to fall back on.
+  const backup = preview?.full_backup ?? false;
+  const noun = backup ? "backup" : "bundle";
+  const instead = backup ? "Use Merge instead." : "Import as copies instead.";
   const choose = async () => {
     setErr(null);
     try {
@@ -931,33 +935,34 @@ export function ImportDialog(props: {
               <tr><td className="k">To create</td><td className="v">{preview.plan.to_create}</td></tr>
               <tr><td className="k">To replace</td><td className="v">{preview.plan.to_replace}</td></tr>
               <tr><td className="k">Skipped (already present)</td><td className="v">{preview.plan.skipped_existing}</td></tr>
-              <tr><td className="k">Secrets</td><td className="v">{preview.secrets_restored ? "restored from the encrypted bundle" : "not included"}</td></tr>
+              <tr><td className="k">Secrets</td><td className="v">{preview.secrets_restored ? `restored from the encrypted ${noun}` : "not included"}</td></tr>
             </tbody>
           </table>
           {preview.missing_secrets.length > 0 && <div className="warn-box">You'll need to fill in {preview.missing_secrets.length} placeholder(s): {preview.missing_secrets.slice(0, 8).join(", ")}</div>}
           {existing.length > 0 && (
             <div className="bad-box col">
               <span>
-                This bundle writes into your existing workspace{existing.length > 1 ? "s" : ""} {existing.map((w) => `'${w.name}'`).join(", ")}; imported items can use
-                {existing.length > 1 ? " their" : " its"} vault secrets and send them wherever they point. A passphrase only proves the bundle was not altered in transit, not who wrote it. Import as copies unless you trust where this bundle came from.
+                This {noun} writes into your existing workspace{existing.length > 1 ? "s" : ""} {existing.map((w) => `'${w.name}'`).join(", ")}; {backup ? "restored" : "imported"} items can use
+                {existing.length > 1 ? " their" : " its"} vault secrets and send them wherever they point. A passphrase only proves the {noun} was not altered, not who made it.{" "}
+                {backup ? "Continue only if this backup is your own or you otherwise trust it." : "Import as copies unless you trust where this bundle came from."}
               </span>
               <label className="check">
                 <input type="checkbox" checked={intoExisting} onChange={(e) => setIntoExisting(e.target.checked)} />
-                I trust this bundle: write into {existing.length > 1 ? "these workspaces" : "this workspace"}
+                I trust this {noun}: write into {existing.length > 1 ? "these workspaces" : "this workspace"}
               </label>
             </div>
           )}
           {preview.plan.foreign_objects.length > 0 && preview.plan.policy === "replace" && (
-            <div className="bad-box">Replace can't overwrite objects that belong to another workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}. Import as copies instead.</div>
+            <div className="bad-box">Replace can't overwrite objects that belong to another workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}. {instead}</div>
           )}
           {preview.plan.foreign_objects.length > 0 && preview.plan.policy === "merge" && (
-            <div className="warn-box">These objects already exist here in another workspace and stay there, unchanged. Imported items never use an object of another workspace, so those that refer to these won't find them until you point them at objects of their own workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}</div>
+            <div className="warn-box">These objects already exist here in another workspace and stay there, unchanged. {backup ? "Restored" : "Imported"} items never use an object of another workspace, so those that refer to these won't find them until you point them at objects of their own workspace: {preview.plan.foreign_objects.slice(0, 8).join(", ")}</div>
           )}
           {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "replace" && (
-            <div className="bad-box">Replace can't overwrite secrets that belong to a workspace outside this bundle: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}. Import as copies instead.</div>
+            <div className="bad-box">Replace can't overwrite secrets that belong to {backup ? "another workspace, or to none" : "a workspace outside this bundle"}: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}. {instead}</div>
           )}
           {preview.plan.foreign_secrets.length > 0 && preview.plan.policy === "merge" && (
-            <div className="warn-box">These secrets already exist here in another workspace and are kept; the imported items that use them won't resolve them: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}</div>
+            <div className="warn-box">These secrets already exist here in another workspace and are kept; the {backup ? "restored" : "imported"} items that use them won't resolve them: {preview.plan.foreign_secrets.slice(0, 8).join(", ")}</div>
           )}
           {preview.warnings.map((w, i) => (
             <div key={i} className="warn-box">

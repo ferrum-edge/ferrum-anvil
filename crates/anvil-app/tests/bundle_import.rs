@@ -676,6 +676,50 @@ fn a_stored_attachment_is_imported_only_with_its_bytes() {
 }
 
 #[test]
+fn a_stored_attachment_whose_content_is_not_stored_here_imports_with_a_warning() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    // A stored attachment whose content this profile does not hold, as after
+    // the loss of its blob or a request created through the API.
+    let lost = b"content that is not stored here";
+    let sha256 = hex::encode(sha2::Sha256::digest(lost));
+    let missing = AttachmentRef::Stored { sha256: sha256.clone(), size: lost.len() as u64, file_name: "lost.bin".into(), media_type: None };
+    a.create_request(&ws.meta.id, None, "Upload", upload(Body::Binary { attachment: missing, content_type: None })).unwrap();
+
+    // The export says which request travels without its file.
+    let preview = a.export_preview(Some(&ws.meta.id), ExportMode::EncryptedTransfer, false).unwrap();
+    let excluded = &preview.manifest.excluded;
+    assert!(excluded.iter().any(|x| x.contains("a stored file of request 'Upload'")), "{excluded:?}");
+    let (bytes, written) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    assert_eq!(written.manifest.excluded, preview.manifest.excluded);
+
+    // A profile that does not store that content imports the bundle, with a
+    // warning naming the request.
+    let warning = "request 'Upload' uses a stored file that the bundle does not include; it will fail until the file is attached again.";
+    let b = new_app(root.path(), "b");
+    let preview = b.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert!(preview.warnings.iter().any(|w| w == warning), "{:?}", preview.warnings);
+    let rep = b.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert!(rep.warnings.iter().any(|w| w == warning), "{:?}", rep.warnings);
+    assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1);
+    assert!(b.get_attachment(&sha256).unwrap().is_none(), "nothing stands in for the missing content");
+
+    // A profile that stores that content refuses the same bundle under every
+    // policy: the request would send those bytes.
+    let c = new_app(root.path(), "c");
+    c.put_attachment("mine.bin", lost, None).unwrap();
+    let needle = "request 'Upload' uses a stored attachment that the bundle does not carry";
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+        let e = c.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
+        assert!(e.to_string().contains(needle), "{policy:?}: {e}");
+        let e = c.import(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
+        assert!(e.to_string().contains(needle), "{policy:?}: {e}");
+    }
+    assert!(c.workspaces().unwrap().is_empty(), "nothing was imported");
+}
+
+#[test]
 fn bundles_describing_a_full_backup_are_never_written_or_restored() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");

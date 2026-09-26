@@ -1,10 +1,12 @@
 //! Full backups: every stored entity round-trips into a clean profile, the
-//! whole file is encrypted and authenticated, and a restore refuses anything
-//! modified, malformed or pointing outside the backup before writing.
+//! whole file is encrypted and authenticated, a restore refuses anything
+//! modified, malformed or pointing outside the backup before writing, and it
+//! writes into a workspace stored here only once the user approves it.
 
 use anvil_app::backup::{self, BackupContents, BackupError, NOT_CARRIED_KINDS, OBJECT_KINDS, TABLES};
 use anvil_app::exec::SendOptions;
 use anvil_app::linked_files::LinkedFileReferrer;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::runner::RunSettings;
 use anvil_app::specs::SpecTarget;
@@ -19,7 +21,7 @@ use anvil_domain::settings::Theme;
 use anvil_domain::workspace::{DatasetFormat, Meta, ProtectionMode, Scenario, ScenarioStep, UserProfile, Variable};
 use anvil_import::ImportOptions;
 use anvil_portability::ExportMode;
-use anvil_portability::plan::ConflictPolicy;
+use anvil_portability::plan::{ConflictPolicy, ExistingWorkspace};
 use anvil_storage::{KdfParams, kind};
 use anvil_transport::recorder::EventCtx;
 use serde_json::json;
@@ -59,6 +61,11 @@ fn new_app(root: &std::path::Path, name: &str) -> App {
 
 fn export(app: &App) -> Vec<u8> {
     app.export_backup_with(PASS, KdfParams::testing()).unwrap().0
+}
+
+/// Approval to write into the stored workspace `ws`.
+fn into(ws: &Id) -> ImportApproval {
+    ImportApproval { existing_workspaces: vec![*ws] }
 }
 
 /// The `pub const NAME: &str = "value";` values of `mod kind` in the store source.
@@ -401,15 +408,21 @@ fn resealed(bytes: &[u8], edit: impl FnOnce(&mut backup::BackupManifest, &mut Ba
 }
 
 #[test]
-fn a_stored_attachment_is_restored_only_with_its_content() {
+fn a_stored_attachment_without_its_content_is_restored_only_where_that_content_is_not_stored() {
     let root = tempfile::tempdir().unwrap();
     let a = small(root.path(), "a");
     let ws = a.workspaces().unwrap().remove(0);
     let rows = a.create_dataset(&ws.meta.id, "rows", DatasetFormat::Csv, b"card\nplaceholder-card\n", vec![]).unwrap();
     let file = a.put_attachment("statement.bin", b"placeholder statement", None).unwrap();
-    let body = Body::Binary { attachment: file.clone(), content_type: None };
-    let spec = RequestSpec { body, ..RequestSpec::http("POST", "https://original.example.invalid/") };
-    a.create_request(&ws.meta.id, None, "Upload", spec).unwrap();
+    let upload = |attachment: &AttachmentRef| RequestSpec {
+        body: Body::Binary { attachment: attachment.clone(), content_type: None },
+        ..RequestSpec::http("POST", "https://original.example.invalid/")
+    };
+    a.create_request(&ws.meta.id, None, "Upload", upload(&file)).unwrap();
+    // A request whose stored content this profile never held, as one created
+    // through the API can be: the backup is still written.
+    let never = AttachmentRef::Stored { sha256: "0".repeat(64), size: 1, file_name: "never.bin".into(), media_type: None };
+    a.create_request(&ws.meta.id, None, "Orphan", upload(&never)).unwrap();
     let bytes = export(&a);
     // The target stores the same content in a workspace of its own.
     let b = new_app(root.path(), "b");
@@ -417,17 +430,141 @@ fn a_stored_attachment_is_restored_only_with_its_content() {
     b.create_dataset(&local.meta.id, "cards", DatasetFormat::Csv, b"card\nplaceholder-card\n", vec![]).unwrap();
     b.put_attachment("mine.bin", b"placeholder statement", None).unwrap();
 
-    // A backup naming stored content by hash without carrying it.
-    for (attachment, needle) in [(&rows.attachment, "dataset 'rows'"), (&file, "request 'Upload'")] {
-        let AttachmentRef::Stored { sha256, .. } = attachment else { panic!("{needle}: a stored attachment") };
+    // A backup naming stored content by hash without carrying it, as after
+    // the loss of a stored blob.
+    let items = [(&rows.attachment, "dataset 'rows'"), (&file, "request 'Upload'")];
+    for (i, (attachment, item)) in items.into_iter().enumerate() {
+        let AttachmentRef::Stored { sha256, .. } = attachment else { panic!("{item}: a stored attachment") };
         let without = resealed(&bytes, |_, c| c.attachments.retain(|x| x.sha256 != *sha256));
-        assert_refused(&b, &without, needle);
+        // Where that content is stored, the reference would resolve to it: refused.
+        assert_refused(&b, &without, item);
         let e = b.restore(&without, Some(PASS), ConflictPolicy::Merge).unwrap_err();
-        assert!(e.to_string().contains(&format!("{needle} uses a stored attachment that the bundle does not carry")), "{e}");
+        assert!(e.to_string().contains(&format!("{item} uses a stored attachment that the backup does not carry")), "{e}");
+        // Where it is not, the backup restores, with a warning naming the item.
+        let fresh = new_app(root.path(), &format!("fresh-{i}"));
+        let warning = format!("{item} uses a stored file that the backup does not include; it will fail until the file is attached again.");
+        let dry = fresh.restore_preview(&without, Some(PASS), ConflictPolicy::Replace).unwrap();
+        assert!(dry.warnings.contains(&warning), "{:?}", dry.warnings);
+        let rep = fresh.restore(&without, Some(PASS), ConflictPolicy::Replace).unwrap();
+        assert!(rep.warnings.contains(&warning), "{:?}", rep.warnings);
+        assert!(fresh.get_attachment(sha256).unwrap().is_none(), "nothing stands in for the missing content");
+        assert_eq!(fresh.find_workspace("W").unwrap().meta.id, ws.meta.id);
     }
-    // With its content, the same backup restores.
-    b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+    // With its content, the same backup restores; only the request whose
+    // content was never stored is named.
+    let rep = b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+    let named: Vec<&String> = rep.warnings.iter().filter(|w| w.contains("does not include")).collect();
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert!(named[0].starts_with("request 'Orphan'"), "{named:?}");
     assert_eq!(b.run_dataset(&b.dataset(&rows.meta.id).unwrap()).unwrap().rows.len(), 1);
+}
+
+#[test]
+fn a_backup_that_claims_a_stored_workspace_is_refused_until_approved() {
+    let root = tempfile::tempdir().unwrap();
+    let a = small(root.path(), "a");
+    let ws = a.workspaces().unwrap().remove(0);
+    let b = new_app(root.path(), "b");
+    // Into a profile without that workspace, nothing needs approving.
+    let first = b.restore_preview(&export(&a), Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(first.plan.existing_workspaces.is_empty(), "{:?}", first.plan);
+    b.restore(&export(&a), Some(PASS), ConflictPolicy::Replace).unwrap();
+
+    // A later backup that names the stored workspace's id and adds a request there.
+    a.create_request(&ws.meta.id, None, "Probe", RequestSpec::http("GET", "https://elsewhere.example.invalid/")).unwrap();
+    let bytes = export(&a);
+    let expected = vec![ExistingWorkspace { id: ws.meta.id, name: "W".into() }];
+    let before = b.backup_contents().unwrap();
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        // The preview names the stored workspace...
+        let preview = b.restore_preview(&bytes, Some(PASS), policy).unwrap();
+        assert_eq!(preview.plan.existing_workspaces, expected, "{policy:?}");
+        assert!(preview.full_backup);
+        // ...and restoring without approving it, or approving another one, is refused.
+        let e = b.restore(&bytes, Some(PASS), policy).unwrap_err();
+        assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'W'")), "{policy:?}: {e}");
+        let e = b.restore_approved(&bytes, Some(PASS), policy, &into(&Id::new())).unwrap_err();
+        assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'W'")), "{policy:?}: {e}");
+        assert!(b.backup_contents().unwrap() == before, "a refused restore changed the profile ({policy:?})");
+    }
+    assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1, "nothing was restored");
+
+    // Once the user approves the stored workspace, the restore writes into it.
+    let rep = b.restore_approved(&bytes, Some(PASS), ConflictPolicy::Merge, &into(&ws.meta.id)).unwrap();
+    assert_eq!(rep.workspace_ids, vec![ws.meta.id.to_string()]);
+    assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 2);
+}
+
+#[test]
+fn every_stored_workspace_a_backup_claims_needs_approval() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let payments = a.create_workspace("Payments").unwrap();
+    let billing = a.create_workspace("Billing").unwrap();
+    let b = new_app(root.path(), "b");
+    b.restore(&export(&a), Some(PASS), ConflictPolicy::Merge).unwrap();
+
+    // A later backup that adds a request to one of the two stored workspaces.
+    a.create_request(&billing.meta.id, None, "Probe", RequestSpec::http("GET", "https://elsewhere.example.invalid/")).unwrap();
+    let bytes = export(&a);
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
+        let preview = b.restore_preview(&bytes, Some(PASS), policy).unwrap();
+        assert_eq!(preview.plan.existing_workspaces.len(), 2, "{policy:?}");
+        // Approving only one of them refuses the whole restore, naming the other.
+        let e = b.restore_approved(&bytes, Some(PASS), policy, &into(&payments.meta.id)).unwrap_err();
+        assert!(
+            matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Billing'") && !m.contains("'Payments'")),
+            "{policy:?}: {e}"
+        );
+    }
+    assert!(b.requests(&billing.meta.id).unwrap().is_empty(), "nothing was restored");
+
+    // Approving both, Replace writes into them.
+    let both = ImportApproval { existing_workspaces: vec![payments.meta.id, billing.meta.id] };
+    b.restore_approved(&bytes, Some(PASS), ConflictPolicy::Replace, &both).unwrap();
+    assert_eq!(b.requests(&billing.meta.id).unwrap().len(), 1);
+}
+
+#[test]
+fn a_restore_never_overwrites_an_object_or_secret_of_another_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let b = new_app(root.path(), "b");
+    let payments = b.create_workspace("Payments").unwrap();
+    let folder = b.create_folder(&payments.meta.id, None, "Orders").unwrap();
+    let token = b.set_secret(&payments.meta.id, "bearer", "placeholder-token-here").unwrap();
+
+    // A backup with a workspace of its own whose folder and secret reuse
+    // the stored folder's and secret's ids.
+    let a = new_app(root.path(), "a");
+    let incoming = a.create_workspace("Incoming").unwrap();
+    let mut look_alike = folder.clone();
+    look_alike.workspace_id = incoming.meta.id;
+    a.store.put(kind::FOLDER, &folder.meta.id, Some(&incoming.meta.id), None, folder.sort_key, &look_alike).unwrap();
+    a.store.put_secret(&token.id, Some(&incoming.meta.id), "bearer", "placeholder-token-there").unwrap();
+    let bytes = export(&a);
+    let object = format!("folder 'Orders' ({})", folder.meta.id);
+    let secret = format!("secret 'bearer' ({})", token.id);
+
+    let preview = b.restore_preview(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(preview.plan.foreign_objects, vec![object.clone()]);
+    assert_eq!(preview.plan.foreign_secrets, vec![secret.clone()]);
+    assert!(preview.plan.existing_workspaces.is_empty(), "{:?}", preview.plan);
+    let before = b.backup_contents().unwrap();
+    let e = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains(&object)), "{e}");
+    assert!(b.backup_contents().unwrap() == before, "a refused restore changed the profile");
+    // Reusing only the secret's id is refused too.
+    let secret_only = resealed(&bytes, |_, c| c.objects.retain(|o| o.kind != kind::FOLDER));
+    let e = b.restore(&secret_only, Some(PASS), ConflictPolicy::Replace).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains(&secret)), "{e}");
+    assert!(b.backup_contents().unwrap() == before, "a refused restore changed the profile");
+
+    // Merge keeps both where they are, unchanged.
+    let rep = b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+    assert_eq!(rep.plan.foreign_objects, vec![object]);
+    assert_eq!(b.folder(&folder.meta.id).unwrap(), folder);
+    assert_eq!(b.store.get_secret(&token.id).unwrap().unwrap().1.as_str(), "placeholder-token-here");
+    assert_eq!(b.store.list_secret_ids(Some(&payments.meta.id)).unwrap(), vec![token.id.to_string()]);
 }
 
 #[test]
@@ -538,13 +675,14 @@ fn merge_keeps_local_items_and_replace_restores_the_backup() {
     s.theme = Theme::Dark;
     b.save_settings(&s).unwrap();
 
-    let merge = b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+    // The backup writes into the workspace restored above, which the user approves.
+    let merge = b.restore_approved(&bytes, Some(PASS), ConflictPolicy::Merge, &into(&ws.meta.id)).unwrap();
     assert_eq!(merge.plan.to_create, 0);
     assert!(merge.plan.skipped_existing >= 4, "{:?}", merge.plan);
     assert_eq!(b.workspace(&ws.meta.id).unwrap().name, "Edited here");
     assert_eq!(b.settings().unwrap().theme, Theme::Dark, "merge keeps this profile's settings");
 
-    let replace = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    let replace = b.restore_approved(&bytes, Some(PASS), ConflictPolicy::Replace, &into(&ws.meta.id)).unwrap();
     assert_eq!(replace.plan.to_replace, merge.plan.skipped_existing);
     assert_eq!(b.workspace(&ws.meta.id).unwrap().name, "W");
     assert_eq!(b.settings().unwrap().theme, Theme::Light);
@@ -578,9 +716,10 @@ fn linked_file_bindings_stay_on_their_device_and_a_replace_drops_overwritten_one
     assert!(b.linked_file_bindings().unwrap().is_empty(), "a restore never binds a linked file");
 
     // Merge keeps the stored request and its binding; Replace overwrites the
-    // request, which is not what the file was chosen for.
-    a.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+    // request, which is not what the file was chosen for. The backup is this
+    // profile's own, so writing into its workspace is approved.
+    a.restore_approved(&bytes, Some(PASS), ConflictPolicy::Merge, &into(&ws.meta.id)).unwrap();
     assert_eq!(a.linked_file_bindings().unwrap().len(), 1);
-    a.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    a.restore_approved(&bytes, Some(PASS), ConflictPolicy::Replace, &into(&ws.meta.id)).unwrap();
     assert!(a.linked_file_bindings().unwrap().is_empty());
 }

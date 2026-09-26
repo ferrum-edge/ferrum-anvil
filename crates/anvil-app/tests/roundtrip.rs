@@ -88,8 +88,10 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
     let hdrs = fx.log.last_request_headers().unwrap();
     assert!(hdrs.iter().any(|(n, v)| n == "x-env-token" && v == "ENV-TOKEN-777"), "secret variable restored");
 
-    // Restoring the same backup again with Merge is idempotent.
-    b.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    // Restoring the same backup again with Merge is idempotent. It writes
+    // into the restored workspace, which the user approves.
+    let approval = anvil_app::port::ImportApproval { existing_workspaces: vec![ws_b.meta.id] };
+    b.restore_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &approval).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
     // A full backup restores every item under its own id; it is never duplicated.
     let e = b.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate).unwrap_err();
