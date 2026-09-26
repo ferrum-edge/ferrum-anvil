@@ -40,7 +40,9 @@ and worded from `catalog/diagnostics/findings.en.json`. Each finding has:
 Wording shared by several findings lives in the catalog's `fragments` map. A
 rule attaches a fragment to a finding's alternatives only when the evidence
 calls for it (for example "the listener may require a PROXY protocol header"
-on a TCP close when Anvil sent no header; see
+on a TCP close, or a close of a new HTTP-family connection, when Anvil sent no
+header, and "the listener may not expect a PROXY protocol header" on a 400, a
+TLS alert or a close right after Anvil sent one; see
 [protocols.md §3.10](protocols.md)); a fragment never changes a finding's
 confidence.
 

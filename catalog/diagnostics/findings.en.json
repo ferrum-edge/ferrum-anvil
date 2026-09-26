@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-11",
+  "version": "2026.09.26-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2632,12 +2632,12 @@
           "owner": "caller"
         },
         {
-          "text": "Check the stream listener's logs for this connection; Ferrum Edge logs a warning that names an untrusted peer or an invalid PROXY header.",
+          "text": "Check the listener's logs for this connection; a Ferrum Edge stream listener logs a warning that names an untrusted peer or an invalid PROXY header.",
           "owner": "gateway_operator"
         }
       ],
       "confirm_with": [
-        "Operator logs for the stream listener at this time (Ferrum Edge: \"socket peer is not in FERRUM_TRUSTED_PROXIES\" or \"did not start with a valid PROXY header\")."
+        "Operator logs for the listener at this time (a Ferrum Edge stream listener: \"socket peer is not in FERRUM_TRUSTED_PROXIES\" or \"did not start with a valid PROXY header\")."
       ]
     },
     "ferrum.catalog.unavailable": {
@@ -2663,7 +2663,8 @@
     }
   },
   "fragments": {
-    "alt.proxy_protocol.header_may_be_required": "The listener may require a PROXY protocol header, which Anvil did not send: a stream listener with PROXY protocol enabled (for example Ferrum Edge stream_proxy_protocol: true) closes a connection that does not begin with a valid header, without sending anything back.",
+    "alt.proxy_protocol.header_may_be_required": "The listener may require a PROXY protocol header, which Anvil did not send: a listener with PROXY protocol enabled (for example a Ferrum Edge stream listener with stream_proxy_protocol: true, HAProxy accept-proxy or nginx listen … proxy_protocol) closes a connection that does not begin with a valid header, without sending anything back.",
+    "alt.proxy_protocol.header_may_be_unexpected": "The listener may not expect a PROXY protocol header: Anvil wrote one at the head of this new connection, and a listener without PROXY protocol reads those bytes as the start of the HTTP request or of the TLS handshake and rejects them (for example with 400 Bad Request or a TLS alert). Ferrum Edge HTTP listeners never read a PROXY header; they take the client address from X-Forwarded-For.",
     "alt.proxy_protocol.envelope_may_be_dropped": "The listener may have dropped the PROXY v2 envelope Anvil sent on each datagram. Envelope checks fail silently: an untrusted source address, an authentication tag that does not verify (wrong secret or listener identity), a sequence already used, or a timestamp outside the listener's freshness horizon."
   }
 }

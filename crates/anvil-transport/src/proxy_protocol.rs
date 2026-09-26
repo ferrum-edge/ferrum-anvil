@@ -134,6 +134,44 @@ pub struct HeaderPlan {
     pub raw: Vec<u8>,
 }
 
+/// The PROXY header of an HTTP-family request: the plan and the scrubber
+/// for its evidence. One header is written per new TCP connection; a pooled
+/// connection keeps the header it was opened with, so the pool key includes
+/// [`ConnectionHeader::pool_key`].
+#[derive(Clone)]
+pub struct ConnectionHeader {
+    pub plan: HeaderPlan,
+    pub redact: Option<SharedRedact>,
+}
+
+impl std::fmt::Debug for ConnectionHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionHeader").field("plan", &self.plan).finish()
+    }
+}
+
+impl ConnectionHeader {
+    /// The request field the header is configured in.
+    pub const FIELD: &'static str = "proxy_protocol";
+
+    /// A digest of everything that decides the header bytes: connections
+    /// opened with different plans are never shared.
+    pub fn pool_key(&self) -> String {
+        let p = &self.plan;
+        let text = format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+            p.version,
+            p.command,
+            p.family,
+            p.source,
+            p.destination,
+            p.tlvs,
+            hex::encode(&p.raw)
+        );
+        crate::certs::sha256_hex(text.as_bytes())[..16].to_string()
+    }
+}
+
 /// Header bytes plus the evidence describing them.
 #[derive(Clone, Debug)]
 pub struct BuiltHeader {

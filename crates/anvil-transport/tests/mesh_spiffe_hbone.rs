@@ -74,6 +74,8 @@ fn plan(url: &str, tls: Option<TlsSettings>, proxy: Option<ProxyPlan>) -> HttpPl
     let host = u.host_str().unwrap().trim_start_matches('[').trim_end_matches(']').to_string();
     let port = u.port_or_known_default().unwrap();
     HttpPlan {
+        proxy_header: None,
+        proxy_header_withheld: None,
         method: http::Method::GET,
         https,
         host: host.clone(),

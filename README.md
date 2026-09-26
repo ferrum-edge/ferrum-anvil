@@ -23,8 +23,9 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
 - **Mesh and edge features**: HBONE tunnels (HTTP/2 CONNECT over mTLS) for
   HTTP, WebSocket, gRPC, SSE and raw TCP; SPIFFE ID or trust-domain server
   verification with X.509-SVID client identities; SNI override; PROXY
-  protocol v1/v2 headers on TCP/TLS and signed datagram envelopes on
-  UDP/DTLS. See `docs/protocols.md`.
+  protocol v1/v2 headers on TCP/TLS and on HTTP-family requests (one per
+  new connection) and signed datagram envelopes on UDP/DTLS. See
+  `docs/protocols.md`.
 - **Auth and TLS**:
   - Auth types: API key, Basic, Bearer, JWT signing, OAuth 2.0, Ferrum HMAC
     v2, DPoP, WS-Security, and multi-auth.

@@ -329,6 +329,9 @@ pub struct GrpcPlan {
     /// HTTP/3 policy is chosen. gRPC-Web: HTTP/1.1, HTTP/2, h2c, HTTP/3, or
     /// (automatic) ALPN `h2`/`http/1.1` over TLS and HTTP/1.1 in cleartext.
     pub version: HttpVersionPolicy,
+    /// PROXY protocol header written at the head of each new TCP connection,
+    /// before TLS (TCP legs only; HTTP/3 is refused before traffic).
+    pub proxy_header: Option<crate::proxy_protocol::ConnectionHeader>,
 }
 
 impl GrpcPlan {
@@ -1160,7 +1163,8 @@ async fn connect(
         (true, TcpHttp::Negotiate) => &["h2", "http/1.1"],
     };
     let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: false };
-    let est = establish_guarded(rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline).await?;
+    let header = plan.proxy_header.as_ref().map(crate::connector::PreTlsHeader::of);
+    let est = establish_guarded_with(rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline, header).await?;
     let negotiated = est.observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone());
     let use_h2 = match (tls, t) {
         (true, TcpHttp::H2) => {

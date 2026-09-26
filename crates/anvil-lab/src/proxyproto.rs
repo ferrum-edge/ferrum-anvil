@@ -12,6 +12,11 @@
 //! transaction summary's `client_ip`, the PROXY warnings and datagram drop
 //! reasons) and the fixtures behind the gateway; neither is ever given to the
 //! engine. A close or silence alone never yields a confirmed PROXY claim.
+//!
+//! The PP-HTTP scenarios send an HTTP-family request with a PROXY header to
+//! the gateway's ordinary HTTP and HTTPS listeners, which never read one:
+//! Anvil must report the public outcome and offer "the listener may not
+//! expect a PROXY header" only as an alternative.
 
 use crate::fixtures_proxyproto::ProxyProtoFixtures;
 use crate::gateway::{self, Gateway};
@@ -49,6 +54,8 @@ const UDP: &str = "127.0.0.1:18903";
 const DTLS: &str = "127.0.0.1:18904";
 const UDP_AUTH: &str = "127.0.0.1:18911";
 const DTLS_AUTH: &str = "127.0.0.1:18912";
+const HTTP: &str = "127.0.0.1:18980";
+const HTTPS_PORT: u16 = 18981;
 const GATEWAY_PORTS: &[u16] = &[18980, 18981, 18901, 18902, 18903, 18904, 18982, 18983, 18911, 18912, 18984, 18921, 18923];
 /// Ferrum rate-limits datagram-drop warnings to one per second per listener;
 /// drop scenarios wait this long first so their own reason is logged.
@@ -1062,6 +1069,172 @@ fn pp019(env: &Env) -> Fut<'_> {
     })
 }
 
+// ------------------------------------------------ HTTP-family requests ---
+
+fn http_ctx(env: &Env, url: &str, h: Option<ProxyHeaderSpec>) -> ExecutionContext {
+    let mut s = RequestSpec::http("GET", url);
+    s.proxy_protocol = h;
+    ctx_with(env, s, url.starts_with("https://"))
+}
+
+fn http_status(o: &ExecutionOutput) -> Option<u16> {
+    o.record.response.as_ref().map(|r| r.status)
+}
+
+/// Findings that offer "the listener may not expect a PROXY header", with their confidence.
+fn may_not_expect(o: &ExecutionOutput) -> Vec<(String, Confidence)> {
+    o.record
+        .findings
+        .iter()
+        .filter(|f| f.alternatives.iter().any(|a| a.contains("may not expect a PROXY protocol header")))
+        .map(|f| (f.code.clone(), f.confidence))
+        .collect()
+}
+
+/// The header went out on a new connection, before any TLS.
+fn http_header_sent(c: &mut Checks, o: &ExecutionOutput, format: ProxyHeaderFormat) {
+    let a = last(o);
+    let p = a.and_then(|a| a.phase(Phase::ProxyProtocolHeader));
+    let h = sent_header(o);
+    c.add(
+        CheckKind::Diagnosis,
+        "the PROXY header was written in its own phase on a new connection, before any TLS",
+        p.map(|p| p.status) == Some(PhaseStatus::Completed)
+            && a.and_then(|a| a.connection.as_ref()).map(|c| !c.reused).unwrap_or(false)
+            && h.as_ref().map(|h| h.format == format && h.well_formed).unwrap_or(false)
+            && a.and_then(|a| a.phase(Phase::TlsHandshake))
+                .and_then(|t| t.start_us)
+                .map(|s| p.and_then(|p| p.end_us) <= Some(s))
+                .unwrap_or(true),
+        format!("{:?}", p.map(|p| (&p.status, &p.detail))),
+    );
+}
+
+fn pp_http_001(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        env.engine.http.pool.clear();
+        let from = op_from(&env.gateway);
+        let before = env.fx.http_backend.log.count_requests();
+        let url = format!("http://{HTTP}/pp-http/echo");
+        let o = send(env, &http_ctx(env, &url, Some(header(ProxyHeaderVersion::V1, Some("203.0.113.80:48080"))))).await;
+        http_header_sent(&mut c, &o, ProxyHeaderFormat::V1);
+        // The listener reads the header as its request line and answers 400,
+        // then closes. When that answer arrives before the HTTP client has
+        // written its request, the client sees only the close: both are the
+        // public outcome, and each gets its own PROXY alternative.
+        let alts = may_not_expect(&o);
+        let (outcome, ok) = match http_status(&o) {
+            Some(400) => (
+                "HTTP 400, with 'the listener may not expect a PROXY header' on the 400 finding only",
+                o.record.findings.iter().any(|f| f.code == "http.client_error")
+                    && alts.iter().map(|x| x.0.as_str()).collect::<Vec<_>>() == vec!["http.client_error"]
+                    && !codes(&o).iter().any(|x| x.starts_with("tcp.proxy_header")),
+            ),
+            None => (
+                "a close before any response: the close finding offers 'may not expect a PROXY header', next to tcp.proxy_header_maybe_rejected (unknown)",
+                last(&o)
+                    .and_then(|a| a.failure.as_ref())
+                    .map(|f| matches!(f.kind, FailureKind::ClosedBeforeResponse | FailureKind::ResetBeforeResponse))
+                    .unwrap_or(false)
+                    && alts.iter().any(|x| x.0.starts_with("exchange."))
+                    && o.record.findings.iter().any(|f| f.code == "tcp.proxy_header_maybe_rejected" && f.confidence == Confidence::Unknown),
+            ),
+            Some(_) => ("an unexpected status", false),
+        };
+        c.add(CheckKind::Diagnosis, format!("the public outcome is recorded as observed: {outcome}"), ok, outcome_line(&o));
+        c.add(
+            CheckKind::Diagnosis,
+            "the PROXY header is only ever an alternative (never a confirmed cause)",
+            !alts.is_empty() && alts.iter().all(|x| !x.0.contains("proxy")),
+            format!("{alts:?}"),
+        );
+        no_proxy_confirmed(&mut c, &o);
+        c.absent_prefix(&o, "ferrum.token");
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend behind the route saw no request",
+            env.fx.http_backend.log.count_requests() == before,
+            format!("{before} → {}", env.fx.http_backend.log.count_requests()),
+        );
+        let lines = op_log(&env.gateway, from, "pp-http");
+        c.add(CheckKind::GroundTruth, "the gateway routed no transaction for pp-http", lines.is_empty(), format!("{lines:?}"));
+        // Recovery: the same request without a header.
+        let r = send(env, &http_ctx(env, &url, None)).await;
+        c.add(
+            CheckKind::Recovery,
+            "without the header the listener answers 200 and the backend gets the request",
+            http_status(&r) == Some(200) && env.fx.http_backend.log.count_requests() == before + 1 && may_not_expect(&r).is_empty(),
+            outcome_line(&r),
+        );
+        let lines = op_check(
+            &mut c,
+            &env.gateway,
+            from,
+            "pp-http",
+            &["\"response_status_code\":200"],
+            "the recovery was routed (200)",
+            Duration::from_secs(2),
+        )
+        .await;
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
+    })
+}
+
+fn pp_http_002(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        env.engine.http.pool.clear();
+        let from = op_from(&env.gateway);
+        let before = env.fx.http_backend.log.count_requests();
+        let url = format!("https://127.0.0.1:{HTTPS_PORT}/pp-http/echo");
+        let o = send(env, &http_ctx(env, &url, Some(header(ProxyHeaderVersion::V2, Some("203.0.113.81:48081"))))).await;
+        http_header_sent(&mut c, &o, ProxyHeaderFormat::V2);
+        let f = last(&o).and_then(|a| a.failure.clone());
+        c.add(
+            CheckKind::Diagnosis,
+            "the TLS handshake failed as observed (the listener read the header as the start of TLS)",
+            f.as_ref().map(|f| f.phase == Phase::TlsHandshake).unwrap_or(false) && o.record.response.is_none(),
+            outcome_line(&o),
+        );
+        let alert = f.as_ref().and_then(|f| f.tls_alert.clone());
+        let alts = may_not_expect(&o);
+        let maybe_rejected = o.record.findings.iter().find(|f| f.code == "tcp.proxy_header_maybe_rejected");
+        c.add(
+            CheckKind::Diagnosis,
+            "a TLS alert gets 'may not expect a PROXY header' as an alternative; a bare close gets tcp.proxy_header_maybe_rejected (unknown)",
+            match &alert {
+                Some(_) => !alts.is_empty() && alts.iter().all(|(_, conf)| *conf != Confidence::Confirmed),
+                None => maybe_rejected.map(|m| m.confidence == Confidence::Unknown).unwrap_or(false),
+            },
+            format!("alert={alert:?} alternatives={alts:?} findings={:?}", codes(&o)),
+        );
+        no_proxy_confirmed(&mut c, &o);
+        c.absent_prefix(&o, "ferrum.");
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend behind the route saw no request",
+            env.fx.http_backend.log.count_requests() == before,
+            format!("{before} → {}", env.fx.http_backend.log.count_requests()),
+        );
+        let lines = op_log(&env.gateway, from, "pp-http");
+        c.add(CheckKind::GroundTruth, "the gateway routed no transaction for pp-http", lines.is_empty(), format!("{lines:?}"));
+        let r = send(env, &http_ctx(env, &url, None)).await;
+        c.add(
+            CheckKind::Recovery,
+            "without the header the HTTPS listener answers 200 over verified TLS",
+            http_status(&r) == Some(200)
+                && last(&r)
+                    .and_then(|a| a.connection.as_ref())
+                    .and_then(|c| c.tls.as_ref())
+                    .map(|t| t.verification == TlsVerification::Verified)
+                    .unwrap_or(false),
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
+    })
+}
+
 // ----------------------------------------------------------------- wiring ---
 
 /// Scenarios that need the `::1` instance (an untrusted loopback peer).
@@ -1090,6 +1263,16 @@ pub fn all() -> Vec<Def> {
         Def { id: "PP-017", title: "DTLS without envelope: handshake datagrams dropped, no answer", run: pp017 },
         Def { id: "PP-018", title: "Authenticated envelope on the DTLS-terminating listener", run: pp018 },
         Def { id: "PP-019", title: "UDP envelope from an untrusted peer (::1) dropped", run: pp019 },
+        Def {
+            id: "PP-HTTP-001",
+            title: "HTTP request with a PROXY header to the HTTP listener (no PROXY support): refused, header only an alternative",
+            run: pp_http_001,
+        },
+        Def {
+            id: "PP-HTTP-002",
+            title: "HTTPS request with a PROXY header to the HTTPS listener: TLS fails, header only an alternative",
+            run: pp_http_002,
+        },
     ]
 }
 

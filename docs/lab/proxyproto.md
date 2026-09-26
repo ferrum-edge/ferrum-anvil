@@ -6,6 +6,12 @@ Every stream proxy sets `stream_proxy_protocol: true`: `tcp` and `tcp_tls` liste
 PROXY v1/v2 header at the head of each connection, and `udp` / `dtls` listeners require the
 PROXY v2 `DGRAM` envelope on every datagram. There are no gateway mocks.
 
+Two more scenarios (PP-HTTP-001/002) send an **HTTP-family request with a PROXY header** to
+the gateway's ordinary HTTP and HTTPS listeners. Ferrum Edge HTTP listeners never read a PROXY
+header (`stream_proxy_protocol` is rejected for HTTP-family proxies, `src/config/types.rs`
+v0.9.7; `src/proxy/gateway_listener.rs` has no PROXY parsing), so they show what a listener that
+does not expect the header does, and that Anvil reports only the public outcome.
+
 What Anvil sends is described in [protocols.md §3.10](../protocols.md). The gateway behaviour
 under test is Ferrum Edge `docs/tcp_udp_proxy.md` ("Inbound PROXY Protocol", "Datagram
 Client-Address Metadata (UDP / DTLS)") and its source: `src/proxy/proxy_protocol.rs`,
@@ -91,6 +97,8 @@ port). A wildcard bind would be `0.0.0.0` / `::`, which is a *different* identit
 | PP-017 | DTLS to 18904 without envelope | `client.dtls.handshake_timeout`; no PROXY claim | DTLS drop reason `invalid_signature` for each flight |
 | PP-018 | Authenticated DTLS, identity `dtls 127.0.0.1:18912` (the default for `dtls://`) | Echo | Backend received the payload; `client_ip` 203.0.113.118 |
 | PP-019 | Envelope from `[::1]` to the `::1` instance | No response only | Drop reason `untrusted_peer`; backend received nothing |
+| PP-HTTP-001 | `GET http://127.0.0.1:18980/pp-http/echo` with a v1 header (source 203.0.113.80:48080) | The header written in its own phase on a new connection; the public outcome as observed: either HTTP 400 (`http.client_error` with "the listener may not expect a PROXY protocol header" as its only PROXY alternative) or, when the listener's answer arrives before the request is written, a close before any response (`exchange.closed_before_response` with that alternative, next to `tcp.proxy_header_maybe_rejected` **unknown**); no confirmed PROXY claim | The backend saw no request; no `pp-http` transaction in the operator log. Recovery without the header: 200, the backend got it, operator log 200 |
+| PP-HTTP-002 | `GET https://127.0.0.1:18981/pp-http/echo` with a v2 header | The header phase ends before the TLS handshake starts; the handshake fails as observed (a `decode_error` alert: `client.tls.peer_alert` **unknown** with "the listener may not expect a PROXY protocol header" as an alternative); no confirmed PROXY claim, no `ferrum.*` finding | The backend saw no request; no `pp-http` transaction. Recovery without the header: 200 over verified TLS |
 
 Datagram drops are silent on the wire, and Ferrum rate-limits the drop warning to one per
 second per listener, so each drop scenario waits 1.1 s before sending.
@@ -105,6 +113,10 @@ gateway) produces no `ferrum.token.*` / `ferrum.outcome` finding.
 After merging into the main branch (2026-09-26), `anvil-lab run all --untrusted-pass` and
 `anvil-lab --release v0.9.5 run all --untrusted-pass` gave proxyproto **42/0/0 on both v0.9.7 and
 v0.9.5**.
+
+With PP-HTTP-001/002 (2026-09-26): three consecutive runs on v0.9.7 gave **46 passed, 0 failed,
+0 skipped** each time (23 scenarios × both passes), and one run on v0.9.5 **46/0/0**. In every run
+PP-HTTP-001 was observed as a close before any response and PP-HTTP-002 as a `decode_error` alert.
 
 ## 5. Observations
 
@@ -122,3 +134,11 @@ v0.9.5**.
 - **Authenticated drops carry exact reasons** in the operator log, which is what separates the
   wrong-secret, replay, stale and wrong-listener cases; Anvil itself sees only silence for all
   of them and says so.
+- **HTTP listeners answer the PROXY line at once.** A raw probe of 18980 with only
+  `PROXY TCP4 … \r\n` gets `HTTP/1.1 400 Bad Request` with `connection: close` and
+  `content-length: 0`, then the connection closes (with a reset when more bytes were sent).
+  Because the answer arrives before Anvil's HTTP/1.1 request is written, the HTTP client
+  discards it and reports a close before any response ("received unexpected message from
+  connection" in the failure message); an HTTP server that waits for more bytes (the HTTP
+  fixture) is seen answering 400. The HTTPS listener reads the header as a TLS record and sends
+  a `decode_error` alert. Neither logs a transaction, and the backend is never contacted.

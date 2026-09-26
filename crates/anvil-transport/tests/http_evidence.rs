@@ -40,6 +40,8 @@ fn plan(url: &str, tls: Option<TlsSettings>) -> HttpPlan {
     };
     let target = format!("{}{}", u.path(), u.query().map(|q| format!("?{q}")).unwrap_or_default());
     HttpPlan {
+        proxy_header: None,
+        proxy_header_withheld: None,
         method: http::Method::GET,
         https,
         host,

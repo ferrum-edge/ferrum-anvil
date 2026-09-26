@@ -1,5 +1,6 @@
-//! Shared stream establishment: DNS → TCP → proxy tunnel → TLS, recording
-//! each phase. Used by HTTP/1.1, HTTP/2, WebSocket (H1) and raw TCP/TLS.
+//! Shared stream establishment: DNS → TCP → proxy tunnel → PROXY header →
+//! TLS, recording each phase. Used by HTTP/1.1, HTTP/2, WebSocket, gRPC, SSE
+//! and raw TCP/TLS.
 //!
 //! With an HBONE proxy the whole outer leg (DNS, TCP, mTLS, HTTP/2 `CONNECT`)
 //! is one `proxy_tunnel` phase here; its own phases and identities are in
@@ -96,6 +97,19 @@ pub fn blank_observation(id: u64) -> ConnectionObservation {
 pub struct PreTlsHeader<'a> {
     pub plan: &'a crate::proxy_protocol::HeaderPlan,
     pub redact: crate::proxy_protocol::Redact<'a>,
+    /// The request field the header is configured in (for typed failures).
+    pub field: &'static str,
+}
+
+impl<'a> PreTlsHeader<'a> {
+    /// The header of an HTTP-family request.
+    pub fn of(h: &'a crate::proxy_protocol::ConnectionHeader) -> Self {
+        PreTlsHeader {
+            plan: &h.plan,
+            redact: h.redact.as_deref().map(|r| r as &(dyn Fn(&str) -> String + Send + Sync)),
+            field: crate::proxy_protocol::ConnectionHeader::FIELD,
+        }
+    }
 }
 
 /// Establish a stream to `target`, optionally through `proxy`.
@@ -125,7 +139,7 @@ pub async fn establish_with(
         && p.kind == ProxyKind::Hbone
     {
         obs.via_proxy = Some(p.label.clone());
-        if header.is_some() {
+        if let Some(h) = &header {
             // The header would travel through the tunnel to the destination
             // itself; mesh relays never read PROXY headers (they carry peer
             // identity instead), so refuse rather than drop it silently.
@@ -137,7 +151,7 @@ pub async fn establish_with(
                     p.label
                 ),
             )
-            .with_field("tcp.proxy_protocol");
+            .with_field(h.field);
             return Err((f, obs));
         }
         rec.mark(Phase::Dns, PhaseStatus::NotApplicable, Some("the HBONE endpoint resolves the destination (outer DNS: tunnel evidence)"));
@@ -275,8 +289,7 @@ pub async fn establish_with(
             Ok(b) => b,
             Err(e) => {
                 rec.finish(idx, PhaseStatus::Failed);
-                let f =
-                    TransportFailure::new(Phase::ProxyProtocolHeader, FailureKind::BodySerialization, e).with_field("tcp.proxy_protocol");
+                let f = TransportFailure::new(Phase::ProxyProtocolHeader, FailureKind::BodySerialization, e).with_field(h.field);
                 return Err((f, obs));
             }
         };

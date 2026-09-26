@@ -1,6 +1,7 @@
-// PROXY protocol settings for TCP/TLS (connection header) and UDP/DTLS
-// (per-datagram v2 DGRAM envelope) sessions. Pure editors: nothing here
-// performs I/O except storing a secret in the vault through SecretField.
+// PROXY protocol settings for TCP/TLS sessions and HTTP-family requests
+// (connection header) and UDP/DTLS sessions (per-datagram v2 DGRAM
+// envelope). Pure editors: nothing here performs I/O except storing a secret
+// in the vault through SecretField.
 import type { DatagramAuthSpec, DatagramEnvelopeSpec, ProxyHeaderObservation, ProxyHeaderSpec } from "./generated/contracts";
 import { SecretField } from "./ui";
 
@@ -34,8 +35,9 @@ function Addr(props: { label: string; value?: string | null; onChange: (v: strin
 
 type HeaderMode = "off" | "v1" | "v2" | "raw";
 
-/** PROXY v1/v2 header written after connect and before TLS. */
-export function ProxyHeaderEditor(props: { value: ProxyHeaderSpec | null | undefined; onChange: (v: ProxyHeaderSpec | null) => void }) {
+/** PROXY v1/v2 header written after connect and before TLS. `http`: the
+ * request-level header of an HTTP-family request (one per new connection). */
+export function ProxyHeaderEditor(props: { value: ProxyHeaderSpec | null | undefined; onChange: (v: ProxyHeaderSpec | null) => void; http?: boolean }) {
   const h = props.value;
   const mode: HeaderMode = h ? (h.version ?? "v2") : "off";
   const set = (patch: Partial<ProxyHeaderSpec>) => props.onChange({ ...(h ?? {}), ...patch });
@@ -101,6 +103,12 @@ export function ProxyHeaderEditor(props: { value: ProxyHeaderSpec | null | undef
         <p className="hint">
           Written at the head of the connection, before any TLS. A listener that requires PROXY protocol closes a connection whose header is missing, malformed or from an untrusted peer without saying why; Anvil reports such a close as a possible cause, never as a
           confirmed one.
+        </p>
+      )}
+      {mode !== "off" && props.http && (
+        <p className="hint" data-testid="proxy-header-http-hint">
+          HTTP-family requests: written once on every new TCP connection to this request&apos;s host and port. A reused (pooled) connection keeps the header it was opened with and never serves a request with another header. Redirects to another host or port are followed
+          without it. Refused before sending over HTTP/3 (QUIC has no standard carriage for it) and through any proxy. A listener that does not expect the header usually answers 400 or a TLS alert; Anvil offers that as an alternative, never as the cause.
         </p>
       )}
     </fieldset>

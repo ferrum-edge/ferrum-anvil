@@ -63,6 +63,7 @@ fn timeouts() -> Timeouts {
 
 fn sse_plan(addr: SocketAddr, target: &str) -> sse::SsePlan {
     sse::SsePlan {
+        proxy_header: None,
         method: http::Method::GET,
         https: true,
         host: addr.ip().to_string(),

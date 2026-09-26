@@ -3165,6 +3165,14 @@ export interface RequestSpec {
   tcp?: TcpSpec | null;
   udp?: UdpSpec | null;
   /**
+   * PROXY protocol header for an HTTP-family request (HTTP/1.1, HTTP/2,
+   * WebSocket, gRPC, gRPC-Web, SSE): written once at the head of every new
+   * TCP connection to the request's own `host:port`, before any TLS. A
+   * pooled connection keeps the header it was opened with. Raw TCP uses
+   * `tcp.proxy_protocol` and UDP `udp.proxy_protocol` instead.
+   */
+  proxy_protocol?: ProxyHeaderSpec | null;
+  /**
    * Reference to the imported spec operation this request came from.
    */
   source?: ImportSource | null;
@@ -3298,7 +3306,8 @@ export interface StreamPayload {
   encoding?: "text" | "hex" | "base64";
 }
 /**
- * PROXY protocol connection header for a TCP / TCP+TLS session.
+ * PROXY protocol connection header for a TCP / TCP+TLS session, or for the
+ * connections of an HTTP-family request (`RequestSpec::proxy_protocol`).
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ProxyHeaderSpec".

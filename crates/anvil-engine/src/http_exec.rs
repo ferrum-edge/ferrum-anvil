@@ -40,6 +40,9 @@ pub struct Prepared {
     pub require_verified_tls: bool,
     pub oauth_key: Option<(String, anvil_auth::oauth::OAuthResolved)>,
     pub inferred: Vec<String>,
+    /// The request's PROXY header (HTTP-family requests), for connections to
+    /// the request's own `host:port`.
+    pub proxy_header: Option<anvil_transport::proxy_protocol::HeaderPlan>,
 }
 
 fn host_matches(pattern: &str, host: &str) -> bool {
@@ -350,6 +353,10 @@ pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver,
         (None, None, vec![])
     };
     let proxy = proxy_for(engine, ctx, &settings, &http.target, &mut inferred)?;
+    let proxy_header = crate::proxy_protocol::request_header(&ctx.spec, r, &settings, proxy.as_ref())?;
+    if let (Some(spec), Some(_)) = (&ctx.spec.proxy_protocol, &proxy_header) {
+        inferred.push(crate::proxy_protocol::request_header_note(spec, &http.target.authority));
+    }
     let (trust, require_verified_tls) = trust_for(ctx, &http.target);
     Ok(Prepared {
         http,
@@ -365,7 +372,14 @@ pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver,
         require_verified_tls,
         oauth_key,
         inferred,
+        proxy_header,
     })
+}
+
+/// Whether two targets are the same TCP listener (`host:port`): a PROXY
+/// header is configured for the request's own listener only.
+fn same_listener(a: &Target, b: &Target) -> bool {
+    a.host.eq_ignore_ascii_case(&b.host) && a.port == b.port
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -493,6 +507,26 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         }
         let target_for_plan = Target { query: query.clone(), ..current.target.clone() };
         let display_url = redactor.url(&target_for_plan.url());
+        // The PROXY header is configured for the request's own listener: a
+        // redirect elsewhere is followed without it, and the attempt says so.
+        let (proxy_header, proxy_header_withheld) = match &prep.proxy_header {
+            Some(h) if same_listener(&current.target, &prep.http.target) => {
+                let r = redactor.clone();
+                let redact: anvil_transport::proxy_protocol::SharedRedact = Arc::new(move |s: &str| r.text(s));
+                (Some(anvil_transport::proxy_protocol::ConnectionHeader { plan: h.clone(), redact: Some(redact) }), None)
+            }
+            Some(_) => {
+                let why = format!(
+                    "not sent: the PROXY header is configured for {} only, and this attempt goes to {}",
+                    prep.http.target.authority, current.target.authority
+                );
+                if !prep.inferred.iter().any(|i| i.starts_with("PROXY header withheld")) {
+                    prep.inferred.push(format!("PROXY header withheld on the redirect to {}: {why}", current.target.authority));
+                }
+                (None, Some(why))
+            }
+            None => (None, None),
+        };
         let plan = HttpPlan {
             method: http::Method::from_bytes(current.method.as_bytes()).unwrap_or(http::Method::GET),
             https: current.target.scheme == "https",
@@ -515,6 +549,8 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             tls: current.tls.clone(),
             isolation: ctx.isolation.clone(),
             display_url,
+            proxy_header,
+            proxy_header_withheld,
         };
         let index = attempts.len() as u32;
         let outs = match prep.settings.http_version {

@@ -466,6 +466,13 @@ pub struct RequestSpec {
     pub tcp: Option<TcpSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp: Option<UdpSpec>,
+    /// PROXY protocol header for an HTTP-family request (HTTP/1.1, HTTP/2,
+    /// WebSocket, gRPC, gRPC-Web, SSE): written once at the head of every new
+    /// TCP connection to the request's own `host:port`, before any TLS. A
+    /// pooled connection keeps the header it was opened with. Raw TCP uses
+    /// `tcp.proxy_protocol` and UDP `udp.proxy_protocol` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<crate::proxy_protocol::ProxyHeaderSpec>,
     /// Reference to the imported spec operation this request came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ImportSource>,
@@ -494,6 +501,7 @@ impl RequestSpec {
             sse: None,
             tcp: None,
             udp: None,
+            proxy_protocol: None,
             source: None,
         }
     }

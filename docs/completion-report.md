@@ -28,7 +28,7 @@ pass.
   - Live lint.
   - Timing and sizes.
   - Protocols: HTTP/1.1, HTTP/2, h2c and HTTP/3 (forced or with fallback); WebSocket (HTTP/1.1, HTTP/2 and HTTP/3); gRPC in four modes over HTTP/2 or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or HTTP/3; TCP/TLS; UDP and DTLS, direct or through an HTTP/3 CONNECT-UDP (MASQUE) proxy.
-  - Mesh and edge features: HBONE tunnels (HTTP/2 CONNECT over mTLS), SPIFFE ID or trust-domain server verification with X.509-SVID client identities, SNI override, and PROXY protocol v1/v2 headers (TCP/TLS) and datagram envelopes (UDP/DTLS).
+  - Mesh and edge features: HBONE tunnels (HTTP/2 CONNECT over mTLS), SPIFFE ID or trust-domain server verification with X.509-SVID client identities, SNI override, and PROXY protocol v1/v2 headers (TCP/TLS and HTTP-family requests over TCP) and datagram envelopes (UDP/DTLS).
   - Interactive sessions for the session protocols.
   - See `docs/protocols.md`.
 - **Auth and TLS.**

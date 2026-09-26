@@ -60,6 +60,13 @@ pub struct HttpPlan {
     pub isolation: String,
     /// Redacted URL for evidence.
     pub display_url: String,
+    /// PROXY protocol header written once at the head of each new connection,
+    /// before TLS. Part of the pool key: a connection keeps the header it was
+    /// opened with and is never shared with another header (or none).
+    pub proxy_header: Option<crate::proxy_protocol::ConnectionHeader>,
+    /// Why a configured header is not sent on this attempt (a redirect to
+    /// another listener); recorded as a `not_applicable` header phase.
+    pub proxy_header_withheld: Option<String>,
 }
 
 pub struct AttemptOutput {
@@ -214,8 +221,9 @@ fn pool_key(plan: &HttpPlan) -> String {
         .unwrap_or_default();
     let tls = plan.tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default();
     let dns = format!("{:?}{:?}{:?}", plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference);
+    let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
     format!(
-        "{}|{}://{}:{}|{}|{}|{:?}|{}",
+        "{}|{}://{}:{}|{}|{}|{:?}|{}|pp:{}",
         plan.isolation,
         if plan.https { "https" } else { "http" },
         plan.host.to_ascii_lowercase(),
@@ -223,7 +231,8 @@ fn pool_key(plan: &HttpPlan) -> String {
         proxy,
         tls,
         plan.version,
-        crate::certs::sha256_hex(dns.as_bytes())
+        crate::certs::sha256_hex(dns.as_bytes()),
+        header
     )
 }
 
@@ -362,6 +371,14 @@ impl HttpTransport {
                 rec.finish(q, PhaseStatus::Completed);
                 rec.mark(Phase::Dns, PhaseStatus::Reused, Some("pooled connection"));
                 rec.mark(Phase::Connect, PhaseStatus::Reused, Some("pooled connection"));
+                if p.template.proxy_header.is_some() {
+                    let sent_on =
+                        format!("sent once when connection #{} was opened; a reused connection does not send it again", p.template.id);
+                    rec.mark(Phase::ProxyProtocolHeader, PhaseStatus::Reused, Some(&sent_on));
+                }
+                if let Some(why) = &plan.proxy_header_withheld {
+                    rec.mark(Phase::ProxyProtocolHeader, PhaseStatus::NotApplicable, Some(why));
+                }
                 if plan.https {
                     rec.mark(Phase::TlsHandshake, PhaseStatus::Reused, Some("pooled connection"));
                 }
@@ -372,8 +389,9 @@ impl HttpTransport {
                 let forward = plan.proxy.as_ref().map(|p| p.kind == ProxyKind::Http && !plan.https).unwrap_or(false);
                 let alpn: &[&str] = if plan.https { alpn_for(plan.version) } else { &[] };
                 let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: forward };
+                let header = plan.proxy_header.as_ref().map(connector::PreTlsHeader::of);
                 let est = tokio::select! {
-                    r = connector::establish(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref()) => r,
+                    r = connector::establish_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), header) => r,
                     _ = cancel.cancelled() => {
                         let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::Canceled, "canceled during connection setup");
                         return (fail(rec, obs, f, DispatchState::NotDispatched), false);
@@ -384,6 +402,9 @@ impl HttpTransport {
                         return (fail(rec, obs, f, DispatchState::NotDispatched), false);
                     }
                 };
+                if let Some(why) = &plan.proxy_header_withheld {
+                    mark_withheld(&mut rec, why);
+                }
                 let est = match est {
                     Ok(e) => e,
                     Err((f, cobs)) => {
@@ -822,6 +843,22 @@ impl HttpTransport {
             closed,
         })
     }
+}
+
+/// Record a configured PROXY header that this attempt does not send, where
+/// it would have been written (before the TLS handshake).
+fn mark_withheld(rec: &mut Recorder, why: &str) {
+    let at = rec.phases.iter().position(|p| p.phase == Phase::TlsHandshake).unwrap_or(rec.phases.len());
+    rec.phases.insert(
+        at,
+        PhaseTiming {
+            phase: Phase::ProxyProtocolHeader,
+            status: PhaseStatus::NotApplicable,
+            start_us: None,
+            end_us: None,
+            detail: Some(why.into()),
+        },
+    );
 }
 
 /// Prefer the typed TLS error captured at the I/O boundary when the HTTP

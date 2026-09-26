@@ -356,6 +356,11 @@ async fn prepare_ws(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Re
         display_url: b.redactor.url(&t.url()),
         transcript: TranscriptLimits::default(),
         redact: Some(redact_fn(&b.redactor)),
+        proxy_header: b
+            .prep
+            .proxy_header
+            .clone()
+            .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
     Ok(finish_prep(b, Plan::Ws(plan), method.into(), url, headers, Bytes::new(), vec![]))
@@ -407,6 +412,11 @@ async fn prepare_sse(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
         max_reconnects: if spec.reconnect { SSE_MAX_RECONNECTS } else { 0 },
         transcript: TranscriptLimits::default(),
         redact: Some(redact_fn(&b.redactor)),
+        proxy_header: b
+            .prep
+            .proxy_header
+            .clone()
+            .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
     Ok(finish_prep(b, Plan::Sse(plan), method, url, headers, body, facts))
@@ -583,6 +593,11 @@ async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, int
         redact: Some(redact_fn(&b.redactor)),
         wire: spec.wire,
         version,
+        proxy_header: b
+            .prep
+            .proxy_header
+            .clone()
+            .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let mut p = finish_prep(b, Plan::Grpc(plan), "POST".into(), display, headers, unary_body, facts);
     p.content_type = Some(
@@ -636,8 +651,11 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     for (i, p) in payloads.iter().enumerate() {
         rawtcp::encode_frame(spec.framing, p).map_err(|e| local(FailureKind::BodySerialization, e, &format!("tcp.payloads[{i}]")))?;
     }
-    let proxy_header =
-        spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some())).transpose()?;
+    let proxy_header = spec
+        .proxy_protocol
+        .as_ref()
+        .map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some(), "tcp.proxy_protocol"))
+        .transpose()?;
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(p) = &spec.proxy_protocol {
         b.inferred.push(crate::proxy_protocol::header_note(p));
