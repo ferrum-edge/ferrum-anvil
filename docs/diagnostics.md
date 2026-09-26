@@ -44,7 +44,7 @@ on a TCP close when Anvil sent no header; see
 [protocols.md §3.10](protocols.md)); a fragment never changes a finding's
 confidence.
 
-The catalog has 148 finding codes (catalog version shown in the app status
+The catalog has 151 finding codes (catalog version shown in the app status
 bar; every record names the findings catalog and the Ferrum catalog it used):
 
 | Family | Codes | Examples |
@@ -52,7 +52,7 @@ bar; every record names the findings catalog and the Ferrum catalog it used):
 | `local.*` | 16 | unresolved variable, lint blocked, vault locked, invalid client identity; nothing was sent |
 | `client.*` | 39 | DNS, connect, TLS (untrusted issuer, name mismatch, expired, client cert required/rejected, ALPN, SPIFFE ID mismatch, untrusted trust domain, invalid SVID, SNI override), QUIC/H3, DTLS |
 | `proxy.*` | 4 | forward-proxy CONNECT failures and authentication |
-| `hbone.*` | 9 | mesh HBONE tunnel leg: endpoint unreachable, mTLS split by leg, CONNECT refused/unavailable, HTTP/2 tunnel errors |
+| `hbone.*` | 12 | mesh HBONE tunnel leg: endpoint unreachable, mTLS split by leg, CONNECT refused/unavailable, HTTP/2 tunnel errors; UDP datagram tunnels: ended by the endpoint, truncated record, datagram over the record limit |
 | `exchange.*` | 11 | write failures, header timeout, HTTP/2 GOAWAY/RST/REFUSED_STREAM, closed before response |
 | `response.*` | 4 | incomplete body, idle/total body timeouts, stream reset mid-body |
 | `request.*` | 4 | canceled; processing uncertain; an earlier attempt may have processed |
@@ -115,6 +115,9 @@ failures carry their own failure kinds and `hbone.*` findings, dispatch is
 | `hbone.tunnel_refused` | the endpoint answered `CONNECT` with a non-2xx, non-5xx status | confirmed that the endpoint refused (likely when its identity was not verified) |
 | `hbone.tunnel_unavailable` | the endpoint answered `CONNECT` with a 5xx; no leg claim | confirmed that it answered, cause unknown |
 | `hbone.tunnel_protocol_error` | HTTP/2 failure before a `CONNECT` answer (no `h2`, reset, GOAWAY, deadline) | unknown (deadline confirmed) |
+| `hbone.udp_tunnel_ended` | UDP tunnel: the endpoint ended the datagram tunnel before Anvil did (`END_STREAM`: warning; `RST_STREAM`/`GOAWAY` or a lost connection: error) | confirmed that the endpoint sent the frame over a verified endpoint (likely otherwise); unknown for a lost connection; never why |
+| `hbone.udp_record_truncated` | UDP tunnel: the stream ended inside a `[u16 length][payload]` record; the partial record was discarded | confirmed (likely over an unverified endpoint) |
+| `hbone.udp_datagram_too_large` | UDP tunnel: Anvil refused a datagram over the 65,535 bytes one record carries (scope `local_client`) | confirmed |
 
 A `CONNECT` refusal quotes the endpoint's public body (its JSON `error`
 string, bounded) and never claims a precise mesh-policy cause: several
@@ -126,6 +129,19 @@ endpoint's identity was verified, because the refusal arrives on that
 authenticated HTTP/2 connection before any tunnel exists. A verification bypass
 on the endpoint's TLS profile produces `client.tls.verification_bypassed` with
 scope `forward_proxy`.
+
+A UDP (datagram) tunnel adds catalog fragments, never a claimed cause: a
+refusal lists why an endpoint may not relay a UDP tunnel (not an inbound mesh
+listener, a destination it does not terminate, no authenticated peer, no
+datagram-tunnel support: 404/405) or could not open it (DNS, socket, session
+limit; UDP has no handshake, so a 5xx says nothing about a listener at the
+destination), and silence (`udp.no_response`) adds that the relay gives no
+acknowledgement and that ICMP errors reach the endpoint's socket, not Anvil.
+The endpoint sends no reason when it ends a tunnel (Ferrum Edge ends its relay
+with `END_STREAM` after an ICMP error on its socket, at its idle limit, on a
+revoked admission), so `hbone.udp_tunnel_ended` keeps those as alternatives
+and says it does not prove the destination is down. An end mid-session never
+produces an `exchange.*` finding: the stream is the endpoint's.
 
 The untrusted-destination rule is unchanged: Ferrum markers are only
 interpreted for a destination declared as a Ferrum gateway, and the `hbone.*`

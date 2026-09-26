@@ -218,8 +218,17 @@ fn proxy_invalid(msg: impl Into<String>, field: &str) -> TransportFailure {
 /// Headers that are connection-specific in HTTP/2 and never sent on a CONNECT.
 const CONNECTION_SPECIFIC: &[&str] = &["host", "connection", "upgrade", "transfer-encoding", "keep-alive", "proxy-connection", "te"];
 
+/// Protocol marker headers on an HBONE `CONNECT`.
+const HBONE_MARKERS: &[&str] = &["x-ferrum-mesh-protocol", "x-istio-protocol"];
+
 /// Validated extra headers for an HBONE `CONNECT` (marker, baggage, extras).
-fn hbone_connect_headers(h: &anvil_domain::tls::HboneOptions) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, TransportFailure> {
+/// A `datagram` tunnel (UDP) always carries the marker with the value `udp`,
+/// which is what makes the endpoint relay datagrams; the byte-stream marker
+/// value is `hbone`, and it is optional.
+fn hbone_connect_headers(
+    h: &anvil_domain::tls::HboneOptions,
+    datagram: bool,
+) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, TransportFailure> {
     use anvil_domain::tls::HboneMarker;
     let mut out = Vec::new();
     let mut push = |name: &str, value: &str, field: &str| -> Result<(), TransportFailure> {
@@ -228,15 +237,24 @@ fn hbone_connect_headers(h: &anvil_domain::tls::HboneOptions) -> Result<Vec<(htt
         if CONNECTION_SPECIFIC.contains(&n.as_str()) {
             return Err(proxy_invalid(format!("'{name}' is a connection-specific header and cannot be sent on an HTTP/2 CONNECT"), field));
         }
+        if datagram && field != "proxy.hbone.marker" && HBONE_MARKERS.contains(&n.as_str()) {
+            return Err(proxy_invalid(
+                format!(
+                    "'{name}' is set by Anvil on a UDP tunnel (the marker value udp selects the datagram relay); remove it from the HBONE proxy's extra headers"
+                ),
+                field,
+            ));
+        }
         let v = http::HeaderValue::from_str(value)
             .map_err(|_| proxy_invalid(format!("the value of HBONE CONNECT header '{name}' is not a valid header value"), field))?;
         out.push((n, v));
         Ok(())
     };
-    match h.marker {
-        HboneMarker::None => {}
-        HboneMarker::FerrumMeshProtocol => push("x-ferrum-mesh-protocol", "hbone", "proxy.hbone.marker")?,
-        HboneMarker::IstioProtocol => push("x-istio-protocol", "hbone", "proxy.hbone.marker")?,
+    let value = if datagram { "udp" } else { "hbone" };
+    match (h.marker, datagram) {
+        (HboneMarker::None, false) => {}
+        (HboneMarker::IstioProtocol, _) => push("x-istio-protocol", value, "proxy.hbone.marker")?,
+        (HboneMarker::None | HboneMarker::FerrumMeshProtocol, _) => push("x-ferrum-mesh-protocol", value, "proxy.hbone.marker")?,
     }
     if let Some(b) = h.baggage.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         push("baggage", b, "proxy.hbone.baggage")?;
@@ -245,6 +263,20 @@ fn hbone_connect_headers(h: &anvil_domain::tls::HboneOptions) -> Result<Vec<(htt
         push(&kv.name, &kv.value, &format!("proxy.hbone.extra_headers[{i}]"))?;
     }
     Ok(out)
+}
+
+/// The `CONNECT` headers of the selected HBONE proxy profile for a UDP
+/// datagram tunnel (the `udp` marker, then the profile's baggage and extras).
+pub(crate) fn hbone_datagram_connect_headers(
+    ctx: &ExecutionContext,
+    settings: &EffectiveSettings,
+) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, TransportFailure> {
+    let opts = settings
+        .proxy_profile_id
+        .and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id))
+        .and_then(|p| p.hbone.clone())
+        .unwrap_or_default();
+    hbone_connect_headers(&opts, true)
 }
 
 pub(crate) fn proxy_for(
@@ -312,7 +344,7 @@ pub(crate) fn proxy_for(
         _ => None,
     };
     let connect_headers = match (&p.kind, &p.hbone) {
-        (ProxyKind::Hbone, Some(h)) => hbone_connect_headers(h)?,
+        (ProxyKind::Hbone, Some(h)) => hbone_connect_headers(h, false)?,
         _ => vec![],
     };
     Ok(Some(ProxyPlan { kind: p.kind, host, port, credentials, tls, label: format!("{} ({})", p.name, p.address), connect_headers }))

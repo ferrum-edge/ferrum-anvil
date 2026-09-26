@@ -190,7 +190,7 @@
       }
     },
     "HboneMarker": {
-      "description": "Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;\nFerrum accepts either marker (value `hbone`) or none. A marker is a wire\nshape hint only and never authenticates the peer.",
+      "description": "Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;\nFerrum accepts either marker (value `hbone`) or none. A marker is a wire\nshape hint only and never authenticates the peer.\n\nA UDP request (`udp://`) through the profile always sends a marker with\nthe value `udp` (Ferrum Mesh datagram-over-HBONE): `x-istio-protocol:\nudp` for [`HboneMarker::IstioProtocol`], `x-ferrum-mesh-protocol: udp`\notherwise.",
       "oneOf": [
         {
           "type": "string",

@@ -526,6 +526,57 @@ pub struct TunnelObservation {
     /// (e.g. `tls_spiffe_id_mismatch` at `tls_handshake`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<TransportFailure>,
+    /// The datagram channel of a UDP tunnel (`CONNECT` with the `udp`
+    /// protocol marker); absent for a byte-stream tunnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datagrams: Option<HboneDatagramChannel>,
+}
+
+/// A UDP datagram channel carried by an HBONE `CONNECT` stream (Ferrum Mesh
+/// datagram-over-HBONE framing): every datagram is one
+/// `[u16 big-endian length][payload]` record on the stream, in both
+/// directions. Counts cover only what Anvil wrote to and read from the
+/// stream; delivery to the destination is never inferred.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HboneDatagramChannel {
+    /// Records (datagrams) Anvil wrote on the `CONNECT` stream.
+    pub records_sent: u64,
+    /// Complete records read from the stream.
+    pub records_received: u64,
+    /// Datagrams refused locally, before sending, because they exceed the
+    /// 65,535 bytes one record can carry.
+    #[serde(default)]
+    pub oversize_refused: u64,
+    /// Bytes of an incomplete record the endpoint's stream ended inside
+    /// (discarded; never counted as a received datagram).
+    #[serde(default)]
+    pub truncated_tail_bytes: u64,
+    /// How the `CONNECT` stream (the tunnel) ended.
+    pub closed_by: crate::outcome::ClosedBy,
+    /// The HTTP/2 error code (name) when the endpoint reset the stream or
+    /// the connection (`RST_STREAM` / `GOAWAY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_code: Option<String>,
+}
+
+impl HboneDatagramChannel {
+    /// A channel that has not carried anything yet.
+    pub fn new() -> Self {
+        HboneDatagramChannel {
+            records_sent: 0,
+            records_received: 0,
+            oversize_refused: 0,
+            truncated_tail_bytes: 0,
+            closed_by: crate::outcome::ClosedBy::NotClosed,
+            reset_code: None,
+        }
+    }
+}
+
+impl Default for HboneDatagramChannel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

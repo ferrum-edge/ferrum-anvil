@@ -155,13 +155,23 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                     .var("host", ctx.target_host()),
                 );
             } else if *datagrams_received == 0 && *datagrams_sent > 0 {
-                out.push(
+                let mut d =
                     Draft::new("udp.no_response", "protocol.streams", Confidence::Confirmed, SourceScope::Unknown, Owner::Unknown, Severity::Warning)
                         .ev(E::NativeTransport, "udp.sent", datagrams_sent.to_string())
                         .ev(E::NativeTransport, "udp.received", "0")
                         .var("sent", datagrams_sent.to_string())
-                        .var("window_ms", window_ms.to_string()),
-                );
+                        .var("window_ms", window_ms.to_string());
+                // Through an HBONE datagram tunnel the endpoint relays
+                // without acknowledgement, and ICMP errors reach its socket.
+                let via_hbone = ctx
+                    .final_attempt()
+                    .and_then(|a| a.connection.as_ref())
+                    .and_then(|c| c.tunnel.as_ref())
+                    .and_then(|t| t.datagrams.as_ref().map(|_| t.authority.clone()));
+                if let Some(authority) = via_hbone {
+                    d = d.var("authority", authority).alt_fragment(super::mesh::UDP_SILENCE);
+                }
+                out.push(d);
             } else if datagrams_received < datagrams_sent {
                 out.push(
                     Draft::new("udp.partial_responses", "protocol.streams", Confidence::Confirmed, SourceScope::Unknown, Owner::Unknown, Severity::Info)

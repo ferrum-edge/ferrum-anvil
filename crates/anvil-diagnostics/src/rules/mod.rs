@@ -95,6 +95,12 @@ pub const RULES: &[RuleMeta] = &[
         fixtures: &["MESH-HBONE-001", "MESH-HBONE-002", "MESH-HBONE-003", "MESH-HBONE-004", "MESH-HBONE-005"],
     },
     RuleMeta {
+        id: "mesh.hbone_udp",
+        version: 1,
+        summary: "HBONE UDP (datagram) tunnel: endpoint end before Anvil's close, a stream ending inside a record, datagrams over the record limit",
+        fixtures: &["MESH-UDP-005", "MESH-UDP-006", "MESH-UDP-007"],
+    },
+    RuleMeta {
         id: "transport.exchange",
         version: 1,
         summary: "Request write / response header wait outcomes",

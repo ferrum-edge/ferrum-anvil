@@ -1647,6 +1647,17 @@
               "type": "null"
             }
           ]
+        },
+        "datagrams": {
+          "description": "The datagram channel of a UDP tunnel (`CONNECT` with the `udp`\nprotocol marker); absent for a byte-stream tunnel.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HboneDatagramChannel"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1868,6 +1879,72 @@
         "phase",
         "kind",
         "message"
+      ]
+    },
+    "HboneDatagramChannel": {
+      "description": "A UDP datagram channel carried by an HBONE `CONNECT` stream (Ferrum Mesh\ndatagram-over-HBONE framing): every datagram is one\n`[u16 big-endian length][payload]` record on the stream, in both\ndirections. Counts cover only what Anvil wrote to and read from the\nstream; delivery to the destination is never inferred.",
+      "type": "object",
+      "properties": {
+        "records_sent": {
+          "description": "Records (datagrams) Anvil wrote on the `CONNECT` stream.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "records_received": {
+          "description": "Complete records read from the stream.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "oversize_refused": {
+          "description": "Datagrams refused locally, before sending, because they exceed the\n65,535 bytes one record can carry.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "truncated_tail_bytes": {
+          "description": "Bytes of an incomplete record the endpoint's stream ended inside\n(discarded; never counted as a received datagram).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "closed_by": {
+          "description": "How the `CONNECT` stream (the tunnel) ended.",
+          "$ref": "#/$defs/ClosedBy"
+        },
+        "reset_code": {
+          "description": "The HTTP/2 error code (name) when the endpoint reset the stream or\nthe connection (`RST_STREAM` / `GOAWAY`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "records_sent",
+        "records_received",
+        "closed_by"
+      ]
+    },
+    "ClosedBy": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "peer",
+            "client",
+            "timeout",
+            "not_closed"
+          ]
+        },
+        {
+          "description": "Connection ended without a closing handshake (e.g. WebSocket 1006).",
+          "type": "string",
+          "const": "abnormal"
+        }
       ]
     },
     "DispatchState": {
@@ -2541,24 +2618,6 @@
           "description": "No terminal status was received — the RPC result is unknown.",
           "type": "string",
           "const": "missing"
-        }
-      ]
-    },
-    "ClosedBy": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "peer",
-            "client",
-            "timeout",
-            "not_closed"
-          ]
-        },
-        {
-          "description": "Connection ended without a closing handshake (e.g. WebSocket 1006).",
-          "type": "string",
-          "const": "abnormal"
         }
       ]
     },

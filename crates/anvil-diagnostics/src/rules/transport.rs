@@ -1,7 +1,7 @@
 use super::Ctx;
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
-use anvil_domain::execution::{BodyCompleteness, FailureKind as K};
+use anvil_domain::execution::{BodyCompleteness, FailureKind as K, Phase};
 use anvil_domain::outcome::{OutcomeWarning, WarningCode};
 
 pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarning>) {
@@ -29,6 +29,13 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     }
 
     let Some(f) = a.failure.as_ref() else { return };
+    // The end of an HBONE datagram tunnel mid-session belongs to the tunnel's
+    // stream, which the endpoint owns: the mesh rules explain it, and no
+    // exchange finding may describe it as the destination's reset.
+    let datagram_tunnel = a.connection.as_ref().and_then(|c| c.tunnel.as_ref()).is_some_and(|t| t.datagrams.is_some());
+    if datagram_tunnel && f.phase == Phase::Session && !matches!(f.kind, K::TotalTimeout | K::Canceled) {
+        return;
+    }
     let status = a.response_status;
     let base = |code: &str, conf: Confidence, scope: SourceScope, owner: Owner, sev: Severity| {
         let mut d = Draft::new(code, "transport.exchange", conf, scope, owner, sev)

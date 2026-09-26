@@ -519,7 +519,7 @@ function parseHeaders(t: string): KeyValue[] {
     });
 }
 
-function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsProfiles: TlsProfile[]; onChange: (p: ProxyProfile) => void }) {
+export function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsProfiles: TlsProfile[]; onChange: (p: ProxyProfile) => void }) {
   const hbone = p.kind === "hbone";
   const opts: HboneOptions = p.hbone ?? { marker: "none", extra_headers: [] };
   const setHbone = (h: HboneOptions) => onChange({ ...p, hbone: h });
@@ -573,6 +573,9 @@ function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsProfiles:
           <legend className="faint">HBONE CONNECT</legend>
           <p className="hint">
             Anvil sends <code>CONNECT</code> with <code>:authority</code> = the request's host:port over HTTP/2; a 2xx opens the tunnel and the request (HTTP, TLS, WebSocket or TCP) runs inside it. A fresh tunnel is opened per request.
+          </p>
+          <p className="hint" data-testid="hbone-udp-help">
+            UDP requests (udp://) use a datagram tunnel: the <code>CONNECT</code> always carries the marker with the value <code>udp</code> ({(opts.marker ?? "none") === "istio_protocol" ? "x-istio-protocol: udp" : "x-ferrum-mesh-protocol: udp"}), and each datagram is one [u16 length][payload] record on the stream.
           </p>
           <div className="row">
             <label className="lbl">

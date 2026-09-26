@@ -660,6 +660,9 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
           </div>
         )}
         <p className="hint">UDP has no delivery signal: silence means no reply arrived within the window, not that the datagram was lost or dropped by a specific hop.</p>
+        <p className="hint" data-testid="udp-hbone-help">
+          Mesh: with an HBONE proxy profile selected in Settings, udp:// runs through an HBONE datagram tunnel (Ferrum Mesh framing: one [u16 length][payload] record per datagram, at most 65,535 bytes; larger datagrams are refused and not sent). HTTP and SOCKS5 proxies carry TCP only. DTLS through HBONE is not supported yet.
+        </p>
         <DatagramEnvelopeEditor
           value={u.proxy_protocol}
           onChange={(proxy_protocol) => set({ udp: { ...u, proxy_protocol } })}
@@ -903,16 +906,34 @@ function fromTri(s: string): boolean | null {
 }
 
 function SettingsEditor({ spec, set, profiles }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; profiles: Profiles }) {
-  return <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} />;
+  return <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} protocol={spec.protocol} />;
+}
+
+/** How a proxy profile carries a UDP request: only an HBONE profile does (as a datagram tunnel). */
+function udpProxyLabel(p: ProxyProfile): string {
+  return p.kind === "hbone" ? "carries UDP as a datagram tunnel" : "TCP only: refused for UDP";
 }
 
 /** Settings overrides for any layer (workspace, folder, request). Blank or
- * "inherit" leaves the value to the outer layer. */
-export function SettingsOverridesEditor({ value, onChange, profiles }: { value: SettingsOverrides; onChange: (s: SettingsOverrides) => void; profiles: Profiles }) {
+ * "inherit" leaves the value to the outer layer. `protocol` is the request's
+ * protocol when editing a request (it annotates what a proxy can carry). */
+export function SettingsOverridesEditor({
+  value,
+  onChange,
+  profiles,
+  protocol,
+}: {
+  value: SettingsOverrides;
+  onChange: (s: SettingsOverrides) => void;
+  profiles: Profiles;
+  protocol?: RequestSpec["protocol"];
+}) {
   const s: SettingsOverrides = value;
   const upd = (patch: Partial<SettingsOverrides>) => onChange({ ...s, ...patch });
   const t = s.timeouts ?? {};
   const selectedTls = profiles.tls.find((p) => p.id === s.tls_profile_id);
+  const udp = protocol === "udp";
+  const selectedProxy = s.proxy_profile_id?.kind === "profile" ? profiles.proxy.find((p) => p.id === (s.proxy_profile_id as { id: string }).id) : undefined;
   return (
     <div className="col" style={{ gap: 14, maxWidth: 860 }}>
       <p className="hint">Blank or “inherit” uses the folder, workspace or app default. The Effective request tab shows the resolved value and which layer it came from.</p>
@@ -1033,7 +1054,7 @@ export function SettingsOverridesEditor({ value, onChange, profiles }: { value: 
             <option value="none">No proxy</option>
             {profiles.proxy.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} ({p.kind} {p.address})
+                {p.name} ({p.kind} {p.address}){udp ? ` — ${udpProxyLabel(p)}` : ""}
               </option>
             ))}
           </select>
@@ -1053,6 +1074,16 @@ export function SettingsOverridesEditor({ value, onChange, profiles }: { value: 
       {selectedTls?.verify === false && (
         <div className="warn-box">
           <b>Certificate verification is off for requests using “{selectedTls.name}”.</b> Traffic is still encrypted, but the server is not authenticated. This applies only to requests that select this profile.
+        </div>
+      )}
+      {udp && selectedProxy?.kind === "hbone" && (
+        <p className="hint" data-testid="udp-proxy-help">
+          UDP goes through “{selectedProxy.name}” as an HBONE datagram tunnel: an HTTP/2 CONNECT to the request&apos;s host:port with {selectedProxy.hbone?.marker === "istio_protocol" ? "x-istio-protocol" : "x-ferrum-mesh-protocol"}: udp, then one [u16 length][payload] record per datagram (at most 65,535 bytes). The endpoint relays to the destination without acknowledgement, and ICMP errors reach the endpoint, not Anvil. DTLS and a PROXY protocol envelope are refused through it.
+        </p>
+      )}
+      {udp && selectedProxy && selectedProxy.kind !== "hbone" && (
+        <div className="warn-box" role="alert">
+          UDP cannot go through “{selectedProxy.name}”: {selectedProxy.kind === "socks5" ? "SOCKS5" : "HTTP CONNECT"} tunnels carry TCP only. Choose an HBONE proxy profile or the MASQUE option on the UDP tab; otherwise the request is refused before anything is sent.
         </div>
       )}
     </div>

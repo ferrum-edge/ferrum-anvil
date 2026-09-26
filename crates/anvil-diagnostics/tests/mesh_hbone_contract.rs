@@ -98,6 +98,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
                 refusal_body: s.body.map(String::from),
                 refusal_body_truncated: false,
                 failure: Some(s.inner.clone()),
+                datagrams: None,
             }),
         }),
         phases: vec![],
@@ -346,4 +347,168 @@ fn a_direct_tls13_handshake_failure_after_finished_with_a_presented_certificate_
     assert!(d.findings.iter().all(|f| f.code != "client.tls.client_cert_rejected"));
     let d = direct(FailureKind::TlsAlertAfterHandshake, false);
     assert!(d.findings.iter().all(|f| f.code != "client.tls.client_cert_rejected"));
+}
+
+// ------------------------------------------------------ UDP (datagrams) ---
+
+/// A UDP session through an HBONE datagram tunnel: `connect_status`,
+/// channel facts, the attempt's failure and the datagram counts.
+fn udp(
+    status: u16,
+    channel: HboneDatagramChannel,
+    failure: Option<TransportFailure>,
+    sent: u64,
+    received: u64,
+    tls: TlsObservation,
+) -> Diagnosis {
+    let s = Shape {
+        kind: FailureKind::HboneConnectRefused,
+        inner: inner(Phase::ProxyTunnel, FailureKind::HboneConnectRefused, None),
+        tls: Some(tls),
+        status: Some(status),
+        body: (status >= 300).then_some(r#"{"error":"HBONE UDP relay destination not allowed"}"#),
+    };
+    let mut a = attempt(&s);
+    a.method = "UDP".into();
+    a.url = format!("udp://{AUTHORITY}");
+    a.dispatch = match (sent, received) {
+        (0, _) => DispatchState::NotDispatched,
+        (_, 0) => DispatchState::MayHaveBeenSent,
+        _ => DispatchState::Sent,
+    };
+    let t = a.connection.as_mut().unwrap().tunnel.as_mut().unwrap();
+    t.connect_headers = vec![HeaderEntry { name: "x-ferrum-mesh-protocol".into(), value: "udp".into() }];
+    t.datagrams = Some(channel);
+    if status < 300 {
+        t.failure = None;
+        a.failure = failure;
+    }
+    let attempts = vec![a];
+    let trust = FerrumTrust::NotConfigured;
+    let ps = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: 1000, masque: None };
+    diagnose(&DiagnosticInput {
+        protocol: Protocol::Udp,
+        method: "UDP",
+        preparation_failure: None,
+        attempts: &attempts,
+        response: None,
+        body: &[],
+        stream: None,
+        protocol_status: &ps,
+        trust: &trust,
+        tls_verification_enabled: true,
+        credentials_stripped_on_redirect: false,
+        protocol_fallback_from: None,
+    })
+}
+
+fn channel(sent: u64, received: u64, closed_by: anvil_domain::outcome::ClosedBy) -> HboneDatagramChannel {
+    HboneDatagramChannel { records_sent: sent, records_received: received, closed_by, ..HboneDatagramChannel::new() }
+}
+
+fn codes(d: &Diagnosis) -> Vec<String> {
+    d.findings.iter().map(|f| f.code.clone()).collect()
+}
+
+fn session_failure(kind: FailureKind, h2: Option<u32>) -> TransportFailure {
+    let mut f = TransportFailure::new(Phase::Session, kind, "the datagram tunnel ended abnormally");
+    f.h2_error_code = h2;
+    f
+}
+
+#[test]
+fn the_endpoint_ending_a_udp_tunnel_is_its_close_and_never_the_destinations() {
+    use anvil_domain::diagnostics::Severity;
+    use anvil_domain::outcome::ClosedBy;
+    // END_STREAM (Ferrum Edge's relay ends this way: MESH-026/027): a warning, confirmed over a verified endpoint.
+    let d = udp(200, channel(2, 1, ClosedBy::Peer), None, 2, 1, outer_tls(TlsVerification::Verified, true));
+    let f = find(&d, "hbone.udp_tunnel_ended");
+    assert_eq!((f.confidence, f.severity, f.scope), (Confidence::Confirmed, Severity::Warning, SourceScope::ForwardProxy));
+    assert!(f.explanation.contains("END_STREAM") && f.explanation.contains(AUTHORITY), "{}", f.explanation);
+    assert!(f.does_not_prove.iter().any(|x| x.contains("down")), "{:?}", f.does_not_prove);
+    assert!(f.alternatives.iter().any(|x| x.contains("ICMP")), "{:?}", f.alternatives);
+    // Over an unverified endpoint, the frame's author is only likely.
+    let d = udp(200, channel(2, 1, ClosedBy::Peer), None, 2, 1, outer_tls(TlsVerification::Bypassed { would_have_failed: None }, true));
+    assert_eq!(find(&d, "hbone.udp_tunnel_ended").confidence, Confidence::Likely);
+
+    // RST_STREAM: an error with its code, and no exchange finding about the destination.
+    let mut ch = channel(1, 1, ClosedBy::Abnormal);
+    ch.reset_code = Some("CANCEL".into());
+    let d = udp(200, ch, Some(session_failure(FailureKind::H2StreamReset, Some(8))), 1, 1, outer_tls(TlsVerification::Verified, true));
+    let f = find(&d, "hbone.udp_tunnel_ended");
+    assert_eq!(f.severity, Severity::Error);
+    assert!(f.explanation.contains("RST_STREAM CANCEL"), "{}", f.explanation);
+    assert!(f.evidence.iter().any(|e| e.key == "h2.error_code" && e.value == "CANCEL"));
+    assert!(!codes(&d).iter().any(|c| c.starts_with("exchange.") || c.starts_with("response.")), "{:?}", codes(&d));
+
+    // A lost connection has no author: unknown.
+    let d = udp(
+        200,
+        channel(1, 0, ClosedBy::Abnormal),
+        Some(session_failure(FailureKind::BodyIncomplete, None)),
+        1,
+        0,
+        outer_tls(TlsVerification::Verified, true),
+    );
+    assert_eq!(find(&d, "hbone.udp_tunnel_ended").confidence, Confidence::Unknown);
+
+    // Anvil's own end (window, Close) is not an early end.
+    let d = udp(200, channel(1, 1, ClosedBy::Client), None, 1, 1, outer_tls(TlsVerification::Verified, true));
+    assert!(!codes(&d).iter().any(|c| c.starts_with("hbone.")), "{:?}", codes(&d));
+}
+
+#[test]
+fn a_truncated_record_and_oversize_datagrams_have_their_own_findings() {
+    use anvil_domain::outcome::ClosedBy;
+    let mut ch = channel(1, 1, ClosedBy::Abnormal);
+    ch.truncated_tail_bytes = 6;
+    let d = udp(200, ch, Some(session_failure(FailureKind::BodyIncomplete, None)), 1, 1, outer_tls(TlsVerification::Verified, true));
+    let f = find(&d, "hbone.udp_record_truncated");
+    assert!(f.explanation.contains("6 byte(s)"), "{}", f.explanation);
+    assert!(!codes(&d).contains(&"hbone.udp_tunnel_ended".to_string()), "one finding per end: {:?}", codes(&d));
+
+    let mut ch = channel(1, 1, ClosedBy::Client);
+    ch.oversize_refused = 2;
+    let d = udp(200, ch, None, 1, 1, outer_tls(TlsVerification::Verified, true));
+    let f = find(&d, "hbone.udp_datagram_too_large");
+    assert_eq!((f.scope, f.confidence), (SourceScope::LocalClient, Confidence::Confirmed));
+    assert!(f.explanation.contains("65,535"), "{}", f.explanation);
+}
+
+#[test]
+fn udp_tunnel_refusals_add_datagram_alternatives_without_a_cause() {
+    use anvil_domain::outcome::ClosedBy;
+    let d = udp(403, channel(0, 0, ClosedBy::NotClosed), None, 0, 0, outer_tls(TlsVerification::Verified, true));
+    let f = find(&d, "hbone.tunnel_refused");
+    assert!(f.explanation.contains("HBONE UDP relay destination not allowed"), "{}", f.explanation);
+    assert!(f.alternatives.iter().any(|a| a.contains("UDP (datagram) tunnel") && a.contains(AUTHORITY)), "{:?}", f.alternatives);
+    assert!(f.does_not_prove.iter().any(|x| x.contains("Which mesh policy")));
+    assert!(!codes(&d).iter().any(|c| c.starts_with("udp.") || c.starts_with("hbone.udp_")), "{:?}", codes(&d));
+    no_destination_blame(&d);
+
+    let d = udp(502, channel(0, 0, ClosedBy::NotClosed), None, 0, 0, outer_tls(TlsVerification::Verified, true));
+    let f = find(&d, "hbone.tunnel_unavailable");
+    assert!(f.alternatives.iter().any(|a| a.contains("does not show whether anything listens")), "{:?}", f.alternatives);
+    no_destination_blame(&d);
+
+    // Lookalike: a byte-stream tunnel refusal gets no datagram alternatives.
+    let d = run(&Shape {
+        kind: FailureKind::HboneConnectRefused,
+        inner: inner(Phase::ProxyTunnel, FailureKind::HboneConnectRefused, None),
+        tls: Some(outer_tls(TlsVerification::Verified, true)),
+        status: Some(403),
+        body: Some(r#"{"error":"HBONE relay destination not allowed"}"#),
+    });
+    assert!(!find(&d, "hbone.tunnel_refused").alternatives.iter().any(|a| a.contains("datagram")));
+}
+
+#[test]
+fn silence_through_a_udp_tunnel_is_still_only_no_response_observed() {
+    use anvil_domain::outcome::ClosedBy;
+    let d = udp(200, channel(1, 0, ClosedBy::Client), None, 1, 0, outer_tls(TlsVerification::Verified, true));
+    let f = find(&d, "udp.no_response");
+    assert_eq!(f.confidence, Confidence::Confirmed);
+    assert!(f.alternatives.iter().any(|a| a.contains("without acknowledgement") && a.contains(AUTHORITY)), "{:?}", f.alternatives);
+    assert!(f.does_not_prove.iter().any(|x| x.contains("delivered")));
+    assert!(!codes(&d).iter().any(|c| c.starts_with("hbone.")), "the tunnel was fine: {:?}", codes(&d));
 }

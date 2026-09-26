@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-11",
+  "version": "2026.09.26-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2612,6 +2612,65 @@
         "The endpoint's operator log for this handshake (for example 'peer sent no certificates')."
       ]
     },
+    "hbone.udp_tunnel_ended": {
+      "title": "The UDP tunnel through the HBONE endpoint ended early",
+      "explanation": "The datagram tunnel to {authority} through the HBONE endpoint {endpoint} ended before Anvil closed it: {how}. {received} datagram(s) had been received and {sent} sent; they are kept. No datagram can travel on this tunnel any more.",
+      "alternatives": [
+        "The endpoint's UDP socket toward {authority} failed, for example after an ICMP port-unreachable (a Ferrum Mesh relay ends the tunnel when that socket reports an error).",
+        "The endpoint's idle limit for the datagram relay elapsed.",
+        "The endpoint withdrew the tunnel's admission (a trust or policy change) or is shutting down.",
+        "The network path to the endpoint failed (only when the connection was lost without an HTTP/2 frame)."
+      ],
+      "does_not_prove": [
+        "That {authority} is down, or which datagrams reached it: UDP gives no delivery confirmation.",
+        "Which of these ended the tunnel: the endpoint sends no reason with END_STREAM or a reset."
+      ],
+      "remediation": [
+        {
+          "text": "Check the mesh proxy's log for the relay of this tunnel (how and when it ended, and its byte counts).",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The mesh proxy's operator log for this CONNECT and its relay."
+      ]
+    },
+    "hbone.udp_record_truncated": {
+      "title": "The UDP tunnel ended inside a datagram record",
+      "explanation": "The HBONE endpoint {endpoint} ended the datagram tunnel to {authority} in the middle of a [u16 length][payload] record: {bytes} byte(s) of an incomplete record were discarded and are not counted as a datagram. The {received} complete datagram(s) before it were received intact. The exchange is incomplete.",
+      "alternatives": [
+        "The endpoint stopped its relay while it was writing a datagram (a shutdown or an error mid-write).",
+        "The endpoint does not frame this stream as Ferrum Mesh datagram records (it is not a datagram relay for this CONNECT)."
+      ],
+      "does_not_prove": [
+        "What the incomplete datagram contained, or whether {authority} sent it complete.",
+        "That {authority} is at fault: the framing is written by the endpoint."
+      ],
+      "remediation": [
+        {
+          "text": "Check the mesh proxy's log for this tunnel; if the endpoint is not a Ferrum Mesh datagram relay, send UDP to it without the HBONE proxy.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The mesh proxy's operator log for this CONNECT and its relay."
+      ]
+    },
+    "hbone.udp_datagram_too_large": {
+      "title": "A datagram was too large for an HBONE UDP record",
+      "explanation": "{count} datagram(s) longer than {limit} bytes were refused by Anvil and not sent: one HBONE datagram record carries at most {limit} bytes (a u16 length prefix). The other datagrams of the session were sent as usual.",
+      "alternatives": [],
+      "does_not_prove": [
+        "Anything about the endpoint {endpoint} or the destination {authority}: this was a local decision before sending."
+      ],
+      "remediation": [
+        {
+          "text": "Send datagrams of at most 65,535 bytes (IPv4 UDP itself carries at most 65,507, and many paths far less).",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
     "tcp.proxy_header_maybe_rejected": {
       "title": "The PROXY protocol header may have been rejected",
       "explanation": "Anvil wrote a {format} header ({length} bytes) at the head of the connection to {host}, and the peer then {how} without sending any data. A listener that requires PROXY protocol closes the connection this way when the header is malformed or arrives from a peer it does not trust, but the same close also happens for causes unrelated to the header. {malformed}",
@@ -2664,6 +2723,9 @@
   },
   "fragments": {
     "alt.proxy_protocol.header_may_be_required": "The listener may require a PROXY protocol header, which Anvil did not send: a stream listener with PROXY protocol enabled (for example Ferrum Edge stream_proxy_protocol: true) closes a connection that does not begin with a valid header, without sending anything back.",
-    "alt.proxy_protocol.envelope_may_be_dropped": "The listener may have dropped the PROXY v2 envelope Anvil sent on each datagram. Envelope checks fail silently: an untrusted source address, an authentication tag that does not verify (wrong secret or listener identity), a sequence already used, or a timestamp outside the listener's freshness horizon."
+    "alt.proxy_protocol.envelope_may_be_dropped": "The listener may have dropped the PROXY v2 envelope Anvil sent on each datagram. Envelope checks fail silently: an untrusted source address, an authentication tag that does not verify (wrong secret or listener identity), a sequence already used, or a timestamp outside the listener's freshness horizon.",
+    "alt.hbone.udp_refused": "The endpoint does not relay a UDP (datagram) tunnel to {authority}: a mesh terminator relays one only on an inbound mesh listener, only to a destination it terminates for or an allow-listed external UDP destination, and only for an authenticated mesh peer; one without datagram-tunnel support may answer a udp-marked CONNECT with 404 or 405.",
+    "alt.hbone.udp_unavailable": "The endpoint could not resolve {authority} or open its UDP socket toward it, or it is at its UDP relay session limit. UDP has no handshake, so this does not show whether anything listens at {authority}.",
+    "alt.hbone.udp_silence": "The HBONE endpoint opened the tunnel, but it relays datagrams to {authority} without acknowledgement: it or the path beyond it may have dropped them, and ICMP errors toward {authority} reach the endpoint's socket, never Anvil."
   }
 }

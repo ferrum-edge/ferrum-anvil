@@ -8,13 +8,20 @@
         "trust_domain": "cluster.local",
         "service_account": "anvil-lab-ztunnel",
         "addresses": [
-          "127.0.0.1"
+          "127.0.0.1",
+          "udp-loopback.anvil-lab.test",
+          "udp-unresolvable.anvil-lab.invalid"
         ],
         "ports": [
           {
             "port": 17801,
             "protocol": "http",
             "name": "http"
+          },
+          {
+            "port": 17802,
+            "protocol": "udp",
+            "name": "udp-echo"
           }
         ],
         "selector": {

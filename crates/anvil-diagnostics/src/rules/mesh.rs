@@ -13,13 +13,24 @@
 //!   authenticated HTTP/2 connection before any tunnel existed), but the
 //!   precise mesh-policy cause is never claimed beyond what the public body
 //!   says: several admission reasons share one public response.
+//! * A UDP (datagram) tunnel adds its channel facts: datagrams Anvil refused
+//!   locally, a record the stream ended inside, and an end of the tunnel
+//!   before Anvil closed it. The endpoint sends no reason for an end, so the
+//!   causes stay alternatives; datagrams exchanged before it are kept.
 
 use super::Ctx;
 use super::tls::{describe_check, identity_evidence};
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
-use anvil_domain::execution::{FailureKind as K, TlsObservation, TlsVerification, TunnelObservation};
-use anvil_domain::outcome::{OutcomeWarning, WarningCode};
+use anvil_domain::execution::{FailureKind as K, HboneDatagramChannel, TlsObservation, TlsVerification, TunnelObservation};
+use anvil_domain::outcome::{ClosedBy, OutcomeWarning, WarningCode};
+
+/// Catalog fragment: why an endpoint may refuse a UDP (datagram) tunnel.
+pub const UDP_REFUSED: &str = "alt.hbone.udp_refused";
+/// Catalog fragment: why an endpoint may be unable to open a UDP tunnel.
+pub const UDP_UNAVAILABLE: &str = "alt.hbone.udp_unavailable";
+/// Catalog fragment: silence through an open UDP tunnel.
+pub const UDP_SILENCE: &str = "alt.hbone.udp_silence";
 
 /// Alerts that concern the client's certificate (the endpoint judged the SVID).
 const CLIENT_CERT_ALERTS: &[&str] = &[
@@ -89,6 +100,13 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             None => d.var("would", "passed or was not evaluated".to_string()),
         };
         out.push(d);
+    }
+
+    // ---- the datagram channel of an open UDP tunnel ----
+    if let Some(ch) = &t.datagrams
+        && t.connect_status.is_some_and(|s| (200..300).contains(&s))
+    {
+        datagram_rules(ctx, t, ch, out);
     }
 
     let Some(f) = a.failure.as_ref() else { return };
@@ -182,6 +200,11 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                     a.index,
                 );
             }
+            // A UDP (datagram) tunnel has its own refusal reasons; they stay
+            // alternatives, never the claimed cause.
+            if t.datagrams.is_some() {
+                d = d.alt_fragment(if status >= 500 { UDP_UNAVAILABLE } else { UDP_REFUSED });
+            }
             Some(d)
         }
         // TLS 1.3 client-SVID refusal whose alert was lost: the endpoint asked
@@ -216,6 +239,70 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     if let Some(d) = d {
         out.push(d);
     }
+}
+
+/// Facts of an open UDP tunnel: datagrams Anvil refused locally, a record
+/// the endpoint's stream ended inside, and an end the endpoint chose. The
+/// endpoint sends no reason for ending a tunnel, so none is claimed.
+fn datagram_rules(ctx: &Ctx<'_>, t: &TunnelObservation, ch: &HboneDatagramChannel, out: &mut Vec<Draft>) {
+    let idx = ctx.attempt_index();
+    let base = |code: &str, conf: Confidence, scope: SourceScope, owner: Owner, sev: Severity| {
+        Draft::new(code, "mesh.hbone_udp", conf, scope, owner, sev)
+            .ev_at(E::NativeTransport, "tunnel.endpoint", t.endpoint.clone(), idx)
+            .ev_at(E::NativeTransport, "tunnel.authority", t.authority.clone(), idx)
+            .ev_at(E::NativeTransport, "tunnel.records_sent", ch.records_sent.to_string(), idx)
+            .ev_at(E::NativeTransport, "tunnel.records_received", ch.records_received.to_string(), idx)
+            .var("endpoint", t.endpoint.clone())
+            .var("authority", t.authority.clone())
+            .var("sent", ch.records_sent.to_string())
+            .var("received", ch.records_received.to_string())
+    };
+    if ch.oversize_refused > 0 {
+        out.push(
+            base("hbone.udp_datagram_too_large", Confidence::Confirmed, SourceScope::LocalClient, Owner::Caller, Severity::Warning)
+                .ev_at(E::LocalValidation, "tunnel.oversize_refused", ch.oversize_refused.to_string(), idx)
+                .var("count", ch.oversize_refused.to_string())
+                .var("limit", "65,535"),
+        );
+    }
+    // END_STREAM, RST_STREAM and GOAWAY are frames the endpoint sent on its
+    // own HTTP/2 connection: certain when that connection's identity was
+    // verified. A lost connection has no author.
+    let verified = t.tls.as_ref().map(|x| x.verification == TlsVerification::Verified).unwrap_or(false);
+    let by_endpoint = if verified { Confidence::Confirmed } else { Confidence::Likely };
+    let code = ch.reset_code.clone().unwrap_or_else(|| "without a code".into());
+    if ch.truncated_tail_bytes > 0 {
+        out.push(
+            base("hbone.udp_record_truncated", by_endpoint, SourceScope::ForwardProxy, Owner::Unknown, Severity::Error)
+                .ev_at(E::BodyCompletion, "tunnel.truncated_tail_bytes", ch.truncated_tail_bytes.to_string(), idx)
+                .ev_at(E::NativeTransport, "tunnel.closed_by", format!("{:?}", ch.closed_by), idx)
+                .var("bytes", ch.truncated_tail_bytes.to_string()),
+        );
+        return;
+    }
+    let failure = ctx.final_attempt().and_then(|a| a.failure.as_ref()).map(|f| f.kind);
+    let (how, conf, severity) = match (ch.closed_by, failure) {
+        (ClosedBy::Peer, _) => {
+            ("the endpoint sent END_STREAM, a clean end of the CONNECT stream".to_string(), by_endpoint, Severity::Warning)
+        }
+        (ClosedBy::Abnormal, Some(K::H2StreamReset)) => {
+            (format!("the endpoint reset the CONNECT stream (RST_STREAM {code})"), by_endpoint, Severity::Error)
+        }
+        (ClosedBy::Abnormal, Some(K::H2GoAway)) => {
+            (format!("the endpoint closed its HTTP/2 connection (GOAWAY {code})"), by_endpoint, Severity::Error)
+        }
+        (ClosedBy::Abnormal, _) => {
+            ("the connection to the endpoint was lost, and no HTTP/2 frame says why".to_string(), Confidence::Unknown, Severity::Error)
+        }
+        _ => return,
+    };
+    let mut d = base("hbone.udp_tunnel_ended", conf, SourceScope::ForwardProxy, Owner::Unknown, severity)
+        .ev_at(E::NativeTransport, "tunnel.closed_by", format!("{:?}", ch.closed_by), idx)
+        .var("how", how);
+    if let Some(c) = &ch.reset_code {
+        d = d.ev_at(E::NativeTransport, "h2.error_code", c.clone(), idx);
+    }
+    out.push(d);
 }
 
 fn tunnel_tls_evidence(mut d: Draft, t: &TlsObservation, attempt: u32) -> Draft {
@@ -255,5 +342,16 @@ fn sni_note(t: &TlsObservation, scope: SourceScope, host: String, attempt: u32) 
         d.var("sni_sent", format!("sent SNI {}", t.server_name))
     } else {
         d.var("sni_sent", format!("sent no SNI ({} is an IP address, which TLS does not carry as SNI)", t.server_name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn udp_fragments_are_worded_in_the_catalog() {
+        let c = crate::render::catalog();
+        for k in [super::UDP_REFUSED, super::UDP_UNAVAILABLE, super::UDP_SILENCE] {
+            assert!(c.fragments.get(k).is_some_and(|t| !t.trim().is_empty() && t.contains("{authority}")), "{k}");
+        }
     }
 }
