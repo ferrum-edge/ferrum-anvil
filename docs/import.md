@@ -356,6 +356,8 @@ bytes, line breaks included (curl strips CR/LF only from `@file` data);
 `--form-string` values are literal (no `;type=` metadata, no file reads).
 SOAP requests (`SOAPAction` + XML, or `application/soap+xml`) become SOAP
 bodies; a SOAP 1.2 `action` media-type parameter becomes the SOAP action.
+For SOAP 1.1, the `Content-Type` is dropped only when it contains exactly
+`charset=utf-8`; otherwise its explicit media type and parameters are kept.
 The SOAP 1.2 `Content-Type` is dropped only when it contains exactly
 `charset=utf-8` and optionally one plain `action` parameter. Otherwise the
 header is kept as explicit, matching what curl sends. A bare
