@@ -893,6 +893,12 @@ pub struct StreamTranscript {
 }
 
 /// Summary of the prepared request as it was actually sent (redacted).
+///
+/// `method`, `url`, `headers`, the body fields, `content_type` and
+/// `auth_label` describe the original request as prepared; each attempt
+/// records what it sent to its own target. `tls_profile`, `proxy` and
+/// `tls_verification_enabled` describe the connection that produced the
+/// final response (the last redirect hop when redirects were followed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PreparedSummary {
     pub protocol: Protocol,
@@ -906,10 +912,18 @@ pub struct PreparedSummary {
     pub content_type: Option<String>,
     /// `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.
     pub auth_label: String,
+    /// TLS profile of the connection that produced the final response (the last redirect
+    /// hop when redirects were followed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_profile: Option<String>,
+    /// Proxy route of the connection that produced the final response (the last redirect
+    /// hop when redirects were followed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Whether TLS verification was on for the connection that produced the
+    /// final response (the last redirect hop when redirects were followed).
+    /// `true` when that connection was plain HTTP: verification was not
+    /// turned off, there was no TLS to verify.
     pub tls_verification_enabled: bool,
     pub settings: EffectiveSettings,
     /// Headers Anvil added or inferred, and why.

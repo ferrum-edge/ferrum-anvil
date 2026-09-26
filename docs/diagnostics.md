@@ -224,8 +224,11 @@ release-specific sentences Anvil adds to token findings.
 Anvil matches an observed response against a catalog only when the
 destination matches a user-declared **Ferrum gateway integration profile**,
 and only against the catalog whose id equals the profile's
-`compatibility_id`. Without a profile, a Ferrum-looking header yields
-`ferrum.marker.unverified`: any server can send it. A profile whose
+`compatibility_id`. After redirects, the destination is the origin that
+produced the final response: its own profile (or none) and its own
+`require_verified_tls` apply, never those of the original request URL.
+Without a profile, a Ferrum-looking header yields `ferrum.marker.unverified`:
+any server can send it. A profile whose
 `compatibility_id` has no embedded catalog never borrows another release's:
 Anvil reports `ferrum.catalog.unavailable` (confidence unknown), does no
 outcome matching, and reads a token only with the coarse meaning every audited
