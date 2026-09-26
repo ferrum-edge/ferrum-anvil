@@ -98,7 +98,7 @@ impl DatagramChannel for SocketChannel {
     async fn recv(&mut self) -> Inbound {
         match self.sock.recv(&mut self.buf).await {
             Ok(n) => Inbound::Datagram(Bytes::copy_from_slice(&self.buf[..n])),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Inbound::PortUnreachable(e),
+            Err(e) if crate::udp::is_icmp_port_unreachable(&e) => Inbound::PortUnreachable(e),
             Err(e) => Inbound::Error(e),
         }
     }

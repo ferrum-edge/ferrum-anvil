@@ -181,10 +181,9 @@ async fn proto_020_udp_icmp_unreachable_is_recorded_as_such() {
     let out = udp::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     assert!(matches!(out.status, ProtocolStatus::Udp { datagrams_received: 0, .. }));
     let t = out.transcript.unwrap();
-    if cfg!(unix) {
-        assert!(out.facts.icmp_port_unreachable, "loopback ICMP port-unreachable is reported to a connected socket");
-        assert!(t.messages.iter().any(|m| m.kind == "icmp_port_unreachable"));
-    }
+    // Unix reports it as `ConnectionRefused`, Windows as `WSAECONNRESET`.
+    assert!(out.facts.icmp_port_unreachable, "loopback ICMP port-unreachable is reported to a connected socket");
+    assert!(t.messages.iter().any(|m| m.kind == "icmp_port_unreachable"));
     assert!(out.attempts[0].observation.failure.is_none(), "silence/ICMP is evidence, not a transport failure");
 }
 

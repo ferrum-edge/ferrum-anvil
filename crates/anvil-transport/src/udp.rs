@@ -91,6 +91,15 @@ impl PayloadTally {
     }
 }
 
+/// Whether an error on a connected UDP socket is the OS reporting ICMP port
+/// unreachable for the destination. Linux and macOS report it as
+/// `ECONNREFUSED`. Winsock reports it on a UDP socket as `WSAECONNRESET`
+/// ("a previous send operation resulted in an ICMP Port Unreachable
+/// message"), which the standard library maps to `ConnectionReset`.
+pub(crate) fn is_icmp_port_unreachable(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionRefused || (cfg!(windows) && e.kind() == std::io::ErrorKind::ConnectionReset)
+}
+
 /// The bytes put on the wire for one datagram.
 pub(crate) fn wire<'a>(env: &mut Option<crate::proxy_protocol::Enveloper>, d: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
     match env {
@@ -212,7 +221,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                 tally.sent(d);
                 tr.data(Direction::Sent, "datagram", d);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Err(e) if is_icmp_port_unreachable(&e) => {
                 facts.icmp_port_unreachable = true;
                 tr.note("icmp_port_unreachable", "the OS reported ICMP port unreachable for the destination before this datagram was sent");
                 // The error is consumed by this call; retry once so the datagram is still offered.
@@ -263,7 +272,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                     break;
                 }
             }
-            Ev::Recv(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Ev::Recv(Err(e)) if is_icmp_port_unreachable(&e) => {
                 errors += 1;
                 if !facts.icmp_port_unreachable {
                     facts.icmp_port_unreachable = true;
@@ -347,4 +356,20 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     let obs = finish_attempt(rec, obs, events);
     let ps = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: plan.response_window_ms, masque: None };
     SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, Some(tr.finish()), ps, facts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn icmp_port_unreachable_is_recognised_as_each_os_reports_it() {
+        assert!(is_icmp_port_unreachable(&Error::from(ErrorKind::ConnectionRefused)));
+        // WSAECONNRESET on a Windows UDP socket; a reset is not ICMP evidence elsewhere.
+        assert_eq!(is_icmp_port_unreachable(&Error::from(ErrorKind::ConnectionReset)), cfg!(windows));
+        #[cfg(windows)]
+        assert!(is_icmp_port_unreachable(&Error::from_raw_os_error(10054)), "WSAECONNRESET");
+        assert!(!is_icmp_port_unreachable(&Error::from(ErrorKind::TimedOut)));
+    }
 }
