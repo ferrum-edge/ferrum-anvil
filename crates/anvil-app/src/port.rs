@@ -208,6 +208,7 @@ impl App {
         let (existing, stored) = self.store.read_consistently(|r| Ok((existing(r)?, stored_among(r, &uncarried)?)))?;
         let mut warnings = opened.warnings;
         warnings.extend(uncarried_warnings(&uncarried, &stored, "bundle", "imported")?);
+        warnings.extend(crate::device_identity::sealed_note(&opened.graph.workspaces));
         let plan = plan::plan(&opened.graph, &existing, policy);
         Ok(ImportReport {
             plan,
@@ -401,6 +402,9 @@ impl App {
                     s.put_secret(&sid, ws.as_ref(), &v.label, &v.value)?;
                 }
             }
+            // This device's JWT-SVID stays out of every workspace written here
+            // until the user allows it on this device.
+            crate::device_identity::seal_in(s, g.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes)))
         })??;
         for (sha, bytes) in &g.attachments {
@@ -413,6 +417,7 @@ impl App {
         }
         let mut warnings = opened.warnings;
         warnings.extend(notes);
+        warnings.extend(crate::device_identity::sealed_note(&g.workspaces));
         Ok(ImportReport {
             plan,
             warnings,

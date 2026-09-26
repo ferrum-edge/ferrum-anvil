@@ -87,6 +87,6 @@ describe("file grants in the renderer", () => {
         importers[file] = m[1].split(",").map((s) => s.trim()).filter(Boolean);
       }
     }
-    expect(importers).toEqual({ "./Workbench.tsx": ["ask"] });
+    expect(importers).toEqual({ "./Workbench.tsx": ["ask"], "./ScopeSettings.tsx": ["ask"] });
   });
 });

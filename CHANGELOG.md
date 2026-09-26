@@ -20,6 +20,22 @@
   window, and its sessions cannot be driven from there. A JWT-SVID token
   file is read through links (such as a Kubernetes projected token), but
   the file opened must be a regular file of at most 16 KiB.
+- A bundle import or full-backup restore now seals, on this device only,
+  every workspace it writes into, including Duplicate copies and new
+  workspaces: its requests are refused this device's workload identity
+  (JWT-SVID or X.509-SVID), that is a JWT-SVID from the Workload API or a
+  token file, and a TLS profile, the request's own or its proxy's, whose
+  client identity is an X.509-SVID from the Workload API, until you allow it
+  with **Allow on this device** in the workspace settings' Auth tab or
+  `anvil workspace allow-device-identity <workspace>` (a workspace id, or an
+  exact name no other workspace has). A JWT-SVID from a vault or variable
+  value is unaffected. Seals are never exported or backed up, so after
+  restoring your own backup on a new device, allow each workspace you trust.
+  The desktop now binds a token file by the path you chose rather than the
+  file it resolved to, so a Kubernetes projected token keeps working after
+  it rotates; a projected token file bound by an earlier build names the
+  file of one rotation, so choose it again. A run or load run of a closed
+  profile ends with a generic message in the new profile's window.
 - Bundle imports now store the load plans and history records a bundle
   carries (exports include load plans, and list a plan left out because it
   names a deleted object among the excluded items), and a Duplicate import

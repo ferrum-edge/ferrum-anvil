@@ -127,6 +127,16 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
             }
             Err(err) => LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(err.to_string()) },
         };
+        // Another profile is open: its window shows nothing of this one.
+        let ev = if st.is_current(&app) {
+            ev
+        } else {
+            LoadFinishedEvent {
+                run_key: key.clone(),
+                run_id: None,
+                error: Some("the profile the load run was started in was closed".into()),
+            }
+        };
         let _ = handle.emit("load-finished", ev);
     });
     Ok(run_key)
