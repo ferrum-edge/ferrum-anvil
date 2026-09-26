@@ -569,3 +569,74 @@ describe("saving a request", () => {
     expect(screen.queryByLabelText("unsaved")).toBeNull();
   });
 });
+
+describe("renaming an open request", () => {
+  const startRename = () => {
+    fireEvent.click(
+      within(screen.getByRole("treeitem", { name: /Alpha/ })).getByRole("button", { name: "Rename" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "Renamed" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  };
+
+  it("saves only the name and keeps drafts made before and during the rename", async () => {
+    const saves: ReturnType<typeof deferred<RequestDefinition>>[] = [];
+    backend({
+      request_save: () => {
+        const d = deferred<RequestDefinition>();
+        saves.push(d);
+        return d.promise;
+      },
+    });
+    await boot();
+    await openTab("Alpha");
+    fireEvent.change(urlField(), { target: { value: "https://before-rename.test/" } });
+    startRename();
+    await waitFor(() => expect(saves).toHaveLength(1));
+
+    const submitted = calls("request_save")[0].request as RequestDefinition;
+    expect(submitted.name).toBe("Renamed");
+    expect(submitted.spec.url).toBe("https://r1.test/");
+    fireEvent.change(urlField(), { target: { value: "https://during-rename.test/" } });
+    await act(async () => saves[0].resolve({ ...submitted, revision_id: "rename-rev" }));
+
+    expect(openTabs().getByRole("tab", { name: /Renamed/ })).toBeTruthy();
+    expect(urlField().value).toBe("https://during-rename.test/");
+    expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+    fireEvent.change(urlField(), { target: { value: "https://r1.test/" } });
+    expect(screen.queryByLabelText("unsaved")).toBeNull();
+  });
+
+  it("waits behind an in-flight save and renames its saved revision", async () => {
+    const saves: ReturnType<typeof deferred<RequestDefinition>>[] = [];
+    backend({
+      request_save: () => {
+        const d = deferred<RequestDefinition>();
+        saves.push(d);
+        return d.promise;
+      },
+    });
+    await boot();
+    await openTab("Alpha");
+    fireEvent.change(urlField(), { target: { value: "https://first-save.test/" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    const first = calls("request_save")[0].request as RequestDefinition;
+
+    startRename();
+    await act(async () => {});
+    expect(saves).toHaveLength(1);
+    await act(async () => saves[0].resolve({ ...first, revision_id: "first-rev" }));
+    await waitFor(() => expect(saves).toHaveLength(2));
+    const renamed = calls("request_save")[1].request as RequestDefinition;
+    expect(renamed.name).toBe("Renamed");
+    expect(renamed.spec.url).toBe("https://first-save.test/");
+    expect(renamed.revision_id).toBe("first-rev");
+
+    fireEvent.change(urlField(), { target: { value: "https://new-draft.test/" } });
+    await act(async () => saves[1].resolve({ ...renamed, revision_id: "rename-rev" }));
+    expect(urlField().value).toBe("https://new-draft.test/");
+    expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+  });
+});
