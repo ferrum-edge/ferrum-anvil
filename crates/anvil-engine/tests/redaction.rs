@@ -186,7 +186,7 @@ fn a_link_anchor_parameter_is_redacted_as_a_url() {
     assert_eq!(quoted, format!(r#"<https://h/next>; rel="next"; anchor="https://h/u/{REDACTED}?token={REDACTED}""#));
     let bare = r.header("Link", "<https://h/a>; Anchor = /u/AUDIT%2fsecret%2Bwith%3Dreserved; rel=up, <https://h/b>; rel=next");
     assert_eq!(bare, format!("<https://h/a>; Anchor = /u/{REDACTED}; rel=up, <https://h/b>; rel=next"));
-    let plain = r#"<https://h/a>; rel="x"; anchor="#frag", <https://h/b>; title="anchor=here""#;
+    let plain = r##"<https://h/a>; rel="x"; anchor="#frag", <https://h/b>; title="anchor=here""##;
     assert_eq!(r.header("Link", plain), plain, "anchors without secrets and look-alikes stay readable");
 }
 

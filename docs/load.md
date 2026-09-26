@@ -16,6 +16,8 @@ send, and trust settings cannot drift (LOAD-005, LOAD-008).
 The load engine adds exactly one settings layer, `run:load`, on top of the
 request's own layers:
 
+The 1 MiB response capture limit cannot be raised from the app or CLI.
+
 | Field | Value | Why |
 |---|---|---|
 | `keepalive` | `true` for `persistent`, `false` for `fresh` | the plan's connection mode (HTTP pools and gRPC channels) |

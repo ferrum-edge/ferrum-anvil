@@ -556,6 +556,28 @@ async fn load_soap_and_graphql_outcomes_not_determined_from_the_body_are_not_suc
         assert_eq!(r.failure_categories[0].category, "application_failure: application.not_determined_from_body", "{path}");
     }
 
+    let authorization_redirect = RequestSpec {
+        body: Body::Soap {
+            version: SoapVersion::Soap11,
+            envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+            action: None,
+        },
+        settings: small_capture.clone(),
+        ..RequestSpec::http(
+            "POST",
+            &f.url("/redirect?to=%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3Dfixture"),
+        )
+    };
+    let id = Id::new();
+    let r = run(
+        plan(Workload::Iterations { iterations: 1, concurrency: 1 }, vec![id]),
+        vec![(id, ctx(authorization_redirect))],
+        None,
+    )
+    .await;
+    assert_eq!(r.requests.application_failures, 1);
+    assert_eq!(r.failure_categories[0].category, "application_failure: auth.browser_session_required");
+
     // A plain request is judged by its status, which a prefix does not hide.
     let s = RequestSpec { settings: small_capture, ..RequestSpec::http("GET", &f.url("/soap-fault")) };
     let id = Id::new();

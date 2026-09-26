@@ -366,7 +366,9 @@ fn describe_failure(obs: &mut SendObservation, rec: &ExecutionRecord, step: &Ste
     let detail = match terminal {
         Terminal::Timeout => kind.clone().unwrap_or_else(|| "deadline".into()),
         Terminal::Completed if expectation_short => "tcp.expected_frames_not_received".into(),
-        Terminal::Completed if not_determined_from_body(rec, step) => "application.not_determined_from_body".into(),
+        Terminal::Completed if not_determined_from_body(rec, step) => {
+            top.clone().unwrap_or_else(|| "application.not_determined_from_body".into())
+        }
         _ if assertion_failure && !application_failure => rec
             .assertion_results
             .iter()
