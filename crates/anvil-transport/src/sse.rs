@@ -309,9 +309,7 @@ impl Source {
     }
 
     /// End the attempt's connection. HTTP/3: close the QUIC connection with
-    /// `H3_NO_ERROR`, which also ends the request stream. (h3-quinn 0.0.10
-    /// panics on `stop_sending` after a canceled read, so the stream is not
-    /// stopped on its own.)
+    /// `H3_NO_ERROR`, which also ends the request stream.
     fn close(self) {
         if let Source::H3 { stream, quic, .. } = self {
             drop(stream);
