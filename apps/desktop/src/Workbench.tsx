@@ -5,6 +5,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api, onExecutionEvent, onSessionEnded, type ExecutionView, type HistoryItem, type StreamMessage, type TreeNode } from "./api";
 import { SessionConsole } from "./SessionConsole";
 import { ScopeSettingsDialog } from "./ScopeSettings";
+import mark from "./assets/ferrum-anvil-mark.png";
 import type { Environment, RequestDefinition, Workspace } from "./generated/contracts";
 import { EnvironmentsDialog, ExportDialog, ImportDialog, ProfilesDialog, SettingsDialog } from "./Dialogs";
 import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
@@ -283,9 +284,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark" aria-hidden>
-            ⚒
-          </div>
+          <img className="brand-mark" src={mark} alt="" />
           Anvil
         </div>
         <select
@@ -514,6 +513,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           ) : (
             <div className="empty">
               <div>
+                <img className="empty-mark" src={mark} alt="" />
                 <div className="big">Put your APIs to the test.</div>
                 <div>Open a request from the sidebar, or create one with ⌘/Ctrl+N.</div>
                 <button className="btn primary" style={{ marginTop: 14 }} onClick={() => newRequest(null)}>

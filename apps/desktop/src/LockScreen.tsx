@@ -2,6 +2,7 @@
 // screen never holds the data key.
 import { useEffect, useState } from "react";
 import { api, type ProfileSummary } from "./api";
+import logo from "./assets/ferrum-anvil-logo.webp";
 
 export function LockScreen(props: { onUnlocked: () => void; reason?: string | null }) {
   const [profiles, setProfiles] = useState<ProfileSummary[] | null>(null);
@@ -154,7 +155,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
     return (
       <div className="lock">
         <div className="lock-card" aria-busy="true">
-          <h1>Ferrum Anvil</h1>
+          <img className="brand-logo" src={logo} alt="Ferrum Anvil — Put your APIs to the test." />
           <p className="muted">Opening your local profile…</p>
         </div>
       </div>
@@ -170,13 +171,8 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
           void (mode === "create" ? create() : unlock());
         }}
       >
-        <div className="row">
-          <div className="brand-mark" aria-hidden>
-            ⚒
-          </div>
-          <h1>Ferrum Anvil</h1>
-        </div>
-        <div className="tagline">Put your APIs to the test.</div>
+        <h1 className="sr-only">Ferrum Anvil — Put your APIs to the test.</h1>
+        <img className="brand-logo" src={logo} alt="" />
         {props.reason && <div className="warn-box">Locked ({props.reason === "idle" ? "inactivity" : props.reason === "suspend" ? "the system went to sleep" : "manually"}). Active runs were stopped.</div>}
 
         {mode !== "create" && profiles && profiles.length > 0 && (

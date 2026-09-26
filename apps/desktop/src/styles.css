@@ -117,7 +117,9 @@ label.check { display: inline-flex; gap: 6px; align-items: center; cursor: point
 .shell { display: grid; grid-template-rows: 46px 1fr 24px; height: 100%; }
 .topbar { display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg-raised); }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: 0.2px; margin-right: 8px; }
-.brand-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); display: grid; place-items: center; color: var(--accent-ink); font-size: 13px; font-weight: 800; }
+.brand-mark { width: 24px; height: 24px; display: block; }
+.brand-logo { display: block; width: 100%; height: auto; border-radius: 10px; }
+.empty-mark { display: block; width: 72px; height: 72px; margin: 0 auto 12px; }
 .statusbar { display: flex; align-items: center; gap: 14px; padding: 0 12px; border-top: 1px solid var(--border); background: var(--bg-raised); font-size: 11px; color: var(--text-3); }
 .main { display: grid; grid-template-columns: var(--sidebar-w, 290px) 5px 1fr; min-height: 0; }
 .resizer { cursor: col-resize; background: transparent; }
