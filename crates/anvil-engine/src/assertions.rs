@@ -56,55 +56,149 @@ pub fn json_path(body: &[u8], path: &str) -> Result<Option<String>, String> {
     })
 }
 
-/// XPath subset over a DTD-free parse: `/a/b`, `//b`, `/a/b[2]`, `/a/@attr`,
-/// `.../text()`. Names match local names (namespace prefixes ignored).
-pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
-    let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8".to_string())?;
-    let doc = roxmltree::Document::parse_with_options(text, roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() })
-        .map_err(|e| format!("body is not XML: {e}"))?;
-    let mut nodes: Vec<roxmltree::Node> = vec![doc.root()];
+/// One location step of the supported XPath subset. `descendant` is true
+/// after `//` (descendant-or-self of the context, then the step).
+#[derive(Debug)]
+enum XStep<'a> {
+    /// Child elements by local name (`*` for any), optionally only the n-th
+    /// matching child of each parent (1-based).
+    Element { descendant: bool, name: &'a str, position: Option<usize> },
+    /// `@name`: the attribute of the selected elements. Last step only.
+    Attribute { descendant: bool, name: &'a str },
+    /// `text()`: the text-node children of the selected elements. Last step only.
+    Text { descendant: bool },
+}
+
+/// Parse the whole path up front: anything outside the subset is an error,
+/// never a step that silently selects more (or other) nodes.
+fn parse_xpath(path: &str) -> Result<Vec<XStep<'_>>, String> {
     let mut rest = path.trim();
     if !rest.starts_with('/') {
         return Err("XPath must start with / or //".into());
     }
+    let mut steps = Vec::new();
     while !rest.is_empty() {
+        if matches!(steps.last(), Some(XStep::Attribute { .. } | XStep::Text { .. })) {
+            return Err("XPath: @attribute and text() must be the last step".into());
+        }
         let descendant = rest.starts_with("//");
-        rest = rest.trim_start_matches('/');
-        let end = rest.find('/').unwrap_or(rest.len());
-        let step = &rest[..end];
-        rest = &rest[end..];
-        if step == "text()" {
-            let t: Vec<String> =
-                nodes.iter().map(|n| n.descendants().filter(|d| d.is_text()).map(|d| d.text().unwrap_or("")).collect::<String>()).collect();
-            return Ok(t.into_iter().next());
+        rest = &rest[if descendant { 2 } else { 1 }..];
+        let (step, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        rest = tail;
+        if step.is_empty() {
+            return Err(format!("XPath has an empty step in '{path}'"));
         }
-        if let Some(attr) = step.strip_prefix('@') {
-            return Ok(nodes.iter().find_map(|n| n.attributes().find(|a| a.name() == attr).map(|a| a.value().to_string())));
+        if step == "text()" || step.starts_with('@') {
+            if steps.is_empty() && !descendant {
+                return Err(format!("XPath step '/{step}' must follow an element step"));
+            }
+            steps.push(match step.strip_prefix('@') {
+                Some(attr) => XStep::Attribute { descendant, name: xpath_name(attr)? },
+                None => XStep::Text { descendant },
+            });
+            continue;
         }
-        let (name, index) = match step.split_once('[') {
-            Some((n, i)) => (n, i.trim_end_matches(']').parse::<usize>().ok()),
+        let (name, position) = match step.split_once('[') {
+            None if step.contains(']') => return Err(format!("XPath step '{step}' has an unbalanced ']'")),
             None => (step, None),
-        };
-        let mut next = Vec::new();
-        for n in &nodes {
-            let candidates: Vec<roxmltree::Node> = if descendant {
-                n.descendants().filter(|d| d.is_element()).collect()
-            } else {
-                n.children().filter(|d| d.is_element()).collect()
-            };
-            let matched: Vec<roxmltree::Node> = candidates.into_iter().filter(|c| name == "*" || c.tag_name().name() == name).collect();
-            match index {
-                Some(i) if i >= 1 => {
-                    if let Some(x) = matched.get(i - 1) {
-                        next.push(*x);
-                    }
+            Some((name, predicate)) => {
+                let Some(inner) = predicate.strip_suffix(']') else {
+                    return Err(format!("XPath step '{step}' has a malformed predicate (expected it to end with ']')"));
+                };
+                if inner.contains(['[', ']']) {
+                    return Err(format!("XPath step '{step}': only one predicate per step is supported"));
                 }
-                _ => next.extend(matched),
+                let inner = inner.trim();
+                if inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(format!("XPath predicate '[{inner}]' is not supported; only a position such as [1] or [2] is"));
+                }
+                let n: usize = inner.parse().map_err(|_| format!("XPath position [{inner}] is too large"))?;
+                if n == 0 {
+                    return Err("XPath positions start at 1; [0] never selects anything".into());
+                }
+                (name, Some(n))
+            }
+        };
+        let name = if name == "*" { name } else { xpath_name(name)? };
+        steps.push(XStep::Element { descendant, name, position });
+    }
+    Ok(steps)
+}
+
+/// A (possibly prefixed) XML name reduced to its local name; prefixes are
+/// ignored because the subset matches local names only.
+fn xpath_name(name: &str) -> Result<&str, String> {
+    let is_name = |s: &str| {
+        let mut chars = s.chars();
+        chars.next().is_some_and(|c| c.is_alphabetic() || c == '_') && chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    };
+    let local = match name.split_once(':') {
+        Some((prefix, local)) if is_name(prefix) => local,
+        Some(_) => "",
+        None => name,
+    };
+    if is_name(local) { Ok(local) } else { Err(format!("XPath step '{name}' is not supported")) }
+}
+
+/// The nodes a step starts from: the context itself, or after `//` every
+/// node below it too. `nodes` is in document order without duplicates, and
+/// so is the result.
+fn xpath_axis<'a, 'i>(nodes: &[roxmltree::Node<'a, 'i>], descendant: bool) -> Vec<roxmltree::Node<'a, 'i>> {
+    if !descendant {
+        return nodes.to_vec();
+    }
+    // A context inside an earlier context's subtree adds nothing; skipping it
+    // keeps nested contexts linear, and the disjoint subtrees stay in order.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for n in nodes {
+        if !seen.contains(n) {
+            for d in n.descendants() {
+                seen.insert(d);
+                out.push(d);
             }
         }
-        nodes = next;
-        if nodes.is_empty() {
-            return Ok(None);
+    }
+    out
+}
+
+/// XPath subset over a DTD-free parse, validated before the body is read:
+/// `/a/b`, `//b`, `/a/b[2]`, `/a/*`, `/a/@attr`, `//@attr`, `/a/text()`.
+/// Names match local names (namespace prefixes ignored). The result is the
+/// first selected node in document order: an element's full text, an
+/// attribute value or a text node. Any other syntax is an error.
+pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
+    let steps = parse_xpath(path)?;
+    let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8".to_string())?;
+    let doc = roxmltree::Document::parse_with_options(text, roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() })
+        .map_err(|e| format!("body is not XML: {e}"))?;
+    let mut nodes: Vec<roxmltree::Node> = vec![doc.root()];
+    for step in steps {
+        match step {
+            XStep::Text { descendant } => {
+                let first = xpath_axis(&nodes, descendant).into_iter().flat_map(|n| n.children()).filter(|c| c.is_text()).min();
+                return Ok(first.map(|t| t.text().unwrap_or("").to_string()));
+            }
+            XStep::Attribute { descendant, name } => {
+                let mut owners = xpath_axis(&nodes, descendant).into_iter();
+                return Ok(owners.find_map(|n| n.attributes().find(|a| a.name() == name).map(|a| a.value().to_string())));
+            }
+            XStep::Element { descendant, name, position } => {
+                let mut next = Vec::new();
+                for parent in xpath_axis(&nodes, descendant) {
+                    let mut matched = parent.children().filter(|c| c.is_element() && (name == "*" || c.tag_name().name() == name));
+                    match position {
+                        Some(i) => next.extend(matched.nth(i - 1)),
+                        None => next.extend(matched),
+                    }
+                }
+                // Children of nested parents interleave.
+                next.sort();
+                nodes = next;
+                if nodes.is_empty() {
+                    return Ok(None);
+                }
+            }
         }
     }
     Ok(nodes.first().map(|n| n.descendants().filter(|d| d.is_text()).map(|d| d.text().unwrap_or("")).collect::<String>()))
