@@ -125,6 +125,29 @@ against it).
   that choice is never imported. TLS trust settings and proxies selected by
   the destination still apply, and a client identity bound to hosts is
   presented only to those hosts.
+- **Altering an encrypted bundle:** the vault (secrets and the sensitive
+  literals moved out of the objects) is sealed with associated data that
+  covers the bundle format version and the SHA-256 of every other entry by
+  name: the manifest (kind, mode, placeholders and vault parameters
+  included), `workspace/objects.json`, each attachment and the history. A
+  change to any entry, or an entry added or removed, fails the vault's
+  authentication, and the import is refused before any secret or literal is
+  restored and before anything is written. Recomputing `checksums.json` does
+  not help: checksums only detect corruption. Each literal is restored only
+  to the field the export recorded (listed in the manifest's placeholders),
+  and only while that field still holds its placeholder; any other mismatch
+  refuses the whole import. Bundles of earlier builds (format 1) sealed the
+  vault with constant associated data that bound nothing else in the
+  archive; an encrypted bundle of that format is refused, with or without
+  its passphrase, and must be exported again. A bundle whose mode and vault
+  disagree (an encrypted-transfer manifest without a vault, or a share-safe
+  one with one) is refused.
+- **Reading an encrypted bundle:** only the vault is encrypted. The objects
+  (names, URLs, header and body text), attachments and history are ordinary
+  zip entries that anyone holding the file can read, in either mode. Secrets
+  and sensitive literals never appear in them, but credentials typed into
+  free text (a body or URL) are only warned about on export. Full backups are
+  ANVILBAK files, encrypted as a whole (below).
 - **Bundle key-derivation costs:** the Argon2id costs in a bundle manifest are
   read before the vault authenticates, so costs outside documented bounds
   (memory, passes, lanes, memory × passes, salt length; see
@@ -152,7 +175,9 @@ against it).
   there can use that workspace's vault secrets. The preview lists each such
   workspace as an error and the import is refused unless the user confirms each
   one after the preview. Encryption proves nothing about who wrote a bundle; it
-  only shows the bundle was not altered after it was encrypted. Duplicate never
+  only shows the bundle was not altered after it was exported (see "Altering
+  an encrypted bundle"), and a share-safe bundle has no passphrase at all.
+  Duplicate never
   writes into a stored workspace and is the safe choice for untrusted bundles.
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
@@ -199,10 +224,17 @@ against it).
   refuses a backup that would overwrite an object, history record or load
   report stored in another workspace, or a secret stored here under another
   owner.
-- **Legacy full backups:** full backups written as zip bundles, whose vault
-  authenticated nothing else in the archive, are refused on import (manifest
-  kind `backup`, mode `full_backup`, or app settings in the archive), so
-  none of their contents is restored; bundle exports never produce them.
+- **Legacy full backups:** full backups written as zip bundles by earlier
+  builds, whose vault authenticated nothing else in the archive, are
+  refused on import: as a legacy full backup when the manifest names kind
+  `backup` or mode `full_backup` or the archive carries app settings, and
+  otherwise (relabelled as an encrypted workspace bundle) because its vault
+  is format 1; a manifest claiming the current format fails the vault's
+  authentication. No secret or sensitive literal from such a vault is ever
+  restored, and bundle exports never produce them. Their other entries were
+  never encrypted: a copy of one exposes its objects, attachments, settings
+  and history, and a copy stripped of its vault is only a share-safe bundle
+  of whatever it now contains, as anyone could write.
 - **Test backdoors shipped:** E2E WebDriver and env unlock only under the `e2e`
   feature; release check fails if present (ADR 0009).
 - **Supply chain:** pinned dependencies with lockfiles, `cargo deny` (licenses,
@@ -210,6 +242,10 @@ against it).
 
 ## Residual risks
 
+- An encrypted bundle's objects, attachments and history are readable by
+  anyone holding the file; only its vault is encrypted (see "Reading an
+  encrypted bundle"). Share one only with people who may read its
+  contents; a full backup encrypts everything.
 - A bundle the user confirms writing into an existing workspace is trusted
   with that workspace's secrets (see "Bundle writing into an existing
   workspace").

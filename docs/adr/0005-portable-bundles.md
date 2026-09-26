@@ -7,8 +7,12 @@
 - Modes:
   - **Share safely** (default): no secrets. Sensitive literals are replaced
     by placeholders listed in the manifest.
-  - **Encrypted transfer**: vault secrets are included, encrypted under an
-    export passphrase.
+  - **Encrypted transfer**: vault secrets and sensitive literals are
+    included, encrypted under an export passphrase. The vault is sealed with
+    the SHA-256 of every other entry (manifest included) as associated data,
+    so it opens only inside the exact bundle it was exported with; the other
+    entries are not encrypted. Encrypted bundles of format 1, whose vault
+    bound nothing else, are refused.
   - **Full backup**: everything, encrypted. It restores into a clean install
     without the original keychain. It is not a zip bundle: one AEAD envelope
     seals the whole payload, bound to the header that names its key-derivation

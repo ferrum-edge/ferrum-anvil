@@ -109,9 +109,34 @@ commands return `LOCKED` until unlock.
 
 | Mode | Contents | Secrets |
 |---|---|---|
-| Share safely | One workspace | None — literal secrets become `{{placeholders}}` listed in the manifest |
-| Encrypted transfer | One workspace | Vault secrets, encrypted with a passphrase you share separately |
+| Share safely | One workspace, or every workspace when none is chosen | None — literal secrets become `{{placeholders}}` listed in the manifest |
+| Encrypted transfer | One workspace, or every workspace when none is chosen | Vault secrets and the literal secrets, encrypted with a passphrase you share separately |
 | Full backup | Everything including history and settings | Encrypted; an ANVILBAK file, not a bundle ([below](#full-backups)) |
+
+An export without a workspace (`anvil export` without `--workspace`) is a
+bundle of every workspace, not a backup: it carries no app settings, profiles,
+spec-import records or load reports, and its bundle kind is `workspace`.
+
+In either bundle mode only the vault is encrypted. The objects (names, URLs,
+header and body text), attachments and history are ordinary zip entries that
+anyone holding the file can read; secrets and literal secrets never appear in
+them, but a credential typed into a body or URL is exported as written, with
+a warning in the preview.
+
+An encrypted-transfer bundle (format 2) seals its vault with the SHA-256 of
+every other entry as associated data: the manifest (kind, mode, placeholders
+and vault parameters included), `workspace/objects.json`, each attachment and
+the history, with the format version. The vault therefore opens only inside
+the exact bundle it was exported with. A change to any entry, or an entry
+added or removed, is refused as a wrong passphrase or a modified bundle,
+before any secret or literal is restored and before anything is written;
+recomputing `checksums.json` does not change that. Each literal is restored
+only to the field the export recorded, and only while that field still holds
+its placeholder. A bundle whose manifest mode and vault disagree is refused.
+Encrypted bundles written by earlier builds (format 1) sealed the vault
+without binding anything else in the archive; they are refused, with or
+without the passphrase, and must be exported again. Share-safe bundles of
+either format still import.
 
 Import is preview-then-apply with conflict policies (duplicate, merge, replace).
 Duplicate gives every imported object, request revision and secret a new id and
@@ -133,7 +158,8 @@ secrets. The preview lists every such workspace as an error, and applying is
 refused unless the user confirms each one after the preview (the desktop's
 checkbox; `anvil import --into-existing <WORKSPACE_ID>`). Confirm only for a
 bundle you trust: a passphrase shows the bundle was not altered after it was
-encrypted, not who wrote it. Duplicate never writes into a stored workspace.
+exported, not who wrote it, and a share-safe bundle has no passphrase at all.
+Duplicate never writes into a stored workspace.
 
 A bundle is refused when any workspace-scoped object (folder, request,
 environment, TLS, proxy or integration profile, dataset, scenario, load plan)
@@ -197,11 +223,16 @@ in it can be read or changed without the export passphrase:
 - The Argon2id costs are read before anything can be authenticated, so they
   are held to the same bounds as a bundle vault's (above) before any
   derivation runs. Exports use 64 MiB, 3 passes and 1 lane.
-- Full backups are only ever ANVILBAK files. A zip bundle whose manifest has
-  kind `backup` or mode `full_backup` (as early development builds wrote
-  them), or that carries app settings, is refused on import with
-  "legacy full backups are not supported; restore from an ANVILBAK backup",
-  and nothing of it is restored. Bundle exports never write that kind or mode.
+- Full backups are only ever ANVILBAK files. Early development builds wrote
+  them as zip bundles whose vault bound nothing else in the archive. One whose
+  manifest has kind `backup` or mode `full_backup`, or that carries app
+  settings, is refused on import with "legacy full backups are not supported;
+  restore from an ANVILBAK backup". One relabelled as an encrypted workspace
+  bundle is refused because its vault is format 1 (above), and one whose
+  manifest claims the current format fails the vault's authentication. No
+  secret or literal from such a vault is ever restored. Their other entries
+  were never encrypted, so a copy of one should be treated as plaintext.
+  Bundle exports never write that kind or mode.
 - It carries every row of every stored object kind (workspaces, folders,
   requests and all their revisions, environments, TLS, proxy and gateway
   profiles, datasets, scenarios, load plans, app settings, user profiles,
@@ -259,7 +290,8 @@ needs no confirmation.
   `DB_SCHEMA_VERSION`. Migrations run forward in a transaction at open.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
-- Bundles carry `format_version`; unknown future formats are rejected.
+- Bundles carry `format_version`; unknown future formats are rejected, and so
+  are encrypted bundles of format 1 (see [Export and import](#export-and-import)).
 - A bundle's manifest `schema_version`, and the `schema_version` of every object,
   settings record and history record in it, is checked before anything is
   decrypted, interpreted or written. A newer schema is refused, and so is an

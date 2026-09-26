@@ -10,12 +10,21 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
 use zip::write::SimpleFileOptions;
 
-pub const FORMAT_VERSION: u32 = 1;
+/// Format 2 binds the encrypted vault to every other entry of its bundle
+/// (see [`vault_aad`]). Format 1 vaults bound nothing else and are refused.
+pub const FORMAT_VERSION: u32 = 2;
+/// Oldest format whose encrypted vault this build opens. Bundles without a
+/// vault (share safely) of older formats still open.
+pub const MIN_VAULT_FORMAT_VERSION: u32 = 2;
 pub const MAX_ENTRIES: usize = 20_000;
 pub const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_RATIO: u64 = 200;
-const VAULT_AAD: &[u8] = b"anvil-portable-vault-v1";
+const FORMAT: &str = "anvil-bundle";
+const MANIFEST_ENTRY: &str = "manifest.json";
+const CHECKSUMS_ENTRY: &str = "checksums.json";
+const VAULT_ENTRY: &str = "secrets/portable-vault.enc";
+const VAULT_BINDING: &str = "anvil-portable-vault-v2";
 
 /// Oldest object schema this build reads. Raising [`anvil_domain::SCHEMA_VERSION`]
 /// needs an explicit migration step in [`migrate_objects`] for every schema
@@ -54,8 +63,10 @@ pub enum BundleError {
     UnsupportedKdf(String),
     #[error("the bundle is encrypted; a passphrase is required")]
     PassphraseRequired,
-    #[error("the passphrase is not correct, or the encrypted vault was modified; nothing was imported")]
+    #[error("the passphrase is not correct, or the bundle was modified after it was exported; nothing was imported")]
     WrongPassphrase,
+    #[error("this encrypted bundle is from an earlier Anvil build and cannot be opened safely; export it again; nothing was imported")]
+    UnboundVault,
     #[error("legacy full backups are not supported; restore from an ANVILBAK backup")]
     LegacyFullBackup,
     #[error("a full backup is written as an ANVILBAK backup file, not as a bundle")]
@@ -164,6 +175,27 @@ fn device_bindings(graph: &PortableGraph) -> Vec<String> {
     out
 }
 
+/// Associated data that binds a vault to the rest of its bundle: the format,
+/// its version and the SHA-256 of every other entry by name (the manifest,
+/// vault parameters included, the objects, each attachment and the history).
+/// Changing, adding or removing any entry makes the vault fail to open, so
+/// its secrets and literals are only ever restored into the exact bundle
+/// they were exported with.
+///
+/// `checksums` maps entry names to lowercase hex SHA-256 digests; the vault
+/// and the checksum list themselves are left out. Entry names never contain
+/// a newline (see [`safe_name`]), so the listing is unambiguous.
+fn vault_aad(format_version: u32, checksums: &BTreeMap<String, String>) -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(format!("{FORMAT}\n{format_version}\n"));
+    for (name, digest) in checksums {
+        if name != VAULT_ENTRY && name != CHECKSUMS_ENTRY {
+            h.update(format!("{name}\n{digest}\n"));
+        }
+    }
+    format!("{VAULT_BINDING}\n{}", hex::encode(h.finalize())).into_bytes()
+}
+
 /// Whether a manifest describes a full backup. Full backups are ANVILBAK
 /// files, whose every byte is authenticated, never bundles.
 fn is_full_backup(kind: BundleKind, mode: ExportMode) -> bool {
@@ -220,7 +252,7 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
     counts.insert("secrets".into(), if encrypted { graph.secrets.len() } else { 0 });
     counts.insert("history".into(), if opts.include_history { graph.history.len() } else { 0 });
     let manifest = Manifest {
-        format: "anvil-bundle".into(),
+        format: FORMAT.into(),
         format_version: FORMAT_VERSION,
         kind: opts.kind,
         mode: opts.mode,
@@ -266,13 +298,12 @@ pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>
         }
         files.push(("history/records.jsonl".into(), jsonl));
     }
+    let mut key = None;
     if !matches!(opts.mode, ExportMode::ShareSafely) {
         check_kdf(&opts.kdf)?;
         let pass = opts.passphrase.unwrap_or_default();
         let salt = crypto::random_bytes(16);
-        let key = crypto::derive(pass.as_bytes(), &salt, &opts.kdf).map_err(|e| BundleError::Invalid(e.to_string()))?;
-        let payload = serde_json::to_vec(&vault)?;
-        files.push(("secrets/portable-vault.enc".into(), crypto::seal(&key, VAULT_AAD, &payload)));
+        key = Some(crypto::derive(pass.as_bytes(), &salt, &opts.kdf).map_err(|e| BundleError::Invalid(e.to_string()))?);
         manifest.vault = Some(VaultInfo {
             kdf: opts.kdf,
             salt_b64: base64::engine::general_purpose::STANDARD.encode(&salt),
@@ -282,19 +313,26 @@ pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>
     }
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     let mut checksums: BTreeMap<String, String> = BTreeMap::new();
-    checksums.insert("manifest.json".into(), sha256(&manifest_bytes));
+    checksums.insert(MANIFEST_ENTRY.into(), sha256(&manifest_bytes));
     for (n, b) in &files {
         checksums.insert(n.clone(), sha256(b));
     }
+    // The vault is sealed last, bound to every other entry as written.
+    if let Some(key) = key {
+        let payload = zeroize::Zeroizing::new(serde_json::to_vec(&vault)?);
+        let sealed = crypto::seal(&key, &vault_aad(manifest.format_version, &checksums), &payload);
+        checksums.insert(VAULT_ENTRY.into(), sha256(&sealed));
+        files.push((VAULT_ENTRY.into(), sealed));
+    }
     let mut zw = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).unix_permissions(0o600);
-    zw.start_file("manifest.json", opt)?;
+    zw.start_file(MANIFEST_ENTRY, opt)?;
     zw.write_all(&manifest_bytes)?;
     for (n, b) in &files {
         zw.start_file(n.as_str(), opt)?;
         zw.write_all(b)?;
     }
-    zw.start_file("checksums.json", opt)?;
+    zw.start_file(CHECKSUMS_ENTRY, opt)?;
     zw.write_all(&serde_json::to_vec_pretty(&checksums)?)?;
     let bytes = zw.finish()?.into_inner();
     let preview = ExportPreview { manifest, secrets_included: vault.secrets.len(), literals_moved: vault.literals.len() };
@@ -324,12 +362,12 @@ fn safe_name(name: &str) -> Result<(), BundleError> {
         return bad("path traversal");
     }
     let allowed = [
-        "manifest.json",
-        "checksums.json",
+        MANIFEST_ENTRY,
+        CHECKSUMS_ENTRY,
         "workspace/objects.json",
         "settings/portable.json",
         "history/records.jsonl",
-        "secrets/portable-vault.enc",
+        VAULT_ENTRY,
     ];
     if allowed.contains(&name) {
         return Ok(());
@@ -441,11 +479,11 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
             return Err(BundleError::Unsafe(name, "duplicate entry".into()));
         }
     }
-    let manifest_bytes = entries.get("manifest.json").ok_or_else(|| BundleError::NotABundle("missing manifest.json".into()))?;
+    let manifest_bytes = entries.get(MANIFEST_ENTRY).ok_or_else(|| BundleError::NotABundle("missing manifest.json".into()))?;
     let checksums: BTreeMap<String, String> =
-        serde_json::from_slice(entries.get("checksums.json").ok_or_else(|| BundleError::NotABundle("missing checksums.json".into()))?)?;
+        serde_json::from_slice(entries.get(CHECKSUMS_ENTRY).ok_or_else(|| BundleError::NotABundle("missing checksums.json".into()))?)?;
     for (name, data) in &entries {
-        if name == "checksums.json" {
+        if name == CHECKSUMS_ENTRY {
             continue;
         }
         match checksums.get(name) {
@@ -459,17 +497,32 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
         }
     }
     let manifest: Manifest = serde_json::from_slice(manifest_bytes).map_err(|e| BundleError::NotABundle(format!("manifest: {e}")))?;
-    if manifest.format != "anvil-bundle" {
+    if manifest.format != FORMAT {
         return Err(BundleError::NotABundle(format!("unknown format '{}'", manifest.format)));
     }
     if manifest.format_version > FORMAT_VERSION {
         return Err(BundleError::FutureFormat { found: manifest.format_version, supported: FORMAT_VERSION });
     }
     // Full backups were once written as bundles, with a vault that bound
-    // nothing else in the archive. They are refused before any object is
-    // interpreted or the vault is opened, so nothing of one is ever restored.
+    // nothing else in the archive. One that still describes itself as such
+    // is refused before any object is interpreted or the vault is opened;
+    // one relabelled as a workspace bundle has a format 1 vault (below).
     if is_full_backup(manifest.kind, manifest.mode) || entries.contains_key("settings/portable.json") {
         return Err(BundleError::LegacyFullBackup);
+    }
+    // A vault is only ever opened as part of the exact bundle it was sealed
+    // with. Earlier formats sealed it without binding anything else in the
+    // archive, so their vaults are refused before a passphrase is asked for.
+    match (&manifest.vault, manifest.mode) {
+        (Some(_), ExportMode::EncryptedTransfer) if !entries.contains_key(VAULT_ENTRY) => {
+            return Err(BundleError::Checksum(format!("{VAULT_ENTRY} (missing)")));
+        }
+        (Some(_), ExportMode::EncryptedTransfer) if manifest.format_version < MIN_VAULT_FORMAT_VERSION => {
+            return Err(BundleError::UnboundVault);
+        }
+        (Some(_), ExportMode::EncryptedTransfer) => {}
+        (None, ExportMode::ShareSafely) if !entries.contains_key(VAULT_ENTRY) => {}
+        _ => return Err(BundleError::Invalid("the manifest's export mode does not match the bundle's encrypted vault".into())),
     }
     // Schema compatibility is settled before any object is interpreted:
     // serde would silently drop fields a newer schema added.
@@ -503,12 +556,19 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
             return Err(BundleError::UnsupportedKdf(format!("{}-byte salt; allowed {MIN_SALT_LEN} to {MAX_SALT_LEN}", salt.len())));
         }
         let pass = passphrase.ok_or(BundleError::PassphraseRequired)?;
-        let enc = entries
-            .get("secrets/portable-vault.enc")
-            .ok_or_else(|| BundleError::Checksum("secrets/portable-vault.enc (missing)".into()))?;
+        let enc = entries.get(VAULT_ENTRY).ok_or_else(|| BundleError::Checksum(format!("{VAULT_ENTRY} (missing)")))?;
         let key = crypto::derive(pass.as_bytes(), &salt, &v.kdf).map_err(|e| BundleError::Invalid(e.to_string()))?;
-        let pt = crypto::open(&key, VAULT_AAD, enc).map_err(|_| BundleError::WrongPassphrase)?;
+        // `checksums` names exactly the entries read above, each with the
+        // digest of its bytes (checked above).
+        let aad = vault_aad(manifest.format_version, &checksums);
+        let pt = crypto::open(&key, &aad, enc).map_err(|_| BundleError::WrongPassphrase)?;
         let payload: VaultPayload = serde_json::from_slice(&pt)?;
+        // Literals go back only to the fields the manifest lists as replaced,
+        // each of which must still hold its placeholder.
+        let listed = manifest.placeholders.iter().map(|p| (&p.pointer, &p.placeholder));
+        if !payload.literals.iter().map(|l| (&l.pointer, &l.placeholder)).eq(listed) {
+            return Err(BundleError::Invalid("the encrypted vault does not match the manifest's placeholders".into()));
+        }
         sanitize::restore(&mut objects, &payload.literals).map_err(BundleError::Invalid)?;
         secrets = payload.secrets;
         secrets_restored = true;
