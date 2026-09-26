@@ -18,6 +18,7 @@ import type {
 import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
 import { Modal, SecretField, Tabs, humanize } from "./ui";
+import { Icon, type IconName } from "./icons";
 import { WorkloadIdentityFields } from "./WorkloadApi";
 
 const now = () => new Date().toISOString();
@@ -78,7 +79,7 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
         <>
           {sel !== "__base" && (
             <button
-              className="btn danger"
+              className="btn ghost danger"
               onClick={async () => {
                 await api.deleteEnvironment(sel);
                 setSel("__base");
@@ -86,28 +87,34 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
                 props.onChanged();
               }}
             >
+              <Icon name="trash" size={14} />
               Delete environment
             </button>
           )}
           <span className="spacer" />
+          <button className="btn" onClick={props.onClose}>
+            Close
+          </button>
           <button className="btn primary" onClick={saveIt}>
             Save
           </button>
         </>
       }
     >
-      <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: 14 }}>
-        <div className="col">
-          <button className={`btn ${sel === "__base" ? "primary" : ""}`} onClick={() => setSel("__base")}>
-            Workspace base
+      <div className="split-dialog">
+        <nav className="nav-list" aria-label="Variable sets">
+          <button className="nav-item" aria-current={sel === "__base"} onClick={() => setSel("__base")}>
+            <Icon name="layers" size={15} />
+            <span>Workspace base</span>
           </button>
           {envs.map((e) => (
-            <button key={e.id} className={`btn ${sel === e.id ? "primary" : ""}`} onClick={() => setSel(e.id)}>
-              {e.name}
+            <button key={e.id} className="nav-item" aria-current={sel === e.id} onClick={() => setSel(e.id)}>
+              <Icon name="globe" size={15} />
+              <span>{e.name}</span>
             </button>
           ))}
           <button
-            className="btn ghost"
+            className="nav-item add"
             onClick={async () => {
               const e = await api.saveEnvironment({ id: crypto.randomUUID(), schema_version: 1, created_at: now(), updated_at: now(), workspace_id: props.workspace.id, name: "New environment", variables: [] });
               await load();
@@ -115,9 +122,10 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
               props.onChanged();
             }}
           >
-            + New environment
+            <Icon name="plus" size={15} />
+            <span>New environment</span>
           </button>
-        </div>
+        </nav>
         <div className="col">
           {sel !== "__base" && (
             <label className="lbl">
@@ -138,34 +146,49 @@ export function VariablesEditor(props: { vars: Variable[]; onChange: (v: Variabl
   const set = (i: number, v: Variable) => props.onChange(props.vars.map((x, j) => (j === i ? v : x)));
   return (
     <div className="col">
-      {props.vars.map((v, i) => (
-        <div key={i} className="row" style={{ alignItems: "flex-end" }}>
-          <input type="checkbox" aria-label="Enabled" checked={v.enabled !== false} onChange={(e) => set(i, { ...v, enabled: e.target.checked })} />
-          <label className="lbl" style={{ width: 200 }}>
-            Name
-            <input className="field mono" value={v.name} onChange={(e) => set(i, { ...v, name: e.target.value })} />
-          </label>
-          <div className="grow">
-            {v.secret ? (
-              <SecretField label="Value (secret)" value={v.value} workspaceId={props.workspaceId} onChange={(value) => set(i, { ...v, value })} />
-            ) : (
-              <label className="lbl">
-                Value
-                <input className="field mono" value={v.value.kind === "template" ? v.value.value : ""} onChange={(e) => set(i, { ...v, value: { kind: "template", value: e.target.value } })} />
-              </label>
-            )}
-          </div>
-          <label className="check" style={{ paddingBottom: 6 }}>
-            <input type="checkbox" checked={!!v.secret} onChange={(e) => set(i, { ...v, secret: e.target.checked })} />
-            secret
-          </label>
-          <button className="btn ghost icon-btn" aria-label="Remove variable" onClick={() => props.onChange(props.vars.filter((_, j) => j !== i))}>
-            ✕
-          </button>
+      <div className="var-table">
+        <div className="var-row var-head">
+          <span />
+          <span>Name</span>
+          <span>Value</span>
+          <span>Secret</span>
+          <span />
         </div>
-      ))}
-      <button className="btn small" style={{ alignSelf: "start" }} onClick={() => props.onChange([...props.vars, { name: "", value: { kind: "template", value: "" }, enabled: true }])}>
-        + Variable
+        {props.vars.length === 0 && <div className="kv-empty">No variables yet.</div>}
+        {props.vars.map((v, i) => (
+          <div key={i} className={`var-row${v.enabled === false ? " off" : ""}`}>
+            <input type="checkbox" aria-label="Enabled" checked={v.enabled !== false} onChange={(e) => set(i, { ...v, enabled: e.target.checked })} />
+            <input className="field mono" aria-label="Variable name" placeholder="name" value={v.name} onChange={(e) => set(i, { ...v, name: e.target.value })} />
+            <div className="var-value">
+              {v.secret ? (
+                <SecretField
+                  label={v.name || "Secret value"}
+                  vaultLabel="Value (secret)"
+                  hideLabel
+                  value={v.value}
+                  workspaceId={props.workspaceId}
+                  onChange={(value) => set(i, { ...v, value })}
+                />
+              ) : (
+                <input
+                  className="field mono"
+                  aria-label="Value"
+                  placeholder="value or {{variable}}"
+                  value={v.value.kind === "template" ? v.value.value : ""}
+                  onChange={(e) => set(i, { ...v, value: { kind: "template", value: e.target.value } })}
+                />
+              )}
+            </div>
+            <input type="checkbox" aria-label="Secret" title="Secret: masked, redacted from history, exported only as a placeholder" checked={!!v.secret} onChange={(e) => set(i, { ...v, secret: e.target.checked })} />
+            <button className="btn ghost icon-btn" aria-label="Remove variable" title="Remove variable" onClick={() => props.onChange(props.vars.filter((_, j) => j !== i))}>
+              <Icon name="x" />
+            </button>
+          </div>
+        ))}
+      </div>
+      <button className="btn small start" onClick={() => props.onChange([...props.vars, { name: "", value: { kind: "template", value: "" }, enabled: true }])}>
+        <Icon name="plus" size={14} />
+        Variable
       </button>
     </div>
   );
@@ -215,8 +238,10 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
         editing ? (
           <>
             <button className="btn" onClick={() => setEditing(null)}>
+              <Icon name="chevronLeft" size={14} />
               Back
             </button>
+            <span className="spacer" />
             <button className="btn primary" onClick={saveIt}>
               Save profile
             </button>
@@ -237,13 +262,24 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
           />
           {tab === "tls" && (
             <ProfileList
-              items={tls.map((p) => ({ id: p.id, name: p.name, meta: `${p.verify === false ? "⚠ verification off" : "verification on"}${spiffeLabel(p)} · ${p.client_identity ? `client cert (${p.client_identity.format})` : "no client cert"} · ${(p.extra_roots_pem ?? []).length} extra CA${p.server_name_override ? ` · SNI ${p.server_name_override}` : ""}` }))}
+              icon="shield"
+              newLabel="New TLS profile"
+              empty="No TLS profiles. Requests use the system trust store with verification on."
+              items={tls.map((p) => ({
+                id: p.id,
+                name: p.name,
+                warn: p.verify === false ? "verification off" : undefined,
+                meta: `${p.verify === false ? "verification off" : "verification on"}${spiffeLabel(p)} · ${p.client_identity ? `client cert (${p.client_identity.format})` : "no client cert"} · ${(p.extra_roots_pem ?? []).length} extra CA${p.server_name_override ? ` · SNI ${p.server_name_override}` : ""}`,
+              }))}
               onEdit={(id) => setEditing({ kind: "tls", value: tls.find((p) => p.id === id)! })}
               onNew={() => setEditing({ kind: "tls", value: { ...base, name: "New TLS profile", verify: true, use_system_roots: true, extra_roots_pem: [], bindings: [], min_version: "tls12" } })}
             />
           )}
           {tab === "proxy" && (
             <ProfileList
+              icon="globe"
+              newLabel="New proxy"
+              empty="No proxies. Requests connect directly unless a proxy is chosen."
               items={proxy.map((p) => ({ id: p.id, name: p.name, meta: `${p.kind === "hbone" ? "HBONE" : p.kind} ${p.address}${p.tls_profile_id ? ` · TLS: ${tls.find((t) => t.id === p.tls_profile_id)?.name ?? "missing profile"}` : ""}${p.no_proxy ? ` · bypass: ${p.no_proxy}` : ""}` }))}
               onEdit={(id) => setEditing({ kind: "proxy", value: proxy.find((p) => p.id === id)! })}
               onNew={() => setEditing({ kind: "proxy", value: { ...base, name: "New proxy", kind: "http", address: "127.0.0.1:8080", no_proxy: "localhost,127.0.0.1" } })}
@@ -255,6 +291,9 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
                 Declaring a destination as a Ferrum Edge gateway lets Anvil treat its <code>X-Gateway-Error</code> markers as gateway-authored (still coarse). Without a profile, the same header from any server is only a “Ferrum-like marker”.
               </p>
               <ProfileList
+                icon="layers"
+                newLabel="New gateway"
+                empty="No gateways declared."
                 items={ints.map((p) => ({ id: p.id, name: p.name, meta: `${p.compatibility_id} · ${p.hosts.map((h) => h.host + (h.port ? `:${h.port}` : "")).join(", ")}${p.require_verified_tls === false ? " · plain-HTTP trust (lab)" : ""}` }))}
                 onEdit={(id) => setEditing({ kind: "ferrum", value: ints.find((p) => p.id === id)! })}
                 onNew={() => setEditing({ kind: "ferrum", value: { ...base, name: "My gateway", kind: "ferrum_gateway", hosts: [{ host: "gateway.example.com" }], compatibility_id: FERRUM_COMPATIBILITY[0].id, require_verified_tls: true } })}
@@ -271,18 +310,33 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   );
 }
 
-function ProfileList(props: { items: { id: string; name: string; meta: string }[]; onEdit: (id: string) => void; onNew: () => void }) {
+function ProfileList(props: {
+  items: { id: string; name: string; meta: string; warn?: string }[];
+  onEdit: (id: string) => void;
+  onNew: () => void;
+  icon: IconName;
+  newLabel: string;
+  empty: string;
+}) {
   return (
     <div className="col">
-      {props.items.length === 0 && <div className="faint">None yet.</div>}
+      {props.items.length === 0 && <div className="empty-note">{props.empty}</div>}
       {props.items.map((i) => (
-        <button key={i.id} className="btn" style={{ height: "auto", padding: 10, justifyContent: "space-between" }} onClick={() => props.onEdit(i.id)}>
-          <b>{i.name}</b>
-          <span className="faint">{i.meta}</span>
+        <button key={i.id} className="list-card" onClick={() => props.onEdit(i.id)}>
+          <Icon name={props.icon} size={18} />
+          <span className="grow">
+            <b>{i.name}</b>
+            <span className="meta" title={i.meta}>
+              {i.meta}
+            </span>
+          </span>
+          {i.warn && <span className="badge warn">{i.warn}</span>}
+          <Icon name="chevronRight" size={14} />
         </button>
       ))}
-      <button className="btn ghost" style={{ alignSelf: "start" }} onClick={props.onNew}>
-        + New
+      <button className="btn small start" onClick={props.onNew}>
+        <Icon name="plus" size={14} />
+        {props.newLabel}
       </button>
     </div>
   );
@@ -312,7 +366,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
   const id: ClientIdentity | null | undefined = p.client_identity;
   const spiffe = p.server_spiffe != null;
   return (
-    <div className="col">
+    <div className="form">
       <label className="lbl">
         Name
         <input className="field" value={p.name} onChange={(e) => onChange({ ...p, name: e.target.value })} />
@@ -341,8 +395,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
         />
       </label>
       <button
-        className="btn small"
-        style={{ alignSelf: "start" }}
+        className="btn small start"
         onClick={async () => {
           const file = await api.chooseFile("pem_file");
           if (!file) return;
@@ -350,9 +403,10 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
           if (r.text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), r.text] });
         }}
       >
+        <Icon name="file" size={14} />
         Add CA from file…
       </button>
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Minimum TLS version
           <select className="field" value={p.min_version ?? "tls12"} onChange={(e) => onChange({ ...p, min_version: e.target.value as "tls12" })}>
@@ -375,8 +429,8 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
           Sent as the TLS server name (SNI) instead of the URL host; the HTTP authority is unchanged. The certificate is verified against this name{spiffe ? ", or against the SPIFFE identity below when set" : ""}.
         </p>
       )}
-      <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-        <legend className="faint">Server identity (SPIFFE / mesh)</legend>
+      <fieldset>
+        <legend>Server identity (SPIFFE / mesh)</legend>
         <label className="check">
           <input
             type="checkbox"
@@ -386,7 +440,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
           Verify the server by its SPIFFE ID instead of the host name
         </label>
         {spiffe && (
-          <div className="col" style={{ marginTop: 8 }}>
+          <div className="col">
             <p className="hint">
               The server's X.509-SVID must chain to the CA certificates above (the trust domain's bundle) and carry exactly one <code>spiffe://</code> URI SAN. DNS names in the certificate are not used. Set an exact ID, a trust domain, or both.
             </p>
@@ -415,11 +469,12 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
           </div>
         )}
       </fieldset>
-      <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-        <legend className="faint">Client certificate (mTLS)</legend>
-        <div className="row">
+      <fieldset>
+        <legend>Client certificate (mTLS)</legend>
+        <div className="fields">
           <select
             className="field"
+            aria-label="Client certificate"
             value={id?.format ?? "none"}
             onChange={(e) =>
               onChange({
@@ -442,14 +497,13 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
           </select>
         </div>
         {id?.format === "pem" && (
-          <div className="col" style={{ marginTop: 8 }}>
+          <div className="col">
             <label className="lbl">
               Certificate chain (PEM)
               <textarea className="field" rows={4} value={id.cert_chain_pem} onChange={(e) => onChange({ ...p, client_identity: { ...id, cert_chain_pem: e.target.value } })} />
             </label>
             <button
-              className="btn small"
-              style={{ alignSelf: "start" }}
+              className="btn small start"
               onClick={async () => {
                 const file = await api.chooseFile("pem_file");
                 if (!file) return;
@@ -457,6 +511,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
                 if (r.text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: r.text } });
               }}
             >
+              <Icon name="file" size={14} />
               Load certificate file…
             </button>
             <SecretField label="Private key (PEM)" multiline value={id.private_key_pem} workspaceId={p.workspace_id} onChange={(v) => onChange({ ...p, client_identity: { ...id, private_key_pem: v as typeof id.private_key_pem } })} />
@@ -464,7 +519,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
           </div>
         )}
         {id?.format === "pkcs12" && (
-          <div className="col" style={{ marginTop: 8 }}>
+          <div className="col">
             <p className="hint">Pick the .p12/.pfx file; it is stored in the vault. Legacy RC2/3DES bundles are supported.</p>
             <P12Picker workspaceId={p.workspace_id} onSecret={(v) => onChange({ ...p, client_identity: { ...id, bundle_b64: v as typeof id.bundle_b64 } })} current={id.bundle_b64.kind === "secret" ? id.bundle_b64.secret.label : null} />
             <SecretField label="Bundle password" value={id.password} workspaceId={p.workspace_id} onChange={(v) => onChange({ ...p, client_identity: { ...id, password: v } })} />
@@ -472,12 +527,12 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
         )}
         {id?.format === "workload_api" && <WorkloadIdentityFields id={id} onChange={(v) => onChange({ ...p, client_identity: v })} />}
         {id && (
-          <label className="lbl" style={{ marginTop: 8 }}>
+          <label className="lbl">
             Present only to these hosts (comma-separated; empty = any request using this profile)
             <input className="field mono" value={hostsText(p.bindings)} onChange={(e) => onChange({ ...p, bindings: parseHosts(e.target.value) })} placeholder="api.internal.example.com, *.mtls.example.com:8443" />
           </label>
         )}
-        {id && (p.bindings ?? []).length === 0 && <div className="warn-box" style={{ marginTop: 8 }}>This certificate will be offered to any server a request using this profile connects to, including redirect targets.</div>}
+        {id && (p.bindings ?? []).length === 0 && <div className="warn-box">This certificate will be offered to any server a request using this profile connects to, including redirect targets.</div>}
       </fieldset>
     </div>
   );
@@ -487,7 +542,12 @@ function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "s
   const [err, setErr] = useState<string | null>(null);
   return (
     <div className="row">
-      {props.current && <span className="badge accent">🔒 {props.current}</span>}
+      {props.current && (
+        <span className="badge accent">
+          <Icon name="key" size={12} />
+          {props.current}
+        </span>
+      )}
       <button
         className="btn small"
         disabled={!props.workspaceId}
@@ -509,7 +569,7 @@ function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "s
       >
         Choose .p12 / .pfx…
       </button>
-      {err && <span className="faint">{err}</span>}
+      {err && <span className="bad-text">{err}</span>}
     </div>
   );
 }
@@ -534,12 +594,12 @@ export function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsPr
   const setHbone = (h: HboneOptions) => onChange({ ...p, hbone: h });
   const tlsProfile = tlsProfiles.find((t) => t.id === p.tls_profile_id);
   return (
-    <div className="col">
+    <div className="form">
       <label className="lbl">
         Name
         <input className="field" value={p.name} onChange={(e) => onChange({ ...p, name: e.target.value })} />
       </label>
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Type
           <select
@@ -578,15 +638,15 @@ export function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsPr
       {hbone && tlsProfile && !tlsProfile.client_identity && <div className="warn-box">The selected TLS profile has no client certificate: the endpoint will not see an authenticated mesh peer.</div>}
       {hbone && tlsProfile && tlsProfile.verify === false && <div className="warn-box">The selected TLS profile disables verification: the HBONE endpoint's identity is not authenticated (shown on every response).</div>}
       {hbone && (
-        <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-          <legend className="faint">HBONE CONNECT</legend>
+        <fieldset>
+          <legend>HBONE CONNECT</legend>
           <p className="hint">
             Anvil sends <code>CONNECT</code> with <code>:authority</code> = the request's host:port over HTTP/2; a 2xx opens the tunnel and the request (HTTP, TLS, WebSocket or TCP) runs inside it. A fresh tunnel is opened per request.
           </p>
           <p className="hint" data-testid="hbone-udp-help">
             UDP requests (udp://) use a datagram tunnel: the <code>CONNECT</code> always carries the marker with the value <code>udp</code> ({(opts.marker ?? "none") === "istio_protocol" ? "x-istio-protocol: udp" : "x-ferrum-mesh-protocol: udp"}), and each datagram is one [u16 length][payload] record on the stream.
           </p>
-          <div className="row">
+          <div className="fields">
             <label className="lbl">
               Protocol marker
               <select className="field" value={opts.marker ?? "none"} onChange={(e) => setHbone({ ...opts, marker: e.target.value as HboneMarker })}>
@@ -631,7 +691,7 @@ export function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsPr
 
 function FerrumForm({ p, onChange }: { p: IntegrationProfile; onChange: (p: IntegrationProfile) => void }) {
   return (
-    <div className="col">
+    <div className="form">
       <label className="lbl">
         Name
         <input className="field" value={p.name} onChange={(e) => onChange({ ...p, name: e.target.value })} />
@@ -716,36 +776,44 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
       title="Export"
       onClose={props.onClose}
       footer={
-        <button className="btn primary" disabled={busy || !preview} onClick={go}>
-          {busy ? "Exporting…" : "Choose file and export"}
-        </button>
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" disabled={busy || !preview} onClick={go}>
+            <Icon name="upload" size={14} />
+            {busy ? "Exporting…" : "Choose file and export"}
+          </button>
+        </>
       }
     >
-      <div className="row">
-        <label className="check">
-          <input type="radio" name="scope" disabled={!props.workspace} checked={scope === "workspace"} onChange={() => setScope("workspace")} />
+      <div className="segmented" role="radiogroup" aria-label="What to export">
+        <button role="radio" aria-checked={scope === "workspace"} disabled={!props.workspace} onClick={() => setScope("workspace")}>
+          <Icon name="layers" size={14} />
           This workspace{props.workspace ? ` (${props.workspace.name})` : ""}
-        </label>
-        <label className="check">
-          <input type="radio" name="scope" checked={scope === "all"} onChange={() => setScope("all")} />
+        </button>
+        <button role="radio" aria-checked={scope === "all"} onClick={() => setScope("all")}>
+          <Icon name="download" size={14} />
           Whole app backup
-        </label>
+        </button>
       </div>
       {scope === "workspace" && (
-        <div className="col">
+        <fieldset className="choices" aria-label="Export mode">
           {MODES.filter((m) => m.id !== "full_backup").map((m) => (
-            <label key={m.id} className="check" style={{ alignItems: "flex-start" }}>
+            <label key={m.id} className={`choice ${mode === m.id ? "selected" : ""}`}>
               <input type="radio" name="mode" checked={mode === m.id} onChange={() => setMode(m.id)} />
               <span>
-                <b>{m.label}</b> <span className="faint">— {m.desc}</span>
+                <b>{m.label}</b>
+                <span className="faint">{m.desc}</span>
               </span>
             </label>
           ))}
-        </div>
+        </fieldset>
       )}
-      {scope === "all" && <p className="hint">{MODES[2].desc}</p>}
+      {scope === "all" && <div className="info-box">{MODES[2].desc}</div>}
       {preview && (
         <div className="col">
+          <h4 className="section-title">What goes into the bundle</h4>
           <table className="grid">
             <tbody>
               {Object.entries(preview.manifest.counts).map(([k, v]) => (
@@ -768,7 +836,7 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
           {preview.manifest.device_bindings.length > 0 && <div className="warn-box">Needs rebinding on the other machine: {preview.manifest.device_bindings.join(", ")}</div>}
           {preview.manifest.content_warnings.length > 0 && (
             <details>
-              <summary className="muted">{preview.manifest.content_warnings.length} content warning(s)</summary>
+              <summary>{preview.manifest.content_warnings.length} content warning(s)</summary>
               <ul>
                 {preview.manifest.content_warnings.map((w, i) => (
                   <li key={i} className="mono">
@@ -781,7 +849,7 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
         </div>
       )}
       {encrypted && (
-        <div className="row">
+        <div className="fields">
           <label className="lbl grow">
             Bundle passphrase
             <input className="field" type="password" value={pass} onChange={(e) => setPass(e.target.value)} autoComplete="new-password" />
@@ -879,6 +947,7 @@ export function ImportDialog(props: {
               Preview
             </button>
             <button className="btn primary" disabled={!preview || busy || (existing.length > 0 && !intoExisting)} onClick={apply}>
+              <Icon name="download" size={14} />
               Import
             </button>
           </>
@@ -900,34 +969,37 @@ export function ImportDialog(props: {
   function bundleBody() {
     return (
       <>
-      <div className="row">
+      <div className="row nowrap">
         <button className="btn" data-autofocus onClick={choose}>
+          <Icon name="file" size={14} />
           Choose bundle…
         </button>
-        <span className="mono faint grow" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+        <span className={`path-chip grow${file ? "" : " none"}`} title={file?.file_name}>
           {file?.file_name ?? "No file selected"}
         </span>
       </div>
-      <label className="lbl">
-        Passphrase (for encrypted bundles)
-        <input className="field" type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
-      </label>
-      <label className="lbl">
-        If objects already exist
-        <select
-          className="field"
-          value={policy}
-          onChange={(e) => {
-            setPolicy(e.target.value);
-            setPreview(null);
-            setIntoExisting(false);
-          }}
-        >
-          <option value="duplicate">Import as copies (new ids)</option>
-          <option value="merge">Merge (keep existing, add new)</option>
-          <option value="replace">Replace existing</option>
-        </select>
-      </label>
+      <div className="fields">
+        <label className="lbl grow">
+          Passphrase (for encrypted bundles)
+          <input className="field" type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
+        </label>
+        <label className="lbl grow">
+          If objects already exist
+          <select
+            className="field"
+            value={policy}
+            onChange={(e) => {
+              setPolicy(e.target.value);
+              setPreview(null);
+              setIntoExisting(false);
+            }}
+          >
+            <option value="duplicate">Import as copies (new ids)</option>
+            <option value="merge">Merge (keep existing, add new)</option>
+            <option value="replace">Replace existing</option>
+          </select>
+        </label>
+      </div>
       <p className="hint">Nothing is changed until you press Import. Imports never run requests, scripts or load plans, and never enable a TLS bypass. Objects are written in one transaction; a checkpoint copy is kept on disk.</p>
       {preview && (
         <div className="col">
@@ -987,6 +1059,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
   const [s, setS] = useState<AppSettings | null>(null);
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     api.settings().then(setS);
     api.systemInfo().then(setInfo);
@@ -997,92 +1070,109 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
       title="Settings"
       onClose={props.onClose}
       footer={
-        <button
-          className="btn primary"
-          onClick={async () => {
-            try {
-              await api.saveSettings(s);
-              props.onSaved(s);
-              props.onClose();
-            } catch (e) {
-              setErr(String((e as Error).message));
-            }
-          }}
-        >
-          Save
-        </button>
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button
+            className="btn primary"
+            onClick={async () => {
+              try {
+                await api.saveSettings(s);
+                props.onSaved(s);
+                props.onClose();
+              } catch (e) {
+                setErr(String((e as Error).message));
+              }
+            }}
+          >
+            Save
+          </button>
+        </>
       }
     >
-      <div className="row">
-        <label className="lbl">
-          Theme
-          <select className="field" value={s.theme} onChange={(e) => setS({ ...s, theme: e.target.value as AppSettings["theme"] })}>
-            <option value="system">System</option>
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
-          </select>
+      <section className="settings-section">
+        <h3>Appearance and lock</h3>
+        <div className="fields">
+          <label className="lbl">
+            Theme
+            <select className="field" value={s.theme} onChange={(e) => setS({ ...s, theme: e.target.value as AppSettings["theme"] })}>
+              <option value="system">System</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </label>
+          <label className="lbl">
+            Lock after inactivity (minutes, 0 = never)
+            <input className="field mono num" value={s.lock.idle_minutes} onChange={(e) => setS({ ...s, lock: { ...s.lock, idle_minutes: Number(e.target.value) || 0 } })} />
+          </label>
+        </div>
+        <label className="check">
+          <input type="checkbox" checked={s.lock.lock_on_os_lock} onChange={(e) => setS({ ...s, lock: { ...s.lock, lock_on_os_lock: e.target.checked } })} />
+          Lock when the computer sleeps
         </label>
-        <label className="lbl">
-          Lock after inactivity (minutes, 0 = never)
-          <input className="field mono" style={{ width: 120 }} value={s.lock.idle_minutes} onChange={(e) => setS({ ...s, lock: { ...s.lock, idle_minutes: Number(e.target.value) || 0 } })} />
+        <ChangePassphrase />
+      </section>
+      <section className="settings-section">
+        <h3>History</h3>
+        <label className="check">
+          <input type="checkbox" checked={s.history.enabled} onChange={(e) => setS({ ...s, history: { ...s.history, enabled: e.target.checked } })} />
+          Keep request history
         </label>
-      </div>
-      <label className="check">
-        <input type="checkbox" checked={s.lock.lock_on_os_lock} onChange={(e) => setS({ ...s, lock: { ...s.lock, lock_on_os_lock: e.target.checked } })} />
-        Lock when the computer sleeps
-      </label>
-      <label className="check">
-        <input type="checkbox" checked={s.history.enabled} onChange={(e) => setS({ ...s, history: { ...s.history, enabled: e.target.checked } })} />
-        Keep request history
-      </label>
-      <label className="check">
-        <input type="checkbox" checked={s.history.keep_response_bodies} onChange={(e) => setS({ ...s, history: { ...s.history, keep_response_bodies: e.target.checked } })} />
-        Keep response bodies in history (encrypted)
-      </label>
-      <div className="row">
-        <label className="lbl">
-          History retention (days)
-          <input className="field mono" style={{ width: 120 }} value={s.history.max_age_days} onChange={(e) => setS({ ...s, history: { ...s.history, max_age_days: Number(e.target.value) || 0 } })} />
+        <label className="check">
+          <input type="checkbox" checked={s.history.keep_response_bodies} onChange={(e) => setS({ ...s, history: { ...s.history, keep_response_bodies: e.target.checked } })} />
+          Keep response bodies in history (encrypted)
         </label>
+        <div className="fields">
+          <label className="lbl">
+            History retention (days)
+            <input className="field mono num" value={s.history.max_age_days} onChange={(e) => setS({ ...s, history: { ...s.history, max_age_days: Number(e.target.value) || 0 } })} />
+          </label>
+          <label className="lbl">
+            History size cap (MB)
+            <input
+              className="field mono num"
+              value={Math.round(s.history.max_total_bytes / 1024 / 1024)}
+              onChange={(e) => setS({ ...s, history: { ...s.history, max_total_bytes: (Number(e.target.value) || 0) * 1024 * 1024 } })}
+            />
+          </label>
+          <button
+            className="btn danger"
+            onClick={async () => {
+              await api.historyClear(null);
+              setNotice("History cleared.");
+            }}
+          >
+            <Icon name="trash" size={14} />
+            Clear all history
+          </button>
+        </div>
+      </section>
+      <section className="settings-section">
+        <h3>Privacy and sign-in</h3>
         <label className="lbl">
-          History size cap (MB)
-          <input
-            className="field mono"
-            style={{ width: 120 }}
-            value={Math.round(s.history.max_total_bytes / 1024 / 1024)}
-            onChange={(e) => setS({ ...s, history: { ...s.history, max_total_bytes: (Number(e.target.value) || 0) * 1024 * 1024 } })}
-          />
+          Extra names to always redact (comma-separated headers, params, fields)
+          <input className="field mono" value={s.redaction_names.join(", ")} onChange={(e) => setS({ ...s, redaction_names: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
         </label>
-      </div>
-      <label className="lbl">
-        Extra names to always redact (comma-separated headers, params, fields)
-        <input className="field mono" value={s.redaction_names.join(", ")} onChange={(e) => setS({ ...s, redaction_names: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
-      </label>
-      <ChangePassphrase />
-      <Providers />
-      <button
-        className="btn danger small"
-        style={{ alignSelf: "start" }}
-        onClick={async () => {
-          await api.historyClear(null);
-          setErr("History cleared.");
-        }}
-      >
-        Clear all history
-      </button>
+        <Providers />
+      </section>
       {info && (
-        <table className="grid">
-          <tbody>
-            <tr><td className="k">Version</td><td className="v">{info.version}</td></tr>
-            <tr><td className="k">Engine</td><td className="v">{info.engine}</td></tr>
-            <tr><td className="k">Diagnostic catalog</td><td className="v">{info.catalog}</td></tr>
-            <tr><td className="k">System trust anchors</td><td className="v">{info.system_roots}</td></tr>
-            <tr><td className="k">Platform</td><td className="v">{info.platform}</td></tr>
-            <tr><td className="k">Data directory</td><td className="v">{info.data_dir}</td></tr>
-          </tbody>
-        </table>
+        <section className="settings-section">
+          <h3>About</h3>
+          <table className="grid">
+            <tbody>
+              <tr><td className="k">Version</td><td className="v">{info.version}</td></tr>
+              <tr><td className="k">Engine</td><td className="v">{info.engine}</td></tr>
+              <tr><td className="k">Diagnostic catalog</td><td className="v">{info.catalog}</td></tr>
+              <tr><td className="k">System trust anchors</td><td className="v">{info.system_roots}</td></tr>
+              <tr><td className="k">Platform</td><td className="v">{info.platform}</td></tr>
+              <tr><td className="k">Data directory</td><td className="v mono">{info.data_dir}</td></tr>
+            </tbody>
+          </table>
+        </section>
       )}
-      {err && <div className="hint">{err}</div>}
+      {notice && <div className="ok-box">{notice}</div>}
+      {err && <div className="bad-box">{err}</div>}
     </Modal>
   );
 }
@@ -1100,7 +1190,8 @@ function ChangePassphrase() {
   const title = keychain ? "Require an unlock passphrase" : "Change unlock passphrase";
   if (!open)
     return (
-      <button className="btn small" style={{ alignSelf: "start" }} onClick={() => setOpen(true)}>
+      <button className="btn small start" onClick={() => setOpen(true)}>
+        <Icon name="key" size={14} />
         {title}…
       </button>
     );
@@ -1112,11 +1203,11 @@ function ChangePassphrase() {
           This profile is opened by the OS keychain. With a passphrase, only the passphrase or a new recovery key opens it, and its key is removed from the OS keychain.
         </p>
       )}
-      <div className="row">
+      <div className="row nowrap">
         <input className="field grow" type="password" aria-label="New passphrase" placeholder="new passphrase" value={a} onChange={(e) => setA(e.target.value)} autoComplete="new-password" />
         <input className="field grow" type="password" aria-label="Repeat passphrase" placeholder="repeat" value={b} onChange={(e) => setB(e.target.value)} autoComplete="new-password" />
         <button
-          className="btn small"
+          className="btn"
           onClick={async () => {
             if (a.length < 8 || a !== b) return setMsg("Enter the same passphrase twice (at least 8 characters).");
             try {
@@ -1149,7 +1240,7 @@ function ChangePassphrase() {
           <div className="recovery" aria-label="Recovery key">
             {recovery}
           </div>
-          <button className="btn small" style={{ alignSelf: "start" }} onClick={() => setRecovery(null)}>
+          <button className="btn small start" onClick={() => setRecovery(null)}>
             I stored it safely
           </button>
         </>
@@ -1167,7 +1258,7 @@ function Providers() {
   if (!list) return null;
   return (
     <details>
-      <summary className="muted">Sign-in providers (optional, identity only)</summary>
+      <summary>Sign-in providers (optional, identity only)</summary>
       <p className="hint">
         A linked provider identity can be required before unlocking, but it never encrypts or unlocks your data by itself — the passphrase, recovery key or OS keychain does.
       </p>
@@ -1185,7 +1276,7 @@ function Providers() {
                   </span>
                 )}
               </td>
-              <td className="faint" style={{ fontSize: 11 }}>
+              <td className="faint small-text">
                 {p.availability.status === "unavailable" ? p.owner_actions.join("; ") : p.native_flow}
               </td>
             </tr>

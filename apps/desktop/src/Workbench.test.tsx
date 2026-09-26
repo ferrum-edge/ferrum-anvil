@@ -431,12 +431,13 @@ describe("Runner and Load tests keep their runs across navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Runner" }));
     fireEvent.click(await screen.findByRole("button", { name: "Run folder" }));
     await screen.findByRole("button", { name: "Stop run" });
+    expect(await screen.findByRole("button", { name: "Runner (run in progress)" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Requests" }));
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
     expect(screen.getByTestId("runner-live")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Runner" }));
+    fireEvent.click(screen.getByRole("button", { name: /Runner/ }));
     expect((screen.getByRole("button", { name: "Run folder" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Stop run" }));
     await waitFor(() => expect(calls("run_cancel")).toEqual([{ runId: "run-1" }]));
@@ -481,11 +482,12 @@ describe("Runner and Load tests keep their runs across navigation", () => {
     fireEvent.click(await screen.findByLabelText(/I own these destinations/));
     fireEvent.click(screen.getByRole("button", { name: "Start load" }));
     await screen.findByRole("button", { name: "Stop run" });
+    expect(await screen.findByRole("button", { name: "Load tests (run in progress)" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Requests" }));
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
     expect(screen.getByTestId("load-live")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Load tests" }));
+    fireEvent.click(screen.getByRole("button", { name: /Load tests/ }));
     fireEvent.click(screen.getByRole("button", { name: "Stop run" }));
     await waitFor(() => expect(calls("load_run_cancel")).toEqual([{ runKey: "key-1" }]));
 

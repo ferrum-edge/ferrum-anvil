@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { api, DEFAULT_IMPORT_OPTIONS, type ImportOptions, type SpecImported, type SpecInput, type SpecPreview } from "./api";
 import { humanize } from "./ui";
+import { Icon } from "./icons";
 
 export function SpecImport(props: { workspaceId: string | null; workspaceName: string | null; onImported: (r: SpecImported) => void }) {
   const [input, setInput] = useState<SpecInput | null>(null);
@@ -53,8 +54,8 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
   };
 
   return (
-    <div className="col" style={{ gap: 12 }}>
-      <div className="row">
+    <div className="col spec-import">
+      <div className="row nowrap">
         <button
           className="btn"
           data-autofocus
@@ -75,9 +76,10 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
             }
           }}
         >
+          <Icon name="file" size={14} />
           Choose file…
         </button>
-        <span className="mono faint grow" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+        <span className={`path-chip grow${input?.kind === "file" ? "" : " none"}`} title={input?.kind === "file" ? (fileName ?? undefined) : undefined}>
           {input?.kind === "file" ? fileName : "OpenAPI 2.0–3.2, WSDL 1.1, Postman v2.x, Insomnia v4, HAR"}
         </span>
       </div>
@@ -94,7 +96,7 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
           }}
         />
       </label>
-      <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+      <div className="fields">
         <label className="lbl">
           Request bodies
           <select className="field" value={opts.mode} onChange={(e) => setOpt({ mode: e.target.value as "sample" })}>
@@ -111,9 +113,9 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
         </label>
         <label className="lbl">
           Server (OpenAPI)
-          <input className="field mono" style={{ width: 70 }} value={opts.server_index} onChange={(e) => setOpt({ server_index: Number(e.target.value) || 0 })} />
+          <input className="field mono tiny" value={opts.server_index} onChange={(e) => setOpt({ server_index: Number(e.target.value) || 0 })} />
         </label>
-        <label className="check">
+        <label className="check field-check">
           <input type="checkbox" checked={opts.include_optional} onChange={(e) => setOpt({ include_optional: e.target.checked })} />
           Include optional fields
         </label>
@@ -123,7 +125,7 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
         Keep literal credentials found in HAR/cURL/Postman/Insomnia (off: they become placeholders)
       </label>
       {opts.include_credentials && <div className="warn-box">Literal credentials will be stored in requests. Prefer moving them into the vault after import.</div>}
-      <div className="row">
+      <div className="row import-actions">
         <label className="check">
           <input type="radio" name="spec-target" checked={target === "new"} onChange={() => setTarget("new")} />
           New workspace
@@ -137,6 +139,7 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
           Preview
         </button>
         <button className="btn primary" disabled={busy || !preview} onClick={doImport}>
+          <Icon name="download" size={14} />
           Import
         </button>
       </div>
@@ -151,7 +154,7 @@ function PreviewView({ p }: { p: SpecPreview }) {
   const r = p.report;
   return (
     <div className="col">
-      <div className="row" style={{ flexWrap: "wrap" }}>
+      <div className="row">
         <span className="badge accent">{humanize(p.detected.kind)}</span>
         <span className="badge">{humanize(p.detected.dialect)}</span>
         {p.detected.declared_version && <span className="badge">v{p.detected.declared_version}</span>}
@@ -186,7 +189,7 @@ function PreviewView({ p }: { p: SpecPreview }) {
       <Section title="Scripts kept as notes (never run)" items={r.scripts.map((x) => `${x.owner} ${x.event} (${x.language})`)} />
       <Section title="Settings imported inactive" items={r.inactive_settings.map((x) => `${x.setting}: ${x.reason}`)} />
       <details>
-        <summary className="muted">First requests</summary>
+        <summary>First requests</summary>
         <pre className="code">{p.sample.join("\n")}</pre>
       </details>
     </div>
@@ -197,12 +200,12 @@ function Section(props: { title: string; items: string[] }) {
   if (props.items.length === 0) return null;
   return (
     <details>
-      <summary className="muted">
+      <summary>
         {props.title} ({props.items.length})
       </summary>
-      <ul style={{ margin: "4px 0", paddingLeft: 18 }}>
+      <ul className="plain-list">
         {props.items.slice(0, 200).map((x, i) => (
-          <li key={i} className="mono" style={{ fontSize: 11 }}>
+          <li key={i} className="mono">
             {x}
           </li>
         ))}
