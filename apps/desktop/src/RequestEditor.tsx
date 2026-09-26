@@ -1,7 +1,6 @@
 // Request editor. Edits a draft RequestDefinition; nothing here performs I/O
 // except explicit lint/preview calls to the Rust backend.
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { api, type EffectiveRequest, type LintResult } from "./api";
 import type {
   Assertion,
@@ -246,9 +245,9 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
   const b = (spec.body ?? { type: "none" }) as Body;
   const setBody = (body: Body) => set({ body });
   const pickBinary = async () => {
-    const path = await open({ multiple: false, directory: false });
-    if (typeof path !== "string") return;
-    const attachment = await api.attachmentAdd(path, null);
+    const file = await api.chooseFile("attachment");
+    if (!file) return;
+    const attachment = await api.attachmentAdd(file.token, null);
     setBody({ type: "binary", attachment, content_type: "application/octet-stream" });
   };
   return (
@@ -424,9 +423,9 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
         <button
           className="btn small"
           onClick={async () => {
-            const path = await open({ multiple: false, directory: false });
-            if (typeof path !== "string") return;
-            const attachment = await api.attachmentAdd(path, null);
+            const file = await api.chooseFile("attachment");
+            if (!file) return;
+            const attachment = await api.attachmentAdd(file.token, null);
             const name = attachment.kind === "stored" ? attachment.file_name : "file";
             onChange([...parts, { name: "file", part_kind: "file", attachment, file_name: name, enabled: true }]);
           }}
@@ -550,10 +549,9 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
             onChange={async (e) => {
               if (e.target.value === "reflection") set({ grpc: { ...g, schema: { kind: "reflection" } } });
               else {
-                const path = await open({ multiple: e.target.value === "proto_files", directory: false });
-                const paths = typeof path === "string" ? [path] : Array.isArray(path) ? path : [];
-                if (paths.length === 0) return;
-                const refs = await Promise.all(paths.map((x) => api.attachmentAdd(x, null)));
+                const files = await api.chooseFiles("attachment", { multiple: e.target.value === "proto_files" });
+                if (files.length === 0) return;
+                const refs = await Promise.all(files.map((f) => api.attachmentAdd(f.token, null)));
                 set({ grpc: { ...g, schema: e.target.value === "proto_files" ? { kind: "proto_files", files: refs } : { kind: "descriptor_set", attachment: refs[0] } } });
               }
             }}

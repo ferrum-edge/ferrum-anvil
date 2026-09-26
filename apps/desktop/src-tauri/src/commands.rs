@@ -4,6 +4,7 @@
 
 use crate::state::DesktopState;
 use anvil_app::exec::SendOptions;
+use anvil_app::file_grants::FilePurpose;
 use anvil_app::profiles::Unlock;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
@@ -592,95 +593,89 @@ pub fn export_preview(
     st.app()?.export_preview(ws.as_ref(), mode(&export_mode)?, false).map_err(e)
 }
 
-/// Write to a path the user picked in the native save dialog.
+/// Write to the destination the user picked in the native save dialog
+/// (`file_choose` with purpose `bundle_export`); `grant` is that selection.
 #[tauri::command]
 pub fn export_to_path(
     st: State<'_, DesktopState>,
     workspace_id: Option<String>,
     export_mode: String,
     passphrase: Option<String>,
-    path: String,
+    grant: String,
 ) -> R<usize> {
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
     let (bytes, _) = st.app()?.export(ws.as_ref(), mode(&export_mode)?, passphrase.as_deref(), false).map_err(e)?;
-    let tmp = format!("{path}.partial");
-    std::fs::write(&tmp, &bytes).map_err(|x| x.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|x| x.to_string())?;
-    Ok(bytes.len())
+    st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
 }
 
-fn read_bundle(path: &str) -> R<Vec<u8>> {
-    let meta = std::fs::metadata(path).map_err(|x| x.to_string())?;
-    if meta.len() > 2 * 1024 * 1024 * 1024 {
-        return Err("bundle is larger than 2 GiB".into());
-    }
-    std::fs::read(path).map_err(|x| x.to_string())
+/// The bundle the user picked in the native open dialog (purpose
+/// `bundle_import`).
+fn read_bundle(st: &DesktopState, grant: &str) -> R<Vec<u8>> {
+    Ok(st.file_grants.read(grant, FilePurpose::BundleImport).map_err(|x| x.to_string())?.bytes)
 }
 
 #[tauri::command]
 pub fn import_preview(
     st: State<'_, DesktopState>,
-    path: String,
+    grant: String,
     passphrase: Option<String>,
     conflict_policy: String,
 ) -> R<anvil_app::port::ImportReport> {
-    let bytes = read_bundle(&path)?;
-    st.app()?.import_preview(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let app = st.app()?;
+    let bytes = read_bundle(&st, &grant)?;
+    app.import_preview(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
 }
 
 #[tauri::command]
 pub fn import_apply(
     st: State<'_, DesktopState>,
-    path: String,
+    grant: String,
     passphrase: Option<String>,
     conflict_policy: String,
 ) -> R<anvil_app::port::ImportReport> {
-    let bytes = read_bundle(&path)?;
-    st.app()?.import(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
+    let app = st.app()?;
+    let bytes = read_bundle(&st, &grant)?;
+    app.import(&bytes, passphrase.as_deref(), policy(&conflict_policy)?).map_err(e)
 }
 
 // ------------------------------------------------------------- attachments
 
-/// Store a file the user picked in the native open dialog as a portable,
-/// content-addressed attachment (bounded size).
+/// Store a file the user picked in the native open dialog (purpose
+/// `attachment`) as a portable, content-addressed attachment (bounded size).
 #[tauri::command]
-pub fn attachment_add(st: State<'_, DesktopState>, path: String, media_type: Option<String>) -> R<anvil_domain::request::AttachmentRef> {
-    const MAX: u64 = 256 * 1024 * 1024;
-    let meta = std::fs::metadata(&path).map_err(|x| x.to_string())?;
-    if !meta.is_file() {
-        return Err("not a regular file".into());
-    }
-    if meta.len() > MAX {
-        return Err("attachments are limited to 256 MiB".into());
-    }
-    let bytes = std::fs::read(&path).map_err(|x| x.to_string())?;
-    let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-    st.app()?.put_attachment(&name, &bytes, media_type).map_err(e)
+pub fn attachment_add(st: State<'_, DesktopState>, grant: String, media_type: Option<String>) -> R<anvil_domain::request::AttachmentRef> {
+    let app = st.app()?;
+    let file = st.file_grants.read(&grant, FilePurpose::Attachment).map_err(|x| x.to_string())?;
+    app.put_attachment(&file.file_name, &file.bytes, media_type).map_err(e)
 }
 
-/// Read a small text file the user picked (PEM certificates/keys). The
-/// content goes straight into the vault when `store_as_secret` is set, so a
-/// private key never round-trips through the webview.
+/// Read a small file the user picked in the native open dialog: a PEM
+/// certificate/key (purpose `pem_file`) or, with `base64`, a PKCS#12
+/// keystore (purpose `pkcs12_file`, which must be stored). The content goes
+/// straight into the vault when `store_as_secret` is set, so a private key
+/// never round-trips through the webview.
 #[tauri::command]
 pub fn read_text_file(
     st: State<'_, DesktopState>,
-    path: String,
+    grant: String,
     workspace_id: Option<String>,
     store_as_secret: Option<String>,
     base64: Option<bool>,
 ) -> R<TextFile> {
     use base64::Engine as _;
-    let meta = std::fs::metadata(&path).map_err(|x| x.to_string())?;
-    if meta.len() > 1024 * 1024 {
-        return Err("file is larger than 1 MiB".into());
-    }
-    // Binary keystores (PKCS#12) are carried as base64 text in the vault.
-    let text = if base64.unwrap_or(false) {
-        base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).map_err(|x| x.to_string())?)
-    } else {
-        std::fs::read_to_string(&path).map_err(|x| x.to_string())?
-    };
     let app = st.app()?;
+    let binary = base64.unwrap_or(false);
+    if binary && store_as_secret.is_none() {
+        return Err("a PKCS#12 keystore is only read into the vault; give it a label".into());
+    }
+    let purpose = if binary { FilePurpose::Pkcs12File } else { FilePurpose::PemFile };
+    let file = st.file_grants.read(&grant, purpose).map_err(|x| x.to_string())?;
+    // Binary keystores (PKCS#12) are carried as base64 text in the vault.
+    let text = if binary {
+        base64::engine::general_purpose::STANDARD.encode(&file.bytes)
+    } else {
+        String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())?
+    };
     if let Some(label) = store_as_secret {
         let ws = workspace_id.map(|w| id(&w)).transpose()?;
         let r = app.set_secret(ws.as_ref(), &label, &text).map_err(e)?;

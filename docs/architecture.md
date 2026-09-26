@@ -31,6 +31,15 @@ CLI (`anvil`) = same anvil-app services without a webview.
   key, clears token caches, pooled connections and TLS/QUIC session tickets,
   cancels executions and sessions, and stops load workers. The lock screen is
   only a view of that state.
+- **File commands never take a path from the webview.** The backend shows
+  the native open or save dialog itself (`file_choose`), keeps the chosen
+  path and returns an opaque grant bound to one purpose (bundle import or
+  export, attachment, PEM or PKCS#12 file, spec source, dataset, load or run
+  report export); file commands accept only such a grant
+  (`anvil_app::file_grants`). A read grant is refused if the file or a folder
+  on its path was replaced after the choice; a write goes to a new temporary
+  file that is renamed over the chosen name, and spends the grant. Grants
+  expire after 30 minutes, are capped at 32 and are revoked on lock.
 - **Load traffic never runs in the UI process.** The desktop re-launches its
   own executable with a fixed, non-secret flag and sends the job over stdin.
   The job carries only the secrets its requests reference.

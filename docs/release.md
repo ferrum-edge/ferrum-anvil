@@ -218,7 +218,8 @@ npm run e2e         # wdio run ./wdio.conf.ts
 | `07-tls-untrusted` | HTTPS fixture whose leaf is signed by a throwaway CA → transport `failed`, dispatch `not dispatched`, `client.tls.untrusted_issuer` on the caller's leg; the first remediation never suggests disabling verification (skipped without `openssl`) |
 | `08-load-report` | load plan over a saved request (via real IPC) → Run… keeps Start disabled until the authorization acknowledgement → run through the self-launched worker → `completed` report; the fixture saw exactly 300 requests |
 | `09-offline-no-account` | REL-005: a local profile with no account or provider sends a request to a loopback fixture, reopens it from History and opens a saved load report; the app process and its load worker hold no socket to a non-loopback address for the whole spec (`lsof` / `Get-NetTCPConnection`; the test-only WebDriver listener is excluded) |
-| `99-lock` | Lock button → lock screen; backend refuses `history_list`, `workspaces_list`, `tree_get`, `settings_get` with `LOCKED` (runs last because the app stays locked) |
+| `10-file-grants` | file commands take only grants from the backend's own native dialog: a file path, a made-up grant and the old `path` arguments are refused by `read_text_file`, `attachment_add`, `import_preview`/`import_apply`, `dataset_add`, `spec_preview` and `export_to_path`; no file content reaches the page and nothing is written; a multi-file save dialog is refused before anything is shown |
+| `99-lock` | Lock button → lock screen; backend refuses `history_list`, `workspaces_list`, `tree_get`, `settings_get`, `file_choose` (no dialog opens) and `read_text_file` with `LOCKED` (runs last because the app stays locked) |
 
 `@wdio/tauri-service` expects its companion plugin (`tauri-plugin-wdio`) for
 mocking and window-focus helpers; Anvil does not ship it. The config selects the

@@ -2,6 +2,7 @@
 
 use crate::commands::{R, e, id};
 use crate::state::DesktopState;
+use anvil_app::file_grants::FilePurpose;
 use anvil_app::runner::RunSettings;
 use anvil_domain::Id;
 use anvil_domain::runner::{RunEvent, RunReport};
@@ -135,9 +136,10 @@ pub fn run_report_delete(st: State<'_, DesktopState>, run_id: String) -> R<()> {
     st.app()?.delete_run_report(&id(&run_id)?).map_err(e)
 }
 
-/// Export to a path chosen in the native save dialog: `json`, `junit`, `html`.
+/// Export to the destination chosen in the native save dialog (`grant`,
+/// purpose `run_report_export`): `json`, `junit`, `html`.
 #[tauri::command]
-pub fn run_report_export(st: State<'_, DesktopState>, run_id: String, format: String, path: String) -> R<usize> {
+pub fn run_report_export(st: State<'_, DesktopState>, run_id: String, format: String, grant: String) -> R<usize> {
     let r = st.app()?.run_report(&id(&run_id)?).map_err(e)?;
     let text = match format.as_str() {
         "json" => anvil_runner::to_json(&r),
@@ -145,6 +147,5 @@ pub fn run_report_export(st: State<'_, DesktopState>, run_id: String, format: St
         "html" => anvil_runner::to_html(&r),
         other => return Err(format!("unknown export format {other}")),
     };
-    std::fs::write(&path, text.as_bytes()).map_err(|x| x.to_string())?;
-    Ok(text.len())
+    st.file_grants.write(&grant, FilePurpose::RunReportExport, text.as_bytes()).map_err(|x| x.to_string())
 }

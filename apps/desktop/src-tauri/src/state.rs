@@ -2,6 +2,7 @@
 //! lock enforcement happens here and there, never only in the webview.
 
 use anvil_app::App;
+use anvil_app::file_grants::FileGrants;
 use anvil_app::profiles::ProfileManager;
 use anvil_domain::Id;
 use parking_lot::{Mutex, RwLock};
@@ -22,6 +23,9 @@ pub struct DesktopState {
     pub pending_load_reports: Mutex<Vec<anvil_domain::load::LoadReport>>,
     /// Open interactive sessions by execution id.
     pub sessions: Mutex<HashMap<String, crate::cmd_sessions::SessionSlot>>,
+    /// Files the user chose in native dialogs this session; file commands
+    /// accept only these grants, never a path from the webview.
+    pub file_grants: FileGrants,
     pub last_activity: Mutex<Instant>,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
@@ -36,6 +40,7 @@ impl DesktopState {
             load_runs: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             pending_load_reports: Mutex::new(Vec::new()),
+            file_grants: FileGrants::default(),
             last_activity: Mutex::new(Instant::now()),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
         }
@@ -74,9 +79,10 @@ impl DesktopState {
         }
     }
 
-    /// Lock: stop active runs (policy: stop runs on lock), drop keys and
-    /// cached credentials/connections.
+    /// Lock: stop active runs (policy: stop runs on lock), drop keys,
+    /// cached credentials/connections and file-dialog grants.
     pub fn lock(&self) {
+        self.file_grants.revoke_all();
         for (_, t) in self.running.lock().drain() {
             t.cancel();
         }

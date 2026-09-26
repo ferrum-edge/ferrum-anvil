@@ -1,5 +1,6 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_files;
 mod cmd_identity;
 mod cmd_load;
 mod cmd_runner;
@@ -164,6 +165,7 @@ pub fn run() {
             commands::import_apply,
             commands::attachment_add,
             commands::read_text_file,
+            cmd_files::file_choose,
             cmd_load::load_plans,
             cmd_load::load_plan_save,
             cmd_load::load_plan_delete,

@@ -200,6 +200,33 @@ export class ApiError extends Error {
   }
 }
 
+// ----------------------------------------------------------- native file dialogs
+// The backend shows the open/save dialog itself and keeps the chosen path; the
+// webview only gets an opaque grant for one purpose, which the file commands
+// accept instead of a path.
+export type FilePurpose =
+  | "bundle_import"
+  | "attachment"
+  | "pem_file"
+  | "pkcs12_file"
+  | "spec_source"
+  | "dataset"
+  | "bundle_export"
+  | "load_report_export"
+  | "run_report_export";
+export interface FileGrant {
+  token: string;
+  /** The chosen file's name without its folder, for display. */
+  file_name: string;
+}
+export interface FileDialogOptions {
+  /** Suggested name for a save dialog. */
+  file_name?: string;
+  filters?: { name: string; extensions: string[] }[];
+  /** Let the open dialog select several files (read purposes only). */
+  multiple?: boolean;
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(cmd, args);
@@ -303,7 +330,7 @@ export interface LoadComparison {
 }
 
 // ----------------------------------------------------------- spec import
-export type SpecInput = { kind: "path"; path: string } | { kind: "text"; text: string; name: string };
+export type SpecInput = { kind: "file"; grant: string } | { kind: "text"; text: string; name: string };
 export interface ImportOptions {
   mode: "blank" | "sample";
   seed: number;
@@ -465,11 +492,16 @@ export const api = {
   workloadProbe: (endpoint: string, audience: string | null) => call<WorkloadProbe>("workload_probe", { endpoint, audience }),
 
   exportPreview: (workspaceId: string | null, exportMode: string) => call<ExportPreview>("export_preview", { workspaceId, exportMode }),
-  exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, path: string) =>
-    call<number>("export_to_path", { workspaceId, exportMode, passphrase, path }),
-  importPreview: (path: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { path, passphrase, conflictPolicy }),
-  importApply: (path: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_apply", { path, passphrase, conflictPolicy }),
-  attachmentAdd: (path: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { path, mediaType }),
+  /** Native open/save dialog for `purpose`; empty when the user cancels. */
+  chooseFiles: (purpose: FilePurpose, options: FileDialogOptions = {}) => call<FileGrant[]>("file_choose", { purpose, options }),
+  /** One file from the native open/save dialog for `purpose`; null when the user cancels. */
+  chooseFile: async (purpose: FilePurpose, options: FileDialogOptions = {}): Promise<FileGrant | null> =>
+    (await call<FileGrant[]>("file_choose", { purpose, options: { ...options, multiple: false } }))[0] ?? null,
+  exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
+    call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
+  importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),
+  importApply: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_apply", { grant, passphrase, conflictPolicy }),
+  attachmentAdd: (grant: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { grant, mediaType }),
 
   loadPlans: (workspaceId: string) => call<LoadPlan[]>("load_plans", { workspaceId }),
   saveLoadPlan: (plan: LoadPlan) => call<LoadPlan>("load_plan_save", { plan }),
@@ -481,11 +513,11 @@ export const api = {
   loadReports: (workspaceId: string) => call<LoadReportSummary[]>("load_reports", { workspaceId }),
   loadReport: (runId: string) => call<LoadReport>("load_report", { runId }),
   deleteLoadReport: (runId: string) => call<void>("load_report_delete", { runId }),
-  exportLoadReport: (runId: string, format: "json" | "csv" | "timeline_csv" | "html", path: string) => call<number>("load_report_export", { runId, format, path }),
+  exportLoadReport: (runId: string, format: "json" | "csv" | "timeline_csv" | "html", grant: string) => call<number>("load_report_export", { runId, format, grant }),
   compareLoadReports: (a: string, b: string) => call<LoadComparison>("load_compare", { a, b }),
   datasets: (workspaceId: string) => call<Dataset[]>("datasets_list", { workspaceId }),
-  addDataset: (workspaceId: string, path: string, name: string, sensitiveColumns: string[]) =>
-    call<Dataset>("dataset_add", { workspaceId, path, name, sensitiveColumns }),
+  addDataset: (workspaceId: string, grant: string, name: string, sensitiveColumns: string[]) =>
+    call<Dataset>("dataset_add", { workspaceId, grant, name, sensitiveColumns }),
 
   scenarios: (workspaceId: string) => call<Scenario[]>("scenarios_list", { workspaceId }),
   createScenario: (workspaceId: string, name: string, requestIds: string[]) => call<Scenario>("scenario_create", { workspaceId, name, requestIds }),
@@ -497,7 +529,7 @@ export const api = {
   runReports: (workspaceId: string) => call<RunReport[]>("run_reports", { workspaceId }),
   runReport: (runId: string) => call<RunReport>("run_report", { runId }),
   deleteRunReport: (runId: string) => call<void>("run_report_delete", { runId }),
-  exportRunReport: (runId: string, format: "json" | "junit" | "html", path: string) => call<number>("run_report_export", { runId, format, path }),
+  exportRunReport: (runId: string, format: "json" | "junit" | "html", grant: string) => call<number>("run_report_export", { runId, format, grant }),
 
   oauthSignIn: (input: SendInput, attempt: string) => call<ApiAuthorization>("oauth_sign_in", { input, attempt }),
   oauthCancel: (attempt: string) => call<boolean>("oauth_cancel", { attempt }),
@@ -511,8 +543,8 @@ export const api = {
 
   specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
   specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
-  readTextFile: (path: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
-    call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { path, workspaceId, storeAsSecret, base64 }),
+  readTextFile: (grant: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
+    call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { grant, workspaceId, storeAsSecret, base64 }),
 };
 
 export function onExecutionEvent(cb: (e: ExecutionEvent) => void): Promise<UnlistenFn> {
