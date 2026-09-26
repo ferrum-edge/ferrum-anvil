@@ -510,7 +510,11 @@ async fn hbone_endpoint_problems_before_connect_are_tunnel_leg_failures() {
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = closed.local_addr().unwrap().to_string();
     drop(closed);
-    let o = run(&HttpTransport::new(), &plan("http://127.0.0.1:1/x", None, Some(hbone_proxy(&addr, client_svid_tls(), &[])))).await;
+    let mut p = plan("http://127.0.0.1:1/x", None, Some(hbone_proxy(&addr, client_svid_tls(), &[])));
+    // Windows retransmits the SYN to a closed loopback port for about 2 s
+    // before reporting the refusal; the budget must outlast that.
+    p.timeouts.connect_ms = Some(10_000);
+    let o = run(&HttpTransport::new(), &p).await;
     assert_eq!(failure(&o).kind, FailureKind::ProxyConnectFailed);
     assert_eq!(tunnel(&o).failure.as_ref().unwrap().kind, FailureKind::ConnectRefused);
     // An endpoint that does not negotiate HTTP/2.
