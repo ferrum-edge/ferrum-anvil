@@ -51,3 +51,12 @@
   bounds are refused before unlocking. The CLI treats an empty
   `ANVIL_EXPORT_PASSPHRASE` as unset and says to unset it when importing a
   bundle that is not encrypted.
+- A vault secret is now sealed together with the workspace that owns it, so
+  a secret whose owner is changed in the database file no longer decrypts.
+  Database schema 2 re-seals existing secrets once, in one transaction, when
+  a profile is opened or unlocked; earlier builds refuse a schema 2 database
+  as newer. The desktop reads an imported bundle or backup and derives its
+  key on a worker thread, and a preview or import can be canceled while the
+  key is derived (`import_apply` and `import_preview` take an optional
+  `attempt` id for `import_cancel`); a canceled import writes nothing. The
+  key a preview derives is not kept for the import that follows.

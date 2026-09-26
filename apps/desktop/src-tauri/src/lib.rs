@@ -166,6 +166,7 @@ pub fn run() {
             commands::export_to_path,
             commands::import_preview,
             commands::import_apply,
+            commands::import_cancel,
             commands::attachment_add,
             commands::read_text_file,
             cmd_files::file_choose,

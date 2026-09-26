@@ -2,9 +2,9 @@
 //! refuses while locked; secrets never cross into the webview except where
 //! the user explicitly typed them (they are stored and only references return).
 
-use crate::state::DesktopState;
+use crate::state::{DesktopState, ImportGate, PendingEntry, cancel_pending};
 use anvil_app::exec::{SendOptions, refuse_linked_files};
-use anvil_app::file_grants::FilePurpose;
+use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::profiles::Unlock;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
@@ -26,9 +26,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 pub(crate) type R<T> = Result<T, String>;
 
+/// What a command returns when its work was canceled before it wrote anything.
+pub(crate) const CANCELED: &str = "CANCELED";
+
 pub(crate) fn e(err: AppError) -> String {
     match err {
         AppError::Locked => "LOCKED".into(),
+        AppError::Canceled => CANCELED.into(),
         other => other.to_string(),
     }
 }
@@ -686,30 +690,81 @@ pub async fn export_to_path(
 
 /// The bundle the user picked in the native open dialog (purpose
 /// `bundle_import`).
-fn read_bundle(st: &DesktopState, grant: &str) -> R<Vec<u8>> {
-    Ok(st.file_grants.read(grant, FilePurpose::BundleImport).map_err(|x| x.to_string())?.bytes)
+fn read_bundle(grants: &FileGrants, grant: &str) -> R<Vec<u8>> {
+    Ok(grants.read(grant, FilePurpose::BundleImport).map_err(|x| x.to_string())?.bytes)
 }
 
-/// A full backup is restored; anything else is imported as a bundle.
+/// Register `attempt` so `import_cancel`, or a lock, can reach the import.
+/// Done before the app is read (see `DesktopState::lock`).
+fn register_import(st: &DesktopState, attempt: Option<&str>) -> R<Option<PendingEntry>> {
+    attempt.map(|a| PendingEntry::register(&st.running, id(a)?)).transpose()
+}
+
+/// Run import work on a blocking worker thread: reading the chosen file and
+/// deriving an encrypted bundle's or backup's vault key (Argon2id, within
+/// the header bounds) must not stall the async runtime.
+///
+/// The derivation cannot be interrupted, so a cancel of `pending` abandons
+/// the worker instead: the command returns `CANCELED` at once, and the
+/// worker drops the key and the contents when the derivation ends. For an
+/// apply, `gate` settles the race with the writes: a cancel that finds them
+/// begun waits for their result instead.
+///
+/// The key a preview derives is not kept for the apply that follows. The
+/// user can leave the preview open for any length of time, and holding the
+/// key would keep material that opens the bundle in memory for all of it;
+/// the apply derives it again, bounded by the same header limits.
+async fn import_work<T: Send + 'static>(
+    pending: Option<PendingEntry>,
+    gate: Option<&ImportGate>,
+    f: impl FnOnce() -> R<T> + Send + 'static,
+) -> R<T> {
+    let mut work = std::pin::pin!(tauri::async_runtime::spawn_blocking(f));
+    if let Some(pending) = &pending {
+        tokio::select! {
+            r = &mut work => return r.map_err(|x| x.to_string())?,
+            _ = pending.token().cancelled() => {
+                if gate.is_none_or(ImportGate::abandon) {
+                    return Err(CANCELED.into());
+                }
+            }
+        }
+    }
+    work.await.map_err(|x| x.to_string())?
+}
+
+/// A full backup is restored; anything else is imported as a bundle. With
+/// an `attempt` id, `import_cancel` (or a lock) ends the preview at once.
 #[tauri::command]
 pub async fn import_preview(
     st: State<'_, DesktopState>,
     grant: String,
     passphrase: Option<String>,
     conflict_policy: String,
+    attempt: Option<String>,
 ) -> R<anvil_app::port::ImportReport> {
+    let pending = register_import(&st, attempt.as_deref())?;
     let app = st.app()?;
-    let bytes = read_bundle(&st, &grant)?;
     let policy = policy(&conflict_policy)?;
-    if anvil_app::backup::is_backup(&bytes) {
-        // A full backup restores every item under its own id, so "copies" is
-        // previewed as Merge; the report's policy tells the dialog to switch.
-        let policy = if policy == ConflictPolicy::Duplicate { ConflictPolicy::Merge } else { policy };
-        return off_ui_thread(move || app.restore_preview(&bytes, passphrase.as_deref(), policy)).await;
-    }
-    off_ui_thread(move || app.import_preview(&bytes, passphrase.as_deref(), policy)).await
+    let grants = st.file_grants.clone();
+    // A preview writes nothing, so it needs no gate.
+    import_work(pending, None, move || {
+        let bytes = read_bundle(&grants, &grant)?;
+        if anvil_app::backup::is_backup(&bytes) {
+            // A full backup restores every item under its own id, so "copies" is
+            // previewed as Merge; the report's policy tells the dialog to switch.
+            let policy = if policy == ConflictPolicy::Duplicate { ConflictPolicy::Merge } else { policy };
+            return app.restore_preview(&bytes, passphrase.as_deref(), policy).map_err(e);
+        }
+        app.import_preview(&bytes, passphrase.as_deref(), policy).map_err(e)
+    })
+    .await
 }
 
+/// With an `attempt` id, `import_cancel` (or a lock) ends the import at once
+/// unless it has begun writing; a canceled import writes nothing. A bundle
+/// import can be canceled until its key is derived and its contents checked,
+/// a full-backup restore only until it starts.
 #[tauri::command]
 pub async fn import_apply(
     st: State<'_, DesktopState>,
@@ -717,17 +772,37 @@ pub async fn import_apply(
     passphrase: Option<String>,
     conflict_policy: String,
     approval: Option<anvil_app::port::ImportApproval>,
+    attempt: Option<String>,
 ) -> R<anvil_app::port::ImportReport> {
+    let pending = register_import(&st, attempt.as_deref())?;
     let app = st.app()?;
-    let bytes = read_bundle(&st, &grant)?;
     let policy = policy(&conflict_policy)?;
     // Only the workspaces the user confirmed after the preview's warning,
     // for a full backup as for a bundle.
     let approval = approval.unwrap_or_default();
-    if anvil_app::backup::is_backup(&bytes) {
-        return off_ui_thread(move || app.restore_approved(&bytes, passphrase.as_deref(), policy, &approval)).await;
-    }
-    off_ui_thread(move || app.import_approved(&bytes, passphrase.as_deref(), policy, &approval)).await
+    let grants = st.file_grants.clone();
+    let gate = Arc::new(ImportGate::default());
+    let worker_gate = gate.clone();
+    import_work(pending, Some(&*gate), move || {
+        let bytes = read_bundle(&grants, &grant)?;
+        if anvil_app::backup::is_backup(&bytes) {
+            if !worker_gate.begin_writes() {
+                return Err(CANCELED.into());
+            }
+            return app.restore_approved(&bytes, passphrase.as_deref(), policy, &approval).map_err(e);
+        }
+        let proceed = || worker_gate.begin_writes();
+        app.import_approved_if(&bytes, passphrase.as_deref(), policy, &approval, &proceed).map_err(e)
+    })
+    .await
+}
+
+/// Cancel the bundle import or preview started with `attempt`. Returns
+/// whether it was still running; the import itself reports whether it was
+/// canceled or had already begun writing.
+#[tauri::command]
+pub fn import_cancel(st: State<'_, DesktopState>, attempt: String) -> R<bool> {
+    Ok(cancel_pending(&st.running, &id(&attempt)?))
 }
 
 // ------------------------------------------------------------- attachments

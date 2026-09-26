@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
@@ -79,8 +80,9 @@ pub struct DesktopState {
     /// opened under.
     pub sessions: Mutex<HashMap<String, (Arc<App>, crate::cmd_sessions::SessionSlot)>>,
     /// Files the user chose in native dialogs this session; file commands
-    /// accept only these grants, never a path from the webview.
-    pub file_grants: FileGrants,
+    /// accept only these grants, never a path from the webview. Shared with
+    /// the worker threads that read a chosen file.
+    pub file_grants: Arc<FileGrants>,
     pub last_activity: Mutex<Instant>,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
@@ -95,7 +97,7 @@ impl DesktopState {
             load_runs: Arc::new(Mutex::new(HashMap::new())),
             sessions: Mutex::new(HashMap::new()),
             pending_load_reports: PendingReports::default(),
-            file_grants: FileGrants::default(),
+            file_grants: Arc::default(),
             last_activity: Mutex::new(Instant::now()),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
         }
@@ -300,6 +302,28 @@ impl Drop for LoadRunEntry {
     }
 }
 
+/// Settles the race between canceling a bundle import and its writes:
+/// whichever claims the gate first wins. A canceled import never writes, and
+/// one whose writes have begun is never reported as canceled.
+#[derive(Default)]
+pub struct ImportGate(AtomicU8);
+
+impl ImportGate {
+    const OPEN: u8 = 0;
+    const WRITING: u8 = 1;
+    const ABANDONED: u8 = 2;
+
+    /// Claim the writes for the import; `false` once it was abandoned.
+    pub fn begin_writes(&self) -> bool {
+        self.0.compare_exchange(Self::OPEN, Self::WRITING, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    /// Abandon the import; `false` once its writes have begun.
+    pub fn abandon(&self) -> bool {
+        self.0.compare_exchange(Self::OPEN, Self::ABANDONED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+}
+
 /// Cancel the running execution `id`. Returns whether it was registered.
 pub fn cancel_pending(running: &Running, id: &Id) -> bool {
     match running.lock().get(id) {
@@ -391,6 +415,22 @@ mod tests {
         };
         assert!(fails().is_err());
         assert!(running.lock().is_empty());
+    }
+
+    #[test]
+    fn an_abandoned_import_never_begins_its_writes() {
+        let gate = ImportGate::default();
+        assert!(gate.abandon());
+        assert!(!gate.begin_writes());
+        assert!(gate.abandon(), "abandoning again changes nothing");
+    }
+
+    #[test]
+    fn an_import_whose_writes_began_is_not_abandoned() {
+        let gate = ImportGate::default();
+        assert!(gate.begin_writes());
+        assert!(!gate.abandon());
+        assert!(!gate.begin_writes(), "the writes are claimed once");
     }
 
     #[test]

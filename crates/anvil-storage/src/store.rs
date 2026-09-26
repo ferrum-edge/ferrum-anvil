@@ -2,9 +2,10 @@
 //!
 //! Every payload (objects, secrets, history records, response bodies,
 //! attachments, load reports) is sealed with the profile DEK and bound to its
-//! table/kind/id through associated data, so the database file, its WAL and
-//! any SQLite temp data hold only ciphertext plus structural metadata (ids,
-//! parent ids, kinds, timestamps, sizes). While locked, the store has no key
+//! table/kind/id through associated data (a vault secret also to the
+//! workspace that owns it), so the database file, its WAL and any SQLite temp
+//! data hold only ciphertext plus structural metadata (ids, parent ids, kinds,
+//! timestamps, sizes). While locked, the store has no key
 //! and every data operation fails with `Locked` — enforcement lives here, not
 //! in the UI.
 //!
@@ -38,7 +39,7 @@ pub const DB_FILE: &str = "anvil.db";
 /// before failing with `SQLITE_BUSY`.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Current on-disk schema version. Increase only with a migration below.
-pub const DB_SCHEMA_VERSION: i64 = 1;
+pub const DB_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -183,9 +184,33 @@ fn aad(table: &str, kind: &str, id: &str) -> Vec<u8> {
     format!("anvil/v1/{table}/{kind}/{id}").into_bytes()
 }
 
-const MIGRATIONS: &[&str] = &[
+/// Associated data of a vault secret: its id and the workspace that owns it
+/// (`None`: no workspace does). A secret whose owner column is changed no
+/// longer decrypts, so it cannot be moved into another workspace.
+fn secret_aad(id: &str, owner: Option<&str>) -> Vec<u8> {
+    match owner {
+        Some(ws) => format!("anvil/v2/secrets/secret/{id}/workspace/{ws}").into_bytes(),
+        None => format!("anvil/v2/secrets/secret/{id}/profile").into_bytes(),
+    }
+}
+
+/// One schema step. Each runs in its own write transaction together with the
+/// version bump that records it.
+enum Migration {
+    /// Schema changes only.
+    Sql(&'static str),
+    /// Re-seal every vault secret under [`secret_aad`] (v2).
+    SecretOwners,
+}
+
+const MIGRATIONS: &[Migration] = &[
     // v1 — baseline schema.
-    r#"
+    Migration::Sql(BASELINE),
+    // v2 — vault secrets bind their owner.
+    Migration::SecretOwners,
+];
+
+const BASELINE: &str = r#"
     CREATE TABLE objects (
         kind TEXT NOT NULL,
         id TEXT NOT NULL,
@@ -205,8 +230,29 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX history_ws ON history(workspace_id, started_at);
     CREATE TABLE load_reports (id TEXT PRIMARY KEY, workspace_id TEXT, started_at INTEGER NOT NULL, payload BLOB NOT NULL);
-    "#,
-];
+    "#;
+
+/// The schema version recorded in `meta` (0 for a new database).
+fn stored_schema_version(conn: &Connection) -> Result<i64> {
+    let v = conn.query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).optional()?;
+    Ok(v.and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
+/// v2: re-seal each vault secret, sealed under [`aad`] until now, under
+/// [`secret_aad`] with the owner its row names. A secret that does not open
+/// fails the step, which then changes nothing.
+fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<()> {
+    let rows: Vec<(String, Option<String>, Vec<u8>)> = {
+        let mut st = conn.prepare("SELECT id, workspace_id, payload FROM secrets")?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<std::result::Result<_, _>>()?
+    };
+    for (id, owner, env) in rows {
+        let pt = crypto::open(key, &aad("secrets", "secret", &id), &env).map_err(|_| StoreError::Integrity)?;
+        let env = crypto::seal(key, &secret_aad(&id, owner.as_deref()), &pt);
+        conn.execute("UPDATE secrets SET payload=?1 WHERE id=?2", params![env, id])?;
+    }
+    Ok(())
+}
 
 impl Store {
     /// Open (or create) the store in `dir`, applying pending migrations.
@@ -218,29 +264,46 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;",
         )?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
-        let found: i64 = conn
-            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0))
-            .optional()?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let found = stored_schema_version(&conn)?;
         if found > DB_SCHEMA_VERSION {
             return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
         }
         let store = Store { dir: dir.to_path_buf(), conn: Mutex::new(conn), tx_owner: Mutex::new(None), key: RwLock::new(Some(key)) };
-        store.migrate(found)?;
+        // The key is checked before a migration re-seals anything with it.
         store.verify_key()?;
+        store.migrate()?;
         Ok(store)
     }
 
-    fn migrate(&self, from: i64) -> Result<()> {
-        let mut conn = self.conn.lock();
-        for (i, sql) in MIGRATIONS.iter().enumerate() {
-            let v = i as i64 + 1;
-            if v <= from {
+    /// Apply the pending migrations with the unlocked key. Each step runs in
+    /// its own write transaction that reads the version again first, so a
+    /// step another connection has applied meanwhile is skipped, and a step
+    /// that fails leaves nothing behind. Runs at open, at unlock and after a
+    /// checkpoint is restored; with nothing pending it only reads the version.
+    fn migrate(&self) -> Result<()> {
+        let key = self.key()?;
+        let mut conn = self.conn()?;
+        let found = stored_schema_version(&conn)?;
+        if found > DB_SCHEMA_VERSION {
+            return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
+        }
+        for (v, step) in (1i64..).zip(MIGRATIONS) {
+            if v <= found {
                 continue;
             }
-            let tx = conn.transaction()?;
-            tx.execute_batch(sql)?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let found = stored_schema_version(&tx)?;
+            if found > DB_SCHEMA_VERSION {
+                return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
+            }
+            // Dropping `tx` rolls it back; it has written nothing.
+            if v <= found {
+                continue;
+            }
+            match step {
+                Migration::Sql(sql) => tx.execute_batch(sql)?,
+                Migration::SecretOwners => reseal_secret_owners(&tx, &key)?,
+            }
             tx.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![v.to_string()],
@@ -318,9 +381,12 @@ impl Store {
         *self.key.write() = None;
     }
 
+    /// Unlock with `key`, then apply any pending migration (such as the
+    /// v2 re-seal of vault secrets) with it. A wrong key, or a migration that
+    /// fails, leaves the store locked.
     pub fn unlock(&self, key: Key) -> Result<()> {
         *self.key.write() = Some(key);
-        if let Err(e) = self.verify_key() {
+        if let Err(e) = self.verify_key().and_then(|()| self.migrate()) {
             self.lock();
             return Err(e);
         }
@@ -613,14 +679,17 @@ impl Store {
     }
 
     /// Replace the live database with a checkpoint, discarding every change
-    /// made since it was taken. Nothing calls this automatically.
+    /// made since it was taken. Nothing calls this automatically. A
+    /// checkpoint taken before a migration is migrated again.
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
         let _ = self.key()?;
-        let mut conn = self.conn()?;
-        let src = Connection::open(path)?;
-        let backup = rusqlite::backup::Backup::new(&src, &mut conn)?;
-        backup.run_to_completion(256, std::time::Duration::from_millis(0), None)?;
-        Ok(())
+        {
+            let mut conn = self.conn()?;
+            let src = Connection::open(path)?;
+            let backup = rusqlite::backup::Backup::new(&src, &mut conn)?;
+            backup.run_to_completion(256, std::time::Duration::from_millis(0), None)?;
+        }
+        self.migrate()
     }
 }
 
@@ -900,37 +969,39 @@ impl Records<'_> {
     fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
         let payload = Zeroizing::new(serde_json::to_vec(&serde_json::json!({"label": label, "value": value}))?);
         let id_s = id.to_string();
-        let env = crypto::seal(&self.key, &aad("secrets", "secret", &id_s), &payload);
+        let owner = workspace_id.map(|w| w.to_string());
+        let env = crypto::seal(&self.key, &secret_aad(&id_s, owner.as_deref()), &payload);
         self.conn.execute(
             "INSERT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
-            params![id_s, workspace_id.map(|w| w.to_string()), chrono::Utc::now().timestamp_millis(), env],
+            params![id_s, owner, chrono::Utc::now().timestamp_millis(), env],
         )?;
         Ok(())
     }
 
     fn get_secret(&self, id: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
         let id_s = id.to_string();
-        let env: Option<Vec<u8>> =
-            self.conn.query_row("SELECT payload FROM secrets WHERE id=?1", params![id_s], |r| r.get(0)).optional()?;
-        self.open_secret(&id_s, env)
+        let sql = "SELECT workspace_id, payload FROM secrets WHERE id=?1";
+        let row: Option<(Option<String>, Vec<u8>)> = self.conn.query_row(sql, params![id_s], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let Some((owner, env)) = row else { return Ok(None) };
+        self.open_secret(&id_s, owner.as_deref(), &env).map(Some)
     }
 
     fn get_workspace_secret(&self, id: &Id, ws: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
-        let id_s = id.to_string();
+        let (id_s, ws_s) = (id.to_string(), ws.to_string());
         let sql = "SELECT payload FROM secrets WHERE id=?1 AND workspace_id=?2";
-        let env: Option<Vec<u8>> = self.conn.query_row(sql, params![id_s, ws.to_string()], |r| r.get(0)).optional()?;
-        self.open_secret(&id_s, env)
+        let env: Option<Vec<u8>> = self.conn.query_row(sql, params![id_s, ws_s], |r| r.get(0)).optional()?;
+        let Some(env) = env else { return Ok(None) };
+        self.open_secret(&id_s, Some(&ws_s), &env).map(Some)
     }
 
-    /// Decrypt a secret row's payload into (label, value).
-    fn open_secret(&self, id_s: &str, env: Option<Vec<u8>>) -> Result<Option<(String, Zeroizing<String>)>> {
-        let Some(env) = env else { return Ok(None) };
-        let pt = crypto::open(&self.key, &aad("secrets", "secret", id_s), &env).map_err(|_| StoreError::Integrity)?;
+    /// Decrypt a secret row's payload, sealed for `owner`, into (label, value).
+    fn open_secret(&self, id_s: &str, owner: Option<&str>, env: &[u8]) -> Result<(String, Zeroizing<String>)> {
+        let pt = crypto::open(&self.key, &secret_aad(id_s, owner), env).map_err(|_| StoreError::Integrity)?;
         let v: serde_json::Value = serde_json::from_slice(&pt)?;
-        Ok(Some((
+        Ok((
             v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             Zeroizing::new(v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string()),
-        )))
+        ))
     }
 
     fn delete_secret(&self, id: &Id) -> Result<()> {

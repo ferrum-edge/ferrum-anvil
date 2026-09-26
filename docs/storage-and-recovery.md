@@ -19,9 +19,11 @@ Everything the user creates or observes: workspaces, folders, requests and their
 immutable revisions, environments, secrets, TLS/proxy/gateway profiles, datasets
 and attachments, scenarios, load plans and reports, history records and (when
 enabled) response bodies, and app settings. Each payload is sealed with
-XChaCha20-Poly1305 using a record-bound AAD (table, kind, id). Only structural
-columns needed for listing (ids, kinds, parent ids, sort keys, timestamps) are
-stored in the clear. The plaintext-leak test searches the database, its WAL and
+XChaCha20-Poly1305 using a record-bound AAD (table, kind, id). A vault secret's
+AAD also names the workspace that owns it (or none), so a secret whose owner is
+changed in the database file no longer decrypts. Only structural columns needed
+for listing (ids, kinds, parent ids, sort keys, owners, timestamps) are stored
+in the clear. The plaintext-leak test searches the database, its WAL and
 journal, and blobs for known secret and body values.
 
 Each vault secret belongs to one workspace. A request resolves a secret
@@ -236,6 +238,16 @@ any passphrase is asked for or any derivation runs, unless they are within:
 Exports use 64 MiB, 3 passes and 1 lane. The same bounds apply to a
 profile's own header ([Unlocking](#unlocking)) and to full backups.
 
+The desktop reads the file and derives the key on a worker thread. A preview
+or import started with an `attempt` id can be canceled with `import_cancel`
+(a lock cancels it too): the command returns `CANCELED` at once, and the
+worker, which cannot interrupt the derivation, drops what it derived and
+writes nothing. A bundle import can be canceled until its key is derived and
+its contents checked; a full-backup restore only until it starts. The key a
+preview derives is not kept for the import that follows, so the import
+derives it again: a preview can stay open indefinitely, and keeping the key
+would keep material that opens the bundle in memory for that long.
+
 A passphrase given for a bundle without a vault (share safely) is refused; in
 the CLI, unset `ANVIL_EXPORT_PASSPHRASE` (an empty value counts as unset) to
 import one.
@@ -340,7 +352,13 @@ needs no confirmation.
 ## Schema versions and migration
 
 - Every object and record carries `schema_version`; the database carries
-  `DB_SCHEMA_VERSION`. Migrations run forward in a transaction at open.
+  `DB_SCHEMA_VERSION`. Migrations run forward at open and at unlock, each
+  step in one write transaction with the version bump that records it, so a
+  step runs once and one that fails changes nothing.
+- Database schema 2 re-seals every vault secret so its AAD names its owner.
+  A secret that does not decrypt fails the step, and the profile stays
+  locked with its data unchanged. Earlier builds refuse a schema 2 database
+  as newer.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
 - Bundles carry `format_version`; unknown future formats are rejected, and so
