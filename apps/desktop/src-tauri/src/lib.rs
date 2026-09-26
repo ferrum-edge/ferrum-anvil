@@ -117,6 +117,7 @@ pub fn run() {
             commands::profile_unlock,
             commands::app_lock,
             commands::profile_change_passphrase,
+            commands::profile_convert_to_passphrase,
             commands::touch,
             commands::system_info,
             commands::workspaces_list,

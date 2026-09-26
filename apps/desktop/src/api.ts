@@ -463,6 +463,8 @@ export const api = {
     call<void>("profile_unlock", { profileId, passphrase, recoveryKey }),
   lock: () => call<void>("app_lock"),
   changePassphrase: (newPassphrase: string) => call<void>("profile_change_passphrase", { newPassphrase }),
+  convertToPassphrase: (newPassphrase: string) =>
+    call<{ recovery_key: string; keychain_entry_removed: boolean }>("profile_convert_to_passphrase", { newPassphrase }),
   touch: () => call<void>("touch"),
 
   workspaces: () => call<Workspace[]>("workspaces_list"),
