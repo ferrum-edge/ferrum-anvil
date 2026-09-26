@@ -1,13 +1,16 @@
 //! Import validation and safety normalization.
 //!
 //! * Referential integrity: folders/requests/environments must belong to a
-//!   workspace in the bundle; folder parents must exist and form no cycle.
+//!   workspace in the bundle; folder parents must exist and form no cycle;
+//!   every secret must be owned by a workspace in the bundle; no two objects
+//!   share an id. Revisions of requests outside the bundle are left out.
 //! * Safety: imports never activate a TLS verification bypass, never mark
 //!   scenarios or load plans as trusted, and never enable legacy HMAC.
 
 use crate::bundle::BundleError;
 use crate::graph::PortableGraph;
 use anvil_domain::Id;
+use anvil_domain::workspace::RequestRevision;
 use std::collections::{HashMap, HashSet};
 
 pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, BundleError> {
@@ -49,6 +52,52 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
     for e in &g.environments {
         if !ws.contains(&e.workspace_id) {
             return Err(BundleError::Invalid(format!("environment '{}' belongs to a workspace that is not in the bundle", e.name)));
+        }
+    }
+    // Two requests can name the same revision, so a backup may carry it
+    // twice; identical copies collapse to one.
+    let mut revisions: Vec<RequestRevision> = Vec::with_capacity(g.revisions.len());
+    let mut position: HashMap<Id, usize> = HashMap::new();
+    for r in std::mem::take(&mut g.revisions) {
+        match position.get(&r.id) {
+            Some(&i) if revisions.get(i) == Some(&r) => {}
+            Some(_) => return Err(BundleError::Invalid(format!("revision {} appears twice with different contents", r.id))),
+            None => {
+                position.insert(r.id, revisions.len());
+                revisions.push(r);
+            }
+        }
+    }
+    // A revision is written under its request; one whose request is not in
+    // the bundle has nothing to belong to and is left out.
+    let request_ids: HashSet<Id> = g.requests.iter().map(|r| r.meta.id).collect();
+    let before = revisions.len();
+    revisions.retain(|r| request_ids.contains(&r.request_id));
+    if revisions.len() < before {
+        warnings.push(format!(
+            "{} request revision(s) belonged to requests that are not in the bundle and were left out.",
+            before - revisions.len()
+        ));
+    }
+    g.revisions = revisions;
+    // Import writes objects by id, so a repeated id would make one object
+    // silently overwrite another.
+    let mut unique = HashSet::new();
+    let revision_ids = g.revisions.iter().map(|r| ("revision".to_string(), r.id, String::new()));
+    for (kind, id, name) in crate::plan::all_ids(g).into_iter().chain(revision_ids) {
+        if !unique.insert(id) {
+            return Err(BundleError::Invalid(format!("{kind} '{name}' reuses the id {id} of another object in the bundle")));
+        }
+    }
+    // A secret is written with the owner the bundle names; an owner outside
+    // the bundle would attach it to an unrelated local workspace.
+    for (id, v) in &g.secrets {
+        if id.parse::<Id>().is_err() {
+            return Err(BundleError::Invalid(format!("secret '{}' has an invalid id", v.label)));
+        }
+        let owner = v.workspace_id.as_deref().and_then(|w| w.parse::<Id>().ok());
+        if !owner.is_some_and(|w| ws.contains(&w)) {
+            return Err(BundleError::Invalid(format!("secret '{}' belongs to a workspace that is not in the bundle", v.label)));
         }
     }
     // ---- safety normalization (DATA-008) ----

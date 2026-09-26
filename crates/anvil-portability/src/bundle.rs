@@ -17,6 +17,23 @@ pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_RATIO: u64 = 200;
 const VAULT_AAD: &[u8] = b"anvil-portable-vault-v1";
 
+/// Oldest object schema this build reads. Raising [`anvil_domain::SCHEMA_VERSION`]
+/// needs an explicit migration step in [`migrate_objects`] for every schema
+/// between this and the new version.
+pub const MIN_SCHEMA_VERSION: u32 = 1;
+
+/// Largest Argon2id memory cost (KiB) a bundle may ask for.
+pub const MAX_KDF_MEMORY_KIB: u32 = 256 * 1024;
+/// Largest Argon2id pass count a bundle may ask for.
+pub const MAX_KDF_ITERATIONS: u32 = 10;
+/// Largest Argon2id lane count a bundle may ask for.
+pub const MAX_KDF_PARALLELISM: u32 = 4;
+/// Largest memory x passes product (KiB-passes) a bundle may ask for: 1 GiB
+/// in total, e.g. 256 MiB for 4 passes. Exports use 64 MiB for 3 passes.
+pub const MAX_KDF_WORK: u64 = 1024 * 1024;
+const MIN_SALT_LEN: usize = 8;
+const MAX_SALT_LEN: usize = 64;
+
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
     #[error("not an Anvil bundle: {0}")]
@@ -29,6 +46,12 @@ pub enum BundleError {
     Checksum(String),
     #[error("this bundle was created by a newer Anvil (format {found}); this version supports format {supported}")]
     FutureFormat { found: u32, supported: u32 },
+    #[error("this bundle was written by a newer Anvil (schema {found}); this version supports schema {supported}; nothing was imported")]
+    FutureSchema { found: u32, supported: u32 },
+    #[error("this bundle uses schema {found}, which this version cannot read (oldest supported: {oldest}); nothing was imported")]
+    UnsupportedSchema { found: u32, oldest: u32 },
+    #[error("the bundle's key-derivation settings are not supported ({0}); nothing was imported")]
+    UnsupportedKdf(String),
     #[error("the bundle is encrypted; a passphrase is required")]
     PassphraseRequired,
     #[error("the passphrase is not correct, or the encrypted vault was modified; nothing was imported")]
@@ -226,6 +249,7 @@ pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>
         files.push(("history/records.jsonl".into(), jsonl));
     }
     if !matches!(opts.mode, ExportMode::ShareSafely) {
+        check_kdf(&opts.kdf)?;
         let pass = opts.passphrase.unwrap_or_default();
         let salt = crypto::random_bytes(16);
         let key = crypto::derive(pass.as_bytes(), &salt, &opts.kdf).map_err(|e| BundleError::Invalid(e.to_string()))?;
@@ -301,6 +325,65 @@ fn safe_name(name: &str) -> Result<(), BundleError> {
     bad("unexpected entry")
 }
 
+/// Refuse Argon2id costs outside the documented bounds. The vault key is
+/// derived before the vault can authenticate, so a bundle's costs are
+/// unauthenticated input; they are checked before any derivation.
+pub fn check_kdf(p: &KdfParams) -> Result<(), BundleError> {
+    let refuse = |why: String| Err(BundleError::UnsupportedKdf(why));
+    if !(1..=MAX_KDF_ITERATIONS).contains(&p.t_cost) {
+        return refuse(format!("{} passes; allowed 1 to {MAX_KDF_ITERATIONS}", p.t_cost));
+    }
+    if !(1..=MAX_KDF_PARALLELISM).contains(&p.p_cost) {
+        return refuse(format!("{} lanes; allowed 1 to {MAX_KDF_PARALLELISM}", p.p_cost));
+    }
+    // Argon2 needs at least 8 KiB per lane.
+    let min_memory = 8 * p.p_cost;
+    if !(min_memory..=MAX_KDF_MEMORY_KIB).contains(&p.m_cost) {
+        return refuse(format!("{} KiB of memory; allowed {min_memory} to {MAX_KDF_MEMORY_KIB} KiB", p.m_cost));
+    }
+    let work = u64::from(p.m_cost) * u64::from(p.t_cost);
+    if work > MAX_KDF_WORK {
+        return refuse(format!("{} KiB for {} passes exceeds the budget of {MAX_KDF_WORK} KiB-passes", p.m_cost, p.t_cost));
+    }
+    Ok(())
+}
+
+/// Refuse schema versions this build cannot read.
+fn check_schema(found: u32) -> Result<(), BundleError> {
+    if found > anvil_domain::SCHEMA_VERSION {
+        return Err(BundleError::FutureSchema { found, supported: anvil_domain::SCHEMA_VERSION });
+    }
+    if found < MIN_SCHEMA_VERSION {
+        return Err(BundleError::UnsupportedSchema { found, oldest: MIN_SCHEMA_VERSION });
+    }
+    Ok(())
+}
+
+/// Check the `schema_version` a record carries, if it carries one.
+fn check_record_schema(record: &serde_json::Value, what: &str) -> Result<(), BundleError> {
+    match record.get("schema_version") {
+        None => Ok(()),
+        Some(v) => {
+            let found = v
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| BundleError::Invalid(format!("{what} has an invalid schema_version")))?;
+            check_schema(found)
+        }
+    }
+}
+
+/// Bring objects written at an older supported schema up to
+/// [`anvil_domain::SCHEMA_VERSION`]. Schema 1 is the only one so far, so
+/// there is nothing to migrate yet; a schema bump adds its step here.
+fn migrate_objects(schema_version: u32, _objects: &mut serde_json::Value) -> Result<(), BundleError> {
+    match schema_version {
+        anvil_domain::SCHEMA_VERSION => Ok(()),
+        // No migration step for this schema: refuse rather than guess.
+        found => Err(BundleError::UnsupportedSchema { found, oldest: MIN_SCHEMA_VERSION }),
+    }
+}
+
 /// Open and fully validate a bundle. Nothing is written anywhere.
 pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleError> {
     let mut zr = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| BundleError::NotABundle(e.to_string()))?;
@@ -364,17 +447,37 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
     if manifest.format_version > FORMAT_VERSION {
         return Err(BundleError::FutureFormat { found: manifest.format_version, supported: FORMAT_VERSION });
     }
+    // Schema compatibility is settled before any object is interpreted:
+    // serde would silently drop fields a newer schema added.
+    check_schema(manifest.schema_version)?;
     let mut objects: serde_json::Value = serde_json::from_slice(
         entries.get("workspace/objects.json").ok_or_else(|| BundleError::NotABundle("missing workspace/objects.json".into()))?,
     )?;
+    if let Some(o) = objects.as_object() {
+        for (name, list) in o {
+            if let Some(items) = list.as_array() {
+                for item in items {
+                    check_record_schema(item, name)?;
+                }
+            } else {
+                check_record_schema(list, name)?;
+            }
+        }
+    }
+    migrate_objects(manifest.schema_version, &mut objects)?;
     let mut secrets_restored = false;
     let mut secrets = BTreeMap::new();
     if let Some(v) = &manifest.vault {
+        // Checked before asking for the passphrase and before deriving.
+        check_kdf(&v.kdf)?;
+        let salt = base64::engine::general_purpose::STANDARD.decode(&v.salt_b64).map_err(|_| BundleError::Invalid("vault salt".into()))?;
+        if !(MIN_SALT_LEN..=MAX_SALT_LEN).contains(&salt.len()) {
+            return Err(BundleError::UnsupportedKdf(format!("{}-byte salt; allowed {MIN_SALT_LEN} to {MAX_SALT_LEN}", salt.len())));
+        }
         let pass = passphrase.ok_or(BundleError::PassphraseRequired)?;
         let enc = entries
             .get("secrets/portable-vault.enc")
             .ok_or_else(|| BundleError::Checksum("secrets/portable-vault.enc (missing)".into()))?;
-        let salt = base64::engine::general_purpose::STANDARD.decode(&v.salt_b64).map_err(|_| BundleError::Invalid("vault salt".into()))?;
         let key = crypto::derive(pass.as_bytes(), &salt, &v.kdf).map_err(|e| BundleError::Invalid(e.to_string()))?;
         let pt = crypto::open(&key, VAULT_AAD, enc).map_err(|_| BundleError::WrongPassphrase)?;
         let payload: VaultPayload = serde_json::from_slice(&pt)?;
@@ -386,7 +489,9 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
         .map_err(|e| BundleError::Invalid(format!("objects.json does not match schema {}: {e}", manifest.schema_version)))?;
     graph.secrets = secrets;
     if let Some(s) = entries.get("settings/portable.json") {
-        graph.app_settings = Some(serde_json::from_slice(s)?);
+        let settings: serde_json::Value = serde_json::from_slice(s)?;
+        check_record_schema(&settings, "settings")?;
+        graph.app_settings = Some(serde_json::from_value(settings)?);
     }
     for (name, data) in &entries {
         if let Some(h) = name.strip_prefix("attachments/") {
@@ -398,7 +503,9 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
     }
     if let Some(h) = entries.get("history/records.jsonl") {
         for line in h.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-            graph.history.push(serde_json::from_slice(line)?);
+            let record: serde_json::Value = serde_json::from_slice(line)?;
+            check_record_schema(&record, "history record")?;
+            graph.history.push(record);
         }
     }
     let warnings = crate::validate::validate_and_normalize(&mut graph)?;
