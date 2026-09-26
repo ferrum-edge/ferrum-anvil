@@ -52,7 +52,9 @@ per send. Three byte counts are separate:
   `response_capture_bytes` option; see [load.md](load.md)). A body larger
   than the capture is still read to the end and counted, but it is marked
   display-truncated, and body assertions and extractions are not evaluated
-  against the prefix.
+  against the prefix. Nor is the application outcome of a SOAP or GraphQL
+  request, whose faults and errors arrive in a 2xx body: it is
+  `not_evaluated` (see [load.md](load.md) for how a load run counts it).
 - **Wire-read bytes** (`limits.max_response_bytes`, 256 MiB by default): how
   much of the body is read from the network before reading stops with a local
   `response_too_large` outcome. Bytes past the capture are counted, not kept.

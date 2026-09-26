@@ -19,7 +19,7 @@ request's own layers:
 | Field | Value | Why |
 |---|---|---|
 | `keepalive` | `true` for `persistent`, `false` for `fresh` | the plan's connection mode (HTTP pools and gRPC channels) |
-| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send; the full body is still read and counted, but body assertions and extractions are not evaluated when it exceeds the capture |
+| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send; the full body is still read and counted, but body assertions and extractions are not evaluated when it exceeds the capture, nor is the application outcome of a SOAP or GraphQL request (see below) |
 
 It also appends iteration-scoped variable layers (lowest to highest
 precedence): `load` (`{{anvil.iteration}}`, `{{anvil.vu}}`), the dataset row,
@@ -50,13 +50,30 @@ What a unit is depends on the request's protocol (`anvil_load::protocol`):
 
 | Unit (`LoadUnitKind`) | Requests | One unit is | Completed means | Success means | Latency (`latency_success`/`_failure`) | Protocol denominators |
 |---|---|---|---|---|---|---|
-| `http_request` | HTTP/1.1, HTTP/2, HTTP/3 (forced or automatic) | one request/response; redirects, retries and an HTTP/3 → TCP fallback are attempts inside it | complete response (any status) | status < 400, no SOAP fault / GraphQL error, assertions pass | sum of attempt durations, fallback attempt included | fallback attempts, requests with a fallback, requests over HTTP/3 |
+| `http_request` | HTTP/1.1, HTTP/2, HTTP/3 (forced or automatic) | one request/response; redirects, retries and an HTTP/3 → TCP fallback are attempts inside it | complete response (any status) | status < 400, assertions pass; for a SOAP or GraphQL request also no fault / errors in the complete response body (an outcome not determined from the body is an application failure) | sum of attempt durations, fallback attempt included | fallback attempts, requests with a fallback, requests over HTTP/3 |
 | `grpc_call` | unary gRPC (native over HTTP/2 or HTTP/3, gRPC-Web) | one call = one send | a terminal `grpc-status` with complete framing (any code) | status 0 and assertions pass; HTTP 200 alone never | sum of attempt durations (channel checkout … status) | status codes (code → count), OK, non-OK, **missing status**, fallback attempts |
 | `grpc_stream` | server-streaming gRPC / gRPC-Web | one stream | the server ended it with a terminal status and complete framing | status 0 and assertions pass | stream duration (call start … status) | streams opened, messages received, streams with messages, **time to first message**, plus the gRPC block |
 | `sse_stream` | SSE | one stream | the stream ended without a failure: the server ended it, or the request's `max_events` / idle timeout stopped it; an error status completes as an application failure | a 2xx event stream and assertions pass | stream duration | streams opened, events received, streams with events, **time to first event**, how streams ended (peer / client / timeout / abnormal) |
 | `websocket_session` | WebSocket (HTTP/1.1 Upgrade, HTTP/2 or HTTP/3 extended CONNECT) | one session: handshake, scripted messages, close | handshake answered and the session ended without a failure (close by either side, `expect_messages`, idle close); a rejected handshake completes as an application failure | accepted handshake, close 1000/1001/none, assertions pass | session duration (connect … close) | opened, handshake rejected, not opened, closed cleanly, messages sent/received, close codes by who closed, **round-trip time only when `expect_messages` is set** |
 | `tcp_exchange` | raw TCP / TLS | one connection carrying the request's frames | connected, frames sent, reading stopped on a stop condition (expected frames, max bytes, read-idle, peer close) without a failure | completed, the expected frames arrived (when `expect_frames` is set with a framing preset), assertions pass; fewer frames = application failure | exchange duration (connect … end of reading; includes the read-idle wait when the exchange ends on idle) | connections, frames sent/received, payload bytes, partial trailing frames, peer closes, expectation met/short |
 | `udp_exchange` / `dtls_exchange` | UDP / DTLS | the request's datagrams, then its response window (DTLS: after a handshake) | the window elapsed (or `max_datagrams` arrived) without a local failure — says nothing about delivery | at least one datagram received and assertions pass; **a completed exchange with nothing received is "no response observed": neither success nor failure, and it has no latency** | time to first response (first datagram sent → first received in the same exchange; not attributed to a specific datagram) | datagrams sent, datagrams received (separate counts), exchanges with a response / with no response observed, repeated payloads, echoed / other payloads, ICMP-unreachable exchanges, DTLS handshakes (attempted, completed, failed, timed out, duration) |
+
+**SOAP and GraphQL outcomes need the whole body.** A SOAP fault or a GraphQL
+`errors` array arrives with an HTTP 2xx, so the application outcome of a
+request with a SOAP or GraphQL body is judged from the response body. When
+only a prefix of that body is available (it exceeded the capture, which a load
+run lowers to at most 1 MiB, or it did not decode completely), a fault past
+the prefix would go unseen: the engine records the application status
+`not_evaluated` with a `partial_visibility` warning, never `success`. A load
+run counts such a completed request as an **application failure** in the
+category `application_failure: application.not_determined_from_body`, so it
+is in `application_failures` and the failure latency distribution, not in
+the successes. The same holds for any other `not_evaluated` outcome of a
+SOAP or GraphQL request (a login redirect, say). Other HTTP requests are
+judged by their status, which a prefix does not hide: a 2xx with a
+display-truncated body still counts as a success unless an assertion fails.
+A SOAP or GraphQL endpoint whose responses exceed the load capture therefore
+cannot show successes in a load run; its units read as "not determined".
 
 A plan has **exactly one unit kind**, so every count, rate and percentile in
 its report has one denominator. The editor (`load_plan_check`), the preflight

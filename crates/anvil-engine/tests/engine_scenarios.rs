@@ -185,6 +185,55 @@ async fn proto_023_soap_fault_and_proto_024_graphql_errors_on_200() {
     assert!(finding(&g, "app.graphql_errors").explanation.contains("Partial data"));
 }
 
+/// A SOAP or GraphQL request whose response body is captured only in part:
+/// the fault or error could lie past the prefix, so the application outcome
+/// is not determined (never "success"). With the whole body, it is judged.
+#[tokio::test]
+async fn soap_and_graphql_outcomes_are_not_judged_from_a_partial_capture() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let soap = Body::Soap {
+        version: anvil_domain::request::SoapVersion::Soap11,
+        envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+        action: None,
+    };
+    let graphql = Body::GraphQl { query: "{ user { id email } }".into(), variables: String::new(), operation_name: None };
+    for (path, body) in [("/soap-fault", soap.clone()), ("/graphql-errors", graphql)] {
+        let mut ctx = ExecutionContext::standalone(RequestSpec { body, ..RequestSpec::http("POST", &f.url(path)) });
+        with_limits(&mut ctx, Limits { capture_bytes: 16, ..Limits::default() });
+        let o = run(&e, &ctx).await;
+        let r = o.record.response.as_ref().unwrap();
+        assert!(r.body.display_truncated && r.body.completeness == BodyCompleteness::Complete, "{path}: {:?}", r.body);
+        assert_eq!(o.record.outcome.transport, TransportState::Completed, "{path}");
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{path}");
+        assert!(o.record.outcome.summary.contains("application not evaluated"), "{path}: {}", o.record.outcome.summary);
+        let warning = o.record.outcome.warnings.iter().find(|w| w.message.contains("application outcome was not determined"));
+        let warning = warning.unwrap_or_else(|| panic!("{path}: {:?}", o.record.outcome.warnings));
+        assert_eq!(warning.code, WarningCode::PartialVisibility, "{path}");
+        assert!(warning.message.contains("only 16 of"), "{path}: {}", warning.message);
+
+        let mut whole = ctx.clone();
+        with_limits(&mut whole, Limits { capture_bytes: 1 << 20, ..Limits::default() });
+        let o = run(&e, &whole).await;
+        assert!(!o.record.response.as_ref().unwrap().body.display_truncated, "{path}");
+        assert_eq!(o.record.outcome.application, ApplicationState::Failure, "{path}: the whole body shows the fault");
+    }
+
+    // A SOAP request whose whole body shows no fault succeeds.
+    let ok = format!("/status/200?ct=text/xml&body={}", url_encode("<Envelope><Body><ok/></Body></Envelope>"));
+    let o = run(&e, &ExecutionContext::standalone(RequestSpec { body: soap, ..RequestSpec::http("POST", &f.url(&ok)) })).await;
+    assert_eq!(o.record.outcome.application, ApplicationState::Success);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+
+    // Other requests are judged by their status: a prefix does not hide it.
+    let mut plain = ctx_for(&f.url("/soap-fault"));
+    with_limits(&mut plain, Limits { capture_bytes: 16, ..Limits::default() });
+    let o = run(&e, &plain).await;
+    assert!(o.record.response.as_ref().unwrap().body.display_truncated);
+    assert_eq!(o.record.outcome.application, ApplicationState::Success);
+}
+
 #[tokio::test]
 async fn local_002_unresolved_variable_never_sends() {
     init();
@@ -355,7 +404,7 @@ fn assert_body_not_evaluated(o: &ExecutionOutput, status: ContentDecoding) {
     );
     assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated);
     let body = result(o, "body");
-    assert!(!body.passed && body.message.contains("not fully decoded"), "{body:?}");
+    assert!(!body.passed && body.message.contains("the complete response body is not available"), "{body:?}");
     assert!(result(o, "status").passed, "assertions that do not read the body still run");
     assert_eq!(o.record.outcome.assertions, AssertionState::Fail);
     assert!(o.extracted.is_empty() && o.record.extracted.is_empty(), "no extraction from an incompletely decoded body");

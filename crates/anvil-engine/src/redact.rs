@@ -12,6 +12,7 @@
 //! that reason.
 
 use crate::vars::Resolver;
+use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::HeaderEntry;
 use anvil_domain::secret::REDACTED;
 
@@ -26,6 +27,10 @@ const MAX_DECODE_ROUNDS: usize = 3;
 /// Headers whose values are URLs (and so may carry encoded query values).
 /// `Link` and `Refresh` embed URLs in a larger value and are handled apart.
 const URL_HEADERS: &[&str] = &["location", "content-location", "referer"];
+
+/// Diagnostic evidence keys whose values are URLs, or `host/path` without a
+/// scheme.
+const URL_EVIDENCE: &[&str] = &["redirect.authorization_endpoint"];
 
 const SENSITIVE_HEADERS: &[&str] = &[
     "authorization",
@@ -183,6 +188,10 @@ impl Redactor {
         if self.secrets.is_empty() {
             return false;
         }
+        // Nothing to decode: only a raw occurrence can reveal a secret.
+        if !s.contains(['%', '+']) {
+            return self.secrets.iter().any(|x| s.contains(x.as_str()));
+        }
         let mut layers: Vec<Vec<u8>> = vec![s.as_bytes().to_vec()];
         for round in 0..=MAX_DECODE_ROUNDS {
             if layers.iter().any(|l| self.secrets.iter().any(|x| contains_bytes(l, x.as_bytes()))) {
@@ -249,17 +258,44 @@ impl Redactor {
         self.text(value)
     }
 
-    /// `Link` (RFC 8288): every `<URI-reference>` is redacted as a URL.
+    /// `Link` (RFC 8288): every `<URI-reference>` is redacted as a URL, and so
+    /// is the value of an `anchor` parameter, which is a URI reference too.
     fn link(&self, value: &str) -> String {
         let value = self.text(value);
         let mut out = String::with_capacity(value.len());
         let mut rest = value.as_str();
         while let Some(start) = rest.find('<') {
             let Some(len) = rest[start + 1..].find('>') else { break };
-            out.push_str(&rest[..=start]);
+            out.push_str(&self.link_params(&rest[..start]));
+            out.push('<');
             out.push_str(&self.url(&rest[start + 1..start + 1 + len]));
             out.push('>');
             rest = &rest[start + 2 + len..];
+        }
+        out.push_str(&self.link_params(rest));
+        out
+    }
+
+    /// The parameters between `Link` URI references with every `anchor`
+    /// value (quoted or not) redacted as a URL.
+    fn link_params(&self, params: &str) -> String {
+        let mut out = String::with_capacity(params.len());
+        let mut rest = params;
+        while let Some(at) = anchor_value_start(rest) {
+            out.push_str(&rest[..at]);
+            let value = &rest[at..];
+            let (redacted, after) = match value.strip_prefix('"') {
+                Some(quoted) => match quoted.find('"') {
+                    Some(end) => (format!("\"{}\"", self.url(&quoted[..end])), &quoted[end + 1..]),
+                    None => (format!("\"{}", self.url(quoted)), ""),
+                },
+                None => {
+                    let end = value.find([';', ',']).unwrap_or(value.len());
+                    (self.url(&value[..end]), &value[end..])
+                }
+            };
+            out.push_str(&redacted);
+            rest = after;
         }
         out.push_str(rest);
         out
@@ -276,6 +312,38 @@ impl Redactor {
             return format!("{head}{q}{}{q}", self.url(&target[1..target.len() - 1]));
         }
         format!("{head}{}", self.url(target))
+    }
+
+    /// An inferred note of a prepared request with its values redacted. An
+    /// auth fact's `htu` (the DPoP target URI) is a URL whose path can carry a
+    /// secret, so it is redacted as a URL.
+    pub fn inferred(&self, line: &str) -> String {
+        match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
+            Some((k, v)) if k.ends_with(".htu") => format!("auth {k}: {}", self.url(v)),
+            _ => self.text(line),
+        }
+    }
+
+    /// A diagnostic finding with its values redacted. URL-valued evidence is
+    /// redacted as a URL, and so is its copy in the explanation.
+    pub fn finding(&self, f: &mut DiagnosticFinding) {
+        f.title = self.text(&f.title);
+        let mut explanation = f.explanation.clone();
+        for e in &mut f.evidence {
+            if !URL_EVIDENCE.contains(&e.key.as_str()) {
+                e.value = self.text(&e.value);
+                continue;
+            }
+            let redacted = self.url(&e.value);
+            if !e.value.is_empty() && redacted != e.value {
+                explanation = explanation.replace(e.value.as_str(), &redacted);
+            }
+            e.value = redacted;
+        }
+        f.explanation = self.text(&explanation);
+        for a in &mut f.alternatives {
+            *a = self.text(a);
+        }
     }
 
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
@@ -445,15 +513,33 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// `scheme://user:pw@host/...` and the scheme-relative `//user:pw@host/...`
+/// with the userinfo replaced.
 fn redact_userinfo(u: &str) -> String {
-    if let Some((scheme, rest)) = u.split_once("://") {
-        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let authority = &rest[..authority_end];
-        if let Some(at) = authority.rfind('@') {
-            return format!("{scheme}://{REDACTED}@{}{}", &authority[at + 1..], &rest[authority_end..]);
-        }
+    let (head, rest) = match u.strip_prefix("//") {
+        Some(rest) => ("//".to_string(), rest),
+        None => match u.split_once("://") {
+            Some((scheme, rest)) => (format!("{scheme}://"), rest),
+            None => return u.to_string(),
+        },
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    match authority.rfind('@') {
+        Some(at) => format!("{head}{REDACTED}@{}{}", &authority[at + 1..], &rest[authority_end..]),
+        None => u.to_string(),
     }
-    u.to_string()
+}
+
+/// Byte offset of the value of the first `anchor` parameter in `s` (a
+/// parameter name follows a `;`).
+fn anchor_value_start(s: &str) -> Option<usize> {
+    let lower = s.to_ascii_lowercase();
+    lower.match_indices("anchor").find_map(|(i, name)| {
+        let after_name = s[i + name.len()..].trim_start();
+        let value = after_name.strip_prefix('=')?.trim_start();
+        if s[..i].trim_end().ends_with(';') { Some(s.len() - value.len()) } else { None }
+    })
 }
 
 #[cfg(test)]
