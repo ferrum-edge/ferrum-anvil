@@ -50,6 +50,35 @@ CLI (`anvil`) = same anvil-app services without a webview.
   OAuth sign-in). An Abort that reaches the backend before the open has
   registered finds nothing to stop; the renderer cancels again once the open
   returns.
+- **Store work stays off the async runtime.** One SQLite connection serves a
+  profile, and a long transaction (an import, a spec import, a folder or
+  workspace delete) holds it until it ends. Commands that write in bulk, read
+  many records or derive a key run their work on a blocking thread
+  (`commands::blocking`): profile creation, unlock and passphrase changes,
+  spec imports, folder and workspace deletes, history lists, views and
+  clears, export previews, and attachment, PEM/PKCS#12 and dataset reads.
+  Bundle imports and previews run on their own worker (`import_work`).
+  Async paths do the same with `anvil_app::off_runtime`: a send, a session
+  open and an OAuth sign-in build their context there, a send and a session
+  record their history there, a collection run prepares its steps and saves
+  its report there (and records each step through `block_in_place`), and a
+  load run prepares its job and saves its report there. A context looks up
+  the vault secrets of its spec, its effective auth and the profiles its
+  settings select as it is built; any other secret is looked up if the
+  engine uses it. A cancel while a send, a session open or a collection run
+  waits for its preparation ends it at once, with nothing sent or recorded.
+  Shorter commands still run on the UI thread, in the order they were
+  called, and wait for a long transaction to end.
+- **A lock wins over work that ran off the lock.** `DesktopState` keeps a
+  lock epoch that every lock and profile switch bumps first. An unlock or a
+  profile creation takes it before its key derivation and opens the profile
+  only if it is unchanged (`set_app_since`, `unlock_since`); otherwise the
+  profile stays locked. An unlock of the open profile checks it under the
+  write lock of the store's key, before the key is set (`Store::unlock_if`),
+  so the profile is never usable in between. `commands::blocking` takes it
+  before the work and returns `LOCKED` instead of the work's result if it
+  changed meanwhile; writes that return no data use `blocking_unchecked`, so
+  a committed write is not reported as `LOCKED`.
 - **File commands never take a path from the webview.** The backend shows
   the native open or save dialog itself (`file_choose`), keeps the chosen
   path and returns an opaque grant bound to one purpose (bundle import or
@@ -138,8 +167,11 @@ CLI (`anvil`) = same anvil-app services without a webview.
 1. **Freeze the context.** `anvil-app` freezes an `ExecutionContext`: the
    request spec (draft or saved revision), variable layers (workspace → environment → folders → request →
    iteration), settings layers (app → workspace → folders → request →
-   run), auth inheritance, TLS/proxy/integration profiles and a scoped
-   secret resolver.
+   run), auth inheritance, TLS/proxy/integration profiles and a secret
+   resolver scoped to the workspace's own vault (`exec::ResolvedSecrets`).
+   The secrets of the spec, the effective auth and the profiles the
+   settings select are looked up as the context is frozen, any other when
+   it is used; all fail closed once the profile locks.
 2. **Prepare.** `anvil-engine` interpolates, lints the body (block or warn),
    serialises it, infers the content type, and then applies auth over the
    final bytes. HMAC digests and DPoP proofs are regenerated on every send.

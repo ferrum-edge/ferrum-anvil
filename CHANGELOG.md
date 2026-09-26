@@ -108,3 +108,39 @@
   failed preparation in the worker ("the datagram secret is not available",
   or the proxy's TLS profile "no longer exists"). A request of another
   protocol with a leftover UDP section ships no datagram secret.
+- Desktop: long store work no longer holds the async runtime. Spec imports
+  and re-imports, folder and workspace deletes, profile creation, unlock and
+  passphrase changes (their key derivation), history lists, views and
+  clears, export previews, and reading an attachment, a PEM/PKCS#12 file or
+  a dataset now run on a worker thread. A send, session open, collection
+  run, load run and OAuth sign-in prepare the request, look up the vault
+  secrets its spec, effective auth and selected profiles name, and record
+  their history or report on a worker thread, so they no longer hold the
+  runtime while an import holds the database. A send, session open or
+  collection run canceled while it waits for that returns at once, with
+  nothing sent or recorded. A synchronous store command issued during a
+  long import still waits for the database connection until the import
+  ends.
+- Desktop: a lock now wins over an unlock or profile creation whose key
+  derivation it overlaps: the profile stays locked, and is never usable in
+  between (a new profile is still created, and its recovery key still
+  shown). A command that runs on a worker thread and returns what it read
+  from the store (a history list or entry, an export or spec preview, a
+  re-import plan, a request preview) returns `LOCKED` instead when a lock or
+  a profile switch overlaps it; one that only writes (a folder or workspace
+  delete, a history clear, a spec import or re-import, an attachment)
+  reports its own outcome. A history list that meets the lock midway fails
+  as locked instead of returning the records read so far, and a load run
+  whose preparation overlaps a lock is not handed to a worker.
+- History records are indexed by their response body, so releasing a
+  replaced body and history retention no longer scan whole tables. The index
+  is created when a profile is opened or unlocked; it changes no stored data,
+  so the database schema version stays 2, and earlier builds still read the
+  database and its full backups. Restoring a checkpoint whose recorded
+  version was set back below schema 2 after its secrets were re-sealed is
+  now refused before the profile is touched, instead of leaving it locked.
+  Deleting an attachment's last use checks for other references and deletes
+  it in one transaction, and the pins re-applied when a profile opens are
+  written in one transaction. Deletes, blob pins and releases, and history
+  and load-report clean-up check the lock only once they hold the database,
+  so one that raced a failed checkpoint restore fails as locked.

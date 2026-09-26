@@ -11,14 +11,15 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-/// Cancellation tokens of running executions, by execution id. Each
-/// registration has its own `Arc`, which identifies it: an entry is removed
-/// only by the registration that inserted it.
+/// Cancellation tokens of running attempts (executions, or imports and
+/// previews), by attempt id. Each registration has its own `Arc`, which
+/// identifies it: an entry is removed only by the registration that inserted
+/// it.
 pub type Running = Mutex<HashMap<Id, Arc<CancellationToken>>>;
 
 /// Load runs in worker processes, by run key: (user cancel, lock stop).
@@ -69,6 +70,12 @@ impl<T> PendingReports<T> {
 pub struct DesktopState {
     pub profiles: ProfileManager,
     pub app: RwLock<Option<Arc<App>>>,
+    /// Bumped by every lock and every profile switch, before either takes
+    /// effect. Work that ran off the lock (a key derivation, a blocking
+    /// store read) compares it with the value it saw when it started, so an
+    /// unlock never outlives a lock that landed meanwhile, and a read's result
+    /// is not returned once one has.
+    lock_epoch: AtomicU64,
     /// Running executions (for cancel and lock-time stop).
     pub running: Arc<Running>,
     /// Bundle imports and previews started with an attempt id (for
@@ -103,6 +110,7 @@ impl DesktopState {
         DesktopState {
             profiles: ProfileManager::new(root),
             app: RwLock::new(None),
+            lock_epoch: AtomicU64::new(0),
             running: Arc::new(Mutex::new(HashMap::new())),
             imports: Arc::new(Mutex::new(HashMap::new())),
             import_worker: Arc::new(Semaphore::new(1)),
@@ -119,14 +127,39 @@ impl DesktopState {
         *self.last_activity.lock() = Instant::now();
     }
 
-    /// Make `app` the open profile. The desktop confines JWT-SVID token
+    /// The current lock epoch (see the `lock_epoch` field). Taken
+    /// before work that runs off the lock, and compared once it has ended.
+    pub fn epoch(&self) -> u64 {
+        self.lock_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Make `app` the open profile, unless a lock or another profile switch
+    /// landed since the epoch `seen` was taken: then `app` is locked and
+    /// dropped, and the error is `LOCKED`. The desktop confines JWT-SVID token
     /// files to the ones bound in its native dialog. File-dialog grants belong
     /// to the profile they were chosen in, so switching revokes them, as a
     /// lock does. The previous profile is locked and its work stopped, so
     /// nothing it started records into this one or keeps its key in memory.
-    pub fn set_app(&self, app: App) {
+    pub fn set_app_since(&self, app: App, seen: u64) -> Result<(), String> {
         app.confine_token_files();
-        let previous = self.app.write().replace(Arc::new(app));
+        let swapped = {
+            let mut g = self.app.write();
+            // A lock bumps the epoch before it reads the app, so one that
+            // bumps after this exchange waits for the guard and locks `app`.
+            match self.lock_epoch.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => Ok(g.replace(Arc::new(app))),
+                Err(_) => Err(app),
+            }
+        };
+        let previous = match swapped {
+            Ok(previous) => previous,
+            // Never published, so locked once the guard is released: a lock
+            // or a status read does not wait for it.
+            Err(rejected) => {
+                rejected.lock();
+                return Err("LOCKED".into());
+            }
+        };
         // After the swap: a choice that starts from now on sees only the new
         // profile, and one still open from before grants nothing.
         self.file_grants.revoke_all();
@@ -137,6 +170,21 @@ impl DesktopState {
             previous.lock();
         }
         self.stop_work();
+        Ok(())
+    }
+
+    /// Unlock `app`, the open profile opened again, with `key`, unless a lock
+    /// or another profile switch landed since the epoch `seen` was taken: then
+    /// it stays locked and the error is `LOCKED`.
+    pub fn unlock_since(&self, app: &App, key: anvil_storage::Key, seen: u64) -> Result<(), String> {
+        // `app` is already published, so the epoch is checked by the gate,
+        // under the write lock of the store's key and before the key is set:
+        // no other thread can use `app` unlocked until it has passed. A lock
+        // (and a profile switch) bumps the epoch before it locks the app,
+        // which takes that write lock, so either the gate sees the bump and
+        // the key is never set, or the key is set first and that lock
+        // clears it.
+        app.unlock_if(key, || self.epoch() == seen).map_err(crate::commands::e)
     }
 
     /// The unlocked app, or an error the UI renders as the lock screen.
@@ -184,6 +232,8 @@ impl DesktopState {
     /// Lock: stop active runs (policy: stop runs on lock), drop keys,
     /// cached credentials/connections and file-dialog grants.
     pub fn lock(&self) {
+        // First, so an unlock or a read still running off the lock sees it.
+        self.lock_epoch.fetch_add(1, Ordering::SeqCst);
         self.file_grants.revoke_all();
         // The app locks before the drain below. An execution registers before
         // it asks for the app, so one registered after the drain is refused by
@@ -220,9 +270,10 @@ impl DesktopState {
     }
 }
 
-/// An execution's entry in [`DesktopState::running`], removed when this is
-/// dropped: on success, on an early return and on a panic alike. It owns a
-/// handle to the registry, so a spawned task can hold it.
+/// An attempt's entry in a registry ([`DesktopState::running`] or
+/// [`DesktopState::imports`]), removed when this is dropped: on success, on
+/// an early return and on a panic alike. It owns a handle to the registry,
+/// so a spawned task can hold it.
 pub struct PendingEntry {
     running: Arc<Running>,
     id: Id,
@@ -231,8 +282,8 @@ pub struct PendingEntry {
 
 impl PendingEntry {
     /// Register a fresh token for `id`, so a cancel (or a lock) can reach the
-    /// execution from now on. Refused while `id` is still registered: the
-    /// running execution keeps its token, and its entry is not removed by
+    /// attempt from now on. Refused while `id` is still registered: the
+    /// running attempt keeps its token, and its entry is not removed by
     /// anyone else.
     pub fn register(running: &Arc<Running>, id: Id) -> Result<Self, String> {
         let token = Arc::new(CancellationToken::new());
@@ -343,7 +394,7 @@ impl ImportGate {
     }
 }
 
-/// Cancel the running execution `id`. Returns whether it was registered.
+/// Cancel the running attempt `id`. Returns whether it was registered.
 pub fn cancel_pending(running: &Running, id: &Id) -> bool {
     match running.lock().get(id) {
         Some(t) => {
@@ -459,7 +510,7 @@ mod tests {
         let first = PendingEntry::register(&running, id).unwrap();
         let second = PendingEntry::register(&running, id).map(|_| ());
         assert_eq!(second, Err(format!("attempt {id} is already running")));
-        // The refusal leaves the first execution's entry and token in place.
+        // The refusal leaves the first attempt's entry and token in place.
         assert!(cancel_pending(&running, &id));
         assert!(first.token().is_cancelled());
         drop(first);
@@ -534,12 +585,12 @@ mod tests {
         let st = DesktopState::new(root.0.clone());
         let (a, _) = create(&st, "A");
         let (b, _) = create(&st, "B");
-        st.set_app(a);
+        st.set_app_since(a, st.epoch()).unwrap();
         let previous = st.app().unwrap();
         // Work started under the first profile.
         let execution = PendingEntry::register(&st.running, Id::new()).unwrap();
         let load_run = LoadRunEntry::register(&st.load_runs);
-        st.set_app(b);
+        st.set_app_since(b, st.epoch()).unwrap();
         assert!(previous.is_locked());
         assert!(!st.is_current(&previous));
         assert!(execution.token().is_cancelled());
@@ -553,6 +604,73 @@ mod tests {
         // Work started from now on is not stopped by the earlier switch.
         let later = PendingEntry::register(&st.running, Id::new()).unwrap();
         assert!(!later.token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_lock_during_an_unlock_leaves_no_profile_open() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, _) = create(&st, "A");
+        // The epoch is taken before the key derivation, and a lock lands during it.
+        let seen = st.epoch();
+        st.lock();
+        assert_eq!(st.set_app_since(a, seen), Err("LOCKED".to_string()));
+        assert!(st.app().is_err());
+        assert!(st.app.read().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_lock_during_an_unlock_of_the_open_profile_leaves_it_locked() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, dir) = create(&st, "A");
+        st.set_app_since(a, st.epoch()).unwrap();
+        st.lock();
+        let open = st.app.read().clone().unwrap();
+        assert!(open.is_locked());
+        let seen = st.epoch();
+        let (_, key) = ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
+        st.lock();
+        assert_eq!(st.unlock_since(&open, key, seen), Err("LOCKED".to_string()));
+        assert!(open.is_locked());
+        assert_eq!(st.app().map(|_| ()), Err("LOCKED".to_string()));
+        // Without a lock meanwhile, the unlock holds.
+        let seen = st.epoch();
+        let (_, key) = ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
+        st.unlock_since(&open, key, seen).unwrap();
+        assert!(st.app().is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_unlock_refused_by_the_epoch_never_makes_the_open_profile_usable() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, dir) = create(&st, "A");
+        st.set_app_since(a, st.epoch()).unwrap();
+        st.lock();
+        let open = st.app.read().clone().unwrap();
+        let seen = st.epoch();
+        st.lock();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            // Polls the published app for the whole unlock: it is never
+            // handed out, since the key is never set.
+            let poller = s.spawn(|| {
+                let mut polls = 0u32;
+                while !done.load(Ordering::SeqCst) || polls == 0 {
+                    assert_eq!(st.app().map(|_| ()), Err("LOCKED".to_string()));
+                    polls += 1;
+                }
+            });
+            for _ in 0..3 {
+                let (_, key) = ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
+                assert_eq!(st.unlock_since(&open, key, seen), Err("LOCKED".to_string()));
+                assert!(open.is_locked());
+            }
+            done.store(true, Ordering::SeqCst);
+            poller.join().unwrap();
+        });
+        assert!(matches!(open.settings(), Err(AppError::Locked)));
     }
 
     #[tokio::test]

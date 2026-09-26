@@ -2,15 +2,16 @@
 //! executable re-launched with a fixed mode flag); the UI process only
 //! relays throttled progress and stores the final report.
 
-use crate::commands::{R, e, id};
+use crate::commands::{R, blocking, blocking_unchecked, e, id};
 use crate::state::{DesktopState, LoadRunEntry, VaultId};
-use anvil_app::AppError;
 use anvil_app::file_grants::{FilePurpose, ReadFile};
 use anvil_app::load::{LoadPlanCheck, LoadPreflight, LoadReportSummary};
+use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport};
 use anvil_domain::workspace::{Dataset, DatasetFormat};
 use serde::Serialize;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub const LOAD_WORKER_FLAG: &str = "--anvil-load-worker";
@@ -70,8 +71,15 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     let entry = LoadRunEntry::register(&st.load_runs);
     let app = st.app()?;
     let vault = VaultId::of(&app);
-    let plan = app.load_plan(&id(&plan_id)?).map_err(e)?;
-    let job = app.worker_job(&plan, acknowledged).map_err(e)?;
+    let plan_id = id(&plan_id)?;
+    // Prepared from the store, secrets and all, on a blocking thread.
+    let preparing = app.clone();
+    let job = anvil_app::off_runtime(move || preparing.worker_job(&preparing.load_plan(&plan_id)?, acknowledged)).await.map_err(e)?;
+    // A lock that landed while the job was prepared stopped this run: its
+    // job, secrets and all, is not handed to a worker.
+    if entry.lock_token().is_cancelled() {
+        return Err("LOCKED".into());
+    }
     let exe = std::env::current_exe().map_err(|x| x.to_string())?;
     let mut controller = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await.map_err(|x| x.to_string())?;
     let run_key = entry.key().to_string();
@@ -104,31 +112,13 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
         }
         let result = controller.wait().await;
         drop(entry);
-        let st = handle.state::<DesktopState>();
-        let ev = match result {
-            Ok(report) => {
-                let run_id = report.run_id;
-                // Into the profile the run started under, never the one open now.
-                match app.save_load_report(&report) {
-                    Ok(()) => LoadFinishedEvent { run_key: key.clone(), run_id: Some(run_id), error: None },
-                    // Locked mid-run, or another profile opened: keep the
-                    // (redacted) partial report and store it when this
-                    // profile is next unlocked.
-                    Err(AppError::Locked) => {
-                        st.hold_report(vault, report);
-                        LoadFinishedEvent { run_key: key.clone(), run_id: Some(run_id), error: None }
-                    }
-                    Err(err) => LoadFinishedEvent {
-                        run_key: key.clone(),
-                        run_id: None,
-                        error: Some(format!("the run finished but its report could not be saved: {}", e(err))),
-                    },
-                }
-            }
-            Err(err) => LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(err.to_string()) },
-        };
+        // The report is saved on a blocking thread.
+        let (owner, run_key) = (app.clone(), key.clone());
+        // Unchecked: `finished` holds the report itself if a lock landed.
+        let ev = blocking_unchecked(&handle, move |st| Ok(finished(st, &owner, vault, run_key, result))).await;
+        let ev = ev.unwrap_or_else(|err| LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(err) });
         // Another profile is open: its window shows nothing of this one.
-        let ev = if st.is_current(&app) {
+        let ev = if handle.state::<DesktopState>().is_current(&app) {
             ev
         } else {
             LoadFinishedEvent {
@@ -140,6 +130,38 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
         let _ = handle.emit("load-finished", ev);
     });
     Ok(run_key)
+}
+
+/// Save the report of a finished run into the profile it started under,
+/// never the one open now.
+fn finished(
+    st: &DesktopState,
+    app: &Arc<App>,
+    vault: VaultId,
+    run_key: String,
+    result: Result<LoadReport, anvil_load::LoadError>,
+) -> LoadFinishedEvent {
+    match result {
+        Ok(report) => {
+            let run_id = report.run_id;
+            match app.save_load_report(&report) {
+                Ok(()) => LoadFinishedEvent { run_key, run_id: Some(run_id), error: None },
+                // Locked mid-run, or another profile opened: keep the
+                // (redacted) partial report and store it when this profile
+                // is next unlocked.
+                Err(AppError::Locked) => {
+                    st.hold_report(vault, report);
+                    LoadFinishedEvent { run_key, run_id: Some(run_id), error: None }
+                }
+                Err(err) => LoadFinishedEvent {
+                    run_key,
+                    run_id: None,
+                    error: Some(format!("the run finished but its report could not be saved: {}", e(err))),
+                },
+            }
+        }
+        Err(err) => LoadFinishedEvent { run_key, run_id: None, error: Some(err.to_string()) },
+    }
 }
 
 #[tauri::command]
@@ -200,34 +222,38 @@ pub fn datasets_list(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec
 /// Copy a CSV/JSON file the user picked in the native open dialog (`grant`,
 /// purpose `dataset`) into encrypted storage as a dataset after checking
 /// that it parses.
+/// Read, parsed and stored on a blocking thread (see `commands::blocking`).
 #[tauri::command]
-pub fn dataset_add(
-    st: State<'_, DesktopState>,
+pub async fn dataset_add(
+    handle: AppHandle,
     workspace_id: String,
     grant: String,
     name: String,
     sensitive_columns: Vec<String>,
 ) -> R<Dataset> {
-    let app = st.app()?;
-    let ReadFile { bytes, file_name } = st.file_grants.read(&grant, FilePurpose::Dataset).map_err(|x| x.to_string())?;
-    let lower = file_name.to_ascii_lowercase();
-    let (format, load_fmt) = if lower.ends_with(".json") {
-        (DatasetFormat::Json, anvil_load::DatasetFormat::Json)
-    } else {
-        (DatasetFormat::Csv, anvil_load::DatasetFormat::Csv)
-    };
-    let parsed = anvil_load::Dataset::parse(load_fmt, bytes.clone()).map_err(|x| x.to_string())?;
-    if let Some(missing) = sensitive_columns.iter().find(|c| !parsed.columns.contains(c)) {
-        return Err(format!("the dataset has no column named '{missing}'"));
-    }
-    let attachment = app.put_attachment(&file_name, &bytes, None).map_err(e)?;
-    let d = Dataset {
-        meta: anvil_domain::workspace::Meta::new(),
-        workspace_id: id(&workspace_id)?,
-        name,
-        format,
-        attachment,
-        sensitive_columns,
-    };
-    app.save_dataset(d).map_err(e)
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let ReadFile { bytes, file_name } = st.file_grants.read(&grant, FilePurpose::Dataset).map_err(|x| x.to_string())?;
+        let lower = file_name.to_ascii_lowercase();
+        let (format, load_fmt) = if lower.ends_with(".json") {
+            (DatasetFormat::Json, anvil_load::DatasetFormat::Json)
+        } else {
+            (DatasetFormat::Csv, anvil_load::DatasetFormat::Csv)
+        };
+        let parsed = anvil_load::Dataset::parse(load_fmt, bytes.clone()).map_err(|x| x.to_string())?;
+        if let Some(missing) = sensitive_columns.iter().find(|c| !parsed.columns.contains(c)) {
+            return Err(format!("the dataset has no column named '{missing}'"));
+        }
+        let attachment = app.put_attachment(&file_name, &bytes, None).map_err(e)?;
+        let d = Dataset {
+            meta: anvil_domain::workspace::Meta::new(),
+            workspace_id: id(&workspace_id)?,
+            name,
+            format,
+            attachment,
+            sensitive_columns,
+        };
+        app.save_dataset(d).map_err(e)
+    })
+    .await
 }

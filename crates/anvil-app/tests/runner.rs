@@ -230,6 +230,24 @@ async fn locking_mid_run_aborts_with_a_partial_report() {
     assert_eq!(*f.state.counters.lock().get("second").unwrap_or(&0), 0, "nothing is sent after the lock");
 }
 
+/// As the desktop runs it: on a multi-thread runtime, where each step's
+/// history record waits on the store through `block_in_place`, and the
+/// steps are prepared and the report saved on a blocking thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_on_a_multi_thread_runtime_records_every_step_and_its_report() {
+    anvil_fixtures::init();
+    let f = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "multi");
+    let ws = app.create_workspace("Multi").unwrap();
+    app.create_request(&ws.meta.id, None, "First", RequestSpec::http("GET", &f.url("/count/multi-first"))).unwrap();
+    app.create_request(&ws.meta.id, None, "Second", RequestSpec::http("GET", &f.url("/count/multi-second"))).unwrap();
+    let r = app.run_folder(&ws.meta.id, None, RunSettings::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!(r.completion, RunnerCompletion::Completed, "{r:#?}");
+    assert_eq!(app.store.list_history(Some(&ws.meta.id), None, 10).unwrap().len(), 2);
+    assert_eq!(app.run_report(&r.run_id).unwrap(), r);
+}
+
 /// The desktop shell spawns runs on the async runtime: the run futures must be `Send`.
 #[allow(dead_code)]
 fn run_futures_are_send(app: &App, id: &anvil_domain::Id) {

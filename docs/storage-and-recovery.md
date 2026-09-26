@@ -427,15 +427,27 @@ needs no confirmation.
   a set-back database only while one of its schema 2 secrets still names its
   owner. Earlier builds
   refuse a schema 2 database, and a full backup made from one, as newer.
+- The history table is indexed by the response body each record references,
+  so releasing a replaced body and retention find a blob's uses without
+  scanning it. The index has no schema version of its own: it is created,
+  where it is missing, each time a profile is opened or unlocked, after the
+  versioned steps, as a best effort: if it cannot be created, a warning is
+  logged and the profile still opens. It changes no stored data, so the
+  schema stays 2 and earlier builds of schema 2 still read the database and
+  full backups made from it.
 - Skipped secrets and the migration trust the database as found. Replacing
   the whole database with an older checkpoint, or restoring a schema 1
   checkpoint whose owner column was edited, cannot be detected without state
   kept outside the database.
 - Restoring a checkpoint opens it read-only and refuses one written by a
-  newer schema, or sealed with another data key, before the live database is
-  touched. A checkpoint from an older schema is migrated under the same hold
-  of the connection as the copy; if the copy or the migration fails, the
-  profile is left locked.
+  newer schema, sealed with another data key, or whose recorded version was
+  set back below schema 2 while a vault secret in it opens under its schema 2
+  AAD (the migration would fail on it), before the live database is touched.
+  A checkpoint from an older schema is migrated under the same hold of the
+  connection as the copy; if the copy or the migration fails, the profile is
+  left locked. Every write, sealing or not, checks the lock only once it
+  holds the connection, so one that raced a failed restore fails as locked
+  instead of writing to the copied database.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
 - Bundles carry `format_version`; unknown future formats are rejected, and so
@@ -454,14 +466,17 @@ Configurable in Settings: enable/disable history, keep or drop response bodies,
 maximum age (days) and total size; pruning keeps the newest records within the
 budget. "Clear all history" deletes history records only. A history record
 that is overwritten (an import under Replace) releases its old response body
-unless another record still uses it.
+unless another record, or the new version of the same record, still uses it.
+Retention and that release look a blob's uses up by index and its pin by
+primary key.
 
 Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so
 retention never removes them. Deleting a dataset deletes its content once no
 request, revision, dataset, spec source, scenario or load plan still refers to
-the same (content-addressed) attachment. Pins are re-applied to existing
-attachments whenever a profile opens.
+the same (content-addressed) attachment; the check and the delete run in one
+write transaction, so nothing can refer to it in between. Pins are re-applied
+to existing attachments, in one write transaction, whenever a profile opens.
 
 ## Plaintext at rest
 

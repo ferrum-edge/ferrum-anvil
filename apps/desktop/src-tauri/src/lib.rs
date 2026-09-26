@@ -80,15 +80,14 @@ pub fn run() {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     let st = handle.state::<DesktopState>();
-                    let (idle_minutes, lock_on_sleep, unlocked) = {
-                        let g = st.app.read();
-                        match g.as_ref() {
-                            Some(a) if !a.is_locked() => {
-                                let s = a.settings().unwrap_or_default();
-                                (s.lock.idle_minutes, s.lock.lock_on_os_lock, true)
-                            }
-                            _ => (0, false, false),
+                    let open = st.app.read().as_ref().filter(|a| !a.is_locked()).cloned();
+                    let (idle_minutes, lock_on_sleep, unlocked) = match open {
+                        Some(a) => {
+                            // Read on a blocking thread: the store may be held by a long transaction.
+                            let s = anvil_app::off_runtime(move || a.settings()).await.unwrap_or_default();
+                            (s.lock.idle_minutes, s.lock.lock_on_os_lock, true)
                         }
+                        None => (0, false, false),
                     };
                     let suspended = {
                         let mut p = st.clock_probe.lock();
@@ -231,9 +230,14 @@ fn e2e_unlock(st: &DesktopState) {
             Err(e) => return eprintln!("e2e: create profile failed: {e}"),
         },
     };
+    let seen = st.epoch();
     match anvil_app::profiles::ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(&pass)) {
         Ok((header, key)) => match anvil_app::App::open(dir, header, key) {
-            Ok(app) => st.set_app(app),
+            Ok(app) => {
+                if let Err(e) = st.set_app_since(app, seen) {
+                    eprintln!("e2e: open failed: {e}");
+                }
+            }
             Err(e) => eprintln!("e2e: open failed: {e}"),
         },
         Err(e) => eprintln!("e2e: unlock failed: {e}"),

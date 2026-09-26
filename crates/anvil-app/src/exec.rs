@@ -17,6 +17,8 @@ use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_storage::Store;
 use anvil_transport::recorder::EventCtx;
 use bytes::Bytes;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -40,6 +42,79 @@ impl SecretResolver for StoreSecrets {
             Err(anvil_storage::StoreError::Locked) => Err("Anvil is locked".into()),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+/// The vault secrets an execution context names, looked up through
+/// [`StoreSecrets`] when the context is built, which [`App::send`] and the
+/// other async paths do on a blocking thread: the engine never waits on the
+/// store while it executes. Each lookup keeps its outcome, so a secret that
+/// is missing, owned by another workspace or unreadable still fails where it
+/// is used. Fails closed once the store is locked.
+pub struct ResolvedSecrets {
+    resolved: HashMap<SecretRef, std::result::Result<Zeroizing<String>, String>>,
+    /// Looks up a reference the context did not name when it was built.
+    store: StoreSecrets,
+}
+
+impl ResolvedSecrets {
+    /// Look up every secret named in `parts` (see [`secret_parts`]).
+    fn lookup(store: StoreSecrets, parts: &[serde_json::Value]) -> ResolvedSecrets {
+        let mut refs = HashSet::new();
+        parts.iter().for_each(|p| collect_secret_refs(p, &mut refs));
+        let mut resolved = HashMap::new();
+        for r in refs {
+            let v = store.resolve(&r);
+            resolved.insert(r, v);
+        }
+        ResolvedSecrets { resolved, store }
+    }
+}
+
+impl SecretResolver for ResolvedSecrets {
+    fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
+        if self.store.store.is_locked() {
+            return Err("Anvil is locked".into());
+        }
+        match self.resolved.get(r) {
+            Some(v) => v.clone(),
+            None => crate::blocking_in_place(|| self.store.resolve(r)),
+        }
+    }
+}
+
+/// Where the engine reads the secrets of `ctx` from when it executes it: the
+/// spec, the effective auth, and the TLS, proxy and integration profiles its
+/// settings select (with the selected proxy's own TLS profile), as JSON.
+/// Any other profile's secrets are looked up only if they are used.
+fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
+    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
+    let tls_ids = [settings.tls_profile_id, proxy.and_then(|p| p.tls_profile_id)];
+    let tls: Vec<_> = ctx.tls_profiles.iter().filter(|t| tls_ids.contains(&Some(t.id))).collect();
+    let integration = settings.integration_profile_id.and_then(|id| ctx.integrations.iter().find(|i| i.id == id));
+    Ok(vec![
+        serde_json::to_value(&ctx.spec)?,
+        serde_json::to_value(ctx.effective_auth().1)?,
+        serde_json::to_value(tls)?,
+        serde_json::to_value(proxy)?,
+        serde_json::to_value(integration)?,
+    ])
+}
+
+/// Every vault reference (`SensitiveValue::Secret`) in `v`.
+fn collect_secret_refs(v: &serde_json::Value, out: &mut HashSet<SecretRef>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if o.get("kind").and_then(|k| k.as_str()) == Some("secret")
+                && let Some(r) = o.get("secret").and_then(|s| SecretRef::deserialize(s).ok())
+            {
+                out.insert(r);
+            }
+            o.values().for_each(|x| collect_secret_refs(x, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_secret_refs(x, out)),
+        _ => {}
     }
 }
 
@@ -209,7 +284,7 @@ impl App {
             }
         });
         let settings_app = self.settings()?;
-        let ctx = ExecutionContext {
+        let mut ctx = ExecutionContext {
             workspace_id: Some(*ws_id),
             request_id: req.as_ref().map(|r| r.meta.id),
             revision_id: req.as_ref().and_then(|r| r.revision_id),
@@ -221,7 +296,8 @@ impl App {
             tls_profiles: self.tls_profiles(ws_id)?,
             proxy_profiles: self.proxy_profiles(ws_id)?,
             integrations: self.integrations(ws_id)?,
-            secrets: Arc::new(secrets),
+            // Replaced below, once the context has passed its checks.
+            secrets: Arc::new(StoreSecrets { store: self.store.clone(), workspace: *ws_id }),
             attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,
@@ -235,10 +311,15 @@ impl App {
         }
         self.check_device_identity(&ws, &ctx)?;
         self.check_token_files(&ctx.effective_auth().1)?;
+        let parts = secret_parts(&ctx)?;
+        ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts));
         Ok(ctx)
     }
 
     /// Execute and (optionally) record history per the retention policy.
+    /// The context is built, and the execution recorded, on a blocking
+    /// thread (see [`crate::off_runtime`]). A cancel while the context is
+    /// being built returns `Canceled` at once: nothing is sent or recorded.
     pub async fn send(
         &self,
         request_id: Option<Id>,
@@ -251,12 +332,46 @@ impl App {
         if self.is_locked() {
             return Err(AppError::Locked);
         }
-        let ctx = self.build_context(request_id, ws, draft, &opts)?;
+        let record_history = opts.record_history;
+        let ctx = self.build_context_off_runtime(request_id, *ws, draft, opts, &cancel).await?;
         let out = self.engine.execute(&ctx, events, cancel).await;
-        if opts.record_history {
-            self.record(&out)?;
+        if !record_history {
+            return Ok(out);
         }
+        let (out, recorded) = self.record_off_runtime(out).await;
+        recorded?;
         Ok(out)
+    }
+
+    /// [`App::build_context`] on a blocking thread (see
+    /// [`crate::off_runtime`]). A cancel returns `Canceled` at once; the
+    /// context still being built is dropped when it is done.
+    pub async fn build_context_off_runtime(
+        &self,
+        request_id: Option<Id>,
+        ws: Id,
+        draft: Option<RequestSpec>,
+        opts: SendOptions,
+        cancel: &CancellationToken,
+    ) -> Result<ExecutionContext> {
+        let app = self.shared();
+        let built = crate::off_runtime(move || app.build_context(request_id, &ws, draft, &opts));
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(AppError::Canceled),
+            ctx = built => ctx,
+        }
+    }
+
+    /// [`App::record`] on a blocking thread (see [`crate::off_runtime`]),
+    /// handing `out` back with the outcome.
+    pub async fn record_off_runtime(&self, out: ExecutionOutput) -> (ExecutionOutput, Result<()>) {
+        let (app, out) = (self.shared(), Arc::new(out));
+        let recording = out.clone();
+        let recorded = crate::off_runtime(move || app.record(&recording)).await;
+        // The blocking closure, and its handle on `out`, has ended by now;
+        // should it not have, `out` is copied.
+        (Arc::unwrap_or_clone(out), recorded)
     }
 
     pub fn record(&self, out: &ExecutionOutput) -> Result<()> {

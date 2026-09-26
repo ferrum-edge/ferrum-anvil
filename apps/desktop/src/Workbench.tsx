@@ -323,7 +323,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       }
     } catch (e) {
       updateTab(rid, { running: false, execId: null });
-      fail(e);
+      // Canceled before it was prepared: nothing was sent or recorded.
+      if ((e as Error).message !== "CANCELED") fail(e);
     }
   };
 

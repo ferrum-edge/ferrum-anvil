@@ -2,7 +2,7 @@
 //! writes, backend lock enforcement, key binding and schema guards.
 
 use anvil_domain::Id;
-use anvil_storage::store::StoreError;
+use anvil_storage::store::{DB_SCHEMA_VERSION, StoreError};
 use anvil_storage::{KdfParams, Key, Store, kind, vault};
 
 const PLANTED: &[&str] =
@@ -87,6 +87,22 @@ fn wrong_key_is_refused_and_does_not_unlock() {
     s.lock();
     assert!(s.unlock(Key::random()).is_err());
     assert!(s.is_locked(), "a failed unlock leaves the store locked");
+}
+
+#[test]
+fn an_unlock_whose_gate_refuses_never_sets_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let s = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let id = Id::new();
+    s.put(kind::WORKSPACE, &id, None, None, 0.0, &serde_json::json!({"name": "w"})).unwrap();
+    s.lock();
+    // A gate that refuses, as for a lock that landed during the unlock.
+    assert!(matches!(s.unlock_if(created.dek.clone(), || false), Err(StoreError::Locked)));
+    assert!(s.is_locked());
+    assert!(matches!(s.get::<serde_json::Value>(kind::WORKSPACE, &id), Err(StoreError::Locked)));
+    s.unlock_if(created.dek.clone(), || true).unwrap();
+    assert!(s.get::<serde_json::Value>(kind::WORKSPACE, &id).unwrap().is_some());
 }
 
 #[test]
@@ -189,6 +205,56 @@ fn replacing_a_history_record_releases_its_old_body() {
     assert!(store.get_blob(&shared_body).unwrap().is_none(), "no record uses it any more");
     store.add_history(&other, None, None, 1, &record, None).unwrap();
     assert_eq!(store.get_blob(&pinned).unwrap().unwrap().as_slice(), b"attachment");
+}
+
+#[test]
+fn replacing_a_history_record_with_the_same_body_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let id = Id::new();
+    store.add_history(&id, None, None, 1, &serde_json::json!({"n": 1}), Some(b"same body")).unwrap();
+    store.add_history(&id, None, None, 2, &serde_json::json!({"n": 2}), Some(b"same body")).unwrap();
+    let (record, body) = store.get_history::<serde_json::Value>(&id.to_string()).unwrap().unwrap();
+    assert_eq!(record, serde_json::json!({"n": 2}));
+    assert_eq!(body.expect("the body is kept").as_slice(), b"same body");
+    // Retention does not collect it either.
+    store.prune_history(u32::MAX, u64::MAX).unwrap();
+    let (_, body) = store.get_history::<serde_json::Value>(&id.to_string()).unwrap().unwrap();
+    assert_eq!(body.expect("the body is kept").as_slice(), b"same body");
+}
+
+#[test]
+fn history_bodies_are_indexed_on_open_and_unlock_without_a_schema_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let db = || rusqlite::Connection::open(dir.path().join("anvil.db")).unwrap();
+    let indexed = || -> bool {
+        let sql = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='history_body_blob')";
+        db().query_row(sql, [], |r| r.get(0)).unwrap()
+    };
+    let version = || db().query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).unwrap();
+    drop(Store::open(dir.path(), created.dek.clone()).unwrap());
+    assert!(indexed());
+    // An index changes no stored data: the schema version, which earlier
+    // builds check, stays the same.
+    assert_eq!(version(), DB_SCHEMA_VERSION.to_string());
+
+    // A database an earlier build left without the index gets it when opened.
+    db().execute_batch("DROP INDEX history_body_blob;").unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    assert!(indexed());
+    assert_eq!(version(), DB_SCHEMA_VERSION.to_string());
+
+    // And when unlocked; with the index in place, opening again changes nothing.
+    store.lock();
+    db().execute_batch("DROP INDEX history_body_blob;").unwrap();
+    store.unlock(created.dek.clone()).unwrap();
+    assert!(indexed());
+    drop(store);
+    drop(Store::open(dir.path(), created.dek.clone()).unwrap());
+    assert!(indexed());
+    assert_eq!(version(), DB_SCHEMA_VERSION.to_string());
 }
 
 #[test]
