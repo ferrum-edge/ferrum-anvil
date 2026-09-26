@@ -126,7 +126,56 @@ pub enum ProtocolStatus {
         datagrams_sent: u64,
         datagrams_received: u64,
         window_ms: u64,
+        /// Present when the datagrams went through an RFC 9298 CONNECT-UDP
+        /// (MASQUE) proxy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        masque: Option<MasqueTunnel>,
     },
+}
+
+/// How HTTP Datagrams travelled through a CONNECT-UDP tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MasqueEncoding {
+    /// QUIC DATAGRAM frames (quarter stream ID + context ID 0).
+    QuicDatagram,
+    /// RFC 9297 DATAGRAM capsules on the CONNECT stream.
+    Capsule,
+}
+
+/// Evidence about an RFC 9298 CONNECT-UDP tunnel through an HTTP/3 proxy.
+/// Counts cover only what Anvil sent and received; delivery to the target
+/// is never inferred.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MasqueTunnel {
+    /// `host:port` of the proxy.
+    pub proxy: String,
+    /// `host:port` the tunnel was requested for.
+    pub target: String,
+    /// Whether the proxy's HTTP/3 SETTINGS enabled extended CONNECT
+    /// (`None`: no SETTINGS were received).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_connect: Option<bool>,
+    /// Whether HTTP/3 datagrams were available: the proxy's SETTINGS enabled
+    /// `SETTINGS_H3_DATAGRAM` and QUIC negotiated DATAGRAM frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h3_datagrams: Option<bool>,
+    /// The proxy's HTTP status for the CONNECT-UDP request (`None`: no answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_status: Option<u16>,
+    /// The encoding chosen for sending (`None`: the tunnel never opened).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<MasqueEncoding>,
+    pub sent_quic_datagrams: u64,
+    pub sent_capsules: u64,
+    pub received_quic_datagrams: u64,
+    pub received_capsules: u64,
+    /// HTTP Datagrams with an unregistered context ID and capsules of
+    /// unknown type, dropped as RFC 9298 §4 / RFC 9297 §3.1 require.
+    #[serde(default)]
+    pub dropped: u64,
+    /// How the CONNECT stream (the tunnel) ended.
+    pub closed_by: ClosedBy,
 }
 
 /// The composite outcome. Transport completion, application status and

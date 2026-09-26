@@ -138,6 +138,25 @@ describe("ResponsePanel", () => {
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
   });
 
+  it("names the MASQUE proxy and its refusal in the UDP badge, never the target", () => {
+    const tunnel = (connect_status: number, closed_by: string, encoding: string | null) => ({
+      protocol: "udp",
+      datagrams_sent: connect_status === 200 ? 2 : 0,
+      datagrams_received: connect_status === 200 ? 2 : 0,
+      window_ms: 800,
+      masque: { proxy: "127.0.0.1:18843", target: "127.0.0.1:19807", connect_status, encoding, closed_by, sent_quic_datagrams: 0, sent_capsules: 2, received_quic_datagrams: 0, received_capsules: 2 },
+    });
+    const refused = view({ findings: [] });
+    (refused.record.outcome as unknown as { protocol_status: unknown }).protocol_status = tunnel(403, "not_closed", "capsule");
+    render(<ResponsePanel view={refused} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByText(/MASQUE proxy 127\.0\.0\.1:18843 refused \(403\)/)).toBeTruthy();
+    cleanup();
+    const open = view({ findings: [] });
+    (open.record.outcome as unknown as { protocol_status: unknown }).protocol_status = tunnel(200, "client", "capsule");
+    render(<ResponsePanel view={open} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByText(/2 received in 800 ms · via MASQUE 127\.0\.0\.1:18843 \(capsules\)/)).toBeTruthy();
+  });
+
   it("shows a cancel control while a request is running", () => {
     const onCancel = vi.fn();
     render(<ResponsePanel view={null} running progressBytes={2048} onCancel={onCancel} />);

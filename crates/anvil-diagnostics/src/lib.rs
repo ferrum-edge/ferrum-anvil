@@ -178,6 +178,12 @@ pub fn assess_application(protocol: Protocol, status: &ProtocolStatus, body: &Bo
             Some(_) => ApplicationState::Failure,
             None => ApplicationState::NotEvaluated,
         },
+        // A CONNECT-UDP proxy that refused the tunnel is an application-level
+        // answer (of the proxy). An open tunnel is never judged: UDP has no
+        // application status.
+        ProtocolStatus::Udp { masque: Some(m), .. } if m.connect_status.map(|s| !(200..300).contains(&s)).unwrap_or(false) => {
+            ApplicationState::Failure
+        }
         _ => {
             let _ = protocol;
             ApplicationState::NotEvaluated

@@ -12,6 +12,8 @@ import type {
   HttpVersionPolicy,
   IntegrationProfile,
   KeyValue,
+  MasqueDatagramMode,
+  MasqueSpec,
   MultipartPart,
   ProxyProfile,
   RequestDefinition,
@@ -30,6 +32,8 @@ export interface Profiles {
 
 type Sub = "params" | "headers" | "body" | "auth" | "tests" | "protocol" | "settings" | "effective";
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"];
+/** RFC 9298 §2 default URI Template (mirrors `anvil_domain::request::MASQUE_DEFAULT_TEMPLATE`). */
+const MASQUE_DEFAULT_TEMPLATE = "/.well-known/masque/udp/{target_host}/{target_port}/";
 const PROTOCOLS: { id: NonNullable<RequestSpec["protocol"]>; label: string }[] = [
   { id: "http", label: "HTTP" },
   { id: "web_socket", label: "WebSocket" },
@@ -484,6 +488,7 @@ export function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Part
           <input type="checkbox" checked={!!s.reconnect} onChange={(e) => set({ sse: { ...s, reconnect: e.target.checked } })} />
           Reconnect automatically (off by default)
         </label>
+        <p className="hint">The HTTP version setting applies: HTTP/3 streams events over QUIC (https:// only); each reconnection is a new attempt on a new connection.</p>
       </div>
     );
   }
@@ -609,6 +614,8 @@ export function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Part
   }
   if (p === "udp") {
     const u = spec.udp ?? { datagrams: [] };
+    const m = u.masque ?? null;
+    const setMasque = (patch: Partial<MasqueSpec>) => m && set({ udp: { ...u, masque: { ...m, ...patch } } });
     return (
       <div className="col" style={{ maxWidth: 760 }}>
         <PayloadsEditor payloads={u.datagrams} onChange={(datagrams) => set({ udp: { ...u, datagrams } })} />
@@ -616,6 +623,40 @@ export function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Part
           <NumField label="Response window (ms)" value={u.response_window_ms} onChange={(v) => set({ udp: { ...u, response_window_ms: v ?? undefined } })} />
           <NumField label="Max datagrams" value={u.max_datagrams} onChange={(v) => set({ udp: { ...u, max_datagrams: v ?? undefined } })} />
         </div>
+        <label className="check">
+          <input
+            type="checkbox"
+            aria-label="Send through a MASQUE proxy"
+            checked={!!m}
+            onChange={(e) => set({ udp: { ...u, masque: e.target.checked ? { proxy_url: "", uri_template: MASQUE_DEFAULT_TEMPLATE, datagrams: "auto" } : null } })}
+          />
+          Send through an HTTP/3 MASQUE proxy (RFC 9298 CONNECT-UDP)
+        </label>
+        {m && (
+          <div className="col">
+            <div className="row">
+              <label className="lbl grow">
+                Proxy URL
+                <input className="field mono" aria-label="MASQUE proxy URL" placeholder="https://proxy.example:443" value={m.proxy_url} onChange={(e) => setMasque({ proxy_url: e.target.value })} />
+              </label>
+              <label className="lbl">
+                Datagrams
+                <select className="field" aria-label="MASQUE datagram mode" value={m.datagrams ?? "auto"} onChange={(e) => setMasque({ datagrams: e.target.value as MasqueDatagramMode })}>
+                  <option value="auto">Auto (QUIC datagrams if offered, else capsules)</option>
+                  <option value="quic_datagrams">QUIC DATAGRAM frames only</option>
+                  <option value="capsules">DATAGRAM capsules only</option>
+                </select>
+              </label>
+            </div>
+            <label className="lbl">
+              URI template
+              <input className="field mono" aria-label="MASQUE URI template" value={m.uri_template ?? MASQUE_DEFAULT_TEMPLATE} onChange={(e) => setMasque({ uri_template: e.target.value })} />
+            </label>
+            <p className="hint">
+              The request URL stays the UDP target (udp://host:port); {"{target_host}"} and {"{target_port}"} are filled from it. Headers and auth go on the CONNECT request and the TLS profile applies to the proxy. A refusal is the proxy&apos;s answer, never evidence about the target. DTLS inside the tunnel is not supported.
+            </p>
+          </div>
+        )}
         <p className="hint">UDP has no delivery signal: silence means no reply arrived within the window, not that the datagram was lost or dropped by a specific hop.</p>
       </div>
     );

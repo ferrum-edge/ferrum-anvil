@@ -11,6 +11,22 @@
 //! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — native gRPC over HTTP/3
 //!   (all four call modes, full duplex, status in HTTP/3 trailers), or
 //!   gRPC-Web (binary/text) for an `application/grpc-web*` content type
+//! * `/sse?count=&interval=` — server-sent events (`id: n`, `event: tick`),
+//!   then a clean end of stream; `/sse-abort?…` resets the stream
+//!   (`H3_INTERNAL_ERROR`) after the events; `/sse-flaky` sends `retry: 50`
+//!   and events 1–2 then resets when the request has no `Last-Event-ID`, and
+//!   one more event then a clean end when it has one
+//! * `CONNECT …/udp/{host}/{port}/` with `:protocol = connect-udp` (RFC 9298)
+//!   — a MASQUE proxy that relays to that UDP target over a connected socket.
+//!   It answers `200` with `capsule-protocol: ?1`, accepts HTTP Datagrams as
+//!   DATAGRAM capsules and (when [`H3Options::h3_datagrams`]) QUIC DATAGRAM
+//!   frames, and answers in QUIC DATAGRAM frames only when both sides enabled
+//!   `SETTINGS_H3_DATAGRAM`, otherwise in capsules. Query options:
+//!   `refuse=<status>` answers that status with a JSON body;
+//!   `reset_after=N` / `fin_after=N` reset (`H3_INTERNAL_ERROR`) or finish
+//!   the stream after N replies. CONNECT-UDP while
+//!   [`H3Options::connect_udp`] is off gets `501`, a path that is not a
+//!   template expansion `400`.
 //!
 //! Ground truth records QUIC connections, the negotiated ALPN and every
 //! request, so tests can prove that a request really travelled over QUIC.
@@ -59,13 +75,18 @@ impl Drop for H3Fixture {
 /// Server behaviour switches.
 #[derive(Clone, Copy, Debug)]
 pub struct H3Options {
-    /// Advertise `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 9220 WebSocket).
+    /// Advertise `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 9220 WebSocket, RFC 9298 CONNECT-UDP).
     pub extended_connect: bool,
+    /// Serve RFC 9298 CONNECT-UDP (otherwise such requests get `501`).
+    pub connect_udp: bool,
+    /// Advertise `SETTINGS_H3_DATAGRAM` and use QUIC DATAGRAM frames for
+    /// CONNECT-UDP replies when the client advertised it too.
+    pub h3_datagrams: bool,
 }
 
 impl Default for H3Options {
     fn default() -> Self {
-        H3Options { extended_connect: true }
+        H3Options { extended_connect: true, connect_udp: true, h3_datagrams: false }
     }
 }
 
@@ -112,8 +133,12 @@ pub async fn serve_with(bind: &str, tls: TlsServerOptions, options: H3Options) -
                     .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
                     .and_then(|d| d.protocol.map(|p| String::from_utf8_lossy(&p).into_owned()));
                 log.push(GroundTruth::TlsHandshakeCompleted { alpn, client_cert_cn: None });
+                let router = DatagramRouter::default();
+                tokio::spawn(route_datagrams(conn.clone(), router.clone()));
+                let quic = conn.clone();
                 let built = h3::server::builder()
                     .enable_extended_connect(options.extended_connect)
+                    .enable_datagram(options.h3_datagrams)
                     .build::<_, Bytes>(h3_quinn::Connection::new(conn))
                     .await;
                 let mut h3c = match built {
@@ -131,9 +156,13 @@ pub async fn serve_with(bind: &str, tls: TlsServerOptions, options: H3Options) -
                     match accepted {
                         Ok(Some(resolver)) => {
                             let log = log.clone();
+                            let (quic, router) = (quic.clone(), router.clone());
                             tokio::spawn(async move {
                                 let Ok((req, mut stream)) = resolver.resolve_request().await else { return };
                                 if req.method() == http::Method::CONNECT {
+                                    if req.extensions().get::<h3::ext::Protocol>() == Some(&h3::ext::Protocol::CONNECT_UDP) {
+                                        return connect_udp(req, stream, log, options, quic, router).await;
+                                    }
                                     return websocket(req, stream, log).await;
                                 }
                                 let p = req.uri().path();
@@ -176,6 +205,9 @@ pub async fn serve_with(bind: &str, tls: TlsServerOptions, options: H3Options) -
                                     headers: headers.clone(),
                                 });
                                 let segs: Vec<&str> = req.uri().path().trim_start_matches('/').split('/').collect();
+                                if let [route @ ("sse" | "sse-abort" | "sse-flaky")] = segs.as_slice() {
+                                    return sse(route, &req, stream, log).await;
+                                }
                                 let (status, ct, body) = match segs.as_slice() {
                                     [""] => (200u16, "text/plain", Bytes::from_static(b"anvil h3 fixture ok\n")),
                                     ["status", code] => {
@@ -323,4 +355,274 @@ async fn websocket(req: http::Request<()>, mut stream: ServerStream, log: Ground
     }
     drop(ws);
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), uplink).await;
+}
+
+// ------------------------------------------------------------------- SSE ---
+
+fn query(req: &http::Request<()>) -> Vec<(String, String)> {
+    req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
+fn query_u64(qs: &[(String, String)], k: &str) -> Option<u64> {
+    qs.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.parse().ok())
+}
+
+/// Server-sent events over an HTTP/3 request stream.
+async fn sse(route: &str, req: &http::Request<()>, mut stream: ServerStream, log: GroundTruthLog) {
+    let qs = query(req);
+    let count = query_u64(&qs, "count").unwrap_or(3).min(10_000);
+    let interval = std::time::Duration::from_millis(query_u64(&qs, "interval").unwrap_or(30).min(60_000));
+    let last_id: Option<u64> = req.headers().get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok());
+    log.push(GroundTruth::ResponseStarted { status: 200 });
+    let resp = http::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("x-fixture-protocol", "h3")
+        .body(())
+        .expect("static response");
+    if stream.send_response(resp).await.is_err() {
+        return;
+    }
+    let event = |i: u64| Bytes::from(format!("id: {i}\nevent: tick\ndata: {{\"n\":{i}}}\n\n"));
+    match (route, last_id) {
+        ("sse-flaky", None) => {
+            let _ = stream.send_data(Bytes::from_static(b"retry: 50\n")).await;
+            for i in 1..=2 {
+                if stream.send_data(event(i)).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(interval).await;
+            }
+            log.push(GroundTruth::FaultApplied { fault: "sse_flaky_reset".into() });
+            stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+        }
+        ("sse-flaky", Some(last)) => {
+            let _ = stream.send_data(event(last + 1)).await;
+            let _ = stream.finish().await;
+        }
+        _ => {
+            for i in 0..count {
+                if stream.send_data(event(i)).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(interval).await;
+            }
+            if route == "sse-abort" {
+                log.push(GroundTruth::FaultApplied { fault: "sse_abort_mid_stream".into() });
+                stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+            } else {
+                let _ = stream.finish().await;
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------ CONNECT-UDP ---
+
+/// QUIC DATAGRAM frames of one connection, routed by quarter stream ID to
+/// the CONNECT-UDP stream they belong to (RFC 9297 §2.1).
+#[derive(Clone, Default)]
+struct DatagramRouter(Arc<parking_lot::Mutex<std::collections::HashMap<u64, tokio::sync::mpsc::Sender<Bytes>>>>);
+
+fn put_varint(out: &mut Vec<u8>, v: u64) {
+    if v < 1 << 6 {
+        out.push(v as u8);
+    } else if v < 1 << 14 {
+        out.extend_from_slice(&(0x4000 | v as u16).to_be_bytes());
+    } else if v < 1 << 30 {
+        out.extend_from_slice(&(0x8000_0000 | v as u32).to_be_bytes());
+    } else {
+        out.extend_from_slice(&(0xc000_0000_0000_0000 | v).to_be_bytes());
+    }
+}
+
+fn read_varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
+    let first = *buf.get(*pos)?;
+    let len = 1usize << (first >> 6);
+    if buf.len() - *pos < len {
+        return None;
+    }
+    let mut v = u64::from(first & 0x3f);
+    for i in 1..len {
+        v = (v << 8) | u64::from(buf[*pos + i]);
+    }
+    *pos += len;
+    Some(v)
+}
+
+async fn route_datagrams(conn: quinn::Connection, router: DatagramRouter) {
+    while let Ok(d) = conn.read_datagram().await {
+        let mut pos = 0;
+        let Some(q) = read_varint(&d, &mut pos) else { continue };
+        let tx = router.0.lock().get(&q).cloned();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(d.slice(pos..));
+        }
+    }
+}
+
+/// `…/udp/{target_host}/{target_port}/` with percent-decoding of the host.
+fn connect_udp_target(path: &str) -> Option<(String, u16)> {
+    let segs: Vec<&str> = path.split('/').collect();
+    if !path.ends_with('/') || segs.len() < 4 || segs[segs.len() - 4] != "udp" {
+        return None;
+    }
+    let raw = segs[segs.len() - 3];
+    let mut host = Vec::with_capacity(raw.len());
+    let b = raw.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            host.push(u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            host.push(b[i]);
+            i += 1;
+        }
+    }
+    let port: u16 = segs[segs.len() - 2].parse().ok().filter(|p| *p > 0)?;
+    Some((String::from_utf8(host).ok()?, port))
+}
+
+async fn reply_json(stream: &mut ServerStream, log: &GroundTruthLog, status: u16, body: String) {
+    log.push(GroundTruth::ResponseStarted { status });
+    let resp = http::Response::builder().status(status).header("content-type", "application/json").body(()).expect("static response");
+    if stream.send_response(resp).await.is_ok() {
+        let _ = stream.send_data(Bytes::from(body)).await;
+        let _ = stream.finish().await;
+    }
+}
+
+/// RFC 9298 CONNECT-UDP: relay HTTP Datagrams to and from the UDP target.
+async fn connect_udp(
+    req: http::Request<()>,
+    mut stream: ServerStream,
+    log: GroundTruthLog,
+    options: H3Options,
+    quic: quinn::Connection,
+    router: DatagramRouter,
+) {
+    use h3::ConnectionState;
+    let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+    let headers: Vec<(String, String)> =
+        req.headers().iter().map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
+    log.push(GroundTruth::RequestReceived { method: "CONNECT".into(), path: path.clone(), body_bytes: 0, headers });
+    if !options.connect_udp {
+        return reply_json(&mut stream, &log, 501, r#"{"error":"CONNECT-UDP is disabled on this fixture"}"#.into()).await;
+    }
+    let qs = query(&req);
+    if let Some(code) = query_u64(&qs, "refuse") {
+        let body = format!(r#"{{"error":"the fixture refused this CONNECT-UDP request","status":{code}}}"#);
+        return reply_json(&mut stream, &log, code as u16, body).await;
+    }
+    let Some((host, port)) = connect_udp_target(req.uri().path()) else {
+        return reply_json(&mut stream, &log, 400, r#"{"error":"path does not expand the connect-udp URI template"}"#.into()).await;
+    };
+    let addr = match tokio::net::lookup_host((host.as_str(), port)).await.ok().and_then(|mut a| a.next()) {
+        Some(a) => a,
+        None => return reply_json(&mut stream, &log, 502, r#"{"error":"CONNECT-UDP target could not be resolved"}"#.into()).await,
+    };
+    let bind: SocketAddr = if addr.is_ipv6() { "[::]:0".parse().expect("v6") } else { "0.0.0.0:0".parse().expect("v4") };
+    let sock = match tokio::net::UdpSocket::bind(bind).await {
+        Ok(s) if s.connect(addr).await.is_ok() => s,
+        _ => return reply_json(&mut stream, &log, 502, r#"{"error":"CONNECT-UDP tunnel socket could not be created"}"#.into()).await,
+    };
+    let client_datagrams = matches!(stream.settings(), std::borrow::Cow::Borrowed(s) if s.enable_datagram());
+    let quic_replies = options.h3_datagrams && client_datagrams && quic.max_datagram_size().is_some();
+    log.push(GroundTruth::ResponseStarted { status: 200 });
+    let resp = http::Response::builder().status(200).header("capsule-protocol", "?1").body(()).expect("static response");
+    if stream.send_response(resp).await.is_err() {
+        return;
+    }
+    let reset_after = query_u64(&qs, "reset_after");
+    let fin_after = query_u64(&qs, "fin_after");
+    let quarter = stream.id().into_inner() / 4;
+    let (tx_dgram, mut rx_dgram) = tokio::sync::mpsc::channel::<Bytes>(64);
+    router.0.lock().insert(quarter, tx_dgram);
+    let (mut send, mut recv) = stream.split();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 65_536];
+    let mut replies = 0u64;
+    let mut ended = false;
+    // Client → target: one Context ID 0 payload.
+    let relay = |ctx_and_payload: &[u8], via: &str| -> Option<Vec<u8>> {
+        let mut pos = 0;
+        let ctx = read_varint(ctx_and_payload, &mut pos)?;
+        if ctx != 0 {
+            return None;
+        }
+        log.push(GroundTruth::DatagramRelayed { bytes: (ctx_and_payload.len() - pos) as u64, via: via.into() });
+        Some(ctx_and_payload[pos..].to_vec())
+    };
+    loop {
+        tokio::select! {
+            c = recv.recv_data() => match c {
+                Ok(Some(mut chunk)) => {
+                    let n = chunk.remaining();
+                    pending.extend_from_slice(&chunk.copy_to_bytes(n));
+                    loop {
+                        let mut pos = 0;
+                        let (Some(ty), Some(len)) = (read_varint(&pending, &mut pos), read_varint(&pending, &mut pos)) else { break };
+                        let len = len as usize;
+                        if pending.len() - pos < len {
+                            break;
+                        }
+                        let value: Vec<u8> = pending[pos..pos + len].to_vec();
+                        pending.drain(..pos + len);
+                        if ty == 0
+                            && let Some(p) = relay(&value, "capsule")
+                        {
+                            let _ = sock.send(&p).await;
+                        }
+                    }
+                }
+                _ => break,
+            },
+            Some(d) = rx_dgram.recv() => {
+                if let Some(p) = relay(&d, "quic_datagram") {
+                    let _ = sock.send(&p).await;
+                }
+            }
+            r = sock.recv(&mut buf) => {
+                let Ok(n) = r else { break };
+                let sent = if quic_replies {
+                    let mut out = Vec::with_capacity(n + 9);
+                    put_varint(&mut out, quarter);
+                    put_varint(&mut out, 0);
+                    out.extend_from_slice(&buf[..n]);
+                    quic.send_datagram(Bytes::from(out)).is_ok()
+                } else {
+                    let mut out = Vec::with_capacity(n + 10);
+                    put_varint(&mut out, 0);
+                    put_varint(&mut out, n as u64 + 1);
+                    put_varint(&mut out, 0);
+                    out.extend_from_slice(&buf[..n]);
+                    send.send_data(Bytes::from(out)).await.is_ok()
+                };
+                if !sent {
+                    break;
+                }
+                replies += 1;
+                if reset_after == Some(replies) {
+                    // Let the reply leave before the reset abandons unsent stream data.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    log.push(GroundTruth::FaultApplied { fault: "masque_reset".into() });
+                    send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                    ended = true;
+                    break;
+                }
+                if fin_after == Some(replies) {
+                    log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
+                    let _ = send.finish().await;
+                    ended = true;
+                    break;
+                }
+            }
+        }
+    }
+    router.0.lock().remove(&quarter);
+    if !ended {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), send.finish()).await;
+    }
 }

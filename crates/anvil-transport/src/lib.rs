@@ -19,6 +19,7 @@ pub mod grpc;
 pub mod grpc_web;
 pub mod h3;
 pub mod http;
+pub mod masque;
 pub mod net;
 pub mod rawtcp;
 pub mod recorder;

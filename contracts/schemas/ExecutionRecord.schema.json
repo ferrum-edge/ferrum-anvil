@@ -882,6 +882,16 @@
           "description": "Peer sent a fatal alert after the client finished its handshake\n(TLS 1.3 client-certificate rejection surfaces here).",
           "type": "string",
           "const": "tls_alert_after_handshake"
+        },
+        {
+          "description": "The HTTP/3 MASQUE proxy's SETTINGS do not offer what the CONNECT-UDP\ntunnel needs (extended CONNECT, or HTTP/3 datagrams when required),\nor never arrived. No request was sent.",
+          "type": "string",
+          "const": "masque_unsupported"
+        },
+        {
+          "description": "The MASQUE proxy answered the CONNECT-UDP request with a non-2xx\nstatus; no tunnel was opened.",
+          "type": "string",
+          "const": "masque_refused"
         }
       ]
     },
@@ -2015,6 +2025,17 @@
               "format": "uint64",
               "minimum": 0
             },
+            "masque": {
+              "description": "Present when the datagrams went through an RFC 9298 CONNECT-UDP\n(MASQUE) proxy.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MasqueTunnel"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "protocol": {
               "type": "string",
               "const": "udp"
@@ -2068,6 +2089,110 @@
           "description": "Connection ended without a closing handshake (e.g. WebSocket 1006).",
           "type": "string",
           "const": "abnormal"
+        }
+      ]
+    },
+    "MasqueTunnel": {
+      "description": "Evidence about an RFC 9298 CONNECT-UDP tunnel through an HTTP/3 proxy.\nCounts cover only what Anvil sent and received; delivery to the target\nis never inferred.",
+      "type": "object",
+      "properties": {
+        "proxy": {
+          "description": "`host:port` of the proxy.",
+          "type": "string"
+        },
+        "target": {
+          "description": "`host:port` the tunnel was requested for.",
+          "type": "string"
+        },
+        "extended_connect": {
+          "description": "Whether the proxy's HTTP/3 SETTINGS enabled extended CONNECT\n(`None`: no SETTINGS were received).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "h3_datagrams": {
+          "description": "Whether HTTP/3 datagrams were available: the proxy's SETTINGS enabled\n`SETTINGS_H3_DATAGRAM` and QUIC negotiated DATAGRAM frames.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "connect_status": {
+          "description": "The proxy's HTTP status for the CONNECT-UDP request (`None`: no answer).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "encoding": {
+          "description": "The encoding chosen for sending (`None`: the tunnel never opened).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MasqueEncoding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sent_quic_datagrams": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sent_capsules": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "received_quic_datagrams": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "received_capsules": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "dropped": {
+          "description": "HTTP Datagrams with an unregistered context ID and capsules of\nunknown type, dropped as RFC 9298 §4 / RFC 9297 §3.1 require.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "closed_by": {
+          "description": "How the CONNECT stream (the tunnel) ended.",
+          "$ref": "#/$defs/ClosedBy"
+        }
+      },
+      "required": [
+        "proxy",
+        "target",
+        "sent_quic_datagrams",
+        "sent_capsules",
+        "received_quic_datagrams",
+        "received_capsules",
+        "closed_by"
+      ]
+    },
+    "MasqueEncoding": {
+      "description": "How HTTP Datagrams travelled through a CONNECT-UDP tunnel.",
+      "oneOf": [
+        {
+          "description": "QUIC DATAGRAM frames (quarter stream ID + context ID 0).",
+          "type": "string",
+          "const": "quic_datagram"
+        },
+        {
+          "description": "RFC 9297 DATAGRAM capsules on the CONNECT stream.",
+          "type": "string",
+          "const": "capsule"
         }
       ]
     },

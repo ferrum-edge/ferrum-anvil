@@ -219,6 +219,7 @@ fn udp_ctx(env: &Env, url: &str, datagrams: &[&str], window_ms: u64, root_pem: O
         datagrams: datagrams.iter().map(|d| StreamPayload { data: d.to_string(), encoding: PayloadEncoding::Text }).collect(),
         response_window_ms: window_ms,
         max_datagrams: 100,
+        masque: None,
     });
     ctx_with(env, s, root_pem, None)
 }

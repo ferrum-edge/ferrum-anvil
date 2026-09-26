@@ -10,6 +10,8 @@
 //!   accepted the call but is slow to answer).
 //! * [`sse_abort`]: an event stream that sends a few events and then aborts
 //!   the response body mid-stream (no terminal chunk / stream reset).
+//! * [`sse_flaky`]: an event stream that aborts unless the request carries
+//!   `Last-Event-ID`, then resumes after it (SSE reconnection, `h3x` profile).
 //!
 //! Ground truth goes to each fixture's [`GroundTruthLog`]; it is never given
 //! to the diagnostic engine.
@@ -246,4 +248,55 @@ pub async fn sse_abort(bind: &str) -> anyhow::Result<SlowFixture> {
 
 fn full(b: &'static str) -> FxBody {
     http_body_util::Full::new(Bytes::from_static(b.as_bytes())).map_err(|e: Infallible| match e {}).boxed()
+}
+
+// ------------------------------------------------------------- SSE flaky ---
+
+/// `GET /…?interval=MS` for SSE reconnection through a gateway. Without a
+/// `Last-Event-ID`: `retry: 50`, events 1 and 2, then the body is aborted.
+/// With `Last-Event-ID: N`: event N+1 and a clean end of stream. The request
+/// headers (including `Last-Event-ID`) are recorded as ground truth.
+pub async fn sse_flaky(bind: &str) -> anyhow::Result<SlowFixture> {
+    serve_with(bind, |req: Request<Incoming>, log: GroundTruthLog| async move {
+        request_received(&req, &log);
+        let interval = req
+            .uri()
+            .query()
+            .map(|q| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect::<Vec<(String, String)>>())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(n, _)| n == "interval")
+            .and_then(|(_, v)| v.parse::<u64>().ok())
+            .unwrap_or(30)
+            .min(10_000);
+        let last: Option<u64> = req.headers().get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok());
+        let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(16);
+        let body: FxBody = BodyExt::boxed(StreamBody::new(rx));
+        tokio::spawn(async move {
+            let event = |i: u64| Bytes::from(format!("id: {i}\nevent: tick\ndata: {{\"n\":{i}}}\n\n"));
+            match last {
+                None => {
+                    let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"retry: 50\n")))).await;
+                    for i in 1..=2 {
+                        if tx.send(Ok(Frame::data(event(i)))).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(interval)).await;
+                    }
+                    log.push(GroundTruth::FaultApplied { fault: "sse_flaky_abort".into() });
+                    let _ = tx.send(Err(std::io::Error::other("fixture aborts the event stream"))).await;
+                }
+                Some(n) => {
+                    let _ = tx.send(Ok(Frame::data(event(n + 1)))).await;
+                }
+            }
+        });
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(body)
+            .expect("static response")
+    })
+    .await
 }

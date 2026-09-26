@@ -2,7 +2,7 @@ use super::Ctx;
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
 use anvil_domain::execution::{Direction, FailureKind};
-use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, OutcomeWarning, ProtocolStatus, WarningCode};
+use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, MasqueTunnel, OutcomeWarning, ProtocolStatus, WarningCode};
 
 pub fn grpc_name(code: i32) -> &'static str {
     match code {
@@ -125,7 +125,10 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 );
             }
         }
-        ProtocolStatus::Udp { datagrams_sent, datagrams_received, window_ms } => {
+        ProtocolStatus::Udp { datagrams_sent, datagrams_received, window_ms, masque } => {
+            if let Some(m) = masque {
+                masque_rules(ctx, m, out);
+            }
             // A DTLS peer that completed the handshake and then sent
             // close_notify without answering did answer: it closed the
             // session. "Nothing is listening" is then contradicted, so the
@@ -204,6 +207,67 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             }
         }
         _ => {}
+    }
+}
+
+/// RFC 9298 CONNECT-UDP tunnel facts. Every claim is about the MASQUE proxy
+/// Anvil talked to; a refusal or a missing capability is never a claim
+/// about the UDP target, which the proxy may not have contacted at all.
+fn masque_rules(ctx: &Ctx<'_>, m: &MasqueTunnel, out: &mut Vec<Draft>) {
+    let idx = ctx.attempt_index();
+    let failure = ctx.final_attempt().and_then(|a| a.failure.as_ref());
+    let base = |code: &str, conf: Confidence, owner: Owner, sev: Severity| {
+        Draft::new(code, "protocol.masque", conf, SourceScope::ForwardProxy, owner, sev)
+            .ev_at(E::NativeTransport, "masque.proxy", m.proxy.clone(), idx)
+            .ev_at(E::NativeTransport, "masque.target", m.target.clone(), idx)
+            .var("proxy", m.proxy.clone())
+            .var("target", m.target.clone())
+    };
+    let settings = |d: Draft| {
+        let flag = |v: Option<bool>| v.map(|b| if b { "enabled" } else { "not enabled" }).unwrap_or("not received").to_string();
+        d.ev_at(E::NativeTransport, "h3.settings.enable_connect_protocol", flag(m.extended_connect), idx).ev_at(
+            E::NativeTransport,
+            "h3.settings.h3_datagram",
+            flag(m.h3_datagrams),
+            idx,
+        )
+    };
+    if let Some(s) = m.connect_status.filter(|s| !(200..300).contains(s)) {
+        let mut d = base("masque.proxy_refused", Confidence::Confirmed, Owner::Unknown, Severity::Error)
+            .ev_at(E::HttpStatus, "connect.status", s.to_string(), idx)
+            .var("status", s.to_string());
+        if let Some(r) = ctx.input.response {
+            for v in r.header_values("proxy-status") {
+                d = d.ev_at(E::HttpHeader, "header.proxy-status", v.to_string(), idx);
+            }
+        }
+        if let Some(e) = &ctx.body.json_error {
+            d = d.ev_at(E::BodyContent, "body.error", e.clone(), idx);
+        }
+        out.push(d);
+    }
+    if failure.map(|f| f.kind == FailureKind::MasqueUnsupported).unwrap_or(false) {
+        let d = match (m.extended_connect, m.h3_datagrams) {
+            (None, _) => base("masque.settings_not_received", Confidence::Unknown, Owner::Unknown, Severity::Error),
+            (Some(false), _) => base("masque.extended_connect_unavailable", Confidence::Confirmed, Owner::Unknown, Severity::Error),
+            (Some(true), _) => base("masque.no_datagram_support", Confidence::Confirmed, Owner::Unknown, Severity::Error),
+        };
+        out.push(settings(d));
+    }
+    if m.connect_status.map(|s| (200..300).contains(&s)).unwrap_or(false) && m.closed_by == ClosedBy::Abnormal {
+        let mut d = base("masque.tunnel_ended_abnormally", Confidence::Confirmed, Owner::Unknown, Severity::Error).ev_at(
+            E::NativeTransport,
+            "closed_by",
+            format!("{:?}", m.closed_by),
+            idx,
+        );
+        if let Some(f) = failure {
+            d = d.ev_at(E::NativeTransport, "failure.kind", format!("{:?}", f.kind), idx);
+            if let Some(c) = f.quic_error_code {
+                d = d.ev_at(E::NativeTransport, "h3.error_code", format!("0x{c:x}"), idx);
+            }
+        }
+        out.push(d);
     }
 }
 

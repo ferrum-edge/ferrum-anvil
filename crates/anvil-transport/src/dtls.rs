@@ -678,7 +678,7 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     obs.bytes.request_body = tr.sent_bytes();
     obs.bytes.response_body_wire = Some(tr.received_bytes());
     let obs = finish_attempt(rec, obs, events);
-    let ps = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: plan.response_window_ms };
+    let ps = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: plan.response_window_ms, masque: None };
     SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, Some(tr.finish()), ps, facts)
 }
 

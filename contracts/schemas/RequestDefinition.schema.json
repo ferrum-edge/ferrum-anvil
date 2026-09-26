@@ -2377,10 +2377,63 @@
           "format": "uint32",
           "minimum": 0,
           "default": 1000
+        },
+        "masque": {
+          "description": "Send the datagrams through an HTTP/3 MASQUE proxy (RFC 9298\nCONNECT-UDP) instead of directly. The request URL stays the UDP\ntarget (`udp://host:port`); the proxy only relays. `None` = direct.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MasqueSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "datagrams"
+      ]
+    },
+    "MasqueSpec": {
+      "description": "RFC 9298 UDP proxying over HTTP/3 (\"MASQUE\" CONNECT-UDP). Belongs to\nthe UDP request rather than to a proxy profile: the proxy is addressed by\na URI Template (not `host:port`), carries only UDP, and its datagram\nencoding is part of the exchange's evidence (docs/protocols.md).",
+      "type": "object",
+      "properties": {
+        "proxy_url": {
+          "description": "The proxy's `https://host:port` origin (variables allowed). HTTP/3\nneeds TLS, so any other scheme is refused before traffic; the TLS\nprofile setting applies to the QUIC handshake with the proxy.",
+          "type": "string"
+        },
+        "uri_template": {
+          "description": "RFC 9298 §2 URI Template path (and optional query) on the proxy.\n`{target_host}` and `{target_port}` are expanded from the request URL.",
+          "type": "string",
+          "default": "/.well-known/masque/udp/{target_host}/{target_port}/"
+        },
+        "datagrams": {
+          "$ref": "#/$defs/MasqueDatagramMode",
+          "default": "auto"
+        }
+      },
+      "required": [
+        "proxy_url"
+      ]
+    },
+    "MasqueDatagramMode": {
+      "description": "How HTTP Datagrams (RFC 9297) are carried through the tunnel.",
+      "oneOf": [
+        {
+          "description": "QUIC DATAGRAM frames when the proxy's SETTINGS enable HTTP/3\ndatagrams (`SETTINGS_H3_DATAGRAM`) and QUIC negotiated DATAGRAM\nframes; otherwise DATAGRAM capsules on the CONNECT stream (RFC 9297\n§3.5). The encoding used is recorded.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Require QUIC DATAGRAM frames; fail before traffic when the proxy does\nnot offer HTTP/3 datagrams.",
+          "type": "string",
+          "const": "quic_datagrams"
+        },
+        {
+          "description": "Always DATAGRAM capsules on the CONNECT stream.",
+          "type": "string",
+          "const": "capsules"
+        }
       ]
     },
     "ImportSource": {
