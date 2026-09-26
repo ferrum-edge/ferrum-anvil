@@ -943,7 +943,10 @@ export function ImportDialog(props: {
             <div className="bad-box col">
               <span>
                 This {noun} writes into your existing workspace{existing.length > 1 ? "s" : ""} {existing.map((w) => `'${w.name}'`).join(", ")}; {backup ? "restored" : "imported"} items can use
-                {existing.length > 1 ? " their" : " its"} vault secrets and send them wherever they point. A passphrase only proves the {noun} was not altered, not who made it.{" "}
+                {existing.length > 1 ? " their" : " its"} vault secrets and send them wherever they point.{" "}
+                {preview.secrets_restored
+                  ? `Its passphrase only proves the ${noun} was not altered, not who made it.`
+                  : `This ${noun} is not encrypted, so nothing shows it was not altered or who made it.`}{" "}
                 {backup ? "Continue only if this backup is your own or you otherwise trust it." : "Import as copies unless you trust where this bundle came from."}
               </span>
               <label className="check">

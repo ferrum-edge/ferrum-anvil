@@ -130,18 +130,22 @@ against it).
   covers the bundle format version and the SHA-256 of every other entry by
   name: the manifest (kind, mode, placeholders and vault parameters
   included), `workspace/objects.json`, each attachment and the history. A
-  change to any entry, or an entry added or removed, fails the vault's
-  authentication, and the import is refused before any secret or literal is
-  restored and before anything is written. Recomputing `checksums.json` does
-  not help: checksums only detect corruption. Each literal is restored only
-  to the field the export recorded (listed in the manifest's placeholders),
-  and only while that field still holds its placeholder; any other mismatch
-  refuses the whole import. Bundles of earlier builds (format 1) sealed the
-  vault with constant associated data that bound nothing else in the
-  archive; an encrypted bundle of that format is refused, with or without
-  its passphrase, and must be exported again. A bundle whose mode and vault
-  disagree (an encrypted-transfer manifest without a vault, or a share-safe
-  one with one) is refused.
+  change to any other entry, or another entry added or removed, fails the
+  vault's authentication, and the import is refused before any secret or
+  literal is restored and before anything is written. Recomputing
+  `checksums.json` does not help: checksums only detect corruption. Each
+  literal is restored only to the field the export recorded (listed in the
+  manifest's placeholders), and only while that field still holds its
+  placeholder; any other mismatch refuses the whole import. Bundles of
+  earlier builds (format 1) sealed the vault with constant associated data
+  that bound nothing else in the archive; an encrypted bundle of that format
+  is refused, with or without its passphrase, and must be exported again. A
+  bundle whose mode and vault disagree (an encrypted-transfer manifest
+  without a vault, or a share-safe one with one) is refused. Removing the
+  vault, with the manifest relabelled to match, does not fail
+  authentication: it turns the bundle into a share-safe one, from which no
+  secret or literal is restored. A passphrase given for a share-safe bundle
+  is refused rather than accepted as though it verified the bundle.
 - **Reading an encrypted bundle:** only the vault is encrypted. The objects
   (names, URLs, header and body text), attachments and history are ordinary
   zip entries that anyone holding the file can read, in either mode. Secrets
@@ -174,11 +178,12 @@ against it).
   Replace into a stored workspace assume the bundle is trusted: what they write
   there can use that workspace's vault secrets. The preview lists each such
   workspace as an error and the import is refused unless the user confirms each
-  one after the preview. Encryption proves nothing about who wrote a bundle; it
-  only shows the bundle was not altered after it was exported (see "Altering
-  an encrypted bundle"), and a share-safe bundle has no passphrase at all.
-  Duplicate never
-  writes into a stored workspace and is the safe choice for untrusted bundles.
+  one after the preview. Encryption proves nothing about who wrote a bundle;
+  for an encrypted bundle whose vault opened, it only shows the bundle was not
+  altered after it was exported (see "Altering an encrypted bundle"). A
+  share-safe bundle has no passphrase at all, and nothing shows it was not
+  altered. Duplicate never writes into a stored workspace and is the safe
+  choice for untrusted bundles.
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
   request is prepared only in its own workspace and with folders of that
@@ -246,6 +251,10 @@ against it).
   anyone holding the file; only its vault is encrypted (see "Reading an
   encrypted bundle"). Share one only with people who may read its
   contents; a full backup encrypts everything.
+- An encrypted bundle's passphrase shows only that the bundle is one some
+  export sealed with it: an older, authentic bundle exported with the same
+  passphrase still opens. Use a new passphrase for each export when it
+  matters which one is imported.
 - A bundle the user confirms writing into an existing workspace is trusted
   with that workspace's secrets (see "Bundle writing into an existing
   workspace").

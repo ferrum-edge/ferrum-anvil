@@ -1153,6 +1153,30 @@ fn an_encrypted_bundle_changed_in_any_entry_restores_nothing() {
     assert!(matches!(bundle::open(&no_vault, Some(pass)), Err(BundleError::Checksum(_))));
 }
 
+#[test]
+fn a_passphrase_is_refused_for_a_bundle_without_a_vault() {
+    let pass = "correct horse battery";
+    let g = sample();
+    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    // Without its vault, and relabelled, an encrypted bundle is a share-safe
+    // one: the passphrase would verify nothing about it.
+    let stripped = edit_json(&without_entry(&bytes, "secrets/portable-vault.enc"), "manifest.json", |m| {
+        m["mode"] = "share_safely".into();
+        m["vault"] = serde_json::Value::Null;
+    });
+    let e = bundle::open(&stripped, Some(pass)).unwrap_err();
+    assert!(matches!(e, BundleError::NotEncrypted), "{e}");
+    assert!(e.to_string().contains("not encrypted"), "{e}");
+    // Opened without one, it restores no credentials.
+    let opened = bundle::open(&stripped, None).unwrap();
+    assert!(!opened.secrets_restored && opened.graph.secrets.is_empty());
+
+    // A bundle exported to share safely is refused a passphrase as well.
+    let (safe, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    assert!(matches!(bundle::open(&safe, Some(pass)), Err(BundleError::NotEncrypted)));
+    assert!(!bundle::open(&safe, None).unwrap().secrets_restored);
+}
+
 /// `bytes`, an encrypted bundle of `g`, as format 1 wrote it: its vault
 /// sealed with a constant associated data that binds nothing else in the
 /// archive.

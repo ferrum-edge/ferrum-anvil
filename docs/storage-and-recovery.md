@@ -127,12 +127,16 @@ An encrypted-transfer bundle (format 2) seals its vault with the SHA-256 of
 every other entry as associated data: the manifest (kind, mode, placeholders
 and vault parameters included), `workspace/objects.json`, each attachment and
 the history, with the format version. The vault therefore opens only inside
-the exact bundle it was exported with. A change to any entry, or an entry
-added or removed, is refused as a wrong passphrase or a modified bundle,
-before any secret or literal is restored and before anything is written;
-recomputing `checksums.json` does not change that. Each literal is restored
-only to the field the export recorded, and only while that field still holds
-its placeholder. A bundle whose manifest mode and vault disagree is refused.
+the exact bundle it was exported with. A change to any other entry, or
+another entry added or removed, is refused as a wrong passphrase or a
+modified bundle, before any secret or literal is restored and before anything
+is written; recomputing `checksums.json` does not change that. Each literal
+is restored only to the field the export recorded, and only while that field
+still holds its placeholder. A bundle whose manifest mode and vault disagree
+is refused. Removing the vault, with the manifest relabelled to match, does
+not fail authentication: it turns the bundle into a share-safe one, from
+which no secret or literal is restored. A passphrase given for a share-safe
+bundle is refused rather than accepted as though it verified anything.
 Encrypted bundles written by earlier builds (format 1) sealed the vault
 without binding anything else in the archive; they are refused, with or
 without the passphrase, and must be exported again. Share-safe bundles of
@@ -157,8 +161,10 @@ to any URL, a variable, an auth setting) can use that workspace's vault
 secrets. The preview lists every such workspace as an error, and applying is
 refused unless the user confirms each one after the preview (the desktop's
 checkbox; `anvil import --into-existing <WORKSPACE_ID>`). Confirm only for a
-bundle you trust: a passphrase shows the bundle was not altered after it was
-exported, not who wrote it, and a share-safe bundle has no passphrase at all.
+bundle you trust: for an encrypted bundle whose vault opened, the passphrase
+shows the bundle was not altered after it was exported, not who wrote it; a
+share-safe bundle has no passphrase at all, and nothing shows it was not
+altered.
 Duplicate never writes into a stored workspace.
 
 A bundle is refused when any workspace-scoped object (folder, request,

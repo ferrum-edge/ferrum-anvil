@@ -67,6 +67,8 @@ pub enum BundleError {
     WrongPassphrase,
     #[error("this encrypted bundle is from an earlier Anvil build and cannot be opened safely; export it again; nothing was imported")]
     UnboundVault,
+    #[error("this bundle is not encrypted; a passphrase proves nothing about it; open it without one; nothing was imported")]
+    NotEncrypted,
     #[error("legacy full backups are not supported; restore from an ANVILBAK backup")]
     LegacyFullBackup,
     #[error("a full backup is written as an ANVILBAK backup file, not as a bundle")]
@@ -361,14 +363,8 @@ fn safe_name(name: &str) -> Result<(), BundleError> {
     if name.split('/').any(|seg| seg == ".." || seg == ".") {
         return bad("path traversal");
     }
-    let allowed = [
-        MANIFEST_ENTRY,
-        CHECKSUMS_ENTRY,
-        "workspace/objects.json",
-        "settings/portable.json",
-        "history/records.jsonl",
-        VAULT_ENTRY,
-    ];
+    let allowed =
+        [MANIFEST_ENTRY, CHECKSUMS_ENTRY, "workspace/objects.json", "settings/portable.json", "history/records.jsonl", VAULT_ENTRY];
     if allowed.contains(&name) {
         return Ok(());
     }
@@ -523,6 +519,12 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
         (Some(_), ExportMode::EncryptedTransfer) => {}
         (None, ExportMode::ShareSafely) if !entries.contains_key(VAULT_ENTRY) => {}
         _ => return Err(BundleError::Invalid("the manifest's export mode does not match the bundle's encrypted vault".into())),
+    }
+    // A passphrase is only ever checked against a vault. One given for a
+    // bundle without a vault would verify nothing, yet read as though the
+    // bundle had been checked against it.
+    if manifest.vault.is_none() && passphrase.is_some() {
+        return Err(BundleError::NotEncrypted);
     }
     // Schema compatibility is settled before any object is interpreted:
     // serde would silently drop fields a newer schema added.

@@ -9,4 +9,6 @@
   is refused before any secret is restored. Encrypted bundles exported by
   earlier builds (format 1), including whole-profile zip backups from early
   development builds, are refused on import; export them again with this
-  version. Share-safe bundles of either format still import.
+  version. Share-safe bundles of either format still import, but only
+  without a passphrase: one given for a bundle that is not encrypted is
+  refused, since it would verify nothing.

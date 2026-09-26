@@ -191,8 +191,9 @@ fn placeholder_text(placeholder: &str) -> String {
 ///
 /// Each value goes back only to the exact pointer it was taken from, and
 /// only while that field still holds the text [`sanitize`] wrote there. A
-/// pointer that is missing, names anything else or repeats refuses the
-/// whole restore and leaves `v` unchanged.
+/// pointer that is missing, or whose field holds anything else (as a field
+/// already restored by an earlier value usually does), refuses the whole
+/// restore and leaves `v` unchanged.
 pub fn restore(v: &mut serde_json::Value, extracted: &[Extracted]) -> Result<(), String> {
     let mut restored = v.clone();
     for e in extracted {
