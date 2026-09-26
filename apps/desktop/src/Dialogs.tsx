@@ -10,6 +10,7 @@ import type {
   HboneOptions,
   IntegrationProfile,
   KeyValue,
+  ProtectionMode,
   ProxyProfile,
   TlsProfile,
   Variable,
@@ -987,15 +988,23 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
   const [s, setS] = useState<AppSettings | null>(null);
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // A recovery key from a conversion is shown once: Settings stays open
+  // until the user confirms they stored it.
+  const [recovery, setRecovery] = useState<string | null>(null);
+  const [closeRefused, setCloseRefused] = useState(false);
   useEffect(() => {
     api.settings().then(setS);
     api.systemInfo().then(setInfo);
   }, []);
+  const close = () => {
+    if (recovery) return setCloseRefused(true);
+    props.onClose();
+  };
   if (!s) return null;
   return (
     <Modal
       title="Settings"
-      onClose={props.onClose}
+      onClose={close}
       footer={
         <button
           className="btn primary"
@@ -1003,7 +1012,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
             try {
               await api.saveSettings(s);
               props.onSaved(s);
-              props.onClose();
+              close();
             } catch (e) {
               setErr(String((e as Error).message));
             }
@@ -1058,7 +1067,14 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
         Extra names to always redact (comma-separated headers, params, fields)
         <input className="field mono" value={s.redaction_names.join(", ")} onChange={(e) => setS({ ...s, redaction_names: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
       </label>
-      <ChangePassphrase />
+      <ChangePassphrase
+        recovery={recovery}
+        closeRefused={closeRefused}
+        onRecovery={(key) => {
+          setRecovery(key);
+          setCloseRefused(false);
+        }}
+      />
       <Providers />
       <button
         className="btn danger small"
@@ -1087,22 +1103,66 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
   );
 }
 
-function ChangePassphrase() {
+type LeftoverEntry = { profileId: string; name: string; service: string; account: string };
+
+function ChangePassphrase(props: { recovery: string | null; closeRefused: boolean; onRecovery: (key: string | null) => void }) {
   const [open, setOpen] = useState(false);
-  const [keychain, setKeychain] = useState(false);
+  // Converting and changing are different operations: neither is offered
+  // until the open profile's mode is known.
+  const [protection, setProtection] = useState<ProtectionMode | null>(null);
+  const [statusErr, setStatusErr] = useState<string | null>(null);
+  const [leftovers, setLeftovers] = useState<LeftoverEntry[]>([]);
   const [a, setA] = useState("");
   const [b, setB] = useState("");
-  const [recovery, setRecovery] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const loadStatus = () => {
+    setStatusErr(null);
+    api
+      .status()
+      .then((st) => (st.protection ? setProtection(st.protection) : setStatusErr("no profile is open")))
+      .catch((e: unknown) => setStatusErr((e as Error).message));
+  };
+  const loadLeftovers = () => {
+    api
+      .profiles()
+      .then((list) =>
+        setLeftovers(list.flatMap((p) => (p.leftover_keychain_entry ? [{ profileId: p.profile_id, name: p.display_name, ...p.leftover_keychain_entry }] : []))),
+      )
+      .catch(() => setLeftovers([]));
+  };
   useEffect(() => {
-    api.status().then((st) => setKeychain(st.protection === "os_keychain")).catch(() => {});
+    loadStatus();
+    loadLeftovers();
   }, []);
+  const keychain = protection === "os_keychain";
   const title = keychain ? "Require an unlock passphrase" : "Change unlock passphrase";
-  if (!open)
+  const notes = (
+    <>
+      {leftovers.map((l) => (
+        <p key={l.profileId} className="hint" role="status">
+          The old OS keychain entry of “{l.name}” is still waiting to be removed (service <code>{l.service}</code>, account <code>{l.account}</code>). It no longer opens the
+          profile. Anvil retries removing it at each unlock until it is gone; you can also delete it yourself in the OS keychain.
+        </p>
+      ))}
+      {statusErr && (
+        <div className="hint">
+          Could not read how this profile is protected: {statusErr}.{" "}
+          <button className="btn small" onClick={loadStatus}>
+            Retry
+          </button>
+        </div>
+      )}
+    </>
+  );
+  if (!open && !props.recovery)
     return (
-      <button className="btn small" style={{ alignSelf: "start" }} onClick={() => setOpen(true)}>
-        {title}…
-      </button>
+      <>
+        <button className="btn small" style={{ alignSelf: "start" }} disabled={!protection} onClick={() => setOpen(true)}>
+          {protection ? `${title}…` : "Unlock passphrase…"}
+        </button>
+        {notes}
+      </>
     );
   return (
     <fieldset className="box">
@@ -1117,18 +1177,21 @@ function ChangePassphrase() {
         <input className="field grow" type="password" aria-label="Repeat passphrase" placeholder="repeat" value={b} onChange={(e) => setB(e.target.value)} autoComplete="new-password" />
         <button
           className="btn small"
+          disabled={!protection || busy}
           onClick={async () => {
             if (a.length < 8 || a !== b) return setMsg("Enter the same passphrase twice (at least 8 characters).");
+            setBusy(true);
             try {
               if (keychain) {
                 const r = await api.convertToPassphrase(a);
-                setKeychain(false);
-                setRecovery(r.recovery_key);
+                setProtection("passphrase");
+                props.onRecovery(r.recovery_key);
                 setMsg(
                   r.keychain_entry_removed
                     ? "Passphrase set. The OS keychain no longer opens this profile."
-                    : "Passphrase set. The OS keychain no longer opens this profile; its old entry could not be removed yet and will be removed at the next unlock.",
+                    : "Passphrase set. The OS keychain no longer opens this profile; its old entry could not be removed yet and removal is retried at each unlock until it is gone.",
                 );
+                loadLeftovers();
               } else {
                 await api.changePassphrase(a);
                 setMsg("Passphrase changed. The recovery key still works.");
@@ -1137,24 +1200,34 @@ function ChangePassphrase() {
               setB("");
             } catch (e) {
               setMsg(String((e as Error).message));
+              // The mode may have changed meanwhile; offer what now applies.
+              loadStatus();
+            } finally {
+              setBusy(false);
             }
           }}
         >
           Save
         </button>
       </div>
-      {recovery && (
+      {props.recovery && (
         <>
           <p className="hint">Your recovery key opens this profile if you forget the passphrase. It is shown once and is not stored anywhere. Keep it offline.</p>
           <div className="recovery" aria-label="Recovery key">
-            {recovery}
+            {props.recovery}
           </div>
-          <button className="btn small" style={{ alignSelf: "start" }} onClick={() => setRecovery(null)}>
+          {props.closeRefused && (
+            <p className="hint" role="alert">
+              Store the recovery key before closing Settings. It cannot be shown again.
+            </p>
+          )}
+          <button className="btn small" style={{ alignSelf: "start" }} onClick={() => props.onRecovery(null)}>
             I stored it safely
           </button>
         </>
       )}
       {msg && <div className="hint">{msg}</div>}
+      {notes}
     </fieldset>
   );
 }

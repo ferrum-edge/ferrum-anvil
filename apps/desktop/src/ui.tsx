@@ -27,8 +27,13 @@ export function humanize(s: string): string {
 
 export function Modal(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Escape calls the latest onClose, not the one from the first render.
+  const onClose = useRef(props.onClose);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && props.onClose();
+    onClose.current = props.onClose;
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose.current();
     window.addEventListener("keydown", onKey);
     // Focus the first field in the body (not the header close button).
     const root = ref.current;

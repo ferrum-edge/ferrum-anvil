@@ -51,3 +51,27 @@
   bounds are refused before unlocking. The CLI treats an empty
   `ANVIL_EXPORT_PASSPHRASE` as unset and says to unset it when importing a
   bundle that is not encrypted.
+- Profile headers now carry a MAC, under a key derived from the data key,
+  over their protection mode, checked at every unlock and before a
+  passphrase change or conversion rewrites the header, so a header edited to
+  claim keychain mode (or stripped of the MAC) no longer opens a profile
+  converted to a passphrase from its old keychain entry. A conversion tags
+  the keychain entry before it writes the passphrase header, and stops with
+  nothing changed if the credential store refuses; an old entry the store
+  refuses to delete is overwritten with a marker that opens nothing. Headers
+  and keychain entries from earlier builds still open, are trusted as found
+  at their first unlock on this build, and are upgraded then; a keychain
+  header without a MAC that carries passphrase or recovery wraps is refused.
+  An old entry left by a conversion done in an earlier build stays usable
+  by a header edited back to keychain mode (MAC and wraps removed) only if
+  the store refuses both to delete and to overwrite it, and a copy of the
+  header saved before a conversion opens from that entry until it is removed
+  or overwritten. Keychain entries
+  written by this build are not readable by earlier development builds.
+  Header writes use a temporary file per writer under an advisory lock
+  (`profile.lock`), and a writer holding the lock removes temporary files
+  older than ten minutes. Settings lists a keychain entry whose removal is
+  still pending, offers neither converting nor changing the passphrase until
+  the profile's mode is known, and stays open until a new recovery key is
+  confirmed stored. A conversion reports the old entry as removed whenever
+  the delete succeeded.

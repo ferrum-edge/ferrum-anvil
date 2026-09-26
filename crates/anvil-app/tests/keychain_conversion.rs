@@ -2,11 +2,11 @@
 //! Runs against keyring-core's in-memory mock credential store, installed
 //! before any entry is created; no real OS keychain is touched.
 
-use anvil_app::profiles::{ProfileManager, Unlock};
+use anvil_app::profiles::{KeychainEntryName, ProfileManager, Unlock};
 use anvil_app::{App, AppError};
 use anvil_domain::workspace::ProtectionMode;
-use anvil_storage::KdfParams;
 use anvil_storage::vault::{self, VaultError};
+use anvil_storage::{KdfParams, Key};
 
 const PASS: &str = "new passphrase 123";
 
@@ -19,6 +19,16 @@ fn mock_store() {
 
 fn entry(account: &str) -> keyring_core::Entry {
     keyring_core::Entry::new("com.ferrumedge.anvil", account).unwrap()
+}
+
+/// Put a converted profile's old entry, tagged as this build stores it, and
+/// its account name back, as a conversion leaves them when it stops after
+/// publishing the passphrase header or the store refuses to remove them.
+fn leave_entry_behind(dir: &std::path::Path, account: &str, dek: &Key) {
+    entry(account).set_secret(&[b"anvil-dek-v2:".as_slice(), dek.as_bytes().as_slice()].concat()).unwrap();
+    let mut h = vault::read_header(dir).unwrap();
+    h.keychain_account = Some(account.into());
+    vault::write_header(dir, &h).unwrap();
 }
 
 #[test]
@@ -67,20 +77,94 @@ fn a_leftover_keychain_entry_is_removed_at_the_next_unlock() {
     let pm = ProfileManager::new(root.path());
     let (s, dek) = pm.create_keychain("Local").unwrap();
     let account = vault::read_header(&s.dir).unwrap().keychain_account.unwrap();
+    let key = Key::from_bytes(dek.as_bytes()).unwrap();
     let h = vault::read_header(&s.dir).unwrap();
     let app = App::open(s.dir.clone(), h, dek).unwrap();
-
-    // The credential store refuses once, during the conversion.
-    let e = entry(&account);
-    let cred = e.as_any().downcast_ref::<keyring_core::mock::Cred>().unwrap();
-    cred.set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
-    let conv = app.convert_to_passphrase(PASS, KdfParams::testing()).unwrap();
-    assert!(!conv.keychain_entry_removed);
+    app.convert_to_passphrase(PASS, KdfParams::testing()).unwrap();
     drop(app);
+    leave_entry_behind(&s.dir, &account, &key);
 
-    assert!(entry(&account).get_secret().is_ok());
+    // The profile list tells Settings which entry is still waiting.
+    let pending = pm.find(&s.profile_id).unwrap().leftover_keychain_entry.expect("listed as pending removal");
+    assert_eq!(pending, KeychainEntryName { service: "com.ferrumedge.anvil".into(), account: account.clone() });
     assert!(ProfileManager::unlock(&s.dir, Unlock::Keychain).is_err(), "the leftover entry does not unlock");
     ProfileManager::unlock(&s.dir, Unlock::Passphrase(PASS)).unwrap();
     assert!(matches!(entry(&account).get_secret(), Err(keyring_core::Error::NoEntry)));
     assert!(vault::read_header(&s.dir).unwrap().keychain_account.is_none());
+    assert!(pm.find(&s.profile_id).unwrap().leftover_keychain_entry.is_none());
+}
+
+#[test]
+fn a_leftover_entry_does_not_reopen_a_header_edited_back_to_keychain_mode() {
+    mock_store();
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, dek) = pm.create_keychain("Local").unwrap();
+    let account = vault::read_header(&s.dir).unwrap().keychain_account.unwrap();
+    let key = Key::from_bytes(dek.as_bytes()).unwrap();
+    let app = App::open(s.dir.clone(), vault::read_header(&s.dir).unwrap(), dek).unwrap();
+    app.convert_to_passphrase(PASS, KdfParams::testing()).unwrap();
+    drop(app);
+    leave_entry_behind(&s.dir, &account, &key);
+
+    let mut h = vault::read_header(&s.dir).unwrap();
+    h.protection = ProtectionMode::OsKeychain;
+    vault::write_header(&s.dir, &h).unwrap();
+    let r = ProfileManager::unlock(&s.dir, Unlock::Keychain);
+    assert!(matches!(r, Err(AppError::Vault(VaultError::HeaderTampered))));
+    h.protection_mac = None;
+    vault::write_header(&s.dir, &h).unwrap();
+    let r = ProfileManager::unlock(&s.dir, Unlock::Keychain);
+    assert!(matches!(r, Err(AppError::Vault(VaultError::HeaderTampered))));
+    // Without the wraps too it looks like an earlier build's keychain
+    // header, but the entry is tagged.
+    h.passphrase_wrap = None;
+    h.recovery_wrap = None;
+    vault::write_header(&s.dir, &h).unwrap();
+    let r = ProfileManager::unlock(&s.dir, Unlock::Keychain);
+    assert!(matches!(r, Err(AppError::Vault(VaultError::HeaderTampered))));
+    assert!(vault::read_header(&s.dir).unwrap().protection_mac.is_none(), "nothing was sealed");
+    assert!(entry(&account).get_secret().is_ok(), "nothing was unlocked, so nothing was retired");
+}
+
+#[test]
+fn unlocking_upgrades_a_header_from_an_earlier_build() {
+    mock_store();
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, dek) = pm.create_keychain("Local").unwrap();
+    let account = vault::read_header(&s.dir).unwrap().keychain_account.unwrap();
+    // As an earlier build wrote it: the bare key and no MAC.
+    entry(&account).set_secret(dek.as_bytes()).unwrap();
+    let mut h = vault::read_header(&s.dir).unwrap();
+    h.protection_mac = None;
+    vault::write_header(&s.dir, &h).unwrap();
+
+    let (h, key) = ProfileManager::unlock(&s.dir, Unlock::Keychain).unwrap();
+    assert_eq!(key.as_bytes(), dek.as_bytes());
+    assert!(h.protection_mac.is_some(), "the returned header is the upgraded one");
+    assert_eq!(vault::read_header(&s.dir).unwrap().protection_mac, h.protection_mac);
+    assert_ne!(entry(&account).get_secret().unwrap(), dek.as_bytes(), "the entry is tagged");
+    assert!(ProfileManager::unlock(&s.dir, Unlock::Keychain).is_ok());
+}
+
+#[test]
+fn a_conversion_the_store_refuses_leaves_a_keychain_profile() {
+    mock_store();
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, dek) = pm.create_keychain("Local").unwrap();
+    let account = vault::read_header(&s.dir).unwrap().keychain_account.unwrap();
+    let app = App::open(s.dir.clone(), vault::read_header(&s.dir).unwrap(), dek).unwrap();
+
+    // The store refuses the read that tagging the entry starts with.
+    let e = entry(&account);
+    let cred = e.as_any().downcast_ref::<keyring_core::mock::Cred>().unwrap();
+    cred.set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
+    let r = app.convert_to_passphrase(PASS, KdfParams::testing());
+    assert!(matches!(r, Err(AppError::Vault(VaultError::KeychainUnavailable(_)))));
+    drop(app);
+
+    assert_eq!(pm.find(&s.profile_id).unwrap().protection, ProtectionMode::OsKeychain);
+    assert!(ProfileManager::unlock(&s.dir, Unlock::Keychain).is_ok(), "nothing changed");
 }
