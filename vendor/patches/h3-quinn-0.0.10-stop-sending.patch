@@ -1,0 +1,102 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -7,7 +7,7 @@
+     convert::TryInto,
+     future::Future,
+     pin::Pin,
+-    sync::Arc,
++    sync::{Arc, Mutex},
+     task::{self, Poll},
+ };
+ 
+@@ -345,6 +345,11 @@
+ pub struct RecvStream {
+     stream: Option<quinn::RecvStream>,
+     read_chunk_fut: ReadChunkFuture,
++    // The stream's ID, kept here because an outstanding read owns the stream.
++    id: StreamId,
++    // An error code for the outstanding read to stop the stream with
++    // (`stop_sending` while `read_chunk_fut` owns the stream).
++    stop: Arc<Mutex<Option<VarInt>>>,
+ }
+ 
+ type ReadChunkFuture = ReusableBoxFuture<
+@@ -357,10 +362,13 @@
+ 
+ impl RecvStream {
+     fn new(stream: quinn::RecvStream) -> Self {
++        let id = u64::from(stream.id()).try_into().expect("invalid stream id");
+         Self {
+             stream: Some(stream),
+             // Should only allocate once the first time it's used
+             read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
++            id,
++            stop: Arc::new(Mutex::new(None)),
+         }
+     }
+ }
+@@ -374,9 +382,28 @@
+         cx: &mut task::Context<'_>,
+     ) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
+         if let Some(mut stream) = self.stream.take() {
++            let stop = self.stop.clone();
+             self.read_chunk_fut.set(async move {
+-                let chunk = stream.read_chunk(usize::MAX, true).await;
+-                (stream, chunk)
++                // A stop request ends the read (unread data stays unread) and
++                // stops the stream with the requested code.
++                let chunk = {
++                    let mut read = std::pin::pin!(stream.read_chunk(usize::MAX, true));
++                    std::future::poll_fn(|cx| {
++                        let requested = stop.lock().unwrap().take();
++                        match requested {
++                            Some(code) => Poll::Ready(Err(code)),
++                            None => read.as_mut().poll(cx).map(Ok),
++                        }
++                    })
++                    .await
++                };
++                match chunk {
++                    Ok(chunk) => (stream, chunk),
++                    Err(code) => {
++                        stream.stop(code).ok();
++                        (stream, Err(ReadError::ClosedStream))
++                    }
++                }
+             })
+         };
+ 
+@@ -389,18 +416,25 @@
+ 
+     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
+     fn stop_sending(&mut self, error_code: u64) {
+-        self.stream
+-            .as_mut()
+-            .unwrap()
+-            .stop(VarInt::from_u64(error_code).expect("invalid error_code"))
+-            .ok();
++        let error_code = VarInt::from_u64(error_code).expect("invalid error_code");
++        if let Some(stream) = self.stream.as_mut() {
++            stream.stop(error_code).ok();
++            return;
++        }
++        // An outstanding read owns the stream. Hand it the code and poll it
++        // once: it stops the stream now, rather than when the peer next sends
++        // (which after a cancel may be never, leaving quinn's drop to send
++        // STOP_SENDING with code 0), and gives the stream back.
++        *self.stop.lock().unwrap() = Some(error_code);
++        let mut cx = task::Context::from_waker(futures::task::noop_waker_ref());
++        if let Poll::Ready((stream, _)) = self.read_chunk_fut.poll(&mut cx) {
++            self.stream = Some(stream);
++        }
+     }
+ 
+     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
+     fn recv_id(&self) -> StreamId {
+-        let num: u64 = self.stream.as_ref().unwrap().id().into();
+-
+-        num.try_into().expect("invalid stream id")
++        self.id
+     }
+ }
+ 

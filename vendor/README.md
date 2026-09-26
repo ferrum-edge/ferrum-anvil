@@ -31,6 +31,53 @@ cargo download h3@0.0.8   # or unpack ~/.cargo/registry/src/*/h3-0.0.8
 diff -ru <unpacked h3-0.0.8> vendor/h3-0.0.8-rfc9220   # only src/ext.rs differs
 ```
 
+## `h3-quinn-0.0.10-stop-sending/`
+
+`h3-quinn` 0.0.10 exactly as published on crates.io (checksum
+`8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4`, built
+from hyperium/h3 `2dc3412bdf6083451920d5bfd7a9484d054c1859`), without the
+published `Cargo.lock` and `.cargo_vcs_info.json`, and with one change:
+`patches/h3-quinn-0.0.10-stop-sending.patch`, confined to `RecvStream` in
+`src/lib.rs`.
+
+`RecvStream::poll_data` moves the `quinn::RecvStream` into the read future
+while a read is outstanding, and 0.0.10's `stop_sending` and `recv_id` then
+`unwrap()` the empty slot and panic. That is the ordinary cancel path: a
+request waiting for response data is canceled (a deadline, the user, a local
+failure), and Anvil stops the response half with `H3_REQUEST_CANCELLED`. The
+patch:
+
+* `stop_sending` with no read outstanding stops the stream at once, as
+  before. With one outstanding, it hands the code to the read future and polls
+  it once with a no-op waker; the future sees the code before polling quinn,
+  drops the unfinished read (no data is consumed), stops the stream with that
+  code, and returns the stream. The requested code goes on the wire straight
+  away.
+* `recv_id` returns the ID captured when the stream was created.
+
+Upstream fixed the panics after 0.0.10 (hyperium/h3#331 for `stop_sending`,
+#357 for `recv_id`), but that `stop_sending` only records the code and applies
+it when the outstanding read completes. After a cancel the peer may never
+send again, so the stream is dropped first and quinn stops it with code 0,
+which is not an HTTP/3 error code (hyperium/h3#361, open). Anvil reports the
+code it sends, so the patch applies it immediately instead.
+
+The workspace uses it through `[patch.crates-io]` in `Cargo.toml`, like `h3`
+above. The license is upstream's MIT license (`h3-quinn-0.0.10-stop-sending/LICENSE`).
+
+**Retire it** when an `h3-quinn` release applies `stop_sending` while a read is
+outstanding (hyperium/h3#361): bump `h3-quinn` in `Cargo.toml`, delete the
+`[patch.crates-io]` entry, this directory and the patch, and regenerate
+`THIRD_PARTY_LICENSES.md`.
+
+To check the vendored copy against crates.io:
+
+```bash
+cargo download h3-quinn@0.0.10   # or unpack ~/.cargo/registry/src/*/h3-quinn-0.0.10
+cd <unpacked h3-quinn-0.0.10> && patch -p1 < vendor/patches/h3-quinn-0.0.10-stop-sending.patch
+diff -r <unpacked h3-quinn-0.0.10> vendor/h3-quinn-0.0.10-stop-sending   # only Cargo.lock and .cargo_vcs_info.json differ
+```
+
 ## `tungstenite-0.30.0-deflate/`
 
 `tungstenite` 0.30.0 exactly as published on crates.io (checksum
