@@ -735,6 +735,9 @@ mod tests {
             assert_eq!(parse_address("unix:///run/spire/agent.sock").unwrap(), EndpointAddress::Unix("/run/spire/agent.sock".into()));
             assert_eq!(parse_address("unix:/tmp/wl.sock").unwrap(), EndpointAddress::Unix("/tmp/wl.sock".into()));
             assert!(matches!(parse_address("npipe:spire-agent"), Err(EndpointError::Unsupported(_))));
+        } else if cfg!(windows) {
+            assert_eq!(parse_address("npipe:spire-agent").unwrap(), EndpointAddress::NamedPipe(r"\\.\pipe\spire-agent".into()));
+            assert!(matches!(parse_address("unix:///run/spire/agent.sock"), Err(EndpointError::Unsupported(_))));
         }
         for bad in ["/run/spire/agent.sock", "unix://host/run/a.sock", "unix:relative.sock", "unix:///a.sock?x=1", "http://x", "unix:"] {
             assert!(matches!(parse_address(bad), Err(EndpointError::Invalid(_))), "{bad}");
@@ -744,10 +747,13 @@ mod tests {
 
     #[test]
     fn endpoint_resolution_prefers_the_setting_then_the_environment() {
-        let e = resolve_endpoint_with("unix:///a/b.sock", Some("unix:///env.sock".into())).unwrap();
-        assert_eq!((e.uri.as_str(), e.source), ("unix:///a/b.sock", WorkloadEndpointSource::Setting));
-        let e = resolve_endpoint_with("  ", Some("unix:///env.sock".into())).unwrap();
-        assert_eq!((e.uri.as_str(), e.source), ("unix:///env.sock", WorkloadEndpointSource::Environment));
+        // Each platform's native endpoint kind (Unix socket, or named pipe on Windows).
+        let (setting, env) =
+            if cfg!(windows) { ("npipe:spire-agent", "npipe:env-agent") } else { ("unix:///a/b.sock", "unix:///env.sock") };
+        let e = resolve_endpoint_with(setting, Some(env.into())).unwrap();
+        assert_eq!((e.uri.as_str(), e.source), (setting, WorkloadEndpointSource::Setting));
+        let e = resolve_endpoint_with("  ", Some(env.into())).unwrap();
+        assert_eq!((e.uri.as_str(), e.source), (env, WorkloadEndpointSource::Environment));
         assert_eq!(resolve_endpoint_with("", None), Err(EndpointError::NotConfigured));
         assert_eq!(resolve_endpoint_with("", Some(" ".into())), Err(EndpointError::NotConfigured));
     }
