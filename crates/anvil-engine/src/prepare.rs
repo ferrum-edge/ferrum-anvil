@@ -526,4 +526,25 @@ mod tests {
         assert_eq!(t.host, "::1");
         assert_eq!(t.authority, "[::1]:8080");
     }
+
+    #[test]
+    fn default_preparation_lints_declaration_like_xml_as_text_not_a_dtd() {
+        let r = Resolver::new(vec![crate::vars::VarLayer { label: "environment:test".into(), vars: Vec::new() }], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+
+        let cdata = r#"<document><![CDATA[<!DOCTYPE html><html><body>Report</body></html>]]></document>"#;
+        let mut spec = RequestSpec::http("POST", "https://api.example.com/");
+        spec.body = Body::Xml { text: cdata.into() };
+        let form = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+        assert_eq!(&form.body[..], cdata.as_bytes());
+
+        let comment = r#"<document><!-- documentation example: <!ENTITY example 'value'> --><value>ok</value></document>"#;
+        spec.body = Body::Xml { text: comment.into() };
+        prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+
+        spec.body = Body::Xml { text: r#"<!DOCTYPE r [<!ENTITY a "b">]><r>&a;</r>"#.into() };
+        let err = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap_err();
+        assert_eq!(err.kind, FailureKind::LintBlocked);
+        assert_eq!(err.phase, Phase::Prepare);
+    }
 }
