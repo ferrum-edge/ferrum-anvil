@@ -1036,18 +1036,29 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
 
 function ChangePassphrase() {
   const [open, setOpen] = useState(false);
+  const [keychain, setKeychain] = useState(false);
   const [a, setA] = useState("");
   const [b, setB] = useState("");
+  const [recovery, setRecovery] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    api.status().then((st) => setKeychain(st.protection === "os_keychain")).catch(() => {});
+  }, []);
+  const title = keychain ? "Require an unlock passphrase" : "Change unlock passphrase";
   if (!open)
     return (
       <button className="btn small" style={{ alignSelf: "start" }} onClick={() => setOpen(true)}>
-        Change unlock passphrase…
+        {title}…
       </button>
     );
   return (
     <fieldset className="box">
-      <legend>Change unlock passphrase</legend>
+      <legend>{title}</legend>
+      {keychain && (
+        <p className="hint">
+          This profile is opened by the OS keychain. With a passphrase, only the passphrase or a new recovery key opens it, and its key is removed from the OS keychain.
+        </p>
+      )}
       <div className="row">
         <input className="field grow" type="password" aria-label="New passphrase" placeholder="new passphrase" value={a} onChange={(e) => setA(e.target.value)} autoComplete="new-password" />
         <input className="field grow" type="password" aria-label="Repeat passphrase" placeholder="repeat" value={b} onChange={(e) => setB(e.target.value)} autoComplete="new-password" />
@@ -1056,10 +1067,21 @@ function ChangePassphrase() {
           onClick={async () => {
             if (a.length < 8 || a !== b) return setMsg("Enter the same passphrase twice (at least 8 characters).");
             try {
-              await api.changePassphrase(a);
+              if (keychain) {
+                const r = await api.convertToPassphrase(a);
+                setKeychain(false);
+                setRecovery(r.recovery_key);
+                setMsg(
+                  r.keychain_entry_removed
+                    ? "Passphrase set. The OS keychain no longer opens this profile."
+                    : "Passphrase set. The OS keychain no longer opens this profile; its old entry could not be removed yet and will be removed at the next unlock.",
+                );
+              } else {
+                await api.changePassphrase(a);
+                setMsg("Passphrase changed. The recovery key still works.");
+              }
               setA("");
               setB("");
-              setMsg("Passphrase changed. The recovery key still works.");
             } catch (e) {
               setMsg(String((e as Error).message));
             }
@@ -1068,6 +1090,17 @@ function ChangePassphrase() {
           Save
         </button>
       </div>
+      {recovery && (
+        <>
+          <p className="hint">Your recovery key opens this profile if you forget the passphrase. It is shown once and is not stored anywhere. Keep it offline.</p>
+          <div className="recovery" aria-label="Recovery key">
+            {recovery}
+          </div>
+          <button className="btn small" style={{ alignSelf: "start" }} onClick={() => setRecovery(null)}>
+            I stored it safely
+          </button>
+        </>
+      )}
       {msg && <div className="hint">{msg}</div>}
     </fieldset>
   );
