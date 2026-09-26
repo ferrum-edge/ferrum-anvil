@@ -2,7 +2,7 @@
  "_comment": "Reasoned statuses for failure-matrix cases that cannot be executed as live or automated tests yet. Used by scripts/matrix-coverage.py only when no test/lab evidence exists. 'blocked', 'partial' and 'not_applicable' are never counted as passed; 'verified_check' records an executed check script (exact command, artifacts and result) that CI re-runs on every release artifact.",
  "TRUST-009": {
   "status": "blocked",
-  "reason": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
+  "reason": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md; proposed upstream as ferrum-edge/ferrum-edge#5767); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
  },
  "TRUST-010": {
   "status": "blocked",

@@ -6826,7 +6826,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
+   "note": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md; proposed upstream as ferrum-edge/ferrum-edge#5767); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
   },
   {
    "id": "TRUST-010",

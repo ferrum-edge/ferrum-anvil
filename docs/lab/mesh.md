@@ -67,8 +67,8 @@ DTLS records are opaque datagrams). The Ambient workload also declares two names
 `FERRUM_DNS_OVERRIDES`) and `udp-unresolvable.anvil-lab.invalid` (RFC 6761 `.invalid`, never resolves).
 The Ambient instance clears `FERRUM_MESH_NODE_WAYPOINT_POD_REGISTRY_DIR`: with the default directory and
 no node agent, the absent registry is authoritative and refuses every declared name at relay synthesis
-(`denial = unresolvable_authority`, seen in the first lab run), so the names could never reach the UDP
-relay's own checks.
+(`denial = unresolvable_authority`, seen in the first lab run; ferrum-edge/ferrum-edge#5766), so the names
+could never reach the UDP relay's own checks.
 
 Ambient on macOS: the Ambient UDP placement guard withholds `/health` readiness on a host without the
 node-agent netns producer, while every TCP listener serves. The lab waits on `/live` for that instance.
@@ -134,7 +134,7 @@ no gateway attribution.
   nothing listens, MESH-027), the relay ends and the client sees a clean `END_STREAM` right after its
   datagram. Anvil reports that as the endpoint ending the tunnel (`closed_by = peer`,
   `hbone.udp_tunnel_ended`) and keeps the ICMP as an alternative: the ICMP reaches the gateway, never
-  Anvil, so `udp.icmp_port_unreachable` cannot appear through a tunnel.
+  Anvil, so `udp.icmp_port_unreachable` cannot appear through a tunnel (ferrum-edge/ferrum-edge#5765).
 - **The UDP destination 403 is reachable, unlike the byte-stream one.** A declared Ambient name passes
   relay synthesis without being resolved; the datagram relay then resolves it and drops loopback answers
   (Ambient), answering `403 {"error":"HBONE UDP relay destination not allowed"}` (MESH-024). The byte
@@ -156,7 +156,7 @@ no gateway attribution.
   destination the terminator does not own is refused `403` with
   `mesh_authz.deny_policy=hbone_relay_destination_denied`. At relay synthesis the code returns `None`
   and the caller answers the generic route-miss `404 {"error":"Not Found"}`, logging the reason only at
-  debug level. The public signal is therefore identical to "no route". Anvil reports the refusal with
+  debug level (ferrum-edge/ferrum-edge#5763). The public signal is therefore identical to "no route". Anvil reports the refusal with
   its status and body and lists "no route or relay for this authority" among the alternatives; it never
   claims the guard as the cause.
 - **The unauthenticated-peer gate runs after relay synthesis.** On Ambient over loopback every CONNECT is

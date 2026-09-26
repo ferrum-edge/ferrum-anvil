@@ -4,6 +4,7 @@
 released gateway. Anvil keeps "authorized diagnostic detail" explicitly
 unavailable until a gateway ships it.
 **Owner:** Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer.
+**Tracking:** ferrum-edge/ferrum-edge#5767 (this proposal) and ferrum-edge/ferrum-edge#5759 (backend-spoofable markers).
 **Compatibility:** additive. The seven public `X-Gateway-Error` tokens, their
 statuses and bodies stay unchanged.
 

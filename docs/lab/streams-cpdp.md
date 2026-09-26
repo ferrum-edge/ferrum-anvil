@@ -270,7 +270,7 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
   (PROTO-002). The recorded observation is the same on 0.9.7, and on both releases it is
   not stable across passes: the trusted pass saw no relayed trailers, the untrusted repeat
   saw them relayed (2026-09-26 runs). So the lab verifies Anvil's trailer preservation against the backend
-  directly, and verifies through the gateway only that Anvil invents nothing. A cleartext
+  directly, and verifies through the gateway only that Anvil invents nothing. Root cause (dispatch-path dependent trailer relay) filed as ferrum-edge/ferrum-edge#5760. A cleartext
   h2c-capable backend is reached over HTTP/1.1 for non-gRPC traffic, which is why PROTO-002
   uses an h2 TLS backend.
 - **gRPC and Ferrum markers.**
@@ -291,7 +291,7 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
     complete gRPC-Web body; it also logs `grpc_status: 2` for these calls, including over
     HTTP/3 where the body is left alone. That looks like a gateway defect: a gRPC-Web client
     that stops at the first trailer frame sees status 0, one that reads on sees malformed
-    framing. Anvil reports what is on the wire and claims nothing about translation.
+    framing. Anvil reports what is on the wire and claims nothing about translation. Filed as ferrum-edge/ferrum-edge#5758.
   - The gRPC-Web routes have no marker to attribute: gateway-authored terminal statuses
     (`14 Backend unavailable`) arrive in the trailer frame with `x-grpc-web: 1` and no
     `X-Gateway-Error`, so Anvil reports RPC failures of unknown origin.

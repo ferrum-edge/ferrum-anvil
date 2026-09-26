@@ -138,6 +138,7 @@ results and reasoned statuses.
   - See `docs/protocols.md` §5.
 - **XML signing.** Anvil does not sign XML. AUTH-030/031 run live with lab-signed fixtures, which Anvil sends verbatim.
 - **Ferrum Edge 0.9.5 and 0.9.7 only.** Other gateway versions have no catalog and are not validated. Several 0.9.7 changes are source-audited but not reproduced live (Gateway API route timeouts, Redis quota counting, the WAF `fail_closed` disposition; see `docs/audit/gateway-0.9.7-delta.md`). The gateway relays plain-HTTP/2 trailers inconsistently in the lab (both releases).
+- **Gateway defects and gaps found by the lab** are filed upstream with source citations and reproductions: ferrum-edge/ferrum-edge#5758 (gRPC-Web pass-through gets an extra trailer frame), #5759 (backend-spoofable gateway markers), #5760 (HTTP/2 trailers dropped depending on dispatch path), #5761 (HTTP/3 0-RTT classification race), #5762 (route-timeout 504 labelled `backend_timeout`), #5763 (relay refusal 404 vs documented 403), #5764 (Workload API `ValidateJWTSVID` claims format), #5765 (HBONE UDP relay failures invisible), #5766 (Ambient registry default), and feature requests #5767 (gateway diagnostic contract, G01), #5768 (PROXY protocol on HTTP listeners), #5769 (WebSocket compression).
 - **Measurements.** Resource numbers come from one machine. Webview helper processes and cold start are not measured.
 
 ## Reproducing
