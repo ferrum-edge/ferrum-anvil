@@ -230,9 +230,14 @@ fn e2e_unlock(st: &DesktopState) {
             Err(e) => return eprintln!("e2e: create profile failed: {e}"),
         },
     };
+    let seen = st.epoch();
     match anvil_app::profiles::ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(&pass)) {
         Ok((header, key)) => match anvil_app::App::open(dir, header, key) {
-            Ok(app) => st.set_app(app),
+            Ok(app) => {
+                if let Err(e) = st.set_app_since(app, seen) {
+                    eprintln!("e2e: open failed: {e}");
+                }
+            }
             Err(e) => eprintln!("e2e: open failed: {e}"),
         },
         Err(e) => eprintln!("e2e: unlock failed: {e}"),

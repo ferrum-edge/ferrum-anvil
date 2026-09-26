@@ -2,7 +2,7 @@
 //! writes, backend lock enforcement, key binding and schema guards.
 
 use anvil_domain::Id;
-use anvil_storage::store::StoreError;
+use anvil_storage::store::{DB_SCHEMA_VERSION, StoreError};
 use anvil_storage::{KdfParams, Key, Store, kind, vault};
 
 const PLANTED: &[&str] =
@@ -209,7 +209,7 @@ fn replacing_a_history_record_with_the_same_body_keeps_it() {
 }
 
 #[test]
-fn schema_3_indexes_history_bodies_and_the_step_runs_again_after_a_set_back() {
+fn history_bodies_are_indexed_on_open_and_unlock_without_a_schema_step() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
     let db = || rusqlite::Connection::open(dir.path().join("anvil.db")).unwrap();
@@ -220,19 +220,25 @@ fn schema_3_indexes_history_bodies_and_the_step_runs_again_after_a_set_back() {
     let version = || db().query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).unwrap();
     drop(Store::open(dir.path(), created.dek.clone()).unwrap());
     assert!(indexed());
-    assert_eq!(version(), "3");
+    // An index changes no stored data: the schema version, which earlier
+    // builds check, stays the same.
+    assert_eq!(version(), DB_SCHEMA_VERSION.to_string());
 
-    // A schema 2 database, as an earlier build left it, gets the index.
-    db().execute_batch("DROP INDEX history_body_blob; UPDATE meta SET value='2' WHERE key='schema_version';").unwrap();
+    // A database an earlier build left without the index gets it when opened.
+    db().execute_batch("DROP INDEX history_body_blob;").unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    assert!(indexed());
+    assert_eq!(version(), DB_SCHEMA_VERSION.to_string());
+
+    // And when unlocked; with the index in place, opening again changes nothing.
+    store.lock();
+    db().execute_batch("DROP INDEX history_body_blob;").unwrap();
+    store.unlock(created.dek.clone()).unwrap();
+    assert!(indexed());
+    drop(store);
     drop(Store::open(dir.path(), created.dek.clone()).unwrap());
     assert!(indexed());
-    assert_eq!(version(), "3");
-
-    // Set back with the index still in place: the step runs again.
-    db().execute("UPDATE meta SET value='2' WHERE key='schema_version'", []).unwrap();
-    drop(Store::open(dir.path(), created.dek.clone()).unwrap());
-    assert!(indexed());
-    assert_eq!(version(), "3");
+    assert_eq!(version(), DB_SCHEMA_VERSION.to_string());
 }
 
 #[test]

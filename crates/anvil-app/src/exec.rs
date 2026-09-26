@@ -58,8 +58,7 @@ pub struct ResolvedSecrets {
 }
 
 impl ResolvedSecrets {
-    /// Look up every secret named in `parts`: the context's spec, auth
-    /// layers and TLS, proxy and integration profiles, as JSON.
+    /// Look up every secret named in `parts` (see [`secret_parts`]).
     fn lookup(store: StoreSecrets, parts: &[serde_json::Value]) -> ResolvedSecrets {
         let mut refs = HashSet::new();
         parts.iter().for_each(|p| collect_secret_refs(p, &mut refs));
@@ -82,6 +81,25 @@ impl SecretResolver for ResolvedSecrets {
             None => crate::blocking_in_place(|| self.store.resolve(r)),
         }
     }
+}
+
+/// Where the engine reads the secrets of `ctx` from when it executes it: the
+/// spec, the effective auth, and the TLS, proxy and integration profiles its
+/// settings select (with the selected proxy's own TLS profile), as JSON.
+/// Any other profile's secrets are looked up only if they are used.
+fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
+    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
+    let tls_ids = [settings.tls_profile_id, proxy.and_then(|p| p.tls_profile_id)];
+    let tls: Vec<_> = ctx.tls_profiles.iter().filter(|t| tls_ids.contains(&Some(t.id))).collect();
+    let integration = settings.integration_profile_id.and_then(|id| ctx.integrations.iter().find(|i| i.id == id));
+    Ok(vec![
+        serde_json::to_value(&ctx.spec)?,
+        serde_json::to_value(ctx.effective_auth().1)?,
+        serde_json::to_value(tls)?,
+        serde_json::to_value(proxy)?,
+        serde_json::to_value(integration)?,
+    ])
 }
 
 /// Every vault reference (`SensitiveValue::Secret`) in `v`.
@@ -266,17 +284,7 @@ impl App {
             }
         });
         let settings_app = self.settings()?;
-        let tls_profiles = self.tls_profiles(ws_id)?;
-        let proxy_profiles = self.proxy_profiles(ws_id)?;
-        let integrations = self.integrations(ws_id)?;
-        let parts = [
-            serde_json::to_value(&spec)?,
-            serde_json::to_value(&auth_layers)?,
-            serde_json::to_value(&tls_profiles)?,
-            serde_json::to_value(&proxy_profiles)?,
-            serde_json::to_value(&integrations)?,
-        ];
-        let ctx = ExecutionContext {
+        let mut ctx = ExecutionContext {
             workspace_id: Some(*ws_id),
             request_id: req.as_ref().map(|r| r.meta.id),
             revision_id: req.as_ref().and_then(|r| r.revision_id),
@@ -285,10 +293,11 @@ impl App {
             settings_layers,
             auth_layers,
             var_layers,
-            tls_profiles,
-            proxy_profiles,
-            integrations,
-            secrets: Arc::new(ResolvedSecrets::lookup(secrets, &parts)),
+            tls_profiles: self.tls_profiles(ws_id)?,
+            proxy_profiles: self.proxy_profiles(ws_id)?,
+            integrations: self.integrations(ws_id)?,
+            // Replaced below, once the context has passed its checks.
+            secrets: Arc::new(StoreSecrets { store: self.store.clone(), workspace: *ws_id }),
             attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,
@@ -302,6 +311,8 @@ impl App {
         }
         self.check_device_identity(&ws, &ctx)?;
         self.check_token_files(&ctx.effective_auth().1)?;
+        let parts = secret_parts(&ctx)?;
+        ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts));
         Ok(ctx)
     }
 

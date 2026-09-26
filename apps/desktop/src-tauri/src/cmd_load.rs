@@ -2,7 +2,7 @@
 //! executable re-launched with a fixed mode flag); the UI process only
 //! relays throttled progress and stores the final report.
 
-use crate::commands::{R, blocking, e, id};
+use crate::commands::{R, blocking, blocking_unchecked, e, id};
 use crate::state::{DesktopState, LoadRunEntry, VaultId};
 use anvil_app::file_grants::{FilePurpose, ReadFile};
 use anvil_app::load::{LoadPlanCheck, LoadPreflight, LoadReportSummary};
@@ -75,6 +75,11 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     // Prepared from the store, secrets and all, on a blocking thread.
     let preparing = app.clone();
     let job = anvil_app::off_runtime(move || preparing.worker_job(&preparing.load_plan(&plan_id)?, acknowledged)).await.map_err(e)?;
+    // A lock that landed while the job was prepared stopped this run: its
+    // job, secrets and all, is not handed to a worker.
+    if entry.lock_token().is_cancelled() {
+        return Err("LOCKED".into());
+    }
     let exe = std::env::current_exe().map_err(|x| x.to_string())?;
     let mut controller = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await.map_err(|x| x.to_string())?;
     let run_key = entry.key().to_string();
@@ -109,7 +114,8 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
         drop(entry);
         // The report is saved on a blocking thread.
         let (owner, run_key) = (app.clone(), key.clone());
-        let ev = blocking(&handle, move |st| Ok(finished(st, &owner, vault, run_key, result))).await;
+        // Unchecked: `finished` holds the report itself if a lock landed.
+        let ev = blocking_unchecked(&handle, move |st| Ok(finished(st, &owner, vault, run_key, result))).await;
         let ev = ev.unwrap_or_else(|err| LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(err) });
         // Another profile is open: its window shows nothing of this one.
         let ev = if handle.state::<DesktopState>().is_current(&app) {

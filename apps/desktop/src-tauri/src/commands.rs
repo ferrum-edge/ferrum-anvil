@@ -18,7 +18,7 @@ use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::{Environment, Folder, RequestDefinition, Workspace};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
-use anvil_storage::KdfParams;
+use anvil_storage::{KdfParams, StoreError};
 use anvil_transport::recorder::EventCtx;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -50,8 +50,29 @@ pub(crate) fn id(s: &str) -> R<Id> {
 /// A synchronous command runs on the UI thread, an async one on an async
 /// runtime worker; neither should derive a key (Argon2id) or wait on the
 /// store, which another command's long transaction (an import, a folder
-/// delete) can hold for a while.
+/// delete) can hold for a while. A lock or a profile switch that lands while
+/// the work runs makes the result `LOCKED`, so nothing the work read from the
+/// store reaches the webview after the lock.
 pub(crate) async fn blocking<T: Send + 'static>(handle: &AppHandle, f: impl FnOnce(&DesktopState) -> R<T> + Send + 'static) -> R<T> {
+    let seen = handle.state::<DesktopState>().epoch();
+    blocking_unchecked(handle, move |st| {
+        let out = f(st)?;
+        if st.epoch() != seen {
+            return Err("LOCKED".into());
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// [`blocking`] without the check for a lock that landed meanwhile: for
+/// profile create and unlock, which check it themselves (see
+/// [`DesktopState::set_app_since`]), and for work whose result stays the
+/// user's to see after a lock.
+pub(crate) async fn blocking_unchecked<T: Send + 'static>(
+    handle: &AppHandle,
+    f: impl FnOnce(&DesktopState) -> R<T> + Send + 'static,
+) -> R<T> {
     let handle = handle.clone();
     tauri::async_runtime::spawn_blocking(move || f(&handle.state::<DesktopState>())).await.map_err(|x| x.to_string())?
 }
@@ -96,10 +117,14 @@ pub struct Created {
 
 /// The key derivation, and opening and migrating the store, run on a
 /// blocking thread (see [`blocking`]), as for every command below that
-/// derives a key.
+/// derives a key. A lock that lands meanwhile leaves the new profile closed;
+/// it is still created, and its recovery key is still returned, since it is
+/// shown only here.
 #[tauri::command]
 pub async fn profile_create(handle: AppHandle, name: String, passphrase: Option<String>, keychain: bool) -> R<Created> {
-    blocking(&handle, move |st| {
+    // Taken before the key derivation: a lock from now on wins over this.
+    let seen = handle.state::<DesktopState>().epoch();
+    blocking_unchecked(&handle, move |st| {
         let (summary, key, recovery) = if keychain {
             let (s, k) = st.profiles.create_keychain(&name).map_err(e)?;
             (s, k, None)
@@ -110,8 +135,9 @@ pub async fn profile_create(handle: AppHandle, name: String, passphrase: Option<
         };
         let header = anvil_storage::vault::read_header(&summary.dir).map_err(|x| x.to_string())?;
         let app = App::open(summary.dir.clone(), header, key).map_err(e)?;
-        st.set_app(app);
-        st.touch();
+        if st.set_app_since(app, seen).is_ok() {
+            st.touch();
+        }
         Ok(Created { profile_id: summary.profile_id, recovery_key: recovery })
     })
     .await
@@ -119,7 +145,10 @@ pub async fn profile_create(handle: AppHandle, name: String, passphrase: Option<
 
 #[tauri::command]
 pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: Option<String>, recovery_key: Option<String>) -> R<()> {
-    blocking(&handle, move |st| {
+    // Taken before the key derivation: a lock from now on wins over this
+    // unlock (see `DesktopState::set_app_since` and `unlock_since`).
+    let seen = handle.state::<DesktopState>().epoch();
+    blocking_unchecked(&handle, move |st| {
         let p = st.profiles.find(&profile_id).map_err(e)?;
         let how = match (&passphrase, &recovery_key) {
             (Some(pw), _) => Unlock::Passphrase(pw),
@@ -127,20 +156,18 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
             (None, None) => Unlock::Keychain,
         };
         let (header, key) = anvil_app::profiles::ProfileManager::unlock(&p.dir, how).map_err(e)?;
+        // Not held across the unlock: a lock waits on no store work of this one.
+        let open = st.app.read().clone();
+        if let Some(a) = open
+            && a.header.profile_id == header.profile_id
         {
-            let g = st.app.read();
-            if let Some(a) = g.as_ref()
-                && a.header.profile_id == header.profile_id
-            {
-                a.unlock(key).map_err(e)?;
-                st.touch();
-                drop(g);
-                st.flush_pending_reports();
-                return Ok(());
-            }
+            st.unlock_since(&a, key, seen)?;
+            st.touch();
+            st.flush_pending_reports();
+            return Ok(());
         }
         let app = App::open(p.dir, header, key).map_err(e)?;
-        st.set_app(app);
+        st.set_app_since(app, seen)?;
         st.touch();
         st.flush_pending_reports();
         Ok(())
@@ -149,10 +176,11 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
 }
 
 /// Re-wrap the data key under a new passphrase (the app must be unlocked;
-/// passphrase profiles only).
+/// passphrase profiles only). Its outcome is reported even after a lock that
+/// landed meanwhile: it says which passphrase opens the profile now.
 #[tauri::command]
 pub async fn profile_change_passphrase(handle: AppHandle, new_passphrase: String) -> R<()> {
-    blocking(&handle, move |st| st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)).await
+    blocking_unchecked(&handle, move |st| st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)).await
 }
 
 #[derive(Serialize)]
@@ -165,10 +193,12 @@ pub struct Converted {
 }
 
 /// Protect an OS-keychain profile with a passphrase instead (the app must be
-/// unlocked). Afterwards the keychain no longer opens it.
+/// unlocked). Afterwards the keychain no longer opens it. The new recovery
+/// key is returned even after a lock that landed meanwhile: it is shown only
+/// here.
 #[tauri::command]
 pub async fn profile_convert_to_passphrase(handle: AppHandle, new_passphrase: String) -> R<Converted> {
-    blocking(&handle, move |st| {
+    blocking_unchecked(&handle, move |st| {
         let c = st.app()?.convert_to_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)?;
         Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
     })
@@ -574,17 +604,22 @@ pub async fn history_list(handle: AppHandle, workspace_id: String, request_id: O
         let rid = request_id.as_deref().map(id).transpose()?;
         let mut out = Vec::new();
         for h in app.store.list_history(Some(&ws), rid.as_ref(), limit.min(500)).map_err(|x| x.to_string())? {
-            if let Ok(Some((rec, _))) = app.store.get_history::<ExecutionRecord>(&h.id) {
-                out.push(HistoryItem {
-                    id: h.id,
-                    started_at: h.started_at,
-                    method: rec.prepared.method.clone(),
-                    url: rec.prepared.url.clone(),
-                    summary: rec.outcome.summary.clone(),
-                    status: rec.response.as_ref().map(|r| r.status),
-                    request_id: rec.request_id.map(|r| r.to_string()),
-                });
-            }
+            let rec = match app.store.get_history::<ExecutionRecord>(&h.id) {
+                Ok(Some((rec, _))) => rec,
+                // Locked midway: no partial list.
+                Err(StoreError::Locked) => return Err("LOCKED".into()),
+                // Removed meanwhile, or unreadable: left out.
+                Ok(None) | Err(_) => continue,
+            };
+            out.push(HistoryItem {
+                id: h.id,
+                started_at: h.started_at,
+                method: rec.prepared.method.clone(),
+                url: rec.prepared.url.clone(),
+                summary: rec.outcome.summary.clone(),
+                status: rec.response.as_ref().map(|r| r.status),
+                request_id: rec.request_id.map(|r| r.to_string()),
+            });
         }
         Ok(out)
     })

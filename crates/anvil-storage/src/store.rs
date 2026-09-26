@@ -39,7 +39,7 @@ pub const DB_FILE: &str = "anvil.db";
 /// before failing with `SQLITE_BUSY`.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Current on-disk schema version. Increase only with a migration below.
-pub const DB_SCHEMA_VERSION: i64 = 3;
+pub const DB_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -211,9 +211,6 @@ const MIGRATIONS: &[Migration] = &[
     Migration::Sql(BASELINE),
     // v2 — vault secrets bind their owner.
     Migration::SecretOwners,
-    // v3 — history bodies are looked up by index when a blob is released or
-    // retention runs.
-    Migration::Sql(HISTORY_BODY_INDEX),
 ];
 
 const BASELINE: &str = r#"
@@ -238,8 +235,10 @@ const BASELINE: &str = r#"
     CREATE TABLE load_reports (id TEXT PRIMARY KEY, workspace_id TEXT, started_at INTEGER NOT NULL, payload BLOB NOT NULL);
     "#;
 
-/// `IF NOT EXISTS`: a database whose recorded version was set back below 3
-/// already has the index, and the step runs again without failing.
+/// History bodies are looked up by index when a blob is released or retention
+/// runs. Unversioned: [`migrate_on`] creates it on every database it opens
+/// once the versioned steps have run, and an index changes no stored data, so
+/// earlier builds of the same schema still read the database and its backups.
 const HISTORY_BODY_INDEX: &str = "CREATE INDEX IF NOT EXISTS history_body_blob ON history(body_blob);";
 
 /// The schema version recorded in `meta` (0 for a new database).
@@ -313,8 +312,9 @@ fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
 /// [`verify_key_on`] has checked first, so a wrong key fails before anything
 /// is re-sealed with it. Each step runs in its own write transaction that
 /// reads the version again first, so a step another connection has applied
-/// meanwhile is skipped, and a step that fails leaves nothing behind. With
-/// nothing pending it only reads the version.
+/// meanwhile is skipped, and a step that fails leaves nothing behind. Then it
+/// creates the unversioned indexes ([`HISTORY_BODY_INDEX`]) where they are
+/// missing; with nothing pending and every index in place it only reads.
 fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
     let found = stored_schema_version(conn)?;
     if found > DB_SCHEMA_VERSION {
@@ -349,6 +349,7 @@ fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
             tracing::warn!(schema = v, left, "vault secrets that did not decrypt were left as they were");
         }
     }
+    conn.execute_batch(HISTORY_BODY_INDEX)?;
     Ok(())
 }
 

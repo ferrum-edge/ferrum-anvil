@@ -103,6 +103,17 @@ fn run_error(e: anvil_runner::RunError) -> AppError {
     AppError::Invalid(e.to_string())
 }
 
+/// Prepare part of a run with `f` on a blocking thread (see
+/// [`crate::off_runtime`]). A cancel returns `Canceled` at once, as for a
+/// send: nothing has run yet, and what `f` prepares is dropped when it is done.
+async fn prepare<T: Send + 'static>(cancel: &CancellationToken, f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(AppError::Canceled),
+        r = crate::off_runtime(f) => r,
+    }
+}
+
 impl App {
     // ------------------------------------------------------------ runs
 
@@ -113,7 +124,7 @@ impl App {
             return Err(AppError::Locked);
         }
         let (app, scenario_id, dataset) = (self.shared(), *scenario_id, settings.dataset.clone());
-        let plan = crate::off_runtime(move || app.scenario_plan(&scenario_id, dataset)).await?;
+        let plan = prepare(&cancel, move || app.scenario_plan(&scenario_id, dataset)).await?;
         self.run_plan(plan, settings, cancel).await
     }
 
@@ -137,7 +148,7 @@ impl App {
             return Err(AppError::Locked);
         }
         let (app, ws, dataset) = (self.shared(), *ws, settings.dataset.clone());
-        let plan = crate::off_runtime(move || app.folder_plan(&ws, folder, dataset)).await?;
+        let plan = prepare(&cancel, move || app.folder_plan(&ws, folder, dataset)).await?;
         self.run_plan(plan, settings, cancel).await
     }
 
@@ -155,7 +166,7 @@ impl App {
     /// Run a prepared plan against this workspace's store.
     pub async fn run_plan(&self, plan: RunPlan, settings: RunSettings, cancel: CancellationToken) -> Result<RunReport> {
         let (app, environment, seed) = (self.shared(), settings.environment, settings.seed);
-        let (plan, steps) = crate::off_runtime(move || app.run_steps(plan, environment, seed)).await?;
+        let (plan, steps) = prepare(&cancel, move || app.run_steps(plan, environment, seed)).await?;
         let provider = AppProvider { app: self, steps, record_history: settings.record_history };
         let run_opts = RunOptions {
             iterations: settings.iterations,

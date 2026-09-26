@@ -427,12 +427,13 @@ needs no confirmation.
   a set-back database only while one of its schema 2 secrets still names its
   owner. Earlier builds
   refuse a schema 2 database, and a full backup made from one, as newer.
-- Database schema 3 adds an index on the response body each history record
-  references, so releasing a replaced body and retention find a blob's uses
-  without scanning the history table. The step is idempotent: a database
-  whose recorded version was set back below 3 runs it again without failing.
-  Earlier builds refuse a schema 3 database, and a full backup made from one
-  (a backup records the database schema it was made from), as newer.
+- The history table is indexed by the response body each record references,
+  so releasing a replaced body and retention find a blob's uses without
+  scanning it. The index has no schema version of its own: it is created,
+  where it is missing, each time a profile is opened or unlocked, after the
+  versioned steps. It changes no stored data, so the schema stays 2 and
+  earlier builds of schema 2 still read the database and full backups made
+  from it.
 - Skipped secrets and the migration trust the database as found. Replacing
   the whole database with an older checkpoint, or restoring a schema 1
   checkpoint whose owner column was edited, cannot be detected without state
@@ -465,8 +466,8 @@ maximum age (days) and total size; pruning keeps the newest records within the
 budget. "Clear all history" deletes history records only. A history record
 that is overwritten (an import under Replace) releases its old response body
 unless another record, or the new version of the same record, still uses it.
-Retention and that release look a blob's uses up by index (schema 3) and its
-pin by primary key.
+Retention and that release look a blob's uses up by index and its pin by
+primary key.
 
 Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so
