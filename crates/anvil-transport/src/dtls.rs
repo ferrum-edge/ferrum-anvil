@@ -44,7 +44,6 @@ use anvil_domain::settings::Timeouts;
 use bytes::Bytes;
 use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -515,20 +514,21 @@ struct Session {
 struct Inbox {
     received: u64,
     peer_closed: bool,
-    seen: HashSet<[u8; 32]>,
+    tally: crate::udp::PayloadTally,
 }
 
 impl Inbox {
+    /// An application datagram Anvil sent (so an identical reply counts as an echo).
+    fn sent(&mut self, d: &[u8]) {
+        self.tally.sent(d);
+    }
+
     fn record(&mut self, outs: &[Out], tr: &mut Transcript, facts: &mut SessionFacts) {
         for o in outs {
             match o {
                 Out::App(d) => {
                     self.received += 1;
-                    let mut digest = [0u8; 32];
-                    digest.copy_from_slice(&Sha256::digest(d));
-                    if !self.seen.insert(digest) {
-                        facts.repeated_datagrams += 1;
-                    }
+                    self.tally.received(d, facts);
                     tr.data(Direction::Received, "datagram", d);
                 }
                 Out::Close => {
@@ -770,6 +770,7 @@ async fn exchange<C: DatagramChannel>(
             break;
         }
         sent += 1;
+        inbox.sent(d);
         tr.data(Direction::Sent, "datagram", d);
         inbox.record(&outs, &mut tr, facts);
     }
@@ -859,6 +860,7 @@ async fn exchange<C: DatagramChannel>(
                             path_ended = true;
                         } else {
                             sent += 1;
+                            inbox.sent(&p);
                             tr.data(Direction::Sent, "datagram", &p);
                         }
                         inbox.record(&outs, &mut tr, facts);

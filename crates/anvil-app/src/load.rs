@@ -6,10 +6,10 @@
 use crate::exec::SendOptions;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
-use anvil_domain::load::{LoadPlan, LoadReport};
-use anvil_domain::request::AttachmentRef;
+use anvil_domain::load::{LoadPlan, LoadReport, LoadUnitKind, UnitSemantics};
+use anvil_domain::request::{AttachmentRef, Protocol};
 use anvil_domain::workspace::DatasetFormat as DomainDatasetFormat;
-use anvil_load::{Dataset, DatasetFormat, LoadJob, RunOptions, WorkerJob};
+use anvil_load::{Dataset, DatasetFormat, LoadJob, Refusal, RunOptions, WorkerJob};
 use anvil_storage::store::kind;
 use std::collections::HashMap;
 
@@ -25,8 +25,24 @@ pub struct LoadReportSummary {
     pub achieved_rate_per_sec: f64,
     pub started: u64,
     pub failures: u64,
-    /// p95 of successful sends; `None` when no send succeeded.
+    /// p95 of successful units; `None` when no unit succeeded.
     pub p95_us: Option<u64>,
+    /// What one unit of the run was (requests, sessions, exchanges, ...).
+    pub unit: LoadUnitKind,
+}
+
+/// What a plan would measure, or why it cannot run (checked without sending
+/// anything; the editor shows it while the plan is being built).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LoadPlanCheck {
+    /// `None` when the plan is refused or has no requests yet.
+    pub unit: Option<LoadUnitKind>,
+    pub unit_label: Option<String>,
+    pub semantics: Option<UnitSemantics>,
+    /// A typed refusal (LOAD-013), raised before any traffic.
+    pub refusal: Option<Refusal>,
+    /// The protocol of each request the plan references, in plan order.
+    pub protocols: Vec<(Id, Protocol)>,
 }
 
 /// What the user must see and acknowledge before a run starts.
@@ -41,6 +57,10 @@ pub struct LoadPreflight {
     pub dataset_rows: Option<usize>,
     pub trusted: bool,
     pub warnings: Vec<String>,
+    /// The unit every count in the report will be per, and its definitions.
+    pub unit: LoadUnitKind,
+    pub unit_label: String,
+    pub semantics: UnitSemantics,
 }
 
 impl App {
@@ -109,15 +129,44 @@ impl App {
             .map_err(|e| AppError::Invalid(e.to_string()))
     }
 
+    /// Classify the plan's requests into one load unit (LOAD-013) without
+    /// sending anything. Refusals are typed and returned, not raised.
+    pub fn load_plan_check(&self, p: &LoadPlan) -> Result<LoadPlanCheck> {
+        let job = self.load_job(p)?;
+        let ids = Self::plan_requests(p);
+        let protocols = ids.iter().map(|id| (*id, job.requests[id].spec.protocol)).collect();
+        if ids.is_empty() {
+            return Ok(LoadPlanCheck { unit: None, unit_label: None, semantics: None, refusal: None, protocols });
+        }
+        Ok(match anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode) {
+            Ok((unit, _)) => LoadPlanCheck {
+                unit: Some(unit),
+                unit_label: Some(anvil_load::protocol::label(unit).into()),
+                semantics: Some(anvil_load::protocol::semantics(unit, p.connection_mode)),
+                refusal: None,
+                protocols,
+            },
+            Err(r) => LoadPlanCheck { unit: None, unit_label: None, semantics: None, refusal: Some(r), protocols },
+        })
+    }
+
     pub fn load_preflight(&self, p: &LoadPlan) -> Result<LoadPreflight> {
         validate_plan(p)?;
         let job = self.load_job(p)?;
+        let ids = Self::plan_requests(p);
+        // Refused combinations stop here, before the user can start traffic.
+        let (unit, _) = anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode)
+            .map_err(|r| AppError::Invalid(format!("this plan cannot be load tested: {r}")))?;
         let mut destinations = Vec::new();
-        for id in Self::plan_requests(p) {
+        for id in ids {
             let ctx = &job.requests[&id];
-            let preview = self.engine.preview(ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
-            let origin = url_origin(&preview.url);
-            destinations.push(format!("{} {origin}", preview.method));
+            destinations.push(match ctx.spec.protocol {
+                Protocol::Http => {
+                    let preview = self.engine.preview(ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
+                    format!("{} {}", preview.method, url_origin(&preview.url))
+                }
+                other => session_destination(ctx, other),
+            });
         }
         destinations.dedup();
         let (workload, max_duration_secs, peak_target) = describe(p);
@@ -128,6 +177,12 @@ impl App {
         if destinations.iter().any(|d| !d.contains("127.0.0.1") && !d.contains("localhost") && !d.contains("[::1]")) {
             warnings.push("Traffic leaves this machine. Only load-test systems you own or are authorized to test.".into());
         }
+        if !anvil_load::protocol::connection_mode_applies(unit) {
+            warnings.push(format!(
+                "Each {} opens its own connection, so the plan's connection mode does not apply.",
+                anvil_load::protocol::semantics(unit, p.connection_mode).unit_singular
+            ));
+        }
         Ok(LoadPreflight {
             destinations,
             workload,
@@ -136,6 +191,9 @@ impl App {
             dataset_rows: job.dataset.as_ref().map(|d| d.rows.len()),
             trusted: p.trusted,
             warnings,
+            unit,
+            unit_label: anvil_load::protocol::label(unit).into(),
+            semantics: anvil_load::protocol::semantics(unit, p.connection_mode),
         })
     }
 
@@ -173,6 +231,7 @@ impl App {
                 started: r.counts.started,
                 failures: r.counts.transport_failures + r.counts.timeouts + r.counts.application_failures,
                 p95_us: (r.latency_success.count > 0).then_some(r.latency_success.p95_us),
+                unit: r.protocol_metrics.as_ref().map(|m| m.unit).unwrap_or_default(),
             })
             .collect())
     }
@@ -193,6 +252,23 @@ fn validate_plan(p: &LoadPlan) -> Result<()> {
         return Err(AppError::Invalid("add at least one saved request to the plan".into()));
     }
     anvil_load::validate_plan(p).map_err(|e| AppError::Invalid(e.to_string()))
+}
+
+/// `WS ws://host:port`-style destination of a session request, from its URL
+/// with the context's variables resolved (nothing is sent).
+fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol) -> String {
+    let url = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None)
+        .resolve(&ctx.spec.url, "url")
+        .unwrap_or_else(|_| ctx.spec.url.clone());
+    let label = match protocol {
+        Protocol::WebSocket => "WebSocket",
+        Protocol::Grpc => "gRPC",
+        Protocol::Sse => "SSE",
+        Protocol::Tcp => "TCP",
+        Protocol::Udp => "UDP",
+        Protocol::Http => "HTTP",
+    };
+    format!("{label} {}", url_origin(&url))
 }
 
 fn url_origin(url: &str) -> String {

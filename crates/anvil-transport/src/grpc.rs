@@ -332,6 +332,10 @@ pub struct GrpcPlan {
     /// PROXY protocol header written at the head of each new TCP connection,
     /// before TLS (TCP legs only; HTTP/3 is refused before traffic).
     pub proxy_header: Option<crate::proxy_protocol::ConnectionHeader>,
+    /// Reuse pooled connections from (and return them to) these channels.
+    /// `None` (manual calls, interactive sessions, fresh-connection load):
+    /// every call opens and closes its own connection.
+    pub channels: Option<Arc<Channels>>,
 }
 
 impl GrpcPlan {
@@ -525,6 +529,193 @@ impl Conn {
             Conn::H3(_) => "the HTTP/3 stream was reset with H3_REQUEST_CANCELLED",
         }
     }
+}
+
+// ------------------------------------------------------------ channels ---
+
+/// A pooled HTTP/2 or HTTP/3 connection (multiplexed, so it is shared).
+#[derive(Clone)]
+enum SharedConn {
+    H2(http2::SendRequest<GrpcBody>),
+    H3 { send: crate::h3::SendReq, quic: quinn::Connection },
+}
+
+#[derive(Clone)]
+struct SharedChannel {
+    conn: SharedConn,
+    stats: Arc<ConnStats>,
+    template: ConnectionObservation,
+    served: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl SharedChannel {
+    fn usable(&self) -> bool {
+        match &self.conn {
+            SharedConn::H2(s) => !s.is_closed(),
+            SharedConn::H3 { quic, .. } => quic.close_reason().is_none(),
+        }
+    }
+}
+
+/// A pooled HTTP/1.1 connection (gRPC-Web): used by one call at a time.
+struct ExclusiveChannel {
+    sender: http1::SendRequest<GrpcBody>,
+    stats: Arc<ConnStats>,
+    template: ConnectionObservation,
+    served: u32,
+}
+
+/// Reusable gRPC channels of one engine, keyed by destination and security
+/// context (host, port, TLS fingerprint, proxy, HTTP version policy, wire,
+/// DNS settings). Calls only use them when the plan carries a handle: the
+/// load engine enables that for its persistent connection mode, so each
+/// virtual user keeps one pooled HTTP/2 or HTTP/3 connection (HTTP/1.1 for
+/// gRPC-Web) across its calls. A manual call opens its own connection so its
+/// evidence covers the whole setup. HBONE tunnels are never pooled (a tunnel
+/// carries one execution's identity and headers).
+#[derive(Default)]
+pub struct Channels {
+    shared: parking_lot::Mutex<HashMap<String, SharedChannel>>,
+    exclusive: parking_lot::Mutex<HashMap<String, Vec<ExclusiveChannel>>>,
+}
+
+const MAX_EXCLUSIVE_PER_KEY: usize = 8;
+
+impl Channels {
+    pub fn new() -> Self {
+        Channels::default()
+    }
+
+    /// Drop every pooled connection (e.g. on lock or at the end of a run).
+    pub fn clear(&self) {
+        self.shared.lock().clear();
+        self.exclusive.lock().clear();
+    }
+
+    /// Pooled connections currently held (tests and diagnostics).
+    pub fn len(&self) -> usize {
+        self.shared.lock().len() + self.exclusive.lock().values().map(Vec::len).sum::<usize>()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn checkout(&self, key: &str) -> Option<Connected> {
+        {
+            let mut shared = self.shared.lock();
+            match shared.get(key) {
+                Some(ch) if ch.usable() => {
+                    let ch = ch.clone();
+                    let mut observation = ch.template.clone();
+                    observation.reused = true;
+                    observation.prior_requests = ch.served.fetch_add(1, Ordering::SeqCst);
+                    let (conn, quic) = match ch.conn {
+                        SharedConn::H2(s) => (Conn::H2(s), None),
+                        SharedConn::H3 { send, quic } => (Conn::H3(send), Some(quic)),
+                    };
+                    return Some(Connected { conn, stats: ch.stats, observation, quic });
+                }
+                Some(_) => {
+                    shared.remove(key);
+                }
+                None => {}
+            }
+        }
+        let mut exclusive = self.exclusive.lock();
+        let list = exclusive.get_mut(key)?;
+        while let Some(ch) = list.pop() {
+            if ch.sender.is_closed() || !ch.sender.is_ready() {
+                continue;
+            }
+            let mut observation = ch.template.clone();
+            observation.reused = true;
+            observation.prior_requests = ch.served;
+            return Some(Connected { conn: Conn::H1(ch.sender), stats: ch.stats, observation, quic: None });
+        }
+        None
+    }
+
+    /// Return a connection after a call. HTTP/2 stays pooled while it is
+    /// open; HTTP/3 and HTTP/1.1 only after a clean call (a canceled HTTP/3
+    /// stream is not reused: the connection is closed instead).
+    async fn checkin(&self, key: &str, c: Connected, clean: bool) {
+        let Connected { conn, stats, mut observation, quic } = c;
+        observation.reused = false;
+        match conn {
+            Conn::H2(s) => {
+                if s.is_closed() {
+                    self.shared.lock().remove(key);
+                    return;
+                }
+                let mut shared = self.shared.lock();
+                if !shared.contains_key(key) {
+                    let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
+                    observation.prior_requests = 0;
+                    shared.insert(key.to_string(), SharedChannel { conn: SharedConn::H2(s), stats, template: observation, served });
+                }
+            }
+            Conn::H3(send) => {
+                let Some(quic) = quic else { return };
+                if !clean || quic.close_reason().is_some() {
+                    self.shared.lock().remove(key);
+                    quic.close(crate::h3::H3_NO_ERROR.into(), b"");
+                    return;
+                }
+                let mut shared = self.shared.lock();
+                if !shared.contains_key(key) {
+                    let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
+                    observation.prior_requests = 0;
+                    shared.insert(
+                        key.to_string(),
+                        SharedChannel { conn: SharedConn::H3 { send, quic }, stats, template: observation, served },
+                    );
+                }
+            }
+            Conn::H1(mut s) => {
+                if !clean {
+                    return;
+                }
+                // The HTTP/1.1 connection becomes ready once hyper has
+                // processed the end of the response; wait briefly for it.
+                let ready = tokio::time::timeout(Duration::from_millis(50), s.ready()).await;
+                if !matches!(ready, Ok(Ok(()))) {
+                    return;
+                }
+                let mut exclusive = self.exclusive.lock();
+                let list = exclusive.entry(key.to_string()).or_default();
+                if list.len() < MAX_EXCLUSIVE_PER_KEY {
+                    let served = observation.prior_requests + 1;
+                    list.push(ExclusiveChannel { sender: s, stats, template: observation, served });
+                }
+            }
+        }
+    }
+}
+
+/// Pool key for a plan's connection on one leg.
+fn channel_key(plan: &GrpcPlan, leg: Leg) -> String {
+    let proxy = plan
+        .proxy
+        .as_ref()
+        .map(|p| format!("{:?}:{}:{}:{}", p.kind, p.host, p.port, p.tls.as_ref().map(|t| t.fingerprint.as_str()).unwrap_or("")))
+        .unwrap_or_default();
+    let dns = format!("{:?}{:?}{:?}", plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference);
+    // A connection's PROXY header is fixed for its lifetime, so channels with
+    // different header plans (or none) are never shared.
+    let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
+    format!(
+        "{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}",
+        leg,
+        plan.host.to_ascii_lowercase(),
+        plan.port,
+        plan.tls.as_ref().map(|t| t.fingerprint.as_str()).unwrap_or("cleartext"),
+        proxy,
+        plan.version,
+        plan.wire.is_web(),
+        crate::certs::sha256_hex(dns.as_bytes()),
+        header
+    )
 }
 
 /// Shared between the call loop and the HTTP/3 request-stream tasks.
@@ -1211,23 +1402,58 @@ async fn attempt(
     events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: index });
     let mut obs = new_attempt(index, reason, "POST", &plan.display_url);
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
-    let Connected { mut conn, stats, observation, quic } = match connect(&mut rec, plan, leg, cancel, total_deadline).await {
-        Ok(c) => c,
-        Err((f, cobs)) => {
-            obs.connection = cobs;
-            return SessionOutput::single(
-                fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
-                None,
-                ProtocolStatus::None,
-                SessionFacts::default(),
-            );
+    // Channel reuse (load, persistent mode): never for interactive calls or HBONE tunnels.
+    let pool = plan
+        .channels
+        .as_ref()
+        .filter(|_| !interactive && !crate::hbone::is_hbone(plan.proxy.as_ref()))
+        .map(|p| (p, channel_key(plan, leg)));
+    let pooled = pool.as_ref().and_then(|(p, key)| p.checkout(key));
+    let connected = match pooled {
+        Some(c) => {
+            let detail = Some("pooled gRPC channel");
+            rec.mark(Phase::Dns, PhaseStatus::Reused, detail);
+            match leg {
+                Leg::Quic => rec.mark(Phase::QuicHandshake, PhaseStatus::Reused, detail),
+                Leg::Tcp(_) => {
+                    rec.mark(Phase::Connect, PhaseStatus::Reused, detail);
+                    if plan.tls.is_some() {
+                        rec.mark(Phase::TlsHandshake, PhaseStatus::Reused, detail);
+                    }
+                }
+            }
+            c
         }
+        None => match connect(&mut rec, plan, leg, cancel, total_deadline).await {
+            Ok(c) => c,
+            Err((f, cobs)) => {
+                obs.connection = cobs;
+                return SessionOutput::single(
+                    fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
+                    None,
+                    ProtocolStatus::None,
+                    SessionFacts::default(),
+                );
+            }
+        },
     };
-    obs.connection = Some(observation);
+    let Connected { mut conn, stats, observation, quic } = connected;
+    obs.connection = Some(observation.clone());
     let cx = CallCx { plan, events, cancel, total_deadline, index };
-    let out = exchange(cx, local, &mut conn, stats, rec, obs, commands).await;
-    if let Some(q) = quic {
-        q.close(0x100u32.into(), b""); // H3_NO_ERROR
+    let out = exchange(cx, local, &mut conn, stats.clone(), rec, obs, commands).await;
+    match pool {
+        Some((p, key)) => {
+            let last = out.attempts.last();
+            let clean = last.is_some_and(|a| {
+                a.observation.failure.is_none() && a.response.as_ref().is_some_and(|r| r.body.completeness == BodyCompleteness::Complete)
+            });
+            p.checkin(&key, Connected { conn, stats, observation, quic }, clean).await;
+        }
+        None => {
+            if let Some(q) = quic {
+                q.close(crate::h3::H3_NO_ERROR.into(), b"");
+            }
+        }
     }
     out
 }

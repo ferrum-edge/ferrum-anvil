@@ -276,6 +276,10 @@ pub struct SessionFacts {
     /// UDP may duplicate datagrams, but the peer may also send identical
     /// replies; the count is an observation, not a duplicate-delivery claim.
     pub repeated_datagrams: u64,
+    /// Received datagrams byte-identical to a datagram sent in the same
+    /// exchange (echo-shaped). A payload comparison only: it never says which
+    /// sent datagram, if any, was delivered.
+    pub echoed_datagrams: u64,
     /// The OS reported an ICMP port-unreachable for the UDP destination.
     pub icmp_port_unreachable: bool,
 }

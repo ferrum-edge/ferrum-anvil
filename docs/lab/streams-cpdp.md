@@ -116,6 +116,9 @@ attribution. Every row passed in every run of the final stability batch (§5).
 | PROTO-021 | PROTO-021 | UDP where every other reply is dropped: 4 sent, 2 received, with per-datagram boundaries. The finding is `udp.partial_responses`, with no confirmed loss claim. |
 | PROTO-022 | PROTO-022 | DTLS terminated at the gateway (18405). A completed `dtls_handshake`, verified, no TLS-adapter phase, and echo. The plain UDP backend received the decrypted datagram. |
 | PROTO-022-wrong-root | PROTO-022 | The client trusts the wrong root. The failure is a client-side `tls_untrusted_issuer` in `dtls_handshake`, with nothing dispatched and no datagram at the backend. Recovery: the correct root. The wrong-*client-identity* leg (DTLS client CA) belongs to the `tls` profile. |
+| LOAD-013-grpc | LOAD-013 (gRPC) | A load run (`anvil-load`, 30 unary calls over h2c, 3 virtual users, persistent) with dataset rows choosing OK or PERMISSION_DENIED. Anvil reports `status_codes` 0 × 20 and 7 × 10, 20 success samples only, and at most 3 connections (pooled channels; 3 opened, 27 reused). Ground truth: the backend received exactly 30 calls, and the gateway's transaction log has 30 `Unary` lines whose `grpc_status` is 0 × 20 and 7 × 10. |
+| LOAD-013-ws | LOAD-013 (WebSocket) | 10 WebSocket sessions under load (2 scripted messages, `expect_messages` 2): 10 opened, 10 closed cleanly by Anvil with 1000, 20 messages each way and 20 round trips. Ground truth: the backend received exactly 20 messages; the gateway logged 10 upgrades (101) and 10 session ends (`websocket.termination_reason`). |
+| LOAD-013-udp | LOAD-013 (UDP) | 5 exchanges of 4 datagrams to the drop-every-other backend (18403): 20 sent and 10 received as separate counts, every exchange with a response, and the report's note that the ratio is never a delivery rate. Ground truth: the backend's log shows all 20 datagrams arrived, which Anvil does not claim. |
 
 ## 3. `cpdp` scenarios: genuine stale fences
 
@@ -200,6 +203,12 @@ line.
 
 After every protocol branch was merged (2026-09-26), `run all` gave streams **84/0/0** and cpdp
 **10/0/0 on both v0.9.7 and v0.9.5**.
+
+After per-protocol load units were added (LOAD-013; three load scenarios), three consecutive
+`run streams --untrusted-pass` runs on **v0.9.7** and one on **v0.9.5** gave **90 passed,
+0 failed, 0 skipped** each (45 scenarios × 2 passes). The load scenarios' counts were identical in
+every run (gRPC 0 × 20 / 7 × 10 with 3 connections opened, WebSocket 10 sessions / 20 messages /
+20 round trips, UDP 20 sent / 10 received) and matched the backend and operator-log ground truth.
 
 Earlier consecutive runs with `--untrusted-pass` on 2026-09-25 (macOS arm64, Ferrum Edge v0.9.5,
 sha256 `6a531f2c…`). The counts are harness totals: the trusted pass, the untrusted pass,

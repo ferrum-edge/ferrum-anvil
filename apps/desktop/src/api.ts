@@ -10,6 +10,11 @@ import type {
   LatencySummary,
   LoadPlan,
   LoadReport,
+  LoadUnitKind,
+  ProtocolLoadMetrics,
+  Protocol,
+  RequestCounts,
+  UnitSemantics,
   RunCompletion,
   RunEvent,
   RunReport,
@@ -46,6 +51,9 @@ export type {
   Dataset,
   LoadPlan,
   LoadReport,
+  LoadUnitKind,
+  ProtocolLoadMetrics,
+  UnitSemantics,
   DiagnosticFinding,
   Environment,
   ExecutionEvent,
@@ -205,6 +213,34 @@ export interface LoadPreflight {
   dataset_rows?: number | null;
   trusted: boolean;
   warnings: string[];
+  /** The unit every count in the report is per (LOAD-013). */
+  unit: LoadUnitKind;
+  unit_label: string;
+  semantics: UnitSemantics;
+}
+/** Why a plan cannot be load tested; raised before any traffic (LOAD-013). */
+export interface LoadRefusal {
+  code:
+    | "mixed_unit_kinds"
+    | "grpc_client_streaming"
+    | "grpc_bidirectional"
+    | "grpc_reflection"
+    | "sse_reconnect"
+    | "udp_masque"
+    | "udp_hbone"
+    | "hbone_persistent"
+    | "incomplete_request";
+  request_id?: string | null;
+  message: string;
+}
+/** What an edited plan would measure, or its typed refusal. Nothing is sent. */
+export interface LoadPlanCheck {
+  unit?: LoadUnitKind | null;
+  unit_label?: string | null;
+  semantics?: UnitSemantics | null;
+  refusal?: LoadRefusal | null;
+  /** [request id, protocol] in plan order. */
+  protocols: [string, Protocol][];
 }
 export interface LoadReportSummary {
   run_id: string;
@@ -216,8 +252,9 @@ export interface LoadReportSummary {
   achieved_rate_per_sec: number;
   started: number;
   failures: number;
-  /** p95 of successful sends; null when none succeeded. */
+  /** p95 of successful units; null when none succeeded. */
   p95_us: number | null;
+  unit: LoadUnitKind;
 }
 export interface LoadProgress {
   run_id: string;
@@ -226,6 +263,10 @@ export interface LoadProgress {
   in_flight: number;
   snapshot: {
     counts: LoadCounts;
+    /** Unit ledger: one entry per request / call / stream / session / exchange. */
+    requests: RequestCounts;
+    /** Protocol denominators of the plan's unit kind. */
+    protocol?: ProtocolLoadMetrics | null;
     achieved_rate_per_sec: number;
     offered_rate_per_sec?: number | null;
     latency_success: LatencySummary;
@@ -417,6 +458,7 @@ export const api = {
   saveLoadPlan: (plan: LoadPlan) => call<LoadPlan>("load_plan_save", { plan }),
   deleteLoadPlan: (planId: string) => call<void>("load_plan_delete", { planId }),
   loadPreflight: (planId: string) => call<LoadPreflight>("load_preflight", { planId }),
+  loadPlanCheck: (plan: LoadPlan) => call<LoadPlanCheck>("load_plan_check", { plan }),
   loadRunStart: (planId: string, acknowledged: boolean) => call<string>("load_run_start", { planId, acknowledged }),
   loadRunCancel: (runKey: string) => call<boolean>("load_run_cancel", { runKey }),
   loadReports: (workspaceId: string) => call<LoadReportSummary[]>("load_reports", { workspaceId }),

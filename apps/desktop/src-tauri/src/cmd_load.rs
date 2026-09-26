@@ -4,7 +4,7 @@
 
 use crate::commands::{R, e, id};
 use crate::state::DesktopState;
-use anvil_app::load::{LoadPreflight, LoadReportSummary};
+use anvil_app::load::{LoadPlanCheck, LoadPreflight, LoadReportSummary};
 use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport};
 use anvil_domain::workspace::{Dataset, DatasetFormat};
@@ -35,6 +35,13 @@ pub fn load_preflight(st: State<'_, DesktopState>, plan_id: String) -> R<LoadPre
     let app = st.app()?;
     let p = app.load_plan(&id(&plan_id)?).map_err(e)?;
     app.load_preflight(&p).map_err(e)
+}
+
+/// What an edited (possibly unsaved) plan would measure, or its typed
+/// refusal (LOAD-013). Nothing is sent.
+#[tauri::command]
+pub fn load_plan_check(st: State<'_, DesktopState>, plan: LoadPlan) -> R<LoadPlanCheck> {
+    st.app()?.load_plan_check(&plan).map_err(e)
 }
 
 #[derive(Serialize, Clone)]

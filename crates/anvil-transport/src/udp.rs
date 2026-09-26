@@ -60,6 +60,37 @@ pub(crate) fn start_envelope(
         .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::BodySerialization, e).with_field("udp.proxy_protocol"))
 }
 
+/// Payload observations on received datagrams: byte-identical repeats of an
+/// earlier received datagram, and echoes of a datagram sent in the same
+/// exchange. Observations only — neither is a delivery or duplication claim.
+#[derive(Default)]
+pub(crate) struct PayloadTally {
+    received: HashSet<[u8; 32]>,
+    sent: HashSet<[u8; 32]>,
+}
+
+fn digest(d: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&Sha256::digest(d));
+    out
+}
+
+impl PayloadTally {
+    pub(crate) fn sent(&mut self, d: &[u8]) {
+        self.sent.insert(digest(d));
+    }
+
+    pub(crate) fn received(&mut self, d: &[u8], facts: &mut SessionFacts) {
+        let h = digest(d);
+        if self.sent.contains(&h) {
+            facts.echoed_datagrams += 1;
+        }
+        if !self.received.insert(h) {
+            facts.repeated_datagrams += 1;
+        }
+    }
+}
+
 /// The bytes put on the wire for one datagram.
 pub(crate) fn wire<'a>(env: &mut Option<crate::proxy_protocol::Enveloper>, d: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
     match env {
@@ -170,7 +201,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     let mut sent = 0u64;
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
-    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    let mut tally = PayloadTally::default();
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
     for d in &plan.datagrams {
@@ -178,6 +209,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
         match sock.send(&w).await {
             Ok(_) => {
                 sent += 1;
+                tally.sent(d);
                 tr.data(Direction::Sent, "datagram", d);
             }
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
@@ -186,6 +218,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                 // The error is consumed by this call; retry once so the datagram is still offered.
                 if sock.send(&w).await.is_ok() {
                     sent += 1;
+                    tally.sent(d);
                     tr.data(Direction::Sent, "datagram", d);
                 }
             }
@@ -223,11 +256,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
         match ev {
             Ev::Recv(Ok(n)) => {
                 received += 1;
-                let mut digest = [0u8; 32];
-                digest.copy_from_slice(&Sha256::digest(&buf[..n]));
-                if !seen.insert(digest) {
-                    facts.repeated_datagrams += 1;
-                }
+                tally.received(&buf[..n], &mut facts);
                 tr.data(Direction::Received, "datagram", &buf[..n]);
                 if received >= plan.max_datagrams as u64 {
                     tr.note("note", &format!("stopped receiving at max_datagrams ({})", plan.max_datagrams));
@@ -258,6 +287,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                 Some(SessionCommand::SendText { text }) => {
                     if sock.send(&wire(&mut env, text.as_bytes())).await.is_ok() {
                         sent += 1;
+                        tally.sent(text.as_bytes());
                         tr.data(Direction::Sent, "datagram", text.as_bytes());
                     }
                     window_end = Instant::now() + window;
@@ -266,6 +296,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                     Ok(b) => {
                         if sock.send(&wire(&mut env, &b)).await.is_ok() {
                             sent += 1;
+                            tally.sent(&b);
                             tr.data(Direction::Sent, "datagram", &b);
                         }
                         window_end = Instant::now() + window;

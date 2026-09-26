@@ -599,6 +599,9 @@ async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, int
             .proxy_header
             .clone()
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
+        // Channel reuse only where the engine enables it (load runs) and
+        // keep-alive is on; interactive calls always own their connection.
+        channels: if !interactive && b.prep.settings.keepalive { engine.grpc_channels.clone() } else { None },
     };
     let mut p = finish_prep(b, Plan::Grpc(plan), "POST".into(), display, headers, unary_body, facts);
     p.content_type = Some(
@@ -1278,7 +1281,9 @@ async fn run_prepared(
         stream: out.transcript,
         protocol_status_override: Some(out.status),
     };
-    record::assemble(assembly)
+    let mut output = record::assemble(assembly);
+    output.session_facts = Some(out.facts);
+    output
 }
 
 /// Automation execution for WebSocket, gRPC, SSE, TCP/TLS and UDP/DTLS.

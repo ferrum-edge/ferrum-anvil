@@ -53,7 +53,8 @@ pass.
 - **Native load engine.**
   - Runs in a separate worker process and needs an explicit authorization acknowledgement.
   - Workloads: open, closed and fixed-iteration.
-  - Reports: HDR percentiles, balanced ledgers, generator health, comparison, and exports.
+  - One load unit per protocol (LOAD-013): HTTP requests (HTTP/1.1, HTTP/2, HTTP/3 with separately counted fallback attempts), unary gRPC calls and server-streaming gRPC streams (native and gRPC-Web, pooled channels per virtual user), SSE streams, WebSocket sessions, TCP exchanges and UDP/DTLS exchanges, with typed denominators (status codes, messages, sessions, frames, datagrams sent vs received) and typed refusals for combinations without a unit.
+  - Reports: HDR percentiles, balanced ledgers, generator health, comparison (never across protocols), and exports.
   - Locking the app stops the run and keeps a partial report.
   - See `docs/load.md`.
 - **Real-gateway failure lab.**
@@ -124,9 +125,8 @@ results and reasoned statuses.
 - **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md` and ferrum-edge/ferrum-anvil#3.
 - **Protocol and load gaps:**
   - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).
-  - Load testing is HTTP-family only, one worker on one machine.
-  - HTTP/3 has not been exercised under load.
-  - gRPC-Web carries only unary and server streaming (the protocol's limit) and cannot use server reflection; gRPC over HTTP/3 opens a fresh QUIC connection per call.
+  - Load testing runs one worker on one machine. Client-streaming and bidirectional gRPC, gRPC with server reflection, SSE with reconnection, UDP through MASQUE and mixed-protocol plans are refused for load; there is no load action that holds sessions open while messages flow at a rate (see `docs/load.md`).
+  - gRPC-Web carries only unary and server streaming (the protocol's limit) and cannot use server reflection; a manually sent gRPC call over HTTP/3 opens a fresh QUIC connection (load runs reuse pooled channels).
   - See `docs/protocols.md` §5.
 - **XML signing.** Anvil does not sign XML. AUTH-030/031 run live with lab-signed fixtures, which Anvil sends verbatim.
 - **Ferrum Edge 0.9.5 and 0.9.7 only.** Other gateway versions have no catalog and are not validated. Several 0.9.7 changes are source-audited but not reproduced live (Gateway API route timeouts, Redis quota counting, the WAF `fail_closed` disposition; see `docs/audit/gateway-0.9.7-delta.md`). The gateway relays plain-HTTP/2 trailers inconsistently in the lab (both releases).

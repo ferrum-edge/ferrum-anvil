@@ -412,7 +412,10 @@ fn real_main() {
     // directly: dropping the runtime would wait on the blocking stdin reader.
     if std::env::args_os().nth(1).is_some_and(|a| a == specs_load::LOAD_WORKER_FLAG) {
         anvil_transport::init();
-        let code = runtime().block_on(anvil_load::worker::run_stdio());
+        // A named binding: a temporary runtime would be dropped at the end of
+        // the statement — before `exit` — and wait on the stdin reader forever.
+        let rt = runtime();
+        let code = rt.block_on(anvil_load::worker::run_stdio());
         std::process::exit(code);
     }
     let code = runtime().block_on(cli_main());

@@ -271,6 +271,7 @@ async fn proto_016_grpc_adapter_with_a_compiled_proto_and_trailers() {
         redact: None,
         wire: GrpcWire::Grpc,
         version: HttpVersionPolicy::Auto,
+        channels: None,
     };
     let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     match &out.status {
@@ -340,6 +341,7 @@ fn echo_plan(
         redact: None,
         wire,
         version,
+        channels: None,
     }
 }
 

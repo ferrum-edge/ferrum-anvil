@@ -713,6 +713,23 @@ export type Workload =
  */
 export type RunCompletion = "completed" | "canceled_by_user" | "aborted_by_rule" | "worker_crashed" | "stopped_by_lock";
 /**
+ * What one load *unit* is (LOAD-013). A plan has exactly one unit kind:
+ * every request in its chain or mix must produce the same kind, so every
+ * count, rate and latency in a report has a single denominator.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "LoadUnitKind".
+ */
+export type LoadUnitKind =
+  | "http_request"
+  | "grpc_call"
+  | "grpc_stream"
+  | "sse_stream"
+  | "websocket_session"
+  | "tcp_exchange"
+  | "udp_exchange"
+  | "dtls_exchange";
+/**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ProxyKind".
  */
@@ -2716,6 +2733,12 @@ export interface LoadReport {
   warmup_iterations_excluded?: number;
   warmup_sends_excluded?: number;
   /**
+   * The unit kind, its definitions and its protocol-specific denominators
+   * (messages, sessions, frames, datagrams). `None` only in reports written
+   * before protocol load existed, which were HTTP-only.
+   */
+  protocol_metrics?: ProtocolLoadMetrics | null;
+  /**
    * SHA-256 of the canonical JSON of this report with this field unset;
    * verified when a saved report is reopened.
    */
@@ -2946,6 +2969,344 @@ export interface LatencySummary2 {
  * acquisition/refresh, retry backoff and record assembly.
  */
 export interface LatencySummary3 {
+  count: number;
+  min_us: number;
+  max_us: number;
+  mean_us: number;
+  p50_us: number;
+  p90_us: number;
+  p95_us: number;
+  p99_us: number;
+}
+/**
+ * Protocol-specific denominators of a run (LOAD-013). Exactly one family
+ * block is set for the plan's unit kind (gRPC streams set `grpc` and `stream`).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ProtocolLoadMetrics".
+ */
+export interface ProtocolLoadMetrics {
+  /**
+   * [`PROTOCOL_METRICS_VERSION`] of the producing engine.
+   */
+  version: number;
+  unit: LoadUnitKind;
+  semantics: UnitSemantics;
+  http?: HttpLoadMetrics | null;
+  grpc?: GrpcLoadMetrics | null;
+  stream?: StreamLoadMetrics | null;
+  websocket?: WebSocketLoadMetrics | null;
+  tcp?: TcpLoadMetrics | null;
+  datagram?: DatagramLoadMetrics | null;
+}
+/**
+ * Plain-language definitions that travel with every report, so a reader
+ * never has to guess what a count or a latency refers to.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "UnitSemantics".
+ */
+export interface UnitSemantics {
+  /**
+   * `request`, `call`, `stream`, `session`, `exchange`.
+   */
+  unit_singular: string;
+  unit_plural: string;
+  /**
+   * When a unit counts as `completed` in the unit ledger.
+   */
+  completed_means: string;
+  /**
+   * When a completed unit is a success (and enters the success latency).
+   */
+  success_means: string;
+  /**
+   * What `latency_success` / `latency_failure` measure for this unit.
+   */
+  latency_means: string;
+  /**
+   * How the plan's connection mode applies to this unit.
+   */
+  connection_mode_means: string;
+}
+/**
+ * HTTP requests (all HTTP versions).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "HttpLoadMetrics".
+ */
+export interface HttpLoadMetrics {
+  /**
+   * Attempts made over TCP after HTTP/3 failed before a response (the
+   * automatic HTTP/3 policy). Extra attempts inside a request, never
+   * extra requests.
+   */
+  protocol_fallback_attempts: number;
+  /**
+   * Requests that needed such a fallback.
+   */
+  units_with_fallback: number;
+  /**
+   * Requests whose final attempt ran over HTTP/3.
+   */
+  units_over_h3: number;
+}
+/**
+ * gRPC calls and streams (native gRPC and gRPC-Web).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "GrpcLoadMetrics".
+ */
+export interface GrpcLoadMetrics {
+  /**
+   * Terminal `grpc-status` of every completed unit (code → count). Sums to
+   * the unit ledger's `completed`: a unit completes only with a status and
+   * complete framing.
+   */
+  status_codes: [unknown, unknown][];
+  /**
+   * Completed with status 0 (OK).
+   */
+  ok: number;
+  /**
+   * Completed with a non-OK status; equals the ledger's application failures.
+   */
+  non_ok: number;
+  /**
+   * A response arrived but no terminal status did: the RPC result is
+   * unknown, so the unit is incomplete (a transport failure or timeout in
+   * the ledger) and never a success.
+   */
+  missing_status: number;
+  /**
+   * Attempts over TCP after HTTP/3 failed before the call was sent.
+   */
+  protocol_fallback_attempts: number;
+}
+/**
+ * Server-streaming gRPC calls and SSE streams.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "StreamLoadMetrics".
+ */
+export interface StreamLoadMetrics {
+  /**
+   * Streams whose response head was accepted (gRPC: HTTP 200; SSE: 2xx).
+   */
+  opened: number;
+  /**
+   * gRPC response messages or SSE events received, over all measured streams.
+   */
+  messages_received: number;
+  /**
+   * Opened streams that received at least one message or event.
+   */
+  with_messages: number;
+  time_to_first_message: LatencySummary4;
+  /**
+   * SSE only: how opened streams ended (`peer` = the server ended it,
+   * `client` = the request's `max_events`, `timeout` = its idle timeout or
+   * the total deadline, `abnormal` = a failure).
+   */
+  ended_by?: ClosedCount[];
+}
+/**
+ * Unit start → first message/event, over streams that received one.
+ */
+export interface LatencySummary4 {
+  count: number;
+  min_us: number;
+  max_us: number;
+  mean_us: number;
+  p50_us: number;
+  p90_us: number;
+  p95_us: number;
+  p99_us: number;
+}
+/**
+ * How many units ended one way.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ClosedCount".
+ */
+export interface ClosedCount {
+  closed_by: ClosedBy;
+  /**
+   * WebSocket close code, when one was exchanged.
+   */
+  code?: number | null;
+  count: number;
+}
+/**
+ * WebSocket sessions.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WebSocketLoadMetrics".
+ */
+export interface WebSocketLoadMetrics {
+  /**
+   * Handshake accepted (101, or 200 for extended CONNECT).
+   */
+  opened: number;
+  /**
+   * The server answered the handshake with another status (see the status distribution).
+   */
+  handshake_rejected: number;
+  /**
+   * No usable handshake answer: DNS, connect, proxy, TLS, an invalid
+   * handshake response, a timeout or a cancel before the session opened.
+   */
+  not_opened: number;
+  /**
+   * Opened sessions that ended without a failure (a close handshake by
+   * either side, the request's `expect_messages`, or its idle close).
+   */
+  closed_cleanly: number;
+  /**
+   * Text and binary messages sent / received (control frames excluded).
+   */
+  messages_sent: number;
+  messages_received: number;
+  /**
+   * Round-trip times exist only when a request defines `expect_messages`:
+   * the i-th scripted data message sent is paired with the i-th data
+   * message received (an echo-style exchange). Otherwise no RTT is claimed.
+   */
+  rtt_defined: boolean;
+  rtt_pairs: number;
+  rtt: LatencySummary5;
+  /**
+   * Opened sessions whose messages could not be paired (transcript bound
+   * reached, or a reply arrived before its message was sent).
+   */
+  rtt_unpaired_sessions: number;
+  /**
+   * Opened sessions by who closed and the close code.
+   */
+  close_codes: ClosedCount[];
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "LatencySummary".
+ */
+export interface LatencySummary5 {
+  count: number;
+  min_us: number;
+  max_us: number;
+  mean_us: number;
+  p50_us: number;
+  p90_us: number;
+  p95_us: number;
+  p99_us: number;
+}
+/**
+ * TCP/TLS framed exchanges.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "TcpLoadMetrics".
+ */
+export interface TcpLoadMetrics {
+  /**
+   * Connections that completed setup (TCP, proxy tunnel, TLS) — one per exchange.
+   */
+  connected: number;
+  /**
+   * Frames (with a framing preset) or chunks (without one) sent / received.
+   */
+  frames_sent: number;
+  frames_received: number;
+  payload_bytes_sent: number;
+  payload_bytes_received: number;
+  /**
+   * Exchanges that ended with a partial trailing frame.
+   */
+  partial_frames: number;
+  /**
+   * Exchanges the peer closed (FIN) before a local stop condition.
+   */
+  peer_closes: number;
+  /**
+   * The request's `expect_frames`, when it has a framing preset.
+   */
+  expected_frames?: number | null;
+  /**
+   * Completed exchanges that received the expected frames.
+   */
+  expectation_met: number;
+  /**
+   * Completed exchanges that received fewer (counted as application failures).
+   */
+  expectation_short: number;
+}
+/**
+ * UDP and DTLS datagram exchanges. Sent and received are separate counts:
+ * UDP has no acknowledgement, so nothing here infers delivery or loss.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DatagramLoadMetrics".
+ */
+export interface DatagramLoadMetrics {
+  datagrams_sent: number;
+  datagrams_received: number;
+  /**
+   * Completed exchanges with at least one datagram received.
+   */
+  exchanges_with_response: number;
+  /**
+   * Completed exchanges with none received in the window: "no response
+   * observed" — not a failure, not a loss, not a delivery.
+   */
+  exchanges_silent: number;
+  /**
+   * Received datagrams byte-identical to an earlier one in the same exchange.
+   */
+  repeated_payloads: number;
+  /**
+   * Received datagrams byte-identical to a datagram sent in the same
+   * exchange (echo-shaped). The rest are "other payloads"; neither says
+   * which datagram, if any, was delivered.
+   */
+  echoed_payloads: number;
+  /**
+   * Exchanges in which the OS reported ICMP port unreachable.
+   */
+  icmp_unreachable_exchanges: number;
+  time_to_first_datagram: LatencySummary6;
+  /**
+   * DTLS exchanges only.
+   */
+  dtls_handshakes?: HandshakeMetrics | null;
+}
+/**
+ * First datagram sent → first datagram received, per responding exchange.
+ */
+export interface LatencySummary6 {
+  count: number;
+  min_us: number;
+  max_us: number;
+  mean_us: number;
+  p50_us: number;
+  p90_us: number;
+  p95_us: number;
+  p99_us: number;
+}
+/**
+ * A DTLS handshake measured as its own phase.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "HandshakeMetrics".
+ */
+export interface HandshakeMetrics {
+  attempted: number;
+  completed: number;
+  failed: number;
+  timed_out: number;
+  duration: LatencySummary7;
+}
+/**
+ * Duration of completed handshakes.
+ */
+export interface LatencySummary7 {
   count: number;
   min_us: number;
   max_us: number;
@@ -4148,28 +4509,19 @@ export interface SettingsOverrides3 {
   integration_profile_id?: Id | null;
 }
 /**
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "LatencySummary".
- */
-export interface LatencySummary4 {
-  count: number;
-  min_us: number;
-  max_us: number;
-  mean_us: number;
-  p50_us: number;
-  p90_us: number;
-  p95_us: number;
-  p99_us: number;
-}
-/**
- * Send ledger of the measured window: one entry per `Engine::execute` call.
- * Balances like [`LoadCounts`]:
+ * Unit ledger of the measured window: one entry per `Engine::execute` call,
+ * i.e. one *unit* of the plan's [`LoadUnitKind`] (an HTTP request, a gRPC
+ * call or stream, an SSE stream, a WebSocket session, a TCP exchange or a
+ * UDP/DTLS exchange). Balances like [`LoadCounts`]:
  * `started = completed + transport_failures + timeouts + canceled + in_flight_at_end`.
  *
- * `completed` means a complete response was received for a request/response
- * protocol. Datagram and stream denominators (UDP datagrams sent/received,
- * WebSocket messages, gRPC stream messages) are not modelled here: the load
- * engine refuses non-HTTP requests rather than implying delivery (LOAD-013).
+ * What `completed` means depends on the unit (see
+ * [`ProtocolLoadMetrics::semantics`]): a complete response for HTTP, a
+ * terminal gRPC status with complete framing, a stream or session that ended
+ * without a failure, an exchange that ran to its stop condition. Messages,
+ * events, frames and datagrams are counted per unit in
+ * [`ProtocolLoadMetrics`]; they are never folded into these counts, and a
+ * datagram sent is never counted as delivered (LOAD-013).
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "RequestCounts".

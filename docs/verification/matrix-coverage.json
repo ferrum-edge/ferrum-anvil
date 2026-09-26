@@ -3,8 +3,8 @@
  "gateway_release": "v0.9.7",
  "total": 182,
  "totals": {
-  "verified_test": 75,
-  "verified_live": 96,
+  "verified_test": 74,
+  "verified_live": 97,
   "blocked": 6,
   "not_applicable": 2,
   "verified_check": 1,
@@ -1243,19 +1243,19 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2232,
+     "line": 2233,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2470,
+     "line": 2639,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
      "results/lab/20260926T025501Z-core",
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "core:UP-002": {
@@ -1344,12 +1344,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2260,
+     "line": 2261,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2471,
+     "line": 2640,
      "kind": "lab"
     },
     {
@@ -1375,7 +1375,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams",
+     "results/lab/20260926T044038Z-streams",
      "results/lab/20260926T025632Z-tls"
     ],
     "variants": {
@@ -1709,19 +1709,19 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1192,
+     "line": 1193,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2434,
+     "line": 2603,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
      "results/lab/20260926T025501Z-core",
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "core:UP-010": {
@@ -5072,12 +5072,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 424,
+     "line": 425,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2419,
+     "line": 2588,
      "kind": "lab"
     },
     {
@@ -5088,7 +5088,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-001": {
@@ -5121,12 +5121,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 463,
+     "line": 464,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2420,
+     "line": 2589,
      "kind": "lab"
     },
     {
@@ -5137,7 +5137,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-002": {
@@ -5211,12 +5211,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 534,
+     "line": 535,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2421,
+     "line": 2590,
      "kind": "lab"
     },
     {
@@ -5232,7 +5232,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-005": {
@@ -5275,18 +5275,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 599,
+     "line": 600,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2422,
+     "line": 2591,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-006": {
@@ -5324,18 +5324,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 629,
+     "line": 630,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2423,
+     "line": 2592,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-007": {
@@ -5373,18 +5373,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 657,
+     "line": 658,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2424,
+     "line": 2593,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-008": {
@@ -5422,28 +5422,28 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 716,
+     "line": 717,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 749,
+     "line": 750,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2425,
+     "line": 2594,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2426,
+     "line": 2595,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-009-client-close": {
@@ -5495,18 +5495,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 773,
+     "line": 774,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2427,
+     "line": 2596,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-010": {
@@ -5562,18 +5562,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 861,
+     "line": 862,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2428,
+     "line": 2597,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-012": {
@@ -5611,28 +5611,28 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 888,
+     "line": 889,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 939,
+     "line": 940,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2465,
+     "line": 2634,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2466,
+     "line": 2635,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-013-blocked": {
@@ -5689,48 +5689,48 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 977,
+     "line": 978,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1010,
+     "line": 1011,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1330,
+     "line": 1331,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1367,
+     "line": 1368,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2429,
+     "line": 2598,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2430,
+     "line": 2599,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2436,
+     "line": 2605,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2438,
+     "line": 2607,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-014": {
@@ -5815,18 +5815,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1050,
+     "line": 1051,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2431,
+     "line": 2600,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-015": {
@@ -5884,43 +5884,43 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1082,
+     "line": 1083,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1131,
+     "line": 1132,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1255,
+     "line": 1256,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1442,
+     "line": 1443,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1485,
+     "line": 1486,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2432,
+     "line": 2601,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2433,
+     "line": 2602,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-016-h3-fallback": {
@@ -6089,7 +6089,7 @@
    "lab": {
     "runs": [
      "results/lab/20260926T025828Z-h3x",
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "h3x:PROTO-018-h3-blocked": {
@@ -6211,38 +6211,38 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2158,
+     "line": 2159,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2190,
+     "line": 2191,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2208,
+     "line": 2209,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2467,
+     "line": 2636,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2468,
+     "line": 2637,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2469,
+     "line": 2638,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-019-tls": {
@@ -6308,12 +6308,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2297,
+     "line": 2298,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2472,
+     "line": 2641,
      "kind": "lab"
     },
     {
@@ -6324,7 +6324,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-020": {
@@ -6362,18 +6362,18 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2331,
+     "line": 2332,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2473,
+     "line": 2642,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "streams:PROTO-021": {
@@ -6441,22 +6441,22 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2358,
+     "line": 2359,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2387,
+     "line": 2388,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2474,
+     "line": 2643,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2475,
+     "line": 2644,
      "kind": "lab"
     },
     {
@@ -6467,7 +6467,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20260926T025713Z-streams",
+     "results/lab/20260926T044038Z-streams",
      "results/lab/20260926T025632Z-tls"
     ],
     "variants": {
@@ -6753,19 +6753,19 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2112,
+     "line": 2113,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2464,
+     "line": 2633,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
      "results/lab/20260926T025828Z-h3x",
-     "results/lab/20260926T025713Z-streams"
+     "results/lab/20260926T044038Z-streams"
     ],
     "variants": {
      "h3x:TRUST-007-sse-h3": {
@@ -7207,12 +7207,12 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 676,
+     "line": 745,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 680,
+     "line": 749,
      "kind": "integration_test"
     }
    ],
@@ -7313,7 +7313,7 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 112,
+     "line": 113,
      "kind": "integration_test"
     }
    ],
@@ -7331,7 +7331,7 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 141,
+     "line": 142,
      "kind": "integration_test"
     }
    ],
@@ -7349,7 +7349,7 @@
    "references": [
     {
      "path": "crates/anvil-load/src/metrics.rs",
-     "line": 466,
+     "line": 1091,
      "kind": "unit_test"
     }
    ],
@@ -7368,12 +7368,12 @@
    "references": [
     {
      "path": "crates/anvil-load/src/metrics.rs",
-     "line": 530,
+     "line": 1156,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 161,
+     "line": 162,
      "kind": "integration_test"
     }
    ],
@@ -7391,7 +7391,7 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 193,
+     "line": 194,
      "kind": "integration_test"
     }
    ],
@@ -7409,7 +7409,7 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 246,
+     "line": 247,
      "kind": "integration_test"
     }
    ],
@@ -7428,12 +7428,12 @@
    "references": [
     {
      "path": "crates/anvil-load/src/report.rs",
-     "line": 535,
+     "line": 854,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 288,
+     "line": 289,
      "kind": "integration_test"
     }
    ],
@@ -7451,7 +7451,7 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 306,
+     "line": 307,
      "kind": "integration_test"
     }
    ],
@@ -7469,17 +7469,17 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 405,
+     "line": 406,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 434,
+     "line": 435,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 462,
+     "line": 463,
      "kind": "integration_test"
     }
    ],
@@ -7498,12 +7498,12 @@
    "references": [
     {
      "path": "crates/anvil-load/src/metrics.rs",
-     "line": 561,
+     "line": 1188,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 510,
+     "line": 511,
      "kind": "integration_test"
     }
    ],
@@ -7522,17 +7522,17 @@
    "references": [
     {
      "path": "crates/anvil-load/src/html.rs",
-     "line": 575,
+     "line": 777,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/src/report.rs",
-     "line": 554,
+     "line": 873,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 536,
+     "line": 537,
      "kind": "integration_test"
     }
    ],
@@ -7553,23 +7553,123 @@
    "id": "LOAD-013",
    "category": "Load correctness and report durability",
    "title": "Datagram accounting",
-   "status": "verified_test",
+   "status": "verified_live",
    "evidence_kinds": [
-    "integration_test"
+    "integration_test",
+    "lab",
+    "renderer_test"
    ],
    "references": [
     {
-     "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 565,
+     "path": "apps/desktop/src/LoadView.test.tsx",
+     "line": 1,
+     "kind": "renderer_test"
+    },
+    {
+     "path": "crates/anvil-app/tests/specs_load.rs",
+     "line": 178,
      "kind": "integration_test"
     },
     {
-     "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 572,
+     "path": "crates/anvil-app/tests/specs_load.rs",
+     "line": 209,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-cli/tests/cli_load.rs",
+     "line": 1,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-cli/tests/cli_load.rs",
+     "line": 111,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2464,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2504,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2551,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2645,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2646,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/streams.rs",
+     "line": 2647,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-load/tests/load_protocols.rs",
+     "line": 1,
      "kind": "integration_test"
     }
    ],
-   "lab": null,
+   "lab": {
+    "runs": [
+     "results/lab/20260926T044038Z-streams"
+    ],
+    "variants": {
+     "streams:LOAD-013-grpc": {
+      "profile": "streams",
+      "scenario": "LOAD-013-grpc",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:LOAD-013-udp": {
+      "profile": "streams",
+      "scenario": "LOAD-013-udp",
+      "passes": {
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     },
+     "streams:LOAD-013-ws": {
+      "profile": "streams",
+      "scenario": "LOAD-013-ws",
+      "passes": {
+       "trusted": {
+        "status": "passed",
+        "skip_reason": null
+       },
+       "untrusted": {
+        "status": "passed",
+        "skip_reason": null
+       }
+      }
+     }
+    }
+   },
    "note": null
   },
   {
@@ -7583,7 +7683,7 @@
    "references": [
     {
      "path": "crates/anvil-load/src/compare.rs",
-     "line": 228,
+     "line": 308,
      "kind": "unit_test"
     }
    ],

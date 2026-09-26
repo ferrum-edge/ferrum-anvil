@@ -1,5 +1,8 @@
 // Load testing: plan editor, explicit preflight confirmation, live progress
-// from the worker process, saved reports and run comparison.
+// from the worker process, saved reports and run comparison. Every plan
+// measures one load unit (HTTP requests, gRPC calls or streams, SSE streams,
+// WebSocket sessions, TCP or UDP/DTLS exchanges); the editor shows which one,
+// or the typed refusal, before anything can run (LOAD-013).
 import { useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -9,17 +12,103 @@ import {
   type Dataset,
   type LoadComparison,
   type LoadPlan,
+  type LoadPlanCheck,
   type LoadPreflight,
   type LoadProgress,
   type LoadReport,
   type LoadReportSummary,
   type TreeNode,
 } from "./api";
-import type { Environment, Stage, TimeBucket, WeightedStep, Workload } from "./generated/contracts";
+import type {
+  ClosedCount,
+  Environment,
+  LatencySummary,
+  LoadUnitKind,
+  Protocol,
+  ProtocolLoadMetrics,
+  RequestCounts,
+  Stage,
+  TimeBucket,
+  WeightedStep,
+  Workload,
+} from "./generated/contracts";
 
 /// Plan with its optional list fields normalized for editing.
 type EditPlan = LoadPlan & { chain: string[]; mix: WeightedStep[] };
 import { Modal, fmtBytes, fmtUs, humanize, uid } from "./ui";
+
+const UNIT_WORDS: Record<LoadUnitKind, [string, string]> = {
+  http_request: ["request", "requests"],
+  grpc_call: ["call", "calls"],
+  grpc_stream: ["stream", "streams"],
+  sse_stream: ["stream", "streams"],
+  websocket_session: ["session", "sessions"],
+  tcp_exchange: ["exchange", "exchanges"],
+  udp_exchange: ["exchange", "exchanges"],
+  dtls_exchange: ["exchange", "exchanges"],
+};
+
+const PROTOCOL_LABEL: Record<Protocol, string> = { http: "HTTP", web_socket: "WebSocket", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP" };
+
+const GRPC_CODES = [
+  "OK",
+  "CANCELLED",
+  "UNKNOWN",
+  "INVALID_ARGUMENT",
+  "DEADLINE_EXCEEDED",
+  "NOT_FOUND",
+  "ALREADY_EXISTS",
+  "PERMISSION_DENIED",
+  "RESOURCE_EXHAUSTED",
+  "FAILED_PRECONDITION",
+  "ABORTED",
+  "OUT_OF_RANGE",
+  "UNIMPLEMENTED",
+  "INTERNAL",
+  "UNAVAILABLE",
+  "DATA_LOSS",
+  "UNAUTHENTICATED",
+];
+
+/** Singular and plural unit nouns ("request"/"requests" for reports without protocol metrics). */
+export function unitWords(p?: ProtocolLoadMetrics | null): [string, string] {
+  return p ? [p.semantics.unit_singular, p.semantics.unit_plural] : ["request", "requests"];
+}
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+const NO_UNITS: RequestCounts = {
+  started: 0,
+  completed: 0,
+  transport_failures: 0,
+  timeouts: 0,
+  canceled: 0,
+  in_flight_at_end: 0,
+  application_failures: 0,
+  assertion_failures: 0,
+  connections_opened: 0,
+  connections_reused: 0,
+};
+
+/** A percentile only exists when there were samples: never "0 µs". */
+function pct(l: LatencySummary | undefined, v: number | undefined): string {
+  return !l || l.count === 0 ? "—" : fmtUs(v);
+}
+
+function closedText(c: ClosedCount["closed_by"]): string {
+  switch (c) {
+    case "peer":
+      return "peer";
+    case "client":
+      return "client (stop condition or close)";
+    case "abnormal":
+      return "abnormal (no close handshake)";
+    case "timeout":
+      return "timeout (idle or deadline)";
+    default:
+      return "not closed";
+  }
+}
 
 function flatten(nodes: TreeNode[], path: string[] = []): { id: string; label: string; method: string }[] {
   return nodes.flatMap((n) =>
@@ -129,7 +218,8 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
               </span>
               <span />
               <span className="faint" style={{ fontSize: 11 }}>
-                {new Date(r.started_at).toLocaleString()} · {r.achieved_rate_per_sec.toFixed(1)}/s · p95 {r.p95_us === null ? "— (no successes)" : fmtUs(r.p95_us)} · {r.failures} failed
+                {new Date(r.started_at).toLocaleString()} · {UNIT_WORDS[r.unit]?.[1] ?? "requests"} · {r.achieved_rate_per_sec.toFixed(1)}/s · p95{" "}
+                {r.p95_us === null ? "— (no successes)" : fmtUs(r.p95_us)} · {r.failures} failed
               </span>
             </div>
           ))}
@@ -176,7 +266,7 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
 
 // ------------------------------------------------------------ plan editor
 
-function PlanEditor(props: {
+export function PlanEditor(props: {
   plan: LoadPlan;
   requests: { id: string; label: string; method: string }[];
   environments: Environment[];
@@ -192,7 +282,29 @@ function PlanEditor(props: {
   const [preflight, setPreflight] = useState<LoadPreflight | null>(null);
   const [ack, setAck] = useState(false);
   const [datasetDlg, setDatasetDlg] = useState(false);
+  const [check, setCheck] = useState<LoadPlanCheck | null>(null);
   const useMix = p.mix.length > 0;
+  const requestKey = JSON.stringify([p.chain, p.mix.map((m) => m.request_id), p.connection_mode]);
+  // What the plan measures (or why it is refused), re-checked as requests change. Nothing is sent.
+  useEffect(() => {
+    if (p.chain.length === 0 && p.mix.length === 0) {
+      setCheck(null);
+      return;
+    }
+    let stale = false;
+    const t = setTimeout(() => {
+      api
+        .loadPlanCheck(p)
+        .then((c) => !stale && setCheck(c))
+        .catch(() => !stale && setCheck(null));
+    }, 150);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
+  }, [requestKey]);
+  const protocolOf = (id: string) => check?.protocols.find(([rid]) => rid === id)?.[1];
+  const refused = !!check?.refusal;
   const w = p.workload;
   const setW = (workload: Workload) => setP({ ...p, workload });
   const label = (id: string) => props.requests.find((r) => r.id === id)?.label ?? "(missing request)";
@@ -219,6 +331,8 @@ function PlanEditor(props: {
         </button>
         <button
           className="btn primary"
+          disabled={refused}
+          title={refused ? "This plan cannot be load tested; see the refusal below." : undefined}
           onClick={async () => {
             const saved = await saveIt();
             if (!saved) return;
@@ -261,6 +375,7 @@ function PlanEditor(props: {
           p.chain.map((id, i) => (
             <div className="row" key={`${id}-${i}`}>
               <span className="faint mono">{i + 1}.</span>
+              <ProtocolBadge protocol={protocolOf(id)} />
               <span className="grow">{label(id)}</span>
               <button className="btn ghost icon-btn" aria-label="Move up" disabled={i === 0} onClick={() => setP({ ...p, chain: swap(p.chain, i, i - 1) })}>
                 ↑
@@ -276,6 +391,7 @@ function PlanEditor(props: {
         {useMix &&
           p.mix.map((m, i) => (
             <div className="row" key={`${m.request_id}-${i}`}>
+              <ProtocolBadge protocol={protocolOf(m.request_id)} />
               <span className="grow">{label(m.request_id)}</span>
               <label className="lbl" style={{ flexDirection: "row", alignItems: "center" }}>
                 weight
@@ -307,6 +423,7 @@ function PlanEditor(props: {
           </button>
         </div>
         <p className="hint">Values extracted by earlier steps are available to later steps of the same iteration. Auth signatures, nonces and JWTs are generated fresh for every send.</p>
+        <UnitBox check={check} />
       </fieldset>
 
       <fieldset className="box">
@@ -458,6 +575,13 @@ function PlanEditor(props: {
                 </td>
               </tr>
               <tr>
+                <td className="k">Load unit</td>
+                <td className="v">
+                  <div>{preflight.unit_label}</div>
+                  <div className="faint">{preflight.semantics.completed_means}</div>
+                </td>
+              </tr>
+              <tr>
                 <td className="k">Workload</td>
                 <td className="v">{preflight.workload}</td>
               </tr>
@@ -484,6 +608,35 @@ function PlanEditor(props: {
           </label>
         </Modal>
       )}
+    </div>
+  );
+}
+
+function ProtocolBadge({ protocol }: { protocol?: Protocol }) {
+  return protocol ? <span className="badge">{PROTOCOL_LABEL[protocol]}</span> : null;
+}
+
+/** The plan's load unit and its definitions, or the typed refusal (LOAD-013). */
+export function UnitBox({ check }: { check: LoadPlanCheck | null }) {
+  if (!check) return null;
+  if (check.refusal) {
+    return (
+      <div className="bad-box" role="alert" data-testid="load-refusal">
+        <b>Not supported for load</b> <span className="mono">({check.refusal.code})</span>: {check.refusal.message}
+      </div>
+    );
+  }
+  if (!check.unit || !check.semantics) return null;
+  const s = check.semantics;
+  return (
+    <div className="ok-box" data-testid="load-unit">
+      <b>Load unit: {check.unit_label}</b> — every count, rate and latency is per {s.unit_singular}.
+      <ul>
+        <li>Completed: {s.completed_means}</li>
+        <li>Success: {s.success_means}</li>
+        <li>Latency: {s.latency_means}</li>
+        <li>Connections: {s.connection_mode_means}</li>
+      </ul>
     </div>
   );
 }
@@ -583,6 +736,8 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
 function LivePanel(props: { live: { runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] }; onCancel: () => void }) {
   const p = props.live.progress;
   const c = p?.snapshot.counts;
+  const u = p?.snapshot.requests;
+  const [, many] = unitWords(p?.snapshot.protocol);
   return (
     <div className="col" style={{ gap: 14 }}>
       <div className="row">
@@ -600,15 +755,18 @@ function LivePanel(props: { live: { runKey: string; planName: string; progress: 
           <div className="cards">
             <Card label="Achieved rate" value={`${p.snapshot.achieved_rate_per_sec.toFixed(1)}/s`} sub={p.snapshot.offered_rate_per_sec != null ? `offered ${p.snapshot.offered_rate_per_sec.toFixed(1)}/s` : undefined} />
             <Card label="In flight" value={String(p.in_flight)} />
-            <Card label="Started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped` : undefined} />
-            <Card label="Completed" value={String(c.completed)} />
-            <Card label="Failures" value={String(c.transport_failures + c.timeouts + c.application_failures)} bad={c.transport_failures + c.timeouts + c.application_failures > 0} />
+            <Card label="Iterations started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped` : undefined} />
+            {u && <Card label={`${cap(many)} completed`} value={String(u.completed)} sub={`${u.started} started`} />}
+            {u && (
+              <Card label={`Failed ${many}`} value={String(u.transport_failures + u.timeouts + u.application_failures)} bad={u.transport_failures + u.timeouts + u.application_failures > 0} />
+            )}
             {p.snapshot.latency_success.count === 0 ? (
-              <Card label="p95 (success)" value="—" sub="no successful sends yet" />
+              <Card label="p95 (success)" value="—" sub={`no successful ${many} yet`} />
             ) : (
               <Card label="p95 (success)" value={fmtUs(p.snapshot.latency_success.p95_us)} sub={`p99 ${fmtUs(p.snapshot.latency_success.p99_us)}`} />
             )}
           </div>
+          {p.snapshot.protocol && <ProtocolCards p={p.snapshot.protocol} />}
           <Timeline buckets={props.live.timeline.filter(Boolean)} />
         </>
       )}
@@ -653,7 +811,7 @@ function Timeline({ buckets }: { buckets: TimeBucket[] }) {
 
 // --------------------------------------------------------------- report
 
-function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify: (m: string) => void; onDeleted: () => void }) {
+export function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify: (m: string) => void; onDeleted: () => void }) {
   const [r, setR] = useState<LoadReport | null>(null);
   const [cmpWith, setCmpWith] = useState("");
   const [cmp, setCmp] = useState<LoadComparison | null>(null);
@@ -662,6 +820,8 @@ function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify
   }, [props.runId]);
   if (!r) return <div className="faint">Loading report…</div>;
   const c = r.counts;
+  const u = r.requests ?? NO_UNITS;
+  const [, many] = unitWords(r.protocol_metrics);
   const exportAs = async (format: "json" | "csv" | "timeline_csv" | "html") => {
     const ext = format === "html" ? "html" : format === "json" ? "json" : "csv";
     const path = await save({ defaultPath: `anvil-load-${r.plan.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}` });
@@ -704,13 +864,15 @@ function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify
       <div className="faint">Destinations: {r.destination_summary.join(", ")}</div>
       <div className="cards">
         <Card label="Achieved rate" value={`${r.achieved_rate_per_sec.toFixed(1)}/s`} sub={r.offered_rate_per_sec != null ? `offered ${r.offered_rate_per_sec.toFixed(1)}/s` : undefined} />
-        <Card label="Started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped (in-flight cap)` : undefined} />
-        <Card label="Completed" value={String(c.completed)} />
-        <Card label="Transport failures" value={String(c.transport_failures)} bad={c.transport_failures > 0} />
-        <Card label="Timeouts" value={String(c.timeouts)} bad={c.timeouts > 0} />
-        <Card label="Application failures" value={String(c.application_failures)} bad={c.application_failures > 0} />
-        <Card label="Assertion failures" value={String(c.assertion_failures)} bad={c.assertion_failures > 0} />
+        <Card label="Iterations started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped (in-flight cap)` : undefined} />
+        <Card label={`${cap(many)} started`} value={String(u.started)} />
+        <Card label={`${cap(many)} completed`} value={String(u.completed)} />
+        <Card label="Transport failures" value={String(u.transport_failures)} bad={u.transport_failures > 0} />
+        <Card label="Timeouts" value={String(u.timeouts)} bad={u.timeouts > 0} />
+        <Card label="Application failures" value={String(u.application_failures)} bad={u.application_failures > 0} />
+        <Card label="Assertion failures" value={String(u.assertion_failures)} bad={u.assertion_failures > 0} />
       </div>
+      {r.protocol_metrics && <ProtocolPanel p={r.protocol_metrics} requests={u} />}
       <table className="grid">
         <thead>
           <tr>
@@ -725,8 +887,8 @@ function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify
         </thead>
         <tbody>
           {[
-            ["Successful sends", r.latency_success],
-            ["Failed sends (to failure point)", r.latency_failure],
+            [`Successful ${many}`, r.latency_success],
+            [`Failed ${many} (to failure point)`, r.latency_failure],
           ].map(([name, l]) => {
             const L = l as LoadReport["latency_success"];
             return (
@@ -735,7 +897,7 @@ function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify
                 <td className="v">{L.count}</td>
                 {L.count === 0 ? (
                   <td className="v faint" colSpan={5}>
-                    no samples
+                    — (no samples)
                   </td>
                 ) : (
                   <>
@@ -751,7 +913,10 @@ function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify
           })}
         </tbody>
       </table>
-      <p className="hint">Timeouts are censored (their true latency is unknown) and excluded from both distributions; they are counted above. Percentiles come from merged HDR histograms, never averaged.</p>
+      <p className="hint">
+        {r.protocol_metrics ? `${r.protocol_metrics.semantics.latency_means} ` : ""}Timeouts are censored (their true latency is unknown) and excluded from both distributions; they are counted above. Percentiles cover
+        successful {many} only and come from merged HDR histograms, never averaged.
+      </p>
       <Timeline buckets={r.timeline} />
       <div className="row" style={{ alignItems: "flex-start", gap: 24, flexWrap: "wrap" }}>
         <div className="col grow">
@@ -852,5 +1017,218 @@ function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify
         </div>
       )}
     </div>
+  );
+}
+
+// ------------------------------------------------------------ protocol
+
+function Rows(props: { rows: [string, string][]; testid?: string }) {
+  return (
+    <table className="grid" data-testid={props.testid}>
+      <tbody>
+        {props.rows.map(([k, v]) => (
+          <tr key={k}>
+            <td className="k">{k}</td>
+            <td className="v">{v}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function LatencyRows(props: { rows: [string, LatencySummary][] }) {
+  return (
+    <table className="grid">
+      <thead>
+        <tr>
+          <th>Distribution</th>
+          <th>count</th>
+          <th>p50</th>
+          <th>p90</th>
+          <th>p99</th>
+          <th>max</th>
+        </tr>
+      </thead>
+      <tbody>
+        {props.rows.map(([name, l]) => (
+          <tr key={name}>
+            <td>{name}</td>
+            <td className="v">{l.count}</td>
+            <td className="v">{pct(l, l.p50_us)}</td>
+            <td className="v">{pct(l, l.p90_us)}</td>
+            <td className="v">{pct(l, l.p99_us)}</td>
+            <td className="v">{pct(l, l.max_us)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+const ratio = (n: number, d: number) => (d === 0 ? "—" : (n / d).toFixed(3));
+
+/** Compact live cards for the protocol denominators. */
+export function ProtocolCards({ p }: { p: ProtocolLoadMetrics }) {
+  return (
+    <div className="cards" data-testid="protocol-cards">
+      {p.http && p.http.protocol_fallback_attempts > 0 && <Card label="HTTP/3 fallback attempts" value={String(p.http.protocol_fallback_attempts)} />}
+      {p.grpc && (
+        <>
+          <Card label="gRPC OK" value={String(p.grpc.ok)} />
+          <Card label="gRPC non-OK" value={String(p.grpc.non_ok)} bad={p.grpc.non_ok > 0} />
+          <Card label="No terminal status" value={String(p.grpc.missing_status)} bad={p.grpc.missing_status > 0} />
+        </>
+      )}
+      {p.stream && <Card label={p.unit === "sse_stream" ? "Events received" : "Messages received"} value={String(p.stream.messages_received)} sub={`${p.stream.opened} streams opened`} />}
+      {p.websocket && (
+        <>
+          <Card label="Sessions opened" value={String(p.websocket.opened)} sub={p.websocket.handshake_rejected ? `${p.websocket.handshake_rejected} rejected` : undefined} />
+          <Card label="Messages sent / received" value={`${p.websocket.messages_sent} / ${p.websocket.messages_received}`} />
+        </>
+      )}
+      {p.tcp && <Card label="Frames sent / received" value={`${p.tcp.frames_sent} / ${p.tcp.frames_received}`} sub={`${p.tcp.connected} connections`} />}
+      {p.datagram && (
+        <>
+          <Card label="Datagrams sent" value={String(p.datagram.datagrams_sent)} />
+          <Card label="Datagrams received" value={String(p.datagram.datagrams_received)} sub="a separate count, not deliveries" />
+          <Card label="No response observed" value={String(p.datagram.exchanges_silent)} sub="exchanges; not failures" />
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The unit's definitions and its protocol denominators (mirrors the HTML report). */
+export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; requests: RequestCounts }) {
+  const s = p.semantics;
+  return (
+    <section className="col" data-testid="protocol-panel" aria-label="Protocol metrics">
+      <h4 className="faint" style={{ margin: 0 }}>
+        Load unit: {s.unit_plural} ({humanize(p.unit)})
+      </h4>
+      <Rows
+        rows={[
+          ["Completed", s.completed_means],
+          ["Success", s.success_means],
+          ["Latency", s.latency_means],
+          ["Connections", s.connection_mode_means],
+        ]}
+      />
+      {p.http && (
+        <Rows
+          rows={[
+            ["HTTP/3 → TCP fallback attempts (extra attempts, not requests)", String(p.http.protocol_fallback_attempts)],
+            ["Requests that needed a fallback", String(p.http.units_with_fallback)],
+            ["Requests completed over HTTP/3", String(p.http.units_over_h3)],
+          ]}
+        />
+      )}
+      {p.grpc && (
+        <>
+          <Rows
+            testid="grpc-summary"
+            rows={[
+              ["Status OK", String(p.grpc.ok)],
+              ["Status non-OK", String(p.grpc.non_ok)],
+              ["Response without a terminal status (incomplete, never success)", String(p.grpc.missing_status)],
+              ["Timed out before any status (status unknown, not DEADLINE_EXCEEDED)", String(requests.timeouts)],
+              ["HTTP/3 → TCP fallback attempts", String(p.grpc.protocol_fallback_attempts)],
+            ]}
+          />
+          {p.grpc.status_codes.length > 0 && (
+            <Rows
+              testid="grpc-codes"
+              rows={p.grpc.status_codes.map(([code, n]) => [`${String(code)} ${GRPC_CODES[Number(code)] ?? "non-standard code"}`, String(n)] as [string, string])}
+            />
+          )}
+        </>
+      )}
+      {p.stream && (
+        <>
+          <Rows
+            rows={[
+              ["Streams opened", String(p.stream.opened)],
+              [p.unit === "sse_stream" ? "Events received" : "Messages received", String(p.stream.messages_received)],
+              ["Opened streams with at least one", String(p.stream.with_messages)],
+              ["Mean per opened stream", ratio(p.stream.messages_received, p.stream.opened)],
+              ...(p.stream.ended_by ?? []).map((c) => [`Ended by ${closedText(c.closed_by)}`, String(c.count)] as [string, string]),
+            ]}
+          />
+          <LatencyRows rows={[["Time to first message/event", p.stream.time_to_first_message]]} />
+        </>
+      )}
+      {p.websocket && (
+        <>
+          <Rows
+            testid="ws-summary"
+            rows={[
+              ["Sessions opened (handshake accepted)", String(p.websocket.opened)],
+              ["Handshake rejected (server answered another status)", String(p.websocket.handshake_rejected)],
+              ["Not opened (connect, TLS, invalid handshake, timeout, cancel)", String(p.websocket.not_opened)],
+              ["Opened and closed cleanly", String(p.websocket.closed_cleanly)],
+              ["Messages sent / received", `${p.websocket.messages_sent} / ${p.websocket.messages_received}`],
+              ...p.websocket.close_codes.map((c) => [`Closed by ${closedText(c.closed_by)}${c.code != null ? `, code ${c.code}` : ""}`, String(c.count)] as [string, string]),
+            ]}
+          />
+          {p.websocket.rtt_defined ? (
+            <LatencyRows rows={[[`Round trip (i-th sent → i-th received; ${p.websocket.rtt_pairs} pairs)`, p.websocket.rtt]]} />
+          ) : (
+            <p className="hint" data-testid="ws-no-rtt">
+              Round-trip time: not defined — the request does not set expect_messages, so messages are not paired.
+            </p>
+          )}
+        </>
+      )}
+      {p.tcp && (
+        <Rows
+          rows={[
+            ["Connections set up", String(p.tcp.connected)],
+            ["Frames sent / received", `${p.tcp.frames_sent} / ${p.tcp.frames_received}`],
+            ["Payload bytes sent / received", `${fmtBytes(p.tcp.payload_bytes_sent)} / ${fmtBytes(p.tcp.payload_bytes_received)}`],
+            ["Exchanges ending with a partial frame", String(p.tcp.partial_frames)],
+            ["Exchanges the peer closed", String(p.tcp.peer_closes)],
+            ["Expected frames per exchange", p.tcp.expected_frames != null ? String(p.tcp.expected_frames) : "not defined"],
+            ["Expected frames received / short", `${p.tcp.expectation_met} / ${p.tcp.expectation_short}`],
+          ]}
+        />
+      )}
+      {p.datagram && (
+        <>
+          <Rows
+            testid="datagram-summary"
+            rows={[
+              ["Datagrams sent", String(p.datagram.datagrams_sent)],
+              ["Datagrams received", String(p.datagram.datagrams_received)],
+              ["Received per sent (observed ratio, not a delivery rate)", ratio(p.datagram.datagrams_received, p.datagram.datagrams_sent)],
+              ["Exchanges with a response", String(p.datagram.exchanges_with_response)],
+              ["Exchanges with no response observed", String(p.datagram.exchanges_silent)],
+              ["Repeated payloads", String(p.datagram.repeated_payloads)],
+              ["Echoed / other payloads", `${p.datagram.echoed_payloads} / ${Math.max(0, p.datagram.datagrams_received - p.datagram.echoed_payloads)}`],
+              ["Exchanges with ICMP port unreachable", String(p.datagram.icmp_unreachable_exchanges)],
+              ...(p.datagram.dtls_handshakes
+                ? ([
+                    ["DTLS handshakes attempted", String(p.datagram.dtls_handshakes.attempted)],
+                    [
+                      "Completed / failed / timed out",
+                      `${p.datagram.dtls_handshakes.completed} / ${p.datagram.dtls_handshakes.failed} / ${p.datagram.dtls_handshakes.timed_out}`,
+                    ],
+                  ] as [string, string][])
+                : []),
+            ]}
+          />
+          <LatencyRows
+            rows={[
+              ["Time to first response", p.datagram.time_to_first_datagram],
+              ...(p.datagram.dtls_handshakes ? ([["DTLS handshake (completed)", p.datagram.dtls_handshakes.duration]] as [string, LatencySummary][]) : []),
+            ]}
+          />
+          <p className="hint">
+            Sent and received are separate counts. UDP has no acknowledgement: nothing here claims delivery or loss, and received datagrams are not attributed to
+            sent ones. Silence means only that no response was observed.
+          </p>
+        </>
+      )}
+    </section>
   );
 }

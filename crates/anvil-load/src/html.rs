@@ -274,7 +274,9 @@ fn tile(label: &str, value: &str, hint: &str) -> String {
 
 fn latency_row(name: &str, l: &LatencySummary) -> String {
     if l.count == 0 {
-        return format!(r#"<tr><td>{}</td><td class="num">0</td><td colspan="7" class="ok">no samples</td></tr>"#, esc(name));
+        // No sample means no value — never "0 µs".
+        let dash = r#"<td class="num">—</td>"#.repeat(7);
+        return format!(r#"<tr><td>{}</td><td class="num">0</td>{dash}</tr>"#, esc(name));
     }
     format!(
         r#"<tr><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td></tr>"#,
@@ -290,6 +292,192 @@ fn latency_row(name: &str, l: &LatencySummary) -> String {
     )
 }
 
+/// Canonical gRPC status code names.
+pub fn grpc_code_name(code: i32) -> &'static str {
+    match code {
+        0 => "OK",
+        1 => "CANCELLED",
+        2 => "UNKNOWN",
+        3 => "INVALID_ARGUMENT",
+        4 => "DEADLINE_EXCEEDED",
+        5 => "NOT_FOUND",
+        6 => "ALREADY_EXISTS",
+        7 => "PERMISSION_DENIED",
+        8 => "RESOURCE_EXHAUSTED",
+        9 => "FAILED_PRECONDITION",
+        10 => "ABORTED",
+        11 => "OUT_OF_RANGE",
+        12 => "UNIMPLEMENTED",
+        13 => "INTERNAL",
+        14 => "UNAVAILABLE",
+        15 => "DATA_LOSS",
+        16 => "UNAUTHENTICATED",
+        _ => "non-standard code",
+    }
+}
+
+fn closed_text(c: anvil_domain::outcome::ClosedBy) -> &'static str {
+    use anvil_domain::outcome::ClosedBy::*;
+    match c {
+        Peer => "peer",
+        Client => "client (stop condition or close)",
+        Abnormal => "abnormal (no close handshake)",
+        Timeout => "timeout (idle or deadline)",
+        NotClosed => "not closed",
+    }
+}
+
+fn kv_table(rows: &[(&str, String)]) -> String {
+    let mut s = String::from("<table>");
+    for (k, v) in rows {
+        let _ = write!(s, r#"<tr><th>{}</th><td class="num">{}</td></tr>"#, esc(k), esc(v));
+    }
+    s.push_str("</table>");
+    s
+}
+
+fn ratio(n: u64, d: u64) -> String {
+    if d == 0 { "—".into() } else { format!("{:.3}", n as f64 / d as f64) }
+}
+
+/// The unit's definitions and its protocol denominators.
+fn protocol_section(p: &ProtocolLoadMetrics) -> String {
+    let mut h = String::new();
+    let sem = &p.semantics;
+    let _ = write!(
+        h,
+        r#"<h2>Protocol: {}</h2><div class="card"><table><tr><th>Unit</th><td>{}</td></tr><tr><th>Completed</th><td>{}</td></tr><tr><th>Success</th><td>{}</td></tr><tr><th>Latency</th><td>{}</td></tr><tr><th>Connections</th><td>{}</td></tr></table>"#,
+        esc(crate::protocol::label(p.unit)),
+        esc(&sem.unit_singular),
+        esc(&sem.completed_means),
+        esc(&sem.success_means),
+        esc(&sem.latency_means),
+        esc(&sem.connection_mode_means)
+    );
+    let lat_head = r#"<table><tr><th>Distribution</th><th class="num">Count</th><th class="num">Min</th><th class="num">p50</th><th class="num">p90</th><th class="num">p95</th><th class="num">p99</th><th class="num">Max</th><th class="num">Mean</th></tr>"#;
+    if let Some(x) = &p.http {
+        h.push_str(&kv_table(&[
+            ("HTTP/3 → TCP fallback attempts (extra attempts, not requests)", fmt_n(x.protocol_fallback_attempts)),
+            ("Requests that needed a fallback", fmt_n(x.units_with_fallback)),
+            ("Requests completed over HTTP/3", fmt_n(x.units_over_h3)),
+        ]));
+    }
+    if let Some(g) = &p.grpc {
+        h.push_str(&kv_table(&[
+            ("Status OK", fmt_n(g.ok)),
+            ("Status non-OK", fmt_n(g.non_ok)),
+            ("Response without a terminal status (incomplete, never success)", fmt_n(g.missing_status)),
+            ("HTTP/3 → TCP fallback attempts", fmt_n(g.protocol_fallback_attempts)),
+        ]));
+        if !g.status_codes.is_empty() {
+            h.push_str(r#"<table><tr><th>grpc-status</th><th>Name</th><th class="num">Completed</th></tr>"#);
+            for (code, n) in &g.status_codes {
+                let _ = write!(
+                    h,
+                    r#"<tr><td class="num">{code}</td><td>{}</td><td class="num">{}</td></tr>"#,
+                    grpc_code_name(*code),
+                    fmt_n(*n)
+                );
+            }
+            h.push_str("</table>");
+        }
+    }
+    if let Some(s) = &p.stream {
+        let per = if s.opened == 0 { "—".to_string() } else { format!("{:.1}", s.messages_received as f64 / s.opened as f64) };
+        h.push_str(&kv_table(&[
+            ("Streams opened", fmt_n(s.opened)),
+            (if p.unit == LoadUnitKind::SseStream { "Events received" } else { "Messages received" }, fmt_n(s.messages_received)),
+            ("Opened streams with at least one", fmt_n(s.with_messages)),
+            ("Mean per opened stream", per),
+        ]));
+        h.push_str(lat_head);
+        h.push_str(&latency_row("Time to first message/event", &s.time_to_first_message));
+        h.push_str("</table>");
+        if !s.ended_by.is_empty() {
+            let rows: Vec<(&str, String)> = s.ended_by.iter().map(|c| (closed_text(c.closed_by), fmt_n(c.count))).collect();
+            h.push_str("<p class=\"sub\">How opened streams ended:</p>");
+            h.push_str(&kv_table(&rows));
+        }
+    }
+    if let Some(w) = &p.websocket {
+        h.push_str(&kv_table(&[
+            ("Sessions opened (handshake accepted)", fmt_n(w.opened)),
+            ("Handshake rejected (server answered another status)", fmt_n(w.handshake_rejected)),
+            ("Not opened (DNS, connect, TLS, invalid handshake, timeout, cancel)", fmt_n(w.not_opened)),
+            ("Opened and closed cleanly", fmt_n(w.closed_cleanly)),
+            ("Messages sent", fmt_n(w.messages_sent)),
+            ("Messages received", fmt_n(w.messages_received)),
+        ]));
+        if w.rtt_defined {
+            h.push_str(lat_head);
+            h.push_str(&latency_row("Round trip (i-th sent → i-th received)", &w.rtt));
+            h.push_str("</table>");
+            let _ = write!(
+                h,
+                r#"<p class="sub">{} pair(s); {} session(s) could not be paired.</p>"#,
+                fmt_n(w.rtt_pairs),
+                fmt_n(w.rtt_unpaired_sessions)
+            );
+        } else {
+            h.push_str(r#"<p class="sub">Round-trip time: not defined — the request does not set expect_messages, so messages are not paired.</p>"#);
+        }
+        if !w.close_codes.is_empty() {
+            h.push_str(r#"<table><tr><th>Closed by</th><th class="num">Code</th><th class="num">Sessions</th></tr>"#);
+            for c in &w.close_codes {
+                let _ = write!(
+                    h,
+                    r#"<tr><td>{}</td><td class="num">{}</td><td class="num">{}</td></tr>"#,
+                    closed_text(c.closed_by),
+                    c.code.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
+                    fmt_n(c.count)
+                );
+            }
+            h.push_str("</table>");
+        }
+    }
+    if let Some(t) = &p.tcp {
+        h.push_str(&kv_table(&[
+            ("Connections set up", fmt_n(t.connected)),
+            ("Frames sent / received", format!("{} / {}", fmt_n(t.frames_sent), fmt_n(t.frames_received))),
+            ("Payload bytes sent / received", format!("{} / {}", fmt_bytes(t.payload_bytes_sent), fmt_bytes(t.payload_bytes_received))),
+            ("Exchanges ending with a partial frame", fmt_n(t.partial_frames)),
+            ("Exchanges the peer closed", fmt_n(t.peer_closes)),
+            ("Expected frames per exchange", t.expected_frames.map(|f| f.to_string()).unwrap_or_else(|| "not defined".into())),
+            ("Expected frames received / short", format!("{} / {}", fmt_n(t.expectation_met), fmt_n(t.expectation_short))),
+        ]));
+    }
+    if let Some(d) = &p.datagram {
+        h.push_str(&kv_table(&[
+            ("Datagrams sent", fmt_n(d.datagrams_sent)),
+            ("Datagrams received", fmt_n(d.datagrams_received)),
+            ("Received per sent (observed ratio, not a delivery rate)", ratio(d.datagrams_received, d.datagrams_sent)),
+            ("Exchanges with a response", fmt_n(d.exchanges_with_response)),
+            ("Exchanges with no response observed", fmt_n(d.exchanges_silent)),
+            ("Repeated payloads (identical to an earlier received one)", fmt_n(d.repeated_payloads)),
+            (
+                "Echoed payloads / other payloads",
+                format!("{} / {}", fmt_n(d.echoed_payloads), fmt_n(d.datagrams_received.saturating_sub(d.echoed_payloads))),
+            ),
+            ("Exchanges with ICMP port unreachable", fmt_n(d.icmp_unreachable_exchanges)),
+        ]));
+        h.push_str(lat_head);
+        h.push_str(&latency_row("Time to first response", &d.time_to_first_datagram));
+        if let Some(hs) = &d.dtls_handshakes {
+            h.push_str(&latency_row("DTLS handshake (completed)", &hs.duration));
+        }
+        h.push_str("</table>");
+        if let Some(hs) = &d.dtls_handshakes {
+            h.push_str(&kv_table(&[
+                ("DTLS handshakes attempted", fmt_n(hs.attempted)),
+                ("Completed / failed / timed out", format!("{} / {} / {}", fmt_n(hs.completed), fmt_n(hs.failed), fmt_n(hs.timed_out))),
+            ]));
+        }
+        h.push_str(r#"<p class="sub">Sent and received are separate counts. UDP has no acknowledgement: nothing here claims delivery or loss, and received datagrams are not attributed to sent ones. Silence means only that no response was observed.</p>"#);
+    }
+    h.push_str("</div>");
+    h
+}
+
 fn completion_text(c: RunCompletion) -> &'static str {
     match c {
         RunCompletion::Completed => "Completed",
@@ -297,6 +485,23 @@ fn completion_text(c: RunCompletion) -> &'static str {
         RunCompletion::AbortedByRule => "Aborted by an abort rule",
         RunCompletion::WorkerCrashed => "Load worker crashed",
         RunCompletion::StoppedByLock => "Stopped because the vault locked",
+    }
+}
+
+/// Singular and plural unit nouns of a report (`request`/`requests` for
+/// reports written before protocol load existed).
+pub fn unit_words(r: &LoadReport) -> (String, String) {
+    match &r.protocol_metrics {
+        Some(p) => (p.semantics.unit_singular.clone(), p.semantics.unit_plural.clone()),
+        None => ("request".into(), "requests".into()),
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
     }
 }
 
@@ -344,6 +549,8 @@ pub fn to_html(r: &LoadReport) -> String {
     // Tiles.
     let c = &r.counts;
     let q = &r.requests;
+    let (one, many) = unit_words(r);
+    let title_many = capitalize(&many);
     let failed = q.transport_failures + q.timeouts + q.application_failures.max(q.assertion_failures);
     let finished = q.completed + q.transport_failures + q.timeouts;
     let err_pct = if finished > 0 { failed as f64 * 100.0 / finished as f64 } else { 0.0 };
@@ -352,12 +559,12 @@ pub fn to_html(r: &LoadReport) -> String {
     if let Some(o) = r.offered_rate_per_sec {
         h.push_str(&tile("Offered rate", &format!("{o:.1}/s"), "arrivals scheduled per second"));
     }
-    // No successful send means no success latency, never "0 µs".
+    // No successful unit means no success latency, never "0 µs".
     let success_us = |v: u64| if r.latency_success.count == 0 { "—".to_string() } else { fmt_us(v) };
-    let sub = if r.latency_success.count == 0 { "no successful sends" } else { "merged histogram" };
-    h.push_str(&tile("p50 success", &success_us(r.latency_success.p50_us), sub));
-    h.push_str(&tile("p99 success", &success_us(r.latency_success.p99_us), sub));
-    h.push_str(&tile("Failed sends", &format!("{err_pct:.1} %"), &format!("{} of {} finished", fmt_n(failed), fmt_n(finished))));
+    let sub = if r.latency_success.count == 0 { format!("no successful {many}") } else { "merged histogram".to_string() };
+    h.push_str(&tile("p50 success", &success_us(r.latency_success.p50_us), &sub));
+    h.push_str(&tile("p99 success", &success_us(r.latency_success.p99_us), &sub));
+    h.push_str(&tile(&format!("Failed {many}"), &format!("{err_pct:.1} %"), &format!("{} of {} finished", fmt_n(failed), fmt_n(finished))));
     h.push_str(&tile("Dropped arrivals", &fmt_n(c.dropped), "never started, no latency"));
     h.push_str(&tile("Timeouts", &fmt_n(r.timeouts_censored.count), "censored, excluded from latency"));
     h.push_str("</div>");
@@ -381,7 +588,7 @@ pub fn to_html(r: &LoadReport) -> String {
     );
     let _ = write!(
         h,
-        r#"<tr><td>Sends</td><td class="num">—</td><td class="num">{}</td><td class="num">—</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td></tr></table>"#,
+        r#"<tr><td>{title_many}</td><td class="num">—</td><td class="num">{}</td><td class="num">—</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td></tr></table>"#,
         fmt_n(q.started),
         fmt_n(q.completed),
         fmt_n(q.transport_failures),
@@ -391,9 +598,10 @@ pub fn to_html(r: &LoadReport) -> String {
         fmt_n(q.application_failures),
         fmt_n(q.assertion_failures)
     );
+    let balanced = balanced && crate::report::check_protocol_balance(r).is_ok();
     let _ = write!(
         h,
-        r#"<p class="sub">{} Scheduled = started + dropped; started = completed + transport failures + timeouts + canceled + in flight at end. Application and assertion failures are subsets of completed. Connections: {} opened, {} reused. Bytes (logical): {} sent, {} received over {:.1} s measured.</p></div>"#,
+        r#"<p class="sub">{} One iteration runs the plan's chain (or one weighted pick); each step is one {one}. Scheduled = started + dropped; started = completed + transport failures + timeouts + canceled + in flight at end. Application and assertion failures are subsets of completed. Connections: {} opened, {} reused. Bytes (logical): {} sent, {} received over {:.1} s measured.</p></div>"#,
         if balanced { "Counts balance." } else { "WARNING: counts do not balance — treat this report as suspect." },
         fmt_n(q.connections_opened),
         fmt_n(q.connections_reused),
@@ -402,15 +610,21 @@ pub fn to_html(r: &LoadReport) -> String {
         r.measured_duration_secs
     );
 
+    if let Some(p) = &r.protocol_metrics {
+        h.push_str(&protocol_section(p));
+    }
+
     // Latency.
     h.push_str(r#"<h2>Latency</h2><div class="card"><table><tr><th>Distribution</th><th class="num">Count</th><th class="num">Min</th><th class="num">p50</th><th class="num">p90</th><th class="num">p95</th><th class="num">p99</th><th class="num">Max</th><th class="num">Mean</th></tr>"#);
-    h.push_str(&latency_row("Successful sends", &r.latency_success));
-    h.push_str(&latency_row("Failed sends (to failure)", &r.latency_failure));
+    h.push_str(&latency_row(&format!("Successful {many}"), &r.latency_success));
+    h.push_str(&latency_row(&format!("Failed {many} (to failure)"), &r.latency_failure));
     h.push_str(&latency_row("Setup (prepare, token, backoff)", &r.latency_setup));
     h.push_str(&latency_row("Timeouts — censored, not latency", &r.timeouts_censored.elapsed_at_timeout));
     let _ = write!(
         h,
-        r#"</table><p class="sub">Percentiles come from HDR histograms merged across all workers before any percentile is computed; they are never averages of per-worker percentiles. {}</p></div>"#,
+        r#"</table><p class="sub">{} Percentiles cover successful {} only (— when there are none) and come from HDR histograms merged across all workers before any percentile is computed; they are never averages of per-worker percentiles. {}</p></div>"#,
+        esc(&r.protocol_metrics.as_ref().map(|p| p.semantics.latency_means.clone()).unwrap_or_default()),
+        esc(&many),
         if r.timeouts_censored.count > 0 { esc(&r.timeouts_censored.label) } else { String::new() }
     );
 
@@ -448,13 +662,14 @@ pub fn to_html(r: &LoadReport) -> String {
             })
             .collect();
         h.push_str(r#"<h2>Throughput per second</h2><div class="card">"#);
-        let mut items = vec![("Completed sends", "--series-1"), ("Failed sends", "--series-2")];
+        let (completed_label, failed_label) = (format!("Completed {many}"), format!("Failed {many}"));
+        let mut items = vec![(completed_label.as_str(), "--series-1"), (failed_label.as_str(), "--series-2")];
         if has_drops {
             items.push(("Dropped arrivals", "--series-3"));
         }
         h.push_str(&legend(&items));
         h.push_str(&line_chart(
-            "Sends completed, failed and arrivals dropped per second",
+            &format!("{title_many} completed, failed and arrivals dropped per second"),
             &series,
             x_max,
             r.plan.warmup_secs as f64,
@@ -475,13 +690,13 @@ pub fn to_html(r: &LoadReport) -> String {
             let hover: Vec<(f64, String)> = lat
                 .iter()
                 .map(|b| {
-                    (b.second as f64, format!("{} s: p50 {}, p99 {} (successful sends)", b.second, fmt_us(b.p50_us), fmt_us(b.p99_us)))
+                    (b.second as f64, format!("{} s: p50 {}, p99 {} (successful {many})", b.second, fmt_us(b.p50_us), fmt_us(b.p99_us)))
                 })
                 .collect();
-            h.push_str(r#"<h2>Successful-send latency per second</h2><div class="card">"#);
+            let _ = write!(h, r#"<h2>Successful-{one} latency per second</h2><div class="card">"#);
             h.push_str(&legend(&[("p50", "--series-1"), ("p99", "--series-2")]));
             h.push_str(&line_chart(
-                "Successful-send latency p50 and p99 per second, milliseconds",
+                &format!("Successful-{one} latency p50 and p99 per second, milliseconds"),
                 &series,
                 x_max,
                 r.plan.warmup_secs as f64,
