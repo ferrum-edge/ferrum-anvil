@@ -1001,10 +1001,21 @@ impl Records<'_> {
         let id_s = id.to_string();
         let env = crypto::seal(&self.key, &aad("history", "record", &id_s), &json);
         let size = env.len() as i64 + body.map(|b| b.len() as i64).unwrap_or(0);
+        // Replacing a record drops its reference to the old body.
+        let replaced: Option<String> =
+            self.conn.query_row("SELECT body_blob FROM history WHERE id=?1", params![id_s], |r| r.get(0)).optional()?.flatten();
         self.conn.execute(
             "INSERT OR REPLACE INTO history(id,workspace_id,request_id,started_at,size,body_blob,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![id_s, workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), started_at_ms, size, body_blob, env],
         )?;
+        // As `Store::release_blob`: the old body goes unless another history
+        // record still uses it. A pinned blob is an attachment's and stays.
+        if let Some(old) = replaced {
+            self.conn.execute(
+                "DELETE FROM blobs WHERE id=?1 AND id NOT IN (SELECT body_blob FROM history WHERE body_blob IS NOT NULL) AND id NOT IN (SELECT value FROM meta WHERE key LIKE 'pin:%')",
+                params![old],
+            )?;
+        }
         Ok(())
     }
 

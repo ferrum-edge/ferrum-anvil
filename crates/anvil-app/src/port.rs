@@ -4,6 +4,7 @@ use crate::linked_files::LinkedFileBinding;
 use crate::workspace::attachment_index_id;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
+use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::workspace::Workspace;
 use anvil_portability::bundle::{self, BundleKind, ExportMode, ExportOptions, ExportPreview};
 use anvil_portability::plan::{self, ConflictPolicy, Existing, ImportPlan};
@@ -11,6 +12,7 @@ use anvil_portability::validate::{self, UncarriedAttachment};
 use anvil_portability::{PortableGraph, SecretValue};
 use anvil_storage::{KdfParams, StoreRead, kind};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +32,10 @@ pub struct ImportReport {
     pub workspace_ids: Vec<String>,
     /// Whether the file is a full backup (restored) rather than a bundle.
     pub full_backup: bool,
+    /// SHA-256 (lowercase hex) of the file as read. An approval given after
+    /// the preview names it ([`ImportApproval::bundle_sha256`]), so it holds
+    /// only for the file that was previewed.
+    pub bundle_sha256: String,
 }
 
 /// What the user confirmed after reading an import preview.
@@ -40,6 +46,38 @@ pub struct ImportApproval {
     /// Any claimed workspace missing from this list refuses the import.
     #[serde(default)]
     pub existing_workspaces: Vec<Id>,
+    /// The preview's `bundle_sha256`: the file this approval was given for.
+    /// Required while `existing_workspaces` names any workspace; a file with
+    /// any other digest is refused before anything is read from it.
+    #[serde(default)]
+    pub bundle_sha256: Option<String>,
+}
+
+impl ImportApproval {
+    /// Approval to write the previewed `file` into `existing_workspaces`.
+    pub fn for_file(file: &[u8], existing_workspaces: Vec<Id>) -> Self {
+        ImportApproval { existing_workspaces, bundle_sha256: Some(file_sha256(file)) }
+    }
+
+    /// Refuse to apply `file` unless it is the file this approval was given
+    /// for. An approval that names no workspace and no digest approves
+    /// nothing, so it holds for any file.
+    pub(crate) fn check_file(&self, file: &[u8], done: &str) -> Result<()> {
+        match &self.bundle_sha256 {
+            Some(d) if !d.eq_ignore_ascii_case(&file_sha256(file)) => Err(AppError::Invalid(format!(
+                "the file is not the one that was previewed (it changed or was replaced since); nothing was {done}. Preview it again."
+            ))),
+            None if !self.existing_workspaces.is_empty() => Err(AppError::Invalid(format!(
+                "an approval to write into an existing workspace must name the previewed file's bundle_sha256; nothing was {done}."
+            ))),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// SHA-256 (lowercase hex) of an import file, as [`ImportReport::bundle_sha256`].
+pub fn file_sha256(file: &[u8]) -> String {
+    hex::encode(Sha256::digest(file))
 }
 
 impl App {
@@ -83,6 +121,26 @@ impl App {
                     if let Some((rec, _)) = self.store.get_history::<serde_json::Value>(&h.id)? {
                         g.history.push(rec);
                     }
+                }
+            }
+        }
+        // A load plan travels with the requests, dataset and environment it
+        // names. One that still names one deleted since is left out, and
+        // listed among the export's excluded items: an import refuses a plan
+        // whose objects are not in the bundle.
+        for w in &wss {
+            let id = w.meta.id;
+            let requests: HashSet<Id> = g.requests.iter().filter(|r| r.workspace_id == id).map(|r| r.meta.id).collect();
+            let datasets: HashSet<Id> = g.datasets.iter().filter(|d| d.workspace_id == id).map(|d| d.meta.id).collect();
+            let environments: HashSet<Id> = g.environments.iter().filter(|e| e.workspace_id == id).map(|e| e.meta.id).collect();
+            for p in self.load_plans(&id)? {
+                let runs = p.chain.iter().chain(p.mix.iter().map(|m| &m.request_id)).all(|r| requests.contains(r));
+                let dataset = p.dataset_id.is_none_or(|d| datasets.contains(&d));
+                let environment = p.environment_id.is_none_or(|e| environments.contains(&e));
+                if runs && dataset && environment {
+                    g.load_plans.push(p);
+                } else {
+                    g.omitted.push(format!("load plan '{}' (it names a request, dataset or environment deleted since)", p.name));
                 }
             }
         }
@@ -144,6 +202,7 @@ impl App {
     /// describe a full backup are refused; full backups are restored with
     /// [`App::restore`].
     pub fn import_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
+        let bundle_sha256 = file_sha256(bytes);
         let opened = bundle::open(bytes, passphrase)?;
         let uncarried = validate::uncarried_attachments(&opened.graph)?;
         let (existing, stored) = self.store.read_consistently(|r| Ok((existing(r)?, stored_among(r, &uncarried)?)))?;
@@ -161,6 +220,7 @@ impl App {
             workspaces: opened.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: vec![],
             full_backup: false,
+            bundle_sha256,
         })
     }
 
@@ -177,6 +237,8 @@ impl App {
     /// anything is written.
     ///
     /// The whole import is refused, before anything is written, when:
+    /// - `approval` was given for another file (its `bundle_sha256`), or
+    ///   names an existing workspace without naming a file;
     /// - a request or dataset names a stored attachment by content hash that
     ///   the bundle does not carry, and content with that hash is stored
     ///   here: it would resolve to bytes the bundle never carried. One whose
@@ -196,10 +258,12 @@ impl App {
         policy: ConflictPolicy,
         approval: &ImportApproval,
     ) -> Result<ImportReport> {
+        approval.check_file(bytes, "imported")?;
         let opened = bundle::open(bytes, passphrase)?;
         let mut g = opened.graph;
         let uncarried = validate::uncarried_attachments(&g)?;
         let checkpoint = self.store.checkpoint("before-import")?;
+        let imported_at = chrono::Utc::now();
         // A failure rolls back this import's own transaction and nothing else.
         // The checkpoint is never restored automatically: that would also
         // erase whatever other callers saved since it was taken.
@@ -302,6 +366,24 @@ impl App {
                     s.put(kind::SCENARIO, &sc.meta.id, Some(&sc.workspace_id), None, 0.0, sc)?;
                 }
             }
+            for p in &g.load_plans {
+                if !skip(&p.id) {
+                    s.put(kind::LOAD_PLAN, &p.id, Some(&p.workspace_id), None, 0.0, p)?;
+                }
+            }
+            // Validation keeps only records of a workspace in the bundle, as
+            // valid execution records; the bundle carries no response bodies.
+            // A record is never dated after its import, so age-based
+            // retention always reaches it.
+            for h in &g.history {
+                let mut rec: ExecutionRecord = serde_json::from_value(h.clone())?;
+                if policy == ConflictPolicy::Merge && existing.history.contains_key(&rec.id) {
+                    continue;
+                }
+                rec.started_at = rec.started_at.min(imported_at);
+                let started_at = rec.started_at.timestamp_millis();
+                s.add_history(&rec.id, rec.workspace_id.as_ref(), rec.request_id.as_ref(), started_at, &rec, None)?;
+            }
             // A linked-file binding was chosen for the request or dataset it
             // names; one this import overwrites is not that object any more.
             let written: HashSet<Id> =
@@ -346,6 +428,7 @@ impl App {
             workspaces: g.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: g.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
             full_backup: false,
+            bundle_sha256: file_sha256(bytes),
         })
     }
 }
@@ -359,8 +442,8 @@ fn refuse_full_backup(mode: ExportMode) -> Result<()> {
     Ok(())
 }
 
-/// Every stored object and secret with its owner, and every stored
-/// workspace with its name, read through `s`.
+/// Every stored object, secret and history record with its owner, and every
+/// stored workspace with its name, read through `s`.
 pub(crate) fn existing(s: &StoreRead<'_>) -> anvil_storage::store::Result<Existing> {
     let mut e = Existing::default();
     for k in kind::ALL {
@@ -377,6 +460,11 @@ pub(crate) fn existing(s: &StoreRead<'_>) -> anvil_storage::store::Result<Existi
     for (id, owner) in s.secret_owners()? {
         if let Ok(id) = id.parse() {
             e.secrets.insert(id, owner.and_then(|w| w.parse().ok()));
+        }
+    }
+    for h in s.history_entries()? {
+        if let Ok(id) = h.id.parse() {
+            e.history.insert(id, h.workspace_id.and_then(|w| w.parse().ok()));
         }
     }
     Ok(e)

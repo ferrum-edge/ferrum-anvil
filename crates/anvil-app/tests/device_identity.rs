@@ -45,8 +45,7 @@ fn refused<T>(r: Result<T, AppError>, label: &str) -> String {
 
 /// Approval to write `file` into the stored workspaces `ws`.
 fn approve(file: &[u8], ws: Vec<Id>) -> ImportApproval {
-    let _ = file;
-    ImportApproval { existing_workspaces: ws }
+    ImportApproval::for_file(file, ws)
 }
 
 fn jwt_svid(source: JwtSvidSource) -> AuthConfig {
