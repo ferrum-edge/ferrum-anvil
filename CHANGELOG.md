@@ -98,3 +98,13 @@
   the profile's mode is known, and stays open until a new recovery key is
   confirmed stored. A conversion reports the old entry as removed whenever
   the delete succeeded.
+
+### Fixed
+
+- A load run now hands its worker every vault secret the plan's requests
+  resolve: the datagram PROXY-protocol authentication secret of a UDP
+  request, and the client identity of the selected proxy's own TLS profile
+  (which also travels to the worker now), were missing, so those requests
+  failed preparation in the worker ("the datagram secret is not available",
+  or the proxy's TLS profile "no longer exists"). A request of another
+  protocol with a leftover UDP section ships no datagram secret.

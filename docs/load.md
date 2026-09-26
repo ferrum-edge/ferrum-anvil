@@ -294,10 +294,11 @@ iteration workloads have no target rate, and say so.
 
 * **stdin, line 1**: one JSON `WorkerJob` (≤ 256 MiB): plan, run options,
   per-request specs and settings/auth/variable layers, the selected TLS and
-  proxy profiles, Ferrum trust profiles with their diagnostic-detail
-  credentials removed, a map of **scoped secret values**, stored attachment
-  bytes (base64, digest-verified: request bodies and the `.proto` files or
-  descriptor set a gRPC request's schema needs) and the dataset bytes.
+  proxy profiles (and the proxy's own TLS profile), Ferrum trust profiles
+  with their diagnostic-detail credentials removed, a map of **scoped secret
+  values**, stored attachment bytes (base64, digest-verified: request bodies
+  and the `.proto` files or descriptor set a gRPC request's schema needs) and
+  the dataset bytes.
 * **stdin, afterwards**: a `{"cancel":true}` line **or EOF** cancels the run.
   EOF means the parent went away, so a worker never keeps generating traffic
   for a dead app.
@@ -308,14 +309,18 @@ iteration workloads have no target rate, and say so.
   never quotes job content (serde messages can echo values).
 
 **Secret handling.** `WorkerJob::from_load_job` resolves only the secrets the
-plan's requests actually reference — the effective auth profile, the selected
-TLS profile's client identity and the selected proxy password — through each
-context's own resolver. Values travel only over the stdin pipe (never argv or
-the environment, which other local users can read), are held in zeroizing
-buffers, redact in `Debug`, and are rebuilt in the worker as `MemorySecrets` /
-`MemoryAttachments`. The LOAD-009 test checks the process table shows no job
-content and that a scoped secret was used by every send but never appears in
-the report.
+plan's requests actually reference — the effective auth profile, the client
+identities of the selected TLS profile and of the selected proxy's TLS
+profile, the selected proxy password and a UDP request's datagram
+PROXY-protocol authentication secret — through each context's own resolver.
+A request of another protocol never ships a datagram secret, even with a
+leftover UDP section. A unit test fails when the published schemas gain a
+sensitive field that this scoping does not know about. Values travel only
+over the stdin pipe (never argv or the environment, which other local users
+can read), are held in zeroizing buffers, redact in `Debug`, and are rebuilt
+in the worker as `MemorySecrets` / `MemoryAttachments`. The LOAD-009 test
+checks the process table shows no job content and that a scoped secret was
+used by every send but never appears in the report.
 
 **Cancel, drain and crash.** Cancel stops scheduling and further chain steps,
 gives in-flight sends `cancel_drain_ms` (default 2 s), then cancels them and
