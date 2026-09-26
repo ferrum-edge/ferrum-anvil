@@ -13,7 +13,6 @@ use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{AttachmentRef, Body, MultipartContent, MultipartPart, RequestSpec};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
 use anvil_domain::workspace::{Dataset, DatasetFormat, Meta};
-use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
@@ -193,11 +192,11 @@ fn token_file_bindings_stay_on_this_device() {
     let ws = a.create_workspace("W").unwrap();
     let binding = a.bind_token_file(&token).unwrap();
     a.create_request(&ws.meta.id, None, "r", with_auth(jwt_svid_file(&binding.path))).unwrap();
-    let (bytes, _) = a.export(None, ExportMode::FullBackup, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) = a.export_backup_with("export passphrase 1", KdfParams::testing()).unwrap();
 
     let b = new_app(root.path(), "b");
-    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
-    assert!(b.token_file_bindings().unwrap().is_empty(), "an import never binds a token file");
+    b.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    assert!(b.token_file_bindings().unwrap().is_empty(), "a restore never binds a token file");
     b.confine_token_files();
     let ws_b = b.workspaces().unwrap().into_iter().find(|w| w.name == "W").unwrap();
     let req = b.requests(&ws_b.meta.id).unwrap().into_iter().find(|r| r.name == "r").unwrap();

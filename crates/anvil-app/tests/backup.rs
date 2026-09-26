@@ -267,10 +267,8 @@ async fn full_backup_restores_every_entity_into_a_clean_profile() {
     // The restored request sends with its restored secret.
     let ws_b = b.find_workspace(MARKERS[0]).unwrap();
     let req_b = b.find_request(&ws_b.meta.id, "Orders/Echo").unwrap();
-    let out = b
-        .send(Some(req_b.meta.id), &ws_b.meta.id, None, SendOptions::default(), EventCtx::none(), CancellationToken::new())
-        .await
-        .unwrap();
+    let out =
+        b.send(Some(req_b.meta.id), &ws_b.meta.id, None, SendOptions::default(), EventCtx::none(), CancellationToken::new()).await.unwrap();
     assert_eq!(out.record.response.as_ref().unwrap().status, 200, "{:?}", out.record.findings);
     let seen = fx.log.last_request_headers().unwrap();
     assert!(seen.iter().any(|(n, v)| n == "x-api-key" && v == MARKERS[3]), "the workspace secret was restored");
@@ -452,6 +450,29 @@ fn authentic_contents_are_still_validated_and_normalised() {
     assert_refused(&b, &newer_object, "an object written by a newer schema");
     assert_refused(&b, &resealed(&bytes, |m, _| m.schema_version += 1), "a newer object schema");
     assert_refused(&b, &resealed(&bytes, |m, _| m.mode = ExportMode::EncryptedTransfer), "a manifest for another mode");
+    let foreign_revision = resealed(&bytes, |_, c| {
+        let i = obj(c, kind::REVISION);
+        c.objects[i].workspace_id = Some(local.meta.id.to_string());
+    });
+    assert_refused(&b, &foreign_revision, "a revision stored under a workspace outside the backup");
+
+    // A revision whose request is not in the backup is left out, with a warning.
+    let orphan_id = Id::new();
+    let orphan = resealed(&bytes, |_, c| {
+        let mut row = c.objects[obj(c, kind::REVISION)].clone();
+        let request = Id::new();
+        row.id = orphan_id.to_string();
+        row.parent_id = Some(request.to_string());
+        row.value["id"] = json!(orphan_id);
+        row.value["request_id"] = json!(request);
+        c.objects.push(row);
+    });
+    let fresh = new_app(root.path(), "c");
+    let rep = fresh.restore(&orphan, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("request revision(s)")), "{:?}", rep.warnings);
+    let restored = fresh.backup_contents().unwrap();
+    assert!(restored.objects.iter().all(|o| o.id != orphan_id.to_string()), "an orphaned revision is not restored");
+    assert!(restored.objects.iter().any(|o| o.kind == kind::REVISION), "the request's own revision is restored");
 
     // Accepted, with the bundle-import safety normalisation applied.
     let rep = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();

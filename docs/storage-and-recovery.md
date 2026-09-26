@@ -67,7 +67,7 @@ commands return `LOCKED` until unlock.
 |---|---|---|
 | Share safely | One workspace | None — literal secrets become `{{placeholders}}` listed in the manifest |
 | Encrypted transfer | One workspace | Vault secrets, encrypted with a passphrase you share separately |
-| Full backup | Everything including history and settings | Encrypted |
+| Full backup | Everything including history and settings | Encrypted; an ANVILBAK file, not a bundle ([below](#full-backups)) |
 
 Import is preview-then-apply with conflict policies (duplicate, merge, replace).
 Duplicate gives every imported object, request revision and secret a new id and
@@ -106,12 +106,18 @@ in it can be read or changed without the export passphrase:
   followed by one XChaCha20-Poly1305 envelope that seals the whole payload: the
   manifest and every object, secret, attachment, history record and load
   report. The header bytes are the envelope's associated data. Without the
-  passphrase nothing in the file is readable, and a change to any byte (header,
-  costs, salt or payload) makes the restore fail before anything is parsed or
-  written.
+  passphrase nothing in the file is readable. The header (JSON, at most 4 KiB)
+  is the only part parsed before authentication, and only to check its format
+  and costs; a change to any byte (header, costs, salt or payload) then makes
+  the restore fail before the payload is parsed or anything is written.
 - The Argon2id costs are read before anything can be authenticated, so they
   are held to the same bounds as a bundle vault's (above) before any
   derivation runs. Exports use 64 MiB, 3 passes and 1 lane.
+- Full backups are only ever ANVILBAK files. A zip bundle whose manifest has
+  kind `backup` or mode `full_backup` (as early development builds wrote
+  them), or that carries app settings, is refused on import with
+  "legacy full backups are not supported; restore from an ANVILBAK backup",
+  and nothing of it is restored. Bundle exports never write that kind or mode.
 - It carries every row of every stored object kind (workspaces, folders,
   requests and all their revisions, environments, TLS, proxy and gateway
   profiles, datasets, scenarios, load plans, app settings, user profiles,
@@ -130,8 +136,11 @@ Restore is preview-then-apply. Every item is checked against its schema
 version, its type and the rest of the backup (ids, owning workspaces,
 attachment hashes), the import trust normalisation above applies, and
 everything is written in one
-transaction after a checkpoint. Replace overwrites items that have the same id;
-Merge keeps them, including this profile's settings; Duplicate is refused,
+transaction after a checkpoint. A request revision is restored under its
+request, in that request's workspace: revisions whose request is not in the
+backup (it was deleted) are left out with a warning, and one stored under
+another request or workspace is refused. Replace overwrites items that have
+the same id; Merge keeps them, including this profile's settings; Duplicate is refused,
 because a backup restores items under their own ids. Nothing else in the
 profile is deleted.
 

@@ -10,9 +10,14 @@
 //! (XChaCha20-Poly1305, see `anvil_storage::crypto`) seals the whole payload
 //! (manifest, objects, secrets, attachments, history and load reports) with
 //! everything before it (signature, length and header) as associated data.
-//! Nothing in the file is readable without the passphrase, and a change to
-//! any byte, header included, fails authentication before anything is parsed
-//! or written.
+//! Nothing in the file is readable without the passphrase. The header (JSON,
+//! at most 4 KiB) is the only part parsed before authentication, and only to
+//! check its format and bounded key-derivation costs; a change to any byte,
+//! header included, then fails authentication before the payload is parsed
+//! or anything is written.
+//!
+//! Full backups are never zip bundles: a bundle that describes one is refused
+//! by `anvil_portability::bundle::open`.
 //!
 //! Every store table and object kind is either carried or listed with the
 //! reason it stays behind ([`TABLES`], [`OBJECT_KINDS`], [`NOT_CARRIED_KINDS`]);
@@ -325,7 +330,8 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<(Back
         return Err(BackupError::TooLarge);
     }
     let truncated = || BackupError::NotABackup("the file is truncated".into());
-    let rest = bytes.strip_prefix(MAGIC.as_slice()).ok_or_else(|| BackupError::NotABackup("the full-backup signature is missing".into()))?;
+    let rest =
+        bytes.strip_prefix(MAGIC.as_slice()).ok_or_else(|| BackupError::NotABackup("the full-backup signature is missing".into()))?;
     let len = rest.get(..4).ok_or_else(truncated)?;
     let len = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
     if len > MAX_HEADER_BYTES {
@@ -395,7 +401,6 @@ struct Snapshot {
 #[derive(Default)]
 struct Decoded {
     graph: PortableGraph,
-    revisions: Vec<RequestRevision>,
     user_profiles: Vec<UserProfile>,
     spec_sources: Vec<SpecSourceRecord>,
     run_reports: Vec<RunReport>,
@@ -616,6 +621,7 @@ fn parse_id(what: &str, id: &str) -> std::result::Result<Id, BackupError> {
 fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     let mut d = Decoded::default();
     let mut seen = HashSet::new();
+    let mut revision_rows: HashMap<Id, &ObjectRow> = HashMap::new();
     let g = &mut d.graph;
     for o in &c.objects {
         if !seen.insert((o.kind.as_str(), o.id.as_str())) {
@@ -626,7 +632,11 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
             kind::WORKSPACE => g.workspaces.push(typed(o, |x: &Workspace| x.meta.id)?),
             kind::FOLDER => g.folders.push(typed(o, |x: &Folder| x.meta.id)?),
             kind::REQUEST => g.requests.push(typed(o, |x: &RequestDefinition| x.meta.id)?),
-            kind::REVISION => d.revisions.push(typed(o, |x: &RequestRevision| x.id)?),
+            kind::REVISION => {
+                let r = typed(o, |x: &RequestRevision| x.id)?;
+                revision_rows.insert(r.id, o);
+                g.revisions.push(r);
+            }
             kind::ENVIRONMENT => g.environments.push(typed(o, |x: &Environment| x.meta.id)?),
             kind::TLS_PROFILE => g.tls_profiles.push(typed(o, |x: &TlsProfile| x.id)?),
             kind::PROXY_PROFILE => g.proxy_profiles.push(typed(o, |x: &ProxyProfile| x.id)?),
@@ -699,7 +709,8 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     let mut history_ids = HashSet::new();
     for h in &c.history {
         check_record_schema(&h.record, "history record", &h.id)?;
-        let rec: ExecutionRecord = serde_json::from_value(h.record.clone()).map_err(|e| invalid(format!("history record {}: {e}", h.id)))?;
+        let rec: ExecutionRecord =
+            serde_json::from_value(h.record.clone()).map_err(|e| invalid(format!("history record {}: {e}", h.id)))?;
         if rec.id.to_string() != h.id || !history_ids.insert(rec.id) {
             return Err(invalid(format!("history record {} is not unique or holds another record", h.id)));
         }
@@ -736,8 +747,23 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     d.missing_secrets = missing;
     // Same checks and trust normalisation as a bundle import: referential
     // integrity, TLS bypasses, marker trust, credential forwarding, early
-    // data, legacy HMAC and scenario/plan trust.
+    // data, legacy HMAC and scenario/plan trust. Revisions of requests that
+    // are not in the backup (their request was deleted) are left out.
     d.warnings = anvil_portability::validate::validate_and_normalize(&mut d.graph).map_err(|e| invalid(e.to_string()))?;
+    // A revision is written under its request, in that request's workspace;
+    // one stored under another request or workspace is refused.
+    let request_ws: HashMap<Id, Id> = d.graph.requests.iter().map(|r| (r.meta.id, r.workspace_id)).collect();
+    for r in &d.graph.revisions {
+        let (Some(ws), Some(row)) = (request_ws.get(&r.request_id), revision_rows.get(&r.id)) else {
+            return Err(invalid(format!("revision {} belongs to a request that is not in the backup", r.id)));
+        };
+        let names = |stored: &Option<String>, id: &Id| stored.as_deref().is_none_or(|s| s == id.to_string());
+        if !names(&row.workspace_id, ws) || !names(&row.parent_id, &r.request_id) {
+            return Err(invalid(format!("revision {} is stored under a request or workspace other than its own", r.id)));
+        }
+    }
+    let kept: HashSet<String> = d.graph.revisions.iter().map(|r| r.id.to_string()).collect();
+    d.items.retain(|(k, id)| k != kind::REVISION || kept.contains(id));
     Ok(d)
 }
 
@@ -842,8 +868,9 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     for x in &g.requests {
         w.put(kind::REQUEST, &x.meta.id, Some(&x.workspace_id), x.folder_id.as_ref(), x.sort_key, x)?;
     }
+    // Decoding keeps only revisions whose request is in the backup.
     let request_ws: HashMap<Id, Id> = g.requests.iter().map(|r| (r.meta.id, r.workspace_id)).collect();
-    for x in &d.revisions {
+    for x in &g.revisions {
         w.put(kind::REVISION, &x.id, request_ws.get(&x.request_id), Some(&x.request_id), 0.0, x)?;
     }
     for x in &g.environments {

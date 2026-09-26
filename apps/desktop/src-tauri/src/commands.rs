@@ -660,6 +660,9 @@ pub fn import_preview(
     let bytes = read_bundle(&st, &grant)?;
     let (pass, pol) = (passphrase.as_deref(), policy(&conflict_policy)?);
     if anvil_app::backup::is_backup(&bytes) {
+        // A full backup restores every item under its own id, so "copies" is
+        // previewed as Merge; the report's policy tells the dialog to switch.
+        let pol = if pol == ConflictPolicy::Duplicate { ConflictPolicy::Merge } else { pol };
         return app.restore_preview(&bytes, pass, pol).map_err(e);
     }
     app.import_preview(&bytes, pass, pol).map_err(e)

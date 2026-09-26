@@ -78,16 +78,16 @@ impl App {
                 g.attachments.insert(sha, b);
             }
         }
-        if ws.is_none() {
-            g.app_settings = Some(self.settings()?);
-        }
         Ok(g)
     }
 
+    /// What [`App::export`] would write. A full backup is not a bundle: see
+    /// [`App::backup_preview`].
     pub fn export_preview(&self, ws: Option<&Id>, mode: ExportMode, include_history: bool) -> Result<ExportPreview> {
+        refuse_full_backup(mode)?;
         let g = self.graph(ws, !matches!(mode, ExportMode::ShareSafely), include_history)?;
         let opts = ExportOptions {
-            kind: if ws.is_some() { BundleKind::Workspace } else { BundleKind::Backup },
+            kind: BundleKind::Workspace,
             mode,
             passphrase: Some("preview-only-passphrase"),
             include_history,
@@ -97,6 +97,8 @@ impl App {
         Ok(bundle::preview(&g, &opts)?)
     }
 
+    /// Write a bundle of one workspace, or of every workspace when `ws` is
+    /// `None`. A full backup is not a bundle: see [`App::export_backup`].
     pub fn export(
         &self,
         ws: Option<&Id>,
@@ -104,9 +106,10 @@ impl App {
         passphrase: Option<&str>,
         include_history: bool,
     ) -> Result<(Vec<u8>, ExportPreview)> {
+        refuse_full_backup(mode)?;
         let g = self.graph(ws, !matches!(mode, ExportMode::ShareSafely), include_history)?;
         let opts = ExportOptions {
-            kind: if ws.is_some() { BundleKind::Workspace } else { BundleKind::Backup },
+            kind: BundleKind::Workspace,
             mode,
             passphrase,
             include_history,
@@ -116,7 +119,9 @@ impl App {
         Ok(bundle::write(&g, &opts)?)
     }
 
-    /// Dry run: validate and plan without mutating anything.
+    /// Dry run: validate and plan without mutating anything. Bundles that
+    /// describe a full backup are refused; full backups are restored with
+    /// [`App::restore`].
     pub fn import_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
         let plan = plan::plan(&opened.graph, &self.store.read_consistently(existing_ids)?, policy);
@@ -134,7 +139,8 @@ impl App {
     /// Apply after taking a restore checkpoint. Objects and secrets are
     /// written in one transaction, which any failure before its commit rolls
     /// back. Attachments are stored after the commit and stay stored if that
-    /// step fails.
+    /// step fails. Bundles that describe a full backup are refused before
+    /// anything is written.
     pub fn import(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
         let mut g = opened.graph;
@@ -243,6 +249,15 @@ impl App {
             workspace_ids: g.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
         })
     }
+}
+
+/// Full backups are ANVILBAK files written by [`App::export_backup`], never
+/// bundles.
+fn refuse_full_backup(mode: ExportMode) -> Result<()> {
+    if mode == ExportMode::FullBackup {
+        return Err(bundle::BundleError::FullBackupNotABundle.into());
+    }
+    Ok(())
 }
 
 /// Ids of every stored object, read through `s`.
