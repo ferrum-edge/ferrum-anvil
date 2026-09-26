@@ -32,9 +32,11 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) type SendReq = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
-/// A QUIC connection with HTTP/3 set up on it. Every clone shares one
-/// `SendRequest`; when the last clone is dropped, h3 closes the connection
-/// with `H3_NO_ERROR`.
+/// A QUIC connection with HTTP/3 set up on it, shared by its clones.
+/// Dropping every clone does not close it: quinn keeps a connection open
+/// while any handle to it exists, and the spawned HTTP/3 driver task holds
+/// handles until the connection ends. A connection the pool gives up is
+/// closed explicitly ([`H3Conn::close`]).
 #[derive(Clone)]
 struct H3Conn {
     send: SendReq,
@@ -78,34 +80,56 @@ impl H3Conn {
     fn expired(&self, now: Instant, ttl: Duration) -> bool {
         !self.is_usable() || self.idle_start().is_some_and(|t| now.saturating_duration_since(t) >= ttl)
     }
+
+    /// Close the QUIC connection with `H3_NO_ERROR`. Requests in flight on it
+    /// would fail, so only a connection carrying none is closed.
+    fn close(&self) {
+        self.quic.close(H3_NO_ERROR.into(), b"");
+    }
 }
 
-/// One request's use of a pooled connection. While any is held the
-/// connection is busy: it is never expired or evicted as idle. When the last
-/// one ends, the pool's idle cap is applied again.
+fn close_all(conns: Vec<H3Conn>) {
+    for c in conns {
+        c.close();
+    }
+}
+
+/// One request's use of a connection. While any is held the connection is
+/// busy: it is never expired or evicted as idle. When the last one ends, the
+/// pool's idle cap is applied again, or the connection is closed when the
+/// pool no longer holds it (it was never pooled, or was evicted, replaced or
+/// cleared while busy).
 struct StreamLease {
-    streams: Arc<Mutex<StreamUse>>,
+    conn: H3Conn,
+    key: String,
     pool: Weak<PoolShared>,
 }
 
 impl Drop for StreamLease {
     fn drop(&mut self) {
         let now_idle = {
-            let mut u = self.streams.lock();
+            let mut u = self.conn.streams.lock();
             u.active = u.active.saturating_sub(1);
             if u.active == 0 {
                 u.idle_since = Instant::now();
             }
             u.active == 0
         };
-        if now_idle && let Some(pool) = self.pool.upgrade() {
-            pool.enforce_cap();
+        if !now_idle {
+            return;
+        }
+        match self.pool.upgrade() {
+            Some(pool) => pool.released(&self.key, &self.conn),
+            None => self.conn.close(),
         }
     }
 }
 
 const MAX_IDLE_TOTAL: usize = 64;
 const IDLE_TTL: Duration = Duration::from_secs(90);
+/// How long the connection that answered `425 Too Early` is kept at most for
+/// the retry (the engine sends it right away); shorter when the idle TTL is.
+const TOO_EARLY_TTL: Duration = Duration::from_secs(10);
 
 /// Bounds of the pooled QUIC connections. The pool keeps one connection per
 /// key (isolation, destination and TLS profile), shared by that key's
@@ -139,7 +163,9 @@ pub struct PoolStats {
 ///
 /// Idle connections are bounded in total, and a background sweep closes
 /// those idle longer than the TTL even when their key is never used again.
-/// The sweep runs only while the pool holds connections.
+/// The sweep runs only while the pool holds connections. A connection the
+/// pool gives up is closed at once when idle, else when its last request
+/// ends; closing happens outside the pool lock.
 struct Pool {
     shared: Arc<PoolShared>,
 }
@@ -154,9 +180,25 @@ struct PoolState {
     conns: HashMap<String, H3Conn>,
     /// The connection that answered `425 Too Early`, kept (even with
     /// connection reuse off) for the one retry the engine sends on it after
-    /// the handshake (RFC 8470 §5.2).
+    /// the handshake (RFC 8470 §5.2). It can also be the key's pooled one.
     too_early: HashMap<String, H3Conn>,
     sweeper: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl PoolState {
+    /// Whether the pool holds connection `id` under `key`, for reuse or for
+    /// the retry after 425.
+    fn holds(&self, key: &str, id: u64) -> bool {
+        let is = |c: Option<&H3Conn>| c.is_some_and(|c| c.template.id == id);
+        is(self.conns.get(key)) || is(self.too_early.get(key))
+    }
+
+    /// Of the connections just removed, those to close now: idle and no
+    /// longer held under their key. A busy one is closed when its last
+    /// request ends (see [`StreamLease`]).
+    fn to_close(&self, removed: Vec<(String, H3Conn)>) -> Vec<H3Conn> {
+        removed.into_iter().filter(|(k, c)| c.idle_start().is_some() && !self.holds(k, c.template.id)).map(|(_, c)| c).collect()
+    }
 }
 
 impl Pool {
@@ -169,79 +211,92 @@ impl Pool {
         PoolStats { connections: state.conns.len(), idle: state.conns.values().filter(|c| c.idle_start().is_some()).count() }
     }
 
-    /// Count one more request on `c`. Taken under the pool lock, so a
-    /// connection is never handed out and evicted at once.
-    fn lease(&self, c: &H3Conn) -> StreamLease {
+    /// Count one more request on `c`. For a pooled connection it is taken
+    /// under the pool lock, so a connection is never handed out and evicted
+    /// at once.
+    fn lease(&self, key: &str, c: &H3Conn) -> StreamLease {
         c.streams.lock().active += 1;
-        StreamLease { streams: c.streams.clone(), pool: Arc::downgrade(&self.shared) }
+        StreamLease { conn: c.clone(), key: key.to_string(), pool: Arc::downgrade(&self.shared) }
     }
 
     /// The pooled connection for `key`, leased for one request, unless it
-    /// is closed or expired (then it is dropped).
+    /// is closed or expired (then it is removed and closed).
     fn checkout(&self, key: &str) -> Option<(H3Conn, StreamLease)> {
         let now = Instant::now();
         let ttl = self.shared.limits.idle_ttl;
         let (found, stale) = {
             let mut state = self.shared.state.lock();
             if state.conns.get(key)?.expired(now, ttl) {
-                (None, state.conns.remove(key))
+                let removed = state.conns.remove_entry(key).into_iter().collect();
+                (None, state.to_close(removed))
             } else {
                 let c = state.conns.get(key)?.clone();
-                let lease = self.lease(&c);
-                (Some((c, lease)), None)
+                let lease = self.lease(key, &c);
+                (Some((c, lease)), Vec::new())
             }
         };
-        // Closed outside the lock.
-        drop(stale);
+        close_all(stale);
         found
     }
 
     /// Pool a new connection for `key`, leased for the request that opened
-    /// it. It replaces the key's previous connection, if any.
+    /// it. It replaces the key's previous connection, if any; that one is
+    /// closed once no request is in flight on it.
     fn checkin(&self, key: &str, c: H3Conn) -> StreamLease {
-        let mut dropped = Vec::new();
-        let lease = {
+        let (lease, closing) = {
             let mut state = self.shared.state.lock();
-            let lease = self.lease(&c);
-            dropped.extend(state.conns.insert(key.to_string(), c));
-            evict_over_cap(&mut state.conns, self.shared.limits.max_idle_total, &mut dropped);
+            let lease = self.lease(key, &c);
+            let mut removed = Vec::new();
+            removed.extend(state.conns.insert(key.to_string(), c).map(|old| (key.to_string(), old)));
+            evict_over_cap(&mut state.conns, self.shared.limits.max_idle_total, &mut removed);
             self.ensure_sweeper(&mut state);
-            lease
+            (lease, state.to_close(removed))
         };
-        drop(dropped);
+        close_all(closing);
         lease
     }
 
-    /// Drop the key's connection if it is still `conn_id`.
+    /// Remove the key's connection if it is still `conn_id` (a request could
+    /// not be written on it). It is closed once no request is in flight on it.
     fn evict(&self, key: &str, conn_id: u64) {
-        let removed = {
+        let closing = {
             let mut state = self.shared.state.lock();
-            match state.conns.get(key) {
-                Some(c) if c.template.id == conn_id => state.conns.remove(key),
-                _ => None,
-            }
+            let removed = match state.conns.get(key) {
+                Some(c) if c.template.id == conn_id => state.conns.remove_entry(key).into_iter().collect(),
+                _ => Vec::new(),
+            };
+            state.to_close(removed)
         };
-        drop(removed);
+        close_all(closing);
     }
 
     /// The connection kept for the retry after `425 Too Early`, if it is
-    /// still usable.
+    /// still usable and was kept less than [`TOO_EARLY_TTL`] ago.
     fn take_too_early(&self, key: &str) -> Option<(H3Conn, StreamLease)> {
-        let mut state = self.shared.state.lock();
-        let c = state.too_early.remove(key)?;
-        let lease = c.is_usable().then(|| self.lease(&c));
-        drop(state);
-        lease.map(|lease| (c, lease))
+        let ttl = self.shared.limits.idle_ttl.min(TOO_EARLY_TTL);
+        let (found, stale) = {
+            let mut state = self.shared.state.lock();
+            let (k, c) = state.too_early.remove_entry(key)?;
+            if c.expired(Instant::now(), ttl) {
+                (None, state.to_close(vec![(k, c)]))
+            } else {
+                let lease = self.lease(key, &c);
+                (Some((c, lease)), Vec::new())
+            }
+        };
+        close_all(stale);
+        found
     }
 
     fn keep_too_early(&self, key: &str, c: H3Conn) {
-        let replaced = {
+        let closing = {
             let mut state = self.shared.state.lock();
-            let replaced = state.too_early.insert(key.to_string(), c);
+            let mut removed = Vec::new();
+            removed.extend(state.too_early.insert(key.to_string(), c).map(|old| (key.to_string(), old)));
             self.ensure_sweeper(&mut state);
-            replaced
+            state.to_close(removed)
         };
-        drop(replaced);
+        close_all(closing);
     }
 
     /// Start the background sweep unless it is running. It holds only a
@@ -265,22 +320,30 @@ impl Pool {
     }
 
     fn clear(&self) {
-        let removed = {
+        let closing = {
             let mut state = self.shared.state.lock();
-            (std::mem::take(&mut state.conns), std::mem::take(&mut state.too_early))
+            let removed = std::mem::take(&mut state.conns).into_iter().chain(std::mem::take(&mut state.too_early)).collect();
+            state.to_close(removed)
         };
-        drop(removed);
+        close_all(closing);
     }
 
     fn clear_isolation(&self, isolation: &str) {
         let prefix = format!("{isolation}|");
-        let removed: (Vec<_>, Vec<_>) = {
+        let closing = {
             let mut state = self.shared.state.lock();
-            let conns = state.conns.extract_if(|k, _| k.starts_with(&prefix)).collect();
-            let too_early = state.too_early.extract_if(|k, _| k.starts_with(&prefix)).collect();
-            (conns, too_early)
+            let mut removed: Vec<_> = state.conns.extract_if(|k, _| k.starts_with(&prefix)).collect();
+            removed.extend(state.too_early.extract_if(|k, _| k.starts_with(&prefix)));
+            state.to_close(removed)
         };
-        drop(removed);
+        close_all(closing);
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // Idle connections close now, busy ones when their request ends.
+        self.clear();
     }
 }
 
@@ -289,27 +352,39 @@ impl PoolShared {
     /// the pool still holds any; the sweeper stops otherwise.
     fn sweep(&self, now: Instant) -> bool {
         let ttl = self.limits.idle_ttl;
-        let mut dropped = Vec::new();
-        let more = {
+        let too_early_ttl = ttl.min(TOO_EARLY_TTL);
+        let (more, closing) = {
             let mut state = self.state.lock();
-            dropped.extend(state.conns.extract_if(|_, c| c.expired(now, ttl)).map(|(_, c)| c));
-            evict_over_cap(&mut state.conns, self.limits.max_idle_total, &mut dropped);
-            dropped.extend(state.too_early.extract_if(|_, c| c.expired(now, ttl)).map(|(_, c)| c));
+            let mut removed: Vec<_> = state.conns.extract_if(|_, c| c.expired(now, ttl)).collect();
+            evict_over_cap(&mut state.conns, self.limits.max_idle_total, &mut removed);
+            removed.extend(state.too_early.extract_if(|_, c| c.expired(now, too_early_ttl)));
             let more = !state.conns.is_empty() || !state.too_early.is_empty();
             if !more {
                 state.sweeper = None;
             }
-            more
+            (more, state.to_close(removed))
         };
-        drop(dropped);
+        close_all(closing);
         more
     }
 
-    /// Apply the idle cap (a connection just became idle).
-    fn enforce_cap(&self) {
-        let mut dropped = Vec::new();
-        evict_over_cap(&mut self.state.lock().conns, self.limits.max_idle_total, &mut dropped);
-        drop(dropped);
+    /// The last request in flight on `conn` ended: apply the idle cap while
+    /// the pool holds the connection under `key`, else close it. It is left
+    /// open if another request took it meanwhile; that one's end closes it.
+    fn released(&self, key: &str, conn: &H3Conn) {
+        let (close, closing) = {
+            let mut state = self.state.lock();
+            let held = state.holds(key, conn.template.id);
+            let mut removed = Vec::new();
+            if held {
+                evict_over_cap(&mut state.conns, self.limits.max_idle_total, &mut removed);
+            }
+            (!held && conn.idle_start().is_some(), state.to_close(removed))
+        };
+        if close {
+            conn.close();
+        }
+        close_all(closing);
     }
 }
 
@@ -321,15 +396,13 @@ fn sweep_interval(ttl: Duration) -> Duration {
 
 /// Move the longest-idle connections to `out` until at most `max` remain
 /// idle. Connections carrying requests are not idle and stay.
-fn evict_over_cap(conns: &mut HashMap<String, H3Conn>, max: usize, out: &mut Vec<H3Conn>) {
-    let mut idle: Vec<(Instant, String)> = conns.iter().filter_map(|(k, c)| c.idle_start().map(|t| (t, k.clone()))).collect();
-    if idle.len() <= max {
-        return;
-    }
-    idle.sort_unstable();
-    let excess = idle.len() - max;
-    for (_, key) in idle.into_iter().take(excess) {
-        out.extend(conns.remove(&key));
+fn evict_over_cap(conns: &mut HashMap<String, H3Conn>, max: usize, out: &mut Vec<(String, H3Conn)>) {
+    let mut idle = conns.values().filter(|c| c.idle_start().is_some()).count();
+    while idle > max {
+        let oldest = conns.iter().filter_map(|(k, c)| c.idle_start().map(|t| (t, k))).min_by_key(|(t, _)| *t).map(|(_, k)| k.clone());
+        let Some(key) = oldest else { break };
+        out.extend(conns.remove_entry(&key));
+        idle -= 1;
     }
 }
 
@@ -1149,8 +1222,9 @@ impl H3Transport {
         };
         let pooled = handed.or_else(|| if plan.keepalive { self.pool.checkout(&key) } else { None });
         let mut track: Option<EarlyTrack> = None;
-        // Held until the attempt ends: a pooled connection carrying this
-        // request is busy, not idle.
+        // Held until the attempt ends: the connection carrying this request
+        // is busy, not idle. One the pool does not keep (connection reuse
+        // off, or evicted meanwhile) is closed when the attempt ends.
         let mut lease: Option<StreamLease> = None;
         let (conn, reused, zero) = match pooled {
             Some((c, l)) => {
@@ -1169,9 +1243,7 @@ impl H3Transport {
                 Ok(Fresh::Established(b)) => {
                     let (c, t) = *b;
                     track = Some(t);
-                    if plan.keepalive {
-                        lease = Some(self.pool.checkin(&key, c.clone()));
-                    }
+                    lease = Some(if plan.keepalive { self.pool.checkin(&key, c.clone()) } else { self.pool.lease(&key, &c) });
                     (Some(c), false, None)
                 }
                 Ok(Fresh::ZeroRtt(z)) => (None, false, Some(z)),
@@ -1201,9 +1273,7 @@ impl H3Transport {
                 };
                 let QuicConnected { quic, send, observation: cobs, .. } = connected;
                 let c = H3Conn::new(send, quic, cobs);
-                if plan.keepalive {
-                    lease = Some(self.pool.checkin(&key, c.clone()));
-                }
+                lease = Some(if plan.keepalive { self.pool.checkin(&key, c.clone()) } else { self.pool.lease(&key, &c) });
                 (Some(c), false, None)
             }
         };
@@ -1426,9 +1496,7 @@ impl H3Transport {
                 }
             };
             let c = H3Conn::new(send, quic, cobs);
-            if plan.keepalive && poolable {
-                lease = Some(self.pool.checkin(&key, c.clone()));
-            }
+            lease = Some(if plan.keepalive && poolable { self.pool.checkin(&key, c.clone()) } else { self.pool.lease(&key, &c) });
             track = Some(track_z);
             (c, stream)
         } else {

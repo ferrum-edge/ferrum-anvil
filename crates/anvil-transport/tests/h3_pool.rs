@@ -112,6 +112,11 @@ impl Origin {
 }
 
 async fn origin() -> Origin {
+    origin_with(None).await
+}
+
+/// [`origin`] advertising `SETTINGS_MAX_FIELD_SECTION_SIZE` when given.
+async fn origin_with(max_field_section_size: Option<u64>) -> Origin {
     let mut opts = TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone());
     opts.alpn = vec!["h3".into()];
     opts.tls13_only = true;
@@ -128,14 +133,11 @@ async fn origin() -> Origin {
                 let Ok(conn) = incoming.await else { return };
                 a.fetch_add(1, Ordering::SeqCst);
                 let quic = conn.clone();
-                tokio::spawn(async move {
-                    if let quinn::ConnectionError::ApplicationClosed(close) = quic.closed().await
-                        && u64::from(close.error_code) == H3_NO_ERROR
-                    {
-                        c.fetch_add(1, Ordering::SeqCst);
-                    }
-                });
-                let Ok(mut h3c) = h3::server::builder().build::<_, Bytes>(h3_quinn::Connection::new(conn)).await else { return };
+                let mut builder = h3::server::builder();
+                if let Some(max) = max_field_section_size {
+                    builder.max_field_section_size(max);
+                }
+                let Ok(mut h3c) = builder.build::<_, Bytes>(h3_quinn::Connection::new(conn)).await else { return };
                 while let Ok(Some(resolver)) = h3c.accept().await {
                     tokio::spawn(async move {
                         let Ok((req, mut stream)) = resolver.resolve_request().await else { return };
@@ -149,6 +151,15 @@ async fn origin() -> Origin {
                         }
                     });
                 }
+                // Read how the connection ended while `h3c` is still alive:
+                // dropping it closes the connection locally, and quinn then
+                // reports `LocallyClosed` instead of the client's close.
+                if let quinn::ConnectionError::ApplicationClosed(close) = quic.closed().await
+                    && u64::from(close.error_code) == H3_NO_ERROR
+                {
+                    c.fetch_add(1, Ordering::SeqCst);
+                }
+                drop(h3c);
             });
         }
     });
@@ -246,5 +257,31 @@ async fn clearing_an_isolation_closes_only_its_pooled_quic_connections() {
     assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the cleared connection was not closed");
     assert_eq!(t.pool_stats(), PoolStats { connections: 1, idle: 1 });
     assert!(reused(&run(&t, &other).await), "the other isolation keeps its connection");
+    assert_eq!((o.accepted(), o.closed()), (2, 1));
+}
+
+#[tokio::test]
+async fn a_request_that_cannot_be_written_evicts_and_closes_its_quic_connection() {
+    init();
+    let o = origin_with(Some(1024)).await;
+    let t = H3Transport::new();
+    run(&t, &plan(o.addr, "/")).await;
+    assert_eq!(t.pool_stats(), PoolStats { connections: 1, idle: 1 });
+    // The server's SETTINGS arrived with the first response; let the
+    // connection's HTTP/3 driver take them in.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Headers over the server's SETTINGS_MAX_FIELD_SECTION_SIZE are refused
+    // before a stream opens: the write fails on the pooled connection.
+    let mut big = plan(o.addr, "/");
+    big.headers.push((http::HeaderName::from_static("x-big"), http::HeaderValue::from_str(&"a".repeat(4096)).unwrap()));
+    let failed = t.execute(&big, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert_eq!(failed.observation.failure.as_ref().map(|f| f.kind), Some(FailureKind::RequestWriteFailed));
+    assert!(reused(&failed));
+    assert_eq!(t.pool_stats(), PoolStats::default(), "the connection is evicted");
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the evicted connection was not closed");
+
+    let again = run(&t, &plan(o.addr, "/")).await;
+    assert!(!reused(&again), "the next request opens a new connection");
     assert_eq!((o.accepted(), o.closed()), (2, 1));
 }
