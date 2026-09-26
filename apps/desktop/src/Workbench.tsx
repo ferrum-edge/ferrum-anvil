@@ -219,7 +219,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // one at a time, in the order asked, so the last to finish wrote last; each
   // moves the saved baseline to what it wrote and keeps edits made meanwhile,
   // which stay unsaved.
-  const saving = useRef(new Map<string, Promise<unknown>>());
+  const saving = useRef(new Map<string, Promise<RequestDefinition>>());
   const saveTab = async (t: OpenTab | null = tab) => {
     if (!t) return;
     const submitted = t.req;
@@ -753,9 +753,39 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                 setWs(saved);
               } else {
                 const open = tabsRef.current.find((t) => t.req.id === dialog.id);
-                const r = open ? open.req : await api.getRequest(dialog.id);
-                const saved = await api.saveRequest({ ...r, name });
-                if (open) updateTab(saved.id, { req: { ...open.req, name }, saved: snap({ ...open.req, name }) === open.saved ? open.saved : snap(saved) });
+                if (!open) {
+                  await api.saveRequest({ ...(await api.getRequest(dialog.id)), name });
+                } else {
+                  const baseline = JSON.parse(open.saved) as {
+                    n: string;
+                    s: RequestDefinition["spec"];
+                  };
+                  const prior = saving.current.get(open.req.id);
+                  const run = (prior ?? Promise.resolve(undefined))
+                    .catch(() => undefined)
+                    .then((lastSaved) => {
+                      const current = tabsRef.current.find((t) => t.req.id === open.req.id);
+                      const source = lastSaved ?? current?.req ?? open.req;
+                      return api.saveRequest({
+                        ...source,
+                        name,
+                        spec: lastSaved?.spec ?? baseline.s,
+                      });
+                    });
+                  saving.current.set(open.req.id, run);
+                  try {
+                    const saved = await run;
+                    setTabs((ts) =>
+                      ts.map((t) =>
+                        t.req.id === saved.id
+                          ? { ...t, req: { ...saved, spec: t.req.spec }, saved: snap(saved) }
+                          : t,
+                      ),
+                    );
+                  } finally {
+                    if (saving.current.get(open.req.id) === run) saving.current.delete(open.req.id);
+                  }
+                }
               }
               await loadTree();
             } catch (e) {
