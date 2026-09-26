@@ -1,0 +1,64 @@
+# Ferrum Anvil failure lab - profile "proxyproto" (ferrum-edge v0.9.7, file mode)
+#
+# Scenarios: crates/anvil-lab/src/proxyproto.rs, docs/lab/proxyproto.md.
+# Gateway:   HTTP 127.0.0.1:18980, HTTPS 18981 (unused), admin 18990, streams [::]:18901-18904.
+# Fixtures:  127.0.0.1:19901-19904.
+#
+# The TCP backends require PROXY v2 themselves: backend_proxy_protocol: v2 makes the gateway
+# re-advertise the client identity it resolved (the forwarded source after trust gating, or
+# the socket peer for LOCAL / UNKNOWN), which the fixture records as ground truth.
+version: "1"
+
+resource_counts:
+  proxies: 4
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  # Plain TCP listener that requires a PROXY v1/v2 header.
+  - id: pp-tcp
+    listen_port: 18901
+    backend_scheme: tcp
+    backend_host: 127.0.0.1
+    backend_port: 19901
+    stream_proxy_protocol: true
+    backend_proxy_protocol: v2
+    tcp_idle_timeout_seconds: 30
+
+  # TCP+TLS (TLS terminated here): the PROXY header precedes the TLS ClientHello.
+  - id: pp-tcp-tls
+    listen_port: 18902
+    backend_scheme: tcp
+    backend_host: 127.0.0.1
+    backend_port: 19902
+    frontend_tls: true
+    stream_proxy_protocol: true
+    backend_proxy_protocol: v2
+    tcp_idle_timeout_seconds: 30
+
+  # UDP listener that requires the PROXY v2 DGRAM envelope on every datagram.
+  - id: pp-udp
+    listen_port: 18903
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19903
+    stream_proxy_protocol: true
+    udp_idle_timeout_seconds: 2
+
+  # DTLS terminated here; the envelope wraps every datagram outside the DTLS records.
+  - id: pp-dtls
+    listen_port: 18904
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19904
+    frontend_tls: true
+    stream_proxy_protocol: true
+    udp_idle_timeout_seconds: 2
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}

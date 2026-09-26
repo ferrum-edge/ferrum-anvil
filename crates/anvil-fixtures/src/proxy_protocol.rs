@@ -585,3 +585,25 @@ pub async fn udp_relay(bind: &str, target: SocketAddr, gate: DatagramGate) -> an
     });
     Ok(ProxyFixture { addr, log, cancel })
 }
+
+/// Plain UDP echo that records every payload exactly as received (a backend
+/// behind a gateway that strips the envelope: it must see no envelope bytes).
+pub async fn udp_plain_echo(bind: &str) -> anyhow::Result<ProxyFixture> {
+    let sock = UdpSocket::bind(bind).await?;
+    let addr = sock.local_addr()?;
+    let log = ProxyLog::default();
+    let cancel = CancellationToken::new();
+    let (l2, c2) = (log.clone(), cancel.clone());
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_535];
+        loop {
+            let (n, peer) = tokio::select! {
+                r = sock.recv_from(&mut buf) => match r { Ok(x) => x, Err(_) => continue },
+                _ = c2.cancelled() => break,
+            };
+            let _ = sock.send_to(&buf[..n], peer).await;
+            l2.push(ProxyEvent::Datagram { peer, source: None, sequence: None, authenticated: false, payload: buf[..n].to_vec() });
+        }
+    });
+    Ok(ProxyFixture { addr, log, cancel })
+}

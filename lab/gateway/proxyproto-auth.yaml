@@ -1,0 +1,37 @@
+# Ferrum Anvil failure lab - profile "proxyproto", authenticated datagram instance
+# (ferrum-edge v0.9.7, file mode). Gateway: HTTP 18982, HTTPS 18983 (unused), admin 18991,
+# streams 127.0.0.1:18911-18912. Fixtures: 127.0.0.1:19913-19914.
+version: "1"
+
+resource_counts:
+  proxies: 2
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 0
+
+proxies:
+  # Authenticated DGRAM envelope, plain UDP receive boundary: identity "udp 127.0.0.1:18911".
+  - id: pp-udp-auth
+    listen_port: 18911
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19913
+    stream_proxy_protocol: true
+    udp_idle_timeout_seconds: 2
+
+  # Authenticated DGRAM envelope, DTLS-terminating boundary: identity "dtls 127.0.0.1:18912".
+  - id: pp-dtls-auth
+    listen_port: 18912
+    backend_scheme: udp
+    backend_host: 127.0.0.1
+    backend_port: 19914
+    frontend_tls: true
+    stream_proxy_protocol: true
+    udp_idle_timeout_seconds: 2
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}
