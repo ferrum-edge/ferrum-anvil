@@ -96,7 +96,7 @@ describe("file grants", () => {
     const r = await invoke("file_choose", { purpose: "bundle_export", options: { multiple: true } });
     expectRefused("file_choose", r, "a save dialog chooses one file");
     const t = await invoke("file_choose", { purpose: "jwt_svid_file", options: { multiple: true } });
-    expectRefused("file_choose jwt_svid_file", t, "choose one token file");
+    expectRefused("file_choose jwt_svid_file", t, "choose one file");
   });
 
   /** Every command that takes a request spec from the webview. */
