@@ -1,0 +1,105 @@
+# Ferrum Anvil failure lab - profile "h3x" (ferrum-edge v0.9.7, file mode)
+#
+# Scenarios (crates/anvil-lab/src/h3x.rs, docs/lab/h3x.md):
+#   SSE over HTTP/3 through the QUIC listener (events, idle, cancel, mid-stream abort,
+#   Last-Event-ID reconnect, UDP-blocked path) and RFC 9298 CONNECT-UDP through the same
+#   listener (echo, silent target, destination refusal, malformed template, method
+#   policy, profile disabled, no extended CONNECT, HTTP/3 datagrams required, UDP-blocked
+#   path, DTLS-in-tunnel refused locally).
+# Settings:  h3x.conf (main: HTTP 18880, HTTPS+QUIC 18843, admin 18890), h3x-off.conf
+#            (CONNECT-UDP disabled: 18881 / 18844 / 18891) and h3x-noext.conf (no extended
+#            CONNECT: 18882 / 18845 / 18892) share this file.
+# Fixtures:  127.0.0.1:19800-19899. 19807/udp is a live echo that is deliberately NOT a
+#            MASQUE destination (the refusal must leave it untouched).
+#
+# CONNECT-UDP destinations are ADMITTED, not load balanced (docs/http3.md "Routing,
+# policy, and destination admission"): the requested target_host:target_port must be the
+# route's backend or one of its upstream's targets, else 403. The MASQUE route is the
+# only route without allowed_methods; every other route restricts methods so CONNECT
+# cannot reach it.
+# {{LAB_CERTS}} is rendered by the lab runner (per-run ephemeral PKI, never committed).
+version: "1"
+
+resource_counts:
+  proxies: 6
+  consumers: 0
+  plugin_configs: 1
+  upstreams: 1
+
+upstreams:
+  # The MASQUE route's admitted UDP destinations: echo (19805) and a silent sink (19806).
+  - id: h3x-udp-targets
+    targets:
+      - host: 127.0.0.1
+        port: 19805
+      - host: 127.0.0.1
+        port: 19806
+
+proxies:
+  # Positive control: forced HTTP/3 request through the QUIC listener.
+  - id: h3x-echo
+    listen_path: /h3x/echo
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19803
+    strip_listen_path: true
+    pool_enable_http2: false
+    allowed_methods: [GET, POST]
+
+  # PROTO-018-h3*: server-sent events (/sse?count=&interval= on the HTTP fixture).
+  - id: h3x-sse
+    listen_path: /sse
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19813
+    strip_listen_path: false
+    pool_enable_http2: false
+    allowed_methods: [GET]
+
+  # TRUST-007-sse-h3: the backend aborts its event stream mid-body.
+  - id: h3x-sse-abort
+    listen_path: /sse-abort
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19816
+    strip_listen_path: true
+    pool_enable_http2: false
+    allowed_methods: [GET]
+
+  # PROTO-018-h3-reconnect: events 1-2 then an abort without Last-Event-ID; one more
+  # event and a clean end when the request carries Last-Event-ID.
+  - id: h3x-sse-flaky
+    listen_path: /sse-flaky
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19817
+    strip_listen_path: true
+    pool_enable_http2: false
+    allowed_methods: [GET]
+
+  # MASQUE-*: the dedicated CONNECT-UDP route (RFC 9298 default template
+  # /.well-known/masque/udp/{target_host}/{target_port}/). backend_* is only the route's
+  # HTTP shape; admission uses the upstream's targets.
+  - id: h3x-masque
+    listen_path: /.well-known/masque
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19805
+    upstream_id: h3x-udp-targets
+    strip_listen_path: false
+
+  # MASQUE-005: a route whose method policy does not admit CONNECT.
+  - id: h3x-masque-get-only
+    listen_path: /masque-get-only
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19805
+    strip_listen_path: false
+    allowed_methods: [GET]
+
+plugin_configs:
+  - id: lab-access-log
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}
