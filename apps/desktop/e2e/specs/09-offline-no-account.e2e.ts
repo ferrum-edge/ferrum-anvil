@@ -197,7 +197,7 @@ describe("Offline, no-account smoke (REL-005)", () => {
     const report = $(`//aside//div[${cls("hist-row")}][contains(., "Offline smoke load")]`);
     await report.waitForDisplayed();
     await report.click();
-    await $(`//section//b[normalize-space()="Offline smoke load"]`).waitForDisplayed();
+    await $(`//section//h2[normalize-space()="Offline smoke load"]`).waitForDisplayed();
     await screenshot("09-offline-report");
     await $('//div[@aria-label="View"]/button[normalize-space()="Requests"]').click();
   });

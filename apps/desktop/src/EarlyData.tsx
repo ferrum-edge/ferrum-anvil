@@ -38,9 +38,9 @@ export function EarlyDataSettings(props: { value: EarlyDataPolicy | null | undef
   const mode = v == null ? "inherit" : v.enabled ? "on" : "off";
   const extra = v?.extra_methods ?? [];
   return (
-    <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }} aria-label="0-RTT early data">
-      <legend className="faint">0-RTT early data (TLS 1.3 / QUIC)</legend>
-      <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+    <fieldset aria-label="0-RTT early data">
+      <legend>0-RTT early data (TLS 1.3 / QUIC)</legend>
+      <div className="fields">
         <label className="lbl">
           Early data
           <select
@@ -55,9 +55,9 @@ export function EarlyDataSettings(props: { value: EarlyDataPolicy | null | undef
           </select>
         </label>
         {v?.enabled && (
-          <div className="col" style={{ gap: 4 }}>
-            <span className="faint">Always eligible: GET, HEAD, OPTIONS. Also allow:</span>
-            <div className="row">
+          <div className="col tight">
+            <span className="faint small-text">Always eligible: GET, HEAD, OPTIONS. Also allow:</span>
+            <div className="row methods-row">
               {EXTRA_EARLY_METHODS.map((m) => (
                 <label className="check" key={m}>
                   <input
@@ -96,7 +96,7 @@ export function EarlyDataSettings(props: { value: EarlyDataPolicy | null | undef
 export function EarlyDataEvidence({ e }: { e: EarlyDataObservation }) {
   return (
     <div className="col" aria-label="Early data evidence">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>
+      <h4 className="section-title">
         0-RTT early data ({e.transport === "quic" ? "QUIC" : "TLS 1.3 over TCP"})
       </h4>
       <table className="grid">

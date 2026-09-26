@@ -5,7 +5,7 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
-use anvil_domain::request::RequestSpec;
+use anvil_domain::request::{Protocol, RequestSpec};
 use anvil_domain::secret::SecretRef;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::*;
@@ -20,6 +20,9 @@ pub struct TreeNode {
     pub kind: &'static str,
     pub name: String,
     pub method: Option<String>,
+    /// Wire protocol of a request (none for a folder), so a tree can label a
+    /// WebSocket, gRPC, SSE, TCP or UDP request instead of showing its method.
+    pub protocol: Option<Protocol>,
     pub url: Option<String>,
     pub favorite: bool,
     pub children: Vec<TreeNode>,
@@ -385,6 +388,7 @@ impl App {
                     kind: "folder",
                     name: f.name.clone(),
                     method: None,
+                    protocol: None,
                     url: None,
                     favorite: false,
                     children: build(Some(f.meta.id), folders, reqs, depth + 1),
@@ -397,6 +401,7 @@ impl App {
                 kind: "request",
                 name: r.name.clone(),
                 method: Some(r.spec.method.clone()),
+                protocol: Some(r.spec.protocol),
                 url: Some(r.spec.url.clone()),
                 favorite: r.favorite,
                 children: vec![],

@@ -6,13 +6,14 @@ import { api, onExecutionEvent, onSessionEnded, type ExecutionView, type History
 import { SessionConsole } from "./SessionConsole";
 import { ScopeSettingsDialog } from "./ScopeSettings";
 import mark from "./assets/ferrum-anvil-mark.png";
-import type { Environment, RequestDefinition, Workspace } from "./generated/contracts";
+import type { Environment, Protocol, RequestDefinition, Workspace } from "./generated/contracts";
 import { EnvironmentsDialog, ExportDialog, ImportDialog, ProfilesDialog, SettingsDialog } from "./Dialogs";
 import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
 import { ResponsePanel } from "./ResponsePanel";
 import { LoadView } from "./LoadView";
 import { RunnerView } from "./RunnerView";
-import { Modal, Toast, uid } from "./ui";
+import { Icon } from "./icons";
+import { Keys, Modal, SidebarContext, SidebarResizer, Toast, drag, fmtAgo, shortcut, uid } from "./ui";
 
 // Open tabs live for the whole unlocked session, across workspaces: switching
 // workspaces hides a workspace's tabs (with their drafts, in-flight sends and
@@ -46,6 +47,22 @@ const isDirty = (t: OpenTab) => snap(t.req) !== t.saved;
 const liveWork = (t: OpenTab): "session" | "request" | null => (t.session ? "session" : t.running ? "request" : null);
 
 type View = "requests" | "runner" | "load";
+type Layout = "stack" | "side";
+
+const clamp = (lo: number, hi: number, v: number) => Math.min(hi, Math.max(lo, v));
+/** Below this viewport width the sidebar folds away (the toggle brings it back). */
+const NARROW = "(max-width: 860px)";
+/** The side-by-side layout needs this much editor width; narrower editors stack. */
+const SIDE_MIN_WIDTH = 980;
+const LAYOUT_KEY = "anvil.editor.layout";
+
+function storedLayout(): Layout {
+  try {
+    return localStorage.getItem(LAYOUT_KEY) === "side" ? "side" : "stack";
+  } catch {
+    return "stack";
+  }
+}
 
 export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -70,7 +87,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [filter, setFilter] = useState("");
   const [catalog, setCatalog] = useState("");
   const [reqHeight, setReqHeight] = useState(42);
-  const [sideW, setSideW] = useState(290);
+  const [reqWidth, setReqWidth] = useState(46);
+  const [sideW, setSideW] = useState(280);
+  const [sideCollapsed, setSideCollapsed] = useState(false);
+  const [layout, setLayout] = useState<Layout>(storedLayout);
+  const [editorWide, setEditorWide] = useState(false);
+  const editorRef = useRef<HTMLDivElement | null>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const activeRef = useRef(active);
@@ -189,9 +211,39 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     };
   }, []);
 
+  // Narrow windows fold the sidebar away; widening brings it back.
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(NARROW);
+    const apply = () => setSideCollapsed(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
   const wsTabs = tabs.filter((t) => t.wsId === ws?.id);
   const tab = wsTabs.find((t) => t.req.id === active) ?? null;
   const updateTab = (id: string, patch: Partial<OpenTab>) => setTabs((ts) => ts.map((t) => (t.req.id === id ? { ...t, ...patch } : t)));
+
+  // The side-by-side layout applies only while the editor is wide enough.
+  const hasEditor = !!tab && !!ws;
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([e]) => setEditorWide(e.contentRect.width >= SIDE_MIN_WIDTH));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasEditor, view]);
+  const sideBySide = layout === "side" && editorWide;
+  const toggleLayout = () => {
+    const next: Layout = layout === "side" ? "stack" : "side";
+    setLayout(next);
+    try {
+      localStorage.setItem(LAYOUT_KEY, next);
+    } catch {
+      /* storage unavailable: keep the choice for this session */
+    }
+  };
 
   // ---------------------------------------------------------------- actions
   const openRequest = async (id: string) => {
@@ -424,6 +476,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       } else if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
         void newRequest(null);
+      } else if (mod && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSideCollapsed((c) => !c);
       } else if (e.key === "Escape" && tab?.running) {
         void cancel();
       }
@@ -452,404 +507,520 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   const filtered = useMemo(() => filterTree(tree, filter.trim().toLowerCase()), [tree, filter]);
   const activeEnv = envs.find((e) => e.id === ws?.active_environment_id) ?? null;
+  const sidebar = useMemo(() => ({ resize: (d: number) => setSideW((w) => clamp(200, 520, w + d)) }), []);
 
   // ------------------------------------------------------------------ render
   return (
-    <div className="shell">
-      <header className="topbar">
-        <div className="brand">
-          <img className="brand-mark" src={mark} alt="" />
-          Anvil
-        </div>
-        <select
-          className="field"
-          aria-label="Workspace"
-          value={ws?.id ?? ""}
-          onChange={async (e) => {
-            if (e.target.value === "__new") {
-              const w = await api.createWorkspace("New workspace");
-              await loadWorkspaces(w.id);
-              setDialog({ kind: "rename", id: w.id, isFolder: false, name: w.name });
-            } else {
-              const w = workspaces.find((x) => x.id === e.target.value);
-              if (w) setWs(w);
-            }
-          }}
-        >
-          {workspaces.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name + wsNote(tabs.filter((t) => t.wsId === w.id))}
-            </option>
-          ))}
-          <option value="__new">+ New workspace…</option>
-        </select>
-        <button className="btn ghost icon-btn" aria-label="Workspace settings" title="Workspace auth, variables and settings" onClick={() => setDialog("workspace")}>
-          ⚙
-        </button>
-        <select
-          className="field"
-          aria-label="Environment"
-          value={ws?.active_environment_id ?? ""}
-          onChange={async (e) => {
-            if (!ws) return;
-            if (e.target.value === "__manage") return setDialog("env");
-            const w = await api.saveWorkspace({ ...ws, active_environment_id: e.target.value || null });
-            setWs(w);
-            setWorkspaces((l) => l.map((x) => (x.id === w.id ? w : x)));
-          }}
-        >
-          <option value="">No environment</option>
-          {envs.map((e) => (
-            <option key={e.id} value={e.id}>
-              {e.name}
-            </option>
-          ))}
-          <option value="__manage">Manage environments…</option>
-        </select>
-        <div className="viewswitch" role="group" aria-label="View">
-          <button aria-pressed={view === "requests"} onClick={() => show("requests")}>
-            Requests
+    <SidebarContext.Provider value={sidebar}>
+      <div className={`shell${sideCollapsed ? " side-collapsed" : ""}`} style={{ ["--sidebar-w" as string]: `${sideW}px` }}>
+        <header className="topbar">
+          <button
+            className="btn ghost icon-btn"
+            aria-label={sideCollapsed ? "Show sidebar" : "Hide sidebar"}
+            title={`${sideCollapsed ? "Show" : "Hide"} sidebar (${shortcut("B")})`}
+            onClick={() => setSideCollapsed((c) => !c)}
+          >
+            <Icon name="sidebar" />
           </button>
-          <button aria-pressed={view === "runner"} title={liveRuns.runner ? "A run is in progress" : undefined} onClick={() => show("runner")}>
-            Runner
-            {liveRuns.runner && <span className="live-dot" data-testid="runner-live" />}
-          </button>
-          <button aria-pressed={view === "load"} title={liveRuns.load ? "A load run is in progress" : undefined} onClick={() => show("load")}>
-            Load tests
-            {liveRuns.load && <span className="live-dot" data-testid="load-live" />}
-          </button>
-        </div>
-        <span className="spacer" />
-        <button className="btn ghost" onClick={() => setDialog("profiles")}>
-          Profiles
-        </button>
-        <button className="btn ghost" onClick={() => setDialog("import")}>
-          Import
-        </button>
-        <button className="btn ghost" onClick={() => setDialog("export")}>
-          Export
-        </button>
-        <button className="btn ghost icon-btn" aria-label="Settings" onClick={() => setDialog("settings")}>
-          ⚙
-        </button>
-        <button className="btn" onClick={props.onLock} title="Lock (⌘/Ctrl+L)">
-          🔒 Lock
-        </button>
-      </header>
-
-      {mounted.has("load") && viewWs && (
-        <LoadView
-          workspaceId={viewWs.id}
-          tree={tree}
-          environments={envs}
-          notify={notify}
-          hidden={view !== "load"}
-          onLiveChange={(load) => setLiveRuns((l) => ({ ...l, load }))}
-        />
-      )}
-      {mounted.has("runner") && viewWs && (
-        <RunnerView
-          workspaceId={viewWs.id}
-          tree={tree}
-          environments={envs}
-          activeEnvironment={viewWs.active_environment_id ?? null}
-          notify={notify}
-          hidden={view !== "runner"}
-          onLiveChange={(runner) => setLiveRuns((l) => ({ ...l, runner }))}
-        />
-      )}
-      <div className="main" style={{ ["--sidebar-w" as string]: `${sideW}px`, display: view === "requests" ? undefined : "none" }}>
-        <aside className="sidebar" aria-label="Collections and history">
-          <div className="side-tabs" role="tablist">
-            <button className="side-tab" role="tab" aria-selected={side === "tree"} onClick={() => setSide("tree")}>
-              Collections
+          <div className="brand">
+            <img className="brand-mark" src={mark} alt="" />
+            <span className="brand-name">Anvil</span>
+          </div>
+          <span className="divider" />
+          <div className="topbar-group">
+            <div className="picker" title={ws ? `Workspace: ${ws.name}` : "Workspace"}>
+              <Icon name="layers" size={15} />
+              <select
+                className="field"
+                aria-label="Workspace"
+                value={ws?.id ?? ""}
+                onChange={async (e) => {
+                  if (e.target.value === "__new") {
+                    const w = await api.createWorkspace("New workspace");
+                    await loadWorkspaces(w.id);
+                    setDialog({ kind: "rename", id: w.id, isFolder: false, name: w.name });
+                  } else {
+                    const w = workspaces.find((x) => x.id === e.target.value);
+                    if (w) setWs(w);
+                  }
+                }}
+              >
+                {workspaces.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name + wsNote(tabs.filter((t) => t.wsId === w.id))}
+                  </option>
+                ))}
+                <option value="__new">+ New workspace…</option>
+              </select>
+            </div>
+            <button className="btn ghost icon-btn" aria-label="Workspace settings" title="Workspace auth, variables and settings" onClick={() => setDialog("workspace")}>
+              <Icon name="sliders" />
             </button>
-            <button
-              className="side-tab"
-              role="tab"
-              aria-selected={side === "history"}
-              onClick={() => {
-                setSide("history");
-                void loadHistory();
-              }}
-            >
-              History
+            <div className="picker" title={`Environment: ${activeEnv?.name ?? "none"}`}>
+              <span className={`env-dot${activeEnv ? " on" : ""}`} />
+              <select
+                className="field"
+                aria-label="Environment"
+                value={ws?.active_environment_id ?? ""}
+                onChange={async (e) => {
+                  if (!ws) return;
+                  if (e.target.value === "__manage") return setDialog("env");
+                  const w = await api.saveWorkspace({ ...ws, active_environment_id: e.target.value || null });
+                  setWs(w);
+                  setWorkspaces((l) => l.map((x) => (x.id === w.id ? w : x)));
+                }}
+              >
+                <option value="">No environment</option>
+                {envs.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.name}
+                  </option>
+                ))}
+                <option value="__manage">Manage environments…</option>
+              </select>
+            </div>
+          </div>
+          <span className="divider" />
+          <div className="viewswitch" role="group" aria-label="View">
+            <button aria-pressed={view === "requests"} aria-label="Requests" title="Requests" onClick={() => show("requests")}>
+              <Icon name="send" size={14} />
+              <span className="vs-label">Requests</span>
+            </button>
+            <button aria-pressed={view === "runner"} aria-label={liveRuns.runner ? "Runner (run in progress)" : "Runner"} title={liveRuns.runner ? "A run is in progress" : "Collection runner"} onClick={() => show("runner")}>
+              <Icon name="listChecks" size={14} />
+              <span className="vs-label">Runner</span>
+              {liveRuns.runner && <span className="live-dot" data-testid="runner-live" />}
+            </button>
+            <button aria-pressed={view === "load"} aria-label={liveRuns.load ? "Load tests (run in progress)" : "Load tests"} title={liveRuns.load ? "A load run is in progress" : "Load tests"} onClick={() => show("load")}>
+              <Icon name="zap" size={14} />
+              <span className="vs-label">Load tests</span>
+              {liveRuns.load && <span className="live-dot" data-testid="load-live" />}
             </button>
           </div>
-          {side === "tree" && (
-            <div className="side-body" onDragOver={(e) => e.preventDefault()} onDrop={(e) => onDropTo(e, null, moveInto)}>
-              <div className="row" style={{ marginBottom: 6 }}>
-                <input className="field grow" placeholder="Filter" aria-label="Filter requests" value={filter} onChange={(e) => setFilter(e.target.value)} />
-                <button className="btn small" title="New request (⌘/Ctrl+N)" onClick={() => newRequest(null)}>
-                  + Request
-                </button>
-                <button className="btn small ghost" title="New folder" onClick={() => newFolder(null)}>
-                  + Folder
-                </button>
-              </div>
-              {treeWs !== ws?.id ? (
-                <div className="faint" style={{ padding: 8 }}>Loading…</div>
-              ) : (
-                filtered.length === 0 && <div className="faint" style={{ padding: 8 }}>{filter ? "No matches." : "No requests yet. Create one, or import a bundle."}</div>
-              )}
-              <Tree
-                nodes={filtered}
-                depth={0}
-                expanded={filter ? new Set(allIds(filtered)) : expanded}
-                activeId={active}
-                onToggle={(id) => setExpanded((s) => (s.has(id) ? new Set([...s].filter((x) => x !== id)) : new Set(s).add(id)))}
-                onOpen={openRequest}
-                onNewRequest={newRequest}
-                onNewFolder={newFolder}
-                onRename={(n) => setDialog({ kind: "rename", id: n.id, isFolder: n.kind === "folder", name: n.name })}
-                onFolderSettings={(id) => setDialog({ kind: "folder", id })}
-                onDuplicate={async (n) => {
-                  await api.duplicateRequest(n.id);
-                  await loadTree();
+          <span className="spacer" />
+          <div className="topbar-group">
+            <button className="btn ghost collapsible" title="Connection profiles: TLS, proxies and Ferrum gateways" aria-label="Profiles" onClick={() => setDialog("profiles")}>
+              <Icon name="shield" />
+              <span className="collapsible-label">Profiles</span>
+            </button>
+            <button className="btn ghost collapsible" title="Import a spec, collection or Anvil bundle" aria-label="Import" onClick={() => setDialog("import")}>
+              <Icon name="download" />
+              <span className="collapsible-label">Import</span>
+            </button>
+            <button className="btn ghost collapsible" title="Export a workspace or a full backup" aria-label="Export" onClick={() => setDialog("export")}>
+              <Icon name="upload" />
+              <span className="collapsible-label">Export</span>
+            </button>
+            <button className="btn ghost icon-btn" aria-label="Settings" title="Settings" onClick={() => setDialog("settings")}>
+              <Icon name="gear" />
+            </button>
+          </div>
+          <span className="divider" />
+          <button className="btn" onClick={props.onLock} title={`Lock (${shortcut("L")})`}>
+            <Icon name="lock" size={14} />
+            Lock
+          </button>
+        </header>
+
+        {mounted.has("load") && viewWs && (
+          <LoadView
+            workspaceId={viewWs.id}
+            tree={tree}
+            environments={envs}
+            notify={notify}
+            hidden={view !== "load"}
+            onLiveChange={(load) => setLiveRuns((l) => ({ ...l, load }))}
+          />
+        )}
+        {mounted.has("runner") && viewWs && (
+          <RunnerView
+            workspaceId={viewWs.id}
+            tree={tree}
+            environments={envs}
+            activeEnvironment={viewWs.active_environment_id ?? null}
+            notify={notify}
+            hidden={view !== "runner"}
+            onLiveChange={(runner) => setLiveRuns((l) => ({ ...l, runner }))}
+          />
+        )}
+        <div className="main" style={{ display: view === "requests" ? undefined : "none" }}>
+          <aside className="sidebar" aria-label="Collections and history">
+            <div className="side-tabs" role="tablist">
+              <button className="side-tab" role="tab" aria-selected={side === "tree"} onClick={() => setSide("tree")}>
+                <Icon name="layers" size={14} />
+                Collections
+              </button>
+              <button
+                className="side-tab"
+                role="tab"
+                aria-selected={side === "history"}
+                onClick={() => {
+                  setSide("history");
+                  void loadHistory();
                 }}
-                onDelete={removeNode}
-                onMove={moveInto}
-              />
+              >
+                <Icon name="history" size={14} />
+                History
+              </button>
             </div>
-          )}
-          {side === "history" && (
-            <div className="side-body">
-              {history.length === 0 && <div className="faint" style={{ padding: 8 }}>No history yet.</div>}
-              {history.map((h) => (
-                <div
-                  key={h.id}
-                  className="hist-row"
-                  role="button"
-                  tabIndex={0}
-                  onClick={async () => setDialog({ kind: "history", view: await api.historyGet(h.id) })}
-                  onKeyDown={async (e) => e.key === "Enter" && setDialog({ kind: "history", view: await api.historyGet(h.id) })}
-                >
-                  <span className={`method m-${h.method}`}>{h.method}</span>
-                  <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {h.url}
-                  </span>
-                  <span className={`mono s${String(h.status ?? 5)[0]}`}>{h.status ?? "—"}</span>
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    {new Date(h.started_at * 1000).toLocaleString()} · {h.summary}
-                  </span>
+            {side === "tree" && (
+              <>
+                <div className="side-toolbar">
+                  <div className="search">
+                    <Icon name="search" size={14} />
+                    <input className="field" placeholder="Filter requests" aria-label="Filter requests" value={filter} onChange={(e) => setFilter(e.target.value)} />
+                  </div>
+                  <button className="btn ghost icon-btn" title={`New request (${shortcut("N")})`} aria-label="New request" onClick={() => newRequest(null)}>
+                    <Icon name="plus" />
+                  </button>
+                  <button className="btn ghost icon-btn" title="New folder" aria-label="New folder" onClick={() => newFolder(null)}>
+                    <Icon name="folderPlus" />
+                  </button>
                 </div>
-              ))}
-            </div>
-          )}
-        </aside>
-        <div className="resizer" onMouseDown={(e) => drag(e, "x", (d) => setSideW((w) => Math.min(520, Math.max(200, w + d))))} role="separator" aria-orientation="vertical" />
-        <section className="work">
-          <nav className="tabbar" role="tablist" aria-label="Open requests">
-            {wsTabs.map((t) => (
-              <div key={t.req.id} className="tab" role="tab" aria-selected={t.req.id === active} onClick={() => setActive(t.req.id)} onAuxClick={(e) => e.button === 1 && closeTab(t.req.id)}>
-                <span className={`method m-${t.req.spec.method ?? "GET"}`}>{(t.req.spec.protocol ?? "http") === "http" ? t.req.spec.method ?? "GET" : protoShort(t.req.spec.protocol!)}</span>
-                <span className="name">{t.req.name}</span>
-                {isDirty(t) && <span className="dirty" aria-label="unsaved" />}
-                {t.session && <span className="badge accent">live</span>}
+                <div className="side-body" onDragOver={(e) => e.preventDefault()} onDrop={(e) => onDropTo(e, null, moveInto)}>
+                  {treeWs !== ws?.id ? (
+                    <div className="side-empty">Loading…</div>
+                  ) : (
+                    filtered.length === 0 && <div className="side-empty">{filter ? "No requests match this filter." : "No requests yet. Create one, or import a spec or bundle."}</div>
+                  )}
+                  <Tree
+                    nodes={filtered}
+                    depth={0}
+                    expanded={filter ? new Set(allIds(filtered)) : expanded}
+                    activeId={active}
+                    onToggle={(id) => setExpanded((s) => (s.has(id) ? new Set([...s].filter((x) => x !== id)) : new Set(s).add(id)))}
+                    onOpen={openRequest}
+                    onNewRequest={newRequest}
+                    onNewFolder={newFolder}
+                    onRename={(n) => setDialog({ kind: "rename", id: n.id, isFolder: n.kind === "folder", name: n.name })}
+                    onFolderSettings={(id) => setDialog({ kind: "folder", id })}
+                    onDuplicate={async (n) => {
+                      await api.duplicateRequest(n.id);
+                      await loadTree();
+                    }}
+                    onDelete={removeNode}
+                    onMove={moveInto}
+                  />
+                </div>
+              </>
+            )}
+            {side === "history" && (
+              <div className="side-body">
+                {history.length === 0 && <div className="side-empty">No history yet. Every send is recorded here, encrypted.</div>}
+                {history.map((h) => (
+                  <div
+                    key={h.id}
+                    className="hist-row"
+                    role="button"
+                    tabIndex={0}
+                    title={`${h.method} ${h.url}\n${h.summary}`}
+                    onClick={async () => setDialog({ kind: "history", view: await api.historyGet(h.id) })}
+                    onKeyDown={async (e) => e.key === "Enter" && setDialog({ kind: "history", view: await api.historyGet(h.id) })}
+                  >
+                    <div className="hist-line">
+                      <span className={`method m-${h.method}`}>{h.method}</span>
+                      <span className="hist-url">{h.url}</span>
+                    </div>
+                    <div className="hist-line">
+                      <span className={`status-pill s${String(h.status ?? 5)[0]}`}>{h.status ?? "—"}</span>
+                      <span className="hist-meta">{h.summary}</span>
+                      <span className="hist-when" title={new Date(h.started_at).toLocaleString()}>
+                        {fmtAgo(h.started_at)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </aside>
+          <SidebarResizer />
+          <section className="work">
+            <nav className="tabbar">
+              <div className="tabs-scroll" role="tablist" aria-label="Open requests">
+                {wsTabs.map((t) => {
+                  const dirty = isDirty(t);
+                  return (
+                    <div
+                      key={t.req.id}
+                      className="tab"
+                      role="tab"
+                      aria-selected={t.req.id === active}
+                      title={t.req.spec.url ? `${t.req.name}\n${t.req.spec.url}` : t.req.name}
+                      onClick={() => setActive(t.req.id)}
+                      onAuxClick={(e) => e.button === 1 && closeTab(t.req.id)}
+                    >
+                      <RequestTag protocol={t.req.spec.protocol} method={t.req.spec.method} />
+                      <span className="name">{t.req.name}</span>
+                      {t.session && <span className="live-dot tab-live" role="img" aria-label="live session" title="Live session" />}
+                      <span className={`tab-end${dirty ? " is-dirty" : ""}`}>
+                        {dirty && <span className="dirty" aria-label="unsaved" />}
+                        <button
+                          className="btn ghost xs icon-btn"
+                          aria-label={`Close ${t.req.name}`}
+                          title="Close"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void closeTab(t.req.id);
+                          }}
+                        >
+                          <Icon name="x" size={12} strokeWidth={2.2} />
+                        </button>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="tabbar-actions">
+                <button className="btn ghost small icon-btn" title="New request" aria-label="New request tab" onClick={() => newRequest(null)}>
+                  <Icon name="plus" size={15} />
+                </button>
                 <button
-                  className="btn ghost icon-btn"
-                  style={{ width: 18, height: 18, fontSize: 10 }}
-                  aria-label={`Close ${t.req.name}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void closeTab(t.req.id);
-                  }}
+                  className={`btn ghost small icon-btn${layout === "side" ? " active" : ""}`}
+                  aria-pressed={layout === "side"}
+                  aria-label="Side-by-side layout"
+                  title={
+                    layout === "side"
+                      ? "Stack the request above the response"
+                      : `Show the request and response side by side${editorWide ? "" : " (when the window is wide enough)"}`
+                  }
+                  onClick={toggleLayout}
                 >
-                  ✕
+                  <Icon name="splitColumns" size={15} />
                 </button>
               </div>
-            ))}
-          </nav>
-          {tab && ws ? (
-            <div className="editor" style={{ ["--req-h" as string]: `${reqHeight}%` }}>
-              <div style={{ display: "contents" }}>
-                <RequestEditor
-                  key={tab.req.id}
-                  req={tab.req}
-                  onChange={(req) => updateTab(tab.req.id, { req })}
-                  onSend={(anyway) => void send(anyway)}
-                  onConnect={() => void connect()}
-                  connected={!!tab.session}
-                  onSave={() => void saveTab()}
-                  onCancel={() => void cancel()}
-                  running={tab.running}
-                  dirty={snap(tab.req) !== tab.saved}
-                  workspaceId={ws.id}
-                  environmentId={ws.active_environment_id ?? null}
-                  profiles={profiles}
-                />
-              </div>
+            </nav>
+            {tab && ws ? (
               <div
-                className="hsplit"
-                role="separator"
-                aria-orientation="horizontal"
-                onMouseDown={(e) => {
-                  const host = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
-                  drag(e, "y", (_d, ev) => setReqHeight(Math.min(75, Math.max(15, ((ev.clientY - host.top - 90) / host.height) * 100))));
-                }}
-              />
-              {tab.session ? (
-                <SessionConsole
-                  protocol={tab.req.spec.protocol ?? "http"}
-                  messages={tab.session.messages}
-                  onSend={(c) => api.sessionSend(tab.session!.execId, c)}
-                  onCancel={() => void cancelSession(tab.session!.execId)}
+                ref={editorRef}
+                className={`editor${sideBySide ? " side" : ""}`}
+                style={{ ["--req-h" as string]: `${reqHeight}%`, ["--req-w" as string]: `${reqWidth}%` }}
+              >
+                <div className="req-parts">
+                  <RequestEditor
+                    key={tab.req.id}
+                    req={tab.req}
+                    onChange={(req) => updateTab(tab.req.id, { req })}
+                    onSend={(anyway) => void send(anyway)}
+                    onConnect={() => void connect()}
+                    connected={!!tab.session}
+                    onSave={() => void saveTab()}
+                    onCancel={() => void cancel()}
+                    running={tab.running}
+                    dirty={isDirty(tab)}
+                    workspaceId={ws.id}
+                    environmentId={ws.active_environment_id ?? null}
+                    profiles={profiles}
+                  />
+                </div>
+                <div
+                  className="hsplit"
+                  role="separator"
+                  aria-orientation={sideBySide ? "vertical" : "horizontal"}
+                  aria-label="Resize request and response"
+                  onMouseDown={(e) => {
+                    const host = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+                    if (sideBySide) {
+                      drag(e, "x", (_d, ev) => setReqWidth(clamp(25, 75, ((ev.clientX - host.left) / host.width) * 100)));
+                    } else {
+                      const pane = (e.currentTarget.parentElement as HTMLElement).querySelector(":scope > .req-parts > .pane");
+                      const top = pane?.getBoundingClientRect().top ?? host.top + 96;
+                      drag(e, "y", (_d, ev) => setReqHeight(clamp(10, 80, ((ev.clientY - top) / host.height) * 100)));
+                    }
+                  }}
                 />
-              ) : (
-                <ResponsePanel view={tab.view} running={tab.running} progressBytes={tab.progress} onCancel={() => void cancel()} />
-              )}
-            </div>
-          ) : (
-            <div className="empty">
-              <div>
-                <img className="empty-mark" src={mark} alt="" />
-                <div className="big">Put your APIs to the test.</div>
-                <div>Open a request from the sidebar, or create one with ⌘/Ctrl+N.</div>
-                <button className="btn primary" style={{ marginTop: 14 }} onClick={() => newRequest(null)}>
-                  New request
-                </button>
+                {tab.session ? (
+                  <SessionConsole
+                    protocol={tab.req.spec.protocol ?? "http"}
+                    messages={tab.session.messages}
+                    onSend={(c) => api.sessionSend(tab.session!.execId, c)}
+                    onCancel={() => void cancelSession(tab.session!.execId)}
+                  />
+                ) : (
+                  <ResponsePanel view={tab.view} running={tab.running} progressBytes={tab.progress} onCancel={() => void cancel()} notify={notify} />
+                )}
               </div>
-            </div>
-          )}
-        </section>
-      </div>
+            ) : (
+              <div className="empty">
+                <div>
+                  <img className="empty-mark" src={mark} alt="" />
+                  <div className="big">Put your APIs to the test.</div>
+                  <div className="sub">Open a request from the sidebar, or start a new one.</div>
+                  <button className="btn primary" onClick={() => newRequest(null)}>
+                    <Icon name="plus" size={15} />
+                    New request
+                  </button>
+                  <div className="keys">
+                    <span>
+                      <Keys k="N" /> new
+                    </span>
+                    <span>
+                      <Keys k="Enter" /> send
+                    </span>
+                    <span>
+                      <Keys k="S" /> save
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
 
-      <footer className="statusbar">
-        <span>Profile: {props.profileName}</span>
-        <span>Environment: {activeEnv?.name ?? "none"}</span>
-        <span className="spacer" />
-        <span>Local-only · no account</span>
-        <span>Diagnostics catalog {catalog}</span>
-      </footer>
+        <footer className="statusbar">
+          <span title="Local profile">
+            <Icon name="lock" size={12} />
+            Profile: {props.profileName}
+          </span>
+          <span>
+            <span className={`dot${activeEnv ? " on" : ""}`} />
+            Environment: {activeEnv?.name ?? "none"}
+          </span>
+          <span className="spacer" />
+          <span className="local">
+            <Icon name="shield" size={12} />
+            Local-only · no account
+          </span>
+          <span className="catalog-wrap" title={`Diagnostics catalog ${catalog}`}>
+            <span className="catalog">Diagnostics catalog {catalog}</span>
+          </span>
+        </footer>
 
-      {dialog === "env" && ws && (
-        <EnvironmentsDialog
-          workspace={ws}
-          onClose={() => setDialog(null)}
-          onChanged={async () => {
-            await loadEnvs();
-            await loadWorkspaces(ws.id);
-          }}
-        />
-      )}
-      {dialog === "workspace" && ws && (
-        <ScopeSettingsDialog
-          target={{ kind: "workspace", workspace: ws }}
-          workspaceId={ws.id}
-          profiles={profiles}
-          onClose={() => setDialog(null)}
-          onSaved={(w) => {
-            if (w) {
-              setWs(w);
-              setWorkspaces((l) => l.map((x) => (x.id === w.id ? w : x)));
-            }
-          }}
-        />
-      )}
-      {typeof dialog === "object" && dialog?.kind === "folder" && ws && (
-        <ScopeSettingsDialog target={{ kind: "folder", id: dialog.id }} workspaceId={ws.id} profiles={profiles} onClose={() => setDialog(null)} onSaved={() => void loadTree()} />
-      )}
-      {dialog === "profiles" && ws && <ProfilesDialog workspaceId={ws.id} onClose={() => setDialog(null)} onChanged={loadProfiles} />}
-      {dialog === "export" && <ExportDialog workspace={ws} onClose={() => setDialog(null)} notify={notify} />}
-      {dialog === "import" && (
-        <ImportDialog
-          workspaceId={ws?.id ?? null}
-          workspaceName={ws?.name ?? null}
-          onSpecImported={async (r) => {
-            setDialog(null);
-            const missing = r.report.required_variables.length;
-            notify(`Imported ${r.requests} request(s). Nothing was sent.${missing ? ` Fill in ${missing} variable(s) before sending.` : ""}`);
-            await loadWorkspaces(r.workspace_id);
-            await loadTree();
-          }}
-          onClose={() => setDialog(null)}
-          onImported={async (ids) => {
-            notify(`Imported ${ids.length} workspace(s). Nothing was run.`);
-            await loadWorkspaces(ids[0]);
-            await loadTree();
-          }}
-        />
-      )}
-      {dialog === "settings" && <SettingsDialog onClose={() => setDialog(null)} onSaved={(s) => document.documentElement.setAttribute("data-theme", s.theme)} />}
-      {typeof dialog === "object" && dialog?.kind === "rename" && (
-        <RenameDialog
-          name={dialog.name}
-          onClose={() => setDialog(null)}
-          onSave={async (name) => {
-            try {
-              if (dialog.isFolder) {
-                const f = await api.getFolder(dialog.id);
-                await api.saveFolder({ ...f, name });
-              } else if (workspaces.some((w) => w.id === dialog.id)) {
-                const w = workspaces.find((x) => x.id === dialog.id)!;
-                const saved = await api.saveWorkspace({ ...w, name });
-                setWorkspaces((l) => l.map((x) => (x.id === saved.id ? saved : x)));
-                setWs(saved);
-              } else {
-                const open = tabsRef.current.find((t) => t.req.id === dialog.id);
-                if (!open) {
-                  await api.saveRequest({ ...(await api.getRequest(dialog.id)), name });
+        {dialog === "env" && ws && (
+          <EnvironmentsDialog
+            workspace={ws}
+            onClose={() => setDialog(null)}
+            onChanged={async () => {
+              await loadEnvs();
+              await loadWorkspaces(ws.id);
+            }}
+          />
+        )}
+        {dialog === "workspace" && ws && (
+          <ScopeSettingsDialog
+            target={{ kind: "workspace", workspace: ws }}
+            workspaceId={ws.id}
+            profiles={profiles}
+            onClose={() => setDialog(null)}
+            onSaved={(w) => {
+              if (w) {
+                setWs(w);
+                setWorkspaces((l) => l.map((x) => (x.id === w.id ? w : x)));
+              }
+            }}
+          />
+        )}
+        {typeof dialog === "object" && dialog?.kind === "folder" && ws && (
+          <ScopeSettingsDialog target={{ kind: "folder", id: dialog.id }} workspaceId={ws.id} profiles={profiles} onClose={() => setDialog(null)} onSaved={() => void loadTree()} />
+        )}
+        {dialog === "profiles" && ws && <ProfilesDialog workspaceId={ws.id} onClose={() => setDialog(null)} onChanged={loadProfiles} />}
+        {dialog === "export" && <ExportDialog workspace={ws} onClose={() => setDialog(null)} notify={notify} />}
+        {dialog === "import" && (
+          <ImportDialog
+            workspaceId={ws?.id ?? null}
+            workspaceName={ws?.name ?? null}
+            onSpecImported={async (r) => {
+              setDialog(null);
+              const missing = r.report.required_variables.length;
+              notify(`Imported ${r.requests} request(s). Nothing was sent.${missing ? ` Fill in ${missing} variable(s) before sending.` : ""}`);
+              await loadWorkspaces(r.workspace_id);
+              await loadTree();
+            }}
+            onClose={() => setDialog(null)}
+            onImported={async (ids) => {
+              notify(`Imported ${ids.length} workspace(s). Nothing was run.`);
+              await loadWorkspaces(ids[0]);
+              await loadTree();
+            }}
+          />
+        )}
+        {dialog === "settings" && <SettingsDialog onClose={() => setDialog(null)} onSaved={(s) => document.documentElement.setAttribute("data-theme", s.theme)} />}
+        {typeof dialog === "object" && dialog?.kind === "rename" && (
+          <RenameDialog
+            name={dialog.name}
+            onClose={() => setDialog(null)}
+            onSave={async (name) => {
+              try {
+                if (dialog.isFolder) {
+                  const f = await api.getFolder(dialog.id);
+                  await api.saveFolder({ ...f, name });
+                } else if (workspaces.some((w) => w.id === dialog.id)) {
+                  const w = workspaces.find((x) => x.id === dialog.id)!;
+                  const saved = await api.saveWorkspace({ ...w, name });
+                  setWorkspaces((l) => l.map((x) => (x.id === saved.id ? saved : x)));
+                  setWs(saved);
                 } else {
-                  const baseline = JSON.parse(open.saved) as {
-                    n: string;
-                    s: RequestDefinition["spec"];
-                  };
-                  const prior = saving.current.get(open.req.id);
-                  const run = (prior ?? Promise.resolve(undefined))
-                    .catch(() => undefined)
-                    .then((lastSaved) => {
-                      const current = tabsRef.current.find((t) => t.req.id === open.req.id);
-                      const source = lastSaved ?? current?.req ?? open.req;
-                      return api.saveRequest({
-                        ...source,
-                        name,
-                        spec: lastSaved?.spec ?? baseline.s,
+                  const open = tabsRef.current.find((t) => t.req.id === dialog.id);
+                  if (!open) {
+                    await api.saveRequest({ ...(await api.getRequest(dialog.id)), name });
+                  } else {
+                    const baseline = JSON.parse(open.saved) as {
+                      n: string;
+                      s: RequestDefinition["spec"];
+                    };
+                    const prior = saving.current.get(open.req.id);
+                    const run = (prior ?? Promise.resolve(undefined))
+                      .catch(() => undefined)
+                      .then((lastSaved) => {
+                        const current = tabsRef.current.find((t) => t.req.id === open.req.id);
+                        const source = lastSaved ?? current?.req ?? open.req;
+                        return api.saveRequest({
+                          ...source,
+                          name,
+                          spec: lastSaved?.spec ?? baseline.s,
+                        });
                       });
-                    });
-                  saving.current.set(open.req.id, run);
-                  try {
-                    const saved = await run;
-                    setTabs((ts) =>
-                      ts.map((t) =>
-                        t.req.id === saved.id
-                          ? { ...t, req: { ...saved, spec: t.req.spec }, saved: snap(saved) }
-                          : t,
-                      ),
-                    );
-                  } finally {
-                    if (saving.current.get(open.req.id) === run) saving.current.delete(open.req.id);
+                    saving.current.set(open.req.id, run);
+                    try {
+                      const saved = await run;
+                      setTabs((ts) =>
+                        ts.map((t) =>
+                          t.req.id === saved.id
+                            ? { ...t, req: { ...saved, spec: t.req.spec }, saved: snap(saved) }
+                            : t,
+                        ),
+                      );
+                    } finally {
+                      if (saving.current.get(open.req.id) === run) saving.current.delete(open.req.id);
+                    }
                   }
                 }
+                await loadTree();
+              } catch (e) {
+                fail(e);
               }
-              await loadTree();
-            } catch (e) {
-              fail(e);
+              setDialog(null);
+            }}
+          />
+        )}
+        {typeof dialog === "object" && dialog?.kind === "history" && (
+          <Modal
+            title={`${dialog.view.record.prepared.method} ${dialog.view.record.prepared.url}`}
+            wide
+            onClose={() => setDialog(null)}
+            footer={
+              dialog.view.record.request_id ? (
+                <button
+                  className="btn"
+                  onClick={() => {
+                    const rid = dialog.view.record.request_id!;
+                    setDialog(null);
+                    void openRequest(rid).catch(() => notify("That saved request no longer exists."));
+                  }}
+                >
+                  <Icon name="file" size={14} />
+                  Open the saved request
+                </button>
+              ) : undefined
             }
-            setDialog(null);
-          }}
-        />
-      )}
-      {typeof dialog === "object" && dialog?.kind === "history" && (
-        <Modal title={`${dialog.view.record.prepared.method} ${dialog.view.record.prepared.url}`} wide onClose={() => setDialog(null)}>
-          <div style={{ height: "70vh", display: "grid" }}>
-            <ResponsePanel view={dialog.view} running={false} progressBytes={null} onCancel={() => {}} />
-          </div>
-          {dialog.view.record.request_id && (
-            <button
-              className="btn"
-              onClick={() => {
-                const rid = dialog.view.record.request_id!;
-                setDialog(null);
-                void openRequest(rid).catch(() => notify("That saved request no longer exists."));
-              }}
-            >
-              Open the saved request
-            </button>
-          )}
-        </Modal>
-      )}
-      <Toast message={toast} onClose={() => setToast(null)} />
-    </div>
+          >
+            <div className="history-view">
+              <ResponsePanel view={dialog.view} running={false} progressBytes={null} onCancel={() => {}} notify={notify} />
+            </div>
+          </Modal>
+        )}
+        <Toast message={toast} onClose={() => setToast(null)} />
+      </div>
+    </SidebarContext.Provider>
   );
 }
 
@@ -873,8 +1044,16 @@ function requestIds(nodes: TreeNode[]): string[] {
   return nodes.flatMap((n) => (n.kind === "request" ? [n.id] : requestIds(n.children)));
 }
 
+const PROTOCOL_TAGS: Partial<Record<Protocol, string>> = { web_socket: "WS", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP" };
+
 function protoShort(p: string) {
-  return { web_socket: "WS", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP" }[p] ?? p.toUpperCase();
+  return PROTOCOL_TAGS[p as Protocol] ?? p.toUpperCase();
+}
+
+/** The method of an HTTP request, or the short name of any other protocol. */
+function RequestTag(props: { protocol?: Protocol | null; method?: string | null }) {
+  const label = (props.protocol ?? "http") === "http" ? (props.method ?? "GET") : protoShort(props.protocol!);
+  return <span className={`method m-${label}`}>{label}</span>;
 }
 
 function RenameDialog(props: { name: string; onClose: () => void; onSave: (n: string) => void }) {
@@ -884,9 +1063,14 @@ function RenameDialog(props: { name: string; onClose: () => void; onSave: (n: st
       title="Rename"
       onClose={props.onClose}
       footer={
-        <button className="btn primary" disabled={!n.trim()} onClick={() => props.onSave(n.trim())}>
-          Save
-        </button>
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" disabled={!n.trim()} onClick={() => props.onSave(n.trim())}>
+            Save
+          </button>
+        </>
       }
     >
       <form
@@ -895,26 +1079,10 @@ function RenameDialog(props: { name: string; onClose: () => void; onSave: (n: st
           if (n.trim()) props.onSave(n.trim());
         }}
       >
-        <input className="field" style={{ width: "100%" }} value={n} onChange={(e) => setN(e.target.value)} onFocus={(e) => e.target.select()} />
+        <input className="field full" aria-label="Name" value={n} onChange={(e) => setN(e.target.value)} onFocus={(e) => e.target.select()} />
       </form>
     </Modal>
   );
-}
-
-function drag(e: React.MouseEvent, axis: "x" | "y", onMove: (delta: number, ev: MouseEvent) => void) {
-  e.preventDefault();
-  let last = axis === "x" ? e.clientX : e.clientY;
-  const move = (ev: MouseEvent) => {
-    const cur = axis === "x" ? ev.clientX : ev.clientY;
-    onMove(cur - last, ev);
-    last = cur;
-  };
-  const up = () => {
-    window.removeEventListener("mousemove", move);
-    window.removeEventListener("mouseup", up);
-  };
-  window.addEventListener("mousemove", move);
-  window.addEventListener("mouseup", up);
 }
 
 function filterTree(nodes: TreeNode[], q: string): TreeNode[] {
@@ -956,23 +1124,26 @@ function Tree(props: {
   onMove: (id: string, kind: string, folder: string | null) => void;
 }) {
   const [over, setOver] = useState<string | null>(null);
+  const nested = props.depth > 0;
   return (
-    <div role={props.depth === 0 ? "tree" : "group"}>
+    <div role={nested ? "group" : "tree"} className={nested ? "tree-group" : undefined} style={nested ? { ["--depth" as string]: props.depth } : undefined}>
       {props.nodes.map((n) => {
         const isOpen = props.expanded.has(n.id);
+        const folder = n.kind === "folder";
         return (
           <div key={n.id}>
             <div
-              className={`tree-row ${props.activeId === n.id ? "selected" : ""} ${over === n.id ? "drop-target" : ""}`}
+              className={`tree-row${folder ? " folder" : ""}${props.activeId === n.id ? " selected" : ""}${over === n.id ? " drop-target" : ""}`}
               role="treeitem"
-              aria-expanded={n.kind === "folder" ? isOpen : undefined}
+              aria-expanded={folder ? isOpen : undefined}
               aria-selected={props.activeId === n.id}
               tabIndex={0}
+              title={folder ? n.name : n.url ? `${n.name}\n${n.url}` : n.name}
               style={{ paddingLeft: 6 + props.depth * 14 }}
               draggable
               onDragStart={(e) => e.dataTransfer.setData("application/x-anvil-node", JSON.stringify({ id: n.id, kind: n.kind }))}
               onDragOver={(e) => {
-                if (n.kind === "folder") {
+                if (folder) {
                   e.preventDefault();
                   setOver(n.id);
                 }
@@ -980,45 +1151,54 @@ function Tree(props: {
               onDragLeave={() => setOver(null)}
               onDrop={(e) => {
                 setOver(null);
-                if (n.kind === "folder") onDropTo(e, n.id, props.onMove);
+                if (folder) onDropTo(e, n.id, props.onMove);
               }}
-              onClick={() => (n.kind === "folder" ? props.onToggle(n.id) : props.onOpen(n.id))}
+              onClick={() => (folder ? props.onToggle(n.id) : props.onOpen(n.id))}
               onKeyDown={(e) => {
-                if (e.key === "Enter") n.kind === "folder" ? props.onToggle(n.id) : props.onOpen(n.id);
+                if (e.key === "Enter") folder ? props.onToggle(n.id) : props.onOpen(n.id);
                 if (e.key === "F2") props.onRename(n);
                 if (e.key === "Delete" || e.key === "Backspace") props.onDelete(n);
               }}
             >
-              {n.kind === "folder" ? <span className="caret">{isOpen ? "▾" : "▸"}</span> : <span className={`method m-${n.method ?? "GET"}`}>{n.method ?? "GET"}</span>}
-              <span className="name grow">{n.kind === "folder" ? `📁 ${n.name}` : n.name}</span>
+              {folder ? (
+                <>
+                  <span className="caret">
+                    <Icon name="chevronRight" size={12} strokeWidth={2.2} />
+                  </span>
+                  <Icon name={isOpen ? "folderOpen" : "folder"} size={15} className="folder-icon" />
+                </>
+              ) : (
+                <RequestTag protocol={n.protocol} method={n.method} />
+              )}
+              <span className="name">{n.name}</span>
               <span className="actions" onClick={(e) => e.stopPropagation()}>
-                {n.kind === "folder" && (
+                {folder && (
                   <>
-                    <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="New request here" aria-label="New request in folder" onClick={() => props.onNewRequest(n.id)}>
-                      +
+                    <button className="btn ghost xs icon-btn" title="New request here" aria-label="New request in folder" onClick={() => props.onNewRequest(n.id)}>
+                      <Icon name="plus" size={14} />
                     </button>
-                    <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="New subfolder" aria-label="New subfolder" onClick={() => props.onNewFolder(n.id)}>
-                      ⊞
+                    <button className="btn ghost xs icon-btn" title="New subfolder" aria-label="New subfolder" onClick={() => props.onNewFolder(n.id)}>
+                      <Icon name="folderPlus" size={14} />
                     </button>
-                    <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="Folder auth, variables and settings" aria-label="Folder settings" onClick={() => props.onFolderSettings(n.id)}>
-                      ⚙
+                    <button className="btn ghost xs icon-btn" title="Folder auth, variables and settings" aria-label="Folder settings" onClick={() => props.onFolderSettings(n.id)}>
+                      <Icon name="sliders" size={14} />
                     </button>
                   </>
                 )}
-                {n.kind === "request" && (
-                  <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="Duplicate" aria-label="Duplicate" onClick={() => props.onDuplicate(n)}>
-                    ⧉
+                {!folder && (
+                  <button className="btn ghost xs icon-btn" title="Duplicate" aria-label="Duplicate" onClick={() => props.onDuplicate(n)}>
+                    <Icon name="copy" size={14} />
                   </button>
                 )}
-                <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="Rename (F2)" aria-label="Rename" onClick={() => props.onRename(n)}>
-                  ✎
+                <button className="btn ghost xs icon-btn" title="Rename (F2)" aria-label="Rename" onClick={() => props.onRename(n)}>
+                  <Icon name="pencil" size={14} />
                 </button>
-                <button className="btn ghost icon-btn" style={{ width: 22, height: 22 }} title="Delete" aria-label="Delete" onClick={() => props.onDelete(n)}>
-                  🗑
+                <button className="btn ghost xs icon-btn danger" title="Delete" aria-label="Delete" onClick={() => props.onDelete(n)}>
+                  <Icon name="trash" size={14} />
                 </button>
               </span>
             </div>
-            {n.kind === "folder" && isOpen && <Tree {...props} nodes={n.children} depth={props.depth + 1} />}
+            {folder && isOpen && <Tree {...props} nodes={n.children} depth={props.depth + 1} />}
           </div>
         );
       })}
