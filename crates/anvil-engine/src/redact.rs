@@ -86,8 +86,8 @@ pub fn is_credential_name(name: &str, extra: &[String]) -> bool {
 pub struct Redactor {
     /// Secret values, longest first (compared against decoded URL components).
     secrets: Vec<String>,
-    /// Secret values and their canonical percent-encoded forms, longest first
-    /// (scrubbed from arbitrary text).
+    /// Secret values, their canonical percent-encoded forms and their JSON
+    /// string escaping, longest first (scrubbed from arbitrary text).
     patterns: Vec<String>,
     extra_names: Vec<String>,
 }
@@ -120,6 +120,7 @@ impl Redactor {
         for s in &self.secrets {
             patterns.push(s.clone());
             patterns.extend(encoded_forms(s));
+            patterns.extend(json_escaped(s));
         }
         sort_longest_first(&mut patterns);
         self.patterns = patterns;
@@ -135,9 +136,10 @@ impl Redactor {
     /// Scrub exact secret values (and their canonical encoded forms) from
     /// arbitrary text.
     ///
-    /// Limits: only the raw value and the encodings in [`encoded_forms`] are
+    /// Limits: only the raw value, the encodings in [`encoded_forms`] and the
+    /// value's JSON string escaping (as rendered in JSON diagnostics) are
     /// recognized. A secret encoded any other way (partly or doubly
-    /// percent-encoded, base64, JSON- or HTML-escaped), split by other
+    /// percent-encoded, base64, HTML-escaped), split by other
     /// content, or shorter than 4 characters passes through, and names are
     /// not consulted. Use [`Redactor::url`], [`Redactor::header`] or
     /// [`Redactor::json_text`] where the structure is known.
@@ -408,6 +410,14 @@ fn encoded_forms(s: &str) -> Vec<String> {
     let lower = lower_hex(&upper);
     let form: String = url::form_urlencoded::byte_serialize(s.as_bytes()).collect();
     [upper, lower, form].into_iter().filter(|f| f != s).collect()
+}
+
+/// The value as it appears inside a serialized JSON string, when escaping
+/// changes it (quotes, backslashes, control characters).
+fn json_escaped(s: &str) -> Option<String> {
+    let quoted = serde_json::to_string(s).ok()?;
+    let inner = &quoted[1..quoted.len() - 1];
+    (inner != s).then(|| inner.to_string())
 }
 
 fn lower_hex(encoded: &str) -> String {
