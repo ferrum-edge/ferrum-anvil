@@ -666,8 +666,8 @@ async fn sleep_or_stop(sh: &Shared, d: Duration) -> bool {
 }
 
 /// Returns (time scheduling stopped, still-running tasks).
-async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration) -> (Instant, JoinSet<()>) {
-    let end = sh.t0 + Duration::from_secs(schedule::total_secs(&stages));
+async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration, total_secs: u64) -> (Instant, JoinSet<()>) {
+    let end = sh.t0 + Duration::from_secs(total_secs);
     let max_vus = stages.iter().map(|s| s.target).max().unwrap_or(0) as usize;
     let stages = Arc::new(stages);
     let mut set = JoinSet::new();
@@ -708,8 +708,8 @@ async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration) -> (
     (at, set)
 }
 
-async fn drive_open(sh: Arc<Shared>, stages: Vec<Stage>, max_in_flight: usize) -> (Instant, JoinSet<()>) {
-    let end = sh.t0 + Duration::from_secs(schedule::total_secs(&stages));
+async fn drive_open(sh: Arc<Shared>, stages: Vec<Stage>, max_in_flight: usize, total_secs: u64) -> (Instant, JoinSet<()>) {
+    let end = sh.t0 + Duration::from_secs(total_secs);
     let free: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new((0..max_in_flight).rev().collect()));
     let mut set = JoinSet::new();
     for offset in schedule::Arrivals::new(&stages) {
@@ -814,25 +814,35 @@ pub struct LoadRun {
     mix_cumulative: Vec<u64>,
     dataset: Option<Dataset>,
     slots: usize,
+    /// Validated total schedule length in seconds; 0 for fixed-iteration runs.
+    /// Every deadline in [`LoadRun::execute_lockable`] derives from this value.
+    planned_secs: u64,
 }
 
-/// Workload, warmup and abort-rule checks (returns the slot count). Public
-/// so callers can reject a plan when it is saved, not only when it runs.
-fn validate_workload(plan: &LoadPlan) -> Result<usize, LoadError> {
-    let slots = match &plan.workload {
+/// Bounds resolved from a plan's workload: the slot count and, for
+/// stage-based workloads, the validated total schedule length.
+struct WorkloadLimits {
+    slots: usize,
+    planned_secs: u64,
+}
+
+/// Workload, warmup and abort-rule checks (returns the resolved limits).
+/// Public so callers can reject a plan when it is saved, not only when it runs.
+fn validate_workload(plan: &LoadPlan) -> Result<WorkloadLimits, LoadError> {
+    let (slots, planned_secs) = match &plan.workload {
         Workload::ClosedVirtualUsers { stages, think_time_ms } => {
-            validate_stages(stages, MAX_VUS, "virtual users")?;
+            let total = validate_stages(stages, MAX_VUS, "virtual users")?;
             if *think_time_ms > 3_600_000 {
                 return Err(LoadError::Invalid("think time exceeds one hour".into()));
             }
-            stages.iter().map(|s| s.target).max().unwrap_or(0)
+            (stages.iter().map(|s| s.target).max().unwrap_or(0), total)
         }
         Workload::OpenArrivalRate { stages, max_in_flight } => {
-            validate_stages(stages, MAX_RATE_PER_SEC, "arrivals/s")?;
+            let total = validate_stages(stages, MAX_RATE_PER_SEC, "arrivals/s")?;
             if *max_in_flight == 0 || *max_in_flight > MAX_IN_FLIGHT {
                 return Err(LoadError::Invalid(format!("max_in_flight must be 1..={MAX_IN_FLIGHT}")));
             }
-            *max_in_flight
+            (*max_in_flight, total)
         }
         Workload::Iterations { iterations, concurrency } => {
             if *iterations == 0 || *iterations > MAX_ITERATIONS {
@@ -841,13 +851,11 @@ fn validate_workload(plan: &LoadPlan) -> Result<usize, LoadError> {
             if *concurrency == 0 || *concurrency > MAX_CONCURRENCY {
                 return Err(LoadError::Invalid(format!("concurrency must be 1..={MAX_CONCURRENCY}")));
             }
-            (*concurrency).min(*iterations)
+            ((*concurrency).min(*iterations), 0)
         }
-    } as usize;
+    };
     match &plan.workload {
-        Workload::ClosedVirtualUsers { stages, .. } | Workload::OpenArrivalRate { stages, .. }
-            if plan.warmup_secs >= schedule::total_secs(stages) =>
-        {
+        Workload::ClosedVirtualUsers { .. } | Workload::OpenArrivalRate { .. } if plan.warmup_secs >= planned_secs => {
             return Err(LoadError::Invalid("the warmup covers the whole schedule; nothing would be measured".into()));
         }
         _ => {}
@@ -857,7 +865,7 @@ fn validate_workload(plan: &LoadPlan) -> Result<usize, LoadError> {
     {
         return Err(LoadError::Invalid("abort rule needs max_failure_permille ≤ 1000 and a 1–3600 s window".into()));
     }
-    Ok(slots)
+    Ok(WorkloadLimits { slots: slots as usize, planned_secs })
 }
 
 /// Validate a plan's shape without resolving its requests: a chain or mix is
@@ -872,11 +880,15 @@ pub fn validate_plan(plan: &LoadPlan) -> Result<(), LoadError> {
     validate_workload(plan).map(|_| ())
 }
 
-fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<(), LoadError> {
+/// Validate the stage shape and durations, returning the total schedule
+/// length. Overflow of the sum is refused with a typed validation error
+/// rather than panicking or wrapping.
+fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<u64, LoadError> {
     if stages.is_empty() {
         return Err(LoadError::Invalid("the workload has no stages".into()));
     }
-    let total = schedule::total_secs(stages);
+    let total =
+        schedule::total_secs(stages).ok_or_else(|| LoadError::Invalid("the stage durations overflow; shorten the schedule".into()))?;
     if total == 0 {
         return Err(LoadError::Invalid("the stages have zero total duration".into()));
     }
@@ -889,7 +901,7 @@ fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<(), LoadErr
     if stages.iter().all(|s| s.target == 0) {
         return Err(LoadError::Invalid("every stage target is zero; nothing would be sent".into()));
     }
-    Ok(())
+    Ok(total)
 }
 
 impl LoadRun {
@@ -922,7 +934,9 @@ impl LoadRun {
         if plan.mix.is_empty() && ids.len() > MAX_CHAIN_STEPS {
             return Err(LoadError::Invalid(format!("the chain has {} steps; the limit is {MAX_CHAIN_STEPS}", ids.len())));
         }
-        let slots = validate_workload(&plan)?;
+        let limits = validate_workload(&plan)?;
+        let slots = limits.slots;
+        let planned_secs = limits.planned_secs;
         if plan.dataset_id.is_some() && job.dataset.is_none() {
             return Err(LoadError::Invalid("the plan references a dataset but none was provided".into()));
         }
@@ -973,7 +987,7 @@ impl LoadRun {
             started_at: Utc::now(),
             unit,
         };
-        Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1) })
+        Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1), planned_secs })
     }
 
     pub fn meta(&self) -> &RunMeta {
@@ -990,12 +1004,8 @@ impl LoadRun {
     /// cancelling `lock` stops the run like a user cancel but records
     /// `stopped_by_lock`.
     pub async fn execute_lockable(self, cancel: CancellationToken, lock: CancellationToken, progress: Option<ProgressSink>) -> LoadReport {
-        let LoadRun { mut meta, opts, steps, units, mix_cumulative, dataset, slots } = self;
+        let LoadRun { mut meta, opts, steps, units, mix_cumulative, dataset, slots, planned_secs } = self;
         let plan = meta.plan.clone();
-        let planned_secs = match &plan.workload {
-            Workload::ClosedVirtualUsers { stages, .. } | Workload::OpenArrivalRate { stages, .. } => schedule::total_secs(stages),
-            Workload::Iterations { .. } => 0,
-        };
         let proto = Engine::new();
         let shard_count = slots.clamp(1, MAX_SHARDS);
         meta.started_at = Utc::now();
@@ -1102,9 +1112,11 @@ impl LoadRun {
 
         let (ended_at, mut set) = match plan.workload.clone() {
             Workload::ClosedVirtualUsers { stages, think_time_ms } => {
-                drive_closed(sh.clone(), stages, Duration::from_millis(think_time_ms)).await
+                drive_closed(sh.clone(), stages, Duration::from_millis(think_time_ms), planned_secs).await
             }
-            Workload::OpenArrivalRate { stages, max_in_flight } => drive_open(sh.clone(), stages, max_in_flight as usize).await,
+            Workload::OpenArrivalRate { stages, max_in_flight } => {
+                drive_open(sh.clone(), stages, max_in_flight as usize, planned_secs).await
+            }
             Workload::Iterations { iterations, .. } => drive_iterations(sh.clone(), iterations, slots).await,
         };
         *sched_end.lock() = Some(ended_at);
