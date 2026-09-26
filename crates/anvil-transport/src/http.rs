@@ -1435,15 +1435,21 @@ mod tests {
         let t = HttpTransport::new();
         start_sweeper(&t);
         let first = sweeper(&t).expect("the sweeper runs");
+        let every = sweep_interval(t.pool.limits().idle_ttl);
 
         // Its first sweep finds the pool empty: it ends and is forgotten.
-        tokio::time::sleep(sweep_interval(t.pool.limits().idle_ttl) * 2).await;
+        tokio::time::sleep(every * 2).await;
         assert!(first.is_finished());
         assert!(sweeper(&t).is_none(), "a stopped sweeper is cleared, so the next connection starts a new one");
 
+        // A new one starts and sweeps like the first: it too ends on the
+        // empty pool and is forgotten.
         start_sweeper(&t);
         let second = sweeper(&t).expect("the sweeper runs again");
-        assert!(!second.is_finished());
+        assert_ne!(second.id(), first.id(), "a new sweeper was started");
+        tokio::time::sleep(every * 2).await;
+        assert!(second.is_finished());
+        assert!(sweeper(&t).is_none());
     }
 
     #[tokio::test(start_paused = true)]

@@ -309,7 +309,7 @@ impl Pool {
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         let weak = Arc::downgrade(&self.shared);
-        let every = sweep_interval(self.shared.limits.idle_ttl);
+        let every = self.shared.sweep_every();
         state.sweeper = Some(rt.spawn(async move {
             loop {
                 tokio::time::sleep(every).await;
@@ -360,6 +360,13 @@ impl Drop for PoolShared {
 }
 
 impl PoolShared {
+    /// How often the sweep runs: often enough for the shorter of the idle
+    /// TTL and [`TOO_EARLY_TTL`], so the connection kept for the retry after
+    /// 425 is closed soon after its 10 s even when no retry takes it.
+    fn sweep_every(&self) -> Duration {
+        sweep_interval(self.limits.idle_ttl.min(TOO_EARLY_TTL))
+    }
+
     /// Close closed, expired and over-cap idle connections. Returns whether
     /// the pool still holds any; the sweeper stops otherwise.
     fn sweep(&self, now: Instant) -> bool {
@@ -991,13 +998,25 @@ impl H3Transport {
         self.pool.stats()
     }
 
-    /// Whether the peer's SETTINGS frame has been taken in on every pooled
-    /// connection. Lets a test wait for the peer's limits to apply.
+    /// Whether the pool holds a connection and the peer's SETTINGS frame has
+    /// been taken in on every pooled one. Lets a test wait for the peer's
+    /// limits to apply; not part of the API.
     #[doc(hidden)]
     pub fn pooled_peer_settings_known(&self) -> bool {
         use h3::ConnectionState;
         let state = self.pool.shared.state.lock();
-        state.conns.values().all(|c| matches!(c.send.settings(), std::borrow::Cow::Borrowed(_)))
+        // The vendored h3 0.0.8 (`vendor/h3-0.0.8-rfc9220`,
+        // `ConnectionState::settings`) returns `Cow::Borrowed` of the peer's
+        // SETTINGS once they arrived and `Cow::Owned` defaults before. Recheck
+        // this when h3 is upgraded.
+        !state.conns.is_empty() && state.conns.values().all(|c| matches!(c.send.settings(), std::borrow::Cow::Borrowed(_)))
+    }
+
+    /// Run one sweep of the connection pool as if the clock read `now`, so a
+    /// test can check expiry without waiting for it; not part of the API.
+    #[doc(hidden)]
+    pub fn sweep_pool_at(&self, now: Instant) {
+        self.pool.shared.sweep(now);
     }
 
     /// Drop pooled connections and every session ticket.
@@ -1741,5 +1760,13 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(task.is_finished(), "the sweeper outlived its pool");
+    }
+
+    #[test]
+    fn the_sweep_runs_often_enough_for_the_connection_kept_after_425() {
+        let every = H3Transport::new().pool.shared.sweep_every();
+        assert!(every <= TOO_EARLY_TTL / 6, "{every:?}");
+        let short = H3Transport::with_pool_limits(PoolLimits { idle_ttl: Duration::from_secs(3), ..PoolLimits::default() });
+        assert_eq!(short.pool.shared.sweep_every(), sweep_interval(Duration::from_secs(3)));
     }
 }

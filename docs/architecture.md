@@ -65,9 +65,15 @@ CLI (`anvil`) = same anvil-app services without a webview.
   with the engine that started it. An HTTP/2 connection counts as idle only
   with no request in flight, so neither expiry nor eviction cuts a request
   short. A load run gives each slot (virtual user or concurrency lane) its own
-  engine with smaller caps: 2 idle connections per key and 4 in total for
-  HTTP/1.1 and HTTP/2, and 4 idle QUIC connections, so a run holds at most
-  4 idle sockets of each kind per slot.
+  engine with smaller caps sized from the plan: N is the number of distinct
+  requests in its chain or mix, within 4..=64, so a persistent chain finds
+  each step's connection still pooled on the next iteration. Per slot, the
+  HTTP/1.1 and HTTP/2 pool keeps at most 2 idle connections per key and N in
+  total (one cap for both versions), and the QUIC pool at most N idle
+  connections. These caps leave out connections carrying a request, the
+  connection kept for the one retry after `425 Too Early` (at most one per
+  key: HTTP for up to the idle TTL, QUIC for up to 10 s) and the slot's gRPC
+  channels (one per destination).
 - **The workbench shows the selected workspace's state only.** Its lists
   (collection tree, history, TLS/proxy/gateway profiles, environments) are
   cleared when the workspace changes and filled only from the latest read of

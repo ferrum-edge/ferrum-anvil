@@ -297,21 +297,44 @@ async fn a_full_key_closes_its_longest_idle_connection_not_the_returned_one() {
     assert_eq!(o.accepted(), 2);
 }
 
+/// Send `p` (early data asked for) to `/too-early`: the connection that
+/// answered is kept for the retry, not pooled for reuse.
+async fn answer_425(t: &HttpTransport, p: &HttpPlan) -> AttemptOutput {
+    let out = t.execute(p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await.pop().unwrap();
+    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
+    assert_eq!(out.observation.response_status, Some(425));
+    assert_eq!(t.pool.stats(), PoolStats::default(), "connection reuse is off: nothing is pooled for reuse");
+    out
+}
+
 #[tokio::test]
 async fn the_connection_kept_for_the_retry_after_425_expires() {
     init();
-    let t = HttpTransport::with_pool_limits(PoolLimits { idle_ttl: Duration::from_millis(600), ..PoolLimits::default() });
+    let ttl = Duration::from_secs(2);
+    let t = HttpTransport::with_pool_limits(PoolLimits { idle_ttl: ttl, ..PoolLimits::default() });
     let o = origin(None).await;
     let mut p = plan(&format!("{}too-early", o.url));
     p.keepalive = false;
     p.early_data = EarlyDataIntent::Send;
-    let mut outs = t.execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
-    let out = outs.pop().unwrap();
-    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
-    assert_eq!(out.observation.response_status, Some(425));
-    assert_eq!(t.pool.stats(), PoolStats::default(), "connection reuse is off: nothing is pooled for reuse");
 
-    // No retry is sent: the sweep alone closes the connection kept for it.
-    assert!(eventually(Duration::from_secs(10), || o.closed() == 1).await, "the connection kept for the retry was left open");
+    // The retry, sent before the TTL, goes out on the kept connection.
+    let first = answer_425(&t, &p).await;
+    let mut retry = p.clone();
+    retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
+    let again = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await.pop().unwrap();
+    assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
+    assert!(reused(&again), "the retry opened a new connection");
+    assert_eq!(conn_id(&again), conn_id(&first));
     assert_eq!(o.accepted(), 1);
+    // Connection reuse is off: it is closed once the retry is done.
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the connection was left open after the retry");
+
+    // No retry is sent this time: the sweep alone closes the connection kept
+    // for it, once it was idle for the TTL.
+    let sent = Instant::now();
+    answer_425(&t, &p).await;
+    assert_eq!(o.accepted(), 2);
+    assert!(eventually(Duration::from_secs(10), || o.closed() == 2).await, "the connection kept for the retry was left open");
+    let after = sent.elapsed();
+    assert!(after >= ttl, "closed after {after:?}, before the TTL was up");
 }

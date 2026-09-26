@@ -309,27 +309,45 @@ async fn a_quic_connection_that_was_never_pooled_is_closed_after_its_request() {
     assert_eq!(o.accepted(), 2);
 }
 
+/// Send `p` (early data asked for) to a `/status/425` path: the connection
+/// that answered is kept for the retry, not pooled for reuse.
+async fn answer_425(t: &H3Transport, p: &HttpPlan) -> AttemptOutput {
+    let out = t.execute(p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
+    assert_eq!(out.observation.response_status, Some(425));
+    assert_eq!(t.pool_stats(), PoolStats::default(), "the kept connection is not pooled for reuse");
+    out
+}
+
 #[tokio::test]
 async fn the_quic_connection_kept_for_the_retry_after_425_expires_after_ten_seconds() {
     init();
     let o = origin().await;
     // The idle TTL (30 s) is longer than the 10 s the connection is kept
-    // for the retry, and the sweep runs every 5 s.
+    // for the retry. The sweeps below run as if the clock were ahead, so the
+    // test does not wait for the 10 s.
     let t = H3Transport::with_pool_limits(PoolLimits { idle_ttl: Duration::from_secs(30), ..PoolLimits::default() });
     let mut p = plan(o.addr, "/status/425");
     p.keepalive = false;
     p.early_data = EarlyDataIntent::Send;
-    let kept_at = Instant::now();
-    let out = t.execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
-    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
-    assert_eq!(out.observation.response_status, Some(425));
-    assert_eq!(t.pool_stats(), PoolStats::default(), "the kept connection is not pooled for reuse");
-    assert_eq!(o.closed(), 0, "the connection is kept for the retry");
+    let first = answer_425(&t, &p).await;
 
-    // No retry is sent: the sweep closes it once the 10 s have passed, well
-    // before the idle TTL would.
-    assert!(eventually(Duration::from_secs(25), || o.closed() == 1).await, "the connection kept for the retry was left open");
-    let after = kept_at.elapsed();
-    assert!(after >= Duration::from_secs(10), "closed after {after:?}, before the 10 s were up");
+    // A sweep 9 s later keeps it: the retry goes out on it.
+    t.sweep_pool_at(Instant::now() + Duration::from_secs(9));
+    let mut retry = p.clone();
+    retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
+    let again = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
+    assert!(reused(&again), "the retry opened a new connection");
+    assert_eq!(again.observation.connection.as_ref().unwrap().id, first.observation.connection.as_ref().unwrap().id);
     assert_eq!(o.accepted(), 1);
+    // Connection reuse is off: it is closed once the retry is done.
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the connection was left open after the retry");
+
+    // No retry is sent this time: a sweep 11 s later closes it, well before
+    // the idle TTL would.
+    answer_425(&t, &p).await;
+    assert_eq!(o.accepted(), 2);
+    t.sweep_pool_at(Instant::now() + Duration::from_secs(11));
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 2).await, "the connection kept for the retry was left open");
 }
