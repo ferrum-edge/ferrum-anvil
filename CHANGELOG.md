@@ -122,12 +122,16 @@
   long import still waits for the database connection until the import
   ends.
 - Desktop: a lock now wins over an unlock or profile creation whose key
-  derivation it overlaps: the profile stays locked (a new profile is still
-  created, and its recovery key still shown). A command whose store read
-  overlaps a lock or a profile switch returns `LOCKED` instead of what it
-  read, a history list that meets the lock midway fails as locked instead of
-  returning the records read so far, and a load run whose preparation
-  overlaps a lock is not handed to a worker.
+  derivation it overlaps: the profile stays locked, and is never usable in
+  between (a new profile is still created, and its recovery key still
+  shown). A command that runs on a worker thread and returns what it read
+  from the store (a history list or entry, an export or spec preview, a
+  re-import plan, a request preview) returns `LOCKED` instead when a lock or
+  a profile switch overlaps it; one that only writes (a folder or workspace
+  delete, a history clear, a spec import or re-import, an attachment)
+  reports its own outcome. A history list that meets the lock midway fails
+  as locked instead of returning the records read so far, and a load run
+  whose preparation overlaps a lock is not handed to a worker.
 - History records are indexed by their response body, so releasing a
   replaced body and history retention no longer scan whole tables. The index
   is created when a profile is opened or unlocked; it changes no stored data,

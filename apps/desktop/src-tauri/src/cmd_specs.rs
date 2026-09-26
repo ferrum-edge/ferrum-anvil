@@ -3,7 +3,7 @@
 //! pasted text (cURL); nothing imported is sent or run. A source is read,
 //! parsed and written on a blocking thread (see `commands::blocking`).
 
-use crate::commands::{R, blocking, e, id};
+use crate::commands::{R, blocking, blocking_unchecked, e, id};
 use crate::state::DesktopState;
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::specs::{SpecImported, SpecPreview, SpecSourceRecord, SpecTarget};
@@ -53,9 +53,12 @@ pub async fn spec_preview(handle: AppHandle, input: SpecInput, options: ImportOp
     .await
 }
 
+/// Returns what it imported from the source, not what the store holds, so a
+/// committed import is not reported as `LOCKED` (see
+/// `commands::blocking_unchecked`).
 #[tauri::command]
 pub async fn spec_import(handle: AppHandle, input: SpecInput, options: ImportOptions, target: SpecTarget) -> R<SpecImported> {
-    blocking(&handle, move |st| {
+    blocking_unchecked(&handle, move |st| {
         let app = st.app()?;
         let (bytes, name) = input.load(&st.file_grants)?;
         app.spec_import(&bytes, &name, &options, target).map_err(e)
@@ -78,9 +81,10 @@ pub async fn spec_reimport_plan(handle: AppHandle, import_id: String, input: Spe
     .await
 }
 
+/// Returns only a count (see `spec_import`).
 #[tauri::command]
 pub async fn spec_reimport_apply(handle: AppHandle, import_id: String, input: SpecInput, approval: ReimportApproval) -> R<usize> {
-    blocking(&handle, move |st| {
+    blocking_unchecked(&handle, move |st| {
         let app = st.app()?;
         let (bytes, _) = input.load(&st.file_grants)?;
         app.spec_reimport_apply(&id(&import_id)?, &bytes, &approval).map_err(e)

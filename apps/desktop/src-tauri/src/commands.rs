@@ -67,8 +67,11 @@ pub(crate) async fn blocking<T: Send + 'static>(handle: &AppHandle, f: impl FnOn
 
 /// [`blocking`] without the check for a lock that landed meanwhile: for
 /// profile create and unlock, which check it themselves (see
-/// [`DesktopState::set_app_since`]), and for work whose result stays the
-/// user's to see after a lock.
+/// [`DesktopState::set_app_since`]), for work whose result stays the user's
+/// to see after a lock, and for writes that return no decrypted or
+/// workspace data, so a write committed before the lock is not reported as
+/// `LOCKED`. Anything that returns what it read from the store uses
+/// [`blocking`].
 pub(crate) async fn blocking_unchecked<T: Send + 'static>(
     handle: &AppHandle,
     f: impl FnOnce(&DesktopState) -> R<T> + Send + 'static,
@@ -193,9 +196,11 @@ pub struct Converted {
 }
 
 /// Protect an OS-keychain profile with a passphrase instead (the app must be
-/// unlocked). Afterwards the keychain no longer opens it. The new recovery
-/// key is returned even after a lock that landed meanwhile: it is shown only
-/// here.
+/// unlocked). Afterwards the keychain no longer opens it. The outcome is
+/// returned even after a lock that landed meanwhile, but the UI has then
+/// switched to the lock screen and drops it: the new recovery key is never
+/// shown and is lost, which exposes nothing, and the new passphrase still
+/// opens the profile.
 #[tauri::command]
 pub async fn profile_convert_to_passphrase(handle: AppHandle, new_passphrase: String) -> R<Converted> {
     blocking_unchecked(&handle, move |st| {
@@ -257,10 +262,11 @@ pub fn workspace_save(st: State<'_, DesktopState>, workspace: Workspace) -> R<Wo
 }
 
 /// One transaction over the whole workspace, on a blocking thread (see
-/// [`blocking`]).
+/// [`blocking_unchecked`]: it returns no data, so a delete committed before a
+/// lock is not reported as `LOCKED`).
 #[tauri::command]
 pub async fn workspace_delete(handle: AppHandle, workspace_id: String) -> R<()> {
-    blocking(&handle, move |st| st.app()?.delete_workspace(&id(&workspace_id)?).map_err(e)).await
+    blocking_unchecked(&handle, move |st| st.app()?.delete_workspace(&id(&workspace_id)?).map_err(e)).await
 }
 
 /// Whether a bundle import or backup restore sealed the workspace from this
@@ -314,10 +320,10 @@ pub fn folder_move(st: State<'_, DesktopState>, folder_id: String, parent_id: Op
 }
 
 /// One transaction over the whole subtree, on a blocking thread (see
-/// [`blocking`]).
+/// [`blocking_unchecked`], as for `workspace_delete`).
 #[tauri::command]
 pub async fn folder_delete(handle: AppHandle, folder_id: String) -> R<()> {
-    blocking(&handle, move |st| st.app()?.delete_folder(&id(&folder_id)?).map_err(e)).await
+    blocking_unchecked(&handle, move |st| st.app()?.delete_folder(&id(&folder_id)?).map_err(e)).await
 }
 
 /// A spec from the webview references only stored attachments, never a
@@ -525,6 +531,9 @@ pub fn body_view(raw: &[u8], decoded: Option<&[u8]>, content_type: Option<&str>)
 
 #[tauri::command]
 pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) -> R<anvil_engine::preview::EffectiveRequest> {
+    // Taken before the app is read: a preview built across a lock or a
+    // profile switch is not returned (as in `blocking`).
+    let seen = st.epoch();
     let app = st.app()?;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
@@ -532,7 +541,11 @@ pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) ->
     let opts = SendOptions { environment: env, run_override: input.run_override, send_anyway: input.send_anyway, ..Default::default() };
     let builder = app.clone();
     let ctx = anvil_app::off_runtime(move || builder.build_context(rid, &ws, input.spec, &opts)).await.map_err(e)?;
-    app.engine.preview(&ctx).map_err(|f| format!("{:?}: {}", f.kind, f.message))
+    let preview = app.engine.preview(&ctx).map_err(|f| format!("{:?}: {}", f.kind, f.message))?;
+    if st.epoch() != seen {
+        return Err("LOCKED".into());
+    }
+    Ok(preview)
 }
 
 #[tauri::command]
@@ -647,10 +660,12 @@ pub async fn history_get(handle: AppHandle, history_id: String) -> R<ExecutionVi
     .await
 }
 
+/// On a blocking thread (see [`blocking_unchecked`], as for
+/// `workspace_delete`).
 #[tauri::command]
 pub async fn history_clear(handle: AppHandle, workspace_id: Option<String>) -> R<()> {
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
-    blocking(&handle, move |st| st.app()?.store.clear_history(ws.as_ref()).map_err(|x| x.to_string())).await
+    blocking_unchecked(&handle, move |st| st.app()?.store.clear_history(ws.as_ref()).map_err(|x| x.to_string())).await
 }
 
 #[tauri::command]
@@ -895,10 +910,12 @@ pub fn import_cancel(st: State<'_, DesktopState>, attempt: String) -> R<bool> {
 
 /// Store a file the user picked in the native open dialog (purpose
 /// `attachment`) as a portable, content-addressed attachment (bounded size).
-/// Read and stored on a blocking thread (see [`blocking`]).
+/// Read and stored on a blocking thread (see [`blocking_unchecked`]: it
+/// returns only a reference, so a stored attachment is not reported as
+/// `LOCKED` after a lock).
 #[tauri::command]
 pub async fn attachment_add(handle: AppHandle, grant: String, media_type: Option<String>) -> R<anvil_domain::request::AttachmentRef> {
-    blocking(&handle, move |st| {
+    blocking_unchecked(&handle, move |st| {
         let app = st.app()?;
         let file = st.file_grants.read(&grant, FilePurpose::Attachment).map_err(|x| x.to_string())?;
         app.put_attachment(&file.file_name, &file.bytes, media_type).map_err(e)

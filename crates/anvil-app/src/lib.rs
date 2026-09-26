@@ -116,6 +116,14 @@ impl App {
         Ok(())
     }
 
+    /// Unlock with `key` only if `gate` still allows it once the key is
+    /// checked (see [`Store::unlock_if`]); otherwise the app stays locked and
+    /// the error is `Locked`.
+    pub fn unlock_if(&self, key: Key, gate: impl FnOnce() -> bool) -> Result<()> {
+        self.store.unlock_if(key, gate)?;
+        Ok(())
+    }
+
     pub fn settings(&self) -> Result<anvil_domain::settings::AppSettings> {
         Ok(self.store.get(anvil_storage::kind::APP_SETTINGS, &settings_id())?.unwrap_or_default())
     }

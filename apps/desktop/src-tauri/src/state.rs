@@ -142,15 +142,23 @@ impl DesktopState {
     /// nothing it started records into this one or keeps its key in memory.
     pub fn set_app_since(&self, app: App, seen: u64) -> Result<(), String> {
         app.confine_token_files();
-        let previous = {
+        let swapped = {
             let mut g = self.app.write();
             // A lock bumps the epoch before it reads the app, so one that
             // bumps after this exchange waits for the guard and locks `app`.
-            if self.lock_epoch.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                app.lock();
+            match self.lock_epoch.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => Ok(g.replace(Arc::new(app))),
+                Err(_) => Err(app),
+            }
+        };
+        let previous = match swapped {
+            Ok(previous) => previous,
+            // Never published, so locked once the guard is released: a lock
+            // or a status read does not wait for it.
+            Err(rejected) => {
+                rejected.lock();
                 return Err("LOCKED".into());
             }
-            g.replace(Arc::new(app))
         };
         // After the swap: a choice that starts from now on sees only the new
         // profile, and one still open from before grants nothing.
@@ -167,16 +175,16 @@ impl DesktopState {
 
     /// Unlock `app`, the open profile opened again, with `key`, unless a lock
     /// or another profile switch landed since the epoch `seen` was taken: then
-    /// it is locked again and the error is `LOCKED`.
+    /// it stays locked and the error is `LOCKED`.
     pub fn unlock_since(&self, app: &App, key: anvil_storage::Key, seen: u64) -> Result<(), String> {
-        app.unlock(key).map_err(crate::commands::e)?;
-        // Checked after the unlock: a lock that bumps the epoch from now on
-        // also locks the app itself.
-        if self.epoch() != seen {
-            app.lock();
-            return Err("LOCKED".into());
-        }
-        Ok(())
+        // `app` is already published, so the epoch is checked by the gate,
+        // under the write lock of the store's key and before the key is set:
+        // no other thread can use `app` unlocked until it has passed. A lock
+        // (and a profile switch) bumps the epoch before it locks the app,
+        // which takes that write lock, so either the gate sees the bump and
+        // the key is never set, or the key is set first and that lock
+        // clears it.
+        app.unlock_if(key, || self.epoch() == seen).map_err(crate::commands::e)
     }
 
     /// The unlocked app, or an error the UI renders as the lock screen.
@@ -631,6 +639,38 @@ mod tests {
         let (_, key) = ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
         st.unlock_since(&open, key, seen).unwrap();
         assert!(st.app().is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_unlock_refused_by_the_epoch_never_makes_the_open_profile_usable() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, dir) = create(&st, "A");
+        st.set_app_since(a, st.epoch()).unwrap();
+        st.lock();
+        let open = st.app.read().clone().unwrap();
+        let seen = st.epoch();
+        st.lock();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            // Polls the published app for the whole unlock: it is never
+            // handed out, since the key is never set.
+            let poller = s.spawn(|| {
+                let mut polls = 0u32;
+                while !done.load(Ordering::SeqCst) || polls == 0 {
+                    assert_eq!(st.app().map(|_| ()), Err("LOCKED".to_string()));
+                    polls += 1;
+                }
+            });
+            for _ in 0..3 {
+                let (_, key) = ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
+                assert_eq!(st.unlock_since(&open, key, seen), Err("LOCKED".to_string()));
+                assert!(open.is_locked());
+            }
+            done.store(true, Ordering::SeqCst);
+            poller.join().unwrap();
+        });
+        assert!(matches!(open.settings(), Err(AppError::Locked)));
     }
 
     #[tokio::test]

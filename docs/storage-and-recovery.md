@@ -431,9 +431,10 @@ needs no confirmation.
   so releasing a replaced body and retention find a blob's uses without
   scanning it. The index has no schema version of its own: it is created,
   where it is missing, each time a profile is opened or unlocked, after the
-  versioned steps. It changes no stored data, so the schema stays 2 and
-  earlier builds of schema 2 still read the database and full backups made
-  from it.
+  versioned steps, as a best effort: if it cannot be created, a warning is
+  logged and the profile still opens. It changes no stored data, so the
+  schema stays 2 and earlier builds of schema 2 still read the database and
+  full backups made from it.
 - Skipped secrets and the migration trust the database as found. Replacing
   the whole database with an older checkpoint, or restoring a schema 1
   checkpoint whose owner column was edited, cannot be detected without state

@@ -73,8 +73,12 @@ CLI (`anvil`) = same anvil-app services without a webview.
   lock epoch that every lock and profile switch bumps first. An unlock or a
   profile creation takes it before its key derivation and opens the profile
   only if it is unchanged (`set_app_since`, `unlock_since`); otherwise the
-  profile stays locked. `commands::blocking` takes it before the work and
-  returns `LOCKED` instead of the work's result if it changed meanwhile.
+  profile stays locked. An unlock of the open profile checks it under the
+  write lock of the store's key, before the key is set (`Store::unlock_if`),
+  so the profile is never usable in between. `commands::blocking` takes it
+  before the work and returns `LOCKED` instead of the work's result if it
+  changed meanwhile; writes that return no data use `blocking_unchecked`, so
+  a committed write is not reported as `LOCKED`.
 - **File commands never take a path from the webview.** The backend shows
   the native open or save dialog itself (`file_choose`), keeps the chosen
   path and returns an opaque grant bound to one purpose (bundle import or

@@ -90,6 +90,22 @@ fn wrong_key_is_refused_and_does_not_unlock() {
 }
 
 #[test]
+fn an_unlock_whose_gate_refuses_never_sets_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let s = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let id = Id::new();
+    s.put(kind::WORKSPACE, &id, None, None, 0.0, &serde_json::json!({"name": "w"})).unwrap();
+    s.lock();
+    // A gate that refuses, as for a lock that landed during the unlock.
+    assert!(matches!(s.unlock_if(created.dek.clone(), || false), Err(StoreError::Locked)));
+    assert!(s.is_locked());
+    assert!(matches!(s.get::<serde_json::Value>(kind::WORKSPACE, &id), Err(StoreError::Locked)));
+    s.unlock_if(created.dek.clone(), || true).unwrap();
+    assert!(s.get::<serde_json::Value>(kind::WORKSPACE, &id).unwrap().is_some());
+}
+
+#[test]
 fn rel_004_future_schema_is_refused_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();

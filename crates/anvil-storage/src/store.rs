@@ -314,7 +314,8 @@ fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
 /// reads the version again first, so a step another connection has applied
 /// meanwhile is skipped, and a step that fails leaves nothing behind. Then it
 /// creates the unversioned indexes ([`HISTORY_BODY_INDEX`]) where they are
-/// missing; with nothing pending and every index in place it only reads.
+/// missing, as a best effort; with nothing pending and every index in place
+/// it only reads.
 fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
     let found = stored_schema_version(conn)?;
     if found > DB_SCHEMA_VERSION {
@@ -349,7 +350,11 @@ fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
             tracing::warn!(schema = v, left, "vault secrets that did not decrypt were left as they were");
         }
     }
-    conn.execute_batch(HISTORY_BODY_INDEX)?;
+    // Best effort: a missing index only slows lookups, so it never keeps a
+    // profile from opening or unlocking.
+    if let Err(e) = conn.execute_batch(HISTORY_BODY_INDEX) {
+        tracing::warn!(error = %e, "the history body index could not be created");
+    }
     Ok(())
 }
 
@@ -485,12 +490,28 @@ impl Store {
     /// not yet checked or on a database not yet migrated. A wrong key, or a
     /// migration that fails, leaves the store locked.
     pub fn unlock(&self, key: Key) -> Result<()> {
+        self.unlock_if(key, || true)
+    }
+
+    /// [`Store::unlock`], keeping `key` only if `gate` still allows it:
+    /// `gate` runs under the write lock of the key, right before the key is
+    /// set, so no other call can use the store unlocked before it has
+    /// passed. When it refuses, the store stays locked and the error is
+    /// `Locked`. A caller whose lock takes effect before it calls
+    /// [`Store::lock`] (such as bumping a counter `gate` reads) thereby
+    /// either fails the gate or finds the key set and clears it.
+    pub fn unlock_if(&self, key: Key, gate: impl FnOnce() -> bool) -> Result<()> {
         let r = self.conn().and_then(|mut conn| {
             verify_key_on(&conn, &key)?;
             migrate_on(&mut conn, &key)?;
-            *self.key.write() = Some(key);
+            let mut k = self.key.write();
+            if !gate() {
+                return Err(StoreError::Locked);
+            }
+            *k = Some(key);
             Ok(())
         });
+        // The write guard is released with the closure, before this locks.
         if r.is_err() {
             self.lock();
         }
