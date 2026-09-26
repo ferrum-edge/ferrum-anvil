@@ -1,8 +1,10 @@
 //! Token-cache identity and generations: a cached token is only ever reused
 //! for the exact grant, audience, client, scope, issuer, authorization URL
 //! and token-cache identity it was issued for; a clear (lock), a forget
-//! (sign-out) or a new sign-in wins over every acquisition still in flight;
-//! and a refresh finishes even when its caller stops waiting.
+//! (sign-out) or a new sign-in wins over every acquisition still in flight,
+//! and a send overtaken only by a sign-in is served with its token; a refresh
+//! finishes even when its caller stops waiting, unless a lock or a sign-out
+//! aborts it.
 
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, OAuthResolved, TokenCache, TokenHttp, TokenKey};
@@ -385,13 +387,59 @@ async fn an_older_refresh_never_overwrites_a_newer_sign_in() {
     // The user signs in again while the refresh is in flight.
     sign_in(&cache, &cfg, signed_in("new-sign-in", "rt-new", false));
     issuer.release.notify_one();
-    let e = task.await.unwrap().expect_err("a refresh older than the sign-in must not succeed");
-    assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
+    // The refreshed token is discarded; the send is served by the sign-in.
+    assert_eq!(task.await.unwrap().unwrap(), "new-sign-in");
     assert_eq!(issuer.completed.load(Ordering::SeqCst), 1, "the issuer did answer");
     let stored = cache.get(&key(&cfg)).unwrap();
     assert_eq!(stored.access_token.as_str(), "new-sign-in", "the late refresh did not overwrite the sign-in");
     assert_eq!(stored.refresh_token.as_ref().map(|rt| rt.as_str()), Some("rt-new"));
     assert_eq!(acquire(&cache, &cfg, &issuer).await.unwrap(), "new-sign-in");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_send_that_waited_through_a_sign_in_is_served_by_it() {
+    let issuer = Arc::new(Issuer::gated());
+    issuer.rotate.store(true, Ordering::SeqCst);
+    let cache = Arc::new(TokenCache::new());
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("old", "rt-0", true));
+    let spawn = || {
+        let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
+        tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
+    };
+    let refreshing = spawn();
+    issuer.received.notified().await;
+    let waiter = spawn();
+    settle().await; // the waiter found the expired token and queued on the single-flight lock
+    sign_in(&cache, &cfg, signed_in("new-sign-in", "rt-new", false));
+    issuer.release.notify_one();
+    assert_eq!(refreshing.await.unwrap().unwrap(), "new-sign-in");
+    assert_eq!(waiter.await.unwrap().unwrap(), "new-sign-in", "a sign-in alone does not cancel a waiting send");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 1, "the waiter did not refresh again");
+    assert_eq!(cache.get(&key(&cfg)).unwrap().access_token.as_str(), "new-sign-in");
+}
+
+#[tokio::test]
+async fn a_send_that_waited_through_a_sign_in_and_a_sign_out_is_canceled() {
+    let issuer = Arc::new(Issuer::gated());
+    let cache = Arc::new(TokenCache::new());
+    let cfg = client_credentials("api-a");
+    let spawn = || {
+        let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
+        tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
+    };
+    let holder = spawn();
+    issuer.received.notified().await;
+    let waiter = spawn();
+    settle().await;
+    assert!(!cache.remove(&key(&cfg)));
+    sign_in(&cache, &cfg, signed_in("after-sign-out", "rt", false));
+    issuer.release.notify_one();
+    for task in [holder, waiter] {
+        let r = task.await.unwrap();
+        assert!(matches!(r, Err(AuthError::Canceled(_))), "a sign-out in between still wins: {r:?}");
+    }
     assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -437,13 +485,55 @@ async fn a_refresh_whose_caller_stopped_waiting_loses_to_a_lock() {
         _ = issuer.received.notified() => {}
     }
     cache.clear(); // lock
-    issuer.release.notify_one();
-    while issuer.completed.load(Ordering::SeqCst) == 0 {
-        tokio::task::yield_now().await;
-    }
     settle().await;
+    issuer.release.notify_one();
+    settle().await;
+    assert_eq!(issuer.completed.load(Ordering::SeqCst), 0, "the lock aborted the refresh before the issuer answered");
     assert!(cache.get(&key(&cfg)).is_none(), "the late refresh did not repopulate the cleared cache");
     let e = acquire(&cache, &cfg, &issuer).await.expect_err("locked: a new sign-in is needed");
     assert!(matches!(e, AuthError::InteractionRequired(_)), "{e:?}");
     assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sign_out_aborts_a_detached_refresh_and_frees_its_lock() {
+    let issuer = Arc::new(Issuer::gated());
+    let cache = Arc::new(TokenCache::new());
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("old", "rt-0", true));
+    tokio::select! {
+        r = acquire(&cache, &cfg, &issuer) => panic!("the gated issuer never answered: {r:?}"),
+        _ = issuer.received.notified() => {} // the caller stops waiting; the refresh is detached
+    }
+    assert!(cache.remove(&key(&cfg)), "sign-out");
+    settle().await;
+    issuer.release.notify_one();
+    settle().await;
+    assert_eq!(issuer.completed.load(Ordering::SeqCst), 0, "the sign-out aborted the refresh before the issuer answered");
+    assert!(cache.get(&key(&cfg)).is_none());
+
+    // The aborted refresh released the single-flight lock: a new sign-in
+    // refreshes at once with its own refresh token.
+    issuer.gated.store(false, Ordering::SeqCst);
+    sign_in(&cache, &cfg, signed_in("expired-again", "rt-new", true));
+    assert_eq!(acquire(&cache, &cfg, &issuer).await.unwrap(), "t2");
+    assert_eq!(issuer.form_value(1, "refresh_token").as_deref(), Some("rt-new"));
+}
+
+#[tokio::test]
+async fn a_lock_aborts_a_refresh_its_caller_is_waiting_for() {
+    let issuer = Arc::new(Issuer::gated());
+    let cache = Arc::new(TokenCache::new());
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("old", "rt-0", true));
+    let task = {
+        let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
+        tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
+    };
+    issuer.received.notified().await;
+    cache.clear();
+    // Ends without the issuer ever answering.
+    let e = task.await.unwrap().expect_err("a lock aborts the refresh");
+    assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
+    assert_eq!(issuer.completed.load(Ordering::SeqCst), 0);
 }
