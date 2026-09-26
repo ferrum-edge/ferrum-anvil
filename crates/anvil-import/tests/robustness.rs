@@ -18,6 +18,8 @@ const FIXTURES: &[&str] = &[
     "insomnia/insomnia-v5.yaml",
     "har/session.har",
     "curl/create-order.sh",
+    "curl/literal-data.sh",
+    "curl/literal-form-string.sh",
 ];
 
 fn small() -> ImportOptions {

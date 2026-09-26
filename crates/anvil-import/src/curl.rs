@@ -676,6 +676,7 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
                 // from the body. Drop the header only when that is exactly what
                 // was given; otherwise it stays and takes precedence when sending.
                 let derivable = params.iter().any(|(n, v)| n == "charset" && v.eq_ignore_ascii_case("utf-8"))
+                    && params.iter().filter(|(n, _)| n == "action").count() <= 1
                     && params.iter().all(|(n, v)| match n.as_str() {
                         "charset" => v.eq_ignore_ascii_case("utf-8"),
                         "action" => !v.is_empty() && !v.contains(['"', '\\']),

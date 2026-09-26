@@ -355,9 +355,11 @@ A missing scheme defaults to `http://` (reported). Literal data keeps its
 bytes, line breaks included (curl strips CR/LF only from `@file` data);
 `--form-string` values are literal (no `;type=` metadata, no file reads).
 SOAP requests (`SOAPAction` + XML, or `application/soap+xml`) become SOAP
-bodies; a SOAP 1.2 `action` media-type parameter becomes the SOAP action,
-and a `Content-Type` with parameters beyond `charset=utf-8` and `action` is
-kept as an explicit header.
+bodies; a SOAP 1.2 `action` media-type parameter becomes the SOAP action.
+The SOAP 1.2 `Content-Type` is dropped only when it contains exactly
+`charset=utf-8` and optionally one plain `action` parameter. Otherwise the
+header is kept as explicit, matching what curl sends. A bare
+`application/soap+xml` header is kept as explicit.
 JSON-looking data sent without a `Content-Type` stays form-typed, as curl
 sends it (reported).
 
@@ -388,6 +390,8 @@ timings and pages are not imported.
   generator cannot guarantee is reported instead.
 * `pattern` is never satisfied deliberately; `not`, conditionals and other
   applicators listed above are not evaluated.
+* Insomnia `{{var}}` references in path-parameter values are copied verbatim,
+  so the rendered value is not percent-encoded.
 * Only the first `oneOf`/`anyOf` branch, the first `xsd:choice` branch and one
   media type per request body are generated.
 * External references are never resolved by the importer; resolving approved

@@ -52,6 +52,25 @@ fn fixture_command() {
 }
 
 #[test]
+fn literal_parity_fixtures() {
+    let data = run("curl/literal-data.sh", &opts());
+    match &data.requests[0].spec.body {
+        Body::Raw { text, .. } => assert_eq!(text, "line1\nline2\r\n"),
+        other => panic!("{other:?}"),
+    }
+
+    let form = run("curl/literal-form-string.sh", &opts());
+    match &form.requests[0].spec.body {
+        Body::Multipart { parts } => {
+            assert_eq!(parts[0].name, "x");
+            assert!(matches!(&parts[0].content, MultipartContent::Text { value } if value == "a;type=text/html"));
+            assert_eq!(parts[0].content_type, None);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn include_credentials_keeps_literals() {
     let r = import(&fixture("curl/create-order.sh"), &ImportOptions { include_credentials: true, ..opts() }).unwrap();
     let s = &r.requests[0].spec;
@@ -228,9 +247,11 @@ fn soap12_action_parameter_is_kept() {
         r#"application/soap+xml; action="urn:lookup""#,
         r#"application/soap+xml; charset=iso-8859-1; action="urn:lookup""#,
         r#"application/soap+xml; charset=utf-8; action="urn:lookup"; profile=x"#,
+        r#"application/soap+xml; charset=utf-8; action="urn:first"; action="urn:second""#,
     ] {
         let r = curl(&format!("curl -H 'Content-Type: {ct}' -d '<Envelope/>' https://example.test"));
-        assert_eq!(soap_body(&r), (SoapVersion::Soap12, Some("urn:lookup".into())), "{ct}");
+        let expected_action = if ct.contains("urn:first") { "urn:first" } else { "urn:lookup" };
+        assert_eq!(soap_body(&r), (SoapVersion::Soap12, Some(expected_action.into())), "{ct}");
         assert_eq!(header(&r.requests[0].spec, "Content-Type").map(|h| h.value.as_str()), Some(ct));
     }
     // A SOAPAction header does not turn a SOAP 1.2 media type into SOAP 1.1.
