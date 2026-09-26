@@ -288,6 +288,51 @@ fn data_008_imports_never_activate_bypass_or_trust() {
     assert!(opened.warnings.iter().any(|w| w.contains("other origins")));
 }
 
+/// SPIFFE Workload API sources need no secret, so an import draws on the
+/// importing machine's identity: "send a failing JWT-SVID" is never
+/// imported, and the profiles that use the identity are named. A JWT-SVID
+/// held as a value is a secret like any other (placeholder when shared).
+#[test]
+fn data_008_workload_api_sources_are_flagged_and_send_anyway_is_not_imported() {
+    use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
+    let mut g = sample();
+    let jwt = |source: JwtSvidSource| JwtSvidConfig {
+        source,
+        audiences: vec!["spiffe://example.org/api".into()],
+        endpoint: "unix:///run/spire/sockets/agent.sock".into(),
+        spiffe_id: None,
+        verify_with_bundles: true,
+        send_despite_failed_checks: true,
+        header_name: "Authorization".into(),
+        prefix: "Bearer".into(),
+    };
+    g.requests[0].spec.auth = AuthConfig::JwtSvid { config: jwt(JwtSvidSource::WorkloadApi) };
+    g.requests[1].spec.auth = AuthConfig::Multi {
+        profiles: vec![AuthConfig::JwtSvid {
+            config: jwt(JwtSvidSource::Value { token: SensitiveValue::template("eyJ.LITERAL.jwtsvid") }),
+        }],
+    };
+    g.tls_profiles[0].client_identity =
+        Some(anvil_domain::tls::ClientIdentity::WorkloadApi { endpoint: String::new(), spiffe_id: None, trust_bundle: true });
+    let (bytes, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    assert!(!text_of(&bytes).contains("eyJ.LITERAL.jwtsvid"), "a JWT-SVID value is not shared");
+    let opened = bundle::open(&bytes, None).unwrap();
+    for r in &opened.graph.requests {
+        let cfg = match &r.spec.auth {
+            AuthConfig::JwtSvid { config } => config,
+            AuthConfig::Multi { profiles } => match &profiles[0] {
+                AuthConfig::JwtSvid { config } => config,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        assert!(!cfg.send_despite_failed_checks, "send-anyway is not imported as active");
+    }
+    assert!(opened.warnings.iter().any(|w| w.contains("2 JWT-SVID auth profile(s) sent tokens that failed")), "{:?}", opened.warnings);
+    assert!(opened.warnings.iter().any(|w| w.contains("1 JWT-SVID auth profile(s) fetch tokens from this machine's SPIFFE Workload API")));
+    assert!(opened.warnings.iter().any(|w| w.contains("TLS profile(s) lab present this machine's X.509-SVID")));
+}
+
 #[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();

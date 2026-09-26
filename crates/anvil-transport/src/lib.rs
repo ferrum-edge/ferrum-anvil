@@ -33,6 +33,7 @@ pub mod sse;
 pub mod stats;
 pub mod tls;
 pub mod udp;
+pub mod workload_api;
 pub mod ws;
 pub mod ws_deflate;
 

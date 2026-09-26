@@ -11,6 +11,7 @@ pub mod digest;
 pub mod dpop;
 pub mod hmac_sig;
 pub mod jwt;
+pub mod jwt_svid;
 pub mod oauth;
 pub mod wsse;
 
@@ -102,6 +103,13 @@ pub enum ResolvedAuth {
         timestamp_ttl_secs: Option<u32>,
         saml_assertion: Option<Zeroizing<String>>,
     },
+    /// JWT-SVID: the engine fetches/reads and checks the token first and
+    /// passes it here (empty until then).
+    JwtSvid {
+        token: Zeroizing<String>,
+        header_name: String,
+        prefix: String,
+    },
     Multi(Vec<ResolvedAuth>),
 }
 
@@ -150,6 +158,7 @@ impl ResolvedAuth {
             ResolvedAuth::Hmac(p) => format!("hmac({:?}, user {})", p.profile, p.username),
             ResolvedAuth::Dpop { .. } => "dpop(bound access token)".into(),
             ResolvedAuth::Wsse { username, password_type, .. } => format!("ws-security({password_type:?}, user {username})"),
+            ResolvedAuth::JwtSvid { header_name, .. } => format!("jwt_svid({header_name})"),
             ResolvedAuth::Multi(v) => format!("multi[{}]", v.iter().map(|a| a.label()).collect::<Vec<_>>().join(", ")),
         }
     }
@@ -271,6 +280,14 @@ fn apply_into(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
             )?;
             out.secrets.push(password.to_string());
             out.body = Some(body);
+        }
+        ResolvedAuth::JwtSvid { token, header_name, prefix } => {
+            if token.is_empty() {
+                return Err(AuthError::Invalid("no JWT-SVID is available for this request".into()));
+            }
+            out.secrets.push(token.to_string());
+            let v = if prefix.is_empty() { token.to_string() } else { format!("{prefix} {}", token.as_str()) };
+            set(out, header_name, v);
         }
         ResolvedAuth::Multi(parts) => {
             for p in parts {

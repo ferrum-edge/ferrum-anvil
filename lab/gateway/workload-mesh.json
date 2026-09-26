@@ -1,0 +1,54 @@
+{
+  "mesh": {
+    "workloads": [
+      {
+        "spiffe_id": "spiffe://anvil.lab/ns/lab/sa/workload-svc",
+        "service_name": "svc",
+        "namespace": "ferrum",
+        "trust_domain": "anvil.lab",
+        "service_account": "workload-svc",
+        "addresses": [
+          "127.0.0.1"
+        ],
+        "ports": [
+          {
+            "port": 17501,
+            "protocol": "http",
+            "name": "http"
+          }
+        ],
+        "selector": {
+          "labels": {
+            "app": "svc"
+          },
+          "namespace": "ferrum"
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "svc",
+        "namespace": "ferrum",
+        "ports": [
+          {
+            "port": 17501,
+            "protocol": "http",
+            "name": "http"
+          }
+        ],
+        "workloads": [
+          {
+            "spiffe_id": "spiffe://anvil.lab/ns/lab/sa/workload-svc"
+          }
+        ]
+      }
+    ],
+    "peer_authentications": [
+      {
+        "name": "anvil-lab-workload-strict",
+        "namespace": "ferrum",
+        "mtls_mode": "strict"
+      }
+    ]
+  }
+}

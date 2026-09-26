@@ -140,6 +140,17 @@ pub enum FailureKind {
     OAuthInteractionRequired,
     UnsupportedCombination,
     VaultLocked,
+    /// The SPIFFE Workload API endpoint could not be reached (no socket,
+    /// permission denied, nothing listening, not HTTP/2 gRPC, deadline).
+    WorkloadApiUnavailable,
+    /// The Workload API answered `PERMISSION_DENIED`, or an OK answer carried
+    /// no SVID for this caller: no identity was issued.
+    WorkloadApiDenied,
+    /// Any other Workload API failure (another gRPC status, a malformed answer).
+    WorkloadApiFailed,
+    /// A JWT-SVID failed Anvil's local checks (expiry, audience, subject,
+    /// algorithm, signature) and was not sent.
+    JwtSvidRejectedLocally,
     // ---- name resolution (client leg) ----
     DnsNoSuchHost,
     DnsNoRecords,
@@ -262,6 +273,10 @@ impl FailureKind {
                 | OAuthInteractionRequired
                 | UnsupportedCombination
                 | VaultLocked
+                | WorkloadApiUnavailable
+                | WorkloadApiDenied
+                | WorkloadApiFailed
+                | JwtSvidRejectedLocally
         )
     }
 
@@ -772,6 +787,9 @@ pub struct PreparedSummary {
     pub inferred: Vec<String>,
     /// Secrets omitted from this summary (labels only).
     pub omitted_secrets: Vec<String>,
+    /// SPIFFE Workload API calls and the SVIDs used (public data only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_api: Option<crate::workload::WorkloadApiEvidence>,
 }
 
 /// Complete record of one execution (possibly several attempts).

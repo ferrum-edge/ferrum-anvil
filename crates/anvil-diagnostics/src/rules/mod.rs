@@ -12,6 +12,7 @@ mod protocols;
 mod proxy_header;
 mod tls;
 mod transport;
+mod workload;
 
 use crate::Draft;
 use crate::facts::{BodyFacts, DiagnosticInput};
@@ -155,6 +156,18 @@ pub const RULES: &[RuleMeta] = &[
         ],
     },
     RuleMeta {
+        id: "local.workload_api",
+        version: 1,
+        summary: "SPIFFE Workload API unreachable, no identity issued, or another failure before anything was sent",
+        fixtures: &["WL-005", "WL-006", "WL-FX-001", "WL-FX-002", "WL-FX-003"],
+    },
+    RuleMeta {
+        id: "auth.jwt_svid",
+        version: 1,
+        summary: "JWT-SVID local checks (expiry, audience, subject, algorithm, bundle signature) and a 401 after sending one, never a claimed verifier reason",
+        fixtures: &["WL-002", "WL-003", "WL-004", "WL-007", "WL-FX-004"],
+    },
+    RuleMeta {
         id: "auth.session",
         version: 1,
         summary: "Interactive browser-login (OIDC) challenges and redirects; browser sessions are not shared with Anvil",
@@ -222,5 +235,6 @@ pub fn run_all(ctx: &Ctx<'_>, drafts: &mut Vec<Draft>, warnings: &mut Vec<Outcom
     protocols::rules(ctx, drafts, warnings);
     proxy_header::rules(ctx, drafts);
     auth_session::rules(ctx, drafts);
+    workload::rules(ctx, drafts);
     proxy_header::annotate(ctx, drafts);
 }

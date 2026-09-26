@@ -549,6 +549,19 @@ pub fn jwt_inspect(token: String) -> R<anvil_auth::jwt::Inspection> {
     anvil_auth::jwt::inspect(&token, chrono::Utc::now(), 0).map_err(|x| x.to_string())
 }
 
+/// What a SPIFFE Workload API endpoint issues to this process (public data
+/// only: SPIFFE IDs, expiry, bundle key ids, JWT-SVID checks). Keys and
+/// tokens stay in the backend and are dropped. Refused while locked.
+#[tauri::command]
+pub async fn workload_probe(
+    st: State<'_, DesktopState>,
+    endpoint: String,
+    audience: Option<String>,
+) -> R<anvil_engine::workload::WorkloadProbe> {
+    st.app()?;
+    Ok(anvil_engine::workload::probe(&endpoint, audience.as_deref(), std::time::Duration::from_secs(5)).await)
+}
+
 // ------------------------------------------------------------------ portability
 
 fn mode(m: &str) -> R<ExportMode> {

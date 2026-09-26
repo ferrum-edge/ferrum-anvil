@@ -6,6 +6,7 @@ import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus
 import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
 import { ProxyHeaderEvidence } from "./ProxyProtocolEditor";
 import { WsExtensionsEvidence } from "./WsDeflateEditor";
+import { WorkloadEvidenceView } from "./WorkloadApi";
 
 type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
 
@@ -114,6 +115,7 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
           <>
             <Connection attempt={last} />
             {wsExtensions && !stream && <WsExtensionsEvidence e={wsExtensions} />}
+            {r.prepared.workload_api && <WorkloadEvidenceView w={r.prepared.workload_api} />}
           </>
         )}
         {effectiveTab === "attempts" && <Attempts attempts={r.attempts} />}

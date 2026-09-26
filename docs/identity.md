@@ -6,7 +6,7 @@ one another:
 | # | Identity | What it is | Where it lives |
 |---|---|---|---|
 | 1 | **Application identity** | Who may unlock Anvil on this device: a local profile, unlocked by a passphrase, a recovery key or the OS keychain. It can optionally be *linked* to a provider account (Google, GitHub, Facebook) as an extra unlock policy. | `anvil-storage` (vault), `anvil-app::profiles`, `anvil-app::identity`, `anvil-identity::provider` |
-| 2 | **Target-API identity** | The credential Anvil presents to an API or gateway: API key, Basic, bearer, JWT, OAuth 2, HMAC, DPoP, mTLS, WS-Security. The OAuth authorization-code + PKCE sign-in belongs here. | auth profiles on workspace/folder/request, `anvil-engine`, `anvil-identity::api_oauth` |
+| 2 | **Target-API identity** | The credential Anvil presents to an API or gateway: API key, Basic, bearer, JWT, OAuth 2, HMAC, DPoP, mTLS, WS-Security, and SPIFFE SVIDs the Workload API issues to Anvil (an X.509-SVID as the mTLS identity, a JWT-SVID as the bearer token, §8). The OAuth authorization-code + PKCE sign-in belongs here. | auth and TLS profiles on workspace/folder/request, `anvil-engine`, `anvil-identity::api_oauth` |
 | 3 | **Gateway-to-backend identity** | How the gateway authenticates to its upstream. Configured on the gateway; Anvil cannot change it, and no diagnostic suggests that changing identity 2 fixes identity 3. | the gateway |
 
 Rules that follow from this:
@@ -290,3 +290,45 @@ The webview only ever sees `IdentitySummary`.
 | Full browser round trip, then a real API request with the token; forged state; stray paths and DNS-rebinding Host; timeout; cancellation; denial; refresh; revoked refresh; issuer outage and recovery; the exchange uses the request's TLS profile; refused configurations; WebSocket parity | `crates/anvil-identity/tests/api_oauth.rs` | AUTH-011–015 |
 | Real providers typed unavailable; mock provider round trip and denial | `crates/anvil-identity/src/{provider,mock}.rs` | — |
 | Link with the mock provider; fresh-login policy (refused, allowed, wrong passphrase, stale, other account, recovery offline); identity is not a key; edited hint; relink and unlink; restoring another user's backup; target-API sign-in through the app, dropped on lock | `crates/anvil-app/tests/identity.rs` | DATA-015, DATA-017, DATA-018, DATA-019 |
+| SPIFFE Workload API: X.509-SVID and JWT-SVID sources, local checks, caching, cleared on lock, never recorded; the probe; the import stance | `crates/anvil-transport/tests/workload_api.rs`, `crates/anvil-engine/tests/workload_api.rs`, `crates/anvil-cli/tests/cli_workload.rs`, `crates/anvil-portability/tests/bundles.rs`; live: lab `workload` (`docs/lab/workload.md`) | — |
+
+---
+
+## 8. Target-API workload identity: the SPIFFE Workload API
+
+A SPIFFE workload does not hold a credential file: it asks the local Workload
+API (a SPIRE agent, or Ferrum Edge's in-process server) which identity it has,
+and the API decides from the calling process's kernel peer credentials — for
+Anvil, the operating-system user it runs as. Anvil uses that identity as
+identity #2 only; it never becomes the app login (#1) and never stands in for
+a gateway's backend identity (#3). The protocol details are in
+[protocols.md §3.11](protocols.md).
+
+- **Where.** A TLS profile's client identity can be *SPIFFE Workload API
+  (X.509-SVID)*; an auth profile can be *JWT-SVID (SPIFFE)*. The endpoint is a
+  `unix:///…` socket (`npipe:` on Windows) or, when empty, the
+  `SPIFFE_ENDPOINT_SOCKET` environment variable. The record names the endpoint
+  that was dialed and where the setting came from.
+- **What is issued is not stored.** The X.509-SVID's private key, the
+  JWT-SVID and the JWT bundles are held only in the engine's memory cache
+  (zeroized buffers), refreshed at half their lifetime, cleared on lock with
+  the OAuth tokens, never written to the vault, history, exports or logs, and
+  never sent to the webview. The record keeps public data: SPIFFE IDs, the
+  certificate summary, `aud`, `exp`, `alg`, `kid` and the check results.
+- **Checked before use.** A JWT-SVID must be a JWT-SVID (asymmetric `alg`, a
+  workload SPIFFE ID as `sub`), carry every configured audience and be
+  unexpired by this machine's clock; with bundle verification, its signature
+  must verify against the trust domain's JWT bundle. A failure stops the
+  request unless the profile deliberately sends anyway to test a verifier.
+- **Nothing is invented.** Anvil never mints an SVID or a JWT-SVID, never
+  picks an identity the Workload API did not issue, and never claims why a
+  verifier refused one: a 401 after a JWT-SVID is reported with the local
+  checks as evidence and the verifier's reason left unknown.
+- **Imports.** A Workload API source carries no secret, so an imported
+  profile would draw on *this* machine's identity. Imports therefore never
+  activate "send despite failed checks" and name every imported profile that
+  fetches a JWT-SVID or presents an X.509-SVID, so the user reviews their
+  audiences, destinations and host bindings before sending.
+- **Probe.** *Test the Workload API* in the editors and `anvil workload probe`
+  show what the endpoint issues to Anvil (and, when refused, the uid it
+  attested) without keeping a key or showing a token.

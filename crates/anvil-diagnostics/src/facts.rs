@@ -38,6 +38,8 @@ pub struct DiagnosticInput<'a> {
     pub credentials_stripped_on_redirect: bool,
     /// An automatic H3 → TCP fallback was used.
     pub protocol_fallback_from: Option<String>,
+    /// SPIFFE Workload API calls, SVIDs and JWT-SVID checks of this execution.
+    pub workload: Option<&'a anvil_domain::workload::WorkloadApiEvidence>,
 }
 
 /// Structural facts about a response body (bounded parsing).

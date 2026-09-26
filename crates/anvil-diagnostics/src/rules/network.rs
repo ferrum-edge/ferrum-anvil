@@ -7,7 +7,9 @@ use anvil_domain::execution::{FailureKind as K, Phase};
 /// can be blamed.
 pub fn local(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     let Some(f) = ctx.final_failure() else { return };
-    if !f.kind.is_local_preparation() {
+    // Workload API and JWT-SVID refusals carry typed evidence of their own
+    // (the call, the checks) and are worded by the workload rules.
+    if !f.kind.is_local_preparation() || super::workload::handles(f.kind) {
         return;
     }
     let code = match f.kind {

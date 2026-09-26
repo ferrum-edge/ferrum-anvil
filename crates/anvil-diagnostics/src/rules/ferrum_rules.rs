@@ -544,6 +544,7 @@ mod tests {
             tls_verification_enabled: true,
             credentials_stripped_on_redirect: false,
             protocol_fallback_from: None,
+            workload: None,
         })
         .findings
     }

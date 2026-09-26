@@ -215,6 +215,17 @@
           "items": {
             "type": "string"
           }
+        },
+        "workload_api": {
+          "description": "SPIFFE Workload API calls and the SVIDs used (public data only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkloadApiEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -628,6 +639,505 @@
         "layer"
       ]
     },
+    "WorkloadApiEvidence": {
+      "description": "Everything the Workload API contributed to one execution.",
+      "type": "object",
+      "properties": {
+        "calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkloadApiCall"
+          }
+        },
+        "x509_svids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/X509SvidSummary"
+          }
+        },
+        "jwt_svid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JwtSvidSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "calls",
+        "x509_svids"
+      ]
+    },
+    "WorkloadApiCall": {
+      "description": "One Workload API call made for an execution.",
+      "type": "object",
+      "properties": {
+        "rpc": {
+          "$ref": "#/$defs/WorkloadRpc"
+        },
+        "endpoint": {
+          "description": "The endpoint dialed, as a URI (`unix:///run/spire/agent.sock`).",
+          "type": "string"
+        },
+        "endpoint_source": {
+          "$ref": "#/$defs/WorkloadEndpointSource"
+        },
+        "purpose": {
+          "description": "What the call was for (`TLS profile 'mesh client'`, `JWT-SVID auth`).",
+          "type": "string"
+        },
+        "cached": {
+          "description": "Served from Anvil's in-memory cache (fetched by an earlier execution).",
+          "type": "boolean"
+        },
+        "duration_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "caller_uid": {
+          "description": "The uid this process presents in the socket's peer credentials — what\na Workload API server attests. Recorded when no identity was issued.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "result": {
+          "$ref": "#/$defs/WorkloadCallResult"
+        }
+      },
+      "required": [
+        "rpc",
+        "endpoint",
+        "endpoint_source",
+        "purpose",
+        "result"
+      ]
+    },
+    "WorkloadRpc": {
+      "type": "string",
+      "enum": [
+        "FetchX509SVID",
+        "FetchJWTSVID",
+        "FetchJWTBundles"
+      ]
+    },
+    "WorkloadEndpointSource": {
+      "description": "How the endpoint was chosen.",
+      "oneOf": [
+        {
+          "description": "The profile's `endpoint` setting.",
+          "type": "string",
+          "const": "setting"
+        },
+        {
+          "description": "The `SPIFFE_ENDPOINT_SOCKET` environment variable.",
+          "type": "string",
+          "const": "environment"
+        }
+      ]
+    },
+    "WorkloadCallResult": {
+      "description": "What one Workload API call ended with.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "description": "Anvil could not connect or speak HTTP/2 gRPC to the endpoint.",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "io_error_kind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "unavailable"
+            }
+          },
+          "required": [
+            "result",
+            "detail"
+          ]
+        },
+        {
+          "description": "No answer within the deadline.",
+          "type": "object",
+          "properties": {
+            "deadline_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "result": {
+              "type": "string",
+              "const": "timeout"
+            }
+          },
+          "required": [
+            "result",
+            "deadline_ms"
+          ]
+        },
+        {
+          "description": "The endpoint answered with a non-OK gRPC status. `message` is the\nendpoint's `grpc-message` (untrusted text, bounded).",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "code_name": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "const": "status"
+            }
+          },
+          "required": [
+            "result",
+            "code",
+            "code_name",
+            "message"
+          ]
+        },
+        {
+          "description": "An OK answer that carried no usable identity (no SVIDs, or none with\nthe requested SPIFFE ID).",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "const": "no_identity"
+            }
+          },
+          "required": [
+            "result",
+            "detail"
+          ]
+        },
+        {
+          "description": "The answer could not be decoded as the Workload API message.",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string",
+              "const": "malformed"
+            }
+          },
+          "required": [
+            "result",
+            "detail"
+          ]
+        }
+      ]
+    },
+    "X509SvidSummary": {
+      "description": "The X.509-SVID used as a TLS client identity (public data only).",
+      "type": "object",
+      "properties": {
+        "tls_profile": {
+          "type": "string"
+        },
+        "spiffe_id": {
+          "type": "string"
+        },
+        "certificate": {
+          "$ref": "#/$defs/CertificateSummary"
+        },
+        "chain_length": {
+          "description": "Certificates in the SVID chain (leaf first).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offered_spiffe_ids": {
+          "description": "SPIFFE IDs of every SVID the endpoint returned (the first is the default).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bundle_trusted": {
+          "description": "The SVID's trust-domain bundle was added to the profile's trust anchors.",
+          "type": "boolean"
+        },
+        "bundle_certificates": {
+          "description": "CA certificates in that bundle.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "federated_trust_domains": {
+          "description": "Federated trust domains the endpoint also sent bundles for (recorded,\nnever trusted: one TLS profile holds one trust bundle).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "refresh_after": {
+          "description": "When Anvil will fetch a fresh SVID (half its lifetime, as SPIFFE\nagents rotate).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "tls_profile",
+        "spiffe_id",
+        "certificate",
+        "chain_length",
+        "offered_spiffe_ids",
+        "bundle_trusted",
+        "bundle_certificates",
+        "federated_trust_domains"
+      ]
+    },
+    "CertificateSummary": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "string"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "subject_alt_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "not_before": {
+          "type": "string"
+        },
+        "not_after": {
+          "type": "string"
+        },
+        "serial_hex": {
+          "type": "string"
+        },
+        "sha256_fingerprint": {
+          "type": "string"
+        },
+        "is_ca": {
+          "type": "boolean"
+        },
+        "key_algorithm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subject",
+        "issuer",
+        "subject_alt_names",
+        "not_before",
+        "not_after",
+        "serial_hex",
+        "sha256_fingerprint",
+        "is_ca",
+        "key_algorithm"
+      ]
+    },
+    "JwtSvidSummary": {
+      "description": "The JWT-SVID Anvil presented (decoded claims only, never the token).",
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/JwtSvidSourceKind"
+        },
+        "requested_audiences": {
+          "description": "Audiences Anvil requested / required.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subject": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "audiences": {
+          "description": "The token's `aud` claim.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "algorithm": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issued_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "not_before": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "has_issuer": {
+          "description": "The token carries an `iss` claim (JWT-SVIDs define none).",
+          "type": "boolean"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JwtSvidCheck"
+          }
+        },
+        "sent_despite_failed_checks": {
+          "description": "The token was sent although a check failed (explicit profile choice).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source",
+        "requested_audiences",
+        "audiences",
+        "checks"
+      ]
+    },
+    "JwtSvidSourceKind": {
+      "type": "string",
+      "enum": [
+        "workload_api",
+        "value",
+        "file"
+      ]
+    },
+    "JwtSvidCheck": {
+      "type": "object",
+      "properties": {
+        "check": {
+          "$ref": "#/$defs/JwtSvidCheckKind"
+        },
+        "result": {
+          "$ref": "#/$defs/CheckResult"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "check",
+        "result",
+        "detail"
+      ]
+    },
+    "JwtSvidCheckKind": {
+      "oneOf": [
+        {
+          "description": "Three base64url segments with JSON header and claims.",
+          "type": "string",
+          "const": "format"
+        },
+        {
+          "description": "`alg` present and asymmetric (never `none` or HMAC).",
+          "type": "string",
+          "const": "algorithm"
+        },
+        {
+          "description": "`sub` is a workload SPIFFE ID (and the configured one, when set).",
+          "type": "string",
+          "const": "subject"
+        },
+        {
+          "description": "Every requested audience is in `aud`.",
+          "type": "string",
+          "const": "audience"
+        },
+        {
+          "description": "`exp` present and in the future by this machine's clock.",
+          "type": "string",
+          "const": "expiry"
+        },
+        {
+          "description": "Signature verified against the trust domain's JWT bundle.",
+          "type": "string",
+          "const": "signature"
+        }
+      ]
+    },
+    "CheckResult": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        {
+          "description": "Not evaluated (disabled, or an earlier check made it impossible).",
+          "type": "string",
+          "const": "not_run"
+        }
+      ]
+    },
     "AttemptObservation": {
       "type": "object",
       "properties": {
@@ -877,6 +1387,26 @@
           "description": "The auth profile needs an interactive sign-in (OAuth authorization\ncode + PKCE) before a token exists; the request was not sent.",
           "type": "string",
           "const": "oauth_interaction_required"
+        },
+        {
+          "description": "The SPIFFE Workload API endpoint could not be reached (no socket,\npermission denied, nothing listening, not HTTP/2 gRPC, deadline).",
+          "type": "string",
+          "const": "workload_api_unavailable"
+        },
+        {
+          "description": "The Workload API answered `PERMISSION_DENIED`, or an OK answer carried\nno SVID for this caller: no identity was issued.",
+          "type": "string",
+          "const": "workload_api_denied"
+        },
+        {
+          "description": "Any other Workload API failure (another gRPC status, a malformed answer).",
+          "type": "string",
+          "const": "workload_api_failed"
+        },
+        {
+          "description": "A JWT-SVID failed Anvil's local checks (expiry, audience, subject,\nalgorithm, signature) and was not sent.",
+          "type": "string",
+          "const": "jwt_svid_rejected_locally"
         },
         {
           "description": "The mutual-TLS handshake with the HBONE endpoint failed. The precise\nTLS cause is `connection.tunnel.failure` (and the tunnel's TLS\nobservation); the inner destination was never contacted.",
@@ -1297,52 +1827,6 @@
             "result"
           ]
         }
-      ]
-    },
-    "CertificateSummary": {
-      "type": "object",
-      "properties": {
-        "subject": {
-          "type": "string"
-        },
-        "issuer": {
-          "type": "string"
-        },
-        "subject_alt_names": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "not_before": {
-          "type": "string"
-        },
-        "not_after": {
-          "type": "string"
-        },
-        "serial_hex": {
-          "type": "string"
-        },
-        "sha256_fingerprint": {
-          "type": "string"
-        },
-        "is_ca": {
-          "type": "boolean"
-        },
-        "key_algorithm": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "subject",
-        "issuer",
-        "subject_alt_names",
-        "not_before",
-        "not_after",
-        "serial_hex",
-        "sha256_fingerprint",
-        "is_ca",
-        "key_algorithm"
       ]
     },
     "ProxyHeaderObservation": {

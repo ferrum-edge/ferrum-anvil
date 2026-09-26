@@ -113,6 +113,11 @@ enum Cmd {
     },
     /// Decode a JWT locally (never verifies it).
     Jwt { token: String },
+    /// SPIFFE Workload API: what the endpoint issues to this process.
+    Workload {
+        #[command(subcommand)]
+        cmd: WorkloadCmd,
+    },
     /// Write the JSON Schemas of the data contracts.
     Schema {
         #[arg(long, default_value = "contracts/schemas")]
@@ -130,6 +135,27 @@ enum ProfileCmd {
         /// Store the data key in the OS credential store instead of a passphrase.
         #[arg(long)]
         keychain: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkloadCmd {
+    /// Fetch the X.509-SVIDs and JWT bundles (and, with --audience, a
+    /// JWT-SVID checked against them) and print what was issued. Keys and
+    /// tokens are never printed or kept.
+    Probe {
+        /// `unix:///path/to/socket` (Windows: `npipe:name`). Default: $SPIFFE_ENDPOINT_SOCKET.
+        #[arg(long, default_value = "")]
+        endpoint: String,
+        /// Also request a JWT-SVID for this audience and check it locally.
+        #[arg(long)]
+        audience: Option<String>,
+        /// Deadline per call, in milliseconds.
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u64,
+        /// Print the probe as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -523,6 +549,18 @@ async fn run(cli: Cli) -> Result<i32> {
             println!("wrote {} schemas to {}", anvil_domain::schema::all().len(), out.display());
             Ok(0)
         }
+        Cmd::Workload { cmd: WorkloadCmd::Probe { endpoint, audience, timeout_ms, json } } => {
+            let p = anvil_engine::workload::probe(endpoint, audience.as_deref(), std::time::Duration::from_millis(*timeout_ms)).await;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&p)?);
+            } else {
+                print_probe(&p);
+            }
+            let ok = p.endpoint_error.is_none()
+                && p.calls.iter().all(|c| c.result == anvil_domain::workload::WorkloadCallResult::Ok)
+                && p.jwt_svid.as_ref().is_none_or(|j| j.failed_checks().next().is_none());
+            Ok(if ok { 0 } else { 2 })
+        }
         Cmd::Jwt { token } => {
             let i = anvil_auth::jwt::inspect(token, chrono::Utc::now(), 0).map_err(|e| anyhow!(e.to_string()))?;
             println!("{}", serde_json::to_string_pretty(&i)?);
@@ -541,6 +579,53 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         _ => run_with_app(&cli).await,
+    }
+}
+
+fn print_probe(p: &anvil_engine::workload::WorkloadProbe) {
+    use anvil_domain::workload::WorkloadCallResult as R;
+    println!("endpoint: {}{}", p.endpoint, p.endpoint_source.map(|s| format!(" ({s:?})")).unwrap_or_default());
+    if let Some(e) = &p.endpoint_error {
+        println!("  not dialed: {e}");
+        return;
+    }
+    for c in &p.calls {
+        let res = match &c.result {
+            R::Ok => "OK".to_string(),
+            R::Unavailable { detail, .. } => format!("unavailable: {detail}"),
+            R::Timeout { deadline_ms } => format!("no answer within {deadline_ms} ms"),
+            R::Status { code_name, message, .. } => format!("{code_name} {message:?}"),
+            R::NoIdentity { detail } => format!("no identity: {detail}"),
+            R::Malformed { detail } => format!("malformed answer: {detail}"),
+        };
+        let uid = c.caller_uid.map(|u| format!(" (this process: uid {u})")).unwrap_or_default();
+        println!("  {:<16} {res}{uid}", c.rpc.method());
+    }
+    for s in &p.x509_svids {
+        println!(
+            "  X.509-SVID  {}  expires {}  chain {}  bundle {} CA",
+            s.spiffe_id,
+            s.not_after.to_rfc3339(),
+            s.chain_length,
+            s.bundle_certificates
+        );
+    }
+    for b in &p.jwt_bundles {
+        println!("  JWT bundle  {}  keys {}", b.trust_domain, b.key_ids.join(", "));
+    }
+    if !p.federated_trust_domains.is_empty() {
+        println!("  federated   {}", p.federated_trust_domains.join(", "));
+    }
+    if let Some(j) = &p.jwt_svid {
+        println!(
+            "  JWT-SVID    sub {} aud {:?} alg {} (token not shown)",
+            j.subject.as_deref().unwrap_or("?"),
+            j.audiences,
+            j.algorithm.as_deref().unwrap_or("?")
+        );
+        for c in &j.checks {
+            println!("    {:<10} {:?}: {}", format!("{:?}", c.check).to_lowercase(), c.result, c.detail);
+        }
     }
 }
 

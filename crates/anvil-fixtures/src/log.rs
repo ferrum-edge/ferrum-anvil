@@ -16,17 +16,56 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GroundTruth {
-    ConnectionAccepted { peer: String },
-    TlsHandshakeCompleted { alpn: Option<String>, client_cert_cn: Option<String> },
-    TlsHandshakeFailed { error: String },
-    RequestReceived { method: String, path: String, body_bytes: u64, headers: Vec<(String, String)> },
-    ResponseStarted { status: u16 },
-    FaultApplied { fault: String },
-    DatagramReceived { bytes: u64 },
-    MessageReceived { bytes: u64 },
-    DatagramRelayed { bytes: u64, via: String },
-    WsExtensions { offer: Option<String>, answer: Option<String> },
-    WsMessage { compressed: bool, wire_bytes: u64, bytes: u64 },
+    ConnectionAccepted {
+        peer: String,
+    },
+    TlsHandshakeCompleted {
+        alpn: Option<String>,
+        client_cert_cn: Option<String>,
+    },
+    TlsHandshakeFailed {
+        error: String,
+    },
+    RequestReceived {
+        method: String,
+        path: String,
+        body_bytes: u64,
+        headers: Vec<(String, String)>,
+    },
+    ResponseStarted {
+        status: u16,
+    },
+    FaultApplied {
+        fault: String,
+    },
+    DatagramReceived {
+        bytes: u64,
+    },
+    MessageReceived {
+        bytes: u64,
+    },
+    DatagramRelayed {
+        bytes: u64,
+        via: String,
+    },
+    WsExtensions {
+        offer: Option<String>,
+        answer: Option<String>,
+    },
+    WsMessage {
+        compressed: bool,
+        wire_bytes: u64,
+        bytes: u64,
+    },
+    /// A Workload API call: whether the mandatory metadata was present, the
+    /// audiences / SPIFFE ID requested and the answer (never a key or token).
+    WorkloadApiCall {
+        rpc: String,
+        metadata: bool,
+        audiences: Vec<String>,
+        spiffe_id: String,
+        answer: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

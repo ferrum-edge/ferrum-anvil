@@ -283,6 +283,8 @@ All profiles can run at the same time. Profiles 5 and 6 each change process-wide
 
 The `mesh` profile (Ferrum Edge in mesh mode, `lab/gateway/mesh-*.{conf,json}`, `docs/lab/mesh.md`) sits outside this numbering: its gateway listeners use 17600–17799 (every mesh listener remapped, no default `150xx` port) and its workload fixture 17801.
 
+The `workload` profile (the SPIFFE Workload API, `lab/gateway/workload-{mesh,proxy}.*`, `docs/lab/workload.md`) also sits outside it: gateway listeners 17400–17499 (workload-mesh inbound 17406, outbound 17401, HBONE 17408, egress 17409, DNS 17453, admin 17490; workload-foreign 17426/17421/17428/17429/17455, admin 17492; workload-proxy HTTP 17480, admin 17491) and fixtures 17501 (mesh workload echo), 17502 (API echo), 17503 (lookalike). Its Workload API sockets live under `lab/.run/workload/wapi` when that path meets the gateway's socket contract, otherwise in a private `/private/tmp` (macOS) or `/tmp` directory.
+
 **Lab PKI** (generated per run, never committed, never added to any system trust store)
 - ECDSA P-256 keys in unencrypted PKCS#8. DTLS requires ECDSA (`docs/configuration.md:1027`).
 - `frontend-ca.pem` → `gateway-server.{pem,key}` with SAN `localhost` and `127.0.0.1`. Used for frontend TLS and DTLS.

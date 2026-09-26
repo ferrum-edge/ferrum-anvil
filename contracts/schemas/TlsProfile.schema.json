@@ -136,6 +136,35 @@
             "bundle_b64",
             "password"
           ]
+        },
+        {
+          "description": "X.509-SVID from the SPIFFE Workload API (`FetchX509SVID`), fetched\nwhen a request needs it and re-fetched at half its lifetime (SVID\nrotation). The private key stays in memory and is cleared on lock.",
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "description": "`unix:///path/to/socket` (or `npipe:name` on Windows). Empty: the\n`SPIFFE_ENDPOINT_SOCKET` environment variable.",
+              "type": "string"
+            },
+            "spiffe_id": {
+              "description": "Pick the SVID with this SPIFFE ID when the workload holds several.\nEmpty: the first (default) SVID.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trust_bundle": {
+              "description": "Also trust the SVID's trust-domain bundle from the Workload API\n(for verifying mesh peers by SPIFFE ID), in addition to the\nprofile's CA certificates.",
+              "type": "boolean",
+              "default": false
+            },
+            "format": {
+              "type": "string",
+              "const": "workload_api"
+            }
+          },
+          "required": [
+            "format"
+          ]
         }
       ]
     },

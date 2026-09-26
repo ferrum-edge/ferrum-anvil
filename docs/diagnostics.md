@@ -46,12 +46,12 @@ TLS alert or a close right after Anvil sent one; see
 [protocols.md §3.10](protocols.md)); a fragment never changes a finding's
 confidence.
 
-The catalog has 156 finding codes (catalog version shown in the app status
+The catalog has 163 finding codes (catalog version shown in the app status
 bar; every record names the findings catalog and the Ferrum catalog it used):
 
 | Family | Codes | Examples |
 |---|---|---|
-| `local.*` | 16 | unresolved variable, lint blocked, vault locked, invalid client identity; nothing was sent |
+| `local.*` | 19 | unresolved variable, lint blocked, vault locked, invalid client identity, SPIFFE Workload API unreachable / no identity issued / failed; nothing was sent |
 | `client.*` | 39 | DNS, connect, TLS (untrusted issuer, name mismatch, expired, client cert required/rejected, ALPN, SPIFFE ID mismatch, untrusted trust domain, invalid SVID, SNI override), QUIC/H3, DTLS |
 | `proxy.*` | 4 | forward-proxy CONNECT failures and authentication |
 | `hbone.*` | 12 | mesh HBONE tunnel leg: endpoint unreachable, mTLS split by leg, CONNECT refused/unavailable, HTTP/2 tunnel errors; UDP datagram tunnels: ended by the endpoint, truncated record, datagram over the record limit |
@@ -60,7 +60,7 @@ bar; every record names the findings catalog and the Ferrum catalog it used):
 | `request.*` | 4 | canceled; processing uncertain; an earlier attempt may have processed |
 | `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings) |
 | `ferrum.*` | 18 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog |
-| `app.*`, `auth.*` | 7 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry |
+| `app.*`, `auth.*` | 11 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
 | `grpc.*`, `grpc_web.*` | 2 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame |
 | `masque.*` | 5 | CONNECT-UDP tunnel: proxy refused, no extended CONNECT or HTTP/3 datagrams, SETTINGS never arrived, abnormal end |
 | `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 20 | close codes, idle/cancel, abnormal close, WebSocket permessage-deflate (offered but not negotiated, a refused extension answer, compressed frames never negotiated, undecodable data, the local limit reached after decompression), no UDP response observed, PROXY header possibly rejected |
@@ -148,6 +148,32 @@ produces an `exchange.*` finding: the stream is the endpoint's.
 The untrusted-destination rule is unchanged: Ferrum markers are only
 interpreted for a destination declared as a Ferrum gateway, and the `hbone.*`
 findings make no Ferrum-specific attribution.
+
+## SPIFFE Workload API and JWT-SVIDs
+
+Identities from the Workload API ([protocols.md §3.11](protocols.md)) are
+obtained before anything is sent, so their failures are local observations
+(scope `local_client`, dispatch `not_dispatched`, no destination blamed), with
+the Workload API call as typed evidence: the RPC, the endpoint and where the
+setting came from, the typed result (I/O error kind, deadline, gRPC status and
+the server's bounded message) and, when no identity was issued, the uid this
+process presents in the socket's peer credentials (what the server attests).
+
+| Code | When | Confidence |
+|---|---|---|
+| `local.workload_api_unavailable` | no socket, permission denied, nothing listening, not HTTP/2 gRPC, deadline | confirmed |
+| `local.workload_api_denied` | `PERMISSION_DENIED`, or an OK answer without the SVID asked for | confirmed that none was issued; why is only an alternative |
+| `local.workload_api_failed` | any other status (for example `UNIMPLEMENTED` from an X.509-only Workload API) or an undecodable answer | confirmed that the call failed |
+| `auth.jwt_svid_expired` | `exp` (or `nbf`) fails by this machine's clock | confirmed local comparison; error when refused, warning when sent anyway |
+| `auth.jwt_svid_audience_mismatch` | a configured audience is missing from `aud` | confirmed; error / warning |
+| `auth.jwt_svid_invalid` | format, algorithm (`none`, HMAC), subject or bundle-signature check failed | confirmed; error / warning |
+| `auth.jwt_svid_rejected` | the final status is 401 and a JWT-SVID was sent | **unknown**, scope unknown |
+
+`auth.jwt_svid_rejected` quotes the public body, lists every local check as
+evidence and names a failed check only as one alternative; it never claims
+the verifier's reason. Ferrum Edge's `jwks_auth` answers an expired token, a
+wrong audience and an unknown key with the same `401 {"error":"Invalid or
+unrecognized JWT"}`, and a backend can send that body too (lab `WL-009`).
 
 ## Ferrum Edge catalogs (`catalog/ferrum/<compatibility-id>/outcomes.json`)
 

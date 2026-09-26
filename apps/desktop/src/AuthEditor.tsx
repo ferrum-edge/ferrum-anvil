@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, onOAuthFlow, type FlowEvent, type JwtInspection, type SendInput, type TokenSummary } from "./api";
 import type { AuthConfig, DpopConfig, HmacConfig, JwtAlgorithm, OAuth2Config, SensitiveValue, WsseConfig } from "./generated/contracts";
 import { Modal, SecretField } from "./ui";
+import { JwtSvidFields, defaultJwtSvid } from "./WorkloadApi";
 
 const TYPES: { id: AuthConfig["type"]; label: string }[] = [
   { id: "inherit", label: "Inherit from folder/workspace" },
@@ -12,6 +13,7 @@ const TYPES: { id: AuthConfig["type"]; label: string }[] = [
   { id: "basic", label: "Basic" },
   { id: "bearer", label: "Bearer token" },
   { id: "jwt", label: "JWT (sign locally)" },
+  { id: "jwt_svid", label: "JWT-SVID (SPIFFE)" },
   { id: "oauth2", label: "OAuth 2.0" },
   { id: "hmac", label: "HMAC signature (Ferrum)" },
   { id: "dpop", label: "DPoP (RFC 9449)" },
@@ -34,6 +36,8 @@ function defaults(t: AuthConfig["type"]): AuthConfig {
       return { type: "bearer", token: EMPTY, prefix: "Bearer" };
     case "jwt":
       return { type: "jwt", algorithm: "HS256", signing_key: EMPTY, claims: { expires_in_secs: 300, extra_json: "{}" }, prefix: "Bearer" };
+    case "jwt_svid":
+      return { type: "jwt_svid", config: defaultJwtSvid() };
     case "oauth2":
       return { type: "oauth2", config: { grant: "client_credentials", token_url: "", client_id: "", client_secret: EMPTY, scope: "", client_auth: "basic_header", refresh_skew_secs: 30 } };
     case "hmac":
@@ -135,6 +139,8 @@ function Fields({
       );
     case "jwt":
       return <JwtFields a={a} onChange={onChange} workspaceId={workspaceId} />;
+    case "jwt_svid":
+      return <JwtSvidFields c={a.config} onChange={(config) => onChange({ ...a, config })} workspaceId={workspaceId} />;
     case "oauth2":
       return (
         <>

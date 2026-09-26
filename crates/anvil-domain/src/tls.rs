@@ -27,6 +27,24 @@ pub enum ClientIdentity {
         bundle_b64: SensitiveValue,
         password: SensitiveValue,
     },
+    /// X.509-SVID from the SPIFFE Workload API (`FetchX509SVID`), fetched
+    /// when a request needs it and re-fetched at half its lifetime (SVID
+    /// rotation). The private key stays in memory and is cleared on lock.
+    WorkloadApi {
+        /// `unix:///path/to/socket` (or `npipe:name` on Windows). Empty: the
+        /// `SPIFFE_ENDPOINT_SOCKET` environment variable.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        endpoint: String,
+        /// Pick the SVID with this SPIFFE ID when the workload holds several.
+        /// Empty: the first (default) SVID.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spiffe_id: Option<String>,
+        /// Also trust the SVID's trust-domain bundle from the Workload API
+        /// (for verifying mesh peers by SPIFFE ID), in addition to the
+        /// profile's CA certificates.
+        #[serde(default)]
+        trust_bundle: bool,
+    },
 }
 
 /// Host/port pattern a TLS profile or client identity is bound to. Wildcards

@@ -179,7 +179,7 @@ pub fn grpc_timeout(ms: u64) -> String {
     if ms <= 99_999_999 { format!("{ms}m") } else { format!("{}S", (ms / 1000).min(99_999_999)) }
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
