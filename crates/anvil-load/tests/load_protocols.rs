@@ -19,11 +19,14 @@ use anvil_fixtures::http as fx;
 use anvil_fixtures::streams::{self, TcpMode};
 use anvil_fixtures::{GroundTruth, GroundTruthLog, LabPki, TlsServerOptions, h3server};
 use anvil_load::report::{check_balance, check_protocol_balance, check_request_balance};
-use anvil_load::{Dataset, DatasetFormat, LoadController, LoadError, LoadJob, LoadRun, RefusalCode, RunOptions, WorkerJob};
+#[cfg(unix)]
+use anvil_load::LoadController;
+use anvil_load::{Dataset, DatasetFormat, LoadError, LoadJob, LoadRun, RefusalCode, RunOptions, WorkerJob};
 use bytes::Bytes;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+#[cfg(unix)]
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -670,6 +673,7 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
 }
 
 /// A short open-workload job per protocol, for the worker-process checks.
+#[cfg(unix)]
 fn protocol_jobs(http: &fx::Fixture, tcp: std::net::SocketAddr) -> Vec<(LoadUnitKind, ExecutionContext)> {
     let grpc = format!("grpc://{}", http.addr);
     vec![
@@ -698,6 +702,7 @@ fn protocol_jobs(http: &fx::Fixture, tcp: std::net::SocketAddr) -> Vec<(LoadUnit
     ]
 }
 
+#[cfg(unix)]
 const WORKER: &str = env!("CARGO_BIN_EXE_anvil-load-worker");
 
 /// Authorization acknowledgement, lock-stops-run and the partial report hold
