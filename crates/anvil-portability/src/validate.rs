@@ -6,9 +6,11 @@
 //!   parents, request folders and the requests, datasets and environments a
 //!   scenario or load plan names must be in the bundle and in the same
 //!   workspace; folder parents form no cycle; every secret must be owned by a
-//!   workspace in the bundle; no two objects share an id. Revisions of
-//!   requests outside the bundle are left out, and a request keeps its
-//!   `revision_id` only when that revision of it is in the bundle.
+//!   workspace in the bundle; no two objects share an id; every stored
+//!   attachment a request or dataset names travels with its bytes in the
+//!   bundle. Revisions of requests outside the bundle are left out, and a
+//!   request keeps its `revision_id` only when that revision of it is in the
+//!   bundle.
 //! * Safety: imports never activate a TLS verification bypass, never mark
 //!   scenarios or load plans as trusted, never enable legacy HMAC, and never
 //!   open an imported collection's root folder to its workspace. Linked
@@ -17,6 +19,7 @@
 use crate::bundle::BundleError;
 use crate::graph::PortableGraph;
 use anvil_domain::Id;
+use anvil_domain::request::AttachmentRef;
 use anvil_domain::workspace::RequestRevision;
 use std::collections::{HashMap, HashSet};
 
@@ -97,6 +100,25 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
                 "load plan '{}' uses an environment that is not in the bundle or its workspace",
                 p.name
             )));
+        }
+    }
+    // Stored attachments are found by content hash alone, and import stores
+    // only the bytes the bundle carries: a reference without its bytes here
+    // would name an attachment already stored on this device. Exports always
+    // carry the bytes their requests and datasets use. Revisions are never
+    // sent or run, and exports do not carry their attachments.
+    for r in &g.requests {
+        let mut hashes = Vec::new();
+        stored_hashes(&serde_json::to_value(&r.spec)?, &mut hashes);
+        if hashes.iter().any(|h| !g.attachments.contains_key(h)) {
+            return Err(BundleError::Invalid(format!("request '{}' uses a stored attachment that the bundle does not carry", r.name)));
+        }
+    }
+    for d in &g.datasets {
+        if let AttachmentRef::Stored { sha256, .. } = &d.attachment
+            && !g.attachments.contains_key(sha256)
+        {
+            return Err(BundleError::Invalid(format!("dataset '{}' uses a stored attachment that the bundle does not carry", d.name)));
         }
     }
     // Two requests can name the same revision, so a backup may carry it
@@ -291,6 +313,23 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         ));
     }
     Ok(warnings)
+}
+
+/// The content hash of every stored attachment `v` names, wherever it sits
+/// (binary bodies, multipart parts, gRPC schema files).
+fn stored_hashes(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if o.get("kind").and_then(|k| k.as_str()) == Some("stored")
+                && let Some(h) = o.get("sha256").and_then(|h| h.as_str())
+            {
+                out.push(h.to_string());
+            }
+            o.values().for_each(|x| stored_hashes(x, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| stored_hashes(x, out)),
+        _ => {}
+    }
 }
 
 fn jwt_svid_safety(a: &mut anvil_domain::auth::AuthConfig, send_anyway: &mut usize, from_api: &mut usize) {

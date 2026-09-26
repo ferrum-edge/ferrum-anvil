@@ -9,9 +9,11 @@ use anvil_app::runner::RunSettings;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
-use anvil_domain::request::RequestSpec;
+use anvil_domain::request::{AttachmentRef, Body, MultipartContent, MultipartPart, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
-use anvil_domain::workspace::{Dataset, DatasetFormat, Meta, RequestDefinition, RequestRevision, Scenario, Variable, Workspace};
+use anvil_domain::workspace::{
+    Dataset, DatasetFormat, Meta, RequestDefinition, RequestRevision, Scenario, ScenarioStep, Variable, Workspace,
+};
 use anvil_portability::bundle::{self, BundleError, BundleKind, ExportOptions};
 use anvil_portability::plan::{ConflictPolicy, ExistingWorkspace};
 use anvil_portability::{ExportMode, PortableGraph, SecretValue};
@@ -559,26 +561,29 @@ async fn a_scenario_never_runs_with_a_dataset_of_another_workspace() {
     let rows = a.create_dataset(&ws.meta.id, "customers", DatasetFormat::Csv, b"card\nplaceholder-card\n", vec![]).unwrap();
 
     // A bundle with a workspace of its own whose dataset reuses the stored
-    // dataset's id, and a scenario there that uses it.
+    // dataset's id, and a scenario there that sends each row.
     let incoming = Workspace { meta: Meta::new(), name: "Incoming".into(), ..ws.clone() };
     let look_alike = Dataset { workspace_id: incoming.meta.id, ..rows.clone() };
+    let send_row = request_in(incoming.meta.id, "Send row", RequestSpec::http("POST", "http://127.0.0.1:9/{{card}}"));
     let scenario = Scenario {
         meta: Meta::new(),
         workspace_id: incoming.meta.id,
         name: "Smoke".into(),
         description: String::new(),
-        steps: vec![],
+        steps: vec![ScenarioStep { request_id: send_row.meta.id, enabled: true, delay_ms: 0 }],
         dataset_id: Some(rows.meta.id),
         iterations: 0,
         stop_on_failure: false,
         trusted: false,
     };
-    let g = PortableGraph {
+    let mut g = PortableGraph {
         workspaces: vec![incoming.clone()],
+        requests: vec![send_row],
         datasets: vec![look_alike],
         scenarios: vec![scenario.clone()],
         ..Default::default()
     };
+    g.attachments.insert(sha(&rows.attachment), b"card\nplaceholder-card\n".to_vec());
     let rep = a.import(&encrypted(&g), Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
     assert_eq!(rep.plan.foreign_objects, vec![format!("dataset 'customers' ({})", rows.meta.id)]);
     // Merge keeps the stored dataset in its own workspace and adds the scenario.
@@ -586,14 +591,86 @@ async fn a_scenario_never_runs_with_a_dataset_of_another_workspace() {
     assert_eq!(a.scenario(&scenario.meta.id).unwrap().workspace_id, incoming.meta.id);
 
     // Even allowed to run, the imported scenario never reads the stored rows.
-    let settings = RunSettings { allow_untrusted: true, record_history: false, persist_report: false, ..Default::default() };
+    let settings = RunSettings { allow_untrusted: true, record_history: true, persist_report: false, ..Default::default() };
     let Err(e) = a.run_scenario(&scenario.meta.id, settings, CancellationToken::new()).await else {
         panic!("a scenario ran with a dataset of another workspace")
     };
     assert!(matches!(&e, AppError::Invalid(m) if m.contains("the dataset belongs to another workspace")), "{e}");
+    assert!(a.store.list_history(None, None, 10).unwrap().is_empty(), "nothing was sent");
     // Nor can it be saved with it.
     let Err(e) = a.update_scenario(a.scenario(&scenario.meta.id).unwrap()) else {
         panic!("a scenario was saved with a dataset of another workspace")
     };
     assert!(matches!(&e, AppError::Invalid(m) if m.contains("the dataset belongs to another workspace")), "{e}");
+}
+
+fn sha(a: &AttachmentRef) -> String {
+    match a {
+        AttachmentRef::Stored { sha256, .. } => sha256.clone(),
+        other => panic!("unexpected attachment {other:?}"),
+    }
+}
+
+fn upload(body: Body) -> RequestSpec {
+    RequestSpec { body, ..RequestSpec::http("POST", "http://127.0.0.1:9/upload") }
+}
+
+fn file_part(attachment: AttachmentRef) -> MultipartPart {
+    MultipartPart {
+        name: "file".into(),
+        enabled: true,
+        content: MultipartContent::File { attachment, file_name: None },
+        content_type: None,
+    }
+}
+
+#[test]
+fn a_stored_attachment_is_imported_only_with_its_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let rows = a.create_dataset(&ws.meta.id, "customers", DatasetFormat::Csv, b"card\nplaceholder-card\n", vec![]).unwrap();
+    let file = a.put_attachment("statement.bin", b"placeholder statement", None).unwrap();
+    let binary = upload(Body::Binary { attachment: file.clone(), content_type: None });
+    let multipart = upload(Body::Multipart { parts: vec![file_part(file.clone())] });
+    a.create_request(&ws.meta.id, None, "Binary", binary.clone()).unwrap();
+    a.create_request(&ws.meta.id, None, "Multipart", multipart.clone()).unwrap();
+
+    // Bundles with a workspace of their own that name those attachments by
+    // content hash without carrying their bytes.
+    let incoming = Workspace { meta: Meta::new(), name: "Incoming".into(), ..ws.clone() };
+    let theirs = incoming.meta.id;
+    let only = |edit: &dyn Fn(&mut PortableGraph)| {
+        let mut g = PortableGraph { workspaces: vec![incoming.clone()], ..Default::default() };
+        edit(&mut g);
+        encrypted(&g)
+    };
+    let bundles = [
+        ("dataset", only(&|g| g.datasets.push(Dataset { meta: Meta::new(), workspace_id: theirs, ..rows.clone() }))),
+        ("binary body", only(&|g| g.requests.push(request_in(theirs, "Binary", binary.clone())))),
+        ("multipart part", only(&|g| g.requests.push(request_in(theirs, "Multipart", multipart.clone())))),
+    ];
+    for (label, bytes) in &bundles {
+        let e = a.import_preview(bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap_err();
+        assert!(e.to_string().contains("uses a stored attachment that the bundle does not carry"), "{label}: {e}");
+        for policy in [ConflictPolicy::Duplicate, ConflictPolicy::Merge] {
+            let e = a.import(bytes, Some(EXPORT_PASS), policy).unwrap_err();
+            assert!(e.to_string().contains("uses a stored attachment that the bundle does not carry"), "{label}: {e}");
+        }
+    }
+    assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
+
+    // An exported workspace carries the bytes of every attachment it uses.
+    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    for (name, policy) in [("duplicate", ConflictPolicy::Duplicate), ("merge", ConflictPolicy::Merge)] {
+        let b = new_app(root.path(), name);
+        let rep = b.import(&bytes, None, policy).unwrap();
+        let copy: Id = rep.workspace_ids[0].parse().unwrap();
+        let data = b.datasets(&copy).unwrap().pop().unwrap();
+        assert_eq!(b.run_dataset(&data).unwrap().rows.len(), 1, "{name}");
+        assert_eq!(b.get_attachment(&sha(&file)).unwrap().as_deref(), Some(&b"placeholder statement"[..]), "{name}");
+        assert_eq!(b.requests(&copy).unwrap().len(), 2, "{name}");
+    }
+    let rep = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
+    assert_eq!(a.datasets(&rep.workspace_ids[0].parse().unwrap()).unwrap().len(), 1);
 }

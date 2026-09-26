@@ -2,7 +2,9 @@
 
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
-use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
+use anvil_domain::request::{
+    AttachmentRef, Body, GrpcMode, GrpcSchemaSource, GrpcSpec, GrpcWire, KeyValue, MultipartContent, MultipartPart, Protocol, RequestSpec,
+};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::TlsProfile;
 use anvil_domain::workspace::*;
@@ -765,7 +767,7 @@ fn dataset(workspace_id: Id) -> Dataset {
         workspace_id,
         name: "rows".into(),
         format: DatasetFormat::Csv,
-        attachment: AttachmentRef::Stored { sha256: "a".repeat(64), file_name: "rows.csv".into(), size: 1, media_type: None },
+        attachment: stored(&hex_sha(b"attachment bytes")),
         sensitive_columns: vec![],
     }
 }
@@ -912,4 +914,78 @@ fn a_request_keeps_only_a_revision_of_its_own_from_the_bundle() {
     plan::remap_all(&mut dup).unwrap();
     let copied: HashSet<Id> = dup.revisions.iter().map(|r| r.id).collect();
     assert!(dup.requests.iter().filter_map(|r| r.revision_id).all(|r| copied.contains(&r)));
+}
+
+fn stored(sha256: &str) -> AttachmentRef {
+    AttachmentRef::Stored { sha256: sha256.into(), size: 16, file_name: "upload.bin".into(), media_type: None }
+}
+
+fn file_part(attachment: AttachmentRef, enabled: bool) -> MultipartPart {
+    MultipartPart { name: "file".into(), enabled, content: MultipartContent::File { attachment, file_name: None }, content_type: None }
+}
+
+fn grpc(schema: GrpcSchemaSource) -> RequestSpec {
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9");
+    spec.protocol = Protocol::Grpc;
+    spec.grpc = Some(GrpcSpec {
+        service: "lab.Echo".into(),
+        method: "Say".into(),
+        mode: GrpcMode::Unary,
+        schema,
+        messages: vec!["{}".into()],
+        metadata: vec![],
+        deadline_ms: None,
+        plaintext: true,
+        wire: GrpcWire::Grpc,
+    });
+    spec
+}
+
+/// Every place a request names a stored attachment, next to one the bundle
+/// carries (`carried`), with `sha256` as the other.
+fn stored_specs(carried: &str, sha256: &str) -> Vec<(&'static str, RequestSpec)> {
+    let with_body = |body: Body| RequestSpec { body, ..RequestSpec::http("POST", "http://127.0.0.1:9/upload") };
+    vec![
+        ("binary body", with_body(Body::Binary { attachment: stored(sha256), content_type: None })),
+        ("multipart part", with_body(Body::Multipart { parts: vec![file_part(stored(carried), true), file_part(stored(sha256), true)] })),
+        ("disabled multipart part", with_body(Body::Multipart { parts: vec![file_part(stored(sha256), false)] })),
+        ("gRPC proto file", grpc(GrpcSchemaSource::ProtoFiles { files: vec![stored(carried), stored(sha256)] })),
+        ("gRPC descriptor set", grpc(GrpcSchemaSource::DescriptorSet { attachment: stored(sha256) })),
+    ]
+}
+
+#[test]
+fn a_stored_attachment_is_imported_only_with_its_bytes() {
+    let carried = hex_sha(b"attachment bytes");
+    let elsewhere = hex_sha(b"bytes the bundle does not carry");
+    let reopen = |g: &PortableGraph| bundle::open(&bundle::write(g, &opts(ExportMode::ShareSafely, None)).unwrap().0, None);
+    let refused = |g: &PortableGraph, needle: &str, label: &str| match reopen(g) {
+        Err(BundleError::Invalid(m)) => assert!(m.contains(needle), "{label}: {m}"),
+        other => panic!("{label}: expected the bundle to be refused, got {other:?}"),
+    };
+    // A request or dataset naming stored bytes the bundle does not carry.
+    for (label, spec) in stored_specs(&carried, &elsewhere) {
+        let mut g = sample();
+        g.requests[0].spec = spec;
+        refused(&g, "request 'Create order' uses a stored attachment that the bundle does not carry", label);
+    }
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    g.datasets.push(Dataset { attachment: stored(&elsewhere), ..dataset(ws) });
+    refused(&g, "dataset 'rows' uses a stored attachment that the bundle does not carry", "dataset");
+
+    // With their bytes in the bundle, the same references import.
+    let mut g = sample();
+    let base = g.requests[0].clone();
+    for (label, spec) in stored_specs(&carried, &carried) {
+        g.requests.push(RequestDefinition { meta: Meta::new(), name: label.into(), spec, ..base.clone() });
+    }
+    g.datasets.push(dataset(g.workspaces[0].meta.id));
+    let opened = reopen(&g).expect("every stored attachment travels with its bytes");
+    assert_eq!(opened.graph.requests.len(), 2 + stored_specs(&carried, &carried).len());
+    assert_eq!(opened.graph.attachments.get(&carried).map(Vec::as_slice), Some(&b"attachment bytes"[..]));
+    // A linked local file names no stored bytes.
+    let mut g = sample();
+    g.requests[0].spec.body = Body::Binary { attachment: AttachmentRef::LinkedFile { path: "/tmp/a.bin".into() }, content_type: None };
+    reopen(&g).expect("a linked local file is not a stored attachment");
 }

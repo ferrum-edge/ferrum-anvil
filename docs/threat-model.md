@@ -133,10 +133,11 @@ against it).
 - **Bundle identities:** bundle secrets and every workspace-scoped object
   must belong to a workspace in the bundle, and references between objects
   must stay within their workspace; object ids must be unique, and a Duplicate
-  import gives every object, revision and secret a new id. A Replace import
-  never overwrites or re-owns a secret that a workspace outside the bundle
-  owns, nor overwrites an object stored in another workspace; it is refused
-  instead.
+  import gives every object, revision and secret a new id. Stored attachments
+  are found by content hash, so every attachment a request or dataset names
+  must travel with its bytes in the bundle. A Replace import never overwrites
+  or re-owns a secret that a workspace outside the bundle owns, nor overwrites
+  an object stored in another workspace; it is refused instead.
 - **Bundle writing into an existing workspace:** workspace ids are not
   secret, so any bundle can claim a workspace already stored here. Merge and
   Replace into a stored workspace assume the bundle is trusted: what they write
@@ -150,7 +151,8 @@ against it).
   request is prepared only in its own workspace and with folders of that
   workspace, and a scenario or load plan runs only requests and a dataset of
   its own workspace. A Merge import keeps a stored object whose id a bundle
-  reuses in another workspace, and imported items never use it. This
+  reuses in another workspace, and imported items never use it; imported
+  requests and datasets use only attachment bytes their bundle carried. This
   scope is the workspace boundary: it does not separate items inside one
   workspace, so anything imported into a workspace (see above) can use its
   secrets.
