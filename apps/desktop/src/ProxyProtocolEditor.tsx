@@ -10,8 +10,7 @@ function Num(props: { label: string; value?: number | null; onChange: (v: number
     <label className="lbl">
       {props.label}
       <input
-        className="field mono"
-        style={{ width: 150 }}
+        className="field mono num"
         inputMode="numeric"
         placeholder={props.placeholder}
         value={props.value ?? ""}
@@ -42,9 +41,9 @@ export function ProxyHeaderEditor(props: { value: ProxyHeaderSpec | null | undef
   const mode: HeaderMode = h ? (h.version ?? "v2") : "off";
   const set = (patch: Partial<ProxyHeaderSpec>) => props.onChange({ ...(h ?? {}), ...patch });
   return (
-    <fieldset className="col" aria-label="PROXY protocol">
+    <fieldset aria-label="PROXY protocol">
       <legend>PROXY protocol header</legend>
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Header
           <select
@@ -82,7 +81,7 @@ export function ProxyHeaderEditor(props: { value: ProxyHeaderSpec | null | undef
         )}
       </div>
       {mode !== "off" && mode !== "raw" && (h?.family ?? "auto") === "auto" && (h?.command ?? "proxy") === "proxy" && (
-        <div className="row">
+        <div className="fields">
           <Addr label="Source (client) ip:port" value={h?.source} onChange={(source) => set({ source })} placeholder="this connection's local address" />
           <Addr label="Destination ip:port" value={h?.destination} onChange={(destination) => set({ destination })} placeholder="this connection's remote address" />
         </div>
@@ -128,9 +127,9 @@ export function DatagramEnvelopeEditor(props: {
   const setAuth = (patch: Partial<DatagramAuthSpec>) =>
     set({ authentication: { secret: { kind: "template", value: "" }, listener_bind_address: "0.0.0.0", ...(a ?? {}), ...patch } as DatagramAuthSpec });
   return (
-    <fieldset className="col" aria-label="PROXY protocol envelope">
+    <fieldset aria-label="PROXY protocol envelope">
       <legend>PROXY v2 datagram envelope</legend>
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Envelope
           <select
@@ -158,7 +157,7 @@ export function DatagramEnvelopeEditor(props: {
         )}
       </div>
       {e && (e.command ?? "proxy") === "proxy" && (e.family ?? "auto") === "auto" && (
-        <div className="row">
+        <div className="fields">
           <Addr label="Source (client) ip:port" value={e.source} onChange={(source) => set({ source })} placeholder="this socket's local address" />
           <Addr label="Destination ip:port" value={e.destination} onChange={(destination) => set({ destination })} placeholder="this socket's remote address" />
         </div>
@@ -176,7 +175,7 @@ export function DatagramEnvelopeEditor(props: {
       {e && a && (
         <div className="col">
           <SecretField label="Shared secret (at least 32 bytes, used verbatim)" value={a.secret} onChange={(secret) => setAuth({ secret })} workspaceId={props.workspaceId} />
-          <div className="row">
+          <div className="fields">
             <label className="lbl">
               Listener receive boundary
               <select className="field" value={a.listener_protocol ?? (props.dtls ? "dtls" : "udp")} onChange={(ev) => setAuth({ listener_protocol: ev.target.value as "udp" | "dtls" })}>
@@ -186,11 +185,11 @@ export function DatagramEnvelopeEditor(props: {
             </label>
             <label className="lbl">
               Listener bind address
-              <input className="field mono" style={{ width: 160 }} value={a.listener_bind_address ?? "0.0.0.0"} onChange={(ev) => setAuth({ listener_bind_address: ev.target.value })} />
+              <input className="field mono w-160" value={a.listener_bind_address ?? "0.0.0.0"} onChange={(ev) => setAuth({ listener_bind_address: ev.target.value })} />
             </label>
             <Num label="Listener port" value={a.listener_port} placeholder="destination port" onChange={(v) => setAuth({ listener_port: v })} />
           </div>
-          <div className="row">
+          <div className="fields">
             <Num label="Sender id" value={a.sender_id} onChange={(v) => setAuth({ sender_id: v ?? 0 })} />
             <Num label="Epoch" value={a.epoch} placeholder="now (ms)" onChange={(v) => setAuth({ epoch: v })} />
             <Num label="First sequence" value={a.first_sequence} onChange={(v) => setAuth({ first_sequence: v ?? 0 })} />
@@ -221,7 +220,7 @@ const FORMATS: Record<ProxyHeaderObservation["format"], string> = {
 export function ProxyHeaderEvidence({ h }: { h: ProxyHeaderObservation }) {
   return (
     <div className="col">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>PROXY protocol</h4>
+      <h4 className="section-title">PROXY protocol</h4>
       <table className="grid">
         <tbody>
           <tr>
@@ -249,9 +248,7 @@ export function ProxyHeaderEvidence({ h }: { h: ProxyHeaderObservation }) {
           )}
           <tr>
             <td className="k">Bytes (hex)</td>
-            <td className="v mono" style={{ wordBreak: "break-all" }}>
-              {h.hex}
-            </td>
+            <td className="v mono">{h.hex}</td>
           </tr>
           {(h.tlvs ?? []).map((t, i) => (
             <tr key={i}>

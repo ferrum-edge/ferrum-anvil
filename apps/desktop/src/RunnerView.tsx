@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, onRunEvent, onRunFinished, type RunEvent, type RunReport, type Scenario, type TreeNode } from "./api";
 import type { Environment } from "./generated/contracts";
-import { Modal, fmtUs, humanize } from "./ui";
+import { Modal, SidebarResizer, fmtAgo, fmtUs, humanize } from "./ui";
+import { Icon } from "./icons";
 
 type Sel = { kind: "scenario"; id: string } | { kind: "report"; id: string } | { kind: "new" } | null;
 
@@ -84,24 +85,35 @@ export function RunnerView(props: {
   const runScenario = (s: Scenario) => (s.trusted === false ? setConfirmUntrusted(s) : void start({ kind: "scenario", scenario_id: s.id }, s.name));
 
   return (
-    <div className="main" style={{ ["--sidebar-w" as string]: "290px", display: props.hidden ? "none" : undefined }}>
+    <div className="main" style={props.hidden ? { display: "none" } : undefined}>
       <aside className="sidebar" aria-label="Scenarios and run reports">
         <div className="side-body">
-          <div className="row" style={{ marginBottom: 6 }}>
-            <b className="grow">Scenarios</b>
-            <button className="btn small" onClick={() => setSel({ kind: "new" })}>
-              + Scenario
+          <div className="side-section-head">
+            <span>Scenarios</span>
+            <button className="btn ghost small" title="New scenario" onClick={() => setSel({ kind: "new" })}>
+              <Icon name="plus" size={14} />
+              New
             </button>
           </div>
-          {scenarios.length === 0 && <div className="faint" style={{ padding: 6 }}>No scenarios yet.</div>}
+          {scenarios.length === 0 && <div className="side-empty">No scenarios yet.</div>}
           {scenarios.map((s) => (
-            <div key={s.id} className={`tree-row ${sel?.kind === "scenario" && sel.id === s.id ? "selected" : ""}`} role="button" tabIndex={0} onClick={() => setSel({ kind: "scenario", id: s.id })}>
-              <span className="name grow">{s.name}</span>
+            <div
+              key={s.id}
+              className={`tree-row${sel?.kind === "scenario" && sel.id === s.id ? " selected" : ""}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSel({ kind: "scenario", id: s.id })}
+              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "scenario", id: s.id })}
+            >
+              <Icon name="listChecks" size={14} className="row-icon" />
+              <span className="name">{s.name}</span>
               {s.trusted === false && <span className="badge warn">imported</span>}
             </div>
           ))}
-          <div className="col" style={{ margin: "14px 0" }}>
-            <b>Run a folder</b>
+          <div className="side-section-head">
+            <span>Run a folder</span>
+          </div>
+          <div className="side-card">
             <select className="field" aria-label="Folder to run" value={folderPick} onChange={(e) => setFolderPick(e.target.value)}>
               <option value="">Whole workspace</option>
               {folders.map((f) => (
@@ -111,33 +123,44 @@ export function RunnerView(props: {
               ))}
             </select>
             <button
-              className="btn small"
+              className="btn"
               disabled={!!live}
               onClick={() => void start({ kind: "folder", workspace_id: props.workspaceId, folder_id: folderPick || null }, folders.find((f) => f.id === folderPick)?.label ?? "Whole workspace")}
             >
+              <Icon name="play" size={11} />
               Run folder
             </button>
           </div>
-          <b>Reports</b>
-          {reports.length === 0 && <div className="faint" style={{ padding: 6 }}>No runs yet.</div>}
+          <div className="side-section-head">
+            <span>Reports</span>
+          </div>
+          {reports.length === 0 && <div className="side-empty">No runs yet.</div>}
           {reports.map((r) => (
-            <div key={r.run_id} className={`hist-row ${sel?.kind === "report" && sel.id === r.run_id ? "selected" : ""}`} role="button" tabIndex={0} onClick={() => setSel({ kind: "report", id: r.run_id })}>
-              <span className={`badge ${r.totals.steps_failed + r.totals.steps_errored === 0 && r.completion === "completed" ? "ok" : "bad"}`} style={{ justifySelf: "start" }}>
-                {r.totals.steps_passed}/{r.totals.steps_executed}
-              </span>
-              <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {r.name}
-              </span>
-              <span />
-              <span className="faint" style={{ fontSize: 11 }}>
-                {new Date(r.started_at).toLocaleString()} · {humanize(r.completion)}
-              </span>
+            <div
+              key={r.run_id}
+              className={`hist-row${sel?.kind === "report" && sel.id === r.run_id ? " selected" : ""}`}
+              role="button"
+              tabIndex={0}
+              title={`${r.name} — ${new Date(r.started_at).toLocaleString()}`}
+              onClick={() => setSel({ kind: "report", id: r.run_id })}
+              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "report", id: r.run_id })}
+            >
+              <div className="hist-line">
+                <span className="hist-title">{r.name}</span>
+                <span className={`badge ${r.totals.steps_failed + r.totals.steps_errored === 0 && r.completion === "completed" ? "ok" : "bad"}`}>
+                  {r.totals.steps_passed}/{r.totals.steps_executed}
+                </span>
+              </div>
+              <div className="hist-line">
+                <span className="hist-meta">{humanize(r.completion)}</span>
+                <span className="hist-when">{fmtAgo(Date.parse(r.started_at))}</span>
+              </div>
             </div>
           ))}
         </div>
       </aside>
-      <div className="resizer" />
-      <section className="work" style={{ gridTemplateRows: "1fr" }}>
+      <SidebarResizer />
+      <section className="work single">
         <div className="pane">
           {live && <LiveRun live={live} onCancel={() => void api.runCancel(live.runId)} />}
           {!live && sel?.kind === "new" && (
@@ -167,8 +190,15 @@ export function RunnerView(props: {
           {!live && !sel && (
             <div className="empty">
               <div>
+                <span className="empty-icon">
+                  <Icon name="listChecks" size={22} />
+                </span>
                 <div className="big">Run saved requests as repeatable tests.</div>
-                <div>Each step is a normal Send: same preparation, auth and diagnostics. Values extracted by earlier steps feed later ones.</div>
+                <div className="sub">Each step is a normal Send: same preparation, auth and diagnostics. Values extracted by earlier steps feed later ones.</div>
+                <button className="btn primary" onClick={() => setSel({ kind: "new" })}>
+                  <Icon name="plus" size={15} />
+                  New scenario
+                </button>
               </div>
             </div>
           )}
@@ -203,12 +233,13 @@ export function RunnerView(props: {
                   void start({ kind: "scenario", scenario_id: s.id }, s.name, true);
                 }}
               >
+                <Icon name="play" size={11} />
                 Run once
               </button>
             </>
           }
         >
-          <p>“{confirmUntrusted.name}” came from an import. Review its steps and destinations before running it: it sends real requests.</p>
+          <div className="warn-box">“{confirmUntrusted.name}” came from an import. Review its steps and destinations before running it: it sends real requests.</div>
         </Modal>
       )}
     </div>
@@ -220,38 +251,47 @@ function ScenarioEditor(props: { requests: { id: string; label: string; method: 
   const [ids, setIds] = useState<string[]>([]);
   const [pick, setPick] = useState("");
   return (
-    <div className="col" style={{ maxWidth: 820, gap: 12 }}>
-      <input className="field" aria-label="Scenario name" value={name} onChange={(e) => setName(e.target.value)} style={{ fontSize: 15, fontWeight: 600 }} />
-      {ids.map((id, i) => (
-        <div className="row" key={`${id}-${i}`}>
-          <span className="faint mono">{i + 1}.</span>
-          <span className="grow">{props.requests.find((r) => r.id === id)?.label}</span>
-          <button className="btn ghost icon-btn" aria-label="Remove step" onClick={() => setIds(ids.filter((_, j) => j !== i))}>
-            ✕
+    <div className="page narrow">
+      <input className="field title-input" aria-label="Scenario name" value={name} onChange={(e) => setName(e.target.value)} />
+      <fieldset>
+        <legend>Steps</legend>
+        {ids.length === 0 && <div className="empty-note">Add saved requests in the order they should run.</div>}
+        {ids.length > 0 && (
+          <div className="step-list">
+            {ids.map((id, i) => (
+              <div className="step-row" key={`${id}-${i}`}>
+                <span className="step-n">{i + 1}</span>
+                <span className="step-name">{props.requests.find((r) => r.id === id)?.label}</span>
+                <button className="btn ghost small icon-btn" aria-label="Remove step" title="Remove step" onClick={() => setIds(ids.filter((_, j) => j !== i))}>
+                  <Icon name="x" size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="row nowrap">
+          <select className="field grow" aria-label="Add step" value={pick} onChange={(e) => setPick(e.target.value)}>
+            <option value="">Add a saved request…</option>
+            {props.requests.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.method} {r.label}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn"
+            disabled={!pick}
+            onClick={() => {
+              setIds([...ids, pick]);
+              setPick("");
+            }}
+          >
+            <Icon name="plus" size={14} />
+            Add step
           </button>
         </div>
-      ))}
-      <div className="row">
-        <select className="field grow" aria-label="Add step" value={pick} onChange={(e) => setPick(e.target.value)}>
-          <option value="">Add a saved request…</option>
-          {props.requests.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.method} {r.label}
-            </option>
-          ))}
-        </select>
-        <button
-          className="btn small"
-          disabled={!pick}
-          onClick={() => {
-            setIds([...ids, pick]);
-            setPick("");
-          }}
-        >
-          Add step
-        </button>
-      </div>
-      <button className="btn primary" style={{ alignSelf: "start" }} disabled={!name.trim() || ids.length === 0} onClick={() => void props.onCreate(name.trim(), ids)}>
+      </fieldset>
+      <button className="btn primary start" disabled={!name.trim() || ids.length === 0} onClick={() => void props.onCreate(name.trim(), ids)}>
         Create scenario
       </button>
       <p className="hint">Set extractions on a request (Tests tab) to pass values such as tokens or ids to later steps.</p>
@@ -263,55 +303,71 @@ function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; lab
   const [s, setS] = useState(props.scenario);
   if (!s) return null;
   return (
-    <div className="col" style={{ maxWidth: 820, gap: 12 }}>
-      <div className="row">
-        <b className="grow" style={{ fontSize: 15 }}>
-          {s.name}
-        </b>
-        <button className="btn primary" onClick={() => props.onRun(s)}>
-          Run
-        </button>
-        <button
-          className="btn danger"
-          onClick={async () => {
-            await api.deleteScenario(s.id);
-            props.onDeleted();
-          }}
-        >
-          Delete
-        </button>
+    <div className="page narrow">
+      <div className="page-head">
+        <div className="page-titles">
+          <div className="page-title">
+            <h2>{s.name}</h2>
+            {s.trusted === false && <span className="badge warn">imported</span>}
+          </div>
+          <div className="page-meta">
+            {s.steps.length} step{s.steps.length === 1 ? "" : "s"} · {s.iterations ?? 1} iteration{(s.iterations ?? 1) === 1 ? "" : "s"}
+          </div>
+        </div>
+        <div className="page-actions">
+          <button className="btn primary" onClick={() => props.onRun(s)}>
+            <Icon name="play" size={11} />
+            Run
+          </button>
+          <button
+            className="btn ghost danger icon-btn"
+            aria-label="Delete scenario"
+            title="Delete scenario"
+            onClick={async () => {
+              await api.deleteScenario(s.id);
+              props.onDeleted();
+            }}
+          >
+            <Icon name="trash" />
+          </button>
+        </div>
       </div>
       {s.trusted === false && <div className="warn-box">Imported scenario: review the steps before running it.</div>}
-      <table className="grid">
-        <tbody>
+      <fieldset>
+        <legend>Steps</legend>
+        <div className="step-list">
           {s.steps.map((st, i) => (
-            <tr key={i}>
-              <td className="k">{i + 1}</td>
-              <td>{props.requests.find((r) => r.id === st.request_id)?.label ?? "(missing request)"}</td>
-              <td className="k">{st.delay_ms ? `${st.delay_ms} ms think time` : ""}</td>
-            </tr>
+            <div className="step-row" key={i}>
+              <span className="step-n">{i + 1}</span>
+              <span className="step-name">{props.requests.find((r) => r.id === st.request_id)?.label ?? "(missing request)"}</span>
+              {st.delay_ms ? <span className="faint small-text">{st.delay_ms} ms think time</span> : null}
+            </div>
           ))}
-        </tbody>
-      </table>
-      <div className="row">
-        <label className="lbl">
-          Iterations
-          <input className="field mono" style={{ width: 90 }} value={s.iterations ?? 1} onChange={(e) => setS({ ...s, iterations: Number(e.target.value) || 1 })} />
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={!!s.stop_on_failure} onChange={(e) => setS({ ...s, stop_on_failure: e.target.checked })} />
-          Stop an iteration at its first failed step
-        </label>
-        <button
-          className="btn small"
-          onClick={async () => {
-            setS(await api.saveScenario(s));
-            props.onSaved();
-          }}
-        >
-          Save
-        </button>
-      </div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Run options</legend>
+        <div className="fields">
+          <label className="lbl">
+            Iterations
+            <input className="field mono tiny" value={s.iterations ?? 1} onChange={(e) => setS({ ...s, iterations: Number(e.target.value) || 1 })} />
+          </label>
+          <label className="check field-check">
+            <input type="checkbox" checked={!!s.stop_on_failure} onChange={(e) => setS({ ...s, stop_on_failure: e.target.checked })} />
+            Stop an iteration at its first failed step
+          </label>
+          <span className="spacer" />
+          <button
+            className="btn"
+            onClick={async () => {
+              setS(await api.saveScenario(s));
+              props.onSaved();
+            }}
+          >
+            Save
+          </button>
+        </div>
+      </fieldset>
     </div>
   );
 }
@@ -321,29 +377,46 @@ function LiveRun(props: { live: { runId: string; name: string; events: RunEvent[
   const p = last?.progress;
   const steps = props.live.events.filter((e): e is Extract<RunEvent, { event: "step_finished" }> => e.event === "step_finished");
   return (
-    <div className="col" style={{ gap: 12 }}>
-      <div className="row">
-        <b style={{ fontSize: 15 }}>{props.live.name}</b>
-        <span className="badge accent">running</span>
-        {p && (
-          <span className="faint">
-            {p.steps_done}/{p.steps_total} steps · {p.steps_failed} failed · iteration {p.iterations_done}/{p.iterations_total}
-          </span>
-        )}
-        <span className="spacer" />
-        <button className="btn" onClick={props.onCancel}>
-          Stop run
-        </button>
+    <div className="page narrow">
+      <div className="page-head">
+        <div className="page-titles">
+          <div className="page-title">
+            <h2>{props.live.name}</h2>
+            <span className="badge accent">
+              <span className="live-dot" />
+              running
+            </span>
+          </div>
+          <div className="page-meta">
+            {p ? `${p.steps_done}/${p.steps_total} steps · ${p.steps_failed} failed · iteration ${p.iterations_done}/${p.iterations_total}` : "Starting…"}
+          </div>
+        </div>
+        <div className="page-actions">
+          <button className="btn" onClick={props.onCancel}>
+            <Icon name="stop" size={12} />
+            Stop run
+          </button>
+        </div>
       </div>
       <div className="progress" />
-      <table className="grid">
+      <table className="grid live-steps">
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th>Status</th>
+            <th>Result</th>
+            <th>Time</th>
+          </tr>
+        </thead>
         <tbody>
           {steps.slice(-200).map((e, i) => (
             <tr key={i}>
               <td className="k">
                 {e.iteration + 1}.{e.step + 1}
               </td>
-              <td className={`k ${e.status === "passed" ? "conf-confirmed" : "s5"}`}>{e.status}</td>
+              <td className="k status-cell">
+                <span className={`badge ${e.status === "passed" ? "ok" : "bad"}`}>{e.status}</span>
+              </td>
               <td className="v">{e.http_status ?? ""}</td>
               <td className="k">{e.duration_ms != null ? `${e.duration_ms} ms` : ""}</td>
             </tr>
@@ -369,33 +442,42 @@ function ReportView(props: { runId: string; notify: (m: string) => void; onDelet
     props.notify(`Exported to ${file.file_name}`);
   };
   return (
-    <div className="col" style={{ gap: 12 }}>
-      <div className="row" style={{ flexWrap: "wrap" }}>
-        <b style={{ fontSize: 15 }}>{r.name}</b>
-        <span className={`badge ${r.completion === "completed" && t.steps_failed + t.steps_errored === 0 ? "ok" : "bad"}`}>{humanize(r.completion)}</span>
-        {r.partial && <span className="badge warn">partial</span>}
-        <span className="faint">
-          {new Date(r.started_at).toLocaleString()} · {(r.duration_ms / 1000).toFixed(1)} s{r.environment_name ? ` · ${r.environment_name}` : ""}
-        </span>
-        <span className="spacer" />
-        <button className="btn small" onClick={() => void exportAs("junit")}>
-          JUnit
-        </button>
-        <button className="btn small" onClick={() => void exportAs("html")}>
-          HTML
-        </button>
-        <button className="btn small" onClick={() => void exportAs("json")}>
-          JSON
-        </button>
-        <button
-          className="btn small danger"
-          onClick={async () => {
-            await api.deleteRunReport(r.run_id);
-            props.onDeleted();
-          }}
-        >
-          Delete
-        </button>
+    <div className="page">
+      <div className="page-head">
+        <div className="page-titles">
+          <div className="page-title">
+            <h2>{r.name}</h2>
+            <span className={`badge ${r.completion === "completed" && t.steps_failed + t.steps_errored === 0 ? "ok" : "bad"}`}>{humanize(r.completion)}</span>
+            {r.partial && <span className="badge warn">partial</span>}
+          </div>
+          <div className="page-meta">
+            {new Date(r.started_at).toLocaleString()} · {(r.duration_ms / 1000).toFixed(1)} s{r.environment_name ? ` · ${r.environment_name}` : ""}
+          </div>
+        </div>
+        <div className="page-actions">
+          <div className="btn-group" role="group" aria-label="Export report">
+            <button className="btn small" title="Export as JUnit XML" onClick={() => void exportAs("junit")}>
+              <Icon name="upload" size={13} />
+              JUnit
+            </button>
+            <button className="btn small" title="Export as HTML" onClick={() => void exportAs("html")}>
+              HTML
+            </button>
+            <button className="btn small" title="Export as JSON" onClick={() => void exportAs("json")}>
+              JSON
+            </button>
+          </div>
+          <button
+            className="btn small ghost danger"
+            onClick={async () => {
+              await api.deleteRunReport(r.run_id);
+              props.onDeleted();
+            }}
+          >
+            <Icon name="trash" size={13} />
+            Delete
+          </button>
+        </div>
       </div>
       <div className="cards">
         {(
@@ -408,21 +490,21 @@ function ReportView(props: { runId: string; notify: (m: string) => void; onDelet
             ["Application failures", t.application_failures, t.application_failures > 0],
           ] as [string, number, boolean][]
         ).map(([label, v, bad]) => (
-          <div className="card" key={label}>
+          <div className={`card${bad ? " bad" : ""}`} key={label}>
             <div className="card-label">{label}</div>
-            <div className="card-value" style={bad ? { color: "var(--bad)" } : undefined}>
-              {v}
-            </div>
+            <div className="card-value">{v}</div>
           </div>
         ))}
       </div>
       {r.iterations.map((it) => (
-        <details key={it.index} open={it.status !== "passed"}>
+        <details key={it.index} open={it.status !== "passed"} className="iteration">
           <summary>
             Iteration {it.index + 1}
-            {it.dataset_row != null ? ` (dataset row ${it.dataset_row + 1})` : ""} — {it.status} · {it.duration_ms} ms
+            {it.dataset_row != null ? ` (dataset row ${it.dataset_row + 1})` : ""}
+            <span className={`badge ${it.status === "passed" ? "ok" : "bad"}`}>{it.status}</span>
+            <span className="faint">{it.duration_ms} ms</span>
           </summary>
-          <table className="grid">
+          <table className="grid steps">
             <thead>
               <tr>
                 <th>#</th>
@@ -438,26 +520,28 @@ function ReportView(props: { runId: string; notify: (m: string) => void; onDelet
                 <tr key={s.index}>
                   <td className="k">{s.index + 1}</td>
                   <td>
-                    {s.name}
-                    <div className="faint mono" style={{ fontSize: 11 }}>
+                    <div className="step-title">{s.name}</div>
+                    <div className="step-url">
                       {s.method} {s.url}
                     </div>
                   </td>
-                  <td className={`k ${s.status === "passed" ? "conf-confirmed" : s.status === "skipped" ? "faint" : "s5"}`}>{s.status}</td>
+                  <td className="k status-cell">
+                    <span className={`badge ${s.status === "passed" ? "ok" : s.status === "skipped" ? "neutral" : "bad"}`}>{s.status}</span>
+                  </td>
                   <td className="v">
                     {s.http_status ?? s.grpc_status ?? ""} {s.failed_dimensions?.length ? `(${s.failed_dimensions.join(", ")})` : ""}
                   </td>
                   <td>
                     {s.message ?? s.summary}
                     {s.findings?.slice(0, 2).map((f) => (
-                      <div key={f.code} className="faint" style={{ fontSize: 11 }}>
+                      <div key={f.code} className="step-note">
                         {f.title} ({f.confidence})
                       </div>
                     ))}
                     {s.assertion_results
                       ?.filter((a) => !a.passed)
                       .map((a, i) => (
-                        <div key={i} className="s5" style={{ fontSize: 11 }}>
+                        <div key={i} className="step-note s5">
                           ✗ {a.label}: {a.message}
                         </div>
                       ))}
