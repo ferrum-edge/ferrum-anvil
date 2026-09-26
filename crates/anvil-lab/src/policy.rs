@@ -67,8 +67,8 @@ impl Env {
     fn mark(&self) -> usize {
         self.gateway.log_lines().len()
     }
-    fn op(&self, from: usize, proxy_id: &str) -> Vec<String> {
-        op_log(&self.gateway, from, proxy_id)
+    async fn op(&self, from: usize, proxy_id: &str) -> Vec<String> {
+        op_log(&self.gateway, from, proxy_id).await
     }
     /// A backend-authored response through the plain `/ok` route.
     async fn backend(&self, code: u16, body: &str, headers: &[&str]) -> ExecutionOutput {
@@ -144,7 +144,7 @@ fn gw010(env: &Env) -> Fut<'_> {
         let before = env.fixtures.echo.log.count_requests();
         let o = env.send(&with_header(env.req("GET", "/gw/waf/echo"), "x-lab-waf-test", "1")).await;
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "WAF block", &mut c);
-        let ops = env.op(from, "gw010-waf");
+        let ops = env.op(from, "gw010-waf").await;
         operator_field(&mut c, &ops, "/metadata/waf.action", &["blocked"]);
         operator_field(&mut c, &ops, "/metadata/waf.first_blocking_rule", &["ANVIL-LAB-HEADER"]);
         plugin_reject(&mut c, &o, 403, "http.forbidden");
@@ -178,7 +178,7 @@ fn gw010_body(env: &Env) -> Fut<'_> {
         let before = env.fixtures.echo.log.count_requests();
         let o = env.post_json("/gw/waf/echo", r#"{"comment":"ANVIL-LAB-WAF-MARKER"}"#).await;
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "WAF body block", &mut c);
-        let ops = env.op(from, "gw010-waf");
+        let ops = env.op(from, "gw010-waf").await;
         operator_field(&mut c, &ops, "/metadata/waf.first_blocking_rule", &["ANVIL-LAB-BODY"]);
         plugin_reject(&mut c, &o, 403, "http.forbidden");
         no_claim(&mut c, &o, "waf", Confidence::Likely);
@@ -201,7 +201,7 @@ fn gw010_bot_allow_edge(env: &Env) -> Fut<'_> {
         let before = env.fixtures.echo.log.count_requests();
         let ua = "anvil-lab-bot/1.0 (anvil-lab-monitor/)";
         let o = env.send(&with_header(env.req("GET", "/gw/bot/"), "User-Agent", ua)).await;
-        let ops = env.op(from, "gw010-bot");
+        let ops = env.op(from, "gw010-bot").await;
         if crate::gateway::current_lock().release == "v0.9.5" {
             backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "bot block despite the allow entry", &mut c);
             plugin_reject(&mut c, &o, 403, "http.forbidden");
@@ -227,7 +227,7 @@ fn gw010_bot(env: &Env) -> Fut<'_> {
         let before = env.fixtures.echo.log.count_requests();
         let o = env.send(&with_header(env.req("GET", "/gw/bot/"), "User-Agent", "anvil-lab-bot/1.0")).await;
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "bot block", &mut c);
-        let ops = env.op(from, "gw010-bot");
+        let ops = env.op(from, "gw010-bot").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["on_request_received"]);
         operator_field(&mut c, &ops, "/request_user_agent", &["anvil-lab-bot/1.0"]);
         plugin_reject(&mut c, &o, 403, "http.forbidden");
@@ -258,7 +258,7 @@ fn gw012(env: &Env) -> Fut<'_> {
             format!("{} new queries", q.len() - q0),
         );
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "OPA deny", &mut c);
-        let ops = env.op(from, "gw012-opa-deny");
+        let ops = env.op(from, "gw012-opa-deny").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["authorize"]);
         plugin_reject(&mut c, &o, 403, "http.forbidden");
         c.absent_prefix(&o, "http.unauthorized");
@@ -316,7 +316,7 @@ fn gw013_timeout(env: &Env) -> Fut<'_> {
         let o = env.get("/gw/opa-timeout/echo").await;
         c.add(CheckKind::GroundTruth, "stalled OPA received the decision query", env.fixtures.opa_stall.log.count_requests() > s0, "");
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "OPA timeout", &mut c);
-        let mut ops = env.op(from, "gw013-opa-timeout");
+        let mut ops = env.op(from, "gw013-opa-timeout").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["authorize"]);
         ops.extend(operator_lines(&env.gateway, from, "OPA authorization decision failed"));
         opa_fail_closed(&mut c, env, &o);
@@ -344,7 +344,7 @@ fn gw013_refused(env: &Env) -> Fut<'_> {
         let before = env.fixtures.echo.log.count_requests();
         let o = env.get("/gw/opa-refused/echo").await;
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "OPA refused", &mut c);
-        let mut ops = env.op(from, "gw013-opa-refused");
+        let mut ops = env.op(from, "gw013-opa-refused").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["authorize"]);
         ops.extend(operator_lines(&env.gateway, from, "OPA authorization decision failed"));
         opa_fail_closed(&mut c, env, &o);
@@ -377,7 +377,7 @@ fn gw013_error(env: &Env) -> Fut<'_> {
         env.fixtures.opa.set_failing(false);
         let failed = env.fixtures.opa.queries().iter().skip(q0).any(|q| q.status == 500);
         c.add(CheckKind::GroundTruth, "OPA answered HTTP 500 to the decision query", failed, "");
-        let mut ops = env.op(from, "gw012-opa-allow");
+        let mut ops = env.op(from, "gw012-opa-allow").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["authorize"]);
         ops.extend(operator_lines(&env.gateway, from, "OPA authorization decision failed"));
         opa_fail_closed(&mut c, env, &o);
@@ -395,7 +395,7 @@ fn gw014(env: &Env) -> Fut<'_> {
         let before = env.fixtures.echo.log.count_requests();
         let o = env.get("/gw/ip-deny/echo").await;
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "IP deny", &mut c);
-        let mut ops = env.op(from, "gw014-ip-deny");
+        let mut ops = env.op(from, "gw014-ip-deny").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["on_request_received"]);
         ops.extend(operator_lines(&env.gateway, from, "IP address denied"));
         plugin_reject(&mut c, &o, 403, "http.forbidden");
@@ -430,7 +430,7 @@ fn gw015(env: &Env) -> Fut<'_> {
         let o = env.post_json("/gw/openapi/items", r#"{"name":"x","qty":0}"#).await;
         let unknown = env.get("/gw/openapi/other").await;
         backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "validator rejections", &mut c);
-        let ops = env.op(from, "gw015-openapi");
+        let ops = env.op(from, "gw015-openapi").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["validate_client_request_contract"]);
         for (what, x) in [("malformed JSON", &malformed), ("schema violation", &o), ("unknown operation", &unknown)] {
             plugin_reject(&mut c, x, 400, "http.client_error");
@@ -473,7 +473,7 @@ fn gw009(env: &Env) -> Fut<'_> {
         let before = env.fixtures.json_empty.log.count_requests();
         let o = env.get("/gw/transform-ceiling/status/200?body=%7B%7D").await;
         backend_hits(before, env.fixtures.json_empty.log.count_requests(), 1, "origin served a 2-byte body", &mut c);
-        let mut ops = env.op(from, "gw009-transform-ceiling");
+        let mut ops = env.op(from, "gw009-transform-ceiling").await;
         c.operator_class(&ops, "gw009-transform-ceiling", &["dispatch_policy_rejected"]);
         ops.extend(operator_lines(&env.gateway, from, "output exceeds response size policy"));
         c.status_in(&o, &[502]);
@@ -507,7 +507,7 @@ fn gw009(env: &Env) -> Fut<'_> {
         // different (backend_error) token.
         let from2 = env.mark();
         let size = env.get("/gw/response-size/bytes/1024").await;
-        c.operator_class(&env.op(from2, "gw009-response-size"), "gw009-response-size", &["response_body_too_large"]);
+        c.operator_class(&env.op(from2, "gw009-response-size").await, "gw009-response-size", &["response_body_too_large"]);
         c.add(
             CheckKind::Diagnosis,
             "declared-size ceiling gets no overload claim",
@@ -536,7 +536,7 @@ fn gw004(env: &Env) -> Fut<'_> {
         });
         c.success(CheckKind::GroundTruth, &first);
         backend_hits(before, env.fixtures.slow.log.count_requests(), 1, "only the occupant reached the backend", &mut c);
-        let ops = env.op(from, "gw004-concurrency");
+        let ops = env.op(from, "gw004-concurrency").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["adaptive_concurrency"]);
         c.status_in(&o, &[503]);
         c.add(CheckKind::GroundTruth, "x-adaptive-concurrency-limit exposed", header(&o, "x-adaptive-concurrency-limit") == ["1"], "");
@@ -574,7 +574,7 @@ fn ext_rate_limit(env: &Env) -> Fut<'_> {
         c.success(CheckKind::GroundTruth, &a);
         c.success(CheckKind::GroundTruth, &b);
         backend_hits(before, env.fixtures.echo.log.count_requests(), 2, "admitted within the window", &mut c);
-        let ops = env.op(from, "rl-rate-limit");
+        let ops = env.op(from, "rl-rate-limit").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["on_request_received"]);
         plugin_reject(&mut c, &o, 429, "http.too_many_requests");
         c.add(CheckKind::GroundTruth, "x-ratelimit-remaining: 0 exposed", header(&o, "x-ratelimit-remaining") == ["0"], "");
@@ -608,7 +608,7 @@ fn gw020_guard(env: &Env) -> Fut<'_> {
             )
             .await;
         c.add(CheckKind::GroundTruth, "provider was never called", env.fixtures.ai.call_count() == calls, "");
-        let ops = env.op(from, "gw020-ai-guard");
+        let ops = env.op(from, "gw020-ai-guard").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["before_proxy"]);
         plugin_reject(&mut c, &o, 400, "http.client_error");
         c.add(CheckKind::GroundTruth, "public body names the model policy", body_text(&o).contains("Model not allowed"), body_text(&o));
@@ -642,7 +642,7 @@ fn gw020_budget(env: &Env) -> Fut<'_> {
         c.success(CheckKind::GroundTruth, &b);
         let used: u64 = env.fixtures.ai.calls().iter().skip(calls).map(|x| x.total_tokens).sum();
         c.add(CheckKind::GroundTruth, "provider reported 60 tokens across two calls (limit 50)", used == 60, used.to_string());
-        let ops = env.op(from, "gw020-ai-budget");
+        let ops = env.op(from, "gw020-ai-budget").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["before_proxy"]);
         plugin_reject(&mut c, &o, 429, "http.too_many_requests");
         c.add(CheckKind::GroundTruth, "x-ai-ratelimit-remaining: 0 exposed", header(&o, "x-ai-ratelimit-remaining") == ["0"], "");
@@ -705,7 +705,7 @@ fn gw020_content(env: &Env) -> Fut<'_> {
         let o = env.post_json("/gw/ai/content/v1/chat/completions", CHAT).await;
         env.fixtures.ai.set_reply("Hello from the Anvil lab provider mock.");
         c.add(CheckKind::GroundTruth, "provider answered 200", env.fixtures.ai.calls().last().map(|x| x.status) == Some(200), "");
-        let ops = env.op(from, "gw020-ai-content");
+        let ops = env.op(from, "gw020-ai-content").await;
         c.status_in(&o, &[502]);
         c.not_success(&o);
         c.add(CheckKind::GroundTruth, "public body names the content guard", body_text(&o).contains("content guard"), body_text(&o));
@@ -768,7 +768,7 @@ fn gw001_halfopen(env: &Env) -> Fut<'_> {
         backend_hits(n3, log.count_requests(), 2, "closed breaker forwards again", &mut c);
         c.success(CheckKind::Recovery, &probe_ok);
         c.success(CheckKind::Recovery, &r);
-        let mut ops = env.op(from, "gw001-breaker-halfopen");
+        let mut ops = env.op(from, "gw001-breaker-halfopen").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["circuit_breaker_open"]);
         ops.extend(operator_lines(&env.gateway, from, "Circuit breaker opening"));
         // Lookalike: the application's own 503 with the breaker's exact body.
@@ -790,7 +790,7 @@ fn gw019_error(env: &Env) -> Fut<'_> {
         let mut c = Checks::new();
         let from = env.mark();
         let o = env.get("/gw/header-mutation-error/").await;
-        let ops = env.op(from, "gw019-error-spoof");
+        let ops = env.op(from, "gw019-error-spoof").await;
         c.operator_class(&ops, "gw019-error-spoof", &["connection_refused"]);
         c.status_in(&o, &[502]);
         c.add(
@@ -880,7 +880,7 @@ fn gw019_reject_unknown(env: &Env) -> Fut<'_> {
         let mut c = Checks::new();
         let from = env.mark();
         let o = env.get("/gw/reject-decorated/").await;
-        let ops = env.op(from, "gw019-reject-decorated");
+        let ops = env.op(from, "gw019-reject-decorated").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["on_request_received"]);
         c.status_in(&o, &[403]);
         c.add(
@@ -912,7 +912,7 @@ fn gw019_reject_known(env: &Env) -> Fut<'_> {
         let mut c = Checks::new();
         let from = env.mark();
         let o = env.get("/gw/reject-known-token/").await;
-        let ops = env.op(from, "gw019-reject-known-token");
+        let ops = env.op(from, "gw019-reject-known-token").await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["on_request_received"]);
         c.status_in(&o, &[403]);
         c.add(

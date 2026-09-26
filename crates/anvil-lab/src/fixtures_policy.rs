@@ -126,8 +126,45 @@ pub async fn send(engine: &Engine, c: &ExecutionContext) -> ExecutionOutput {
 
 /// New gateway operator-log lines since line `from` for `proxy_id`
 /// (operator ground truth; never given to the engine).
-pub fn op_log(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
+fn op_lines(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
     gw.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(10).collect()
+}
+
+pub async fn op_log(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
+    wait_for_op_log(|| op_lines(gw, from, proxy_id)).await
+}
+
+pub(crate) async fn wait_for_op_log(mut read_lines: impl FnMut() -> Vec<String>) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let lines = read_lines();
+        if !lines.is_empty() || tokio::time::Instant::now() >= deadline {
+            return lines;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(test)]
+mod op_log_tests {
+    use super::wait_for_op_log;
+
+    #[tokio::test]
+    async fn waits_until_a_transaction_line_appears() {
+        let mut reads = 0;
+        let lines = wait_for_op_log(|| {
+            reads += 1;
+            if reads == 2 {
+                vec!["transaction".to_owned()]
+            } else {
+                vec![]
+            }
+        })
+        .await;
+
+        assert_eq!(reads, 2);
+        assert_eq!(lines, vec!["transaction".to_owned()]);
+    }
 }
 
 /// Explicit skip records for scenarios a profile cannot drive live (filtered
