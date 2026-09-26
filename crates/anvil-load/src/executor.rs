@@ -304,18 +304,35 @@ fn derive_seed(plan_seed: u64, ctx_seed: u64, iteration: u64, step: u64) -> u64 
     splitmix64(plan_seed ^ splitmix64(ctx_seed ^ splitmix64(iteration.wrapping_mul(1_000_003).wrapping_add(step))))
 }
 
+/// Idle HTTP/1.1 and HTTP/2 connections one slot's engine keeps. A slot
+/// sends one request at a time, so it rarely has more than one connection
+/// per destination to return; the small caps keep a run with many slots from
+/// holding slots × 64 idle sockets (the default cap of an engine).
+fn slot_http_pool() -> anvil_transport::http::PoolLimits {
+    anvil_transport::http::PoolLimits { max_idle_per_key: 2, max_idle_total: 4, ..Default::default() }
+}
+
+/// Idle QUIC connections one slot's engine keeps (one per destination).
+fn slot_h3_pool() -> anvil_transport::h3::PoolLimits {
+    anvil_transport::h3::PoolLimits { max_idle_total: 4, ..Default::default() }
+}
+
+/// The engine of one slot: its own small connection pools and gRPC
+/// channels, and the run's shared token cache.
+fn slot_engine(tokens: Arc<anvil_auth::oauth::TokenCache>) -> Engine {
+    let mut e = Engine::new();
+    e.http = Arc::new(anvil_transport::http::HttpTransport::with_pool_limits(slot_http_pool()));
+    e.h3 = anvil_transport::h3::H3Transport::with_pool_limits(slot_h3_pool());
+    e.tokens = tokens;
+    // gRPC calls reuse this slot's channels while keep-alive is on (the
+    // persistent connection mode); fresh mode turns it off.
+    e.grpc_channels = Some(Arc::new(anvil_transport::grpc::Channels::new()));
+    e
+}
+
 impl Shared {
     fn engine(&self, slot: usize) -> Arc<Engine> {
-        self.engines[slot]
-            .get_or_init(|| {
-                let mut e = Engine::new();
-                e.tokens = self.tokens.clone();
-                // gRPC calls reuse this slot's channels while keep-alive is on
-                // (the persistent connection mode); fresh mode turns it off.
-                e.grpc_channels = Some(Arc::new(anvil_transport::grpc::Channels::new()));
-                Arc::new(e)
-            })
-            .clone()
+        self.engines[slot].get_or_init(|| Arc::new(slot_engine(self.tokens.clone()))).clone()
     }
 
     fn shard(&self, slot: usize) -> &Mutex<Shard> {
@@ -1187,6 +1204,19 @@ impl LoadRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_engines_keep_small_connection_pools() {
+        let e = slot_engine(Arc::new(anvil_auth::oauth::TokenCache::new()));
+        let http = e.http.pool.limits();
+        assert_eq!((http.max_idle_per_key, http.max_idle_total), (2, 4));
+        assert!(http.max_idle_total < anvil_transport::http::PoolLimits::default().max_idle_total);
+        assert_eq!(http.idle_ttl, anvil_transport::http::PoolLimits::default().idle_ttl);
+        let h3 = e.h3.pool_limits();
+        assert_eq!(h3.max_idle_total, 4);
+        assert!(h3.max_idle_total < anvil_transport::h3::PoolLimits::default().max_idle_total);
+        assert!(e.grpc_channels.is_some());
+    }
 
     #[test]
     fn weighted_pick_is_seeded_and_proportional() {

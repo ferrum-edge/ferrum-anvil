@@ -59,10 +59,15 @@ CLI (`anvil`) = same anvil-app services without a webview.
 - **Pooled HTTP connections are bounded.** Each engine keeps at most 8 idle
   HTTP/1.1 or HTTP/2 connections per pool key (isolation, destination and
   security context) and 64 in total; one more closes the connection idle
-  longest. A background sweep closes connections idle for 90 s even when their
-  destination is never used again, and stops while the pool is empty. An
-  HTTP/2 connection counts as idle only with no request in flight, so neither
-  expiry nor eviction cuts a request short.
+  longest, within the key when the key is full, else across all keys. A
+  background sweep closes connections idle for 90 s even when their
+  destination is never used again, and stops while the pool is empty; it ends
+  with the engine that started it. An HTTP/2 connection counts as idle only
+  with no request in flight, so neither expiry nor eviction cuts a request
+  short. A load run gives each slot (virtual user or concurrency lane) its own
+  engine with smaller caps: 2 idle connections per key and 4 in total for
+  HTTP/1.1 and HTTP/2, and 4 idle QUIC connections, so a run holds at most
+  4 idle sockets of each kind per slot.
 - **The workbench shows the selected workspace's state only.** Its lists
   (collection tree, history, TLS/proxy/gateway profiles, environments) are
   cleared when the workspace changes and filled only from the latest read of

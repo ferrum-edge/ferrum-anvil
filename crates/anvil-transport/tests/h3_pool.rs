@@ -1,7 +1,9 @@
 //! The HTTP/3 (QUIC) connection pool against real local QUIC servers: a
 //! global idle cap closing the longest-idle connection first, idle expiry
-//! that does not wait for the same destination to be used again, and
-//! connections kept while they carry requests.
+//! that does not wait for the same destination to be used again,
+//! connections kept while they carry requests, and connections the pool
+//! never held (connection reuse off, the retry after `425 Too Early`) closed
+//! when they are done.
 
 use anvil_domain::execution::*;
 use anvil_domain::settings::{HttpVersionPolicy, Limits, Timeouts};
@@ -94,7 +96,8 @@ async fn eventually(within: Duration, mut cond: impl FnMut() -> bool) -> bool {
 
 /// An HTTP/3 origin that counts the QUIC connections it accepted and the
 /// ones the client closed with `H3_NO_ERROR`. `/delay/{ms}` answers after
-/// `ms` milliseconds, any other path at once.
+/// `ms` milliseconds, `/status/{code}` with that status, any other path at
+/// once with 200.
 struct Origin {
     addr: SocketAddr,
     accepted: Arc<AtomicUsize>,
@@ -144,7 +147,8 @@ async fn origin_with(max_field_section_size: Option<u64>) -> Origin {
                         if let Some(ms) = req.uri().path().strip_prefix("/delay/").and_then(|ms| ms.parse().ok()) {
                             tokio::time::sleep(Duration::from_millis(ms)).await;
                         }
-                        let resp = http::Response::builder().status(200).body(()).unwrap();
+                        let status = req.uri().path().strip_prefix("/status/").and_then(|c| c.parse().ok()).unwrap_or(200u16);
+                        let resp = http::Response::builder().status(status).body(()).unwrap();
                         if stream.send_response(resp).await.is_ok() {
                             let _ = stream.send_data(Bytes::from_static(b"ok")).await;
                             let _ = stream.finish().await;
@@ -227,7 +231,7 @@ async fn a_quic_connection_carrying_a_request_is_not_expired() {
 
     // A request outlasting the TTL shares the pooled connection; the sweep
     // runs meanwhile and must leave the busy connection alone.
-    let slow = plan(o.addr, "/delay/3000");
+    let slow = plan(o.addr, "/delay/5000");
     let (done, during) = tokio::join!(run(&t, &slow), async {
         tokio::time::sleep(Duration::from_millis(2000)).await;
         t.pool_stats()
@@ -267,12 +271,13 @@ async fn a_request_that_cannot_be_written_evicts_and_closes_its_quic_connection(
     let t = H3Transport::new();
     run(&t, &plan(o.addr, "/")).await;
     assert_eq!(t.pool_stats(), PoolStats { connections: 1, idle: 1 });
-    // The server's SETTINGS arrived with the first response; let the
-    // connection's HTTP/3 driver take them in.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The client applies the server's limit once its HTTP/3 driver has taken
+    // in the server's SETTINGS.
+    assert!(eventually(Duration::from_secs(5), || t.pooled_peer_settings_known()).await, "the server's SETTINGS never arrived");
 
-    // Headers over the server's SETTINGS_MAX_FIELD_SECTION_SIZE are refused
-    // before a stream opens: the write fails on the pooled connection.
+    // h3 opens the request stream, then refuses headers over the server's
+    // SETTINGS_MAX_FIELD_SECTION_SIZE before sending them: the write fails
+    // on the pooled connection.
     let mut big = plan(o.addr, "/");
     big.headers.push((http::HeaderName::from_static("x-big"), http::HeaderValue::from_str(&"a".repeat(4096)).unwrap()));
     let failed = t.execute(&big, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
@@ -284,4 +289,47 @@ async fn a_request_that_cannot_be_written_evicts_and_closes_its_quic_connection(
     let again = run(&t, &plan(o.addr, "/")).await;
     assert!(!reused(&again), "the next request opens a new connection");
     assert_eq!((o.accepted(), o.closed()), (2, 1));
+}
+
+#[tokio::test]
+async fn a_quic_connection_that_was_never_pooled_is_closed_after_its_request() {
+    init();
+    let o = origin().await;
+    let t = H3Transport::new();
+    let mut p = plan(o.addr, "/");
+    p.keepalive = false;
+    let first = run(&t, &p).await;
+    assert!(!reused(&first));
+    assert_eq!(t.pool_stats(), PoolStats::default(), "connection reuse is off: nothing is pooled");
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the connection was left open");
+
+    let second = run(&t, &p).await;
+    assert!(!reused(&second), "every request opens its own connection");
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 2).await, "the second connection was left open");
+    assert_eq!(o.accepted(), 2);
+}
+
+#[tokio::test]
+async fn the_quic_connection_kept_for_the_retry_after_425_expires_after_ten_seconds() {
+    init();
+    let o = origin().await;
+    // The idle TTL (30 s) is longer than the 10 s the connection is kept
+    // for the retry, and the sweep runs every 5 s.
+    let t = H3Transport::with_pool_limits(PoolLimits { idle_ttl: Duration::from_secs(30), ..PoolLimits::default() });
+    let mut p = plan(o.addr, "/status/425");
+    p.keepalive = false;
+    p.early_data = EarlyDataIntent::Send;
+    let kept_at = Instant::now();
+    let out = t.execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
+    assert_eq!(out.observation.response_status, Some(425));
+    assert_eq!(t.pool_stats(), PoolStats::default(), "the kept connection is not pooled for reuse");
+    assert_eq!(o.closed(), 0, "the connection is kept for the retry");
+
+    // No retry is sent: the sweep closes it once the 10 s have passed, well
+    // before the idle TTL would.
+    assert!(eventually(Duration::from_secs(25), || o.closed() == 1).await, "the connection kept for the retry was left open");
+    let after = kept_at.elapsed();
+    assert!(after >= Duration::from_secs(10), "closed after {after:?}, before the 10 s were up");
+    assert_eq!(o.accepted(), 1);
 }

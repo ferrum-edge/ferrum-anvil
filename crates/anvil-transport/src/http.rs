@@ -252,7 +252,8 @@ const IDLE_TTL: Duration = Duration::from_secs(90);
 /// Bounds of the idle connection pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolLimits {
-    /// Connections kept per pool key.
+    /// Connections kept per pool key; the key's longest idle is closed
+    /// first when a returned one would exceed it.
     pub max_idle_per_key: usize,
     /// Idle connections kept across all keys; the longest idle is closed
     /// first when a new one would exceed it.
@@ -366,6 +367,14 @@ impl Pool {
                 // A shared HTTP/2 connection is already pooled.
                 return;
             }
+            if list.len() >= limits.max_idle_per_key {
+                // The key is full: close its longest-idle connection, not
+                // the one returned now (the freshest).
+                let oldest = list.iter().enumerate().filter_map(|(i, x)| x.idle_start().map(|t| (t, i))).min_by_key(|(t, _)| *t);
+                if let Some((_, i)) = oldest {
+                    dropped.push(list.remove(i));
+                }
+            }
             if list.len() < limits.max_idle_per_key {
                 list.push(p);
             } else {
@@ -421,13 +430,13 @@ impl Pool {
             return;
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
-        let pool = Arc::downgrade(&self.shared);
+        let weak = Arc::downgrade(&self.shared);
         let every = sweep_interval(self.shared.limits.idle_ttl);
         state.sweeper = Some(rt.spawn(async move {
             loop {
                 tokio::time::sleep(every).await;
-                let Some(pool) = pool.upgrade() else { return };
-                if !pool.sweep(Instant::now()) {
+                let Some(shared) = weak.upgrade() else { return };
+                if !shared.sweep(Instant::now()) {
                     return;
                 }
             }
@@ -453,6 +462,16 @@ impl Pool {
             (idle, too_early)
         };
         drop(removed);
+    }
+}
+
+impl Drop for PoolShared {
+    fn drop(&mut self) {
+        // The sweep holds only a weak reference and would end on its next
+        // tick; end it now instead.
+        if let Some(sweeper) = self.state.get_mut().sweeper.take() {
+            sweeper.abort();
+        }
     }
 }
 
@@ -1395,5 +1414,53 @@ pub async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
         None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start_sweeper(t: &HttpTransport) {
+        let mut state = t.pool.shared.state.lock();
+        t.pool.ensure_sweeper(&mut state);
+    }
+
+    fn sweeper(t: &HttpTransport) -> Option<tokio::task::AbortHandle> {
+        t.pool.shared.state.lock().sweeper.as_ref().map(|h| h.abort_handle())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_sweeper_stops_on_an_empty_pool_and_starts_again() {
+        let t = HttpTransport::new();
+        start_sweeper(&t);
+        let first = sweeper(&t).expect("the sweeper runs");
+
+        // Its first sweep finds the pool empty: it ends and is forgotten.
+        tokio::time::sleep(sweep_interval(t.pool.limits().idle_ttl) * 2).await;
+        assert!(first.is_finished());
+        assert!(sweeper(&t).is_none(), "a stopped sweeper is cleared, so the next connection starts a new one");
+
+        start_sweeper(&t);
+        let second = sweeper(&t).expect("the sweeper runs again");
+        assert!(!second.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_transport_ends_the_sweeper_at_once() {
+        let t = HttpTransport::new();
+        start_sweeper(&t);
+        let task = sweeper(&t).expect("the sweeper runs");
+        drop(t);
+
+        // Time is paused and does not advance while this task yields, so the
+        // sweeper ends only because the drop aborted it, not on its next tick.
+        for _ in 0..100 {
+            if task.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(task.is_finished(), "the sweeper outlived its pool");
     }
 }
