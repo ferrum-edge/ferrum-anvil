@@ -324,7 +324,14 @@ in it can be read or changed without the export passphrase:
   stored response bodies, and every load report.
 - It does not carry OS keychain entries, local data keys, provider sessions,
   token-file bindings or linked-file bindings (they name files on this
-  device); the preview lists them. Attachment index entries and blob pins are
+  device), or device-identity seals (this device's own choice); the preview
+  lists them. A restore seals every workspace in the backup, in the same
+  transaction, from this device's workload identity (a JWT-SVID from the
+  Workload API or a token file, and a TLS profile presenting an X.509-SVID
+  from the Workload API) until the user lifts the seal on this device
+  (**Allow on this device** in the workspace settings' Auth tab, or
+  `anvil workspace allow-device-identity`), as a bundle import does; the
+  preview and the report say so. Attachment index entries and blob pins are
   specific to one database and are rebuilt on restore. The restore preview
   lists each linked local file with the request or dataset that names it; a
   restore drops this device's linked-file bindings for every request and

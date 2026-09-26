@@ -66,8 +66,10 @@ CLI (`anvil`) = same anvil-app services without a webview.
   (`AttachmentRef::LinkedFile`), and the desktop refuses to create or save
   a request that does. A JWT-SVID token file is re-read at every send, so
   it is bound instead of granted: `file_choose` with purpose
-  `jwt_svid_file` records the chosen canonical path in the vault
-  (`anvil_app::token_files`, never exported or imported), and the desktop
+  `jwt_svid_file` records the path as chosen in the vault, links kept so a
+  rotating token keeps working (it is canonicalised only to check that it
+  leads to a regular file; `anvil_app::token_files`, never exported or
+  imported), and the desktop
   confines the app so a token-file path that is not bound is refused before
   anything is read. The JWT-SVID editor lists the bound token files and
   removes one (`token_files_list`, `token_file_remove`); an auth setting that

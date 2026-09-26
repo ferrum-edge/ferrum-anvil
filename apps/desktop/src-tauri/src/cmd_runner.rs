@@ -103,6 +103,10 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
         };
         drop(pending);
         let ev = match res {
+            // Another profile is open: its window shows nothing of this one.
+            _ if !handle.state::<DesktopState>().is_current(&app) => {
+                RunFinished { run_id: run_id.to_string(), error: Some("the profile the run was started in was closed".into()) }
+            }
             Ok(r) => RunFinished { run_id: r.run_id.to_string(), error: None },
             Err(err) => RunFinished { run_id: run_id.to_string(), error: Some(e(err)) },
         };

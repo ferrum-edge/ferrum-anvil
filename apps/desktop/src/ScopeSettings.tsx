@@ -2,6 +2,7 @@
 // inherit these (request → folders → workspace → app defaults); the Effective
 // request tab shows which layer each value came from.
 import { useEffect, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import type { AuthConfig, Folder, SettingsOverrides, Variable, Workspace } from "./generated/contracts";
 import { AuthEditor } from "./AuthEditor";
@@ -17,9 +18,26 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
   const [ws, setWs] = useState<Workspace | null>(props.target.kind === "workspace" ? props.target.workspace : null);
   const [tab, setTab] = useState<Tab>("auth");
   const [err, setErr] = useState<string | null>(null);
+  // Set by a bundle import or backup restore on this device; only the user lifts it.
+  const [sealed, setSealed] = useState(false);
   useEffect(() => {
     if (props.target.kind === "folder") api.getFolder(props.target.id).then(setFolder);
+    else api.deviceIdentitySealed(props.target.workspace.id).then(setSealed, () => setSealed(false));
   }, []);
+  const allowDeviceIdentity = async (w: Workspace) => {
+    const ok = await ask(
+      `Let requests in “${w.name}” use this device's workload identity (JWT-SVID or X.509-SVID)? Only do this if you trust what was imported or restored into it.`,
+      { title: "Allow this device's workload identity", kind: "warning", okLabel: "Allow" },
+    );
+    if (!ok) return;
+    setErr(null);
+    try {
+      await api.allowDeviceIdentity(w.id);
+      setSealed(false);
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
   const obj = props.target.kind === "folder" ? folder : ws;
   if (!obj) return null;
   const auth = (obj.auth as AuthConfig | undefined) ?? { type: "inherit" };
@@ -66,6 +84,16 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
       {tab === "auth" && (
         <>
           <p className="hint">Requests set to “Inherit” use the nearest folder's auth, then the workspace's.</p>
+          {sealed && ws && (
+            <div className="warn-box row" role="note">
+              <span className="grow">
+                A bundle import or backup restore wrote into this workspace, so its requests do not use this device's workload identity (JWT-SVID or X.509-SVID).
+              </span>
+              <button className="btn small" onClick={() => void allowDeviceIdentity(ws)}>
+                Allow on this device
+              </button>
+            </div>
+          )}
           <AuthEditor value={auth} onChange={(a) => patch({ auth: a })} workspaceId={props.workspaceId} allowInherit={props.target.kind === "folder"} />
         </>
       )}
