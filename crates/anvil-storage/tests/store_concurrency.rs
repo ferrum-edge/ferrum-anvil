@@ -1,10 +1,13 @@
 //! Transaction isolation: a `Store::atomically` transaction belongs to its
 //! caller alone. Other callers wait for it to end instead of writing into it,
 //! reading its uncommitted rows, or being committed or rolled back with it.
+//! Writes that must be seen together, such as a history body and the row that
+//! references it, commit together even for another connection's retention.
 
 use anvil_domain::Id;
 use anvil_storage::store::{DB_FILE, StoreError};
 use anvil_storage::{KdfParams, Key, Store, kind, vault};
+use serde::{Serialize, Serializer};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::mpsc;
@@ -245,4 +248,95 @@ fn consistent_reads_take_no_write_lock_and_see_one_state() {
     assert_eq!(second.unwrap()["name"], "kept", "a consistent read saw a write committed during it");
     assert_no_open_transaction(dir.path());
     assert_eq!(name(&store, &id).as_deref(), Some("changed"));
+}
+
+/// A history record whose serialization pauses until resumed. `add_history`
+/// serializes the record after storing the body blob and before writing the
+/// history row that references it, so the pause holds the insert exactly
+/// there without touching the database directly.
+struct PausedRecord {
+    reached: mpsc::Sender<()>,
+    resume: mpsc::Receiver<()>,
+}
+
+impl Serialize for PausedRecord {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.reached.send(()).unwrap();
+        self.resume.recv().unwrap();
+        json!({"status": 200}).serialize(s)
+    }
+}
+
+/// Insert a history entry with a body through `adder`, and run retention
+/// through `pruner` while the insert is paused between its body blob and its
+/// history row. Returns whether the database write lock was held during the
+/// pause and whether retention completed inside it.
+fn prune_during_add_history(dir: &Path, adder: &Store, pruner: &Store, id: &Id, body: &[u8]) -> (bool, bool) {
+    thread::scope(|sc| {
+        let (reached, reached_rx) = mpsc::channel();
+        let (resume, resume_rx) = mpsc::channel();
+        let (pruned, pruned_rx) = mpsc::channel();
+        let record = PausedRecord { reached, resume: resume_rx };
+        let started_at = chrono::Utc::now().timestamp_millis();
+        let add = sc.spawn(move || adder.add_history(id, None, None, started_at, &record, Some(body)));
+        reached_rx.recv().unwrap();
+
+        let lock_held = {
+            let raw = rusqlite::Connection::open(dir.join(DB_FILE)).unwrap();
+            raw.busy_timeout(Duration::ZERO).unwrap();
+            raw.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_err()
+        };
+
+        let prune = sc.spawn(move || {
+            let r = pruner.prune_history(365, 1_000_000);
+            let _ = pruned.send(());
+            r
+        });
+        let pruned_inside = pruned_rx.recv_timeout(WINDOW).is_ok();
+        resume.send(()).unwrap();
+        add.join().unwrap().unwrap();
+        assert_eq!(prune.join().unwrap().unwrap(), 0, "retention removed no history entry");
+        (lock_held, pruned_inside)
+    })
+}
+
+fn history_body(store: &Store, id: &Id) -> Option<Vec<u8>> {
+    let (record, body) = store.get_history::<Value>(&id.to_string()).unwrap().expect("the history entry was stored");
+    assert_eq!(record, json!({"status": 200}));
+    body.map(|b| b.to_vec())
+}
+
+#[test]
+fn retention_on_another_connection_never_collects_a_body_being_inserted() {
+    let (dir, a, dek) = open();
+    // A second connection to the same profile, as another process would have.
+    let b = Store::open(dir.path(), dek.clone()).unwrap();
+    let id = Id::new();
+    let body = b"response body".as_slice();
+
+    let (lock_held, pruned_inside) = prune_during_add_history(dir.path(), &a, &b, &id, body);
+
+    assert!(lock_held, "the body blob was stored outside a transaction shared with its history row");
+    assert!(!pruned_inside, "retention on another connection ran between the body blob and its history row");
+    assert_eq!(history_body(&a, &id).as_deref(), Some(body), "retention collected the body of a history entry being inserted");
+    assert_eq!(history_body(&b, &id).as_deref(), Some(body));
+    drop((a, b));
+    let reopened = Store::open(dir.path(), dek).unwrap();
+    assert_eq!(history_body(&reopened, &id).as_deref(), Some(body));
+}
+
+#[test]
+fn retention_on_the_same_connection_waits_for_a_history_insert() {
+    let (dir, store, dek) = open();
+    let id = Id::new();
+    let body = b"response body".as_slice();
+
+    let (lock_held, pruned_inside) = prune_during_add_history(dir.path(), &store, &store, &id, body);
+
+    assert!(lock_held);
+    assert!(!pruned_inside, "retention ran between the body blob and its history row");
+    assert_eq!(history_body(&store, &id).as_deref(), Some(body));
+    drop(store);
+    let reopened = Store::open(dir.path(), dek).unwrap();
+    assert_eq!(history_body(&reopened, &id).as_deref(), Some(body));
 }
