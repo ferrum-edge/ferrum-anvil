@@ -80,8 +80,11 @@ impl App {
         })
     }
 
-    /// Persist an import atomically. Imported requests are ordinary saved
-    /// requests (with an import link for reimport diffs); nothing is sent.
+    /// Persist an import. Folders, requests, environments and the source
+    /// record are written in one transaction; the new workspace or root
+    /// folder and the stored original file are written before it and stay if
+    /// it fails. Imported requests are ordinary saved requests (with an
+    /// import link for reimport diffs); nothing is sent.
     pub fn spec_import(&self, bytes: &[u8], file_name: &str, opts: &ImportOptions, target: SpecTarget) -> Result<SpecImported> {
         let mut r = run(bytes, opts)?;
         let (workspace_id, root_folder_id) = match target {
@@ -122,8 +125,9 @@ impl App {
             anvil_domain::request::AttachmentRef::Stored { sha256, .. } => sha256,
             anvil_domain::request::AttachmentRef::LinkedFile { .. } => String::new(),
         };
-        let checkpoint = self.store.checkpoint("before-spec-import")?;
-        let res = self.store.atomically(|s| {
+        // Kept for a manual restore only; see `App::import`.
+        self.store.checkpoint("before-spec-import")?;
+        self.store.atomically(|s| {
             for f in &r.folders {
                 s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, f)?;
             }
@@ -143,11 +147,7 @@ impl App {
             };
             s.put(kind::SPEC_SOURCE, &r.source.import_id, Some(&workspace_id), None, 0.0, &rec)?;
             Ok(())
-        });
-        if let Err(e) = res {
-            let _ = self.store.restore_checkpoint(&checkpoint);
-            return Err(e.into());
-        }
+        })?;
         Ok(SpecImported { workspace_id, root_folder_id, import_id: r.source.import_id, requests: r.requests.len(), report: r.report })
     }
 
@@ -206,8 +206,9 @@ impl App {
             .collect();
         let keep: Vec<Id> = next.iter().map(|q| q.meta.id).collect();
         let deleted: Vec<Id> = previous.iter().map(|q| q.meta.id).filter(|id| !keep.contains(id)).collect();
-        let checkpoint = self.store.checkpoint("before-spec-reimport")?;
-        let res = self.store.atomically(|s| {
+        // Kept for a manual restore only; see `App::import`.
+        self.store.checkpoint("before-spec-reimport")?;
+        self.store.atomically(|s| {
             for f in &new_folders {
                 s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, f)?;
             }
@@ -228,11 +229,7 @@ impl App {
             s.delete(kind::SPEC_SOURCE, &rec.previous_import_ids[rec.previous_import_ids.len() - 1])?;
             s.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec)?;
             Ok(())
-        });
-        if let Err(e) = res {
-            let _ = self.store.restore_checkpoint(&checkpoint);
-            return Err(e.into());
-        }
+        })?;
         Ok(next.len())
     }
 }
