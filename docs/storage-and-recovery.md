@@ -289,12 +289,11 @@ in it can be read or changed without the export passphrase:
   token-file bindings or linked-file bindings (they name files on this
   device); the preview lists them. Nor does it carry device-identity seals
   (this device's own choice): the preview does not list the seals held where
-  the backup was taken, because a restore seals every workspace it writes
-  anyway. A restore seals every workspace in the backup, in the same
-  transaction, from this device's workload identity (a JWT-SVID from the
-  Workload API or a token file, and a TLS profile presenting an X.509-SVID
-  from the Workload API) until the user lifts the seal on this device
-  (**Allow on this device** in the workspace settings' Auth tab, or
+  the backup was taken, because a restore seals every workspace in the
+  backup, in the same transaction, from this device's workload identity (a
+  JWT-SVID from the Workload API or a token file, and a TLS profile presenting
+  an X.509-SVID from the Workload API) until the user lifts the seal on this
+  device (**Allow on this device** in the workspace settings' Auth tab, or
   `anvil workspace allow-device-identity`), as a bundle import does; the
   preview and the report say so. Attachment index entries and blob pins are
   specific to one database and are rebuilt on restore. The restore preview
@@ -333,9 +332,11 @@ other workspace, Replace keeps this profile's app settings; the preview and
 the report say so, and the plan counts them as kept. When Replace does restore
 them, the preview and the report say that too: they then apply to every
 workspace here, including ones created later. App settings also carry the
-lock, history retention and redaction policies. A restore normalises only
-their default request settings (DNS overrides, resolver, proxy and TLS
-defaults and the like) and restores these policies as the backup has them.
+lock, history retention and redaction policies. In their default request
+settings a restore turns off only cross-origin credential forwarding on
+redirect and 0-RTT early data; everything else, including DNS overrides,
+resolver, proxy and TLS defaults and these policies, is restored as the backup
+has them.
 
 Restore only a full backup that is your own or that you otherwise trust. Like
 a bundle, a backup can claim a workspace already stored here, and what it
