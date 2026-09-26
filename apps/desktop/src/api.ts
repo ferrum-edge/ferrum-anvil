@@ -79,12 +79,18 @@ export interface Status {
   protection?: ProtectionMode;
   version: string;
 }
+export interface KeychainEntryName {
+  service: string;
+  account: string;
+}
 export interface ProfileSummary {
   profile_id: string;
   display_name: string;
   protection: ProtectionMode;
   dir: string;
   created_at: string;
+  /** OS keychain entry left behind by converting to a passphrase; it no longer opens the profile and its removal is retried at each unlock. */
+  leftover_keychain_entry?: KeychainEntryName | null;
 }
 export interface TreeNode {
   id: string;
