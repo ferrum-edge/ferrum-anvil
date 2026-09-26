@@ -877,8 +877,8 @@ fn validate_stages(stages: &[Stage], cap: u64, what: &str) -> Result<u64, LoadEr
     if stages.is_empty() {
         return Err(LoadError::Invalid("the workload has no stages".into()));
     }
-    let total = schedule::total_secs(stages)
-        .ok_or_else(|| LoadError::Invalid("the stage durations overflow; shorten the schedule".into()))?;
+    let total =
+        schedule::total_secs(stages).ok_or_else(|| LoadError::Invalid("the stage durations overflow; shorten the schedule".into()))?;
     if total == 0 {
         return Err(LoadError::Invalid("the stages have zero total duration".into()));
     }

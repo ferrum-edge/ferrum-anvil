@@ -55,9 +55,8 @@ fn is_typed_refusal(result: Result<Result<(), LoadError>, Box<dyn std::any::Any 
 
 #[test]
 fn overflowing_closed_plan_is_refused_without_panicking() {
-    let result = std::panic::catch_unwind(|| {
-        validate_plan(&plan(Workload::ClosedVirtualUsers { stages: overflow_stages(), think_time_ms: 0 }))
-    });
+    let result =
+        std::panic::catch_unwind(|| validate_plan(&plan(Workload::ClosedVirtualUsers { stages: overflow_stages(), think_time_ms: 0 })));
     assert!(is_typed_refusal(result), "a closed plan whose stages overflow must be a typed refusal");
 }
 
