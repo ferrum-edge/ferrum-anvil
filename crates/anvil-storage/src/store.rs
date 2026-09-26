@@ -65,6 +65,10 @@ pub mod kind {
     pub const SPEC_SOURCE: &str = "spec_source";
     /// Saved collection-run reports (`anvil_domain::runner::RunReport`).
     pub const RUN_REPORT: &str = "run_report";
+    /// Token files the user bound in the desktop's native open dialog
+    /// (`anvil_app::token_files`). Device-specific: not in [`ALL`], never
+    /// exported or imported.
+    pub const TOKEN_FILE: &str = "token_file";
     pub const ALL: &[&str] = &[
         WORKSPACE,
         FOLDER,

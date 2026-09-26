@@ -1,11 +1,13 @@
 //! Native file dialogs. The backend shows the dialog and keeps the chosen
 //! path; the webview receives only an opaque grant bound to one purpose (see
 //! `anvil_app::file_grants`), which the file commands accept in place of a
-//! path. No command takes a file path from the webview.
+//! path. No command takes a file path from the webview. A JWT-SVID token
+//! file is bound in the vault instead (`anvil_app::token_files`), and only a
+//! bound path is read at send time.
 
-use crate::commands::R;
+use crate::commands::{R, e};
 use crate::state::DesktopState;
-use anvil_app::file_grants::{Access, FileGrant, FilePurpose};
+use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
 use serde::Deserialize;
 use tauri::{State, Window};
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -31,9 +33,10 @@ pub struct DialogOptions {
     pub multiple: bool,
 }
 
-/// Show the native open dialog (read purposes) or save dialog (write
-/// purposes) and return a grant for each chosen file; empty if the user
-/// cancelled. Refused while locked.
+/// Show the native open dialog (read and bind purposes) or save dialog
+/// (write purposes) and return a grant for each chosen file; empty if the
+/// user cancelled. Refused while locked; a lock while the dialog is open
+/// grants nothing.
 #[tauri::command]
 pub async fn file_choose(
     window: Window,
@@ -42,9 +45,12 @@ pub async fn file_choose(
     options: Option<DialogOptions>,
 ) -> R<Vec<FileGrant>> {
     st.app()?;
+    let generation = st.file_grants.generation();
     let options = options.unwrap_or_default();
-    if options.multiple && purpose.access() == Access::Write {
-        return Err("a save dialog chooses one file".into());
+    match purpose.access() {
+        Access::Write if options.multiple => return Err("a save dialog chooses one file".into()),
+        Access::Bind if options.multiple => return Err("choose one token file".into()),
+        _ => {}
     }
     let mut dialog = window.dialog().file();
     #[cfg(any(windows, target_os = "macos"))]
@@ -61,7 +67,7 @@ pub async fn file_choose(
         Access::Read if options.multiple => dialog.pick_files(move |p| {
             let _ = tx.send(p);
         }),
-        Access::Read => dialog.pick_file(move |p| {
+        Access::Read | Access::Bind => dialog.pick_file(move |p| {
             let _ = tx.send(p.map(|f| vec![f]));
         }),
         Access::Write => {
@@ -78,13 +84,21 @@ pub async fn file_choose(
         return Err(format!("choose at most {MAX_PICKED} files at once"));
     }
     // The app may have locked while the dialog was open: grant nothing then.
-    st.app()?;
+    let app = st.app()?;
     let mut grants = Vec::with_capacity(picked.len());
     for file in picked {
         let path = file.into_path().map_err(|x| x.to_string())?;
         let grant = match purpose.access() {
-            Access::Read => st.file_grants.grant_read(purpose, &path),
-            Access::Write => st.file_grants.grant_write(purpose, &path),
+            Access::Read => st.file_grants.grant_read_at(purpose, &path, generation),
+            Access::Write => st.file_grants.grant_write_at(purpose, &path, generation),
+            Access::Bind => {
+                if st.file_grants.generation() != generation {
+                    return Err(GrantError::Revoked.to_string());
+                }
+                let b = app.bind_token_file(&path).map_err(e)?;
+                let file_name = std::path::Path::new(&b.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Ok(FileGrant { token: b.id.to_string(), file_name, path: Some(b.path) })
+            }
         };
         grants.push(grant.map_err(|x| x.to_string())?);
     }
@@ -102,5 +116,6 @@ fn title(purpose: FilePurpose) -> &'static str {
         FilePurpose::BundleExport => "Export an Anvil bundle",
         FilePurpose::LoadReportExport => "Export the load report",
         FilePurpose::RunReportExport => "Export the run report",
+        FilePurpose::JwtSvidFile => "Choose the JWT-SVID token file",
     }
 }

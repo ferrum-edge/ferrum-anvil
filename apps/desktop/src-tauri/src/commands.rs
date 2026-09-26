@@ -3,7 +3,7 @@
 //! the user explicitly typed them (they are stored and only references return).
 
 use crate::state::DesktopState;
-use anvil_app::exec::SendOptions;
+use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::FilePurpose;
 use anvil_app::profiles::Unlock;
 use anvil_app::{App, AppError};
@@ -86,7 +86,7 @@ pub fn profile_create(st: State<'_, DesktopState>, name: String, passphrase: Opt
     };
     let header = anvil_storage::vault::read_header(&summary.dir).map_err(|x| x.to_string())?;
     let app = App::open(summary.dir.clone(), header, key).map_err(e)?;
-    *st.app.write() = Some(Arc::new(app));
+    st.set_app(app);
     st.touch();
     Ok(Created { profile_id: summary.profile_id, recovery_key: recovery })
 }
@@ -113,7 +113,7 @@ pub fn profile_unlock(st: State<'_, DesktopState>, profile_id: String, passphras
         }
     }
     let app = App::open(p.dir, header, key).map_err(e)?;
-    *st.app.write() = Some(Arc::new(app));
+    st.set_app(app);
     st.touch();
     st.flush_pending_reports();
     Ok(())
@@ -213,6 +213,8 @@ pub fn folder_delete(st: State<'_, DesktopState>, folder_id: String) -> R<()> {
     st.app()?.delete_folder(&id(&folder_id)?).map_err(e)
 }
 
+/// A spec from the webview references only stored attachments, never a
+/// linked local file (a path).
 #[tauri::command]
 pub fn request_create(
     st: State<'_, DesktopState>,
@@ -221,8 +223,11 @@ pub fn request_create(
     name: String,
     spec: Option<RequestSpec>,
 ) -> R<RequestDefinition> {
+    let app = st.app()?;
     let folder = folder_id.map(|p| id(&p)).transpose()?;
-    st.app()?.create_request(&id(&workspace_id)?, folder, &name, spec.unwrap_or_else(|| RequestSpec::http("GET", "https://"))).map_err(e)
+    let spec = spec.unwrap_or_else(|| RequestSpec::http("GET", "https://"));
+    refuse_linked_files(&spec).map_err(e)?;
+    app.create_request(&id(&workspace_id)?, folder, &name, spec).map_err(e)
 }
 
 #[tauri::command]
@@ -232,7 +237,9 @@ pub fn request_get(st: State<'_, DesktopState>, request_id: String) -> R<Request
 
 #[tauri::command]
 pub fn request_save(st: State<'_, DesktopState>, request: RequestDefinition) -> R<RequestDefinition> {
-    st.app()?.save_request(request).map_err(e)
+    let app = st.app()?;
+    refuse_linked_files(&request.spec).map_err(e)?;
+    app.save_request(request).map_err(e)
 }
 
 #[tauri::command]

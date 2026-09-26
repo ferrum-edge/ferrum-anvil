@@ -16,8 +16,13 @@ const MAX_SOURCE: u64 = 32 * 1024 * 1024;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpecInput {
     /// A file chosen in the native open dialog (purpose `spec_source`).
-    File { grant: String },
-    Text { text: String, name: String },
+    File {
+        grant: String,
+    },
+    Text {
+        text: String,
+        name: String,
+    },
 }
 
 impl SpecInput {

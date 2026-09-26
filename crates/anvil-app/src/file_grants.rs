@@ -13,7 +13,12 @@
 //!   goes to a newly created temporary file in that folder (never through an
 //!   existing file or link) that is then renamed over the chosen name. A
 //!   successful write spends the grant.
-//! - Grants expire, are bounded in number and are all revoked on lock.
+//! - Grants expire, are bounded in number and are all revoked on lock. A
+//!   choice that was still in progress when the app locked grants nothing.
+//!
+//! A JWT-SVID token file (`jwt_svid_file`) is different: it is re-read at
+//! every send, so the choice is kept as a persistent binding in the vault
+//! (`anvil_app::token_files`) rather than as a session grant.
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -53,12 +58,19 @@ pub enum FilePurpose {
     LoadReportExport,
     /// Write a collection-run report.
     RunReportExport,
+    /// Bind a JWT-SVID token file that the backend reads at send time.
+    JwtSvidFile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
+    /// Open dialog; the file is read through a session grant.
     Read,
+    /// Save dialog; the file is written through a session grant.
     Write,
+    /// Open dialog; the choice is bound persistently in the vault and the
+    /// backend reads the file itself (never through a grant).
+    Bind,
 }
 
 impl FilePurpose {
@@ -71,7 +83,14 @@ impl FilePurpose {
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
             | FilePurpose::Dataset => Access::Read,
+            FilePurpose::JwtSvidFile => Access::Bind,
         }
+    }
+
+    /// Whether a written file is created readable only by its owner (Unix):
+    /// bundles and backups can carry secrets.
+    pub fn owner_only(self) -> bool {
+        matches!(self, FilePurpose::BundleExport)
     }
 
     /// Largest file read for this purpose (0 for write purposes).
@@ -83,7 +102,7 @@ impl FilePurpose {
             FilePurpose::PemFile | FilePurpose::Pkcs12File => MIB,
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
-            FilePurpose::BundleExport | FilePurpose::LoadReportExport | FilePurpose::RunReportExport => 0,
+            FilePurpose::BundleExport | FilePurpose::LoadReportExport | FilePurpose::RunReportExport | FilePurpose::JwtSvidFile => 0,
         }
     }
 }
@@ -95,6 +114,10 @@ pub struct FileGrant {
     pub token: String,
     /// The chosen file's name without its folder, for display.
     pub file_name: String,
+    /// Only for a bound token file (`jwt_svid_file`): the bound path, which
+    /// the auth setting names. The backend reads it only while it is bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Contents of a file read through a grant.
@@ -112,6 +135,8 @@ pub enum GrantError {
     WrongPurpose,
     #[error("the chosen file changed after it was selected; choose the file again")]
     Changed,
+    #[error("Anvil locked while the file was being chosen; choose the file again")]
+    Revoked,
     #[error("{0}")]
     Invalid(String),
     #[error("the file is larger than {0}")]
@@ -125,25 +150,25 @@ fn io(err: std::io::Error) -> GrantError {
 }
 
 /// Identifies the file a path named when it was chosen, so a replacement
-/// under the same name is noticed: device and inode on Unix, the creation
-/// time on Windows.
+/// under the same name is noticed: device and inode on Unix, volume serial
+/// number and file index on Windows.
 type FileId = (u64, u64);
 
 #[cfg(unix)]
-fn file_id(meta: &Metadata) -> FileId {
+fn file_id(_file: &File, meta: &Metadata) -> std::io::Result<FileId> {
     use std::os::unix::fs::MetadataExt;
-    (meta.dev(), meta.ino())
+    Ok((meta.dev(), meta.ino()))
 }
 
 #[cfg(windows)]
-fn file_id(meta: &Metadata) -> FileId {
-    use std::os::windows::fs::MetadataExt;
-    (meta.creation_time(), 0)
+fn file_id(file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
+    let info = winapi_util::file::information(file)?;
+    Ok((info.volume_serial_number(), info.file_index()))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn file_id(_meta: &Metadata) -> FileId {
-    (0, 0)
+fn file_id(_file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
+    Ok((0, 0))
 }
 
 #[derive(Debug, Clone)]
@@ -162,9 +187,16 @@ struct Entry {
     seq: u64,
 }
 
+struct State {
+    entries: HashMap<String, Entry>,
+    /// Bumped by `revoke_all`. A grant is recorded only while the generation
+    /// its choice started in is still current.
+    generation: u64,
+}
+
 /// The session's outstanding grants.
 pub struct FileGrants {
-    entries: Mutex<HashMap<String, Entry>>,
+    state: Mutex<State>,
     next_seq: AtomicU64,
     ttl: Duration,
 }
@@ -177,11 +209,23 @@ impl Default for FileGrants {
 
 impl FileGrants {
     pub fn new(ttl: Duration) -> Self {
-        FileGrants { entries: Mutex::new(HashMap::new()), next_seq: AtomicU64::new(0), ttl }
+        FileGrants { state: Mutex::new(State { entries: HashMap::new(), generation: 0 }), next_seq: AtomicU64::new(0), ttl }
+    }
+
+    /// The current revocation generation. Take it before showing a dialog and
+    /// pass it to `grant_read_at`/`grant_write_at`, so that a lock while the
+    /// dialog was open grants nothing.
+    pub fn generation(&self) -> u64 {
+        self.state.lock().generation
     }
 
     /// Record a file the user picked in the native open dialog for `purpose`.
     pub fn grant_read(&self, purpose: FilePurpose, picked: &Path) -> Result<FileGrant, GrantError> {
+        self.grant_read_at(purpose, picked, self.generation())
+    }
+
+    /// `grant_read` for a choice that started in `generation`.
+    pub fn grant_read_at(&self, purpose: FilePurpose, picked: &Path, generation: u64) -> Result<FileGrant, GrantError> {
         if purpose.access() != Access::Read {
             return Err(GrantError::WrongPurpose);
         }
@@ -189,17 +233,28 @@ impl FileGrants {
             return Err(GrantError::Invalid("the chosen file has no absolute path".into()));
         }
         let path = std::fs::canonicalize(picked).map_err(io)?;
-        let meta = std::fs::metadata(&path).map_err(io)?;
+        // Checked before opening, so a FIFO or device is never opened.
+        if !std::fs::metadata(&path).map_err(io)?.is_file() {
+            return Err(GrantError::Invalid("not a regular file".into()));
+        }
+        let file = File::open(&path).map_err(io)?;
+        let meta = file.metadata().map_err(io)?;
         if !meta.is_file() {
             return Err(GrantError::Invalid("not a regular file".into()));
         }
+        let id = file_id(&file, &meta).map_err(io)?;
         let file_name = display_name(path.file_name());
-        Ok(self.insert(purpose, Target::Read { id: file_id(&meta), path }, file_name))
+        self.insert(purpose, Target::Read { id, path }, file_name, generation)
     }
 
     /// Record a destination the user picked in the native save dialog for
     /// `purpose`.
     pub fn grant_write(&self, purpose: FilePurpose, picked: &Path) -> Result<FileGrant, GrantError> {
+        self.grant_write_at(purpose, picked, self.generation())
+    }
+
+    /// `grant_write` for a choice that started in `generation`.
+    pub fn grant_write_at(&self, purpose: FilePurpose, picked: &Path, generation: u64) -> Result<FileGrant, GrantError> {
         if purpose.access() != Access::Write {
             return Err(GrantError::WrongPurpose);
         }
@@ -215,7 +270,7 @@ impl FileGrants {
         }
         refuse_directory(&dir.join(name))?;
         let file_name = display_name(Some(name));
-        Ok(self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name))
+        self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name, generation)
     }
 
     /// Read the file behind a read grant issued for `purpose`. The grant stays
@@ -236,7 +291,7 @@ impl FileGrants {
         }
         let file = File::open(&path).map_err(io)?;
         let meta = file.metadata().map_err(io)?;
-        if !meta.is_file() || file_id(&meta) != id {
+        if !meta.is_file() || file_id(&file, &meta).map_err(io)? != id {
             return Err(GrantError::Changed);
         }
         let max = purpose.max_read_bytes();
@@ -254,76 +309,91 @@ impl FileGrants {
 
     /// Replace the destination behind a write grant issued for `purpose` with
     /// `bytes`. The grant is spent when the write succeeds; after a failure it
-    /// stays usable for a retry.
+    /// stays usable for a retry, unless the app locked in the meantime.
     pub fn write(&self, token: &str, purpose: FilePurpose, bytes: &[u8]) -> Result<usize, GrantError> {
         if purpose.access() != Access::Write {
             return Err(GrantError::WrongPurpose);
         }
-        let entry = self.take(token, purpose)?;
-        let result = write_target(&entry.target, bytes);
+        let (entry, generation) = self.take(token, purpose)?;
+        let result = write_target(&entry.target, bytes, purpose.owner_only());
         if result.is_err() {
-            self.entries.lock().insert(token.to_owned(), entry);
+            let mut g = self.state.lock();
+            if g.generation == generation {
+                self.admit(&mut g, token.to_owned(), entry);
+            }
         }
         result.map(|()| bytes.len())
     }
 
-    /// Drop every grant (on lock).
+    /// Drop every grant (on lock); choices still in progress grant nothing.
     pub fn revoke_all(&self) {
-        self.entries.lock().clear();
+        let mut g = self.state.lock();
+        g.entries.clear();
+        g.generation = g.generation.wrapping_add(1);
     }
 
     /// Outstanding, unexpired grants.
     pub fn len(&self) -> usize {
-        let mut g = self.entries.lock();
-        self.prune(&mut g);
-        g.len()
+        let mut g = self.state.lock();
+        self.prune(&mut g.entries);
+        g.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    fn insert(&self, purpose: FilePurpose, target: Target, file_name: String) -> FileGrant {
+    fn insert(&self, purpose: FilePurpose, target: Target, file_name: String, generation: u64) -> Result<FileGrant, GrantError> {
         let token = format!("fg-{}", uuid::Uuid::new_v4().simple());
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let mut g = self.entries.lock();
-        self.prune(&mut g);
-        while g.len() >= MAX_GRANTS {
-            let Some(oldest) = g.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) else { break };
-            g.remove(&oldest);
+        let mut g = self.state.lock();
+        if g.generation != generation {
+            return Err(GrantError::Revoked);
         }
-        g.insert(token.clone(), Entry { purpose, target, file_name: file_name.clone(), issued: Instant::now(), seq });
-        FileGrant { token, file_name }
+        let entry = Entry { purpose, target, file_name: file_name.clone(), issued: Instant::now(), seq };
+        self.admit(&mut g, token.clone(), entry);
+        Ok(FileGrant { token, file_name, path: None })
     }
 
-    fn prune(&self, g: &mut HashMap<String, Entry>) {
-        g.retain(|_, e| e.issued.elapsed() < self.ttl);
+    /// Add a grant, dropping the oldest ones beyond `MAX_GRANTS`.
+    fn admit(&self, g: &mut State, token: String, entry: Entry) {
+        self.prune(&mut g.entries);
+        g.entries.insert(token, entry);
+        while g.entries.len() > MAX_GRANTS {
+            let Some(oldest) = g.entries.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) else { break };
+            g.entries.remove(&oldest);
+        }
+    }
+
+    fn prune(&self, entries: &mut HashMap<String, Entry>) {
+        entries.retain(|_, e| e.issued.elapsed() < self.ttl);
     }
 
     fn lookup(&self, token: &str, purpose: FilePurpose) -> Result<Entry, GrantError> {
-        let mut g = self.entries.lock();
-        self.prune(&mut g);
-        let entry = g.get(token).cloned().ok_or(GrantError::Unknown)?;
+        let mut g = self.state.lock();
+        self.prune(&mut g.entries);
+        let entry = g.entries.get(token).cloned().ok_or(GrantError::Unknown)?;
         if entry.purpose != purpose {
             // Presenting a grant to the wrong command revokes it.
-            g.remove(token);
+            g.entries.remove(token);
             return Err(GrantError::WrongPurpose);
         }
         Ok(entry)
     }
 
-    fn take(&self, token: &str, purpose: FilePurpose) -> Result<Entry, GrantError> {
-        let mut g = self.entries.lock();
-        self.prune(&mut g);
-        let entry = g.remove(token).ok_or(GrantError::Unknown)?;
+    /// Remove a grant for use, with the generation it was taken in.
+    fn take(&self, token: &str, purpose: FilePurpose) -> Result<(Entry, u64), GrantError> {
+        let mut g = self.state.lock();
+        self.prune(&mut g.entries);
+        let entry = g.entries.remove(token).ok_or(GrantError::Unknown)?;
         if entry.purpose != purpose {
             return Err(GrantError::WrongPurpose);
         }
-        Ok(entry)
+        Ok((entry, g.generation))
     }
 }
 
-fn write_target(target: &Target, bytes: &[u8]) -> Result<(), GrantError> {
+fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
     let Target::Write { dir, name } = target else {
         return Err(GrantError::WrongPurpose);
     };
@@ -339,7 +409,7 @@ fn write_target(target: &Target, bytes: &[u8]) -> Result<(), GrantError> {
     let tmp = dir.join(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
     // Renaming replaces the destination entry itself; a link there is
     // replaced, not followed.
-    match write_new(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &dest)) {
+    match write_new(&tmp, bytes, owner_only).and_then(|()| std::fs::rename(&tmp, &dest)) {
         Ok(()) => Ok(()),
         Err(err) => {
             let _ = std::fs::remove_file(&tmp);
@@ -348,8 +418,17 @@ fn write_target(target: &Target, bytes: &[u8]) -> Result<(), GrantError> {
     }
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
+fn write_new(path: &Path, bytes: &[u8], owner_only: bool) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if owner_only {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = owner_only;
+    let mut f = options.open(path)?;
     f.write_all(bytes)?;
     f.sync_all()
 }

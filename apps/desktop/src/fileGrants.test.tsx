@@ -71,14 +71,15 @@ describe("file grants in the renderer", () => {
     expect(onChange.mock.calls[0][0].extra_roots_pem).toEqual(["-----BEGIN CERTIFICATE-----"]);
   });
 
-  it("does not let the webview open a save dialog or the filesystem", () => {
+  it("does not let the webview open a file dialog or the filesystem", () => {
     const perms = capabilities.permissions as string[];
     expect(perms).not.toContain("dialog:allow-save");
+    expect(perms).not.toContain("dialog:allow-open");
     expect(perms).not.toContain("dialog:default");
     expect(perms.filter((p) => p.startsWith("fs:"))).toEqual([]);
   });
 
-  it("uses the webview's own open dialog only for the Workload API token-file setting", () => {
+  it("uses the dialog plugin only for confirmations", () => {
     const sources = import.meta.glob(["./*.tsx", "./*.ts", "!./*.test.tsx", "!./*.test.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
     const importers: Record<string, string[]> = {};
     for (const [file, text] of Object.entries(sources)) {
@@ -86,6 +87,6 @@ describe("file grants in the renderer", () => {
         importers[file] = m[1].split(",").map((s) => s.trim()).filter(Boolean);
       }
     }
-    expect(importers).toEqual({ "./WorkloadApi.tsx": ["open"], "./Workbench.tsx": ["ask"] });
+    expect(importers).toEqual({ "./Workbench.tsx": ["ask"] });
   });
 });

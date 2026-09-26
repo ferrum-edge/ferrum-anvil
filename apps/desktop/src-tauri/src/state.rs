@@ -50,6 +50,13 @@ impl DesktopState {
         *self.last_activity.lock() = Instant::now();
     }
 
+    /// Make `app` the open profile. The desktop confines JWT-SVID token
+    /// files to the ones bound in its native dialog.
+    pub fn set_app(&self, app: App) {
+        app.confine_token_files();
+        *self.app.write() = Some(Arc::new(app));
+    }
+
     /// The unlocked app, or an error the UI renders as the lock screen.
     pub fn app(&self) -> Result<Arc<App>, String> {
         let g = self.app.read();

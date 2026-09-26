@@ -3,7 +3,7 @@
 //! purpose, an expired or revoked grant, or a file swapped after it was
 //! chosen never reaches the disk.
 
-use anvil_app::file_grants::{FileGrants, FilePurpose, GrantError, MAX_GRANTS};
+use anvil_app::file_grants::{Access, FileGrants, FilePurpose, GrantError, MAX_GRANTS};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -203,22 +203,70 @@ fn outstanding_grants_are_bounded() {
     assert_eq!(grants.read(&tokens[MAX_GRANTS], FilePurpose::Attachment).unwrap().bytes, b"x");
 }
 
+#[test]
+fn a_file_replaced_after_it_was_chosen_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file(dir.path(), "cert.pem", b"chosen");
+    let grants = FileGrants::default();
+    let g = grants.grant_read(FilePurpose::PemFile, &path).unwrap();
+    // Created before the original goes away, so it cannot reuse its inode
+    // (Unix) or file index (Windows).
+    let swap = file(dir.path(), "swap", b"substituted");
+    std::fs::rename(swap, &path).unwrap();
+    assert_eq!(grants.read(&g.token, FilePurpose::PemFile).unwrap_err(), GrantError::Changed);
+}
+
+#[test]
+fn a_lock_while_the_dialog_is_open_grants_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file(dir.path(), "a.pem", b"pem");
+    let dest = dir.path().join("out.anvil");
+    let grants = FileGrants::default();
+    let before = grants.generation();
+    grants.revoke_all();
+    assert_ne!(grants.generation(), before);
+    assert_eq!(grants.grant_read_at(FilePurpose::PemFile, &src, before).unwrap_err(), GrantError::Revoked);
+    assert_eq!(grants.grant_write_at(FilePurpose::BundleExport, &dest, before).unwrap_err(), GrantError::Revoked);
+    assert!(grants.is_empty());
+    // A choice started after the lock is granted.
+    let now = grants.generation();
+    let g = grants.grant_read_at(FilePurpose::PemFile, &src, now).unwrap();
+    assert_eq!(grants.read(&g.token, FilePurpose::PemFile).unwrap().bytes, b"pem");
+    assert!(!dest.exists());
+}
+
+#[test]
+fn a_token_file_choice_is_never_a_session_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file(dir.path(), "jwt_svid.token", b"token");
+    let grants = FileGrants::default();
+    assert_eq!(FilePurpose::JwtSvidFile.access(), Access::Bind);
+    assert_eq!(grants.grant_read(FilePurpose::JwtSvidFile, &path).unwrap_err(), GrantError::WrongPurpose);
+    assert_eq!(grants.grant_write(FilePurpose::JwtSvidFile, &path).unwrap_err(), GrantError::WrongPurpose);
+    assert!(grants.is_empty());
+    let g = grants.grant_read(FilePurpose::PemFile, &path).unwrap();
+    assert_eq!(grants.read(&g.token, FilePurpose::JwtSvidFile).unwrap_err(), GrantError::WrongPurpose);
+}
+
+#[test]
+fn a_failed_write_that_is_kept_stays_within_the_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file(dir.path(), "a.bin", b"x");
+    let dest = dir.path().join("out.anvil");
+    let grants = FileGrants::default();
+    let w = grants.grant_write(FilePurpose::BundleExport, &dest).unwrap();
+    for _ in 1..MAX_GRANTS {
+        grants.grant_read(FilePurpose::Attachment, &src).unwrap();
+    }
+    std::fs::create_dir(&dest).unwrap();
+    assert!(grants.write(&w.token, FilePurpose::BundleExport, b"bundle").is_err());
+    assert_eq!(grants.len(), MAX_GRANTS);
+}
+
 #[cfg(unix)]
 mod unix {
     use super::*;
     use std::os::unix::fs::symlink;
-
-    #[test]
-    fn a_file_replaced_after_it_was_chosen_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = file(dir.path(), "cert.pem", b"chosen");
-        let grants = FileGrants::default();
-        let g = grants.grant_read(FilePurpose::PemFile, &path).unwrap();
-        // Created before the original goes away, so it cannot reuse its inode.
-        let swap = file(dir.path(), "swap", b"substituted");
-        std::fs::rename(swap, &path).unwrap();
-        assert_eq!(grants.read(&g.token, FilePurpose::PemFile).unwrap_err(), GrantError::Changed);
-    }
 
     #[test]
     fn a_file_swapped_for_a_link_after_it_was_chosen_is_refused() {
@@ -265,5 +313,17 @@ mod unix {
         assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
         assert!(!std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read(&dest).unwrap(), b"{\"report\":1}");
+    }
+
+    #[test]
+    fn an_exported_bundle_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = file(dir.path(), "backup.anvil", b"old");
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let grants = FileGrants::default();
+        let g = grants.grant_write(FilePurpose::BundleExport, &dest).unwrap();
+        grants.write(&g.token, FilePurpose::BundleExport, b"bundle").unwrap();
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }

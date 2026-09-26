@@ -38,8 +38,19 @@ CLI (`anvil`) = same anvil-app services without a webview.
   report export); file commands accept only such a grant
   (`anvil_app::file_grants`). A read grant is refused if the file or a folder
   on its path was replaced after the choice; a write goes to a new temporary
-  file that is renamed over the chosen name, and spends the grant. Grants
-  expire after 30 minutes, are capped at 32 and are revoked on lock.
+  file that is renamed over the chosen name, and spends the grant (a bundle
+  or backup is created readable only by its owner on Unix). Grants expire
+  after 30 minutes, are capped at 32 and are revoked on lock; a dialog that
+  was open when the app locked grants nothing.
+- **Request specs from the webview name no local file.** `build_context`
+  refuses an unsaved draft that references a linked file
+  (`AttachmentRef::LinkedFile`), and the desktop refuses to create or save
+  a request that does. A JWT-SVID token file is re-read at every send, so
+  it is bound instead of granted: `file_choose` with purpose
+  `jwt_svid_file` records the chosen canonical path in the vault
+  (`anvil_app::token_files`, never exported or imported), and the desktop
+  confines the app so a token-file path that is not bound is refused before
+  anything is read.
 - **Load traffic never runs in the UI process.** The desktop re-launches its
   own executable with a fixed, non-secret flag and sends the job over stdin.
   The job carries only the secrets its requests reference.

@@ -118,7 +118,7 @@ impl App {
             AttachmentRef::Stored { sha256, .. } => {
                 self.get_attachment(sha256)?.ok_or_else(|| AppError::NotFound(format!("dataset attachment {sha256}")))?
             }
-            AttachmentRef::LinkedFile { path } => std::fs::read(path)?,
+            AttachmentRef::LinkedFile { path } => read_linked_dataset(path)?,
         };
         let fmt = match d.format {
             DomainDatasetFormat::Csv => DatasetFormat::Csv,
@@ -269,6 +269,28 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
         Protocol::Http => "HTTP",
     };
     format!("{label} {}", url_origin(&url))
+}
+
+/// A dataset stored as a linked file, bounded like a dataset chosen in the
+/// desktop's dialog; only a regular file is opened.
+fn read_linked_dataset(path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let max = crate::file_grants::FilePurpose::Dataset.max_read_bytes();
+    let too_large = || AppError::Invalid(format!("the linked dataset is larger than {} MiB", max >> 20));
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(AppError::Invalid("the linked dataset is not a regular file".into()));
+    }
+    if meta.len() > max {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(max + 1).read_to_end(&mut bytes)?;
+    // Bounded even if the file grows while it is read.
+    if bytes.len() as u64 > max {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 fn url_origin(url: &str) -> String {
