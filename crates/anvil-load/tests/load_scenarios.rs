@@ -702,6 +702,75 @@ async fn chain_extraction_feeds_next_step_with_dataset_rows() {
     assert_eq!(r.dataset_sha256, Some(sha));
 }
 
+fn extracting_tok(url: &str) -> RequestSpec {
+    let mut s = RequestSpec::http("GET", url);
+    s.extractions =
+        vec![Extraction { variable: "tok".into(), source: ExtractionSource::JsonPath { path: "$.tok".into() }, sensitive: false }];
+    s
+}
+
+/// A request prepared under a sealed import root (`ExecutionContext::scope`).
+fn scoped(spec: RequestSpec, root: Id) -> ExecutionContext {
+    let mut c = ctx(spec);
+    c.scope = Some(root);
+    c
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chain_values_stay_on_their_side_of_an_import_root() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let root = Id::new();
+    let (a, b, c, d) = (Id::new(), Id::new(), Id::new(), Id::new());
+    let requests = HashMap::from([
+        (a, ctx(extracting_tok(&f.url(r#"/status/200?body={"tok":"user-{{k}}"}"#)))),
+        (b, scoped(extracting_tok(&f.url(r#"/status/200?body={"tok":"imported"}"#)), root)),
+        (c, scoped(RequestSpec::http("GET", &f.url("/count/sealed-{{tok}}")), root)),
+        (d, ctx(RequestSpec::http("GET", &f.url("/count/user-{{tok}}")))),
+    ]);
+    let data = Dataset::parse(DatasetFormat::Csv, b"k\nalpha\nbeta\ngamma\n".to_vec()).unwrap();
+    let mut p = plan(Workload::Iterations { iterations: 30, concurrency: 3 }, vec![a, b, c, d]);
+    p.dataset_id = Some(Id::new());
+    // Through the worker's wire format, as a worker run receives it.
+    let job = LoadJob { requests, dataset: Some(data) };
+    let wire = serde_json::to_vec(&WorkerJob::from_load_job(&p, &job, opts()).unwrap()).unwrap();
+    let (p, job, o) = serde_json::from_slice::<WorkerJob>(&wire).unwrap().into_load_job().unwrap();
+    assert_eq!((job.requests[&a].scope, job.requests[&b].scope), (None, Some(root)));
+    let r = LoadRun::prepare(p, job, o).expect("valid plan").execute(CancellationToken::new(), None).await;
+    assert_balanced(&r);
+    assert_eq!(r.counts.completed, 30);
+    // The root's steps saw only what the root extracted; the workspace's
+    // steps only what the workspace extracted.
+    let counters = f.state.counters.lock().clone();
+    let mut expected = HashMap::new();
+    for (k, n) in [("sealed-imported", 30), ("user-user-alpha", 10), ("user-user-beta", 10), ("user-user-gamma", 10)] {
+        expected.insert(k.to_string(), n);
+    }
+    assert_eq!(counters, expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_step_under_an_import_root_never_sends_a_workspace_value() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let root = Id::new();
+    let (login, leak, row) = (Id::new(), Id::new(), Id::new());
+    let requests = vec![
+        (login, ctx(extracting_tok(&f.url(r#"/status/200?body={"tok":"user-session"}"#)))),
+        (leak, scoped(RequestSpec::http("GET", &f.url("/count/leak-{{tok}}")), root)),
+        (row, scoped(RequestSpec::http("GET", &f.url("/count/row-{{k}}")), root)),
+    ];
+    for chain in [vec![login, leak], vec![row]] {
+        let data = Dataset::parse(DatasetFormat::Csv, b"k\nalpha\n".to_vec()).unwrap();
+        let mut p = plan(Workload::Iterations { iterations: 4, concurrency: 1 }, chain);
+        p.dataset_id = Some(Id::new());
+        let r = run(p, requests.clone(), Some(data)).await;
+        assert_eq!(r.counts.started, 4);
+    }
+    assert_eq!(received(&f, "/status/").len(), 4, "the workspace's own step ran");
+    assert!(received(&f, "/count/").is_empty(), "{:?}", f.state.counters.lock());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn weighted_mix_follows_seeded_weights() {
     let _g = serial().await;

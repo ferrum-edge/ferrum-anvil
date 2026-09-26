@@ -1,12 +1,15 @@
 //! Build frozen execution contexts from storage and run them through the
 //! shared engine, recording redacted history.
 
+use crate::file_grants::FilePurpose;
+use crate::linked_files::{LinkedFileReferrer, read_bound_file};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
+use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::Variable;
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::{AttachmentResolver, ExecutionContext, SecretResolver};
@@ -35,6 +38,9 @@ impl SecretResolver for StoreSecrets {
 pub struct StoreAttachments {
     pub app_store: Arc<Store>,
     pub index: std::collections::HashMap<String, Vec<u8>>,
+    /// Linked files chosen on this device (see `anvil_app::linked_files`);
+    /// any other linked file is refused, never read.
+    pub linked: Vec<String>,
 }
 
 impl AttachmentResolver for StoreAttachments {
@@ -45,7 +51,10 @@ impl AttachmentResolver for StoreAttachments {
                 .get(sha256)
                 .map(|b| Bytes::from(b.clone()))
                 .ok_or_else(|| format!("attachment '{file_name}' is missing from this workspace")),
-            AttachmentRef::LinkedFile { .. } => anvil_engine::context::MemoryAttachments::default().load(a),
+            AttachmentRef::LinkedFile { path } if self.linked.contains(path) => {
+                read_bound_file(path, FilePurpose::Attachment.max_read_bytes(), "file").map(Bytes::from).map_err(|e| e.to_string())
+            }
+            AttachmentRef::LinkedFile { path } => Err(format!("the linked local file '{path}' was not chosen on this device")),
         }
     }
 }
@@ -80,8 +89,21 @@ impl App {
     /// Build the frozen context for a saved request (optionally with an
     /// unsaved draft spec) — settings, auth and variable layers resolved
     /// from workspace → folders → request. A draft never names a linked
-    /// local file, and (when confined) a JWT-SVID token file is read only if
-    /// it was bound in the native dialog.
+    /// local file, a saved request only ones chosen for it in the native
+    /// dialog on this device, and (when confined) a JWT-SVID token file is
+    /// read only if it was bound in the native dialog.
+    ///
+    /// Under an import root (`Folder::import_root`) only the imported
+    /// collection's own scope resolves: the root and the folders under it,
+    /// and an environment the import brought. The workspace's variables and
+    /// auth, outer folders and any other environment are left out, and a
+    /// JWT-SVID from this device's Workload API or a token file is refused,
+    /// until the user opens the root to the workspace on this device
+    /// (`use_workspace_scope`). Settings still apply from the workspace
+    /// down, but a TLS profile whose client identity is bound to no host is
+    /// refused. The context is tagged with the sealed root
+    /// (`ExecutionContext::scope`) so a run or load chain keeps values
+    /// extracted outside it, and its dataset, away from it.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -103,7 +125,14 @@ impl App {
             (None, Some(d)) => (None, d),
             (None, None) => return Err(AppError::Invalid("nothing to send".into())),
         };
+        let referrer = req.as_ref().map(|r| LinkedFileReferrer::Request { id: r.meta.id });
+        let linked = self.bound_linked_files(referrer, &spec)?;
         let chain = self.folder_chain(req.as_ref().and_then(|r| r.folder_id))?;
+        // The innermost import root; unless the user opened it to the
+        // workspace, nothing outside it resolves under it.
+        let root = chain.iter().rposition(|f| f.import_root);
+        let sealed = root.filter(|&i| !chain[i].use_workspace_scope);
+        let inner = &chain[sealed.unwrap_or(0)..];
         let settings = self.settings()?;
         let secrets = StoreSecrets(self.store.clone());
         let mut settings_layers = vec![("app".to_string(), settings.defaults.clone()), ("workspace".to_string(), ws.settings.clone())];
@@ -123,19 +152,33 @@ impl App {
             }
             auth
         };
-        let mut auth_layers = vec![("workspace".to_string(), owned(&ws.auth, Some(ws.meta.id)))];
-        for f in &chain {
+        let mut auth_layers = Vec::new();
+        if sealed.is_none() {
+            auth_layers.push(("workspace".to_string(), owned(&ws.auth, Some(ws.meta.id))));
+        }
+        for f in inner {
             auth_layers.push((format!("folder:{}", f.name), owned(&f.auth, Some(f.meta.id))));
         }
         auth_layers.push(("request".into(), owned(&spec.auth, req.as_ref().map(|r| r.meta.id))));
-        let mut var_layers = vec![layer("workspace".into(), &ws.variables, &secrets)?];
+        let mut var_layers = Vec::new();
+        if sealed.is_none() {
+            var_layers.push(layer("workspace".into(), &ws.variables, &secrets)?);
+        }
+        // An import root's variables were the source's workspace variables,
+        // so they rank where those would in a workspace of its own: below
+        // the environment.
+        let (base, nested) = inner.split_at(root.map_or(0, |i| i + 1) - sealed.unwrap_or(0));
+        for f in base {
+            var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
+        }
         let env_id = opts.environment.or(ws.active_environment_id);
+        let env_id = env_id.filter(|eid| sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid)));
         if let Some(eid) = env_id {
             let env =
                 self.environments(ws_id)?.into_iter().find(|e| e.meta.id == eid).ok_or_else(|| AppError::NotFound("environment".into()))?;
             var_layers.push(layer(format!("environment:{}", env.name), &env.variables, &secrets)?);
         }
-        for f in &chain {
+        for f in nested {
             var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
         }
         if !opts.iteration_vars.is_empty() {
@@ -163,12 +206,17 @@ impl App {
             proxy_profiles: self.proxy_profiles(ws_id)?,
             integrations: self.integrations(ws_id)?,
             secrets: Arc::new(StoreSecrets(self.store.clone())),
-            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index }),
+            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,
             seed: opts.seed,
             redaction_names: settings_app.redaction_names.clone(),
+            scope: sealed.map(|i| chain[i].meta.id),
         };
+        if sealed.is_some() {
+            refuse_device_identity(&ctx.effective_auth().1)?;
+            refuse_unbound_client_identity(&ctx)?;
+        }
         self.check_token_files(&ctx.effective_auth().1)?;
         Ok(ctx)
     }
@@ -211,6 +259,43 @@ impl App {
         self.store.prune_history(policy.max_age_days, policy.max_total_bytes)?;
         Ok(())
     }
+}
+
+/// Refuse auth that would present this device's own workload identity (a
+/// JWT-SVID from the Workload API or a token file) for a request under an
+/// import root that the user has not opened to the workspace.
+fn refuse_device_identity(auth: &AuthConfig) -> Result<()> {
+    let device = match auth {
+        AuthConfig::JwtSvid { config } => !matches!(config.source, JwtSvidSource::Value { .. }),
+        AuthConfig::Multi { profiles } => return profiles.iter().try_for_each(refuse_device_identity),
+        _ => false,
+    };
+    if device {
+        return Err(AppError::Invalid(
+            "an imported collection does not use this device's workload identity or token files until opened to the workspace".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a TLS profile with a client identity (a certificate or this
+/// device's X.509-SVID) and no host bindings, which would present it to any
+/// destination, for a request under an import root that the user has not
+/// opened to the workspace. A bound profile presents it only to the hosts
+/// it names.
+fn refuse_unbound_client_identity(ctx: &ExecutionContext) -> Result<()> {
+    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
+    if let Some(p) = profile
+        && p.client_identity.is_some()
+        && p.bindings.is_empty()
+    {
+        return Err(AppError::Invalid(format!(
+            "an imported collection does not use TLS profile '{}' (a client identity bound to no host) until opened to the workspace",
+            p.name
+        )));
+    }
+    Ok(())
 }
 
 /// Refuse a spec that names a linked local file (`AttachmentRef::LinkedFile`,
