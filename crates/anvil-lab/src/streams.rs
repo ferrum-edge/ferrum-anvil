@@ -309,8 +309,12 @@ fn is_success(o: &ExecutionOutput) -> bool {
 }
 
 /// New operator-log lines for `proxy_id` since line `from`.
-fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
+fn transaction_lines(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
     env.gateway.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(10).collect()
+}
+
+async fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
+    crate::fixtures_policy::wait_for_op_log(|| transaction_lines(env, from, proxy_id)).await
 }
 
 fn op_from(env: &Env) -> usize {
@@ -322,14 +326,14 @@ fn op_from(env: &Env) -> usize {
 /// and stream-proxy (TCP/TLS) sessions when the gateway tears the session down,
 /// which can land just after the client has observed the close.
 async fn op_log_settled(env: &Env, from: usize, proxy_id: &str, n: usize) -> Vec<String> {
-    for _ in 0..30 {
-        let lines = op_log(env, from, proxy_id);
+    for _ in 0..60 {
+        let lines = transaction_lines(env, from, proxy_id);
         if lines.len() >= n {
             return lines;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    op_log(env, from, proxy_id)
+    transaction_lines(env, from, proxy_id)
 }
 
 /// Operator-side ground truth: the gateway's transaction log recorded `status`.
@@ -420,8 +424,8 @@ fn ctrl(env: &Env) -> Fut<'_> {
             alt.iter().any(|v| v.contains("h3=\":18443\"")),
             format!("{alt:?}"),
         );
-        operator_status(&mut c, &op_log(env, from, "proto-http-echo"), 200);
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto-http-echo") }
+        operator_status(&mut c, &op_log(env, from, "proto-http-echo").await, 200);
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto-http-echo").await }
     })
 }
 
@@ -458,7 +462,7 @@ fn proto001(env: &Env) -> Fut<'_> {
                 && conn.as_ref().and_then(|x| x.local_address.clone()) == first_conn.as_ref().and_then(|x| x.local_address.clone()),
             format!("{:?} vs {:?}", first_conn.and_then(|x| x.local_address), conn.as_ref().and_then(|x| x.local_address.clone())),
         );
-        let lines = op_log(env, from, "proto-http-echo");
+        let lines = op_log(env, from, "proto-http-echo").await;
         c.add(CheckKind::GroundTruth, "gateway logged both requests", lines.len() >= 2, format!("{} lines", lines.len()));
         Outcome { main: Some(o), recovery: Some(first), checks: c, operator_log: lines }
     })
@@ -508,7 +512,7 @@ fn proto002(env: &Env) -> Fut<'_> {
             body.contains(r#""version":"HTTP/2.0""#),
             body.chars().take(120).collect::<String>(),
         );
-        operator_status(&mut c, &op_log(env, from, "proto002-h2-trailers"), 200);
+        operator_status(&mut c, &op_log(env, from, "proto002-h2-trailers").await, 200);
         // Positive control: directly against the backend, Anvil preserves both trailers.
         let d = send(env, &http_ctx(env, "GET", "https://127.0.0.1:19417/trailers", Some(HttpVersionPolicy::Http2Only))).await;
         let dt = trailers_of(&d);
@@ -531,7 +535,7 @@ fn proto002(env: &Env) -> Fut<'_> {
             true,
             format!("through gateway: {got:?}; direct: {dt:?}"),
         );
-        Outcome { main: Some(o), recovery: Some(d), checks: c, operator_log: op_log(env, from, "proto002-h2-trailers") }
+        Outcome { main: Some(o), recovery: Some(d), checks: c, operator_log: op_log(env, from, "proto002-h2-trailers").await }
     })
 }
 
@@ -617,8 +621,8 @@ fn proto006(env: &Env) -> Fut<'_> {
             "",
         );
         c.add(CheckKind::GroundTruth, "backend received the request relayed from QUIC", env.fx.echo.log.count_requests() > before, "");
-        operator_status(&mut c, &op_log(env, from, "proto006-h3-echo"), 200);
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto006-h3-echo") }
+        operator_status(&mut c, &op_log(env, from, "proto006-h3-echo").await, 200);
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto006-h3-echo").await }
     })
 }
 
@@ -694,7 +698,7 @@ fn proto008(env: &Env) -> Fut<'_> {
             env.fx.udp_blocked_path.connections() > relay_before,
             "",
         );
-        operator_status(&mut c, &op_log(env, from, "proto006-h3-echo"), 200);
+        operator_status(&mut c, &op_log(env, from, "proto006-h3-echo").await, 200);
         // Recovery / contrast: the same policy where UDP reaches the gateway uses H3 with no fallback.
         let r =
             send(env, &http_ctx(env, "GET", &format!("https://{HTTPS}/proto/h3/echo"), Some(HttpVersionPolicy::Http3WithFallback))).await;
@@ -705,7 +709,7 @@ fn proto008(env: &Env) -> Fut<'_> {
             r.record.attempts.len() == 1 && r.record.response.as_ref().map(|x| x.http_version == "HTTP/3").unwrap_or(false),
             format!("{} attempts", r.record.attempts.len()),
         );
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto006-h3-echo") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto006-h3-echo").await }
     })
 }
 
@@ -746,7 +750,7 @@ fn proto009(env: &Env) -> Fut<'_> {
             format!("{:?}", previews(&o, Direction::Received, "text")),
         );
         c.add(CheckKind::GroundTruth, "backend received both messages", bytes_received(&env.fx.ws.log) >= before + 9, "");
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto012-ws-echo").await }
     })
 }
 
@@ -837,7 +841,7 @@ fn proto010(env: &Env) -> Fut<'_> {
             format!("{:?}", previews(&o, Direction::Received, "text")),
         );
         let r = ws_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto012-ws-echo").await }
     })
 }
 
@@ -881,7 +885,7 @@ fn proto012(env: &Env) -> Fut<'_> {
             reqs.iter().filter(|(m, p)| m == "GET" && p.starts_with("/ws")).count() >= 2 && !reqs.iter().any(|(m, _)| m == "CONNECT"),
             format!("{reqs:?}"),
         );
-        Outcome { main: Some(o), recovery: Some(h2c), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+        Outcome { main: Some(o), recovery: Some(h2c), checks: c, operator_log: op_log(env, from, "proto012-ws-echo").await }
     })
 }
 
@@ -926,7 +930,7 @@ fn proto013(env: &Env) -> Fut<'_> {
             reqs.iter().filter(|(m, p)| m == "GET" && p.starts_with("/ws")).count() == 1 && !reqs.iter().any(|(m, _)| m == "CONNECT"),
             format!("{reqs:?}"),
         );
-        let ops = op_log(env, from, "proto012-ws-echo");
+        let ops = op_log(env, from, "proto012-ws-echo").await;
         c.add(
             CheckKind::GroundTruth,
             "the gateway's operator log records an RFC 9220 (HTTP/3) WebSocket upgrade",
@@ -1147,7 +1151,7 @@ fn ws_deflate_h1(env: &Env) -> Fut<'_> {
         deflate_not_negotiated_checks(&mut c, &o, "HTTP/1.1", 101, 2);
         backend_saw_no_offer(&mut c, env, before, "HTTP/1.1", 2);
         let d = deflate_direct_control(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(d), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+        Outcome { main: Some(o), recovery: Some(d), checks: c, operator_log: op_log(env, from, "proto012-ws-echo").await }
     })
 }
 
@@ -1175,7 +1179,7 @@ fn ws_deflate_h2(env: &Env) -> Fut<'_> {
         .await;
         deflate_not_negotiated_checks(&mut c, &h2c, "h2c", 200, 1);
         backend_saw_no_offer(&mut c, env, before, "h2c", 1);
-        Outcome { main: Some(o), recovery: Some(h2c), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+        Outcome { main: Some(o), recovery: Some(h2c), checks: c, operator_log: op_log(env, from, "proto012-ws-echo").await }
     })
 }
 
@@ -1195,7 +1199,7 @@ fn ws_deflate_h3(env: &Env) -> Fut<'_> {
         quic_phases_ok(&mut c, &o);
         deflate_not_negotiated_checks(&mut c, &o, "HTTP/3", 200, 1);
         backend_saw_no_offer(&mut c, env, before, "HTTP/3", 1);
-        let ops = op_log(env, from, "proto012-ws-echo");
+        let ops = op_log(env, from, "proto012-ws-echo").await;
         c.add(
             CheckKind::GroundTruth,
             "the gateway's operator log records an RFC 9220 (HTTP/3) WebSocket upgrade",
@@ -1258,7 +1262,7 @@ fn ws_deflate_lookalike(env: &Env) -> Fut<'_> {
             format!("{:?}", codes(&o)),
         );
         let r = ws_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto012-ws-echo") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto012-ws-echo").await }
     })
 }
 
@@ -1291,9 +1295,9 @@ fn proto014(env: &Env) -> Fut<'_> {
             env.fx.grpc.log.requests().iter().any(|(_, p)| p == "/anvil.lab.v1.Echo/Unary"),
             "",
         );
-        operator_status(&mut c, &op_log(env, from, "proto014-grpc"), 200);
+        operator_status(&mut c, &op_log(env, from, "proto014-grpc").await, 200);
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc").await }
     })
 }
 
@@ -1333,7 +1337,7 @@ fn proto014_down(env: &Env) -> Fut<'_> {
             &["connection_refused", "connection_pool_error", "request_error"],
         );
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc-down") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc-down").await }
     })
 }
 
@@ -1365,7 +1369,7 @@ fn proto015(env: &Env) -> Fut<'_> {
         c.has(&o, "app.grpc_status_missing");
         c.absent_prefix(&o, "ferrum.token");
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc").await }
     })
 }
 
@@ -1414,7 +1418,7 @@ fn proto016(env: &Env) -> Fut<'_> {
             ["Unary", "ServerStream", "ClientStream", "Bidi"].iter().all(|m| paths.contains(&format!("/anvil.lab.v1.Echo/{m}"))),
             format!("{paths:?}"),
         );
-        Outcome { main: Some(bidi), recovery: Some(server), checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+        Outcome { main: Some(bidi), recovery: Some(server), checks: c, operator_log: op_log(env, from, "proto014-grpc").await }
     })
 }
 
@@ -1475,7 +1479,7 @@ fn proto016_deadline(env: &Env) -> Fut<'_> {
             format!("{:?}", hdrs.iter().filter(|(n, _)| n.starts_with("grpc")).collect::<Vec<_>>()),
         );
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc").await }
     })
 }
 
@@ -1510,7 +1514,7 @@ fn up010_grpc(env: &Env) -> Fut<'_> {
         );
         c.operator_class(&op_log_settled(env, from, "proto016-grpc-slow", 1).await, "proto016-grpc-slow", &["read_write_timeout"]);
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto016-grpc-slow") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto016-grpc-slow").await }
     })
 }
 
@@ -1640,7 +1644,7 @@ fn proto014_h3(env: &Env) -> Fut<'_> {
         );
         c.has(&o, "app.grpc_status");
         c.absent_prefix(&o, "ferrum.token");
-        operator_status(&mut c, &op_log(env, from, "proto014-grpc"), 200);
+        operator_status(&mut c, &op_log(env, from, "proto014-grpc").await, 200);
         let r = send(env, &h3_grpc(env, "Unary", GrpcMode::Unary, &[r#"{"message":"ok"}"#], HttpVersionPolicy::Http3Only)).await;
         c.add(
             CheckKind::Recovery,
@@ -1648,7 +1652,7 @@ fn proto014_h3(env: &Env) -> Fut<'_> {
             grpc_status(&r).1 == Some(0) && is_success(&r),
             outcome_line(&r),
         );
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc").await }
     })
 }
 
@@ -1817,8 +1821,8 @@ fn proto016_h3_fallback(env: &Env) -> Fut<'_> {
                 env.fx.grpc.log.count_requests() - backend_before
             ),
         );
-        operator_status(&mut c, &op_log(env, from, "proto014-grpc"), 200);
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+        operator_status(&mut c, &op_log(env, from, "proto014-grpc").await, 200);
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto014-grpc").await }
     })
 }
 
@@ -1943,7 +1947,7 @@ fn grpcweb001(env: &Env) -> Fut<'_> {
             unary_ct.len() == 2 && stream_ct.len() == 1 && unary_ct.iter().chain(&stream_ct).all(|x| x == "application/grpc"),
             format!("unary {unary_ct:?}, server streaming {stream_ct:?}"),
         );
-        let ops = op_log(env, from, "grpcweb-translated");
+        let ops = op_log(env, from, "grpcweb-translated").await;
         operator_status(&mut c, &ops, 200);
         Outcome { main: Some(s), recovery: Some(t), checks: c, operator_log: ops }
     })
@@ -2020,7 +2024,7 @@ fn grpcweb002(env: &Env) -> Fut<'_> {
                 && backend_content_types(env, before, "/anvil.lab.v1.Echo/ServerStream") == vec!["application/grpc".to_string()],
             format!("{unary_ct:?}"),
         );
-        let ops = op_log(env, from, "grpcweb-translated");
+        let ops = op_log(env, from, "grpcweb-translated").await;
         operator_status(&mut c, &ops, 200);
         Outcome { main: Some(s), recovery: Some(q), checks: c, operator_log: ops }
     })
@@ -2092,7 +2096,7 @@ fn grpcweb003(env: &Env) -> Fut<'_> {
             grpc_status(&r).1 == Some(0) && is_success(&r),
             outcome_line(&r),
         );
-        Outcome { main: Some(o), recovery: Some(text), checks: c, operator_log: op_log(env, from, "grpcweb-translated") }
+        Outcome { main: Some(o), recovery: Some(text), checks: c, operator_log: op_log(env, from, "grpcweb-translated").await }
     })
 }
 
@@ -2162,7 +2166,7 @@ fn grpcweb_down(env: &Env) -> Fut<'_> {
             grpc_status(&r).1 == Some(0) && is_success(&r),
             outcome_line(&r),
         );
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "grpcweb-down") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "grpcweb-down").await }
     })
 }
 
@@ -2320,7 +2324,7 @@ fn grpcweb_refused(env: &Env) -> Fut<'_> {
         c.add(
             CheckKind::GroundTruth,
             "neither the gateway nor the backend saw a request",
-            op_log(env, from, "grpcweb-translated").is_empty() && env.fx.grpc.log.count_requests() == before,
+            op_log(env, from, "grpcweb-translated").await.is_empty() && env.fx.grpc.log.count_requests() == before,
             "",
         );
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
@@ -2375,7 +2379,7 @@ fn proto018(env: &Env) -> Fut<'_> {
             format!("{hdrs:?}"),
         );
         let r = sse_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto018-sse") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto018-sse").await }
     })
 }
 
@@ -2395,7 +2399,7 @@ fn proto018_idle(env: &Env) -> Fut<'_> {
         c.no_confirmed_claim(&o, "fail");
         c.absent_prefix(&o, "ferrum.token");
         let r = sse_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto018-sse") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto018-sse").await }
     })
 }
 
@@ -2430,7 +2434,7 @@ fn trust007_sse(env: &Env) -> Fut<'_> {
             format!("{:?}", codes(&o)),
         );
         let r = sse_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto018-sse-abort") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto018-sse-abort").await }
     })
 }
 
@@ -2473,7 +2477,7 @@ fn proto019(env: &Env) -> Fut<'_> {
             format!("{}", bytes_received(&env.fx.tcp_halfclose.log) - before),
         );
         let r = tcp_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto019-tcp-halfclose") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto019-tcp-halfclose").await }
     })
 }
 
@@ -2491,7 +2495,7 @@ fn proto019_echo(env: &Env) -> Fut<'_> {
         );
         c.add(CheckKind::Diagnosis, "no failure recorded", failure_kind(&o).is_none(), "");
         c.add(CheckKind::GroundTruth, "the backend echo received the frames", bytes_received(&env.fx.tcp_echo.log) >= 13, "");
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "tcp-echo") }
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "tcp-echo").await }
     })
 }
 
@@ -2515,7 +2519,7 @@ fn proto019_tls(env: &Env) -> Fut<'_> {
             bytes_received(&env.fx.tcps_echo.log) >= before + 18,
             format!("{}", bytes_received(&env.fx.tcps_echo.log) - before),
         );
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "tcp-tls-echo") }
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "tcp-tls-echo").await }
     })
 }
 
@@ -2543,7 +2547,7 @@ fn up002_tcp(env: &Env) -> Fut<'_> {
         c.max_confidence(&o, "tcp.closed_without_data", Confidence::Confirmed);
         c.operator_class(&op_log_settled(env, from, "tcp-refused", 1).await, "tcp-refused", &["connection_refused"]);
         let r = tcp_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcp-refused") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcp-refused").await }
     })
 }
 
@@ -2578,7 +2582,7 @@ fn up004_tcps(env: &Env) -> Fut<'_> {
             previews(&r, Direction::Received, "frame") == vec!["ok"],
             outcome_line(&r),
         );
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcps-untrusted") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcps-untrusted").await }
     })
 }
 

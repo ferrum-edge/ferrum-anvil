@@ -144,7 +144,7 @@ fn up015(env: &Env) -> Fut<'_> {
             backend_status == Some(200),
             format!("{backend_status:?}"),
         );
-        let ops = op_log(&env.gateway, from, "up015-buffer-capacity");
+        let ops = op_log(&env.gateway, from, "up015-buffer-capacity").await;
         c.operator_class(&ops, "up015-buffer-capacity", &["gateway_buffer_capacity"]);
         c.status_in(&o, &[503]);
         c.add(
@@ -317,7 +317,7 @@ async fn hold_and_probe(
         send(&env.engine, &probe).await
     });
     let seen = log.requests().into_iter().skip(before).collect();
-    (first, o, seen, op_log(&m.gateway, from, proxy_id))
+    (first, o, seen, op_log(&m.gateway, from, proxy_id).await)
 }
 
 /// UP-018 (reqwest HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a

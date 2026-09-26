@@ -29,7 +29,10 @@
 //! import, it writes into a workspace stored here only once the user approves
 //! it: a backup's passphrase says nothing about who made it. App settings
 //! apply to every workspace's requests, so Replace also keeps this profile's
-//! app settings while it holds a workspace the backup does not claim.
+//! app settings while it holds a workspace the backup does not claim. Like a
+//! bundle import, a restore seals every workspace it writes from this
+//! device's workload identity until the user allows it on this device
+//! (`crate::device_identity`).
 
 use crate::linked_files::LinkedFileBinding;
 use crate::port::{self, ImportApproval, ImportReport};
@@ -70,8 +73,6 @@ const MAX_HEADER_BYTES: usize = 4096;
 pub const MAX_BACKUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MIN_PASSPHRASE_LEN: usize = 8;
 const SALT_LEN: usize = 16;
-const MIN_SALT_LEN: usize = 8;
-const MAX_SALT_LEN: usize = 64;
 const MAX_LISTED_CONFLICTS: usize = 50;
 
 /// Bounds on the Argon2id costs a backup may name: the same as for bundle
@@ -107,6 +108,7 @@ pub const NOT_CARRIED_KINDS: &[(&str, &str)] = &[
     (kind::IMPORT_SOURCE, "attachment index entries name blobs by a key of this profile; restore rebuilds them from the attachments"),
     (kind::TOKEN_FILE, "token-file bindings name files on this device; they are bound again on the target machine"),
     (kind::LINKED_FILE, "linked-file bindings name files on this device; they are chosen again on the target machine"),
+    (kind::DEVICE_IDENTITY_SEAL, "seals are this device's choice; a restore seals every workspace it writes on the target machine"),
 ];
 
 /// Every store table and how a full backup covers it.
@@ -363,9 +365,7 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<(Back
     }
     check_kdf(&header.kdf)?;
     let salt = B64.decode(&header.salt_b64).map_err(|_| BackupError::NotABackup("the salt is not base64".into()))?;
-    if !(MIN_SALT_LEN..=MAX_SALT_LEN).contains(&salt.len()) {
-        return Err(BackupError::UnsupportedKdf(format!("{}-byte salt; allowed {MIN_SALT_LEN} to {MAX_SALT_LEN} bytes", salt.len())));
-    }
+    crypto::check_salt(&salt).map_err(BackupError::UnsupportedKdf)?;
     let passphrase = passphrase.ok_or(BackupError::PassphraseRequired)?;
     let (aad, envelope) = bytes.split_at(header_end);
     let key = crypto::derive(passphrase.as_bytes(), &salt, &header.kdf).map_err(|e| BackupError::UnsupportedKdf(e.to_string()))?;
@@ -487,7 +487,7 @@ impl App {
         let local = self.store.read_consistently(|r| local(r, &d))?;
         let notes = restore_notes(&d, &local, policy)?;
         let plan = restore_plan(&d, &local, policy);
-        Ok(report(plan, &manifest, &d, notes, None))
+        Ok(report(plan, &manifest, &d, notes, None, port::file_sha256(bytes)))
     }
 
     /// [`App::restore_approved`] with nothing approved: a backup that claims
@@ -505,6 +505,8 @@ impl App {
     /// profile's too while it holds a workspace the backup does not claim.
     ///
     /// The whole restore is refused, before anything is written, when:
+    /// - `approval` was given for another file (its `bundle_sha256`), or
+    ///   names an existing workspace without naming a file;
     /// - a request or dataset names a stored attachment by content hash that
     ///   the backup does not carry, and content with that hash is stored
     ///   here: it would resolve to bytes the backup never carried. One whose
@@ -516,6 +518,11 @@ impl App {
     ///   kind and id are stored here in another workspace, or a backup
     ///   secret's id is stored here under another owner: nothing is ever
     ///   overwritten or moved out of its workspace.
+    ///
+    /// Every workspace in the backup is sealed from this device's workload
+    /// identity in the same transaction (`crate::device_identity`), so
+    /// restoring your own backup on a new device means allowing it again for
+    /// the workspaces you trust.
     pub fn restore_approved(
         &self,
         bytes: &[u8],
@@ -523,6 +530,7 @@ impl App {
         policy: ConflictPolicy,
         approval: &ImportApproval,
     ) -> Result<ImportReport> {
+        approval.check_file(bytes, "restored")?;
         let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         let checkpoint = self.store.checkpoint("before-restore")?;
         // A refusal returns before anything is written; the transaction then
@@ -537,9 +545,12 @@ impl App {
             };
             let keep_settings = keeps_local_settings(&d, &local, policy);
             write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
+            // This device's workload identity stays out of every workspace
+            // written here until the user allows it on this device.
+            crate::device_identity::seal_in(s, d.graph.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes)))
         })??;
-        Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string())))
+        Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string()), port::file_sha256(bytes)))
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
@@ -1026,7 +1037,14 @@ fn refuse_unapproved(plan: &ImportPlan, approval: &ImportApproval) -> Result<()>
     Ok(())
 }
 
-fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, notes: Vec<String>, checkpoint: Option<String>) -> ImportReport {
+fn report(
+    plan: ImportPlan,
+    manifest: &BackupManifest,
+    d: &Decoded,
+    notes: Vec<String>,
+    checkpoint: Option<String>,
+    bundle_sha256: String,
+) -> ImportReport {
     let mut warnings = d.warnings.clone();
     warnings.extend(notes);
     if plan.policy == ConflictPolicy::Merge {
@@ -1034,6 +1052,7 @@ fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, notes: Vec<S
     }
     warnings.extend(manifest.excluded.iter().map(|e| format!("Not in the backup: {e}")));
     warnings.extend(manifest.device_bindings.iter().cloned());
+    warnings.extend(crate::device_identity::sealed_note(&d.graph.workspaces));
     ImportReport {
         plan,
         warnings,
@@ -1044,6 +1063,7 @@ fn report(plan: ImportPlan, manifest: &BackupManifest, d: &Decoded, notes: Vec<S
         workspaces: d.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
         workspace_ids: d.graph.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
         full_backup: true,
+        bundle_sha256,
     }
 }
 

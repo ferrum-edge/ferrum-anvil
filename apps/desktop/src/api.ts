@@ -189,6 +189,8 @@ export interface ImportReport {
   workspace_ids: string[];
   /** A full backup (restored) rather than a bundle. */
   full_backup: boolean;
+  /** SHA-256 of the file as read; applying passes it back so the approval holds only for the previewed file. */
+  bundle_sha256: string;
 }
 export interface JwtInspection {
   header: unknown;
@@ -244,7 +246,7 @@ export interface FileGrant {
 /** A JWT-SVID token file bound on this device through the native dialog. */
 export interface TokenFileBinding {
   id: string;
-  /** Canonical absolute path of the chosen file. */
+  /** Absolute path of the chosen file, as chosen (links not resolved). */
   path: string;
   bound_at: string;
 }
@@ -483,6 +485,10 @@ export const api = {
   createWorkspace: (name: string) => call<Workspace>("workspace_create", { name }),
   saveWorkspace: (workspace: Workspace) => call<Workspace>("workspace_save", { workspace }),
   deleteWorkspace: (workspaceId: string) => call<void>("workspace_delete", { workspaceId }),
+  /** Whether a bundle import or backup restore sealed the workspace from this device's workload identity (JWT-SVID or X.509-SVID). */
+  deviceIdentitySealed: (workspaceId: string) => call<boolean>("workspace_device_identity_sealed", { workspaceId }),
+  /** Let the workspace's requests use this device's workload identity again (an explicit user choice). */
+  allowDeviceIdentity: (workspaceId: string) => call<boolean>("workspace_allow_device_identity", { workspaceId }),
   tree: (workspaceId: string) => call<TreeNode[]>("tree_get", { workspaceId }),
   createFolder: (workspaceId: string, parentId: string | null, name: string) => call<Folder>("folder_create", { workspaceId, parentId, name }),
   getFolder: (folderId: string) => call<Folder>("folder_get", { folderId }),
@@ -542,9 +548,23 @@ export const api = {
   exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
     call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
   importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),
-  /** `existingWorkspaces`: ids from the preview's `plan.existing_workspaces` the user confirmed writing into. */
-  importApply: (grant: string, passphrase: string | null, conflictPolicy: string, existingWorkspaces: string[] = []) =>
-    call<ImportReport>("import_apply", { grant, passphrase, conflictPolicy, approval: { existing_workspaces: existingWorkspaces } }),
+  /**
+   * `existingWorkspaces`: ids from the preview's `plan.existing_workspaces` the user confirmed writing into.
+   * `bundleSha256`: the preview's `bundle_sha256`; the import is refused if the file changed since.
+   */
+  importApply: (
+    grant: string,
+    passphrase: string | null,
+    conflictPolicy: string,
+    existingWorkspaces: string[] = [],
+    bundleSha256: string | null = null,
+  ) =>
+    call<ImportReport>("import_apply", {
+      grant,
+      passphrase,
+      conflictPolicy,
+      approval: { existing_workspaces: existingWorkspaces, bundle_sha256: bundleSha256 },
+    }),
   attachmentAdd: (grant: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { grant, mediaType }),
 
   loadPlans: (workspaceId: string) => call<LoadPlan[]>("load_plans", { workspaceId }),
