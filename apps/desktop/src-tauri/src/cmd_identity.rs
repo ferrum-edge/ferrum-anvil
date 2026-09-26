@@ -2,12 +2,11 @@
 //! app-login provider catalogue. Provider identities are never keys.
 
 use crate::commands::{R, SendInput, e, id};
-use crate::state::DesktopState;
+use crate::state::{DesktopState, PendingEntry, cancel_pending};
 use anvil_app::exec::SendOptions;
 use anvil_identity::{FlowEvent, FlowOptions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
-use tokio_util::sync::CancellationToken;
 
 fn opts(input: &SendInput) -> R<SendOptions> {
     Ok(SendOptions { environment: input.environment_id.as_deref().map(id).transpose()?, ..Default::default() })
@@ -37,33 +36,27 @@ pub async fn oauth_sign_in(
     input: SendInput,
     attempt: String,
 ) -> R<anvil_identity::api_oauth::ApiAuthorization> {
+    // Registered before the app is read (see `DesktopState::lock`); retired
+    // when dropped, on every path.
+    let pending = PendingEntry::register(&st.running, id(&attempt)?)?;
     let app = st.app()?;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let o = opts(&input)?;
-    let cancel = CancellationToken::new();
-    let key = id(&attempt)?;
-    st.running.lock().insert(key, cancel.clone());
     let h2 = handle.clone();
     let a2 = attempt.clone();
     let observer = move |event: FlowEvent| {
         let _ = h2.emit("oauth-flow", SignInEvent { attempt: a2.clone(), event });
     };
     let opener = |url: &str| open_in_browser(url);
-    let res = app.oauth_sign_in(rid, &ws, input.spec, &o, &opener, &observer, &FlowOptions::default(), &cancel).await;
-    st.running.lock().remove(&key);
+    let res = app.oauth_sign_in(rid, &ws, input.spec, &o, &opener, &observer, &FlowOptions::default(), pending.token()).await;
+    drop(pending);
     res.map_err(e)
 }
 
 #[tauri::command]
 pub fn oauth_cancel(st: State<'_, DesktopState>, attempt: String) -> R<bool> {
-    Ok(match st.running.lock().get(&id(&attempt)?) {
-        Some(t) => {
-            t.cancel();
-            true
-        }
-        None => false,
-    })
+    Ok(cancel_pending(&st.running, &id(&attempt)?))
 }
 
 #[tauri::command]

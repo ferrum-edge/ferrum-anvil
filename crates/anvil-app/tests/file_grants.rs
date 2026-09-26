@@ -341,3 +341,44 @@ mod unix {
         assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
+
+/// Runs `f` on its own thread, failing the test instead of hanging if it blocks.
+#[cfg(unix)]
+fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_secs(30)).expect("the open blocked")
+}
+
+#[cfg(unix)]
+fn mkfifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo").arg(path).status().unwrap();
+    assert!(status.success(), "mkfifo {}", path.display());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_never_granted_or_read_and_never_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let grants = std::sync::Arc::new(FileGrants::default());
+    // Choosing a FIFO (with no writer, so a blocking open would wait for one)
+    // grants nothing.
+    let fifo = dir.path().join("pipe");
+    mkfifo(&fifo);
+    let chosen = within_seconds({
+        let grants = grants.clone();
+        move || grants.grant_read(FilePurpose::Dataset, &fifo)
+    });
+    assert_eq!(chosen.unwrap_err(), GrantError::Invalid("not a regular file".into()));
+    assert!(grants.is_empty());
+
+    // A chosen file swapped for a FIFO under the same name is refused.
+    let path = file(dir.path(), "rows.csv", b"id\n1\n");
+    let g = grants.grant_read(FilePurpose::Dataset, &path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    mkfifo(&path);
+    let read = within_seconds(move || grants.read(&g.token, FilePurpose::Dataset).map(|f| f.bytes));
+    assert_eq!(read.unwrap_err(), GrantError::Changed);
+}

@@ -3,8 +3,8 @@
 // ("what does this endpoint issue to Anvil?") and the evidence view for a
 // record. The backend does every Workload API call; keys and tokens never
 // reach the webview — only SPIFFE IDs, expiry, key ids and check results.
-import { useState } from "react";
-import { api, type WorkloadProbe } from "./api";
+import { useEffect, useState } from "react";
+import { api, type TokenFileBinding, type WorkloadProbe } from "./api";
 import type { CheckResult, ClientIdentity, JwtSvidConfig, JwtSvidSource, JwtSvidSummary, WorkloadApiCall, WorkloadApiEvidence } from "./generated/contracts";
 import { SecretField, humanize } from "./ui";
 
@@ -157,6 +157,60 @@ export function WorkloadProbeButton(props: { endpoint: string; audience?: string
   );
 }
 
+/**
+ * The token files chosen with Choose… on this device: only these are read at
+ * send time. Removing one chosen by mistake stops Anvil reading it until it is
+ * chosen again. `version` changes when a file is chosen, to reload the list.
+ */
+export function TokenFileList({ current, version }: { current: string; version: number }) {
+  const [files, setFiles] = useState<TokenFileBinding[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const load = async () => {
+    try {
+      setFiles((await api.tokenFiles()) ?? []);
+      setErr(null);
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, [version]);
+  const remove = async (f: TokenFileBinding) => {
+    try {
+      await api.removeTokenFile(f.id);
+      await load();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
+  if (files.length === 0 && !err) return null;
+  return (
+    <div className="col" data-testid="token-files">
+      <h4 className="faint" style={{ margin: "6px 0 0" }}>Token files chosen on this device</h4>
+      {err && <div className="bad-box">{err}</div>}
+      <table className="grid" aria-label="Token files chosen on this device">
+        <tbody>
+          {files.map((f) => (
+            <tr key={f.id}>
+              <td className="v mono">
+                {f.path}
+                {f.path === current.trim() ? " (this setting)" : ""}
+              </td>
+              <td className="v">
+                <button className="btn small" aria-label={`Remove ${f.path}`} onClick={() => void remove(f)}>
+                  Remove
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="hint">Only these files are read at send time. An auth setting that names a removed file is refused until you choose it again.</p>
+    </div>
+  );
+}
+
 function sourceOf(kind: JwtSvidSource["kind"], prev: JwtSvidSource): JwtSvidSource {
   if (kind === prev.kind) return prev;
   if (kind === "value") return { kind: "value", token: { kind: "template", value: "" } };
@@ -168,6 +222,8 @@ function sourceOf(kind: JwtSvidSource["kind"], prev: JwtSvidSource): JwtSvidSour
 export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; onChange: (c: JwtSvidConfig) => void; workspaceId: string | null }) {
   const src = c.source;
   const needsEndpoint = src.kind === "workload_api" || !!c.verify_with_bundles;
+  // Bumped when a token file is chosen, so the list of chosen files reloads.
+  const [chosen, setChosen] = useState(0);
   return (
     <>
       <label className="lbl">
@@ -194,12 +250,14 @@ export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; 
               // The backend shows the dialog and binds the chosen file; only a bound file is read at send time.
               const g = await api.chooseFile("jwt_svid_file");
               if (g?.path) onChange({ ...c, source: { kind: "file", path: g.path } });
+              setChosen((n) => n + 1);
             }}
           >
             Choose…
           </button>
         </div>
       )}
+      {src.kind === "file" && <TokenFileList current={src.path} version={chosen} />}
       <label className="lbl">
         Audiences (comma-separated; each must be in the token's aud)
         <input

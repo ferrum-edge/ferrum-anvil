@@ -216,6 +216,7 @@ dependencies = [
  "chrono",
  "hex",
  "keyring-core",
+ "libc",
  "parking_lot",
  "rusqlite",
  "serde",

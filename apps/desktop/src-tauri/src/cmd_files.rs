@@ -4,12 +4,14 @@
 //! path. No command takes a file path from the webview. A JWT-SVID token
 //! file or a linked local file is bound in the vault instead
 //! (`anvil_app::token_files`, `anvil_app::linked_files`), and only a bound
-//! path is read at send time.
+//! path is read at send time. The user lists the bound token files and
+//! removes one that should no longer be read.
 
-use crate::commands::{R, e};
+use crate::commands::{R, e, id};
 use crate::state::DesktopState;
 use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
 use anvil_app::linked_files::LinkedFileReferrer;
+use anvil_app::token_files::TokenFileBinding;
 use serde::Deserialize;
 use tauri::{State, Window};
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -126,6 +128,22 @@ pub async fn file_choose(
         grants.push(grant.map_err(|x| x.to_string())?);
     }
     Ok(grants)
+}
+
+/// The JWT-SVID token files bound on this device (`file_choose` with purpose
+/// `jwt_svid_file`), oldest first. Refused while locked.
+#[tauri::command]
+pub fn token_files_list(st: State<'_, DesktopState>) -> R<Vec<TokenFileBinding>> {
+    st.app()?.token_file_bindings().map_err(e)
+}
+
+/// Remove a token-file binding: an auth setting that names the file is
+/// refused from the next send on, until the user chooses the file again.
+/// Refused while locked.
+#[tauri::command]
+pub fn token_file_remove(st: State<'_, DesktopState>, binding_id: String) -> R<()> {
+    let binding = id(&binding_id)?;
+    st.app()?.remove_token_file_binding(&binding).map_err(e)
 }
 
 fn title(purpose: FilePurpose) -> &'static str {

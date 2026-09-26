@@ -33,6 +33,10 @@ zeroize.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# O_NONBLOCK, so opening a chosen file that became a FIFO never blocks.
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 winapi-util.workspace = true
 

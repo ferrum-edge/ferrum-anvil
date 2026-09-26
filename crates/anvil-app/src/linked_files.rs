@@ -133,24 +133,19 @@ fn unbound(path: &str, noun: &str) -> AppError {
 }
 
 /// Read a bound linked file, bounded to `max` bytes. Only a regular file is
-/// opened, and only while its path still resolves to itself, so a file or
-/// folder on the path replaced by a link is refused.
+/// read (a FIFO or device never blocks the open, see
+/// [`crate::file_grants::open_regular`]), and only while its path still
+/// resolves to itself, so a file or folder on the path replaced by a link is
+/// refused.
 pub(crate) fn read_bound_file(path: &str, max: u64, what: &str) -> Result<Vec<u8>> {
     let too_large = || AppError::Invalid(format!("the linked {what} is larger than {} MiB", max >> 20));
     let not_regular = || AppError::Invalid(format!("the linked {what} is not a regular file"));
     if std::fs::canonicalize(path)?.to_str() != Some(path) {
         return Err(AppError::Invalid(format!("the linked {what} changed after it was chosen; choose it again")));
     }
-    // Checked before opening, so a FIFO or device is never opened.
-    if !std::fs::metadata(path)?.is_file() {
+    let Some((file, meta)) = crate::file_grants::open_regular(Path::new(path))? else {
         return Err(not_regular());
-    }
-    let file = std::fs::File::open(path)?;
-    // The checks that count are on the opened handle, not on the path.
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(not_regular());
-    }
+    };
     if meta.len() > max {
         return Err(too_large());
     }

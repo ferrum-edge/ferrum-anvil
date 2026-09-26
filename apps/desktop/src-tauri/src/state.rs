@@ -7,6 +7,7 @@ use anvil_app::profiles::ProfileManager;
 use anvil_domain::Id;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
@@ -18,7 +19,7 @@ pub struct DesktopState {
     pub profiles: ProfileManager,
     pub app: RwLock<Option<Arc<App>>>,
     /// Running executions (for cancel and lock-time stop).
-    pub running: Running,
+    pub running: Arc<Running>,
     /// Load runs in worker processes, by run key: (user cancel, lock stop).
     pub load_runs: Mutex<HashMap<String, (CancellationToken, CancellationToken)>>,
     /// Load reports that finished while the vault was locked (stop-on-lock);
@@ -39,7 +40,7 @@ impl DesktopState {
         DesktopState {
             profiles: ProfileManager::new(root),
             app: RwLock::new(None),
-            running: Mutex::new(HashMap::new()),
+            running: Arc::new(Mutex::new(HashMap::new())),
             load_runs: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             pending_load_reports: Mutex::new(Vec::new()),
@@ -54,10 +55,15 @@ impl DesktopState {
     }
 
     /// Make `app` the open profile. The desktop confines JWT-SVID token
-    /// files to the ones bound in its native dialog.
+    /// files to the ones bound in its native dialog. File-dialog grants belong
+    /// to the profile they were chosen in, so switching revokes them, as a
+    /// lock does.
     pub fn set_app(&self, app: App) {
         app.confine_token_files();
         *self.app.write() = Some(Arc::new(app));
+        // After the swap: a choice that starts from now on sees only the new
+        // profile, and one still open from before grants nothing.
+        self.file_grants.revoke_all();
     }
 
     /// The unlocked app, or an error the UI renders as the lock screen.
@@ -93,6 +99,12 @@ impl DesktopState {
     /// cached credentials/connections and file-dialog grants.
     pub fn lock(&self) {
         self.file_grants.revoke_all();
+        // The app locks before the drain below. An execution registers before
+        // it asks for the app, so one registered after the drain is refused by
+        // `app()`, and one registered before it is canceled here.
+        if let Some(a) = self.app.read().as_ref() {
+            a.lock();
+        }
         for (_, t) in self.running.lock().drain() {
             t.cancel();
         }
@@ -110,27 +122,32 @@ impl DesktopState {
                 }
             });
         }
-        if let Some(a) = self.app.read().as_ref() {
-            a.lock();
-        }
     }
 }
 
 /// An execution's entry in [`DesktopState::running`], removed when this is
-/// dropped: on success, on an early return and on a panic alike.
-pub struct PendingEntry<'a> {
-    running: &'a Running,
+/// dropped: on success, on an early return and on a panic alike. It owns a
+/// handle to the registry, so a spawned task can hold it.
+pub struct PendingEntry {
+    running: Arc<Running>,
     id: Id,
     token: CancellationToken,
 }
 
-impl<'a> PendingEntry<'a> {
+impl PendingEntry {
     /// Register a fresh token for `id`, so a cancel (or a lock) can reach the
-    /// execution from now on.
-    pub fn register(running: &'a Running, id: Id) -> Self {
+    /// execution from now on. Refused while `id` is still registered: the
+    /// running execution keeps its token, and its entry is not removed by
+    /// anyone else.
+    pub fn register(running: &Arc<Running>, id: Id) -> Result<Self, String> {
         let token = CancellationToken::new();
-        running.lock().insert(id, token.clone());
-        PendingEntry { running, id, token }
+        match running.lock().entry(id) {
+            Entry::Occupied(_) => return Err(format!("execution {id} is already running")),
+            Entry::Vacant(v) => {
+                v.insert(token.clone());
+            }
+        }
+        Ok(PendingEntry { running: running.clone(), id, token })
     }
 
     pub fn token(&self) -> &CancellationToken {
@@ -155,7 +172,7 @@ impl<'a> PendingEntry<'a> {
     }
 }
 
-impl Drop for PendingEntry<'_> {
+impl Drop for PendingEntry {
     fn drop(&mut self) {
         self.running.lock().remove(&self.id);
     }
@@ -179,11 +196,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_before_the_open_completes_abandons_it() {
-        let running = Running::default();
+        let running = Arc::new(Running::default());
         let id = Id::new();
         let (started_tx, started_rx) = oneshot::channel();
         let (_done_tx, done_rx) = oneshot::channel::<()>();
-        let pending = PendingEntry::register(&running, id);
+        let pending = PendingEntry::register(&running, id).unwrap();
         let open = async move {
             started_tx.send(()).unwrap();
             done_rx.await
@@ -200,9 +217,9 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_between_publish_and_retire_is_reported() {
-        let running = Running::default();
+        let running = Arc::new(Running::default());
         let id = Id::new();
-        let pending = PendingEntry::register(&running, id);
+        let pending = PendingEntry::register(&running, id).unwrap();
         let publish = |s| {
             // The entry is still registered while the result is published.
             assert!(cancel_pending(&running, &id));
@@ -215,10 +232,10 @@ mod tests {
 
     #[tokio::test]
     async fn open_without_cancel_retires_the_entry() {
-        let running = Running::default();
+        let running = Arc::new(Running::default());
         let id = Id::new();
         let (tx, rx) = oneshot::channel();
-        let pending = PendingEntry::register(&running, id);
+        let pending = PendingEntry::register(&running, id).unwrap();
         assert!(running.lock().contains_key(&id));
         tx.send("session").unwrap();
         let opened = pending.open(async { rx.await.unwrap() }, |s| s).await;
@@ -230,11 +247,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_open_removes_the_entry() {
-        let running = std::sync::Arc::new(Running::default());
+        let running = Arc::new(Running::default());
         let id = Id::new();
         let shared = running.clone();
         let task = tokio::spawn(async move {
-            let pending = PendingEntry::register(&shared, id);
+            let pending = PendingEntry::register(&shared, id).unwrap();
             pending.open(async { panic!("open failed") }, |()| ()).await
         });
         assert!(task.await.unwrap_err().is_panic());
@@ -243,14 +260,45 @@ mod tests {
 
     #[test]
     fn an_early_return_removes_the_entry() {
-        let running = Running::default();
+        let running = Arc::new(Running::default());
         let id = Id::new();
         let fails = || -> Result<(), String> {
-            let _pending = PendingEntry::register(&running, id);
+            let _pending = PendingEntry::register(&running, id)?;
             assert!(running.lock().contains_key(&id));
             Err("LOCKED".into())
         };
         assert!(fails().is_err());
+        assert!(running.lock().is_empty());
+    }
+
+    #[test]
+    fn an_id_still_registered_is_refused() {
+        let running = Arc::new(Running::default());
+        let id = Id::new();
+        let first = PendingEntry::register(&running, id).unwrap();
+        let second = PendingEntry::register(&running, id).map(|_| ());
+        assert_eq!(second, Err(format!("execution {id} is already running")));
+        // The refusal leaves the first execution's entry and token in place.
+        assert!(cancel_pending(&running, &id));
+        assert!(first.token().is_cancelled());
+        drop(first);
+        assert!(running.lock().is_empty());
+        // Once retired, the id can be registered again.
+        let again = PendingEntry::register(&running, id).unwrap();
+        assert!(!again.token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn an_owned_entry_is_retired_by_a_spawned_task() {
+        let running = Arc::new(Running::default());
+        let id = Id::new();
+        let pending = PendingEntry::register(&running, id).unwrap();
+        tokio::spawn(async move {
+            assert!(!pending.token().is_cancelled());
+            drop(pending);
+        })
+        .await
+        .unwrap();
         assert!(running.lock().is_empty());
     }
 }

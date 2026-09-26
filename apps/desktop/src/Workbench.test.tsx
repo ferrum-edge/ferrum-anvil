@@ -226,6 +226,67 @@ describe("session controls", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
+  it("stops an open that the backend had not registered yet when Abort reached it", async () => {
+    const open = deferred<string>();
+    let registered = false;
+    backend({
+      session_open: () => open.promise,
+      session_cancel: (a) => {
+        // Before `session_open` registers, the backend has nothing to stop.
+        if (!registered) throw "the session is no longer open";
+        openSessions.delete(a.executionId as string);
+        return null;
+      },
+    });
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    const execId = calls("session_open")[0].executionId as string;
+
+    fireEvent.click(screen.getByRole("button", { name: "Abort" }));
+    await waitFor(() => expect(calls("session_cancel")).toHaveLength(1));
+    await act(async () => {});
+    expect(screen.queryByRole("status")).toBeNull();
+    // The open then registers and succeeds: the pending abort stops the session.
+    registered = true;
+    openSessions.add(execId);
+    await act(async () => open.resolve(execId));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }, { executionId: execId }]));
+    expect(openSessions.size).toBe(0);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("stops an open that succeeded while its early Abort's answer was on the way", async () => {
+    const open = deferred<string>();
+    let cancels = 0;
+    let answerFirstCancel!: (err: string) => void;
+    backend({
+      session_open: () => open.promise,
+      session_cancel: (a) => {
+        // The first cancel reached the backend before the open registered; its answer arrives late.
+        if (++cancels === 1) return new Promise((_resolve, reject) => (answerFirstCancel = reject));
+        openSessions.delete(a.executionId as string);
+        return null;
+      },
+    });
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    const execId = calls("session_open")[0].executionId as string;
+
+    fireEvent.click(screen.getByRole("button", { name: "Abort" }));
+    await waitFor(() => expect(calls("session_cancel")).toHaveLength(1));
+    openSessions.add(execId);
+    await act(async () => open.resolve(execId));
+    expect(calls("session_cancel")).toHaveLength(1);
+    await act(async () => answerFirstCancel("the session is no longer open"));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }, { executionId: execId }]));
+    expect(openSessions.size).toBe(0);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("a failed open clears only its own session, not a newer one", async () => {
     backend();
     await boot();
@@ -308,10 +369,11 @@ describe("closing a tab with backend work", () => {
     ask.mockResolvedValueOnce(true);
     fireEvent.click(within(screen.getByRole("treeitem", { name: /Socket/ })).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(calls("session_cancel")).toHaveLength(2));
-    // Let the delete resume after its failed stop before asserting it went no further.
+    // The abandoned delete reports its failed stop; flush once more so a delete
+    // that went ahead regardless would have been called by now.
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("the delete was abandoned"));
     await act(async () => {});
     expect(calls("request_delete")).toHaveLength(0);
-    expect(screen.getByRole("status").textContent).toContain("the delete was abandoned");
     expect(openTabs().getByRole("tab", { name: /Socket/ })).toBeTruthy();
     expect(screen.getByRole("treeitem", { name: /Socket/ })).toBeTruthy();
   });

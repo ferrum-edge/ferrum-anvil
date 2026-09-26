@@ -118,6 +118,36 @@ describe("JWT-SVID auth editor", () => {
     expect(invoke).toHaveBeenCalledWith("file_choose", { purpose: "jwt_svid_file", options: { multiple: false } });
   });
 
+  it("lists the token files chosen on this device and removes one chosen by mistake", async () => {
+    let bound = [
+      { id: "b1", path: "/run/secrets/jwt", bound_at: "2026-01-01T00:00:00Z" },
+      { id: "b2", path: "/home/me/.ssh/id_ed25519", bound_at: "2026-01-02T00:00:00Z" },
+    ];
+    invoke.mockImplementation(async (cmd: string, args?: { bindingId?: string }) => {
+      if (cmd === "token_files_list") return bound;
+      if (cmd === "token_file_remove") bound = bound.filter((b) => b.id !== args?.bindingId);
+      return null;
+    });
+    let last = { type: "none" } as AuthConfig;
+    render(<AuthHarness onValue={(a) => (last = a)} />);
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "jwt_svid" } });
+    fireEvent.change(screen.getByLabelText("Token source"), { target: { value: "file" } });
+    const list = await screen.findByRole("table", { name: "Token files chosen on this device" });
+    expect(list.textContent).toContain("/run/secrets/jwt");
+    expect(list.textContent).toContain("/home/me/.ssh/id_ed25519");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove /home/me/.ssh/id_ed25519" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove /home/me/.ssh/id_ed25519" })).toBeNull());
+    expect(invoke).toHaveBeenCalledWith("token_file_remove", { bindingId: "b2" });
+    expect(screen.getByRole("button", { name: "Remove /run/secrets/jwt" })).toBeTruthy();
+    // Removing a binding does not edit the auth setting.
+    expect(last.type === "jwt_svid" && last.config.source).toEqual({ kind: "file", path: "" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove /run/secrets/jwt" }));
+    await waitFor(() => expect(screen.queryByRole("table", { name: "Token files chosen on this device" })).toBeNull());
+    expect(bound).toEqual([]);
+  });
+
   it("warns before sending a token that failed its checks", () => {
     let last = { type: "none" } as AuthConfig;
     render(<AuthHarness onValue={(a) => (last = a)} />);
