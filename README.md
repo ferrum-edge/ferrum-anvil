@@ -47,9 +47,12 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
     preview report.
   - Export portable workspace bundles (share safely without secrets, or
     encrypted), or full encrypted backups that restore on a clean machine.
-- **Local protection**: everything is encrypted on disk (XChaCha20-Poly1305).
-  Unlock with a passphrase and recovery key, or the OS keychain, and set an
-  idle or sleep auto-lock. The lock is enforced in the backend.
+- **Local protection**: no account and no sign-up. On first run you can
+  **start without a password**: the data key goes to the OS keychain and the
+  app opens straight to the workbench afterwards. Or protect the profile with
+  a passphrase, which comes with a recovery key. Either way everything is
+  encrypted on disk (XChaCha20-Poly1305), with idle and sleep auto-lock, and
+  the lock is enforced in the backend.
 
 ## Build and run
 

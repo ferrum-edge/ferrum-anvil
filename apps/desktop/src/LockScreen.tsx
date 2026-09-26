@@ -8,19 +8,35 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
   const [mode, setMode] = useState<"unlock" | "create" | "recovery">("unlock");
   const [selected, setSelected] = useState<string>("");
   const [secret, setSecret] = useState("");
-  const [name, setName] = useState("");
+  const [name, setName] = useState("Local");
   const [pass2, setPass2] = useState("");
-  const [useKeychain, setUseKeychain] = useState(false);
+  // Default: start without a password; the data key goes to the OS keychain.
+  const [useKeychain, setUseKeychain] = useState(true);
+  const [autoOpening, setAutoOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [recovery, setRecovery] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState(false);
 
   useEffect(() => {
-    api.profiles().then((p) => {
+    api.profiles().then(async (p) => {
       setProfiles(p);
-      if (p.length === 0) setMode("create");
-      else setSelected(p[0].profile_id);
+      if (p.length === 0) return setMode("create");
+      setSelected(p[0].profile_id);
+      // At launch (not after a manual, idle or sleep lock), a single profile
+      // kept in the OS keychain opens by itself: no password was chosen, so
+      // there is nothing to ask for.
+      if (!props.reason && p.length === 1 && p[0].protection === "os_keychain") {
+        setAutoOpening(true);
+        try {
+          await api.unlock(p[0].profile_id, null, null);
+          props.onUnlocked();
+        } catch (e) {
+          setError(String((e as Error).message));
+        } finally {
+          setAutoOpening(false);
+        }
+      }
     });
   }, []);
 
@@ -46,7 +62,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
 
   async function create() {
     setError(null);
-    if (!name.trim()) return setError("Choose a profile name.");
+    if (!name.trim()) return setError("Give the profile a name.");
     if (!useKeychain) {
       if (secret.length < 8) return setError("The passphrase needs at least 8 characters.");
       if (secret !== pass2) return setError("The passphrases do not match.");
@@ -59,7 +75,15 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
       if (r.recovery_key) setRecovery(r.recovery_key);
       else props.onUnlocked();
     } catch (e) {
-      setError(String((e as Error).message));
+      const msg = String((e as Error).message);
+      if (useKeychain && msg.includes("credential store is unavailable")) {
+        // No OS keychain here (e.g. Linux without a Secret Service). Anvil
+        // never stores data unencrypted, so a passphrase is the only option.
+        setUseKeychain(false);
+        setError("This system has no OS keychain Anvil can use, so choose a passphrase instead. Anvil never stores your data unencrypted.");
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -126,6 +150,17 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
     );
   }
 
+  if (autoOpening) {
+    return (
+      <div className="lock">
+        <div className="lock-card" aria-busy="true">
+          <h1>Ferrum Anvil</h1>
+          <p className="muted">Opening your local profile…</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="lock">
       <form
@@ -185,21 +220,36 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
         {mode === "create" && (
           <>
             <p className="muted" style={{ margin: 0 }}>
-              Profiles are local. No account or network is needed. Everything you save — requests, history, secrets — is encrypted on this machine.
+              No account, no sign-up and no network needed. What you save stays on this computer, encrypted.
             </p>
             <label className="lbl">
               Profile name
-              <input className="field" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. work" />
+              <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. work" />
             </label>
-            <label className="check">
-              <input type="checkbox" checked={useKeychain} onChange={(e) => setUseKeychain(e.target.checked)} />
-              Keep the data key in the OS keychain instead of a passphrase
-            </label>
+            <fieldset className="choices" aria-label="How to protect this profile">
+              <label className={`choice ${useKeychain ? "selected" : ""}`}>
+                <input type="radio" name="protection" checked={useKeychain} onChange={() => { setUseKeychain(true); setError(null); }} />
+                <span>
+                  <b>Start now — no password</b>
+                  <span className="faint">
+                    The encryption key is kept in your operating system's keychain, so Anvil opens without asking for anything. Anyone signed in to this computer
+                    account can open it.
+                  </span>
+                </span>
+              </label>
+              <label className={`choice ${!useKeychain ? "selected" : ""}`}>
+                <input type="radio" name="protection" checked={!useKeychain} onChange={() => { setUseKeychain(false); setError(null); }} />
+                <span>
+                  <b>Protect with a passphrase</b>
+                  <span className="faint">You type it to unlock, and you get a recovery key. Better on a shared computer.</span>
+                </span>
+              </label>
+            </fieldset>
             {!useKeychain && (
               <>
                 <label className="lbl">
                   Unlock passphrase
-                  <input className="field" type="password" value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" />
+                  <input className="field" type="password" autoFocus value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" />
                 </label>
                 <label className="lbl">
                   Repeat passphrase
@@ -209,7 +259,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
             )}
             {error && <div className="bad-box" role="alert">{error}</div>}
             <button className="btn primary" type="submit" disabled={busy}>
-              {busy ? "Creating…" : "Create profile"}
+              {busy ? "Creating…" : useKeychain ? "Start working" : "Create profile"}
             </button>
             {profiles && profiles.length > 0 && (
               <button type="button" className="btn ghost small" onClick={() => setMode("unlock")}>

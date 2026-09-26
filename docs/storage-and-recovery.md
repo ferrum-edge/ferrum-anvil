@@ -30,7 +30,7 @@ journal, and blobs for known secret and body values.
 |---|---|
 | Passphrase | Argon2id(passphrase, salt, parameters in the header) unwraps the data key |
 | Recovery key | A random recovery key (shown once at creation of a passphrase profile) unwraps a second copy of the data key |
-| OS keychain | The data key is stored in the platform credential store (Keychain, Credential Manager, Secret Service). A keychain profile has no recovery key: if the keychain item is lost, only a portable backup restores the data |
+| OS keychain | The data key is stored in the platform credential store (Keychain, Credential Manager, Secret Service). This is the first-run default ("Start now — no password"): at launch a single keychain profile opens without any input, but never after a manual, idle or sleep lock. Where no credential store exists (e.g. Linux without a Secret Service) the app falls back to a passphrase; it never stores data unencrypted. A keychain profile has no recovery key: if the keychain item is lost, only a portable backup restores the data |
 
 A linked provider identity is **not** an unlock method; see `docs/identity.md`.
 
