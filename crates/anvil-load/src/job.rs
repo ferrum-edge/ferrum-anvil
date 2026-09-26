@@ -184,6 +184,11 @@ fn walk_auth(a: &AuthConfig, out: &mut Vec<SecretRef>) {
                 push_secret(s, out);
             }
         }
+        AuthConfig::JwtSvid { config } => {
+            if let anvil_domain::workload::JwtSvidSource::Value { token } = &config.source {
+                push_secret(token, out);
+            }
+        }
         AuthConfig::Multi { profiles } => profiles.iter().for_each(|p| walk_auth(p, out)),
     }
 }
@@ -207,7 +212,8 @@ pub fn secret_refs(ctx: &ExecutionContext) -> Vec<SecretRef> {
             push_secret(bundle_b64, &mut out);
             push_secret(password, &mut out);
         }
-        None => {}
+        // Fetched by the worker from the Workload API; no vault secret.
+        Some(ClientIdentity::WorkloadApi { .. }) | None => {}
     }
     if let Some(pw) = proxy.and_then(|p| p.password.as_ref()) {
         push_secret(pw, &mut out);

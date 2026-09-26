@@ -74,6 +74,7 @@ fn run(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trusted
         tls_verification_enabled: true,
         credentials_stripped_on_redirect: true,
         protocol_fallback_from: None,
+        workload: None,
     })
 }
 

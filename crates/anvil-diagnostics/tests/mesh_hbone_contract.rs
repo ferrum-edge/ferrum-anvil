@@ -125,6 +125,7 @@ fn run(s: &Shape) -> Diagnosis {
         tls_verification_enabled: true,
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
+        workload: None,
     })
 }
 
@@ -337,6 +338,7 @@ fn a_direct_tls13_handshake_failure_after_finished_with_a_presented_certificate_
             tls_verification_enabled: true,
             credentials_stripped_on_redirect: false,
             protocol_fallback_from: None,
+            workload: None,
         })
     };
     let d = direct(FailureKind::TlsAlertAfterHandshake, true);

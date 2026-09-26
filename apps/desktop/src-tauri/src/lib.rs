@@ -157,6 +157,7 @@ pub fn run() {
             commands::history_clear,
             commands::lint_body,
             commands::jwt_inspect,
+            commands::workload_probe,
             commands::export_preview,
             commands::export_to_path,
             commands::import_preview,

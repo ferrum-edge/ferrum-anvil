@@ -1,0 +1,48 @@
+# Ferrum Anvil failure lab - profile "workload", relying gateway (ferrum-edge v0.9.7 and v0.9.5, file mode)
+#
+# Scenarios: WL-002 (JWT-SVID accepted), WL-003 (wrong audience), WL-004 (expired, sent anyway)
+#            (see docs/lab/workload.md).
+# Settings:  workload-proxy.conf (proxy HTTP 127.0.0.1:17480, admin 127.0.0.1:17491).
+# Fixture:   echo 127.0.0.1:17502 (the protected API).
+# Tokens:    {{JWKS}} the trust domain anvil.lab's JWT bundle exactly as the workload-mesh Workload API
+#            returned it from FetchJWTBundles (an inline JWKS: jwks_auth provider `jwks`,
+#            src/plugins/jwks_auth.rs parse_inline_jwks); {{AUDIENCE}} the audience this API accepts.
+#            JWT-SVIDs carry no `iss` (docs/mesh.md "Workload API JWT-SVID"), so the provider sets none;
+#            jwks_auth then tries every provider (jwks_auth.rs: "handles no-issuer tokens").
+#            jwks_auth validates exp/nbf with a 0-second leeway.
+version: "1"
+
+resource_counts:
+  proxies: 1
+  consumers: 0
+  plugin_configs: 2
+  upstreams: 0
+
+proxies:
+  # WL-002/003/004: an API accepting JWT-SVIDs of the anvil.lab trust domain for {{AUDIENCE}}.
+  - id: wl-jwt-svid
+    listen_path: /wl/jwt
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 17502
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: wl-jwks
+
+plugin_configs:
+  - id: wl-logging
+    plugin_name: stdout_logging
+    scope: global
+    enabled: true
+    config: {}
+
+  - id: wl-jwks
+    plugin_name: jwks_auth
+    scope: proxy
+    proxy_id: wl-jwt-svid
+    enabled: true
+    config:
+      providers:
+        - jwks: {{JWKS}}
+          audiences: ["{{AUDIENCE}}"]

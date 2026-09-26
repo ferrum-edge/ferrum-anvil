@@ -53,6 +53,7 @@ rcgen.workspace = true
 
 [dev-dependencies]
 anvil-fixtures = { path = "../anvil-fixtures" }
+anvil-auth.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

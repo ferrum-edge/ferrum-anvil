@@ -14,6 +14,11 @@ fn fingerprint(der: &[u8]) -> String {
     h.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }
 
+/// [`summarize`] for raw DER bytes.
+pub fn summarize_der(der: &[u8]) -> CertificateSummary {
+    summarize(&CertificateDer::from(der))
+}
+
 pub fn summarize(der: &CertificateDer<'_>) -> CertificateSummary {
     match X509Certificate::from_der(der.as_ref()) {
         Ok((_, cert)) => {

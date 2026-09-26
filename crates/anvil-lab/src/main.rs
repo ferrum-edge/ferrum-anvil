@@ -36,6 +36,7 @@ mod proxyproto;
 mod scenario;
 mod streams;
 mod tls;
+mod workload;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

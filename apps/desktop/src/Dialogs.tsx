@@ -19,6 +19,7 @@ import type {
 import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
 import { Modal, SecretField, Tabs, humanize } from "./ui";
+import { WorkloadIdentityFields } from "./WorkloadApi";
 
 const now = () => new Date().toISOString();
 
@@ -308,7 +309,7 @@ function spiffeLabel(p: TlsProfile) {
   return ` · SPIFFE ${s.expected_server_spiffe_id || `trust domain ${s.trust_domain}`}`;
 }
 
-function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => void }) {
+export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => void }) {
   const id: ClientIdentity | null | undefined = p.client_identity;
   const spiffe = p.server_spiffe != null;
   return (
@@ -409,7 +410,9 @@ function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => 
               />
             </label>
             {!(p.server_spiffe?.expected_server_spiffe_id || p.server_spiffe?.trust_domain) && <div className="warn-box">Set an expected SPIFFE ID or a trust domain; an empty SPIFFE check falls back to host-name verification.</div>}
-            {(p.extra_roots_pem ?? []).length === 0 && <div className="warn-box">Add the trust domain's CA certificates (its trust bundle) above; SPIFFE verification needs them.</div>}
+            {(p.extra_roots_pem ?? []).length === 0 && !(id?.format === "workload_api" && id.trust_bundle) && (
+              <div className="warn-box">Add the trust domain's CA certificates (its trust bundle) above, or take the bundle from the Workload API below; SPIFFE verification needs them.</div>
+            )}
           </div>
         )}
       </fieldset>
@@ -427,13 +430,16 @@ function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => 
                     ? null
                     : e.target.value === "pem"
                       ? { format: "pem", cert_chain_pem: "", private_key_pem: { kind: "template", value: "" } }
-                      : { format: "pkcs12", bundle_b64: { kind: "template", value: "" }, password: { kind: "template", value: "" } },
+                      : e.target.value === "workload_api"
+                        ? { format: "workload_api", endpoint: "", trust_bundle: true }
+                        : { format: "pkcs12", bundle_b64: { kind: "template", value: "" }, password: { kind: "template", value: "" } },
               })
             }
           >
             <option value="none">None</option>
             <option value="pem">PEM certificate + key</option>
             <option value="pkcs12">PKCS#12 (.p12 / .pfx)</option>
+            <option value="workload_api">SPIFFE Workload API (X.509-SVID)</option>
           </select>
         </div>
         {id?.format === "pem" && (
@@ -465,6 +471,7 @@ function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => 
             <SecretField label="Bundle password" value={id.password} workspaceId={p.workspace_id} onChange={(v) => onChange({ ...p, client_identity: { ...id, password: v } })} />
           </div>
         )}
+        {id?.format === "workload_api" && <WorkloadIdentityFields id={id} onChange={(v) => onChange({ ...p, client_identity: v })} />}
         {id && (
           <label className="lbl" style={{ marginTop: 8 }}>
             Present only to these hosts (comma-separated; empty = any request using this profile)

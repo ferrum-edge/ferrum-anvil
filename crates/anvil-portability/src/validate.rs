@@ -114,7 +114,58 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         warnings
             .push(format!("{legacy} auth profile(s) requested the replayable legacy HMAC v1 opt-in; the opt-in was turned off on import."));
     }
+    // SPIFFE Workload API sources carry no secret: an imported profile draws
+    // on THIS machine's workload identity. Never import "send a JWT-SVID
+    // that failed its checks", and say which profiles use the identity.
+    let (mut send_anyway, mut jwt_from_api) = (0, 0);
+    for a in g
+        .requests
+        .iter_mut()
+        .map(|r| &mut r.spec.auth)
+        .chain(g.folders.iter_mut().map(|f| &mut f.auth))
+        .chain(g.workspaces.iter_mut().map(|w| &mut w.auth))
+    {
+        jwt_svid_safety(a, &mut send_anyway, &mut jwt_from_api);
+    }
+    if send_anyway > 0 {
+        warnings.push(format!(
+            "{send_anyway} JWT-SVID auth profile(s) sent tokens that failed Anvil's local checks; the import turned that off."
+        ));
+    }
+    if jwt_from_api > 0 {
+        warnings.push(format!(
+            "{jwt_from_api} JWT-SVID auth profile(s) fetch tokens from this machine's SPIFFE Workload API and send them to the imported URLs; review their audiences and destinations before sending."
+        ));
+    }
+    let svid_profiles: Vec<&str> = g
+        .tls_profiles
+        .iter()
+        .filter(|t| matches!(t.client_identity, Some(anvil_domain::tls::ClientIdentity::WorkloadApi { .. })))
+        .map(|t| t.name.as_str())
+        .collect();
+    if !svid_profiles.is_empty() {
+        warnings.push(format!(
+            "TLS profile(s) {} present this machine's X.509-SVID from the SPIFFE Workload API; check their host bindings before sending.",
+            svid_profiles.join(", ")
+        ));
+    }
     Ok(warnings)
+}
+
+fn jwt_svid_safety(a: &mut anvil_domain::auth::AuthConfig, send_anyway: &mut usize, from_api: &mut usize) {
+    match a {
+        anvil_domain::auth::AuthConfig::JwtSvid { config } => {
+            if config.send_despite_failed_checks {
+                config.send_despite_failed_checks = false;
+                *send_anyway += 1;
+            }
+            if config.source == anvil_domain::workload::JwtSvidSource::WorkloadApi {
+                *from_api += 1;
+            }
+        }
+        anvil_domain::auth::AuthConfig::Multi { profiles } => profiles.iter_mut().for_each(|p| jwt_svid_safety(p, send_anyway, from_api)),
+        _ => {}
+    }
 }
 
 fn disable_legacy(a: &mut anvil_domain::auth::AuthConfig, n: &mut usize) {

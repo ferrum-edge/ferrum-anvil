@@ -709,6 +709,23 @@
           ]
         },
         {
+          "description": "SPIFFE JWT-SVID as a bearer credential, from the Workload API or a\nvariable/file, checked locally before it is sent.",
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/JwtSvidConfig"
+            },
+            "type": {
+              "type": "string",
+              "const": "jwt_svid"
+            }
+          },
+          "required": [
+            "type",
+            "config"
+          ]
+        },
+        {
           "description": "Several explicit presentations in one request (e.g. mTLS + API key).\nOrder is preserved; conflicting headers fail validation.",
           "type": "object",
           "properties": {
@@ -1066,6 +1083,108 @@
       "enum": [
         "password_text",
         "password_digest"
+      ]
+    },
+    "JwtSvidConfig": {
+      "description": "JWT-SVID bearer auth (SPIFFE JWT-SVID specification). Anvil checks the\ntoken locally before sending it and never mints one itself.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/JwtSvidSource"
+        },
+        "audiences": {
+          "description": "Audiences requested from the Workload API; every one must be in the\ntoken's `aud` before it is sent. At least one is required.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "endpoint": {
+          "description": "Workload API endpoint: `unix:///path/to/socket` (or `npipe:name` on\nWindows). Empty: the `SPIFFE_ENDPOINT_SOCKET` environment variable.\nUsed by the `workload_api` source and by bundle verification.",
+          "type": "string"
+        },
+        "spiffe_id": {
+          "description": "With the `workload_api` source, the SPIFFE ID to request (a workload\nmay hold several); otherwise the subject the token must carry.\nEmpty: the workload's default identity / any subject.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verify_with_bundles": {
+          "description": "Verify the signature against the trust domain's JWT bundle from\n`FetchJWTBundles` before sending.",
+          "type": "boolean",
+          "default": false
+        },
+        "send_despite_failed_checks": {
+          "description": "Send even when a local check fails, to see how a verifier treats a\nbad JWT-SVID. Off by default: a failed check stops the request.",
+          "type": "boolean",
+          "default": false
+        },
+        "header_name": {
+          "description": "Header carrying the token (default `Authorization`).",
+          "type": "string",
+          "default": "Authorization"
+        },
+        "prefix": {
+          "type": "string",
+          "default": "Bearer"
+        }
+      },
+      "required": [
+        "source",
+        "audiences"
+      ]
+    },
+    "JwtSvidSource": {
+      "description": "Where a JWT-SVID comes from.",
+      "oneOf": [
+        {
+          "description": "`FetchJWTSVID` from the Workload API for the configured audiences,\ncached in memory until shortly before it expires.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "workload_api"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A token held in a variable or the vault (for example `{{jwt_svid}}`).",
+          "type": "object",
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "kind": {
+              "type": "string",
+              "const": "value"
+            }
+          },
+          "required": [
+            "kind",
+            "token"
+          ]
+        },
+        {
+          "description": "A token file written by another agent (for example spiffe-helper),\nread at send time.",
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        }
       ]
     },
     "SettingsOverrides": {

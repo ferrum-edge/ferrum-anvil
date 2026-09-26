@@ -31,6 +31,7 @@ pub mod schema;
 pub mod secret;
 pub mod settings;
 pub mod tls;
+pub mod workload;
 pub mod workspace;
 
 pub use ids::Id;

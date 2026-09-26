@@ -33,6 +33,9 @@ import type {
   TlsProfile,
   Workspace,
   EffectiveSettings,
+  JwtSvidSummary,
+  WorkloadApiCall,
+  WorkloadEndpointSource,
 } from "./generated/contracts";
 
 export type {
@@ -167,6 +170,18 @@ export interface JwtInspection {
   time_status: "valid" | "expired" | "not_yet_valid" | "no_expiry";
   signature_verified: boolean;
   notes: string[];
+}
+
+/** What a SPIFFE Workload API endpoint issues to this process (public data only). */
+export interface WorkloadProbe {
+  endpoint: string;
+  endpoint_source?: WorkloadEndpointSource;
+  endpoint_error?: string;
+  calls: WorkloadApiCall[];
+  x509_svids: { spiffe_id: string; not_after: string; chain_length: number; bundle_certificates: number; hint?: string }[];
+  federated_trust_domains: string[];
+  jwt_bundles: { trust_domain: string; key_ids: string[] }[];
+  jwt_svid?: JwtSvidSummary;
 }
 
 export class ApiError extends Error {
@@ -405,6 +420,7 @@ export const api = {
   historyClear: (workspaceId: string | null) => call<void>("history_clear", { workspaceId }),
   lint: (kind: string, text: string) => call<LintResult>("lint_body", { kind, text }),
   jwtInspect: (token: string) => call<JwtInspection>("jwt_inspect", { token }),
+  workloadProbe: (endpoint: string, audience: string | null) => call<WorkloadProbe>("workload_probe", { endpoint, audience }),
 
   exportPreview: (workspaceId: string | null, exportMode: string) => call<ExportPreview>("export_preview", { workspaceId, exportMode }),
   exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, path: string) =>

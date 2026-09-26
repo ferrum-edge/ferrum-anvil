@@ -5,6 +5,7 @@ import type { ExecutionView } from "./api";
 import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation, TunnelObservation } from "./generated/contracts";
 import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
 import { ProxyHeaderEvidence } from "./ProxyProtocolEditor";
+import { WorkloadEvidenceView } from "./WorkloadApi";
 
 type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
 
@@ -102,7 +103,12 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
         {effectiveTab === "body" && <Body view={view} />}
         {effectiveTab === "headers" && <Headers view={view} />}
         {effectiveTab === "timing" && <Timing attempt={last} />}
-        {effectiveTab === "connection" && <Connection attempt={last} />}
+        {effectiveTab === "connection" && (
+          <>
+            <Connection attempt={last} />
+            {r.prepared.workload_api && <WorkloadEvidenceView w={r.prepared.workload_api} />}
+          </>
+        )}
         {effectiveTab === "attempts" && <Attempts attempts={r.attempts} />}
         {effectiveTab === "tests" && <TestsView view={view} />}
       </div>

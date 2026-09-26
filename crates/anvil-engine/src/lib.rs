@@ -23,6 +23,7 @@ pub mod redact;
 pub mod sessions;
 pub mod settings;
 pub mod vars;
+pub mod workload;
 
 use anvil_domain::execution::{ExecutionRecord, ResponseRecord, TransportFailure};
 use anvil_domain::request::Protocol;
@@ -54,6 +55,8 @@ pub struct Engine {
     pub http: HttpTransport,
     pub h3: anvil_transport::h3::H3Transport,
     pub tokens: Arc<anvil_auth::oauth::TokenCache>,
+    /// SPIFFE Workload API SVIDs and JWT bundles (memory only).
+    pub workload: Arc<workload::WorkloadCache>,
     tls: Mutex<HashMap<String, Arc<PreparedTls>>>,
     cookies: Mutex<HashMap<String, cookie_store::CookieStore>>,
 }
@@ -71,6 +74,7 @@ impl Engine {
             http: HttpTransport::new(),
             h3: anvil_transport::h3::H3Transport::new(),
             tokens: Arc::new(anvil_auth::oauth::TokenCache::new()),
+            workload: Arc::new(workload::WorkloadCache::default()),
             tls: Mutex::new(HashMap::new()),
             cookies: Mutex::new(HashMap::new()),
         }
@@ -86,13 +90,21 @@ impl Engine {
         }
     }
 
-    /// Validated TLS material, cached by profile key.
+    /// Validated TLS material, cached by profile key. A key
+    /// `<profile variant>|<material hash>` replaces an entry of the same
+    /// variant with other material, so a rotated Workload API SVID does not
+    /// leave the superseded key material behind.
     pub fn prepared_tls(&self, key: &str, s: &TlsSettings) -> Result<Arc<PreparedTls>, TransportFailure> {
         if let Some(p) = self.tls.lock().get(key) {
             return Ok(p.clone());
         }
         let p = Arc::new(anvil_transport::tls::prepare(s)?);
-        self.tls.lock().insert(key.to_string(), p.clone());
+        let mut cache = self.tls.lock();
+        if let Some((variant, _)) = key.rsplit_once('|') {
+            let prefix = format!("{variant}|");
+            cache.retain(|k, _| !k.starts_with(&prefix));
+        }
+        cache.insert(key.to_string(), p.clone());
         Ok(p)
     }
 
@@ -115,11 +127,12 @@ impl Engine {
 
     /// Clear every per-session sensitive cache (on vault lock, workspace
     /// close or explicit reset): pooled authenticated connections, tokens,
-    /// cookies and prepared client identities.
+    /// Workload API SVIDs, cookies and prepared client identities.
     pub fn clear_sensitive_state(&self) {
         self.http.pool.clear();
         self.h3.clear();
         self.tokens.clear();
+        self.workload.clear();
         self.tls.lock().clear();
         self.cookies.lock().clear();
     }

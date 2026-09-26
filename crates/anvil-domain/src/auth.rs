@@ -231,6 +231,11 @@ pub enum AuthConfig {
     Wsse {
         config: WsseConfig,
     },
+    /// SPIFFE JWT-SVID as a bearer credential, from the Workload API or a
+    /// variable/file, checked locally before it is sent.
+    JwtSvid {
+        config: crate::workload::JwtSvidConfig,
+    },
     /// Several explicit presentations in one request (e.g. mTLS + API key).
     /// Order is preserved; conflicting headers fail validation.
     Multi {
@@ -258,6 +263,7 @@ impl AuthConfig {
             AuthConfig::Hmac { .. } => "hmac",
             AuthConfig::Dpop { .. } => "dpop",
             AuthConfig::Wsse { .. } => "wsse",
+            AuthConfig::JwtSvid { .. } => "jwt_svid",
             AuthConfig::Multi { .. } => "multi",
         }
     }

@@ -26,6 +26,7 @@ use anvil_domain::execution::*;
 use anvil_domain::outcome::{GrpcStatusSource, ProtocolStatus};
 use anvil_domain::request::*;
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
+use anvil_domain::workload::WorkloadApiEvidence;
 use anvil_transport::dns::DnsConfig;
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::session::{CommandRx, RedactFn, SessionFacts, SessionOutput, TranscriptLimits};
@@ -200,6 +201,8 @@ fn identity_material(
                 .map_err(|e| local(FailureKind::ClientIdentityInvalid, e, "tls.client_identity"))?;
             crate::pkcs12::to_pem(&b, &pw)?
         }
+        // Materialized before preparation for DTLS URLs (crate::workload).
+        anvil_domain::tls::ClientIdentity::WorkloadApi { .. } => return Ok(None),
     }))
 }
 
@@ -1079,6 +1082,7 @@ async fn run_plan(plan: &Plan, events: &EventCtx, cancel: &CancellationToken, co
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_prepared(
     prep: SessionPrep,
     ctx: &ExecutionContext,
@@ -1087,6 +1091,7 @@ async fn run_prepared(
     events: EventCtx,
     cancel: CancellationToken,
     commands: Option<CommandRx>,
+    workload: Option<WorkloadApiEvidence>,
 ) -> ExecutionOutput {
     let out = run_plan(&prep.plan, &events, &cancel, commands).await;
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
@@ -1152,6 +1157,7 @@ async fn run_prepared(
         extra_findings: extra,
         stream: out.transcript,
         protocol_status_override: Some(out.status),
+        workload_api: workload,
     };
     record::assemble(assembly)
 }
@@ -1160,9 +1166,16 @@ async fn run_prepared(
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
     let started_at = Utc::now();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver).await;
+    let materialized = match materialized {
+        Ok(m) => m,
+        Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, Some(workload)),
+    };
+    let workload = (!workload.is_empty()).then_some(workload);
+    let ctx = materialized.as_ref().unwrap_or(ctx);
     match prepare_session(engine, ctx, &resolver, false).await {
-        Ok(prep) => run_prepared(prep, ctx, &resolver, started_at, events, cancel, None).await,
-        Err(f) => record::local_failure(ctx, &resolver, started_at, f),
+        Ok(prep) => run_prepared(prep, ctx, &resolver, started_at, events, cancel, None, workload).await,
+        Err(f) => record::local_failure_with(ctx, &resolver, started_at, f, workload),
     }
 }
 
@@ -1260,15 +1273,26 @@ impl Engine {
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let cancel = CancellationToken::new();
         let fallback = Box::new(ctx.clone());
-        match prepare_session(self, &ctx, &resolver, true).await {
+        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver).await;
+        let (ctx, prepared, workload) = match materialized {
+            Ok(m) => {
+                let ctx = m.unwrap_or(ctx);
+                let workload = (!workload.is_empty()).then_some(workload);
+                let prepared = prepare_session(self, &ctx, &resolver, true).await;
+                (ctx, prepared, workload)
+            }
+            Err(f) => (ctx, Err(f), Some(workload)),
+        };
+        match prepared {
             Ok(prep) => {
                 let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
                 let c2 = cancel.clone();
-                let task = tokio::spawn(async move { run_prepared(prep, &ctx, &resolver, started_at, events, c2, Some(rx)).await });
+                let task =
+                    tokio::spawn(async move { run_prepared(prep, &ctx, &resolver, started_at, events, c2, Some(rx), workload).await });
                 SessionHandle { execution_id, protocol, commands: Some(tx), cancel, task, fallback }
             }
             Err(f) => {
-                let out = record::local_failure(&ctx, &resolver, started_at, f);
+                let out = record::local_failure_with(&ctx, &resolver, started_at, f, workload);
                 let task = tokio::spawn(async move { out });
                 SessionHandle { execution_id, protocol, commands: None, cancel, task, fallback }
             }

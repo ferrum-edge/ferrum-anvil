@@ -41,6 +41,7 @@ dimpl.workspace = true
 quinn.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
+jsonwebtoken.workspace = true
 
 [lints]
 workspace = true

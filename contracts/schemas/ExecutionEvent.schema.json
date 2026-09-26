@@ -432,6 +432,26 @@
           "const": "oauth_interaction_required"
         },
         {
+          "description": "The SPIFFE Workload API endpoint could not be reached (no socket,\npermission denied, nothing listening, not HTTP/2 gRPC, deadline).",
+          "type": "string",
+          "const": "workload_api_unavailable"
+        },
+        {
+          "description": "The Workload API answered `PERMISSION_DENIED`, or an OK answer carried\nno SVID for this caller: no identity was issued.",
+          "type": "string",
+          "const": "workload_api_denied"
+        },
+        {
+          "description": "Any other Workload API failure (another gRPC status, a malformed answer).",
+          "type": "string",
+          "const": "workload_api_failed"
+        },
+        {
+          "description": "A JWT-SVID failed Anvil's local checks (expiry, audience, subject,\nalgorithm, signature) and was not sent.",
+          "type": "string",
+          "const": "jwt_svid_rejected_locally"
+        },
+        {
           "description": "The mutual-TLS handshake with the HBONE endpoint failed. The precise\nTLS cause is `connection.tunnel.failure` (and the tunnel's TLS\nobservation); the inner destination was never contacted.",
           "type": "string",
           "const": "hbone_endpoint_tls_failed"

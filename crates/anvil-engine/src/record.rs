@@ -11,6 +11,7 @@ use anvil_domain::Id;
 use anvil_domain::execution::*;
 use anvil_domain::outcome::*;
 use anvil_domain::settings::EffectiveSettings;
+use anvil_domain::workload::WorkloadApiEvidence;
 use anvil_transport::decode::{self, DecodeOutcome};
 use anvil_transport::http::AttemptOutput;
 use bytes::Bytes;
@@ -41,6 +42,8 @@ pub struct Assembly<'a> {
     pub extra_findings: Vec<anvil_diagnostics::Draft>,
     pub stream: Option<StreamTranscript>,
     pub protocol_status_override: Option<ProtocolStatus>,
+    /// SPIFFE Workload API calls and SVIDs used (public data only).
+    pub workload_api: Option<WorkloadApiEvidence>,
 }
 
 fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
@@ -130,6 +133,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         tls_verification_enabled: a.tls_verification_enabled,
         credentials_stripped_on_redirect: a.credentials_stripped,
         protocol_fallback_from: a.protocol_fallback_from.clone(),
+        workload: a.workload_api.as_ref(),
     };
     let mut diagnosis = anvil_diagnostics::diagnose(&diag_input);
     for d in a.extra_findings {
@@ -233,6 +237,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
             settings: a.settings.clone(),
             inferred,
             omitted_secrets: vec![],
+            workload_api: a.workload_api.clone().map(|w| redact_workload(w, redactor)),
         },
         attempts,
         response,
@@ -294,9 +299,41 @@ pub fn summary_line(
     }
 }
 
+/// Workload API evidence carries no secret by construction; its free-text
+/// fields (server messages, check details) still pass the exact-value
+/// redactor.
+fn redact_workload(mut w: WorkloadApiEvidence, r: &Redactor) -> WorkloadApiEvidence {
+    use anvil_domain::workload::WorkloadCallResult as R;
+    for c in &mut w.calls {
+        match &mut c.result {
+            R::Unavailable { detail, .. } | R::NoIdentity { detail } | R::Malformed { detail } => *detail = r.text(detail),
+            R::Status { message, .. } => *message = r.text(message),
+            R::Ok | R::Timeout { .. } => {}
+        }
+    }
+    if let Some(j) = &mut w.jwt_svid {
+        for c in &mut j.checks {
+            c.detail = r.text(&c.detail);
+        }
+    }
+    w
+}
+
 /// Record for a local preparation failure (nothing was sent).
 pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: DateTime<Utc>, f: TransportFailure) -> ExecutionOutput {
+    local_failure_with(ctx, resolver, started_at, f, None)
+}
+
+/// [`local_failure`] with the Workload API evidence gathered before it.
+pub fn local_failure_with(
+    ctx: &ExecutionContext,
+    resolver: &Resolver,
+    started_at: DateTime<Utc>,
+    f: TransportFailure,
+    workload: Option<WorkloadApiEvidence>,
+) -> ExecutionOutput {
     let redactor = Redactor::new(resolver.used_secrets.lock().clone(), ctx.redaction_names.clone());
+    let workload = workload.filter(|w| !w.is_empty()).map(|w| redact_workload(w, &redactor));
     let mut f = f;
     f.message = redactor.text(&f.message);
     let ps = ProtocolStatus::None;
@@ -313,6 +350,7 @@ pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: Da
         tls_verification_enabled: true,
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
+        workload: workload.as_ref(),
     });
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let summary = diag.findings.first().map(|x| x.title.clone()).unwrap_or_else(|| "Not sent".into());
@@ -343,6 +381,7 @@ pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: Da
             settings,
             inferred: vec![],
             omitted_secrets: vec![],
+            workload_api: workload,
         },
         attempts: vec![AttemptObservation {
             index: 0,

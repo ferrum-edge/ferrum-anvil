@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-11",
+  "version": "2026.09.26-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -251,6 +251,75 @@
         }
       ],
       "confirm_with": []
+    },
+    "local.workload_api_unavailable": {
+      "title": "The SPIFFE Workload API could not be reached",
+      "explanation": "Anvil needed {purpose} from the Workload API at {endpoint} ({endpoint_source}), but {rpc} failed: {answer}. Nothing was sent to the destination.",
+      "alternatives": [
+        "The Workload API is not running, or listens on another path (a SPIRE agent's socket is often /run/spire/sockets/agent.sock; Ferrum Edge serves one only with FERRUM_MESH_WORKLOAD_API_ENABLED=true).",
+        "The socket's owner, group or mode does not admit the user Anvil runs as.",
+        "SPIFFE_ENDPOINT_SOCKET or the profile's endpoint names an outdated path."
+      ],
+      "does_not_prove": [
+        "That the destination is unreachable or refused anything: it was never contacted.",
+        "That this process is not entitled to an identity: the Workload API never answered."
+      ],
+      "remediation": [
+        {
+          "text": "Check the endpoint in the profile (or SPIFFE_ENDPOINT_SOCKET), that the Workload API is running, and that its socket admits this user.",
+          "owner": "caller"
+        },
+        {
+          "text": "Ask the operator of the SPIRE agent or mesh proxy whether its Workload API is enabled on this host and at which path.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "`ls -l` on the socket path and the agent's or proxy's startup log naming the socket it serves."
+      ]
+    },
+    "local.workload_api_denied": {
+      "title": "The Workload API issued no identity to Anvil",
+      "explanation": "{rpc} at {endpoint} answered {answer}. A Workload API identifies its caller from the socket's peer credentials (Anvil runs as {uid}); it issued no {what} for {purpose}. Nothing was sent to the destination.",
+      "alternatives": [
+        "No registration entry or attestation rule maps this user or process to a SPIFFE ID (SPIRE: a registration entry with a matching unix selector; Ferrum Edge: FERRUM_MESH_WORKLOAD_API_UNIX_IDENTITY_RULES).",
+        "The profile asks for a SPIFFE ID this workload does not hold.",
+        "The agent has not received this workload's entries yet."
+      ],
+      "does_not_prove": [
+        "Why the Workload API refused: its answer does not name the rule it applied.",
+        "That the destination would reject the request: it was never contacted."
+      ],
+      "remediation": [
+        {
+          "text": "Ask the identity operator to register this workload ({uid}) for the intended SPIFFE ID, or select a SPIFFE ID it holds.",
+          "owner": "identity_provider"
+        }
+      ],
+      "confirm_with": [
+        "The Workload API server's log for this call (it records which workload asked and why it was refused)."
+      ]
+    },
+    "local.workload_api_failed": {
+      "title": "The Workload API call failed",
+      "explanation": "{rpc} at {endpoint} failed while Anvil fetched {purpose}: {answer}. Nothing was sent to the destination.",
+      "alternatives": [
+        "UNIMPLEMENTED on a JWT call: this Workload API serves only X.509-SVIDs (for example a Ferrum Edge CA backend without a JWT signing authority).",
+        "INVALID_ARGUMENT: the server refused the request as malformed (for example an audience it does not accept).",
+        "The endpoint is not a SPIFFE Workload API, or its answer was cut off."
+      ],
+      "does_not_prove": [
+        "That the destination refused anything: it was never contacted."
+      ],
+      "remediation": [
+        {
+          "text": "Check what the Workload API serves (X.509-SVIDs, JWT-SVIDs) and the request Anvil made (the profile's audiences and SPIFFE ID).",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The Workload API server's log for this call."
+      ]
     },
     "client.dns.no_such_host": {
       "title": "The host name does not exist (client DNS)",
@@ -2241,6 +2310,96 @@
         }
       ],
       "confirm_with": []
+    },
+    "auth.jwt_svid_expired": {
+      "title": "The JWT-SVID has expired",
+      "explanation": "The JWT-SVID's time claims fail by this machine's clock: {detail} (exp {expires}). {outcome}",
+      "alternatives": [
+        "This machine's clock is ahead of the issuer's.",
+        "The token was stored in a variable or file before its issuer rotated it."
+      ],
+      "does_not_prove": [
+        "That a verifier would reject it: verifiers use their own clock and clock-skew leeway.",
+        "That the token's signature is valid or invalid."
+      ],
+      "remediation": [
+        {
+          "text": "Use a fresh JWT-SVID (the Workload API source fetches one before it expires) and check this machine's clock.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The token's exp and iat claims in the record, and the verifier's clock."
+      ]
+    },
+    "auth.jwt_svid_audience_mismatch": {
+      "title": "The JWT-SVID is not issued for the requested audience",
+      "explanation": "The profile requires the audience {requested}, but the JWT-SVID's aud claim is {aud}. {outcome}",
+      "alternatives": [
+        "The token was issued for another verifier.",
+        "The profile's audience differs from the one the token was requested with."
+      ],
+      "does_not_prove": [
+        "Which audience the verifier expects: only its configuration says."
+      ],
+      "remediation": [
+        {
+          "text": "Request the JWT-SVID for the verifier's audience, or correct the profile's audience.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The verifier's configured audience (for Ferrum Edge, the jwks_auth provider's audiences)."
+      ]
+    },
+    "auth.jwt_svid_invalid": {
+      "title": "The JWT-SVID failed a local check",
+      "explanation": "Anvil checked the JWT-SVID before sending it and found: {failures}. {outcome}",
+      "alternatives": [
+        "The token is not a JWT-SVID (another JWT, or a truncated value).",
+        "The token was signed by a key that is not in the trust domain's current JWT bundle (a rotated or restarted issuer key)."
+      ],
+      "does_not_prove": [
+        "How a verifier would treat the token: only its own validation decides."
+      ],
+      "remediation": [
+        {
+          "text": "Use a JWT-SVID issued by the trust domain's Workload API for this workload, and compare its kid with the JWT bundle.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The token's header and claims in the record, and the JWT bundle from FetchJWTBundles."
+      ]
+    },
+    "auth.jwt_svid_rejected": {
+      "title": "The destination rejected the JWT-SVID (401)",
+      "explanation": "{host} answered 401 to a request that carried a JWT-SVID for {subject} (aud {audiences}, expires {expires}). Anvil's local checks: {checks}. {body}",
+      "alternatives": [
+        "The verifier expects a different audience than {audiences}.",
+        "The verifier trusts a different JWT bundle or key (a rotated or restarted issuer key, or another trust domain).",
+        "The verifier requires a claim JWT-SVIDs do not carry (for example an issuer or scopes).",
+        "The verifier reads the token from another header or scheme.",
+        "The token is expired or not yet valid by the verifier's clock.",
+        "Another authentication step on the path failed."
+      ],
+      "does_not_prove": [
+        "Which check the verifier failed: its public answer does not identify the reason beyond its body.",
+        "Which component (gateway or application) returned the 401."
+      ],
+      "remediation": [
+        {
+          "text": "Compare the token's audience, subject and key id (in the record) with the verifier's configuration and JWT bundle.",
+          "owner": "caller"
+        },
+        {
+          "text": "Ask the verifier's operator which audience and JWT bundle it validates JWT-SVIDs against.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The verifier's log for this request (the reason it rejected the token)."
+      ]
     },
     "masque.proxy_refused": {
       "title": "The MASQUE proxy refused the UDP tunnel",

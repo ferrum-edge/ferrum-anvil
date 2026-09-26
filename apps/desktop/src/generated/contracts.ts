@@ -328,6 +328,10 @@ export type FailureKind =
       | "internal"
     )
   | "oauth_interaction_required"
+  | "workload_api_unavailable"
+  | "workload_api_denied"
+  | "workload_api_failed"
+  | "jwt_svid_rejected_locally"
   | "hbone_endpoint_tls_failed"
   | "hbone_connect_refused"
   | "hbone_protocol_error"
@@ -345,6 +349,66 @@ export type FailureKind =
  * via the `definition` "Protocol".
  */
 export type Protocol = "http" | "web_socket" | "grpc" | "sse" | "tcp" | "udp";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WorkloadRpc".
+ */
+export type WorkloadRpc = "FetchX509SVID" | "FetchJWTSVID" | "FetchJWTBundles";
+/**
+ * How the endpoint was chosen.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WorkloadEndpointSource".
+ */
+export type WorkloadEndpointSource = "setting" | "environment";
+/**
+ * What one Workload API call ended with.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WorkloadCallResult".
+ */
+export type WorkloadCallResult =
+  | {
+      result: "ok";
+    }
+  | {
+      detail: string;
+      io_error_kind?: string | null;
+      result: "unavailable";
+    }
+  | {
+      deadline_ms: number;
+      result: "timeout";
+    }
+  | {
+      code: number;
+      code_name: string;
+      message: string;
+      result: "status";
+    }
+  | {
+      detail: string;
+      result: "no_identity";
+    }
+  | {
+      detail: string;
+      result: "malformed";
+    };
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "JwtSvidSourceKind".
+ */
+export type JwtSvidSourceKind = "workload_api" | "value" | "file";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "JwtSvidCheckKind".
+ */
+export type JwtSvidCheckKind = "format" | "algorithm" | "subject" | "audience" | "expiry" | "signature";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "CheckResult".
+ */
+export type CheckResult = ("passed" | "failed") | "not_run";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "AttemptReason".
@@ -570,6 +634,24 @@ export type JwtAlgorithm = "HS256" | "HS384" | "HS512" | "RS256" | "ES256";
  */
 export type OAuthGrant = ("client_credentials" | "refresh_token") | "authorization_code_pkce";
 /**
+ * Where a JWT-SVID comes from.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "JwtSvidSource".
+ */
+export type JwtSvidSource =
+  | {
+      kind: "workload_api";
+    }
+  | {
+      token: SensitiveValue;
+      kind: "value";
+    }
+  | {
+      path: string;
+      kind: "file";
+    };
+/**
  * Auth configuration. Applied after interpolation, content-type inference
  * and serialization so body-dependent signatures cover the final bytes.
  *
@@ -646,6 +728,10 @@ export type AuthConfig =
   | {
       config: WsseConfig;
       type: "wsse";
+    }
+  | {
+      config: JwtSvidConfig;
+      type: "jwt_svid";
     }
   | {
       profiles: AuthConfig[];
@@ -1108,6 +1194,25 @@ export type ClientIdentity =
           };
       password: SensitiveValue;
       format: "pkcs12";
+    }
+  | {
+      /**
+       * `unix:///path/to/socket` (or `npipe:name` on Windows). Empty: the
+       * `SPIFFE_ENDPOINT_SOCKET` environment variable.
+       */
+      endpoint?: string;
+      /**
+       * Pick the SVID with this SPIFFE ID when the workload holds several.
+       * Empty: the first (default) SVID.
+       */
+      spiffe_id?: string | null;
+      /**
+       * Also trust the SVID's trust-domain bundle from the Workload API
+       * (for verifying mesh peers by SPIFFE ID), in addition to the
+       * profile's CA certificates.
+       */
+      trust_bundle?: boolean;
+      format: "workload_api";
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1723,6 +1828,10 @@ export interface PreparedSummary {
    * Secrets omitted from this summary (labels only).
    */
   omitted_secrets: string[];
+  /**
+   * SPIFFE Workload API calls and the SVIDs used (public data only).
+   */
+  workload_api?: WorkloadApiEvidence | null;
 }
 /**
  * Header entry (order and duplicates preserved).
@@ -1733,6 +1842,140 @@ export interface PreparedSummary {
 export interface HeaderEntry {
   name: string;
   value: string;
+}
+/**
+ * Everything the Workload API contributed to one execution.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WorkloadApiEvidence".
+ */
+export interface WorkloadApiEvidence {
+  calls: WorkloadApiCall[];
+  x509_svids: X509SvidSummary[];
+  jwt_svid?: JwtSvidSummary | null;
+}
+/**
+ * One Workload API call made for an execution.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WorkloadApiCall".
+ */
+export interface WorkloadApiCall {
+  rpc: WorkloadRpc;
+  /**
+   * The endpoint dialed, as a URI (`unix:///run/spire/agent.sock`).
+   */
+  endpoint: string;
+  endpoint_source: WorkloadEndpointSource;
+  /**
+   * What the call was for (`TLS profile 'mesh client'`, `JWT-SVID auth`).
+   */
+  purpose: string;
+  /**
+   * Served from Anvil's in-memory cache (fetched by an earlier execution).
+   */
+  cached?: boolean;
+  duration_us?: number | null;
+  /**
+   * The uid this process presents in the socket's peer credentials — what
+   * a Workload API server attests. Recorded when no identity was issued.
+   */
+  caller_uid?: number | null;
+  result: WorkloadCallResult;
+}
+/**
+ * The X.509-SVID used as a TLS client identity (public data only).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "X509SvidSummary".
+ */
+export interface X509SvidSummary {
+  tls_profile: string;
+  spiffe_id: string;
+  certificate: CertificateSummary;
+  /**
+   * Certificates in the SVID chain (leaf first).
+   */
+  chain_length: number;
+  hint?: string | null;
+  /**
+   * SPIFFE IDs of every SVID the endpoint returned (the first is the default).
+   */
+  offered_spiffe_ids: string[];
+  /**
+   * The SVID's trust-domain bundle was added to the profile's trust anchors.
+   */
+  bundle_trusted: boolean;
+  /**
+   * CA certificates in that bundle.
+   */
+  bundle_certificates: number;
+  /**
+   * Federated trust domains the endpoint also sent bundles for (recorded,
+   * never trusted: one TLS profile holds one trust bundle).
+   */
+  federated_trust_domains: string[];
+  /**
+   * When Anvil will fetch a fresh SVID (half its lifetime, as SPIFFE
+   * agents rotate).
+   */
+  refresh_after?: string | null;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "CertificateSummary".
+ */
+export interface CertificateSummary {
+  subject: string;
+  issuer: string;
+  subject_alt_names: string[];
+  not_before: string;
+  not_after: string;
+  serial_hex: string;
+  sha256_fingerprint: string;
+  is_ca: boolean;
+  key_algorithm: string;
+}
+/**
+ * The JWT-SVID Anvil presented (decoded claims only, never the token).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "JwtSvidSummary".
+ */
+export interface JwtSvidSummary {
+  source: JwtSvidSourceKind;
+  /**
+   * Audiences Anvil requested / required.
+   */
+  requested_audiences: string[];
+  subject?: string | null;
+  /**
+   * The token's `aud` claim.
+   */
+  audiences: string[];
+  algorithm?: string | null;
+  key_id?: string | null;
+  issued_at?: string | null;
+  not_before?: string | null;
+  expires_at?: string | null;
+  /**
+   * The token carries an `iss` claim (JWT-SVIDs define none).
+   */
+  has_issuer?: boolean;
+  checks: JwtSvidCheck[];
+  /**
+   * The token was sent although a check failed (explicit profile choice).
+   */
+  sent_despite_failed_checks?: boolean;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "JwtSvidCheck".
+ */
+export interface JwtSvidCheck {
+  check: JwtSvidCheckKind;
+  result: CheckResult;
+  detail: string;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1855,21 +2098,6 @@ export interface TlsObservation {
   client_certificate_presented?: CertificateSummary | null;
   alert_received?: string | null;
   resumed?: boolean | null;
-}
-/**
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "CertificateSummary".
- */
-export interface CertificateSummary {
-  subject: string;
-  issuer: string;
-  subject_alt_names: string[];
-  not_before: string;
-  not_after: string;
-  serial_hex: string;
-  sha256_fingerprint: string;
-  is_ca: boolean;
-  key_algorithm: string;
 }
 /**
  * Exactly what PROXY protocol framing Anvil sent. Secrets never appear: the
@@ -2299,6 +2527,10 @@ export interface Folder {
         type: "wsse";
       }
     | {
+        config: JwtSvidConfig;
+        type: "jwt_svid";
+      }
+    | {
         profiles: AuthConfig[];
         type: "multi";
       };
@@ -2484,6 +2716,48 @@ export interface WsseConfig {
    * mints assertions).
    */
   saml_assertion?: SensitiveValue | null;
+}
+/**
+ * JWT-SVID bearer auth (SPIFFE JWT-SVID specification). Anvil checks the
+ * token locally before sending it and never mints one itself.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "JwtSvidConfig".
+ */
+export interface JwtSvidConfig {
+  source: JwtSvidSource;
+  /**
+   * Audiences requested from the Workload API; every one must be in the
+   * token's `aud` before it is sent. At least one is required.
+   */
+  audiences: string[];
+  /**
+   * Workload API endpoint: `unix:///path/to/socket` (or `npipe:name` on
+   * Windows). Empty: the `SPIFFE_ENDPOINT_SOCKET` environment variable.
+   * Used by the `workload_api` source and by bundle verification.
+   */
+  endpoint?: string;
+  /**
+   * With the `workload_api` source, the SPIFFE ID to request (a workload
+   * may hold several); otherwise the subject the token must carry.
+   * Empty: the workload's default identity / any subject.
+   */
+  spiffe_id?: string | null;
+  /**
+   * Verify the signature against the trust domain's JWT bundle from
+   * `FetchJWTBundles` before sending.
+   */
+  verify_with_bundles?: boolean;
+  /**
+   * Send even when a local check fails, to see how a verifier treats a
+   * bad JWT-SVID. Off by default: a failed check stops the request.
+   */
+  send_despite_failed_checks?: boolean;
+  /**
+   * Header carrying the token (default `Authorization`).
+   */
+  header_name?: string;
+  prefix?: string;
 }
 /**
  * Host/port pattern a TLS profile or client identity is bound to. Wildcards
@@ -3141,6 +3415,10 @@ export interface RequestSpec {
     | {
         config: WsseConfig;
         type: "wsse";
+      }
+    | {
+        config: JwtSvidConfig;
+        type: "jwt_svid";
       }
     | {
         profiles: AuthConfig[];
@@ -4050,6 +4328,10 @@ export interface Workspace {
     | {
         config: WsseConfig;
         type: "wsse";
+      }
+    | {
+        config: JwtSvidConfig;
+        type: "jwt_svid";
       }
     | {
         profiles: AuthConfig[];

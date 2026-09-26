@@ -131,6 +131,16 @@ pub(crate) fn resolve_auth(
             timestamp_ttl_secs: config.timestamp_ttl_secs,
             saml_assertion: config.saml_assertion.as_ref().map(|s| sens(s, "auth.saml_assertion")).transpose()?,
         },
+        AuthConfig::JwtSvid { config } => {
+            // The Workload API step (`crate::workload::prepare`) has already
+            // fetched and checked the token and put it here as a value; any
+            // other source has no token yet, and `apply` refuses to send.
+            let token = match &config.source {
+                anvil_domain::workload::JwtSvidSource::Value { token } => sens(token, "auth.jwt_svid.token")?,
+                _ => Zeroizing::new(String::new()),
+            };
+            ResolvedAuth::JwtSvid { token, header_name: config.header_name.trim().to_string(), prefix: config.prefix.clone() }
+        }
         AuthConfig::Multi { profiles } => {
             let mut v = Vec::new();
             for p in profiles {
@@ -185,7 +195,15 @@ pub(crate) fn prepared_from_profile(
     };
     let bind =
         Target { scheme: "https".into(), host: host.to_string(), port, authority: String::new(), path: "/".into(), query: String::new() };
-    if let Some(id) = &p.client_identity {
+    if let Some(anvil_domain::tls::ClientIdentity::WorkloadApi { .. }) = &p.client_identity {
+        // Fetched and materialized before preparation for every connection
+        // that uses this profile over TLS; reaching here means this
+        // connection was not one of them.
+        inferred.push(format!(
+            "client identity of TLS profile '{}' (an X.509-SVID from the SPIFFE Workload API) not presented: it is fetched only for TLS requests and TLS proxies that select the profile",
+            p.name
+        ));
+    } else if let Some(id) = &p.client_identity {
         if binding_matches(&p.bindings, &bind) {
             s.client_identity = Some(match id {
                 anvil_domain::tls::ClientIdentity::Pem { cert_chain_pem, private_key_pem } => {
@@ -202,12 +220,23 @@ pub(crate) fn prepared_from_profile(
                         .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::ClientIdentityInvalid, e))?;
                     crate::pkcs12::to_pem(&b, &pw)?
                 }
+                anvil_domain::tls::ClientIdentity::WorkloadApi { .. } => unreachable!("handled above"),
             });
         } else {
             inferred.push(format!("client certificate from TLS profile '{}' not presented: {} is not in its host bindings", p.name, host));
         }
     }
-    let key = format!("{}|{}|{}", p.id, p.updated_at.timestamp_millis(), s.client_identity.is_some());
+    // The material fingerprint keeps a rotated Workload API SVID (or its
+    // bundle) from reusing the previous rustls configuration.
+    let material: String =
+        s.client_identity.iter().map(|c| c.cert_chain_pem.as_str()).chain(s.extra_roots_pem.iter().map(String::as_str)).collect();
+    let key = format!(
+        "{}|{}|{}|{}",
+        p.id,
+        p.updated_at.timestamp_millis(),
+        s.client_identity.is_some(),
+        anvil_transport::certs::sha256_hex(material.as_bytes())
+    );
     engine.prepared_tls(&key, &s)
 }
 
@@ -385,10 +414,18 @@ struct AttemptTarget {
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
     let started_at = Utc::now();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
+    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver).await;
+    let materialized = match materialized {
+        Ok(m) => m,
+        Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, Some(workload)),
+    };
+    let workload = (!workload.is_empty()).then_some(workload);
+    let ctx = materialized.as_ref().unwrap_or(ctx);
     let prepared = prepare_all(engine, ctx, &resolver, &["https", "http"]);
     let mut prep = match prepared {
         Ok(p) => p,
-        Err(f) => return record::local_failure(ctx, &resolver, started_at, f),
+        Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, workload),
     };
     let mut redactor = Redactor::new(resolver.used_secrets.lock().clone(), ctx.redaction_names.clone());
     let mut extra_findings: Vec<anvil_diagnostics::Draft> = Vec::new();
@@ -404,7 +441,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             }
             Err(e) => {
                 let f = crate::oauth_http::acquisition_failure(cfg, e, "The API request was not sent.");
-                return record::local_failure(ctx, &resolver, started_at, f);
+                return record::local_failure_with(ctx, &resolver, started_at, f, workload);
             }
         }
     }
@@ -469,7 +506,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                 Err(e) => {
                     let f = TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, e.to_string()).with_field("auth");
                     if attempts.is_empty() {
-                        return record::local_failure(ctx, &resolver, started_at, f);
+                        return record::local_failure_with(ctx, &resolver, started_at, f, workload);
                     }
                     break;
                 }
@@ -707,6 +744,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         extra_findings,
         stream: None,
         protocol_status_override: None,
+        workload_api: workload,
     };
     let output = record::assemble(assembly);
     let _ = assertions::evaluate;

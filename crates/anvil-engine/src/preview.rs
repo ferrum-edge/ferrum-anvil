@@ -35,6 +35,14 @@ pub struct EffectiveRequest {
     pub omitted_secrets: usize,
 }
 
+fn has_unfetched_jwt_svid(a: &anvil_auth::ResolvedAuth) -> bool {
+    match a {
+        anvil_auth::ResolvedAuth::JwtSvid { token, .. } => token.is_empty(),
+        anvil_auth::ResolvedAuth::Multi(v) => v.iter().any(has_unfetched_jwt_svid),
+        _ => false,
+    }
+}
+
 impl Engine {
     pub fn preview(&self, ctx: &ExecutionContext) -> Result<EffectiveRequest, TransportFailure> {
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
@@ -57,7 +65,16 @@ impl Engine {
                 | anvil_auth::ResolvedAuth::Dpop { .. }
                 | anvil_auth::ResolvedAuth::Jwt { .. }
                 | anvil_auth::ResolvedAuth::Wsse { .. }
+                | anvil_auth::ResolvedAuth::JwtSvid { .. }
         );
+        let mut inferred = prep.inferred.clone();
+        if has_unfetched_jwt_svid(&prep.auth) {
+            // The preview makes no Workload API call and reads no token file.
+            inferred.push(
+                "JWT-SVID: fetched from the SPIFFE Workload API (or read from its file) and checked locally when the request is sent"
+                    .into(),
+            );
+        }
         if let Ok(applied) = anvil_auth::apply(&prep.auth, &signable, chrono::Utc::now()) {
             for s in &applied.secrets {
                 redactor.add_secret(s);
@@ -97,7 +114,7 @@ impl Engine {
             },
             settings: prep.settings.clone(),
             variables_used: resolver.used.lock().clone(),
-            inferred: prep.inferred.clone(),
+            inferred,
             lint_warning: prep.http.lint_bypassed.clone(),
             omitted_secrets: omitted,
         })
