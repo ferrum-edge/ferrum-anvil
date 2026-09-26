@@ -188,13 +188,31 @@ pub fn change_passphrase(dir: &Path, h: &mut ProfileHeader, dek: &Key, new_passp
     write_header(dir, h)
 }
 
+/// The OS credential store entry holding a keychain profile's data key: the
+/// macOS Keychain, the Windows Credential Manager, or the freedesktop Secret
+/// Service (GNOME Keyring, KWallet) on Linux and the BSDs. There is no
+/// in-memory fallback: a missing store is `KeychainUnavailable`.
+#[cfg(feature = "os-keychain")]
+fn keychain_entry(account: &str) -> Result<keyring_core::Entry, VaultError> {
+    let unavailable = |e: &dyn std::fmt::Display| VaultError::KeychainUnavailable(e.to_string());
+    keyring::Entry::store_status().as_ref().map_err(|e| unavailable(e))?;
+    // Windows defaults to "Enterprise" persistence, which roams with domain
+    // user profiles. The key only unlocks files on this machine, so keep it here.
+    #[cfg(windows)]
+    let entry =
+        keyring_core::Entry::new_with_modifiers(KEYCHAIN_SERVICE, account, &std::collections::HashMap::from([("persistence", "local")]));
+    #[cfg(not(windows))]
+    let entry = keyring_core::Entry::new(KEYCHAIN_SERVICE, account);
+    entry.map_err(|e| unavailable(&e))
+}
+
 #[cfg(feature = "os-keychain")]
 pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
     let dek = Key::random();
     let profile_id = uuid::Uuid::now_v7().to_string();
     let account = format!("profile-{profile_id}");
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &account).map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
-    entry.inner.set_secret(dek.as_bytes()).map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
+    let entry = keychain_entry(&account)?;
+    entry.set_secret(dek.as_bytes()).map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
     let header = ProfileHeader {
         format: "anvil-profile".into(),
         schema_version: anvil_domain::SCHEMA_VERSION,
@@ -214,13 +232,22 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
 #[cfg(feature = "os-keychain")]
 pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
-    let secret = entry.inner.get_secret().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
+    let entry = keychain_entry(account)?;
+    let secret = entry.get_secret().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
     let k = Key::from_bytes(&secret)?;
     if key_check(&k) != h.key_check {
         return Err(VaultError::WrongSecret);
     }
     Ok(k)
+}
+
+/// Remove a keychain profile's data key from the OS credential store. The
+/// profile can no longer be opened afterwards (portable backups still restore).
+#[cfg(feature = "os-keychain")]
+pub fn delete_keychain_entry(h: &ProfileHeader) -> Result<(), VaultError> {
+    let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
+    let entry = keychain_entry(account)?;
+    entry.delete_credential().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))
 }
 
 #[cfg(test)]

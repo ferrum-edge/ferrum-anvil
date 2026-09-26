@@ -57,6 +57,18 @@ jobs:
         run: |
           ulimit -n 4096 2>/dev/null || true
           cargo test --locked --workspace --exclude anvil-desktop
+      # Keychain profiles ("Start now — no password") against the real OS
+      # credential store on every platform. Linux needs a Secret Service: run
+      # gnome-keyring, unlocked, inside a private D-Bus session.
+      - name: OS credential store round trip (Linux Secret Service)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gnome-keyring dbus
+          dbus-run-session -- sh -c 'printf "anvil-ci" | gnome-keyring-daemon --unlock --components=secrets >/dev/null && cargo test --locked -p anvil-storage --test os_keychain -- --ignored'
+      - name: OS credential store round trip (macOS Keychain / Windows Credential Manager)
+        if: runner.os != 'Linux'
+        run: cargo test --locked -p anvil-storage --test os_keychain -- --ignored
 
   frontend:
     name: Frontend

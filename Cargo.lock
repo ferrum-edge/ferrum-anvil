@@ -564,6 +564,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "keyring",
+ "keyring-core",
  "parking_lot",
  "rand 0.10.3",
  "rusqlite",
