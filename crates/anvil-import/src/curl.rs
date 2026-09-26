@@ -270,7 +270,8 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                         b.report.external_ref(file, &at);
                         b.report.unsupported("curl_data_file", &at, "request data read from a file is not imported; paste the content into the body");
                     } else {
-                        let d = if opt == "--data-binary" { d } else { d.replace(['\r', '\n'], "") };
+                        // cURL strips CR/LF only from data it reads from a
+                        // file; a literal argument is sent byte for byte.
                         data.push(Data::Text(d));
                     }
                 }
@@ -308,10 +309,23 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                         i += 1;
                         continue;
                     };
+                    if opt == "--form-string" {
+                        // Everything after the first '=' is the literal value:
+                        // no `@`/`<` file reads and no `;type=` metadata.
+                        let (value, _) = maybe_redact(b, name, val, &at, "form field");
+                        form.push(MultipartPart {
+                            name: name.into(),
+                            enabled: true,
+                            content: MultipartContent::Text { value },
+                            content_type: None,
+                        });
+                        i += 1;
+                        continue;
+                    }
                     let mut parts = val.split(';');
                     let content = parts.next().unwrap_or("").to_string();
                     let ctype = parts.find_map(|p| p.trim().strip_prefix("type=").map(str::to_string));
-                    if opt != "--form-string" && (content.starts_with('@') || content.starts_with('<')) {
+                    if content.starts_with('@') || content.starts_with('<') {
                         b.report.external_ref(&content[1..], &at);
                         b.report.warn("file_part_requires_attachment", &at, format!("form part '{name}' reads a file: attach it before sending (imported disabled)"));
                         form.push(MultipartPart { name: name.into(), enabled: false, content: MultipartContent::Text { value: String::new() }, content_type: ctype });
@@ -654,15 +668,30 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
                     "the data looks like JSON but curl sends it as application/x-www-form-urlencoded (no Content-Type header); imported as-is",
                 );
                 body = Body::Raw { text: joined, content_type: Some(mime) };
+            } else if crate::util::media_essence(&mime) == "application/soap+xml" {
+                // SOAP 1.2 carries the action as a media-type parameter.
+                let params = crate::util::media_params(&mime);
+                let action = params.iter().find(|(n, _)| n == "action").map(|(_, v)| v.clone()).filter(|a| !a.is_empty());
+                // The engine derives `application/soap+xml; charset=utf-8[; action="…"]`
+                // from the body. Drop the header only when that is exactly what
+                // was given; otherwise it stays and takes precedence when sending.
+                let derivable = params.iter().any(|(n, v)| n == "charset" && v.eq_ignore_ascii_case("utf-8"))
+                    && params.iter().filter(|(n, _)| n == "action").count() <= 1
+                    && params.iter().all(|(n, v)| match n.as_str() {
+                        "charset" => v.eq_ignore_ascii_case("utf-8"),
+                        "action" => !v.is_empty() && !v.contains(['"', '\\']),
+                        _ => false,
+                    });
+                if derivable {
+                    headers.retain(|h| !h.name.eq_ignore_ascii_case("content-type"));
+                }
+                body = Body::Soap { version: SoapVersion::Soap12, envelope: joined, action };
             } else if let Some(action) =
                 headers.iter().find(|h| h.name.eq_ignore_ascii_case("SOAPAction")).map(|h| h.value.trim_matches('"').to_string())
                 && crate::util::is_xml_media(&mime)
             {
                 headers.retain(|h| !h.name.eq_ignore_ascii_case("SOAPAction") && !h.name.eq_ignore_ascii_case("content-type"));
                 body = Body::Soap { version: SoapVersion::Soap11, envelope: joined, action: Some(action) };
-            } else if crate::util::media_essence(&mime) == "application/soap+xml" {
-                headers.retain(|h| !h.name.eq_ignore_ascii_case("content-type"));
-                body = Body::Soap { version: SoapVersion::Soap12, envelope: joined, action: None };
             } else {
                 let (mut bd, _) = body_from_text(Some(&mime), joined);
                 if let Body::FormUrlEncoded { fields } = &mut bd {

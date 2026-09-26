@@ -9,7 +9,10 @@
 //! Arbitrary text/XML bodies cannot be scanned reliably; they are reported.
 
 use crate::builder::Builder;
-use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, query_decode, scrub_json, split_query};
+use crate::common::{
+    body_from_text, credential, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, query_decode, scrub_json,
+    split_query,
+};
 use crate::util::{is_credential_name, is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
 use anvil_domain::auth::AuthConfig;
@@ -132,10 +135,12 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
         headers.push(KeyValue { name: "Cookie".into(), value, enabled: true, description: String::new(), sensitive });
     }
 
+    let mut declared = None;
     let body = match req.get("postData") {
-        Some(pd) => post_data(b, pd, &ptr(rptr, "postData")),
+        Some(pd) => post_data(b, pd, &ptr(rptr, "postData"), &mut declared),
         None => Body::None,
     };
+    keep_declared_content_type(&mut headers, declared);
     dedupe_content_type(&mut headers, &body);
 
     let mut spec = RequestSpec::http(method, &base);
@@ -168,7 +173,9 @@ fn redact_raw_query(b: &mut Builder, url: &str, at: &str) -> String {
     format!("{base}?{}", segs.join("&"))
 }
 
-fn post_data(b: &mut Builder, pd: &Value, at: &str) -> Body {
+/// `declared` receives the recorded media type when the body variant cannot
+/// carry it (a vendor `+json` type, `text/xml`, parameters).
+fn post_data(b: &mut Builder, pd: &Value, at: &str, declared: &mut Option<String>) -> Body {
     let mime = str_of(pd, "mimeType").unwrap_or("").to_string();
     let text = str_of(pd, "text").unwrap_or("").to_string();
     if str_of(pd, "encoding").is_some_and(|e| e.eq_ignore_ascii_case("base64")) {
@@ -243,7 +250,9 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str) -> Body {
             let before = b.report.redactions.len();
             scrub_json(b, &mut v, &ptr(at, "text"));
             let text = if b.report.redactions.len() > before { serde_json::to_string_pretty(&v).unwrap_or(text) } else { text };
-            return body_from_text(Some(if mime.is_empty() { "application/json" } else { &mime }), text).0;
+            let (body, ct) = body_from_text(Some(if mime.is_empty() { "application/json" } else { &mime }), text);
+            *declared = ct;
+            return body;
         }
         b.report.warn("body_not_scanned", at, "JSON body could not be parsed; it was not scanned for credentials");
         return Body::Raw { text, content_type: Some(mime) };
@@ -255,5 +264,7 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str) -> Body {
             format!("'{mime}' body is imported verbatim; it was not scanned for credentials (review before sharing)"),
         );
     }
-    body_from_text(if mime.is_empty() { None } else { Some(&mime) }, text).0
+    let (body, ct) = body_from_text(if mime.is_empty() { None } else { Some(&mime) }, text);
+    *declared = ct;
+    body
 }

@@ -166,3 +166,12 @@ fn link_and_refresh_headers_are_redacted_as_urls() {
     assert_eq!(quoted, format!("0; URL='https://h/cb?token={REDACTED}'"));
     assert_eq!(r.header("Refresh", "30"), "30");
 }
+
+#[test]
+fn json_escaped_secrets_are_scrubbed_from_text() {
+    let secret = r#"quote"and\back-9e2f"#;
+    let r = Redactor::new(vec![secret.into()], vec![]);
+    let rendered = serde_json::to_string(secret).unwrap();
+    assert_eq!(r.text(&format!("{rendered} is not of type \"integer\"")), format!("\"{REDACTED}\" is not of type \"integer\""));
+    assert_eq!(r.text(&format!("raw {secret}")), format!("raw {REDACTED}"));
+}

@@ -255,6 +255,50 @@ pub fn media_essence(ct: &str) -> String {
     ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
 }
 
+/// Parameters of a media type (`type/sub; a=b; c="d;e"`) in order, with
+/// lowercased names and quoted-string values unquoted (RFC 9110 §5.6.6).
+/// Parameters without a name or `=` are skipped.
+pub fn media_params(ct: &str) -> Vec<(String, String)> {
+    let Some((_, rest)) = ct.split_once(';') else { return vec![] };
+    let mut out = vec![];
+    let mut chars = rest.chars().peekable();
+    loop {
+        while chars.next_if(|c| *c == ';' || c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut name = String::new();
+        while let Some(c) = chars.next_if(|c| *c != '=' && *c != ';') {
+            name.push(c);
+        }
+        if chars.next_if_eq(&'=').is_none() {
+            continue;
+        }
+        let mut value = String::new();
+        if chars.next_if_eq(&'"').is_some() {
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => break,
+                    '\\' => value.extend(chars.next()),
+                    c => value.push(c),
+                }
+            }
+            // Anything between the closing quote and the next ';' is ignored.
+            while chars.next_if(|c| *c != ';').is_some() {}
+        } else {
+            while let Some(c) = chars.next_if(|c| *c != ';') {
+                value.push(c);
+            }
+            value.truncate(value.trim_end().len());
+        }
+        let name = name.trim().to_ascii_lowercase();
+        if !name.is_empty() {
+            out.push((name, value));
+        }
+    }
+    out
+}
+
 pub fn is_json_media(ct: &str) -> bool {
     let e = media_essence(ct);
     e == "application/json" || e == "text/json" || e.ends_with("+json") || e == "application/x-json"
@@ -308,6 +352,15 @@ pub fn scalar_text(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn media_type_parameters() {
+        let p = |ct: &str| media_params(ct).into_iter().map(|(n, v)| format!("{n}={v}")).collect::<Vec<_>>();
+        assert!(p("application/soap+xml").is_empty());
+        assert_eq!(p(r#"application/soap+xml; charset=utf-8; action="urn:lookup""#), vec!["charset=utf-8", "action=urn:lookup"]);
+        assert_eq!(p(r#"a/b;Action="x;y\"z" ;q=1 ; bare; =v;"#), vec![r#"action=x;y"z"#, "q=1"]);
+        assert_eq!(p(r#"a/b; action="unterminated"#), vec!["action=unterminated"]);
+    }
 
     #[test]
     fn canonical_sorts_keys() {
