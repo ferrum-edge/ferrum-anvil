@@ -1,15 +1,30 @@
-//! gRPC over HTTP/2 (TLS with ALPN `h2`, or h2c with prior knowledge).
+//! gRPC and gRPC-Web calls.
 //!
+//! Wire formats and HTTP versions:
+//! * **Native gRPC** (`application/grpc`, `te: trailers`) over HTTP/2 — TLS
+//!   with ALPN `h2`, or h2c with prior knowledge — or over **HTTP/3** on a
+//!   fresh QUIC connection (DNS and the QUIC handshake are measured; there is
+//!   no TCP phase). With the HTTP/3-with-fallback policy, an HTTP/3 attempt
+//!   that fails before the call was sent is followed by a separate HTTP/2
+//!   attempt (`protocol_fallback{from: h3}`); forced HTTP/3 never uses TCP.
+//! * **gRPC-Web** binary (`application/grpc-web+proto`) or text
+//!   (`application/grpc-web-text`, base64 in both directions) over HTTP/1.1,
+//!   HTTP/2 or HTTP/3 per the version policy. Unary and server streaming
+//!   only (refused before traffic otherwise). The status is read from the
+//!   trailer frame (flag `0x80`) at the end of the body, from the headers of
+//!   a trailers-only answer, or — noted as unusual — from HTTP trailers. A
+//!   body that ends without any of them has a **missing** status.
+//!
+//! Common behavior:
 //! * Length-prefixed message framing with message boundaries preserved in
 //!   the transcript (each message decoded to JSON with the method's type).
-//! * `content-type: application/grpc`, `te: trailers`, `grpc-timeout` from
-//!   the configured deadline (also enforced locally: when it elapses Anvil
-//!   cancels the stream and records that no status was received — it never
-//!   fabricates `DEADLINE_EXCEEDED`).
-//! * Terminal status from trailers, or from the response headers of a
-//!   trailers-only response; `grpc-message` is percent-decoded and
-//!   `grpc-status-details-bin` is decoded as `google.rpc.Status`. A missing
-//!   status is recorded as missing: HTTP 200 alone is never an RPC success.
+//! * `grpc-timeout` from the configured deadline (also enforced locally:
+//!   when it elapses Anvil cancels the stream and records that no status was
+//!   received — it never fabricates `DEADLINE_EXCEEDED`).
+//! * HTTP status and gRPC status are separate; the status source is labeled
+//!   (trailers, trailers-only, trailer frame, missing). `grpc-message` is
+//!   percent-decoded and `grpc-status-details-bin` is decoded as
+//!   `google.rpc.Status`. HTTP 200 alone is never an RPC success.
 //! * Dynamic messages via `prost-reflect`: descriptors from `.proto` sources
 //!   compiled in-process by `protox` (imports resolved only among the
 //!   provided files plus the bundled well-known types), a serialized
@@ -23,28 +38,32 @@
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
+use crate::grpc_web::{self, FrameError, WireFrame};
 use crate::http::{AttemptOutput, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
 use crate::session::*;
+use crate::stats::ConnStats;
 use crate::tls::PreparedTls;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::*;
 use anvil_domain::outcome::{GrpcStatusSource, ProtocolStatus};
-use anvil_domain::request::GrpcMode;
-use anvil_domain::settings::{Limits, Timeouts};
+use anvil_domain::request::{GrpcMode, GrpcWire};
+use anvil_domain::settings::{HttpVersionPolicy, Limits, Timeouts};
 use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
-use hyper::client::conn::http2;
+use hyper::client::conn::{http1, http2};
 use prost::Message as _;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, MethodDescriptor};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
+use std::future::Future;
 use std::io::Read;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -241,9 +260,11 @@ struct ReflResponse {
 // ---------------------------------------------------------------- body ---
 
 /// Streaming request body fed from a channel; dropping the sender ends the
-/// client stream (half-close).
+/// client stream (half-close). `exact` is the whole body length when it is
+/// known before sending (gRPC-Web), so HTTP/1.1 sends `Content-Length`.
 pub struct GrpcBody {
     rx: mpsc::Receiver<Bytes>,
+    exact: Option<u64>,
 }
 
 impl Body for GrpcBody {
@@ -259,7 +280,10 @@ impl Body for GrpcBody {
     }
 
     fn size_hint(&self) -> SizeHint {
-        SizeHint::default()
+        match self.exact {
+            Some(n) => SizeHint::with_exact(n),
+            None => SizeHint::default(),
+        }
     }
 }
 
@@ -274,7 +298,7 @@ pub enum Schema {
 
 #[derive(Clone)]
 pub struct GrpcPlan {
-    /// TLS (ALPN h2); `None` = h2c with prior knowledge.
+    /// TLS; `None` = cleartext (h2c for native gRPC; HTTP/1.1 or h2c for gRPC-Web).
     pub tls: Option<Arc<PreparedTls>>,
     pub host: String,
     pub port: u16,
@@ -299,12 +323,100 @@ pub struct GrpcPlan {
     pub max_message_bytes: usize,
     pub transcript: TranscriptLimits,
     pub redact: Option<RedactFn>,
+    /// Native gRPC, or gRPC-Web binary / text.
+    pub wire: GrpcWire,
+    /// HTTP version policy. Native gRPC: HTTP/2 (TLS or h2c) unless an
+    /// HTTP/3 policy is chosen. gRPC-Web: HTTP/1.1, HTTP/2, h2c, HTTP/3, or
+    /// (automatic) ALPN `h2`/`http/1.1` over TLS and HTTP/1.1 in cleartext.
+    pub version: HttpVersionPolicy,
 }
 
 impl GrpcPlan {
+    /// Absolute URI (HTTP/2 `:scheme`/`:authority`/`:path`).
     fn uri(&self, path: &str) -> String {
         format!("{}://{}{}{}", if self.tls.is_some() { "https" } else { "http" }, self.authority, self.path_prefix, path)
     }
+
+    /// Origin-form request target (HTTP/1.1).
+    fn origin(&self, path: &str) -> String {
+        format!("{}{}", self.path_prefix, path)
+    }
+
+    fn content_type(&self) -> &'static str {
+        match self.wire {
+            GrpcWire::Grpc => "application/grpc",
+            GrpcWire::GrpcWeb => grpc_web::CT_BINARY,
+            GrpcWire::GrpcWebText => grpc_web::CT_TEXT,
+        }
+    }
+
+    /// The HTTP version used over TCP for this plan (also the target of an
+    /// HTTP/3-with-fallback attempt's fallback).
+    fn tcp_http(&self) -> TcpHttp {
+        match (self.wire.is_web(), self.version) {
+            (false, _) => TcpHttp::H2,
+            (true, HttpVersionPolicy::Http1Only) => TcpHttp::H1,
+            (true, HttpVersionPolicy::Http2Only | HttpVersionPolicy::H2c) => TcpHttp::H2,
+            (true, _) => TcpHttp::Negotiate,
+        }
+    }
+}
+
+/// Combinations refused before any traffic; shared by the engine's
+/// preparation and this adapter. Returns the explanation and the field.
+pub fn unsupported_combination(
+    wire: GrpcWire,
+    mode: GrpcMode,
+    reflection: bool,
+    version: HttpVersionPolicy,
+    tls: bool,
+    proxy: bool,
+) -> Option<(String, &'static str)> {
+    use HttpVersionPolicy as V;
+    if wire.is_web() {
+        if matches!(mode, GrpcMode::ClientStreaming | GrpcMode::Bidirectional) {
+            return Some((
+                format!(
+                    "gRPC-Web carries only unary and server-streaming calls, and this is a {mode:?} call: a gRPC-Web client sends the whole request body before it reads the response, so there is no client stream and no half-close. Use native gRPC (HTTP/2 or HTTP/3) for client-streaming and bidirectional methods"
+                ),
+                "grpc.wire",
+            ));
+        }
+        if reflection {
+            return Some((
+                "server reflection is a bidirectional-streaming RPC, which gRPC-Web cannot carry; load the service's .proto files or a descriptor set to call it over gRPC-Web".into(),
+                "grpc.schema",
+            ));
+        }
+        match version {
+            V::H2c if tls => return Some(("h2c (cleartext HTTP/2) cannot be used with a TLS URL".into(), "settings.http_version")),
+            V::Http2Only if !tls => {
+                return Some((
+                    "HTTP/2-only over TLS was selected for a cleartext URL; choose h2c for cleartext HTTP/2".into(),
+                    "settings.http_version",
+                ));
+            }
+            _ => {}
+        }
+    } else if version == V::Http1Only {
+        return Some((
+            "native gRPC requires HTTP/2 or HTTP/3, and HTTP/1.1-only was selected; gRPC-Web (the grpc_web or grpc_web_text wire) runs over HTTP/1.1".into(),
+            "settings.http_version",
+        ));
+    }
+    if matches!(version, V::Http3Only | V::Http3WithFallback) {
+        if !tls {
+            return Some((
+                "gRPC over HTTP/3 needs TLS (QUIC is always encrypted): use a grpcs:// or https:// URL, or HTTP/2 (h2c) for cleartext"
+                    .into(),
+                "settings.http_version",
+            ));
+        }
+        if proxy {
+            return Some(("HTTP/3 cannot be sent through the configured HTTP/SOCKS proxy".into(), "settings.proxy"));
+        }
+    }
+    None
 }
 
 async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
@@ -314,7 +426,8 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
     }
 }
 
-fn base_headers(plan: &GrpcPlan) -> HeaderMap {
+/// Request headers for a call (metadata, auth, and the wire's own fields).
+fn call_headers(plan: &GrpcPlan, h1: bool) -> HeaderMap {
     let mut h = HeaderMap::new();
     for (n, v) in &plan.headers {
         if n == http::header::HOST
@@ -328,32 +441,38 @@ fn base_headers(plan: &GrpcPlan) -> HeaderMap {
         }
         h.append(n.clone(), v.clone());
     }
-    h.insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
-    h.insert(http::header::TE, HeaderValue::from_static("trailers"));
+    if h1 && let Ok(v) = HeaderValue::from_str(&plan.authority) {
+        h.insert(http::header::HOST, v);
+    }
+    let ct = HeaderValue::from_static(plan.content_type());
+    h.insert(http::header::CONTENT_TYPE, ct.clone());
+    if plan.wire.is_web() {
+        // PROTOCOL-WEB: the response mode follows Accept; ask for the request's own.
+        h.insert(http::header::ACCEPT, ct);
+        h.insert("x-grpc-web", HeaderValue::from_static("1"));
+    } else {
+        h.insert(http::header::TE, HeaderValue::from_static("trailers"));
+    }
     if !h.contains_key(http::header::USER_AGENT) {
         h.insert(http::header::USER_AGENT, HeaderValue::from_static(concat!("grpc-anvil/", env!("CARGO_PKG_VERSION"))));
     }
     h
 }
 
-/// Split complete messages out of the receive buffer.
-fn next_message(buf: &mut BytesMut, max: usize) -> Result<Option<(bool, Bytes)>, String> {
-    if buf.len() < 5 {
-        return Ok(None);
+/// Split complete messages out of the receive buffer (native framing).
+fn next_message(buf: &mut BytesMut, max: usize) -> Result<Option<(bool, Bytes)>, FrameError> {
+    match grpc_web::next_frame(buf, max, false)? {
+        Some(WireFrame::Message { compressed, data }) => Ok(Some((compressed, data))),
+        Some(WireFrame::Trailer(_)) => Err(FrameError::Invalid("a trailer frame is not valid in native gRPC".into())),
+        None => Ok(None),
     }
-    let flag = buf[0];
-    if flag > 1 {
-        return Err(format!("invalid gRPC message flag {flag}"));
+}
+
+fn frame_failure(e: FrameError) -> TransportFailure {
+    match e {
+        FrameError::TooLarge(m) => TransportFailure::new(Phase::Session, FailureKind::ResponseTooLargeLocal, m),
+        FrameError::Invalid(m) => TransportFailure::new(Phase::Session, FailureKind::HttpProtocolError, m),
     }
-    let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-    if len > max {
-        return Err(format!("a received message declares {len} bytes, above the local per-message limit of {max}"));
-    }
-    if buf.len() < 5 + len {
-        return Ok(None);
-    }
-    buf.advance(5);
-    Ok(Some((flag == 1, buf.split_to(len).freeze())))
 }
 
 fn gunzip(data: &[u8], max: usize) -> Result<Vec<u8>, String> {
@@ -364,6 +483,289 @@ fn gunzip(data: &[u8], max: usize) -> Result<Vec<u8>, String> {
     }
     Ok(out)
 }
+
+// ------------------------------------------------------ request streams ---
+
+/// How a call reaches the server over TCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TcpHttp {
+    /// HTTP/2: ALPN `h2` only over TLS, prior knowledge (h2c) in cleartext.
+    H2,
+    /// HTTP/1.1 (gRPC-Web).
+    H1,
+    /// gRPC-Web automatic: ALPN `h2`/`http/1.1` over TLS, HTTP/1.1 in cleartext.
+    Negotiate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Leg {
+    Tcp(TcpHttp),
+    Quic,
+}
+
+/// A connection ready for request streams.
+enum Conn {
+    H1(http1::SendRequest<GrpcBody>),
+    H2(http2::SendRequest<GrpcBody>),
+    H3(crate::h3::SendReq),
+}
+
+impl Conn {
+    fn is_h1(&self) -> bool {
+        matches!(self, Conn::H1(_))
+    }
+
+    fn reset_note(&self) -> &'static str {
+        match self {
+            Conn::H1(_) => "the connection was closed",
+            Conn::H2(_) => "RST_STREAM CANCEL",
+            Conn::H3(_) => "the HTTP/3 stream was reset with H3_REQUEST_CANCELLED",
+        }
+    }
+}
+
+/// Shared between the call loop and the HTTP/3 request-stream tasks.
+#[derive(Clone)]
+struct StreamCtl {
+    /// Connection bytes (TCP) or this stream's DATA bytes (HTTP/3).
+    stats: Arc<ConnStats>,
+    /// HTTP/3: the request stream was opened (HEADERS handed to QUIC).
+    opened: Arc<AtomicBool>,
+    /// HTTP/3: reset the request stream (deadline, cancel, local failure).
+    abort: CancellationToken,
+}
+
+impl StreamCtl {
+    fn new(stats: Arc<ConnStats>) -> Self {
+        StreamCtl { stats, opened: Arc::new(AtomicBool::new(false)), abort: CancellationToken::new() }
+    }
+}
+
+type BodyItem = Option<Result<Frame<Bytes>, TransportFailure>>;
+
+/// The response body: hyper's (HTTP/1.1, HTTP/2) or the HTTP/3 downlink
+/// task's channel. Errors are typed at the source.
+enum RespBody {
+    Hyper(hyper::body::Incoming, Arc<ConnStats>),
+    H3(mpsc::Receiver<Result<Frame<Bytes>, TransportFailure>>),
+}
+
+impl RespBody {
+    async fn next(&mut self) -> BodyItem {
+        match self {
+            RespBody::Hyper(b, stats) => match b.frame().await {
+                None => None,
+                Some(Ok(f)) => Some(Ok(f)),
+                Some(Err(e)) => {
+                    let mut f = classify_hyper(&e, HyperStage::Body);
+                    if let Some((k, a)) = stats.tls_error() {
+                        f.kind = k;
+                        f.tls_alert = a;
+                    }
+                    Some(Err(f))
+                }
+            },
+            RespBody::H3(rx) => rx.recv().await,
+        }
+    }
+}
+
+struct RespHead {
+    status: u16,
+    version: http::Version,
+    headers: HeaderMap,
+    body: RespBody,
+}
+
+type HeadFut = Pin<Box<dyn Future<Output = Result<RespHead, TransportFailure>> + Send>>;
+
+/// Open a request stream and send its headers; the request body is fed from
+/// `body`. The returned future resolves with the response head.
+fn start(
+    conn: &mut Conn,
+    plan: &GrpcPlan,
+    path: &str,
+    headers: HeaderMap,
+    body: mpsc::Receiver<Bytes>,
+    exact: Option<u64>,
+    ctl: &StreamCtl,
+) -> Result<HeadFut, TransportFailure> {
+    let bad = |e: http::Error| {
+        TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("the gRPC request could not be built: {e}"))
+            .with_field("url")
+    };
+    let hyper_head = |fut: Pin<Box<dyn Future<Output = Result<hyper::Response<hyper::body::Incoming>, hyper::Error>> + Send>>,
+                      stats: Arc<ConnStats>|
+     -> HeadFut {
+        Box::pin(async move {
+            match fut.await {
+                Ok(resp) => {
+                    let (parts, b) = resp.into_parts();
+                    Ok(RespHead {
+                        status: parts.status.as_u16(),
+                        version: parts.version,
+                        headers: parts.headers,
+                        body: RespBody::Hyper(b, stats),
+                    })
+                }
+                Err(e) => {
+                    let mut f = classify_hyper(&e, HyperStage::AwaitHeaders);
+                    if let Some((k, a)) = stats.tls_error() {
+                        f.kind = k;
+                        f.tls_alert = a;
+                    }
+                    Err(f)
+                }
+            }
+        })
+    };
+    match conn {
+        Conn::H1(s) => {
+            let mut req = Request::builder().method(Method::POST).uri(plan.origin(path)).body(GrpcBody { rx: body, exact }).map_err(bad)?;
+            *req.headers_mut() = headers;
+            Ok(hyper_head(Box::pin(s.send_request(req)), ctl.stats.clone()))
+        }
+        Conn::H2(s) => {
+            let mut req = Request::builder().method(Method::POST).uri(plan.uri(path)).body(GrpcBody { rx: body, exact }).map_err(bad)?;
+            *req.headers_mut() = headers;
+            Ok(hyper_head(Box::pin(s.send_request(req)), ctl.stats.clone()))
+        }
+        Conn::H3(send) => {
+            let mut req = Request::builder()
+                .method(Method::POST)
+                .uri(format!("https://{}{}", plan.authority, plan.origin(path)))
+                .body(())
+                .map_err(bad)?;
+            *req.headers_mut() = headers;
+            let mut send = send.clone();
+            let ctl = ctl.clone();
+            Ok(Box::pin(async move {
+                let stream = send.send_request(req).await.map_err(|e| {
+                    TransportFailure::new(
+                        Phase::AwaitResponseHeaders,
+                        FailureKind::RequestWriteFailed,
+                        format!("the HTTP/3 request stream could not be opened: {e}"),
+                    )
+                })?;
+                ctl.opened.store(true, Ordering::SeqCst);
+                let (send_half, mut recv_half) = stream.split();
+                tokio::spawn(h3_uplink(send_half, body, ctl.clone()));
+                let resp = tokio::select! {
+                    r = recv_half.recv_response() => r.map_err(|e| TransportFailure::new(
+                        Phase::AwaitResponseHeaders,
+                        FailureKind::ResetBeforeResponse,
+                        format!("the HTTP/3 stream ended before response headers: {e}"),
+                    ))?,
+                    _ = ctl.abort.cancelled() => {
+                        recv_half.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                        return Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "the HTTP/3 request stream was reset"));
+                    }
+                };
+                let (parts, ()) = resp.into_parts();
+                let (tx, rx) = mpsc::channel(16);
+                tokio::spawn(h3_downlink(recv_half, tx, ctl));
+                Ok(RespHead {
+                    status: parts.status.as_u16(),
+                    version: http::Version::HTTP_3,
+                    headers: parts.headers,
+                    body: RespBody::H3(rx),
+                })
+            }))
+        }
+    }
+}
+
+type H3Send = h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
+type H3Recv = h3::client::RequestStream<h3_quinn::RecvStream, Bytes>;
+
+/// HTTP/3 request body: DATA frames from the channel; a closed channel
+/// finishes the stream (the client half-close), an abort resets it.
+async fn h3_uplink(mut send: H3Send, mut body: mpsc::Receiver<Bytes>, ctl: StreamCtl) {
+    enum Up {
+        Data(Option<Bytes>),
+        Abort,
+    }
+    loop {
+        let next = tokio::select! {
+            b = body.recv() => Up::Data(b),
+            _ = ctl.abort.cancelled() => Up::Abort,
+        };
+        match next {
+            Up::Data(Some(b)) => {
+                let n = b.len();
+                if send.send_data(b).await.is_err() {
+                    // The peer stopped reading; dropping `body` tells the call loop.
+                    return;
+                }
+                ctl.stats.record_write(n);
+            }
+            Up::Data(None) => {
+                let _ = send.finish().await;
+                return;
+            }
+            Up::Abort => {
+                send.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+                return;
+            }
+        }
+    }
+}
+
+/// HTTP/3 response body: DATA, then trailers, as frames on a channel; a
+/// stream error is sent as a typed failure.
+async fn h3_downlink(mut recv: H3Recv, tx: mpsc::Sender<Result<Frame<Bytes>, TransportFailure>>, ctl: StreamCtl) {
+    enum Down<T> {
+        Data(Result<Option<T>, h3::error::StreamError>),
+        Abort,
+    }
+    loop {
+        let next = tokio::select! {
+            r = recv.recv_data() => Down::Data(r.map(|o| o.map(|mut c| c.copy_to_bytes(c.remaining())))),
+            _ = ctl.abort.cancelled() => Down::Abort,
+        };
+        match next {
+            Down::Data(Ok(Some(d))) => {
+                ctl.stats.record_read(d.len());
+                if tx.send(Ok(Frame::data(d))).await.is_err() {
+                    recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                    return;
+                }
+            }
+            Down::Data(Ok(None)) => break,
+            Down::Data(Err(e)) => {
+                let _ = tx
+                    .send(Err(TransportFailure::new(
+                        Phase::ResponseBody,
+                        FailureKind::BodyReset,
+                        format!("the HTTP/3 response stream ended abnormally: {e}"),
+                    )))
+                    .await;
+                return;
+            }
+            Down::Abort => {
+                recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                return;
+            }
+        }
+    }
+    match recv.recv_trailers().await {
+        Ok(Some(t)) => {
+            let _ = tx.send(Ok(Frame::trailers(t))).await;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let _ = tx
+                .send(Err(TransportFailure::new(
+                    Phase::ResponseBody,
+                    FailureKind::BodyReset,
+                    format!("the HTTP/3 response trailers could not be read: {e}"),
+                )))
+                .await;
+        }
+    }
+}
+
+// ----------------------------------------------------------- reflection ---
 
 /// Result of a single-request call used for reflection.
 struct OneShot {
@@ -377,102 +779,100 @@ struct OneShot {
     failure: Option<TransportFailure>,
 }
 
-async fn one_shot(
-    sender: &mut http2::SendRequest<GrpcBody>,
-    plan: &GrpcPlan,
-    path: &str,
-    msg: &[u8],
-    cancel: &CancellationToken,
-) -> OneShot {
+impl OneShot {
+    fn empty(status: Option<u16>, grpc_status: Option<i32>) -> Self {
+        OneShot {
+            status,
+            version: http::Version::HTTP_2,
+            headers: vec![],
+            trailers: vec![],
+            messages: vec![],
+            grpc_status,
+            grpc_message: None,
+            failure: None,
+        }
+    }
+}
+
+async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stats: &Arc<ConnStats>, cancel: &CancellationToken) -> OneShot {
     let (tx, rx) = mpsc::channel(1);
     let _ = tx.try_send(frame(msg));
     drop(tx);
-    let mut out = OneShot {
-        status: None,
-        version: http::Version::HTTP_2,
-        headers: vec![],
-        trailers: vec![],
-        messages: vec![],
-        grpc_status: None,
-        grpc_message: None,
-        failure: None,
-    };
-    let mut req = match Request::builder().method(Method::POST).uri(plan.uri(path)).body(GrpcBody { rx }) {
-        Ok(r) => r,
-        Err(e) => {
-            out.failure =
-                Some(TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("reflection request could not be built: {e}")));
+    let mut out = OneShot::empty(None, None);
+    let ctl = StreamCtl::new(stats.clone());
+    let fut = match start(conn, plan, path, call_headers(plan, conn.is_h1()), rx, None, &ctl) {
+        Ok(f) => f,
+        Err(f) => {
+            out.failure = Some(f);
             return out;
         }
     };
-    *req.headers_mut() = base_headers(plan);
     let deadline = deadline_from(plan.timeouts.response_headers_ms.or(Some(30_000)));
-    let resp = tokio::select! {
-        r = sender.send_request(req) => r,
-        _ = sleep_until_opt(deadline) => {
-            out.failure = Some(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout, "no answer to the reflection request").with_deadline(plan.timeouts.response_headers_ms));
-            return out;
-        }
-        _ = cancel.cancelled() => {
-            out.failure = Some(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during server reflection"));
+    let head = tokio::select! {
+        r = fut => r,
+        _ = sleep_until_opt(deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout, "no answer to the reflection request").with_deadline(plan.timeouts.response_headers_ms)),
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during server reflection")),
+    };
+    let head = match head {
+        Ok(h) => h,
+        Err(f) => {
+            ctl.abort.cancel();
+            out.failure = Some(f);
             return out;
         }
     };
-    let resp = match resp {
-        Ok(r) => r,
-        Err(e) => {
-            out.failure = Some(classify_hyper(&e, HyperStage::AwaitHeaders));
-            return out;
-        }
-    };
-    out.status = Some(resp.status().as_u16());
-    out.version = resp.version();
-    out.headers = header_entries(resp.headers());
-    if let Some(s) = resp.headers().get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok()) {
+    out.status = Some(head.status);
+    out.version = head.version;
+    out.headers = header_entries(&head.headers);
+    if let Some(s) = head.headers.get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok()) {
         out.grpc_status = Some(s);
-        out.grpc_message = resp.headers().get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
+        out.grpc_message = head.headers.get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
     }
-    let mut body = resp.into_body();
+    let mut body = head.body;
     let mut buf = BytesMut::new();
     loop {
         let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(30_000)));
-        tokio::select! {
-            f = body.frame() => match f {
-                None => break,
-                Some(Ok(fr)) => {
-                    if fr.is_data() {
-                        buf.extend_from_slice(&fr.into_data().unwrap_or_default());
-                        loop {
-                            match next_message(&mut buf, plan.max_message_bytes) {
-                                Ok(Some((false, m))) => out.messages.push(m),
-                                Ok(Some((true, _))) => {
-                                    out.failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::HttpProtocolError, "a compressed reflection response was not negotiated"));
-                                    return out;
-                                }
-                                Ok(None) => break,
-                                Err(e) => {
-                                    out.failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal, e));
-                                    return out;
-                                }
+        let item = tokio::select! {
+            f = body.next() => f,
+            _ = sleep_until_opt(idle) => Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the reflection response stalled"))),
+            _ = cancel.cancelled() => Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled during server reflection"))),
+        };
+        match item {
+            None => break,
+            Some(Ok(fr)) => {
+                if fr.is_data() {
+                    buf.extend_from_slice(&fr.into_data().unwrap_or_default());
+                    loop {
+                        match next_message(&mut buf, plan.max_message_bytes) {
+                            Ok(Some((false, m))) => out.messages.push(m),
+                            Ok(Some((true, _))) => {
+                                out.failure = Some(TransportFailure::new(
+                                    Phase::ResponseBody,
+                                    FailureKind::HttpProtocolError,
+                                    "a compressed reflection response was not negotiated",
+                                ));
+                                ctl.abort.cancel();
+                                return out;
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                let mut f = frame_failure(e);
+                                f.phase = Phase::ResponseBody;
+                                out.failure = Some(f);
+                                ctl.abort.cancel();
+                                return out;
                             }
                         }
-                    } else if let Ok(t) = fr.into_trailers() {
-                        out.trailers = header_entries(&t);
-                        out.grpc_status = t.get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok());
-                        out.grpc_message = t.get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
                     }
+                } else if let Ok(t) = fr.into_trailers() {
+                    out.trailers = header_entries(&t);
+                    out.grpc_status = t.get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok());
+                    out.grpc_message = t.get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
                 }
-                Some(Err(e)) => {
-                    out.failure = Some(classify_hyper(&e, HyperStage::Body));
-                    return out;
-                }
-            },
-            _ = sleep_until_opt(idle) => {
-                out.failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the reflection response stalled"));
-                return out;
             }
-            _ = cancel.cancelled() => {
-                out.failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled during server reflection"));
+            Some(Err(f)) => {
+                ctl.abort.cancel();
+                out.failure = Some(f);
                 return out;
             }
         }
@@ -486,10 +886,12 @@ enum ReflectError {
 }
 
 /// Fetch the service's descriptors (and their dependency closure) by
-/// server reflection, v1 first and v1alpha when v1 is unimplemented.
+/// server reflection, v1 first and v1alpha when v1 is unimplemented. Runs on
+/// the call's own connection (HTTP/2 or HTTP/3).
 async fn reflect(
-    sender: &mut http2::SendRequest<GrpcBody>,
+    conn: &mut Conn,
     plan: &GrpcPlan,
+    stats: &Arc<ConnStats>,
     cancel: &CancellationToken,
 ) -> Result<(DescriptorPool, ReflectionOutcome), ReflectError> {
     let services = ["grpc.reflection.v1.ServerReflection", "grpc.reflection.v1alpha.ServerReflection"];
@@ -509,7 +911,7 @@ async fn reflect(
             if requests > 64 {
                 break;
             }
-            let r = one_shot(sender, plan, &path, &q.encode_to_vec(), cancel).await;
+            let r = one_shot(conn, plan, &path, &q.encode_to_vec(), stats, cancel).await;
             let outcome = |problem: String, r: &OneShot| ReflectionOutcome {
                 service: svc.trim_end_matches(".ServerReflection").to_string(),
                 http_status: r.status,
@@ -592,16 +994,7 @@ async fn reflect(
         return match pool.add_file_descriptor_protos(files.into_values()) {
             Ok(()) => Ok((pool, outcome)),
             Err(e) => Err(ReflectError::Refused(
-                Box::new(OneShot {
-                    status: Some(200),
-                    version: http::Version::HTTP_2,
-                    headers: vec![],
-                    trailers: vec![],
-                    messages: vec![],
-                    grpc_status: Some(0),
-                    grpc_message: None,
-                    failure: None,
-                }),
+                Box::new(OneShot::empty(Some(200), Some(0))),
                 ReflectionOutcome { succeeded: false, problem: Some(format!("the reflected descriptors are incomplete: {e}")), ..outcome },
             )),
         };
@@ -612,16 +1005,7 @@ async fn reflect(
             ReflectionOutcome { problem: Some("the server implements neither grpc.reflection.v1 nor v1alpha".into()), ..o },
         )),
         None => Err(ReflectError::Refused(
-            Box::new(OneShot {
-                status: None,
-                version: http::Version::HTTP_2,
-                headers: vec![],
-                trailers: vec![],
-                messages: vec![],
-                grpc_status: None,
-                grpc_message: None,
-                failure: None,
-            }),
+            Box::new(OneShot::empty(None, None)),
             ReflectionOutcome {
                 service: "grpc.reflection".into(),
                 http_status: None,
@@ -636,102 +1020,305 @@ async fn reflect(
 
 // ----------------------------------------------------------------- run ---
 
+/// Pre-traffic work shared by every attempt: the method (local schema) and
+/// the encoded scripted messages.
+struct Local {
+    method: Option<MethodDescriptor>,
+    encoded: Option<Vec<(Bytes, String)>>,
+}
+
+fn encode_all(plan: &GrpcPlan, m: &MethodDescriptor) -> Result<Vec<(Bytes, String)>, TransportFailure> {
+    let mut msgs = plan.messages.clone();
+    if matches!(plan.mode, GrpcMode::Unary | GrpcMode::ServerStreaming) {
+        if msgs.len() > 1 {
+            return Err(TransportFailure::new(
+                Phase::Prepare,
+                FailureKind::BodySerialization,
+                format!("a {:?} call sends exactly one request message; {} were given", plan.mode, msgs.len()),
+            )
+            .with_field("grpc.messages"));
+        }
+        if msgs.is_empty() {
+            msgs.push("{}".into());
+        }
+    }
+    let input = m.input();
+    msgs.iter()
+        .enumerate()
+        .map(|(i, j)| {
+            encode_json(&input, j).map(|b| (b, j.clone())).map_err(|e| {
+                TransportFailure::new(Phase::Prepare, FailureKind::BodySerialization, e).with_field(format!("grpc.messages[{i}]"))
+            })
+        })
+        .collect()
+}
+
+fn local_checks(plan: &GrpcPlan) -> Result<Local, TransportFailure> {
+    if let Some((msg, field)) = unsupported_combination(
+        plan.wire,
+        plan.mode,
+        matches!(plan.schema, Schema::Reflection),
+        plan.version,
+        plan.tls.is_some(),
+        plan.proxy.is_some(),
+    ) {
+        return Err(TransportFailure::new(Phase::Prepare, FailureKind::UnsupportedCombination, msg).with_field(field));
+    }
+    let mut local = Local { method: None, encoded: None };
+    if let Schema::Pool(pool) = &plan.schema {
+        let m = resolve_method(pool, &plan.service, &plan.method, plan.mode)?;
+        local.encoded = Some(encode_all(plan, &m)?);
+        local.method = Some(m);
+    }
+    Ok(local)
+}
+
+/// Run the call. The HTTP version policy selects HTTP/3 (with an optional,
+/// separately recorded TCP fallback when HTTP/3 fails before the call was
+/// sent) or a TCP connection; everything that can be checked locally is
+/// checked before any traffic.
 pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
+    let local = match local_checks(plan) {
+        Ok(l) => l,
+        Err(f) => {
+            let rec = Recorder::new(0, events.clone());
+            events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
+            let obs = new_attempt(0, AttemptReason::Initial, "POST", &plan.display_url);
+            return SessionOutput::single(
+                fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
+                None,
+                ProtocolStatus::None,
+                SessionFacts::default(),
+            );
+        }
+    };
+    let tcp = Leg::Tcp(plan.tcp_http());
+    match plan.version {
+        HttpVersionPolicy::Http3Only => attempt(plan, &local, Leg::Quic, 0, AttemptReason::Initial, events, cancel, &mut commands).await,
+        HttpVersionPolicy::Http3WithFallback => {
+            let first = attempt(plan, &local, Leg::Quic, 0, AttemptReason::Initial, events, cancel, &mut commands).await;
+            let fall_back = first.attempts.last().is_some_and(|a| {
+                a.response.is_none()
+                    && a.observation.dispatch == DispatchState::NotDispatched
+                    && a.observation.failure.as_ref().is_some_and(|f| f.kind != FailureKind::Canceled && !f.kind.is_local_preparation())
+            }) && !cancel.is_cancelled();
+            if !fall_back {
+                return first;
+            }
+            let reason = AttemptReason::ProtocolFallback { from: "h3".into() };
+            let mut out = attempt(plan, &local, tcp, 1, reason, events, cancel, &mut commands).await;
+            let mut attempts = first.attempts;
+            attempts.append(&mut out.attempts);
+            out.attempts = attempts;
+            out.facts.notes.insert(
+                0,
+                "HTTP/3 was attempted first and failed before the call was sent; the call was made again over TCP as a separate attempt"
+                    .into(),
+            );
+            out
+        }
+        _ => attempt(plan, &local, tcp, 0, AttemptReason::Initial, events, cancel, &mut commands).await,
+    }
+}
+
+struct Connected {
+    conn: Conn,
+    stats: Arc<ConnStats>,
+    observation: ConnectionObservation,
+    quic: Option<quinn::Connection>,
+}
+
+/// TCP (DNS, connect, proxy, TLS, HTTP/1.1 or HTTP/2 setup) or QUIC (DNS,
+/// QUIC handshake with TLS 1.3 inside, HTTP/3 setup).
+async fn connect(
+    rec: &mut Recorder,
+    plan: &GrpcPlan,
+    leg: Leg,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
+) -> Result<Connected, (TransportFailure, Option<ConnectionObservation>)> {
+    let t = match leg {
+        Leg::Quic => {
+            let Some(tls) = plan.tls.clone() else {
+                return Err((
+                    TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "no TLS configuration for HTTP/3"),
+                    None,
+                ));
+            };
+            let c =
+                crate::h3::quic_connect(rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel)
+                    .await?;
+            return Ok(Connected { conn: Conn::H3(c.send), stats: ConnStats::new(), observation: c.observation, quic: Some(c.quic) });
+        }
+        Leg::Tcp(t) => t,
+    };
+    let tls = plan.tls.is_some();
+    let alpn: &[&str] = match (tls, t) {
+        (false, _) => &[],
+        (true, TcpHttp::H2) => &["h2"],
+        (true, TcpHttp::H1) => &["http/1.1"],
+        (true, TcpHttp::Negotiate) => &["h2", "http/1.1"],
+    };
+    let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: false };
+    let est = establish_guarded(rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline).await?;
+    let negotiated = est.observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone());
+    let use_h2 = match (tls, t) {
+        (true, TcpHttp::H2) => {
+            if negotiated.as_deref() != Some("h2") {
+                let what = if plan.wire.is_web() { "HTTP/2-only gRPC-Web" } else { "gRPC" };
+                let f = TransportFailure::new(
+                    Phase::TlsHandshake,
+                    FailureKind::TlsAlpnMismatch,
+                    format!(
+                        "{what} needs HTTP/2 (ALPN 'h2') but the peer negotiated {}",
+                        negotiated.map(|s| format!("'{s}'")).unwrap_or_else(|| "no ALPN protocol".into())
+                    ),
+                );
+                return Err((f, Some(est.observation)));
+            }
+            true
+        }
+        (false, TcpHttp::H2) => true,
+        (true, TcpHttp::Negotiate) => negotiated.as_deref() == Some("h2"),
+        _ => false,
+    };
+    let HttpConn { sender, stats, observation, .. } =
+        http_handshake::<GrpcBody>(rec, est, use_h2, &plan.limits).await.map_err(|(f, o)| (f, Some(o)))?;
+    let conn = match sender {
+        HttpSender::H1(s) => Conn::H1(s),
+        HttpSender::H2(s) => Conn::H2(s),
+    };
+    Ok(Connected { conn, stats, observation, quic: None })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn attempt(
+    plan: &GrpcPlan,
+    local: &Local,
+    leg: Leg,
+    index: u32,
+    reason: AttemptReason,
+    events: &EventCtx,
+    cancel: &CancellationToken,
+    commands: &mut Option<CommandRx>,
+) -> SessionOutput {
     let interactive = commands.is_some();
-    let mut rec = Recorder::new(0, events.clone());
-    events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
-    let mut obs = new_attempt(0, AttemptReason::Initial, "POST", &plan.display_url);
+    let mut rec = Recorder::new(index, events.clone());
+    events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: index });
+    let mut obs = new_attempt(index, reason, "POST", &plan.display_url);
+    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
+    let Connected { mut conn, stats, observation, quic } = match connect(&mut rec, plan, leg, cancel, total_deadline).await {
+        Ok(c) => c,
+        Err((f, cobs)) => {
+            obs.connection = cobs;
+            return SessionOutput::single(
+                fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
+                None,
+                ProtocolStatus::None,
+                SessionFacts::default(),
+            );
+        }
+    };
+    obs.connection = Some(observation);
+    let cx = CallCx { plan, events, cancel, total_deadline, index };
+    let out = exchange(cx, local, &mut conn, stats, rec, obs, commands).await;
+    if let Some(q) = quic {
+        q.close(0x100u32.into(), b""); // H3_NO_ERROR
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+struct CallCx<'a> {
+    plan: &'a GrpcPlan,
+    events: &'a EventCtx,
+    cancel: &'a CancellationToken,
+    total_deadline: Option<Instant>,
+    index: u32,
+}
+
+/// The terminal status as it is being assembled from the response.
+struct Terminal {
+    code: Option<i32>,
+    message: Option<String>,
+    source: GrpcStatusSource,
+}
+
+impl Terminal {
+    fn read_fields(&mut self, get: impl Fn(&str) -> Option<String>, source: GrpcStatusSource, facts: &mut SessionFacts) -> Option<i32> {
+        let code = get("grpc-status").and_then(|s| s.trim().parse::<i32>().ok())?;
+        self.code = Some(code);
+        self.message = get("grpc-message").map(|m| percent_decode(&m));
+        self.source = source;
+        facts.grpc_status_details = get("grpc-status-details-bin").and_then(|d| status_details(&d));
+        Some(code)
+    }
+}
+
+fn header_field(h: &HeaderMap) -> impl Fn(&str) -> Option<String> + '_ {
+    move |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(|s| s.to_string())
+}
+
+/// Decode one received message and add it to the transcript.
+fn deliver(
+    tr: &mut Transcript,
+    output_desc: &MessageDescriptor,
+    encoding: Option<&str>,
+    compressed: bool,
+    m: Bytes,
+    max: usize,
+) -> Result<(), TransportFailure> {
+    let raw = if compressed {
+        match encoding {
+            Some("gzip") => {
+                Bytes::from(gunzip(&m, max).map_err(|e| TransportFailure::new(Phase::Session, FailureKind::DecompressionFailed, e))?)
+            }
+            other => {
+                return Err(TransportFailure::new(
+                    Phase::Session,
+                    FailureKind::HttpProtocolError,
+                    format!("a compressed message arrived with grpc-encoding {other:?}, which Anvil did not negotiate"),
+                ));
+            }
+        }
+    } else {
+        m
+    };
+    match decode_to_json(output_desc, &raw) {
+        Ok(json) => tr.data_text(Direction::Received, "grpc_message", raw.len() as u64, &json),
+        Err(e) => {
+            tr.data(Direction::Received, "grpc_message", &raw);
+            tr.note("decode_error", &format!("message could not be decoded as {}: {e}", output_desc.full_name()));
+        }
+    }
+    Ok(())
+}
+
+/// Reflection (when the schema comes from the server), then the call.
+async fn exchange(
+    cx: CallCx<'_>,
+    local: &Local,
+    conn: &mut Conn,
+    stats: Arc<ConnStats>,
+    mut rec: Recorder,
+    mut obs: AttemptObservation,
+    commands: &mut Option<CommandRx>,
+) -> SessionOutput {
+    let CallCx { plan, events, cancel, total_deadline, index } = cx;
+    let interactive = commands.is_some();
     let mut facts = SessionFacts::default();
     let early = |rec: Recorder, obs: AttemptObservation, f: TransportFailure, facts: SessionFacts, d: DispatchState| {
         SessionOutput::single(fail_attempt(rec, obs, f, d, events), None, ProtocolStatus::None, facts)
     };
-    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
-
-    // Local schema: resolve and encode before any traffic.
-    let mut method_desc: Option<MethodDescriptor> = None;
-    if let Schema::Pool(pool) = &plan.schema {
-        match resolve_method(pool, &plan.service, &plan.method, plan.mode) {
-            Ok(m) => method_desc = Some(m),
-            Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
-        }
-    }
-    let encode_all = |m: &MethodDescriptor| -> Result<Vec<(Bytes, String)>, TransportFailure> {
-        let mut msgs = plan.messages.clone();
-        if matches!(plan.mode, GrpcMode::Unary | GrpcMode::ServerStreaming) {
-            if msgs.len() > 1 {
-                return Err(TransportFailure::new(
-                    Phase::Prepare,
-                    FailureKind::BodySerialization,
-                    format!("a {:?} call sends exactly one request message; {} were given", plan.mode, msgs.len()),
-                )
-                .with_field("grpc.messages"));
-            }
-            if msgs.is_empty() {
-                msgs.push("{}".into());
-            }
-        }
-        let input = m.input();
-        msgs.iter()
-            .enumerate()
-            .map(|(i, j)| {
-                encode_json(&input, j).map(|b| (b, j.clone())).map_err(|e| {
-                    TransportFailure::new(Phase::Prepare, FailureKind::BodySerialization, e).with_field(format!("grpc.messages[{i}]"))
-                })
-            })
-            .collect()
-    };
-    let mut encoded: Option<Vec<(Bytes, String)>> = None;
-    if let Some(m) = &method_desc {
-        match encode_all(m) {
-            Ok(e) => encoded = Some(e),
-            Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
-        }
-    }
-
-    // ---- connection ----
-    let alpn: &[&str] = if plan.tls.is_some() { &["h2"] } else { &[] };
-    let target = Target { host: &plan.host, port: plan.port, tls: plan.tls.as_deref(), alpn, http_forward_via_proxy: false };
-    let est = match establish_guarded(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), cancel, total_deadline).await {
-        Ok(e) => e,
-        Err((f, o)) => {
-            obs.connection = o;
-            return early(rec, obs, f, facts, DispatchState::NotDispatched);
-        }
-    };
-    if plan.tls.is_some() {
-        let negotiated = est.observation.tls.as_ref().and_then(|t| t.alpn_negotiated.clone());
-        if negotiated.as_deref() != Some("h2") {
-            let f = TransportFailure::new(
-                Phase::TlsHandshake,
-                FailureKind::TlsAlpnMismatch,
-                format!(
-                    "gRPC needs HTTP/2 (ALPN 'h2') but the peer negotiated {}",
-                    negotiated.map(|s| format!("'{s}'")).unwrap_or_else(|| "no ALPN protocol".into())
-                ),
-            );
-            obs.connection = Some(est.observation);
-            return early(rec, obs, f, facts, DispatchState::NotDispatched);
-        }
-    }
-    let HttpConn { sender, stats, observation: cobs, .. } = match http_handshake::<GrpcBody>(&mut rec, est, true, &plan.limits).await {
-        Ok(x) => x,
-        Err((f, o)) => {
-            obs.connection = Some(o);
-            return early(rec, obs, f, facts, DispatchState::NotDispatched);
-        }
-    };
-    obs.connection = Some(cobs);
-    let HttpSender::H2(mut h2) = sender else {
-        let f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::Internal, "gRPC requires an HTTP/2 connection");
-        return early(rec, obs, f, facts, DispatchState::NotDispatched);
-    };
     let written_before = stats.bytes_written();
     let read_before = stats.bytes_read();
+    let mut method_desc = local.method.clone();
+    let mut encoded = local.encoded.clone();
 
     // ---- server reflection (network schema) ----
     if matches!(plan.schema, Schema::Reflection) {
         let r_idx = rec.start(Phase::AwaitResponseHeaders);
-        match reflect(&mut h2, plan, cancel).await {
+        match reflect(conn, plan, &stats, cancel).await {
             Ok((pool, outcome)) => {
                 rec.finish_with(r_idx, PhaseStatus::Completed, format!("server reflection via {}", outcome.service));
                 facts.notes.push(format!("schema loaded by server reflection ({})", outcome.service));
@@ -740,7 +1327,7 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
                     Ok(m) => m,
                     Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
                 };
-                match encode_all(&m) {
+                match encode_all(plan, &m) {
                     Ok(e) => encoded = Some(e),
                     Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
                 }
@@ -791,22 +1378,20 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
     };
     let output_desc = method_desc.output();
     let input_desc = method_desc.input();
+    let web = plan.wire.is_web();
+    let text_request = plan.wire == GrpcWire::GrpcWebText;
+    // What goes on the wire for one message: the length-prefixed frame, base64 in text mode.
+    let wire_bytes = |b: &[u8]| if text_request { grpc_web::encode_text(&frame(b)) } else { frame(b) };
     let mut pending: VecDeque<(Bytes, String)> = encoded.unwrap_or_default().into();
-    obs.bytes.request_body = pending.iter().map(|(b, _)| 5 + b.len() as u64).sum();
+    // gRPC-Web sends one complete body, so its length is known up front.
+    let exact = web.then(|| pending.iter().map(|(b, _)| wire_bytes(b).len() as u64).sum::<u64>());
+    obs.bytes.request_body = exact.unwrap_or_else(|| pending.iter().map(|(b, _)| 5 + b.len() as u64).sum());
 
     // ---- the call ----
     let (tx, rx) = mpsc::channel::<Bytes>(64);
     let mut tx = Some(tx);
     let path = format!("/{}/{}", plan.service, plan.method);
-    let mut req = match Request::builder().method(Method::POST).uri(plan.uri(&path)).body(GrpcBody { rx }) {
-        Ok(r) => r,
-        Err(e) => {
-            let f = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("the gRPC request could not be built: {e}"))
-                .with_field("url");
-            return early(rec, obs, f, facts, DispatchState::NotDispatched);
-        }
-    };
-    let mut headers = base_headers(plan);
+    let mut headers = call_headers(plan, conn.is_h1());
     if let Some(ms) = plan.deadline_ms
         && let Ok(v) = HeaderValue::from_str(&grpc_timeout(ms))
     {
@@ -815,7 +1400,11 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
     let sent_headers = header_entries(&headers);
     obs.bytes.request_headers_logical = logical_header_bytes(&sent_headers) + path.len() as u64;
     obs.bytes.request_headers_estimated = true;
-    *req.headers_mut() = headers;
+    let ctl = StreamCtl::new(stats.clone());
+    let mut resp_fut = match start(conn, plan, &path, headers, rx, exact, &ctl) {
+        Ok(f) => Some(f),
+        Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
+    };
 
     let mut tr = Transcript::new(rec.t0, plan.transcript, events.clone(), plan.redact.clone());
     let w_idx = rec.start(Phase::RequestWrite);
@@ -826,8 +1415,7 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
     // Header deadline only when the whole request is sent at once.
     let headers_deadline = if streaming_request || interactive { None } else { deadline_from(plan.timeouts.response_headers_ms) };
     let grpc_deadline = plan.deadline_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-    let mut resp_fut = Some(Box::pin(h2.send_request(req)));
-    let mut body: Option<hyper::body::Incoming> = None;
+    let mut body: Option<RespBody> = None;
     let mut rbuf = BytesMut::new();
     let mut captured = BytesMut::new();
     let mut wire = 0u64;
@@ -836,20 +1424,26 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
     let mut resp_headers: Vec<HeaderEntry> = vec![];
     let mut trailers: Vec<HeaderEntry> = vec![];
     let mut trailers_received = false;
-    let mut grpc_status: Option<i32> = None;
-    let mut grpc_message: Option<String> = None;
-    let mut source = GrpcStatusSource::Missing;
+    let mut term = Terminal { code: None, message: None, source: GrpcStatusSource::Missing };
     let mut encoding: Option<String> = None;
     let mut content_type: Option<String> = None;
     let mut failure: Option<TransportFailure> = None;
     let mut completeness = BodyCompleteness::Incomplete;
     let mut half_close_wanted = !interactive;
     let mut last_progress = Instant::now();
+    // Response body framing: parse gRPC frames (from base64 text), or keep a
+    // non-gRPC body as evidence only.
+    let mut parse_frames = true;
+    let mut text_body = false;
+    let mut b64 = grpc_web::Base64Stream::default();
+    let mut trailer_frame = false;
+    let mut web_facts = GrpcWebFacts::default();
+    // A framing violation seen in an otherwise readable body.
+    let mut framing: Option<TransportFailure> = None;
 
-    type Resp = Result<hyper::Response<hyper::body::Incoming>, hyper::Error>;
     enum Ev {
-        Resp(Resp),
-        Frame(Option<Result<Frame<Bytes>, hyper::Error>>),
+        Resp(Result<RespHead, TransportFailure>),
+        Frame(BodyItem),
         Permit(Result<mpsc::OwnedPermit<Bytes>, mpsc::error::SendError<()>>),
         Cmd(Option<SessionCommand>),
         HeadersTimeout,
@@ -882,9 +1476,9 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
         let send_handle = if can_send { tx.clone() } else { None };
         let ev = tokio::select! {
             r = async { resp_fut.as_mut().expect("guarded").await }, if resp_fut.is_some() => Ev::Resp(r),
-            fr = async { body.as_mut().expect("guarded").frame().await }, if body.is_some() => Ev::Frame(fr),
+            fr = async { body.as_mut().expect("guarded").next().await }, if body.is_some() => Ev::Frame(fr),
             p = async { send_handle.expect("guarded").reserve_owned().await }, if can_send => Ev::Permit(p),
-            c = next_cmd(&mut commands), if interactive && tx.is_some() => Ev::Cmd(c),
+            c = next_cmd(commands), if interactive && tx.is_some() => Ev::Cmd(c),
             _ = sleep_until_opt(headers_deadline), if resp_fut.is_some() => Ev::HeadersTimeout,
             _ = sleep_until_opt(body_idle) => Ev::BodyIdle,
             _ = sleep_until_opt(grpc_deadline) => Ev::GrpcDeadline,
@@ -892,52 +1486,77 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
             _ = cancel.cancelled() => Ev::Canceled,
         };
         match ev {
-            Ev::Resp(Ok(resp)) => {
+            Ev::Resp(Ok(head)) => {
                 resp_fut = None;
                 if let Some(i) = h_idx.take() {
                     rec.finish(i, PhaseStatus::Completed);
                 }
-                let st = resp.status().as_u16();
+                let st = head.status;
                 status = Some(st);
-                version = resp.version();
+                version = head.version;
                 obs.response_status = Some(st);
                 obs.dispatch = DispatchState::Sent;
-                events.emit(ExecutionEvent::ResponseHead { execution_id: events.execution_id, attempt: 0, status: st });
-                resp_headers = header_entries(resp.headers());
+                events.emit(ExecutionEvent::ResponseHead { execution_id: events.execution_id, attempt: index, status: st });
+                resp_headers = header_entries(&head.headers);
                 obs.bytes.response_headers_logical = Some(logical_header_bytes(&resp_headers));
-                content_type = resp.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-                encoding = resp.headers().get("grpc-encoding").and_then(|v| v.to_str().ok()).map(|s| s.to_ascii_lowercase());
-                if let Some(code) =
-                    resp.headers().get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse::<i32>().ok())
-                {
-                    grpc_status = Some(code);
-                    grpc_message = resp.headers().get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
-                    source = GrpcStatusSource::TrailersOnly;
-                    facts.grpc_status_details =
-                        resp.headers().get("grpc-status-details-bin").and_then(|v| v.to_str().ok()).and_then(status_details);
+                content_type = header_field(&head.headers)("content-type");
+                encoding = header_field(&head.headers)("grpc-encoding").map(|s| s.to_ascii_lowercase());
+                term.read_fields(header_field(&head.headers), GrpcStatusSource::TrailersOnly, &mut facts);
+                match content_type.as_deref() {
+                    Some(ct) if grpc_web::is_grpc_web_text(ct) => text_body = true,
+                    Some(ct) if grpc_web::is_grpc_family(ct) => text_body = false,
+                    Some(ct) => {
+                        parse_frames = false;
+                        facts.notes.push(format!(
+                            "the response content type is {ct}, not {}; the body was kept as evidence and not parsed as gRPC frames",
+                            if web { "gRPC-Web" } else { "application/grpc" }
+                        ));
+                    }
+                    None => {
+                        text_body = text_request;
+                        facts.notes.push(format!(
+                            "the response has no content type; the body was parsed as {} gRPC{} frames",
+                            if text_body { "base64 text" } else { "binary" },
+                            if web { "-Web" } else { "" }
+                        ));
+                    }
                 }
-                if !content_type.as_deref().map(|c| c.starts_with("application/grpc")).unwrap_or(false) {
-                    facts.notes.push(format!(
-                        "the response content type is {}, not application/grpc",
-                        content_type.clone().unwrap_or_else(|| "missing".into())
-                    ));
+                if let Some(ct) = content_type.as_deref() {
+                    if web && grpc_web::is_grpc_family(ct) && !grpc_web::is_grpc_web(ct) {
+                        facts.notes.push(format!(
+                            "a gRPC-Web request was answered with the native gRPC content type {ct}; native gRPC carries its status in HTTP trailers, not in a gRPC-Web trailer frame"
+                        ));
+                    } else if !web && grpc_web::is_grpc_web(ct) {
+                        facts.notes.push(format!("a native gRPC request was answered with the gRPC-Web content type {ct}"));
+                    }
+                }
+                if web {
+                    web_facts.response_content_type = content_type.clone();
+                    web_facts.text = parse_frames && text_body;
                 }
                 s_idx = Some(rec.start(Phase::Session));
-                body = Some(resp.into_body());
+                body = Some(head.body);
                 last_progress = Instant::now();
             }
-            Ev::Resp(Err(e)) => {
+            Ev::Resp(Err(f)) => {
                 resp_fut = None;
-                let mut f = classify_hyper(&e, HyperStage::AwaitHeaders);
-                if let Some((k, a)) = stats.tls_error() {
-                    f.kind = k;
-                    f.tls_alert = a;
-                }
                 failure = Some(f);
                 break;
             }
             Ev::Frame(None) => {
                 completeness = BodyCompleteness::Complete;
+                if parse_frames
+                    && text_body
+                    && framing.is_none()
+                    && let Err(e) = b64.finish()
+                {
+                    failure = Some(TransportFailure::new(
+                        Phase::Session,
+                        FailureKind::BodyIncomplete,
+                        format!("the gRPC-Web text body is truncated: {e}"),
+                    ));
+                    completeness = BodyCompleteness::Incomplete;
+                }
                 break;
             }
             Ev::Frame(Some(Ok(fr))) => {
@@ -947,60 +1566,101 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
                     wire += d.len() as u64;
                     let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
                     captured.extend_from_slice(&d[..d.len().min(room)]);
-                    rbuf.extend_from_slice(&d);
-                    let mut err = None;
-                    loop {
-                        match next_message(&mut rbuf, plan.max_message_bytes) {
-                            Ok(Some((compressed, m))) => {
-                                let raw = if compressed {
-                                    match encoding.as_deref() {
-                                        Some("gzip") => match gunzip(&m, plan.max_message_bytes) {
-                                            Ok(v) => Bytes::from(v),
-                                            Err(e) => {
-                                                err = Some(TransportFailure::new(Phase::Session, FailureKind::DecompressionFailed, e));
-                                                break;
-                                            }
-                                        },
-                                        other => {
-                                            err = Some(TransportFailure::new(
-                                                Phase::Session,
-                                                FailureKind::HttpProtocolError,
-                                                format!(
-                                                    "a compressed message arrived with grpc-encoding {other:?}, which Anvil did not negotiate"
+                    if parse_frames && framing.is_none() {
+                        let mut err = None;
+                        if text_body {
+                            if let Err(e) = b64.push(&d, &mut rbuf) {
+                                err = Some(TransportFailure::new(
+                                    Phase::Session,
+                                    FailureKind::HttpProtocolError,
+                                    format!("the gRPC-Web text body is not valid base64: {e}"),
+                                ));
+                            }
+                        } else {
+                            rbuf.extend_from_slice(&d);
+                        }
+                        while err.is_none() {
+                            let next = match grpc_web::next_frame(&mut rbuf, plan.max_message_bytes, web) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    err = Some(frame_failure(e));
+                                    break;
+                                }
+                            };
+                            match next {
+                                None => break,
+                                Some(extra) if trailer_frame => {
+                                    let what = match &extra {
+                                        WireFrame::Trailer(p) => {
+                                            let entries = grpc_web::parse_trailer_block(p).unwrap_or_default();
+                                            let shown = entries.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>().join("\n");
+                                            tr.control(Direction::Received, "trailer_frame", shown.as_bytes());
+                                            match grpc_web::trailer_value(&entries, "grpc-status") {
+                                                Some(s) => format!(
+                                                    "a second trailer frame (grpc-status {s}) followed the first (grpc-status {})",
+                                                    term.code.map(|c| c.to_string()).unwrap_or_else(|| "none".into())
                                                 ),
-                                            ));
-                                            break;
+                                                None => "a second trailer frame followed the first".into(),
+                                            }
                                         }
-                                    }
-                                } else {
-                                    m
-                                };
-                                match decode_to_json(&output_desc, &raw) {
-                                    Ok(json) => tr.data_text(Direction::Received, "grpc_message", raw.len() as u64, &json),
-                                    Err(e) => {
-                                        tr.data(Direction::Received, "grpc_message", &raw);
-                                        tr.note(
-                                            "decode_error",
-                                            &format!("message could not be decoded as {}: {e}", output_desc.full_name()),
-                                        );
+                                        WireFrame::Message { .. } => "a message frame followed the trailer frame".into(),
+                                    };
+                                    err = Some(TransportFailure::new(
+                                        Phase::Session,
+                                        FailureKind::HttpProtocolError,
+                                        format!("{what}; gRPC-Web allows exactly one trailer frame, at the end of the body"),
+                                    ));
+                                    break;
+                                }
+                                Some(WireFrame::Message { compressed, data }) => {
+                                    if let Err(f) =
+                                        deliver(&mut tr, &output_desc, encoding.as_deref(), compressed, data, plan.max_message_bytes)
+                                    {
+                                        err = Some(f);
+                                        break;
                                     }
                                 }
-                            }
-                            Ok(None) => break,
-                            Err(e) => {
-                                err = Some(TransportFailure::new(Phase::Session, FailureKind::ResponseTooLargeLocal, e));
-                                break;
+                                Some(WireFrame::Trailer(payload)) => match grpc_web::parse_trailer_block(&payload) {
+                                    Ok(entries) => {
+                                        trailer_frame = true;
+                                        let shown = entries.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>().join("\n");
+                                        tr.control(Direction::Received, "trailer_frame", shown.as_bytes());
+                                        let before = (term.code, term.source);
+                                        let get = |n: &str| grpc_web::trailer_value(&entries, n).map(|s| s.to_string());
+                                        match term.read_fields(get, GrpcStatusSource::TrailerFrame, &mut facts) {
+                                            Some(code) => {
+                                                if before.1 == GrpcStatusSource::TrailersOnly && before.0 != Some(code) {
+                                                    facts.notes.push(format!(
+                                                        "the response headers carried grpc-status {} but the trailer frame carried {code}; the trailer frame ends the call and is used",
+                                                        before.0.unwrap_or_default()
+                                                    ));
+                                                }
+                                            }
+                                            None => facts.notes.push("the gRPC-Web trailer frame carried no grpc-status".into()),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        err = Some(TransportFailure::new(
+                                            Phase::Session,
+                                            FailureKind::HttpProtocolError,
+                                            format!("the gRPC-Web trailer frame is malformed: {e}"),
+                                        ));
+                                        break;
+                                    }
+                                },
                             }
                         }
-                    }
-                    if let Some(f) = err {
-                        completeness = if f.kind == FailureKind::ResponseTooLargeLocal {
-                            BodyCompleteness::StoppedAtLocalLimit
-                        } else {
-                            BodyCompleteness::Incomplete
-                        };
-                        failure = Some(f);
-                        break;
+                        match err {
+                            Some(f) if f.kind == FailureKind::ResponseTooLargeLocal => {
+                                completeness = BodyCompleteness::StoppedAtLocalLimit;
+                                failure = Some(f);
+                                break;
+                            }
+                            // A framing violation: stop parsing, but read the HTTP body to
+                            // its end so its completeness is reported as observed.
+                            Some(f) => framing = Some(f),
+                            None => {}
+                        }
                     }
                     if wire > plan.limits.max_response_bytes {
                         completeness = BodyCompleteness::StoppedAtLocalLimit;
@@ -1014,27 +1674,30 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
                 } else if let Ok(t) = fr.into_trailers() {
                     trailers_received = true;
                     trailers = header_entries(&t);
-                    if let Some(code) = t.get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse::<i32>().ok()) {
-                        grpc_status = Some(code);
-                        grpc_message = t.get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
-                        source = GrpcStatusSource::Trailers;
-                        facts.grpc_status_details = t.get("grpc-status-details-bin").and_then(|v| v.to_str().ok()).and_then(status_details);
+                    if web && term.source == GrpcStatusSource::TrailerFrame {
+                        if header_field(&t)("grpc-status").is_some() {
+                            facts
+                                .notes
+                                .push("HTTP trailers also carried a grpc-status; the gRPC-Web trailer frame's status is used".into());
+                        }
+                    } else if let Some(code) = term.read_fields(header_field(&t), GrpcStatusSource::Trailers, &mut facts)
+                        && web
+                    {
+                        web_facts.status_in_http_trailers = true;
+                        facts.notes.push(format!(
+                            "grpc-status {code} arrived in HTTP trailers, not in a gRPC-Web trailer frame; browser gRPC-Web clients cannot read HTTP trailers"
+                        ));
                     }
                 }
             }
-            Ev::Frame(Some(Err(e))) => {
-                let mut f = classify_hyper(&e, HyperStage::Body);
+            Ev::Frame(Some(Err(mut f))) => {
                 f.phase = Phase::Session;
-                if let Some((k, a)) = stats.tls_error() {
-                    f.kind = k;
-                    f.tls_alert = a;
-                }
                 failure = Some(f);
                 break;
             }
             Ev::Permit(Ok(p)) => {
                 let (b, json) = pending.pop_front().expect("non-empty");
-                drop(p.send(frame(&b)));
+                drop(p.send(wire_bytes(&b)));
                 tr.data_text(Direction::Sent, "grpc_message", b.len() as u64, &json);
             }
             Ev::Permit(Err(_)) => {
@@ -1059,7 +1722,7 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
                 },
                 Some(SessionCommand::HalfClose) | Some(SessionCommand::Close { .. }) | None => half_close_wanted = true,
                 Some(SessionCommand::Ping) => {
-                    tr.note("unsupported_command", "gRPC calls have no ping command (HTTP/2 PINGs are connection-level)")
+                    tr.note("unsupported_command", "gRPC calls have no ping command (HTTP/2 and QUIC PINGs are connection-level)")
                 }
             },
             Ev::HeadersTimeout => {
@@ -1106,21 +1769,34 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
                 break;
             }
             Ev::Canceled => {
-                failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the call was canceled (RST_STREAM CANCEL)"));
+                failure = Some(TransportFailure::new(
+                    Phase::Session,
+                    FailureKind::Canceled,
+                    format!("the call was canceled ({})", conn.reset_note()),
+                ));
                 completeness = BodyCompleteness::Canceled;
                 break;
             }
         }
     }
-    // Dropping the request sender / response body resets an unfinished stream.
+    // Dropping the request sender / response body resets an unfinished
+    // HTTP/2 stream; an unfinished HTTP/3 stream is reset explicitly.
+    if failure.is_some() || completeness != BodyCompleteness::Complete {
+        ctl.abort.cancel();
+    }
     drop(tx);
     drop(resp_fut);
     drop(body);
-    if !rbuf.is_empty() && failure.is_none() {
+    if let Some(f) = framing {
+        facts.grpc_framing_error = Some(f.message.clone());
+        if failure.is_none() {
+            failure = Some(f);
+        }
+    } else if parse_frames && !rbuf.is_empty() && failure.is_none() {
         failure = Some(TransportFailure::new(
             Phase::Session,
             FailureKind::BodyIncomplete,
-            format!("the stream ended inside a message ({} bytes left over)", rbuf.len()),
+            format!("the stream ended inside a {} ({} bytes left over)", if web { "gRPC-Web frame" } else { "message" }, rbuf.len()),
         ));
         completeness = BodyCompleteness::Incomplete;
     }
@@ -1139,12 +1815,21 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
             },
         );
     }
-    if let Some(code) = grpc_status {
-        let msg = grpc_message.clone().unwrap_or_default();
+    if let Some(code) = term.code {
+        let msg = term.message.clone().unwrap_or_default();
         tr.control(Direction::Received, "status", format!("grpc-status {code} {msg}").trim().as_bytes());
     }
     if status.is_none() && obs.dispatch != DispatchState::Sent {
-        obs.dispatch = if stats.bytes_written() > written_before { DispatchState::MayHaveBeenSent } else { DispatchState::NotDispatched };
+        obs.dispatch = if stats.bytes_written() > written_before || ctl.opened.load(Ordering::SeqCst) {
+            DispatchState::MayHaveBeenSent
+        } else {
+            DispatchState::NotDispatched
+        };
+    }
+    if web && status.is_some() {
+        web_facts.trailer_frame = trailer_frame;
+        web_facts.body_complete = completeness == BodyCompleteness::Complete && failure.is_none();
+        facts.grpc_web = Some(web_facts);
     }
     obs.failure = failure;
     obs.bytes.response_body_wire = Some(wire);
@@ -1167,7 +1852,8 @@ pub async fn run(plan: &GrpcPlan, events: &EventCtx, cancel: &CancellationToken,
     let mut response = response_record(st, version, resp_headers, body_capture(completeness, wire, &captured, content_type));
     response.trailers = trailers;
     response.trailers_received = trailers_received;
-    let ps = ProtocolStatus::Grpc { http_status: Some(st), grpc_status, grpc_message: grpc_message.map(redact), source };
+    let ps =
+        ProtocolStatus::Grpc { http_status: Some(st), grpc_status: term.code, grpc_message: term.message.map(redact), source: term.source };
     SessionOutput::single(AttemptOutput { observation: obs, response: Some(response), body: captured }, Some(tr.finish()), ps, facts)
 }
 
@@ -1207,9 +1893,39 @@ mod tests {
         assert_eq!(next_message(&mut b, 16).unwrap(), Some((false, Bytes::from_static(b"abc"))));
         assert_eq!(next_message(&mut b, 16).unwrap(), None);
         let mut big = BytesMut::from(&[0u8, 0, 0, 1, 0][..]);
-        assert!(next_message(&mut big, 16).is_err());
+        assert!(matches!(next_message(&mut big, 16), Err(FrameError::TooLarge(_))));
+        // A native stream has no trailer frame: 0x80 is an invalid flag, not a size problem.
+        let mut t = BytesMut::from(&[0x80u8, 0, 0, 0, 0][..]);
+        assert!(matches!(next_message(&mut t, 16), Err(FrameError::Invalid(_))));
         assert_eq!(grpc_timeout(1500), "1500m");
         assert_eq!(grpc_timeout(200_000_000), "200000S");
         assert_eq!(percent_decode("a%20b%zz"), "a b%zz");
+    }
+
+    #[test]
+    fn unsupported_combinations_are_refused_before_traffic() {
+        use HttpVersionPolicy as V;
+        let web = GrpcWire::GrpcWeb;
+        let none = |w, m, r, v, tls, proxy| unsupported_combination(w, m, r, v, tls, proxy).is_none();
+        let field = |w, m, r, v, tls, proxy| unsupported_combination(w, m, r, v, tls, proxy).map(|(_, f)| f);
+        // gRPC-Web: unary and server streaming over H1/H2/H3; never client/bidi or reflection.
+        for v in [V::Auto, V::Http1Only, V::Http2Only, V::Http3Only, V::Http3WithFallback] {
+            assert!(none(web, GrpcMode::Unary, false, v, true, false), "{v:?}");
+            assert!(none(GrpcWire::GrpcWebText, GrpcMode::ServerStreaming, false, v, true, false), "{v:?}");
+        }
+        assert_eq!(field(web, GrpcMode::ClientStreaming, false, V::Auto, true, false), Some("grpc.wire"));
+        assert_eq!(field(web, GrpcMode::Bidirectional, false, V::Auto, false, false), Some("grpc.wire"));
+        let (msg, _) = unsupported_combination(web, GrpcMode::Bidirectional, false, V::Auto, true, false).unwrap();
+        assert!(msg.contains("unary and server-streaming") && msg.contains("half-close"), "{msg}");
+        assert_eq!(field(web, GrpcMode::Unary, true, V::Auto, true, false), Some("grpc.schema"));
+        assert_eq!(field(web, GrpcMode::Unary, false, V::H2c, true, false), Some("settings.http_version"));
+        assert_eq!(field(web, GrpcMode::Unary, false, V::Http2Only, false, false), Some("settings.http_version"));
+        assert!(none(web, GrpcMode::Unary, false, V::H2c, false, false));
+        // Native gRPC: never HTTP/1.1; HTTP/3 needs TLS and no proxy.
+        let g = GrpcWire::Grpc;
+        assert_eq!(field(g, GrpcMode::Unary, false, V::Http1Only, true, false), Some("settings.http_version"));
+        assert!(none(g, GrpcMode::Bidirectional, true, V::Http3Only, true, false));
+        assert_eq!(field(g, GrpcMode::Unary, false, V::Http3Only, false, false), Some("settings.http_version"));
+        assert_eq!(field(g, GrpcMode::Unary, false, V::Http3WithFallback, true, true), Some("settings.proxy"));
     }
 }

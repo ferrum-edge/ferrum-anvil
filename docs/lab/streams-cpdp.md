@@ -4,8 +4,9 @@ These two profiles run Anvil's shared engine against the **real, pinned Ferrum E
 release binary**. They do not use mocks of the gateway.
 
 - `streams` sends every protocol Anvil advertises *through* the gateway: HTTP/1.1, HTTP/2
-  (TLS and h2c), HTTP/3 on the gateway's QUIC listener, WebSocket bootstraps, gRPC, SSE,
-  and the TCP, TCP+TLS, UDP and DTLS stream proxies.
+  (TLS and h2c), HTTP/3 on the gateway's QUIC listener, WebSocket bootstraps, gRPC (over
+  HTTP/2 and HTTP/3), gRPC-Web (binary and text, through the `grpc_web` plugin and a
+  pass-through route), SSE, and the TCP, TCP+TLS, UDP and DTLS stream proxies.
 - `cpdp` runs a real control plane (CP, SQLite) and real data planes (DP). It creates
   genuine stale-configuration fences (matrix GW-005).
 
@@ -58,7 +59,7 @@ cargo run -p anvil-lab -- up cpdp
 | | streams | cpdp |
 |---|---|---|
 | Gateway | HTTP 18480 (h1 + h2c); HTTPS 18443/tcp and HTTP/3 18443/udp; admin 18490; stream listeners 18401–18409 | CP admin 18790, CP gRPC 18795; DP HTTP 18780, admin 18791; orphan DP HTTP 18770, admin 18771 (its CP URL 18799 is left unbound) |
-| Fixtures | 19401 WS echo, 19402 gRPC (h2c), 19403 HTTP echo, 19404 TCP reply-after-half-close, 19405 UDP echo, 19406 UDP silent, 19407 UDP drop-every-other, 19408 TCP echo, 19411 TLS echo (lab CA), 19412 gRPC that holds its headers for 4 s, 19413 SSE, 19414 TLS echo (untrusted CA), 19416 SSE that aborts mid-stream, 19417 HTTPS h2 backend, 19420 TCP-only relay to 18443. **Unbound on purpose:** 19409 (gRPC down) and 19410 (TCP refused). | 19701 HTTP echo; 19795 DP→CP relay (can be cut) |
+| Fixtures | 19401 WS echo, 19402 gRPC (h2c; also answers gRPC-Web for `application/grpc-web*` requests), 19403 HTTP echo, 19404 TCP reply-after-half-close, 19405 UDP echo, 19406 UDP silent, 19407 UDP drop-every-other, 19408 TCP echo, 19411 TLS echo (lab CA), 19412 gRPC that holds its headers for 4 s, 19413 SSE, 19414 TLS echo (untrusted CA), 19416 SSE that aborts mid-stream, 19417 HTTPS h2 backend, 19420 TCP-only relay to 18443. **Unbound on purpose:** 19409 (gRPC down) and 19410 (TCP refused). | 19701 HTTP echo; 19795 DP→CP relay (can be cut) |
 
 ## 2. `streams` scenarios
 
@@ -86,6 +87,16 @@ attribution. Every row passed in every run of the final stability batch (§5).
 | PROTO-016 | PROTO-016 | Unary, server-streaming (3), client-streaming (3→1) and bidirectional (2→2) over h2c, plus unary over grpcs (verified, ALPN h2). Message boundaries are exact. The backend saw all four methods. |
 | PROTO-016-deadline | PROTO-016 | A 300 ms client deadline on a 5 s stream. The call is ended either by Anvil's own deadline (`total_timeout`, `deadline_ms` 300) or by the gateway enforcing the forwarded `grpc-timeout` (`RST_STREAM` after DATA, no trailers). The status is **missing**, not an invented DEADLINE_EXCEEDED. The partial messages are kept. Ground truth: the gateway forwarded `grpc-timeout` to the backend. |
 | UP-010-grpc | UP-010 (gRPC), PROTO-016 | The backend holds its headers for 4 s against the gateway's 1 s read timeout. The gateway answers **HTTP 200 trailers-only `grpc-status 4` "Backend deadline exceeded"**. Anvil reports an RPC failure with no local deadline and no token. Operator `error_class` is `read_write_timeout`. |
+| PROTO-016-h3 | PROTO-016 (HTTP/3) | Native gRPC over **HTTP/3** to the QUIC listener (`grpcs://127.0.0.1:18443`, forced HTTP/3): unary, server streaming (3), client streaming (3→1) and bidirectional (2→2), each in one attempt with `grpc-status 0` from the **HTTP/3 trailers** and exact message boundaries. ALPN `h3`, verified, completed `quic_handshake`, connect `not_applicable`, no TCP-TLS phase. Ground truth: the backend received all four calls as native `application/grpc`, and the operator log shows the cleartext backend target (`http://127.0.0.1:19402/...`): the gateway bridged HTTP/3 to its h2c gRPC pool. |
+| PROTO-014-h3 | PROTO-014 (HTTP/3) | HTTP 200 over HTTP/3 with `grpc-status 5` in the HTTP/3 trailers: transport completed, RPC failed, `app.grpc_status`, no token. Recovery: the same call without `failWith`. |
+| PROTO-016-h3-blocked | PROTO-007 (gRPC) | Forced gRPC over HTTP/3 to the TCP-only relay 19420: `quic_handshake_timeout` in one attempt, nothing dispatched, no response and no gRPC status claimed, `client.quic.handshake_timeout`, no `app.grpc*` finding. Ground truth: the relay saw **no** TCP connection and the backend no call. Recovery: forced HTTP/3 on 18443. |
+| PROTO-016-h3-fallback | PROTO-008 (gRPC) | HTTP/3-with-fallback on the same path: two attempts, the failed HTTP/3 one (`not_dispatched`) and `protocol_fallback{from:h3}` over HTTP/2 (TLS, ALPN `h2`), `grpc-status 0`, `client.h3.fallback_used` and the `protocol_fallback` warning. Ground truth: the fallback travelled the relay and the backend was called **exactly once**. |
+| GRPCWEB-001 | gRPC-Web | Binary gRPC-Web through the `grpc_web` plugin (`/grpcweb` → h2c backend): unary and server streaming (3) over HTTP/1.1 (18480), unary over HTTP/2 over verified TLS (18443). Each: `grpc-status 0` from the **trailer frame**, `application/grpc-web+proto`, exact boundaries, no `grpc_web.*` finding, no token, no translation claim. Ground truth: the backend received native `application/grpc` (the gateway translated). |
+| GRPCWEB-002 | gRPC-Web | Text gRPC-Web (base64 both ways) through the plugin: unary and server streaming over HTTP/1.1, unary over **HTTP/3** (QUIC checks as in PROTO-006). The captured body is base64 text, decoded incrementally. Ground truth: the backend received native `application/grpc` for the HTTP/1.1 and HTTP/3 calls. |
+| GRPCWEB-003 | gRPC-Web, PROTO-014 | The backend's native `grpc-status 5` reaches the client as **HTTP 200 + trailer frame `grpc-status: 5`** (binary, HTTP/1.1); text mode over HTTP/2: two messages, then `grpc-status 9` in the trailer frame. RPC failure, `app.grpc_status`, no missing-status or framing claim. |
+| GRPCWEB-down | gRPC-Web, UP-002 | Plugin route to the unbound 19409: **HTTP 200 + a gateway-authored trailer frame** `grpc-status: 14`, `grpc-message: Backend unavailable` (`Content-Length` 57, `x-grpc-web: 1`). Valid framing, an RPC failure of unknown origin (no connect claim, no "which component" claim). Operator `error_class` is `connection_refused` (read after the streamed body is logged). |
+| GRPCWEB-lookalike | gRPC-Web (lookalike) | The same gRPC-Web request to `/grpcweb-raw`, the same backend **without** the plugin, over HTTP/1.1, HTTP/2 and HTTP/3. Ground truth: the backend received `application/grpc-web+proto` with `x-grpc-web: 1`, i.e. untranslated (and answered gRPC-Web itself), while the translating control received `application/grpc`. Anvil makes **no translation claim** either way. **Observed on v0.9.7:** over HTTP/1.1 and HTTP/2 the gateway appends its own synthesized trailer frame `grpc-status: 2` after the backend's `grpc-status: 0` frame (the body is 11 + 21 + 21 bytes, and the operator log records `grpc_status: 2` for all three calls); over HTTP/3 the body passes through unchanged. Anvil reports the appended frame as `grpc.framing_invalid` ("a second trailer frame (grpc-status 2) followed the first (grpc-status 0)"), with the HTTP body complete and the call not a success. The check accepts either a clean pass-through or this invalid framing, and records which. |
+| GRPCWEB-refused | gRPC-Web | Client streaming over gRPC-Web is refused before traffic: `unsupported_combination` in the prepare phase, field `grpc.wire`, with the reason; `not_dispatched`. Ground truth: neither the gateway nor the backend saw a request. |
 | PROTO-018 | PROTO-018 | SSE events, then an explicit cancel at 500 ms. The transport is `canceled` with `sse.canceled`, and no finding contains "timeout". Ground truth: the gateway forwarded `Accept: text/event-stream` and `Last-Event-ID`. Recovery: a complete 3-event stream. |
 | PROTO-018-idle | PROTO-018 | One event, then silence past the 800 ms idle limit. The stream is `closed_by timeout` with `sse.idle_timeout`. It is not a cancel, and there is no confirmed failure claim. |
 | TRUST-007-sse | TRUST-007, UP-011 | The backend aborts its event stream after 3 events. Through the gateway, HTTP 200 turns into an **incomplete** abnormal end. Anvil does not report success, keeps the events, and makes no retrospective gateway-error claim (the status stays 200). |
@@ -219,6 +230,22 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
     §11 item 5) is not implemented.
   - The gRPC variant of the stale fence (200 / 14 without a marker on H1/H2) is not
     exercised.
+- **gRPC over HTTP/3 and gRPC-Web** (the PROTO-016-h3 … GRPCWEB-refused rows) were added
+  against the pinned **v0.9.7** binary. Configuration: the `grpcweb-translated`,
+  `grpcweb-passthrough` and `grpcweb-down` proxies and two proxy-scoped `grpc_web` plugin
+  configs in `streams.yaml` (checked by `lint-profiles.rb` and the binary's `validate`).
+  - **Pass-through gRPC-Web on v0.9.7 appends a trailer frame** over HTTP/1.1 and HTTP/2
+    (GRPCWEB-lookalike). Without the plugin the request reaches the backend untranslated, as
+    documented, but the gateway adds its own `grpc-status: 2` frame after the backend's
+    complete gRPC-Web body; it also logs `grpc_status: 2` for these calls, including over
+    HTTP/3 where the body is left alone. That looks like a gateway defect: a gRPC-Web client
+    that stops at the first trailer frame sees status 0, one that reads on sees malformed
+    framing. Anvil reports what is on the wire and claims nothing about translation.
+  - The gRPC-Web routes have no marker to attribute: gateway-authored terminal statuses
+    (`14 Backend unavailable`) arrive in the trailer frame with `x-grpc-web: 1` and no
+    `X-Gateway-Error`, so Anvil reports RPC failures of unknown origin.
+  - Not exercised: gRPC-Web through the native HTTP/3 backend path (the backend is h2c),
+    gRPC-Web `+json`, request trailer frames, and `Accept`-negotiated mode switching.
 - **gRPC client deadline wording.** A local gRPC deadline is typed as `total_timeout` with
   `deadline_ms`. The generic `response.body_total_timeout` wording then speaks of the
   "total deadline", when this was the gRPC deadline. The value is right, but the wording is

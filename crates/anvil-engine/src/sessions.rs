@@ -23,6 +23,7 @@ use anvil_domain::Id;
 use anvil_domain::diagnostics::{Confidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
 use anvil_domain::events::SessionCommand;
 use anvil_domain::execution::*;
+use anvil_domain::outcome::{GrpcStatusSource, ProtocolStatus};
 use anvil_domain::request::*;
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
 use anvil_transport::dns::DnsConfig;
@@ -446,14 +447,12 @@ async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, int
         return Err(local(FailureKind::BodySerialization, "a gRPC request needs a service, method and schema", "grpc"));
     };
     let mut b = base(engine, ctx, r, &["grpcs", "grpc", "https", "http"])?;
-    match b.prep.settings.http_version {
-        HttpVersionPolicy::Http1Only => {
-            return Err(unsupported("gRPC requires HTTP/2; HTTP/1.1-only was selected", "settings.http_version"));
-        }
-        HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback => {
-            return Err(unsupported("gRPC over HTTP/3 is not implemented; choose HTTP/2 (TLS) or h2c", "settings.http_version"));
-        }
-        _ => {}
+    let version = b.prep.settings.http_version;
+    let target = b.prep.http.target.clone();
+    let tls_url = matches!(target.scheme.as_str(), "grpcs" | "https");
+    let reflection = matches!(spec.schema, GrpcSchemaSource::Reflection);
+    if let Some((msg, field)) = grpc::unsupported_combination(spec.wire, spec.mode, reflection, version, tls_url, b.prep.proxy.is_some()) {
+        return Err(unsupported(msg, field));
     }
     if interactive && !matches!(spec.mode, GrpcMode::ClientStreaming | GrpcMode::Bidirectional) {
         return Err(unsupported(
@@ -461,13 +460,34 @@ async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, int
             "grpc.mode",
         ));
     }
-    let target = b.prep.http.target.clone();
-    let tls_url = matches!(target.scheme.as_str(), "grpcs" | "https");
     if spec.plaintext && tls_url {
         return Err(unsupported("plaintext (h2c) was selected for a TLS URL; use grpc:// or http:// for h2c", "grpc.plaintext"));
     }
-    if !tls_url {
+    if spec.wire.is_web() {
+        b.inferred.push(format!(
+            "gRPC-Web ({}): unary and server streaming only; the status is read from the trailer frame at the end of the response body",
+            if spec.wire == GrpcWire::GrpcWebText { "text, base64 in both directions" } else { "binary" }
+        ));
+        b.inferred.push(
+            match (version, tls_url) {
+                (HttpVersionPolicy::Http1Only, _) => "gRPC-Web over HTTP/1.1",
+                (HttpVersionPolicy::Http2Only, _) => "gRPC-Web over HTTP/2 (ALPN h2 only)",
+                (HttpVersionPolicy::H2c, _) => "gRPC-Web over cleartext HTTP/2 with prior knowledge (h2c)",
+                (HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback, _) => "gRPC-Web over HTTP/3",
+                (_, true) => "gRPC-Web over TLS: ALPN offers h2 and http/1.1; the negotiated protocol is used",
+                (_, false) => "cleartext gRPC-Web uses HTTP/1.1",
+            }
+            .into(),
+        );
+    } else if !tls_url {
         b.inferred.push("cleartext gRPC uses HTTP/2 with prior knowledge (h2c)".into());
+    }
+    match version {
+        HttpVersionPolicy::Http3Only => b.inferred.push("HTTP/3 (QUIC) only: the call never falls back to TCP".into()),
+        HttpVersionPolicy::Http3WithFallback => b
+            .inferred
+            .push("HTTP/3 first; if it fails before the call is sent, the call is made over TCP as a separate, recorded attempt".into()),
+        _ => {}
     }
     let service = r.resolve(&spec.service, "grpc.service")?;
     let method_name = r.resolve(&spec.method, "grpc.method")?;
@@ -482,7 +502,11 @@ async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, int
             let enc =
                 grpc::encode_json(&m.input(), j).map_err(|e| local(FailureKind::BodySerialization, e, &format!("grpc.messages[{i}]")))?;
             if matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming) {
-                unary_body = grpc::frame(&enc);
+                // The exact bytes sent (auth signing, prepared-body evidence).
+                unary_body = match spec.wire {
+                    GrpcWire::GrpcWebText => anvil_transport::grpc_web::encode_text(&grpc::frame(&enc)),
+                    _ => grpc::frame(&enc),
+                };
             }
         }
         if matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming) && messages.len() > 1 {
@@ -556,9 +580,18 @@ async fn prepare_grpc(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, int
         max_message_bytes: b.prep.settings.limits.max_response_bytes.min(GRPC_MAX_MESSAGE) as usize,
         transcript: TranscriptLimits::default(),
         redact: Some(redact_fn(&b.redactor)),
+        wire: spec.wire,
+        version,
     };
     let mut p = finish_prep(b, Plan::Grpc(plan), "POST".into(), display, headers, unary_body, facts);
-    p.content_type = Some("application/grpc".into());
+    p.content_type = Some(
+        match spec.wire {
+            GrpcWire::Grpc => "application/grpc",
+            GrpcWire::GrpcWeb => anvil_transport::grpc_web::CT_BINARY,
+            GrpcWire::GrpcWebText => anvil_transport::grpc_web::CT_TEXT,
+        }
+        .into(),
+    );
     Ok(p)
 }
 
@@ -688,10 +721,68 @@ fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
     Ok(p)
 }
 
-/// Findings the engine derives from session facts (wording supplied here;
-/// these are adapter observations, not generic rules).
-fn fact_findings(facts: &SessionFacts, protocol: Protocol) -> Vec<Draft> {
+/// Findings the engine derives from session facts: adapter observations,
+/// not generic rules. Most are worded here; `grpc_web.no_trailer_frame` and
+/// `grpc.framing_invalid` are worded in the diagnostics catalog.
+fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStatus) -> Vec<Draft> {
     let mut out = Vec::new();
+    if let Some(problem) = &facts.grpc_framing_error
+        && let ProtocolStatus::Grpc { http_status, grpc_status, source, .. } = status
+    {
+        // The body was readable, but its gRPC(-Web) framing was not valid.
+        out.push(
+            Draft::new("grpc.framing_invalid", "protocol.grpc", Confidence::Confirmed, SourceScope::ResponseDelivery, Owner::Unknown, Severity::Error)
+                .ev(EvidenceSource::NativeTransport, "grpc.framing", problem.clone())
+                .ev(EvidenceSource::GrpcStatus, "status.source", format!("{source:?}"))
+                .var("http_status", http_status.map(|s| s.to_string()).unwrap_or_else(|| "no".into()))
+                .var("wire", if facts.grpc_web.is_some() { "gRPC-Web" } else { "gRPC" })
+                .var("problem", problem.clone())
+                .var(
+                    "status_note",
+                    match grpc_status {
+                        Some(code) => format!(
+                            "grpc-status {code} was read before the problem; it is reported, but the response as a whole is malformed, so the call is not a complete success."
+                        ),
+                        None => "No grpc-status was read, so the RPC result is unknown: it is not a success.".into(),
+                    },
+                ),
+        );
+    }
+    if let Some(w) = &facts.grpc_web
+        && !w.trailer_frame
+        && w.body_complete
+        && let ProtocolStatus::Grpc { http_status, grpc_status, source, .. } = status
+        && matches!(source, GrpcStatusSource::Missing | GrpcStatusSource::Trailers)
+    {
+        // A gRPC-Web body that ended cleanly without the trailer frame (and no
+        // trailers-only status): the RPC result is unknown to a gRPC-Web client.
+        let in_trailers = *source == GrpcStatusSource::Trailers;
+        let ct = w.response_content_type.clone().unwrap_or_else(|| "none".into());
+        out.push(
+            Draft::new(
+                "grpc_web.no_trailer_frame",
+                "protocol.grpc",
+                Confidence::Confirmed,
+                SourceScope::ResponseDelivery,
+                Owner::Unknown,
+                if in_trailers { Severity::Warning } else { Severity::Error },
+            )
+            .ev(EvidenceSource::BodyCompletion, "grpc_web.trailer_frame", "absent")
+            .ev(EvidenceSource::HttpHeader, "content-type", ct.clone())
+            .ev(EvidenceSource::GrpcStatus, "status.source", format!("{source:?}"))
+            .var("http_status", http_status.map(|s| s.to_string()).unwrap_or_else(|| "no".into()))
+            .var("content_type", ct)
+            .var(
+                "status_note",
+                match grpc_status {
+                    Some(code) if in_trailers => format!(
+                        "grpc-status {code} arrived in HTTP trailers instead. A browser gRPC-Web client cannot read HTTP trailers, so it would not see this status."
+                    ),
+                    _ => "No grpc-status arrived in the response headers either, so the RPC result is unknown: it is not a success.".into(),
+                },
+            ),
+        );
+    }
     if let Some(r) = &facts.grpc_reflection
         && !r.succeeded
     {
@@ -816,7 +907,12 @@ async fn run_prepared(
         inferred.push(format!("grpc-status-details-bin: {d}"));
     }
     let mut extra = prep.extra_findings;
-    extra.extend(fact_findings(&out.facts, ctx.spec.protocol));
+    extra.extend(fact_findings(&out.facts, ctx.spec.protocol, &out.status));
+    // An automatic HTTP/3 → TCP fallback (gRPC) is reported, never hidden.
+    let fallback_from = observations.iter().find_map(|a| match &a.reason {
+        AttemptReason::ProtocolFallback { from } => Some(from.clone()),
+        _ => None,
+    });
     let assembly = Assembly {
         ctx,
         started_at,
@@ -837,7 +933,7 @@ async fn run_prepared(
         last,
         trust,
         credentials_stripped: false,
-        protocol_fallback_from: None,
+        protocol_fallback_from: fallback_from,
         redactor: &redactor,
         extra_findings: extra,
         stream: out.transcript,

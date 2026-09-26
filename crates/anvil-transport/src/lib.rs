@@ -16,6 +16,7 @@ pub mod dns;
 pub mod dtls;
 pub mod errors;
 pub mod grpc;
+pub mod grpc_web;
 pub mod h3;
 pub mod http;
 pub mod net;

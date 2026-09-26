@@ -1951,9 +1951,14 @@
           "minimum": 0
         },
         "plaintext": {
-          "description": "Use h2c (cleartext prior knowledge) for `http://` targets.",
+          "description": "Use h2c (cleartext prior knowledge) for `http://` targets (native gRPC).",
           "type": "boolean",
           "default": false
+        },
+        "wire": {
+          "description": "Wire format: native gRPC (default; records saved before this field\nexisted load as native), gRPC-Web binary or gRPC-Web text.",
+          "$ref": "#/$defs/GrpcWire",
+          "default": "grpc"
         }
       },
       "required": [
@@ -2024,6 +2029,26 @@
           "required": [
             "kind"
           ]
+        }
+      ]
+    },
+    "GrpcWire": {
+      "description": "How gRPC calls are carried on the wire. The HTTP version comes from the\nrequest's HTTP version policy (see `docs/protocols.md` §3.2).",
+      "oneOf": [
+        {
+          "description": "Native gRPC (`application/grpc`) over HTTP/2 or HTTP/3; the status\narrives in HTTP trailers (or the headers of a trailers-only answer).",
+          "type": "string",
+          "const": "grpc"
+        },
+        {
+          "description": "gRPC-Web, binary (`application/grpc-web+proto`), over HTTP/1.1, HTTP/2\nor HTTP/3. Unary and server streaming only; the status arrives in a\ntrailer frame (flag `0x80`) at the end of the response body.",
+          "type": "string",
+          "const": "grpc_web"
+        },
+        {
+          "description": "gRPC-Web, text (`application/grpc-web-text`): the same frames,\nbase64-encoded in both directions.",
+          "type": "string",
+          "const": "grpc_web_text"
         }
       ]
     },

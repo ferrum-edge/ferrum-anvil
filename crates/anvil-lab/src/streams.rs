@@ -157,6 +157,23 @@ fn echo_proto() -> AttachmentRef {
 }
 
 fn grpc_ctx(env: &Env, url: &str, method: &str, mode: GrpcMode, messages: &[&str], deadline_ms: Option<u64>) -> ExecutionContext {
+    let mut c = grpc_wire_ctx(env, url, method, mode, messages, GrpcWire::Grpc, None);
+    if let Some(g) = c.spec.grpc.as_mut() {
+        g.deadline_ms = deadline_ms;
+    }
+    c
+}
+
+/// A gRPC call with a wire format (native, gRPC-Web binary/text) and an HTTP version policy.
+fn grpc_wire_ctx(
+    env: &Env,
+    url: &str,
+    method: &str,
+    mode: GrpcMode,
+    messages: &[&str],
+    wire: GrpcWire,
+    version: Option<HttpVersionPolicy>,
+) -> ExecutionContext {
     let mut s = spec(Protocol::Grpc, url);
     s.method = "POST".into();
     s.grpc = Some(GrpcSpec {
@@ -166,11 +183,12 @@ fn grpc_ctx(env: &Env, url: &str, method: &str, mode: GrpcMode, messages: &[&str
         schema: GrpcSchemaSource::ProtoFiles { files: vec![echo_proto()] },
         messages: messages.iter().map(|m| m.to_string()).collect(),
         metadata: vec![],
-        deadline_ms,
+        deadline_ms: None,
         plaintext: false,
+        wire,
     });
     let tls = url.starts_with("grpcs://") || url.starts_with("https://");
-    ctx_with(env, s, if tls { lab_root(env) } else { None }, None)
+    ctx_with(env, s, if tls { lab_root(env) } else { None }, version)
 }
 
 fn sse_ctx(env: &Env, url: &str, max_events: u32, idle_timeout_ms: u64, last_event_id: Option<&str>) -> ExecutionContext {
@@ -289,6 +307,19 @@ fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
 
 fn op_from(env: &Env) -> usize {
     env.gateway.log_lines().len()
+}
+
+/// Like [`op_log`], but waits (up to 3 s) for at least `n` lines: streamed
+/// gRPC-Web responses are logged when the body ends, after the client read it.
+async fn op_log_settled(env: &Env, from: usize, proxy_id: &str, n: usize) -> Vec<String> {
+    for _ in 0..30 {
+        let lines = op_log(env, from, proxy_id);
+        if lines.len() >= n {
+            return lines;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    op_log(env, from, proxy_id)
 }
 
 /// Operator-side ground truth: the gateway's transaction log recorded `status`.
@@ -1187,6 +1218,760 @@ fn up010_grpc(env: &Env) -> Fut<'_> {
     })
 }
 
+// --------------------------------------------------------- gRPC over HTTP/3 ---
+
+fn grpc_messages(o: &ExecutionOutput) -> Vec<String> {
+    previews(o, Direction::Received, "grpc_message")
+}
+
+/// Requests (path, headers) a fixture received since entry `from`.
+fn requests_since(log: &anvil_fixtures::GroundTruthLog, from: usize) -> Vec<(String, Vec<(String, String)>)> {
+    log.entries()
+        .into_iter()
+        .skip(from)
+        .filter_map(|e| match e.event {
+            GroundTruth::RequestReceived { path, headers, .. } => Some((path, headers)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn hdr<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    h.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+}
+
+fn h3_grpc(env: &Env, method: &str, mode: GrpcMode, messages: &[&str], policy: HttpVersionPolicy) -> ExecutionContext {
+    grpc_wire_ctx(env, &format!("grpcs://{HTTPS}"), method, mode, messages, GrpcWire::Grpc, Some(policy))
+}
+
+/// PROTO-016 over HTTP/3: native gRPC to the gateway's QUIC listener, which
+/// bridges the call to the h2c gRPC backend. All four call modes.
+fn proto016_h3(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let before = env.fx.grpc.log.entries().len();
+        let mut check = |label: &str, o: &ExecutionOutput, want: Vec<&str>| {
+            c.add(
+                CheckKind::Diagnosis,
+                format!("{label} over HTTP/3: grpc-status 0 from HTTP/3 trailers, exact message boundaries, one attempt"),
+                grpc_status(o).1 == Some(0)
+                    && grpc_status(o).2 == Some(GrpcStatusSource::Trailers)
+                    && o.record.response.as_ref().map(|r| r.trailers_received && r.http_version == "HTTP/3").unwrap_or(false)
+                    && is_success(o)
+                    && o.record.attempts.len() == 1
+                    && grpc_messages(o) == want,
+                format!("{:?} / {}", grpc_messages(o), outcome_line(o)),
+            );
+        };
+        let unary = send(env, &h3_grpc(env, "Unary", GrpcMode::Unary, &[r#"{"message":"q1"}"#], HttpVersionPolicy::Http3Only)).await;
+        check("unary", &unary, vec![r#"{"message":"q1"}"#]);
+        let server = send(
+            env,
+            &h3_grpc(env, "ServerStream", GrpcMode::ServerStreaming, &[r#"{"message":"s","count":3}"#], HttpVersionPolicy::Http3Only),
+        )
+        .await;
+        check("server streaming", &server, vec![r#"{"message":"s"}"#, r#"{"message":"s","index":1}"#, r#"{"message":"s","index":2}"#]);
+        let client = send(
+            env,
+            &h3_grpc(
+                env,
+                "ClientStream",
+                GrpcMode::ClientStreaming,
+                &[r#"{"message":"a"}"#, r#"{"message":"b"}"#, r#"{"message":"c"}"#],
+                HttpVersionPolicy::Http3Only,
+            ),
+        )
+        .await;
+        check("client streaming", &client, vec![r#"{"message":"3 messages; last=c","index":3}"#]);
+        let bidi = send(
+            env,
+            &h3_grpc(env, "Bidi", GrpcMode::Bidirectional, &[r#"{"message":"x"}"#, r#"{"message":"y"}"#], HttpVersionPolicy::Http3Only),
+        )
+        .await;
+        check("bidirectional", &bidi, vec![r#"{"message":"x"}"#, r#"{"message":"y","index":1}"#]);
+        quic_phases_ok(&mut c, &bidi);
+        c.absent_prefix(&bidi, "ferrum.token");
+        let reqs = requests_since(&env.fx.grpc.log, before);
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend received all four calls as native gRPC (the gateway bridged HTTP/3 to its h2c leg)",
+            ["Unary", "ServerStream", "ClientStream", "Bidi"].iter().all(|m| {
+                reqs.iter().any(|(p, h)| *p == format!("/anvil.lab.v1.Echo/{m}") && hdr(h, "content-type") == Some("application/grpc"))
+            }),
+            format!("{:?}", reqs.iter().map(|(p, h)| (p, hdr(h, "content-type"))).collect::<Vec<_>>()),
+        );
+        let ops = op_log_settled(env, from, "proto014-grpc", 4).await;
+        operator_status(&mut c, &ops, 200);
+        let targets: Vec<String> = ops
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("backend_target").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            .collect();
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway's operator log shows the cleartext (h2c) backend leg for the HTTP/3 calls",
+            targets.len() >= 4 && targets.iter().all(|t| t.starts_with("http://127.0.0.1:19402/anvil.lab.v1.Echo/")),
+            format!("{targets:?}"),
+        );
+        Outcome { main: Some(bidi), recovery: Some(unary), checks: c, operator_log: ops }
+    })
+}
+
+/// PROTO-014 over HTTP/3: HTTP 200 with an application error status in the
+/// HTTP/3 trailers is an RPC failure, not a success.
+fn proto014_h3(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let o =
+            send(env, &h3_grpc(env, "Unary", GrpcMode::Unary, &[r#"{"message":"x","failWith":5}"#], HttpVersionPolicy::Http3Only)).await;
+        let (http, st, src, msg) = grpc_status(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "HTTP 200 over HTTP/3 carrying grpc-status 5 in trailers",
+            http == Some(200) && st == Some(5) && src == Some(GrpcStatusSource::Trailers),
+            format!("{http:?} {st:?} {src:?} {msg}"),
+        );
+        quic_phases_ok(&mut c, &o);
+        c.add(
+            CheckKind::Diagnosis,
+            "transport completed, RPC failed (independent dimensions)",
+            o.record.outcome.transport == TransportState::Completed && o.record.outcome.application == ApplicationState::Failure,
+            outcome_line(&o),
+        );
+        c.has(&o, "app.grpc_status");
+        c.absent_prefix(&o, "ferrum.token");
+        operator_status(&mut c, &op_log(env, from, "proto014-grpc"), 200);
+        let r = send(env, &h3_grpc(env, "Unary", GrpcMode::Unary, &[r#"{"message":"ok"}"#], HttpVersionPolicy::Http3Only)).await;
+        c.add(
+            CheckKind::Recovery,
+            "the same call without failWith succeeds over HTTP/3",
+            grpc_status(&r).1 == Some(0) && is_success(&r),
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+    })
+}
+
+fn h3_grpc_blocked(env: &Env, policy: HttpVersionPolicy) -> ExecutionContext {
+    let mut x = grpc_wire_ctx(
+        env,
+        &format!("grpcs://{UDP_BLOCKED}"),
+        "Unary",
+        GrpcMode::Unary,
+        &[r#"{"message":"b"}"#],
+        GrpcWire::Grpc,
+        Some(policy),
+    );
+    let mut t = fast();
+    t.tls_handshake_ms = Some(Some(800));
+    x.settings_layers.push(("scenario".into(), SettingsOverrides { timeouts: Some(t), ..Default::default() }));
+    x
+}
+
+/// Forced gRPC over HTTP/3 on a path that carries TCP but not UDP: a QUIC
+/// handshake timeout, nothing sent, and never a TCP fallback.
+fn proto016_h3_blocked(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let relay_before = env.fx.udp_blocked_path.connections();
+        let backend_before = env.fx.grpc.log.count_requests();
+        let o = send(env, &h3_grpc_blocked(env, HttpVersionPolicy::Http3Only)).await;
+        c.add(
+            CheckKind::Diagnosis,
+            "a QUIC handshake timeout in a single attempt, nothing dispatched",
+            failure_kind(&o) == Some(FailureKind::QuicHandshakeTimeout)
+                && o.record.attempts.len() == 1
+                && o.record.outcome.dispatch == DispatchState::NotDispatched,
+            outcome_line(&o),
+        );
+        c.has(&o, "client.quic.handshake_timeout");
+        c.add(
+            CheckKind::Diagnosis,
+            "no response and no gRPC status are claimed",
+            o.record.response.is_none() && grpc_status(&o).1.is_none(),
+            format!("{:?}", o.record.outcome.protocol_status),
+        );
+        c.absent_prefix(&o, "ferrum.");
+        c.absent_prefix(&o, "app.grpc");
+        c.add(
+            CheckKind::GroundTruth,
+            "no fallback: the TCP path saw no connection and the backend no call",
+            env.fx.udp_blocked_path.connections() == relay_before && env.fx.grpc.log.count_requests() == backend_before,
+            format!("relay {} → {}", relay_before, env.fx.udp_blocked_path.connections()),
+        );
+        let r = send(env, &h3_grpc(env, "Unary", GrpcMode::Unary, &[r#"{"message":"recovered"}"#], HttpVersionPolicy::Http3Only)).await;
+        c.add(
+            CheckKind::Recovery,
+            "forced HTTP/3 on the real QUIC listener works",
+            grpc_status(&r).1 == Some(0) && is_success(&r),
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
+/// HTTP/3-with-fallback on the UDP-blocked path: the failed HTTP/3 attempt
+/// and the HTTP/2 call are both recorded, and the fallback is reported.
+fn proto016_h3_fallback(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let relay_before = env.fx.udp_blocked_path.connections();
+        let backend_before = env.fx.grpc.log.count_requests();
+        let o = send(env, &h3_grpc_blocked(env, HttpVersionPolicy::Http3WithFallback)).await;
+        let atts = &o.record.attempts;
+        c.add(
+            CheckKind::Diagnosis,
+            "both attempts recorded: a failed HTTP/3 attempt (nothing sent), then protocol_fallback{from:h3}",
+            atts.len() == 2
+                && atts[0].failure.as_ref().map(|f| f.kind) == Some(FailureKind::QuicHandshakeTimeout)
+                && atts[0].dispatch == DispatchState::NotDispatched
+                && atts[1].reason == AttemptReason::ProtocolFallback { from: "h3".into() },
+            format!("{:?}", atts.iter().map(|a| (&a.reason, a.failure.as_ref().map(|f| f.kind))).collect::<Vec<_>>()),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "the call completed over HTTP/2 (TLS, ALPN h2), not HTTP/3",
+            grpc_status(&o).1 == Some(0)
+                && is_success(&o)
+                && o.record.response.as_ref().map(|r| r.http_version == "HTTP/2").unwrap_or(false)
+                && atts.last().and_then(|a| a.connection.as_ref()).and_then(|x| x.protocol.clone()) == Some("h2".into()),
+            outcome_line(&o),
+        );
+        c.has(&o, "client.h3.fallback_used");
+        c.add(
+            CheckKind::Diagnosis,
+            "protocol_fallback warning",
+            o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::ProtocolFallback),
+            "",
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "the fallback travelled the TCP path, and the backend was called exactly once",
+            env.fx.udp_blocked_path.connections() > relay_before && env.fx.grpc.log.count_requests() == backend_before + 1,
+            format!(
+                "relay {} → {}; backend +{}",
+                relay_before,
+                env.fx.udp_blocked_path.connections(),
+                env.fx.grpc.log.count_requests() - backend_before
+            ),
+        );
+        operator_status(&mut c, &op_log(env, from, "proto014-grpc"), 200);
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "proto014-grpc") }
+    })
+}
+
+// ----------------------------------------------------------------- gRPC-Web ---
+
+/// Anvil never claims that a gateway translated gRPC-Web: no finding and no
+/// evidence note says so (the public evidence cannot show it).
+fn no_translation_claim(c: &mut Checks, o: &ExecutionOutput) {
+    let findings: Vec<String> = o
+        .record
+        .findings
+        .iter()
+        .filter(|f| format!("{} {}", f.title, f.explanation).to_lowercase().contains("translat"))
+        .map(|f| f.code.clone())
+        .collect();
+    let notes: Vec<&String> = o.record.prepared.inferred.iter().filter(|i| i.to_lowercase().contains("translat")).collect();
+    c.add(
+        CheckKind::Diagnosis,
+        "Anvil makes no gRPC-Web translation claim (findings, evidence notes)",
+        findings.is_empty() && notes.is_empty(),
+        format!("{findings:?} {notes:?}"),
+    );
+}
+
+fn web_ctx(
+    env: &Env,
+    url: &str,
+    method: &str,
+    mode: GrpcMode,
+    message: &str,
+    wire: GrpcWire,
+    policy: HttpVersionPolicy,
+) -> ExecutionContext {
+    grpc_wire_ctx(env, url, method, mode, &[message], wire, Some(policy))
+}
+
+/// Common checks for a successful gRPC-Web call: status 0 from the trailer
+/// frame, the gRPC-Web content type, the HTTP version, message boundaries.
+fn web_ok(c: &mut Checks, label: &str, o: &ExecutionOutput, ct: &str, http: &str, want: Vec<&str>) {
+    let r = o.record.response.as_ref();
+    c.add(
+        CheckKind::Diagnosis,
+        format!("{label}: grpc-status 0 from the trailer frame, {ct} over {http}, exact message boundaries"),
+        grpc_status(o).1 == Some(0)
+            && grpc_status(o).2 == Some(GrpcStatusSource::TrailerFrame)
+            && is_success(o)
+            && r.map(|r| {
+                (http.is_empty() || r.http_version == http) && r.body.content_type.as_deref().map(|x| x.starts_with(ct)).unwrap_or(false)
+            })
+            .unwrap_or(false)
+            && grpc_messages(o) == want,
+        format!(
+            "{:?} {:?} / {} / body[..96] {}",
+            r.map(|r| (&r.http_version, &r.body.content_type)),
+            grpc_messages(o),
+            outcome_line(o),
+            hex::encode(&o.body[..o.body.len().min(96)])
+        ),
+    );
+}
+
+/// Ground truth: what content type the backend received for a path, since `from`.
+fn backend_content_types(env: &Env, from: usize, path: &str) -> Vec<String> {
+    requests_since(&env.fx.grpc.log, from)
+        .into_iter()
+        .filter(|(p, _)| p == path)
+        .map(|(_, h)| hdr(&h, "content-type").unwrap_or("none").to_string())
+        .collect()
+}
+
+/// GRPCWEB-001: binary gRPC-Web through the `grpc_web` plugin, which
+/// translates it to native gRPC for the h2c backend: unary and server
+/// streaming over HTTP/1.1 (cleartext) and HTTP/2 (TLS).
+fn grpcweb001(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let before = env.fx.grpc.log.entries().len();
+        let h1 = format!("grpc://{HTTP}/grpcweb");
+        let h2 = format!("grpcs://{HTTPS}/grpcweb");
+        let ct = "application/grpc-web";
+        let o = send(env, &web_ctx(env, &h1, "Unary", GrpcMode::Unary, r#"{"message":"w1"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto))
+            .await;
+        web_ok(&mut c, "unary, HTTP/1.1", &o, ct, "HTTP/1.1", vec![r#"{"message":"w1"}"#]);
+        let s = send(
+            env,
+            &web_ctx(
+                env,
+                &h1,
+                "ServerStream",
+                GrpcMode::ServerStreaming,
+                r#"{"message":"s","count":3}"#,
+                GrpcWire::GrpcWeb,
+                HttpVersionPolicy::Auto,
+            ),
+        )
+        .await;
+        web_ok(
+            &mut c,
+            "server streaming, HTTP/1.1",
+            &s,
+            ct,
+            "HTTP/1.1",
+            vec![r#"{"message":"s"}"#, r#"{"message":"s","index":1}"#, r#"{"message":"s","index":2}"#],
+        );
+        let t =
+            send(env, &web_ctx(env, &h2, "Unary", GrpcMode::Unary, r#"{"message":"w2"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Http2Only))
+                .await;
+        web_ok(&mut c, "unary, HTTP/2 over TLS", &t, ct, "HTTP/2", vec![r#"{"message":"w2"}"#]);
+        c.add(CheckKind::Diagnosis, "TLS to the gateway verified", tls_verified(&t), "");
+        for x in [&o, &s, &t] {
+            no_translation_claim(&mut c, x);
+            c.absent_prefix(x, "ferrum.token");
+            c.absent_prefix(x, "grpc_web.");
+        }
+        let unary_ct = backend_content_types(env, before, "/anvil.lab.v1.Echo/Unary");
+        let stream_ct = backend_content_types(env, before, "/anvil.lab.v1.Echo/ServerStream");
+        c.add(
+            CheckKind::GroundTruth,
+            "ground truth: the backend received native gRPC (application/grpc), i.e. the gateway translated",
+            unary_ct.len() == 2 && stream_ct.len() == 1 && unary_ct.iter().chain(&stream_ct).all(|x| x == "application/grpc"),
+            format!("unary {unary_ct:?}, server streaming {stream_ct:?}"),
+        );
+        let ops = op_log(env, from, "grpcweb-translated");
+        operator_status(&mut c, &ops, 200);
+        Outcome { main: Some(s), recovery: Some(t), checks: c, operator_log: ops }
+    })
+}
+
+/// GRPCWEB-002: text gRPC-Web (base64 both ways) through the plugin: unary and
+/// server streaming over HTTP/1.1, and unary over HTTP/3 (QUIC).
+fn grpcweb002(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let before = env.fx.grpc.log.entries().len();
+        let h1 = format!("grpc://{HTTP}/grpcweb");
+        let ct = "application/grpc-web-text";
+        let o =
+            send(env, &web_ctx(env, &h1, "Unary", GrpcMode::Unary, r#"{"message":"t1"}"#, GrpcWire::GrpcWebText, HttpVersionPolicy::Auto))
+                .await;
+        web_ok(&mut c, "unary, HTTP/1.1", &o, ct, "HTTP/1.1", vec![r#"{"message":"t1"}"#]);
+        let s = send(
+            env,
+            &web_ctx(
+                env,
+                &h1,
+                "ServerStream",
+                GrpcMode::ServerStreaming,
+                r#"{"message":"s","count":3}"#,
+                GrpcWire::GrpcWebText,
+                HttpVersionPolicy::Auto,
+            ),
+        )
+        .await;
+        web_ok(
+            &mut c,
+            "server streaming, HTTP/1.1",
+            &s,
+            ct,
+            "HTTP/1.1",
+            vec![r#"{"message":"s"}"#, r#"{"message":"s","index":1}"#, r#"{"message":"s","index":2}"#],
+        );
+        let body = String::from_utf8_lossy(&s.body).to_string();
+        c.add(
+            CheckKind::Diagnosis,
+            "the captured response body is base64 text (decoded incrementally into frames)",
+            !body.is_empty() && body.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=\r\n".contains(&b)),
+            body.chars().take(80).collect::<String>(),
+        );
+        let q = send(
+            env,
+            &web_ctx(
+                env,
+                &format!("grpcs://{HTTPS}/grpcweb"),
+                "Unary",
+                GrpcMode::Unary,
+                r#"{"message":"t3"}"#,
+                GrpcWire::GrpcWebText,
+                HttpVersionPolicy::Http3Only,
+            ),
+        )
+        .await;
+        web_ok(&mut c, "unary, HTTP/3", &q, ct, "HTTP/3", vec![r#"{"message":"t3"}"#]);
+        quic_phases_ok(&mut c, &q);
+        for x in [&o, &s, &q] {
+            no_translation_claim(&mut c, x);
+            c.absent_prefix(x, "ferrum.token");
+            c.absent_prefix(x, "grpc_web.");
+        }
+        let unary_ct = backend_content_types(env, before, "/anvil.lab.v1.Echo/Unary");
+        c.add(
+            CheckKind::GroundTruth,
+            "ground truth: the backend received native gRPC for the text calls (HTTP/1.1 and HTTP/3)",
+            unary_ct.len() == 2
+                && unary_ct.iter().all(|x| x == "application/grpc")
+                && backend_content_types(env, before, "/anvil.lab.v1.Echo/ServerStream") == vec!["application/grpc".to_string()],
+            format!("{unary_ct:?}"),
+        );
+        let ops = op_log(env, from, "grpcweb-translated");
+        operator_status(&mut c, &ops, 200);
+        Outcome { main: Some(s), recovery: Some(q), checks: c, operator_log: ops }
+    })
+}
+
+/// GRPCWEB-003: an application error through the plugin: the backend's
+/// native grpc-status 5 reaches the client in the gRPC-Web terminal status.
+fn grpcweb003(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let before = env.fx.grpc.log.entries().len();
+        let url = format!("grpc://{HTTP}/grpcweb");
+        let o = send(
+            env,
+            &web_ctx(env, &url, "Unary", GrpcMode::Unary, r#"{"message":"x","failWith":5}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto),
+        )
+        .await;
+        let (http, st, src, msg) = grpc_status(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "HTTP 200 with grpc-status 5 in the gRPC-Web trailer frame (the backend's native trailers, re-framed by the gateway)",
+            http == Some(200) && st == Some(5) && src == Some(GrpcStatusSource::TrailerFrame),
+            format!("{http:?} {st:?} {src:?} {msg}"),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "RPC failure, not success; no missing-status or missing-trailer-frame claim",
+            o.record.outcome.application == ApplicationState::Failure
+                && !codes(&o).iter().any(|x| x == "app.grpc_status_missing" || x.starts_with("grpc_web.")),
+            outcome_line(&o),
+        );
+        c.has(&o, "app.grpc_status");
+        c.absent_prefix(&o, "ferrum.token");
+        no_translation_claim(&mut c, &o);
+        let text = send(
+            env,
+            &web_ctx(
+                env,
+                &format!("grpcs://{HTTPS}/grpcweb"),
+                "ServerStream",
+                GrpcMode::ServerStreaming,
+                r#"{"message":"e","count":2,"failWith":9}"#,
+                GrpcWire::GrpcWebText,
+                HttpVersionPolicy::Http2Only,
+            ),
+        )
+        .await;
+        let (_, tst, tsrc, _) = grpc_status(&text);
+        c.add(
+            CheckKind::Diagnosis,
+            "text mode over HTTP/2: two messages, then grpc-status 9 in the trailer frame",
+            tst == Some(9) && tsrc == Some(GrpcStatusSource::TrailerFrame) && grpc_messages(&text).len() == 2,
+            format!("{:?} / {}", grpc_messages(&text), outcome_line(&text)),
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "ground truth: the backend (native gRPC) produced both statuses",
+            backend_content_types(env, before, "/anvil.lab.v1.Echo/Unary") == vec!["application/grpc".to_string()]
+                && backend_content_types(env, before, "/anvil.lab.v1.Echo/ServerStream") == vec!["application/grpc".to_string()],
+            "",
+        );
+        let r = send(env, &web_ctx(env, &url, "Unary", GrpcMode::Unary, r#"{"message":"ok"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto))
+            .await;
+        c.add(
+            CheckKind::Recovery,
+            "the same call without failWith succeeds",
+            grpc_status(&r).1 == Some(0) && is_success(&r),
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(text), checks: c, operator_log: op_log(env, from, "grpcweb-translated") }
+    })
+}
+
+/// GRPCWEB-down: gRPC-Web through the plugin to a backend that is down. The
+/// gateway authors the terminal status; Anvil reports an RPC failure of
+/// unknown origin.
+fn grpcweb_down(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let o = send(
+            env,
+            &web_ctx(
+                env,
+                &format!("grpc://{HTTP}/grpcweb-down"),
+                "Unary",
+                GrpcMode::Unary,
+                r#"{"message":"x"}"#,
+                GrpcWire::GrpcWeb,
+                HttpVersionPolicy::Auto,
+            ),
+        )
+        .await;
+        let (http, st, src, msg) = grpc_status(&o);
+        c.add(
+            CheckKind::Diagnosis,
+            "HTTP 200 with grpc-status 14 (UNAVAILABLE) in a gRPC-Web trailer frame",
+            http == Some(200) && st == Some(14) && src == Some(GrpcStatusSource::TrailerFrame),
+            format!("{http:?} {st:?} {src:?} {msg}"),
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "the gateway-framed body is valid: one trailer frame, no framing or missing-status claim",
+            !codes(&o).iter().any(|x| x.starts_with("grpc_web.") || x == "grpc.framing_invalid" || x == "app.grpc_status_missing"),
+            format!("{:?}", codes(&o)),
+        );
+        c.add(CheckKind::Diagnosis, "an RPC failure", o.record.outcome.application == ApplicationState::Failure, outcome_line(&o));
+        c.has(&o, "app.grpc_status");
+        let f = o.record.findings.iter().find(|f| f.code == "app.grpc_status");
+        c.add(
+            CheckKind::Diagnosis,
+            "the component that authored the status is not claimed",
+            f.map(|f| f.does_not_prove.iter().any(|d| d.contains("Which component"))).unwrap_or(false)
+                && !codes(&o).iter().any(|x| x.starts_with("client.connect")),
+            "",
+        );
+        c.no_confirmed_claim(&o, "refused");
+        no_translation_claim(&mut c, &o);
+        let ops = op_log_settled(env, from, "grpcweb-down", 1).await;
+        c.operator_class(&ops, "grpcweb-down", &["connection_refused", "connection_pool_error", "request_error"]);
+        let r = send(
+            env,
+            &web_ctx(
+                env,
+                &format!("grpc://{HTTP}/grpcweb"),
+                "Unary",
+                GrpcMode::Unary,
+                r#"{"message":"ok"}"#,
+                GrpcWire::GrpcWeb,
+                HttpVersionPolicy::Auto,
+            ),
+        )
+        .await;
+        c.add(
+            CheckKind::Recovery,
+            "a healthy gRPC-Web route answers grpc-status 0",
+            grpc_status(&r).1 == Some(0) && is_success(&r),
+            outcome_line(&r),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "grpcweb-down") }
+    })
+}
+
+/// GRPCWEB lookalike: the same gRPC-Web request to a route WITHOUT the
+/// plugin. The gateway passes it through untranslated and the backend (which
+/// also speaks gRPC-Web) answers it. Nothing public shows whether a gateway
+/// translated, so Anvil must not claim that anything was (or was not)
+/// translated; it reports the response exactly as framed.
+fn grpcweb_lookalike(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let before = env.fx.grpc.log.entries().len();
+        let raw_url = |http: &str| format!("{http}/grpcweb-raw");
+        let msg = r#"{"message":"same"}"#;
+        let h1 = send(
+            env,
+            &web_ctx(env, &raw_url(&format!("grpc://{HTTP}")), "Unary", GrpcMode::Unary, msg, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto),
+        )
+        .await;
+        let h2 = send(
+            env,
+            &web_ctx(
+                env,
+                &raw_url(&format!("grpcs://{HTTPS}")),
+                "Unary",
+                GrpcMode::Unary,
+                msg,
+                GrpcWire::GrpcWeb,
+                HttpVersionPolicy::Http2Only,
+            ),
+        )
+        .await;
+        let h3 = send(
+            env,
+            &web_ctx(
+                env,
+                &raw_url(&format!("grpcs://{HTTPS}")),
+                "Unary",
+                GrpcMode::Unary,
+                msg,
+                GrpcWire::GrpcWeb,
+                HttpVersionPolicy::Http3Only,
+            ),
+        )
+        .await;
+        let translated = send(
+            env,
+            &web_ctx(env, &format!("grpc://{HTTP}/grpcweb"), "Unary", GrpcMode::Unary, msg, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto),
+        )
+        .await;
+        web_ok(&mut c, "translating route (control)", &translated, "application/grpc-web", "HTTP/1.1", vec![r#"{"message":"same"}"#]);
+        for (label, o) in [("pass-through over HTTP/1.1", &h1), ("pass-through over HTTP/2", &h2), ("pass-through over HTTP/3", &h3)] {
+            no_translation_claim(&mut c, o);
+            c.absent_prefix(o, "ferrum.");
+            let framing =
+                last(o).and_then(|a| a.failure.as_ref()).filter(|f| f.kind == FailureKind::HttpProtocolError).map(|f| f.message.clone());
+            match framing {
+                // As the backend framed it: one trailer frame ends the body.
+                None => web_ok(&mut c, label, o, "application/grpc-web", "", vec![r#"{"message":"same"}"#]),
+                // A hop appended data after the backend's trailer frame: reported as invalid framing, never success.
+                Some(m) => {
+                    c.add(
+                        CheckKind::Diagnosis,
+                        format!("{label}: data after the trailer frame is invalid gRPC-Web framing, not a success"),
+                        m.contains("trailer frame")
+                            && codes(o).contains(&"grpc.framing_invalid".to_string())
+                            && !codes(o).contains(&"response.body_incomplete".to_string())
+                            && !is_success(o)
+                            && o.record
+                                .response
+                                .as_ref()
+                                .map(|r| r.body.completeness == anvil_domain::execution::BodyCompleteness::Complete)
+                                .unwrap_or(false),
+                        format!("{m} / {} / body {}", outcome_line(o), hex::encode(&o.body[..o.body.len().min(96)])),
+                    );
+                    c.add(CheckKind::GroundTruth, format!("observed ({label}): {m}"), true, "");
+                }
+            }
+        }
+        let seen = requests_since(&env.fx.grpc.log, before);
+        let cts: Vec<Option<&str>> =
+            seen.iter().filter(|(p, _)| p == "/anvil.lab.v1.Echo/Unary").map(|(_, h)| hdr(h, "content-type")).collect();
+        c.add(
+            CheckKind::GroundTruth,
+            "ground truth: without the plugin the backend received gRPC-Web untranslated (3x); with it, native gRPC",
+            cts == vec![
+                Some("application/grpc-web+proto"),
+                Some("application/grpc-web+proto"),
+                Some("application/grpc-web+proto"),
+                Some("application/grpc"),
+            ],
+            format!("{cts:?}"),
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "ground truth: the pass-through requests still carried x-grpc-web to the backend",
+            seen.iter().take(3).all(|(_, h)| hdr(h, "x-grpc-web") == Some("1")),
+            "",
+        );
+        let ops = op_log_settled(env, from, "grpcweb-passthrough", 3).await;
+        operator_status(&mut c, &ops, 200);
+        let statuses: Vec<Option<i64>> = ops
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|v| v.get("grpc_status").and_then(|s| s.as_i64()))
+            .collect();
+        c.add(
+            CheckKind::GroundTruth,
+            format!("observed: the gateway's own log records grpc_status {statuses:?} for the pass-through calls"),
+            true,
+            "",
+        );
+        Outcome { main: Some(h1), recovery: Some(translated), checks: c, operator_log: ops }
+    })
+}
+
+/// gRPC-Web cannot carry client or bidirectional streaming: refused before
+/// any traffic, with the reason.
+fn grpcweb_refused(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let before = env.fx.grpc.log.count_requests();
+        let o = send(
+            env,
+            &grpc_wire_ctx(
+                env,
+                &format!("grpc://{HTTP}/grpcweb"),
+                "ClientStream",
+                GrpcMode::ClientStreaming,
+                &[r#"{"message":"a"}"#, r#"{"message":"b"}"#],
+                GrpcWire::GrpcWeb,
+                Some(HttpVersionPolicy::Auto),
+            ),
+        )
+        .await;
+        let f = last(&o).and_then(|a| a.failure.clone());
+        c.add(
+            CheckKind::Diagnosis,
+            "unsupported_combination in the prepare phase, naming the gRPC-Web limitation",
+            f.as_ref()
+                .map(|f| {
+                    f.kind == FailureKind::UnsupportedCombination
+                        && f.phase == Phase::Prepare
+                        && f.field.as_deref() == Some("grpc.wire")
+                        && f.message.contains("unary and server-streaming")
+                })
+                .unwrap_or(false),
+            format!("{f:?}"),
+        );
+        c.add(CheckKind::Diagnosis, "nothing was dispatched", o.record.outcome.dispatch == DispatchState::NotDispatched, "");
+        c.has(&o, "local.unsupported_combination");
+        c.add(
+            CheckKind::GroundTruth,
+            "neither the gateway nor the backend saw a request",
+            op_log(env, from, "grpcweb-translated").is_empty() && env.fx.grpc.log.count_requests() == before,
+            "",
+        );
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
+    })
+}
+
 // ------------------------------------------------------------------- SSE ---
 
 async fn sse_recovery(env: &Env, c: &mut Checks) -> ExecutionOutput {
@@ -1582,6 +2367,28 @@ pub fn all() -> Vec<Def> {
         Def { id: "PROTO-016", title: "gRPC unary/server/client/bidi (h2c) and unary over TLS", run: proto016 },
         Def { id: "PROTO-016-deadline", title: "gRPC client deadline exceeded through the gateway", run: proto016_deadline },
         Def { id: "UP-010-grpc", title: "gRPC backend header stall: gateway backend deadline", run: up010_grpc },
+        Def { id: "PROTO-016-h3", title: "gRPC over HTTP/3 (four call modes), bridged to the h2c backend", run: proto016_h3 },
+        Def { id: "PROTO-014-h3", title: "gRPC over HTTP/3: HTTP 200 with an error status in HTTP/3 trailers", run: proto014_h3 },
+        Def {
+            id: "PROTO-016-h3-blocked",
+            title: "Forced gRPC over HTTP/3 on a UDP-blocked path: no TCP fallback",
+            run: proto016_h3_blocked,
+        },
+        Def {
+            id: "PROTO-016-h3-fallback",
+            title: "gRPC HTTP/3-with-fallback on a UDP-blocked path: two recorded attempts",
+            run: proto016_h3_fallback,
+        },
+        Def { id: "GRPCWEB-001", title: "gRPC-Web binary via the grpc_web plugin (unary + server streaming, H1/H2)", run: grpcweb001 },
+        Def { id: "GRPCWEB-002", title: "gRPC-Web text via the grpc_web plugin (unary + server streaming, H1/H3)", run: grpcweb002 },
+        Def { id: "GRPCWEB-003", title: "gRPC-Web error status via the grpc_web plugin (binary and text)", run: grpcweb003 },
+        Def { id: "GRPCWEB-down", title: "gRPC-Web to a down backend: gateway-authored terminal status", run: grpcweb_down },
+        Def {
+            id: "GRPCWEB-lookalike",
+            title: "gRPC-Web to a route without the plugin: untranslated, no translation claim",
+            run: grpcweb_lookalike,
+        },
+        Def { id: "GRPCWEB-refused", title: "gRPC-Web client streaming is refused before traffic", run: grpcweb_refused },
         Def { id: "PROTO-018", title: "SSE events then explicit cancel", run: proto018 },
         Def { id: "PROTO-018-idle", title: "SSE idle stream (no events within the idle limit)", run: proto018_idle },
         Def { id: "TRUST-007-sse", title: "SSE aborted mid-stream after HTTP 200", run: trust007_sse },
@@ -1641,7 +2448,8 @@ async fn up() -> anyhow::Result<()> {
         env.gateway.log_path.display()
     );
     println!(
-        "routes: /proto/http/* /proto/h2/* /proto/h3/* /ws /anvil.lab.v1.Echo/* /grpc-down/* /grpc-slow/* /sse /sse-abort/*; \
+        "routes: /proto/http/* /proto/h2/* /proto/h3/* /ws /anvil.lab.v1.Echo/* (gRPC over H2/h2c/H3) /grpc-down/* /grpc-slow/* \
+         /grpcweb/* (grpc_web plugin) /grpcweb-raw/* (no plugin) /grpcweb-down/* /sse /sse-abort/*; \
          tcp 18401 (half-close) 18406 (tls->tcps) 18407 (refused) 18408 (echo) 18409 (tls->untrusted tcps); udp 18402 (silent) 18403 (lossy) 18404 (echo); dtls 18405"
     );
     harness::wait_for_shutdown().await?;

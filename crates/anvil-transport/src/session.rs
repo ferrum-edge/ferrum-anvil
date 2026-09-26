@@ -243,6 +243,20 @@ pub struct ReflectionOutcome {
     pub problem: Option<String>,
 }
 
+/// How a gRPC-Web response body was framed (set once response headers arrived).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrpcWebFacts {
+    pub response_content_type: Option<String>,
+    /// The body was decoded as base64 text.
+    pub text: bool,
+    /// A trailer frame (flag `0x80`) ended the body.
+    pub trailer_frame: bool,
+    /// The body reached its end without a transport or framing failure.
+    pub body_complete: bool,
+    /// The status came from HTTP trailers instead of a trailer frame.
+    pub status_in_http_trailers: bool,
+}
+
 /// Protocol-specific facts an adapter observed beyond the typed status.
 #[derive(Debug, Clone, Default)]
 pub struct SessionFacts {
@@ -253,6 +267,11 @@ pub struct SessionFacts {
     pub grpc_reflection: Option<ReflectionOutcome>,
     /// Decoded summary of `grpc-status-details-bin`, when present.
     pub grpc_status_details: Option<String>,
+    /// gRPC-Web response framing, for gRPC-Web calls that got a response.
+    pub grpc_web: Option<GrpcWebFacts>,
+    /// The response body was readable but its gRPC or gRPC-Web framing was
+    /// invalid (parsing stopped at this problem).
+    pub grpc_framing_error: Option<String>,
     /// Received datagrams byte-identical to an earlier received datagram.
     /// UDP may duplicate datagrams, but the peer may also send identical
     /// replies; the count is an observation, not a duplicate-delivery claim.

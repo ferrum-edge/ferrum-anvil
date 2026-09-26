@@ -469,7 +469,7 @@ export type ProtocolStatus =
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "GrpcStatusSource".
  */
-export type GrpcStatusSource = "trailers" | "trailers_only" | "missing";
+export type GrpcStatusSource = "trailers" | "trailers_only" | "trailer_frame" | "missing";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ClosedBy".
@@ -1141,6 +1141,14 @@ export type LintSendPolicy = "block" | "warn" | "off";
  * via the `definition` "GrpcMode".
  */
 export type GrpcMode = "unary" | "client_streaming" | "server_streaming" | "bidirectional";
+/**
+ * How gRPC calls are carried on the wire. The HTTP version comes from the
+ * request's HTTP version policy (see `docs/protocols.md` §3.2).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "GrpcWire".
+ */
+export type GrpcWire = "grpc" | "grpc_web" | "grpc_web_text";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "WsBootstrap".
@@ -2876,9 +2884,14 @@ export interface GrpcSpec {
    */
   deadline_ms?: number | null;
   /**
-   * Use h2c (cleartext prior knowledge) for `http://` targets.
+   * Use h2c (cleartext prior knowledge) for `http://` targets (native gRPC).
    */
   plaintext?: boolean;
+  /**
+   * Wire format: native gRPC (default; records saved before this field
+   * existed load as native), gRPC-Web binary or gRPC-Web text.
+   */
+  wire?: "grpc" | "grpc_web" | "grpc_web_text";
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema

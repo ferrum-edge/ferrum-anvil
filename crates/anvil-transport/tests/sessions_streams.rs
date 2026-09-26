@@ -1,10 +1,11 @@
 //! Session adapter evidence against real local sockets (no mocks): SSE
 //! reconnection and bounded history, UDP ICMP evidence, DTLS stall, and the
-//! gRPC adapter used directly. Matrix IDs are kept in test names.
+//! gRPC adapter used directly (native over HTTP/2 and HTTP/3, gRPC-Web binary
+//! and text, malformed gRPC-Web bodies). Matrix IDs are kept in test names.
 
 use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, ProtocolStatus};
-use anvil_domain::request::GrpcMode;
+use anvil_domain::request::{GrpcMode, GrpcWire};
 use anvil_domain::settings::{HttpVersionPolicy, Limits, Timeouts};
 use anvil_fixtures::http as fxhttp;
 use anvil_fixtures::streams::{self, UdpMode};
@@ -263,6 +264,8 @@ async fn proto_016_grpc_adapter_with_a_compiled_proto_and_trailers() {
         max_message_bytes: 4 * 1024 * 1024,
         transcript: TranscriptLimits::default(),
         redact: None,
+        wire: GrpcWire::Grpc,
+        version: HttpVersionPolicy::Auto,
     };
     let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     match &out.status {
@@ -282,4 +285,267 @@ async fn proto_016_grpc_adapter_with_a_compiled_proto_and_trailers() {
     let conn = out.attempts[0].observation.connection.as_ref().unwrap();
     assert_eq!(conn.protocol.as_deref(), Some("h2"));
     assert_eq!(conn.tls.as_ref().unwrap().verification, TlsVerification::Verified);
+}
+
+// ------------------------------------------------- gRPC-Web and gRPC over HTTP/3
+
+fn lab_tls() -> Arc<tls::PreparedTls> {
+    Arc::new(
+        tls::prepare(&TlsSettings {
+            verify: true,
+            use_system_roots: false,
+            extra_roots_pem: vec![pki().ca.cert.clone()],
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+}
+
+fn echo_plan(
+    port: u16,
+    tls: bool,
+    method: &str,
+    mode: GrpcMode,
+    message: &str,
+    wire: GrpcWire,
+    version: HttpVersionPolicy,
+) -> grpc::GrpcPlan {
+    let pool = grpc::pool_from_proto_sources(&[("echo.proto".into(), anvil_fixtures::grpc::ECHO_PROTO.into())]).unwrap();
+    grpc::GrpcPlan {
+        tls: tls.then(lab_tls),
+        host: "127.0.0.1".into(),
+        port,
+        authority: format!("127.0.0.1:{port}"),
+        path_prefix: String::new(),
+        service: "anvil.lab.v1.Echo".into(),
+        method: method.into(),
+        mode,
+        schema: grpc::Schema::Pool(pool),
+        messages: vec![message.into()],
+        headers: vec![],
+        deadline_ms: None,
+        timeouts: timeouts(),
+        limits: Limits::default(),
+        dns: DnsConfig::default(),
+        proxy: None,
+        display_url: format!("fixture/anvil.lab.v1.Echo/{method}"),
+        max_message_bytes: 4 * 1024 * 1024,
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        wire,
+        version,
+    }
+}
+
+fn status_of(out: &anvil_transport::session::SessionOutput) -> (Option<i32>, GrpcStatusSource) {
+    match &out.status {
+        ProtocolStatus::Grpc { grpc_status, source, .. } => (*grpc_status, *source),
+        other => panic!("not gRPC: {other:?}"),
+    }
+}
+
+fn failure_of(out: &anvil_transport::session::SessionOutput) -> Option<TransportFailure> {
+    out.attempts.last().and_then(|a| a.observation.failure.clone())
+}
+
+#[tokio::test]
+async fn grpc_web_text_adapter_decodes_padded_segments_and_records_the_trailer_frame() {
+    init();
+    let f = fxhttp::serve("127.0.0.1:0", None).await.unwrap();
+    let plan = echo_plan(
+        f.addr.port(),
+        false,
+        "ServerStream",
+        GrpcMode::ServerStreaming,
+        r#"{"message":"t","count":3,"failWith":9}"#,
+        GrpcWire::GrpcWebText,
+        HttpVersionPolicy::Auto,
+    );
+    let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(status_of(&out), (Some(9), GrpcStatusSource::TrailerFrame), "{:?}", failure_of(&out));
+    let t = out.transcript.as_ref().unwrap();
+    assert_eq!(t.received_count, 3, "three messages decoded from independently padded base64 segments");
+    assert!(t.messages.iter().any(|m| m.kind == "trailer_frame" && m.preview.contains("grpc-status: 9")));
+    let web = out.facts.grpc_web.clone().unwrap();
+    assert!(web.text && web.trailer_frame && web.body_complete && !web.status_in_http_trailers, "{web:?}");
+    assert_eq!(web.response_content_type.as_deref(), Some("application/grpc-web-text"));
+    let a = &out.attempts[0];
+    assert_eq!(a.observation.connection.as_ref().unwrap().protocol.as_deref(), Some("http/1.1"), "cleartext gRPC-Web is HTTP/1.1");
+    assert_eq!(a.response.as_ref().unwrap().http_version, "HTTP/1.1");
+    assert!(a.body.iter().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(b)), "the captured body is the raw base64 text");
+}
+
+#[tokio::test]
+async fn grpc_h3_adapter_uses_quic_and_reads_status_from_h3_trailers() {
+    init();
+    let f =
+        anvil_fixtures::h3server::serve("127.0.0.1:0", TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone()))
+            .await
+            .unwrap();
+    let plan = echo_plan(
+        f.addr.port(),
+        true,
+        "ServerStream",
+        GrpcMode::ServerStreaming,
+        r#"{"message":"q","count":2}"#,
+        GrpcWire::Grpc,
+        HttpVersionPolicy::Http3Only,
+    );
+    let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(status_of(&out), (Some(0), GrpcStatusSource::Trailers), "{:?}", failure_of(&out));
+    assert_eq!(out.transcript.as_ref().unwrap().received_count, 2);
+    let a = &out.attempts[0];
+    let conn = a.observation.connection.as_ref().unwrap();
+    assert_eq!(conn.protocol.as_deref(), Some("h3"));
+    assert!(a.observation.phase(Phase::QuicHandshake).is_some() && a.observation.phase(Phase::TlsHandshake).is_none());
+    let r = a.response.as_ref().unwrap();
+    assert_eq!(r.http_version, "HTTP/3");
+    assert!(r.trailers_received && r.trailers.iter().any(|h| h.name == "grpc-status" && h.value == "0"));
+    assert!(out.facts.grpc_web.is_none());
+    // gRPC-Web over the same HTTP/3 fixture: status from the trailer frame, not trailers.
+    let plan =
+        echo_plan(f.addr.port(), true, "Unary", GrpcMode::Unary, r#"{"message":"w"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Http3Only);
+    let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(status_of(&out), (Some(0), GrpcStatusSource::TrailerFrame), "{:?}", failure_of(&out));
+    assert!(!out.attempts[0].response.as_ref().unwrap().trailers_received);
+}
+
+/// One-shot HTTP/1.1 responder: reads a request (headers + Content-Length
+/// body) and answers with `response` verbatim, then closes.
+async fn raw_h1(response: Vec<u8>) -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((mut s, _)) = l.accept().await else { return };
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = s.read(&mut tmp).await.unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                let len: usize =
+                    head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                if buf.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        let _ = s.write_all(&response).await;
+        let _ = s.shutdown().await;
+    });
+    addr
+}
+
+fn web_frame(flag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut v = vec![flag];
+    v.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    v.extend_from_slice(payload);
+    v
+}
+
+fn h1_response(content_type: &str, status: u16, body: &[u8]) -> Vec<u8> {
+    let mut r =
+        format!("HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len())
+            .into_bytes();
+    r.extend_from_slice(body);
+    r
+}
+
+#[tokio::test]
+async fn grpc_web_malformed_bodies_fail_typed_and_are_never_success() {
+    init();
+    // EchoReply { message: "ok" } as protobuf.
+    let msg = web_frame(0, &[0x0a, 0x02, b'o', b'k']);
+    let ok_trailer = web_frame(0x80, b"grpc-status: 0\r\n");
+    let b64 = |b: &[u8]| {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(b).into_bytes()
+    };
+    let cases: Vec<(&str, GrpcWire, Vec<u8>, FailureKind, &str)> = vec![
+        (
+            "data after the trailer frame",
+            GrpcWire::GrpcWeb,
+            h1_response("application/grpc-web+proto", 200, &[ok_trailer.clone(), msg.clone()].concat()),
+            FailureKind::HttpProtocolError,
+            "a message frame followed the trailer frame",
+        ),
+        (
+            "a second, appended trailer frame",
+            GrpcWire::GrpcWeb,
+            h1_response(
+                "application/grpc-web+proto",
+                200,
+                &[msg.clone(), ok_trailer.clone(), web_frame(0x80, b"grpc-status: 2\r\n")].concat(),
+            ),
+            FailureKind::HttpProtocolError,
+            "a second trailer frame (grpc-status 2) followed the first (grpc-status 0)",
+        ),
+        (
+            "compressed trailer frame",
+            GrpcWire::GrpcWeb,
+            h1_response("application/grpc-web+proto", 200, &web_frame(0x81, b"grpc-status: 0\r\n")),
+            FailureKind::HttpProtocolError,
+            "0x81",
+        ),
+        (
+            "malformed trailer block",
+            GrpcWire::GrpcWeb,
+            h1_response("application/grpc-web+proto", 200, &web_frame(0x80, b"grpc-status 0\r\n")),
+            FailureKind::HttpProtocolError,
+            "trailer frame is malformed",
+        ),
+        (
+            "invalid base64",
+            GrpcWire::GrpcWebText,
+            h1_response("application/grpc-web-text", 200, b"AAAA*AAA"),
+            FailureKind::HttpProtocolError,
+            "not valid base64",
+        ),
+        (
+            "base64 truncated inside a quantum",
+            GrpcWire::GrpcWebText,
+            h1_response("application/grpc-web-text", 200, &[b64(&msg), b"AAA".to_vec()].concat()),
+            FailureKind::BodyIncomplete,
+            "base64 quantum",
+        ),
+        (
+            "body ends inside a frame",
+            GrpcWire::GrpcWeb,
+            h1_response("application/grpc-web+proto", 200, &msg[..6]),
+            FailureKind::BodyIncomplete,
+            "inside a gRPC-Web frame",
+        ),
+    ];
+    for (label, wire, response, kind, needle) in cases {
+        let addr = raw_h1(response).await;
+        let plan = echo_plan(addr.port(), false, "Unary", GrpcMode::Unary, r#"{"message":"x"}"#, wire, HttpVersionPolicy::Http1Only);
+        let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+        let f = failure_of(&out).unwrap_or_else(|| panic!("{label}: expected a failure, got {:?}", out.status));
+        assert_eq!(f.kind, kind, "{label}: {f:?}");
+        assert!(f.message.contains(needle), "{label}: {}", f.message);
+        let body_complete = out.facts.grpc_web.as_ref().map(|w| w.body_complete).unwrap_or(false);
+        assert!(!body_complete, "{label}: a failed body is not complete");
+        let http_body = out.attempts[0].response.as_ref().unwrap().body.completeness;
+        if kind == FailureKind::HttpProtocolError {
+            // A framing violation: the HTTP body itself was read to its end.
+            assert_eq!(http_body, BodyCompleteness::Complete, "{label}");
+            assert_eq!(out.facts.grpc_framing_error.as_deref(), Some(f.message.as_str()), "{label}");
+        } else {
+            assert_eq!(http_body, BodyCompleteness::Incomplete, "{label}");
+            assert!(out.facts.grpc_framing_error.is_none(), "{label}");
+        }
+    }
+    // A non-gRPC answer (an intermediary's HTML error) is kept as evidence, not parsed.
+    let addr = raw_h1(h1_response("text/html", 502, b"<html>bad gateway</html>")).await;
+    let plan = echo_plan(addr.port(), false, "Unary", GrpcMode::Unary, r#"{"message":"x"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto);
+    let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert!(failure_of(&out).is_none(), "{:?}", failure_of(&out));
+    assert_eq!(status_of(&out), (None, GrpcStatusSource::Missing));
+    assert!(out.facts.notes.iter().any(|n| n.contains("text/html") && n.contains("not parsed")), "{:?}", out.facts.notes);
+    assert_eq!(out.attempts[0].body.as_ref(), b"<html>bad gateway</html>");
+    assert_eq!(out.attempts[0].response.as_ref().unwrap().status, 502);
 }

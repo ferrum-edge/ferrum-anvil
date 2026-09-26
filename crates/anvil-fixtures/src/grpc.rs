@@ -1,11 +1,13 @@
 //! gRPC fixture: `anvil.lab.v1.Echo` (all four call modes) and
 //! `grpc.reflection.v1.ServerReflection`, implemented with raw gRPC framing
-//! over the fixture's HTTP/2 server.
+//! over the fixture's HTTP/2 server ([`handle`]) and over the HTTP/3 fixture
+//! ([`handle_h3`], full duplex on one request stream). gRPC-Web is served by
+//! [`crate::grpc_web`].
 
 use crate::http::FxBody;
 use crate::log::{GroundTruth, GroundTruthLog};
 use bytes::{Buf, Bytes, BytesMut};
-use futures::SinkExt;
+use futures::{SinkExt, StreamExt};
 use http::{HeaderMap, HeaderValue, Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
@@ -108,7 +110,7 @@ pub mod prost_types_compat {
     pub use prost_reflect::prost_types::FileDescriptorSet;
 }
 
-fn frame(msg: &impl Message) -> Bytes {
+pub(crate) fn frame(msg: &impl Message) -> Bytes {
     let body = msg.encode_to_vec();
     let mut b = BytesMut::with_capacity(5 + body.len());
     b.extend_from_slice(&[0]);
@@ -128,13 +130,37 @@ fn trailers(status: i32, message: &str) -> HeaderMap {
 
 type Tx = futures::channel::mpsc::Sender<Result<Frame<Bytes>, std::io::Error>>;
 
+/// Where request bytes come from: a hyper body (HTTP/1.1, HTTP/2) or an
+/// HTTP/3 request stream bridged to a channel.
+enum Src {
+    Hyper(Incoming),
+    Chan(tokio::sync::mpsc::Receiver<Result<Bytes, String>>),
+}
+
 /// Incrementally read length-prefixed gRPC messages from a request body.
 struct FrameReader {
-    body: Incoming,
+    src: Src,
     buf: BytesMut,
 }
 
 impl FrameReader {
+    async fn chunk(&mut self) -> Option<Result<Bytes, String>> {
+        match &mut self.src {
+            Src::Hyper(b) => loop {
+                match b.frame().await {
+                    Some(Ok(f)) => {
+                        if let Ok(d) = f.into_data() {
+                            return Some(Ok(d));
+                        }
+                    }
+                    Some(Err(e)) => return Some(Err(e.to_string())),
+                    None => return None,
+                }
+            },
+            Src::Chan(rx) => rx.recv().await,
+        }
+    }
+
     async fn next(&mut self) -> Option<Result<Bytes, String>> {
         loop {
             if self.buf.len() >= 5 {
@@ -147,13 +173,9 @@ impl FrameReader {
                     return Some(Ok(self.buf.split_to(len).freeze()));
                 }
             }
-            match self.body.frame().await {
-                Some(Ok(f)) => {
-                    if let Ok(d) = f.into_data() {
-                        self.buf.extend_from_slice(&d);
-                    }
-                }
-                Some(Err(e)) => return Some(Err(e.to_string())),
+            match self.chunk().await {
+                Some(Ok(d)) => self.buf.extend_from_slice(&d),
+                Some(Err(e)) => return Some(Err(e)),
                 None => {
                     return if self.buf.is_empty() { None } else { Some(Err("truncated gRPC frame".into())) };
                 }
@@ -166,10 +188,69 @@ pub async fn handle(req: Request<Incoming>, log: GroundTruthLog) -> Response<FxB
     let path = req.uri().path().to_string();
     let deny_reflection = req.headers().contains_key("x-fixture-deny-reflection");
     let (tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
-    let body: FxBody = StreamBody::new(rx).boxed();
-    let reader = FrameReader { body: req.into_body(), buf: BytesMut::new() };
+    let body: FxBody = BodyExt::boxed(StreamBody::new(rx));
+    let reader = FrameReader { src: Src::Hyper(req.into_body()), buf: BytesMut::new() };
     tokio::spawn(run(path, reader, tx, log, deny_reflection));
     Response::builder().status(200).header("content-type", "application/grpc").body(body).unwrap()
+}
+
+/// A server-side HTTP/3 request stream.
+pub type H3Stream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+/// Native gRPC over HTTP/3: the same echo service, full duplex. Request DATA
+/// is read while responses are written; the status goes out as HTTP/3
+/// trailers. A fixture abort resets the stream (`H3_INTERNAL_ERROR`) before
+/// any status.
+pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTruthLog) {
+    let path = req.uri().path().to_string();
+    let deny_reflection = req.headers().contains_key("x-fixture-deny-reflection");
+    let (mut send, mut recv) = stream.split();
+    let (dtx, drx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(16);
+    tokio::spawn(async move {
+        loop {
+            match recv.recv_data().await {
+                Ok(Some(mut c)) => {
+                    let n = c.remaining();
+                    if dtx.send(Ok(c.copy_to_bytes(n))).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => return,
+                Err(e) => {
+                    let _ = dtx.send(Err(e.to_string())).await;
+                    return;
+                }
+            }
+        }
+    });
+    let (tx, mut rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
+    tokio::spawn(run(path, FrameReader { src: Src::Chan(drx), buf: BytesMut::new() }, tx, log.clone(), deny_reflection));
+    let resp = http::Response::builder().status(200).header("content-type", "application/grpc").body(()).expect("static response");
+    log.push(GroundTruth::ResponseStarted { status: 200 });
+    if send.send_response(resp).await.is_err() {
+        return;
+    }
+    while let Some(item) = rx.next().await {
+        match item {
+            Ok(f) => match f.into_data() {
+                Ok(d) => {
+                    if send.send_data(d).await.is_err() {
+                        return;
+                    }
+                }
+                Err(f) => {
+                    if let Ok(t) = f.into_trailers() {
+                        let _ = send.send_trailers(t).await;
+                    }
+                }
+            },
+            Err(_) => {
+                send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                return;
+            }
+        }
+    }
+    let _ = send.finish().await;
 }
 
 async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruthLog, deny_reflection: bool) {

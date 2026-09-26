@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.25-7",
+  "version": "2026.09.25-8",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1894,6 +1894,50 @@
         }
       ],
       "confirm_with": []
+    },
+    "grpc.framing_invalid": {
+      "title": "The {wire} response framing is invalid",
+      "explanation": "HTTP status {http_status} arrived and the response body could be read, but it is not valid {wire} framing: {problem}. {status_note}",
+      "alternatives": [
+        "The server wrote a malformed body.",
+        "An intermediary changed the body, for example by appending or re-framing gRPC-Web frames, or passed the request to a server that answers in a different framing."
+      ],
+      "does_not_prove": [
+        "Which hop produced the malformed bytes.",
+        "Whether the RPC took effect on the server."
+      ],
+      "remediation": [
+        {
+          "text": "Capture the raw response at each hop (client, gateway, server) to find where the framing changes.",
+          "owner": "unknown"
+        }
+      ],
+      "confirm_with": [
+        "The server's and any proxy's logs for this call."
+      ]
+    },
+    "grpc_web.no_trailer_frame": {
+      "title": "The gRPC-Web response had no trailer frame",
+      "explanation": "HTTP status {http_status} arrived with content type {content_type}, and the response body ended cleanly without the trailer frame (flag 0x80) that carries grpc-status in gRPC-Web. {status_note}",
+      "alternatives": [
+        "The server, or a proxy in front of it, answered with native gRPC framing, whose status travels in HTTP trailers.",
+        "A hop passed the gRPC-Web request through to a server that does not speak gRPC-Web.",
+        "The server ended the response before writing its status."
+      ],
+      "does_not_prove": [
+        "Which hop dropped the trailer frame or never produced it.",
+        "Whether any gateway on the path translates gRPC-Web, or is configured to.",
+        "That the RPC succeeded or failed on the server."
+      ],
+      "remediation": [
+        {
+          "text": "Check that the server, or the proxy in front of it, speaks gRPC-Web for this route; native gRPC over HTTP/2 or HTTP/3 reads the status from HTTP trailers instead.",
+          "owner": "unknown"
+        }
+      ],
+      "confirm_with": [
+        "The server's or proxy's logs for this call, and whether the route is expected to serve gRPC-Web."
+      ]
     },
     "ws.handshake_rejected": {
       "title": "The WebSocket handshake was rejected",
