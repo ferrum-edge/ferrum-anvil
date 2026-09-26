@@ -279,7 +279,7 @@ async fn handle(
         record(403);
         return text(403, DESTINATION_DENIED_BODY);
     }
-    let upstream = match TcpStream::connect(&authority).await {
+    let upstream = match dial(&authority).await {
         Ok(s) => s,
         Err(_) => {
             record(502);
@@ -410,9 +410,30 @@ pub async fn serve_resetting(bind: &str, opts: HboneOptions, replies: usize) -> 
     Ok(HboneFixture { addr, log, cancel })
 }
 
+/// `authority`'s addresses with IPv4 first: the lab's destinations listen on
+/// 127.0.0.1, and on Windows a refused `::1` (tried first for `localhost`)
+/// takes about 2 s to be reported.
+async fn resolve_ipv4_first(authority: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    let mut addrs: Vec<_> = tokio::net::lookup_host(authority).await?.collect();
+    addrs.sort_by_key(|a| a.is_ipv6());
+    Ok(addrs)
+}
+
+/// A TCP connection to `authority`, trying its addresses in [`resolve_ipv4_first`] order.
+async fn dial(authority: &str) -> std::io::Result<TcpStream> {
+    let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
+    for addr in resolve_ipv4_first(authority).await? {
+        match TcpStream::connect(addr).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 /// A UDP socket connected to `authority` (`host:port`, IPv6 bracketed).
 async fn udp_socket(authority: &str) -> Option<UdpSocket> {
-    let addr = tokio::net::lookup_host(authority).await.ok()?.next()?;
+    let addr = *resolve_ipv4_first(authority).await.ok()?.first()?;
     let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
     let sock = UdpSocket::bind(bind).await.ok()?;
     sock.connect(addr).await.ok()?;

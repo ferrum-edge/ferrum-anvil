@@ -336,10 +336,21 @@ async fn proto_004_goaway_keeps_per_stream_retry_ambiguity() {
     let post = run(&with_settings(ctx(spec), retries.clone())).await;
     assert_eq!(post.record.attempts.len(), 1, "a possibly processed POST is never replayed automatically");
     // A GOAWAY whose last-stream-id covers this stream lets it finish; the
-    // server then closing surfaces as "closed before response".
-    assert!(matches!(last_failure(&post), FailureKind::H2GoAway | FailureKind::ClosedBeforeResponse), "{:?}", codes(&post));
+    // server then closing surfaces as "closed before response". When the
+    // server's socket closes with the client's last frames still unread, the
+    // kernel answers with a TCP RST instead (seen on macOS): a reset before
+    // the response. All three are truthful; none may become a replay.
+    assert!(
+        matches!(last_failure(&post), FailureKind::H2GoAway | FailureKind::ClosedBeforeResponse | FailureKind::ResetBeforeResponse),
+        "{:?}",
+        codes(&post)
+    );
     assert_ne!(post.record.outcome.dispatch, DispatchState::NotDispatched);
-    assert!(has(&post, "exchange.h2_goaway") || has(&post, "exchange.closed_before_response"), "{:?}", codes(&post));
+    assert!(
+        has(&post, "exchange.h2_goaway") || has(&post, "exchange.closed_before_response") || has(&post, "exchange.reset_before_response"),
+        "{:?}",
+        codes(&post)
+    );
     assert!(has(&post, "request.processing_uncertain"), "processing stays uncertain: {:?}", codes(&post));
     assert!(!codes(&post).iter().any(|c| c.starts_with("client.tls.")), "GOAWAY is not a TLS failure");
     assert_eq!(f.streams_seen.load(std::sync::atomic::Ordering::SeqCst), 1, "the server saw the POST exactly once");

@@ -16,6 +16,11 @@ inputs:
   cache-key:
     description: Extra key for the Rust build cache.
     default: ""
+  cache-on-failure:
+    description: >
+      Also save the Rust build cache when the job fails, so a lane that keeps
+      failing (e.g. while a platform-specific test is fixed) still starts warm.
+    default: "true"
   node:
     description: Set up Node.js and run `npm ci` in apps/desktop.
     default: "true"
@@ -51,6 +56,7 @@ runs:
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         key: ${{ inputs.cache-key }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
 
     - name: Node.js
       if: inputs.node == 'true'

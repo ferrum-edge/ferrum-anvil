@@ -124,7 +124,11 @@ async fn local_009_connection_refused_is_client_leg_and_not_dispatched() {
     let port = l.local_addr().unwrap().port();
     drop(l);
     let t = HttpTransport::new();
-    let a = run(&t, &plan(&format!("http://127.0.0.1:{port}/"), None)).await;
+    let mut p = plan(&format!("http://127.0.0.1:{port}/"), None);
+    // Windows retransmits the SYN to a closed loopback port for about 2 s
+    // before reporting the refusal; the budget must outlast that.
+    p.timeouts.connect_ms = Some(10_000);
+    let a = run(&t, &p).await;
     let f = failure(&a);
     assert_eq!(f.kind, FailureKind::ConnectRefused);
     assert_eq!(f.phase, Phase::Connect);

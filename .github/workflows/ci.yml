@@ -21,6 +21,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # Line tables only (not full variable/type debug info) for dev and test
+  # builds: backtraces keep file:line, while compiling, linking (slowest on
+  # Windows) and the cached target directory get much cheaper.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   rust:
@@ -56,7 +61,8 @@ jobs:
         shell: bash
         run: |
           ulimit -n 4096 2>/dev/null || true
-          cargo test --locked --workspace --exclude anvil-desktop
+          # Every failing test binary is reported in one run, not just the first.
+          cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast
       # Keychain profiles ("Start now — no password") against the real OS
       # credential store on every platform. Linux needs a Secret Service: run
       # gnome-keyring, unlocked, inside a private D-Bus session.
