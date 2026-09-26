@@ -23,11 +23,16 @@ use anvil_transport::recorder::EventCtx;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) type R<T> = Result<T, String>;
 
 /// What a command returns when its work was canceled before it wrote anything.
 pub(crate) const CANCELED: &str = "CANCELED";
+
+/// What an import or preview returns while an earlier one's worker is still
+/// running, including one that was canceled and is still deriving its key.
+pub(crate) const IMPORT_BUSY: &str = "an earlier import or preview is still finishing; try again once it has ended";
 
 pub(crate) fn e(err: AppError) -> String {
     match err {
@@ -697,7 +702,13 @@ fn read_bundle(grants: &FileGrants, grant: &str) -> R<Vec<u8>> {
 /// Register `attempt` so `import_cancel`, or a lock, can reach the import.
 /// Done before the app is read (see `DesktopState::lock`).
 fn register_import(st: &DesktopState, attempt: Option<&str>) -> R<Option<PendingEntry>> {
-    attempt.map(|a| PendingEntry::register(&st.running, id(a)?)).transpose()
+    attempt.map(|a| PendingEntry::register(&st.imports, id(a)?)).transpose()
+}
+
+/// Claim the one import worker (`DesktopState::import_worker`). Refused with
+/// [`IMPORT_BUSY`] while another import's worker, canceled or not, runs.
+fn claim_import_worker(slot: &Arc<Semaphore>) -> R<OwnedSemaphorePermit> {
+    slot.clone().try_acquire_owned().map_err(|_| IMPORT_BUSY.to_string())
 }
 
 /// Run import work on a blocking worker thread: reading the chosen file and
@@ -708,18 +719,24 @@ fn register_import(st: &DesktopState, attempt: Option<&str>) -> R<Option<Pending
 /// the worker instead: the command returns `CANCELED` at once, and the
 /// worker drops the key and the contents when the derivation ends. For an
 /// apply, `gate` settles the race with the writes: a cancel that finds them
-/// begun waits for their result instead.
+/// begun waits for their result instead. The worker holds `worker` until it
+/// has ended, also once abandoned, so abandoned workers never pile up.
 ///
 /// The key a preview derives is not kept for the apply that follows. The
 /// user can leave the preview open for any length of time, and holding the
 /// key would keep material that opens the bundle in memory for all of it;
 /// the apply derives it again, bounded by the same header limits.
 async fn import_work<T: Send + 'static>(
+    worker: OwnedSemaphorePermit,
     pending: Option<PendingEntry>,
     gate: Option<&ImportGate>,
     f: impl FnOnce() -> R<T> + Send + 'static,
 ) -> R<T> {
-    let mut work = std::pin::pin!(tauri::async_runtime::spawn_blocking(f));
+    let mut work = std::pin::pin!(tauri::async_runtime::spawn_blocking(move || {
+        let r = f();
+        drop(worker);
+        r
+    }));
     if let Some(pending) = &pending {
         tokio::select! {
             r = &mut work => return r.map_err(|x| x.to_string())?,
@@ -743,12 +760,13 @@ pub async fn import_preview(
     conflict_policy: String,
     attempt: Option<String>,
 ) -> R<anvil_app::port::ImportReport> {
+    let worker = claim_import_worker(&st.import_worker)?;
     let pending = register_import(&st, attempt.as_deref())?;
     let app = st.app()?;
     let policy = policy(&conflict_policy)?;
     let grants = st.file_grants.clone();
     // A preview writes nothing, so it needs no gate.
-    import_work(pending, None, move || {
+    import_work(worker, pending, None, move || {
         let bytes = read_bundle(&grants, &grant)?;
         if anvil_app::backup::is_backup(&bytes) {
             // A full backup restores every item under its own id, so "copies" is
@@ -774,6 +792,7 @@ pub async fn import_apply(
     approval: Option<anvil_app::port::ImportApproval>,
     attempt: Option<String>,
 ) -> R<anvil_app::port::ImportReport> {
+    let worker = claim_import_worker(&st.import_worker)?;
     let pending = register_import(&st, attempt.as_deref())?;
     let app = st.app()?;
     let policy = policy(&conflict_policy)?;
@@ -783,7 +802,7 @@ pub async fn import_apply(
     let grants = st.file_grants.clone();
     let gate = Arc::new(ImportGate::default());
     let worker_gate = gate.clone();
-    import_work(pending, Some(&*gate), move || {
+    import_work(worker, pending, Some(&*gate), move || {
         let bytes = read_bundle(&grants, &grant)?;
         if anvil_app::backup::is_backup(&bytes) {
             if !worker_gate.begin_writes() {
@@ -797,12 +816,12 @@ pub async fn import_apply(
     .await
 }
 
-/// Cancel the bundle import or preview started with `attempt`. Returns
-/// whether it was still running; the import itself reports whether it was
-/// canceled or had already begun writing.
+/// Cancel the bundle import or preview started with `attempt`; never an
+/// execution. Returns whether it was still running; the import itself
+/// reports whether it was canceled or had already begun writing.
 #[tauri::command]
 pub fn import_cancel(st: State<'_, DesktopState>, attempt: String) -> R<bool> {
-    Ok(cancel_pending(&st.running, &id(&attempt)?))
+    Ok(cancel_pending(&st.imports, &id(&attempt)?))
 }
 
 // ------------------------------------------------------------- attachments
@@ -855,4 +874,93 @@ pub fn read_text_file(
 pub struct TextFile {
     pub text: Option<String>,
     pub secret: Option<SecretRef>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Running;
+    use std::sync::mpsc;
+    use tokio::sync::oneshot;
+
+    /// A registered attempt, and the gate of its writes.
+    fn registered() -> (Arc<Running>, Id, PendingEntry, Arc<ImportGate>) {
+        let imports = Arc::new(Running::default());
+        let id = Id::new();
+        let pending = PendingEntry::register(&imports, id).unwrap();
+        (imports, id, pending, Arc::new(ImportGate::default()))
+    }
+
+    #[tokio::test]
+    async fn a_cancel_before_the_writes_begin_abandons_the_import() {
+        let slot = Arc::new(Semaphore::new(1));
+        let (imports, attempt, pending, gate) = registered();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (wrote_tx, wrote_rx) = oneshot::channel();
+        let worker_gate = gate.clone();
+        let worker = claim_import_worker(&slot).unwrap();
+        // Stands in for the key derivation: blocks until released, then claims the writes.
+        let work = import_work(worker, Some(pending), Some(&*gate), move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let wrote = worker_gate.begin_writes();
+            wrote_tx.send(wrote).unwrap();
+            if wrote { Ok("written") } else { Err(CANCELED.to_string()) }
+        });
+        let cancel = async {
+            started_rx.await.unwrap();
+            assert!(cancel_pending(&imports, &attempt));
+        };
+        let (r, ()) = tokio::join!(work, cancel);
+        assert_eq!(r, Err(CANCELED.to_string()));
+        assert!(imports.lock().is_empty());
+        // The abandoned worker still runs, so another import is refused.
+        assert_eq!(claim_import_worker(&slot).map(|_| ()), Err(IMPORT_BUSY.to_string()));
+        release_tx.send(()).unwrap();
+        assert!(!wrote_rx.await.unwrap(), "an abandoned import never begins its writes");
+        // Once the worker has ended, the next import can start.
+        drop(slot.acquire().await.unwrap());
+        assert!(claim_import_worker(&slot).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_after_the_writes_begin_waits_for_the_import() {
+        let slot = Arc::new(Semaphore::new(1));
+        let (imports, attempt, pending, gate) = registered();
+        let (writing_tx, writing_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let worker_gate = gate.clone();
+        let worker = claim_import_worker(&slot).unwrap();
+        let work = import_work(worker, Some(pending), Some(&*gate), move || {
+            assert!(worker_gate.begin_writes());
+            writing_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok("written")
+        });
+        let cancel = async {
+            writing_rx.await.unwrap();
+            assert!(cancel_pending(&imports, &attempt));
+            release_tx.send(()).unwrap();
+        };
+        let (r, ()) = tokio::join!(work, cancel);
+        assert_eq!(r, Ok("written"), "an import whose writes began reports their result");
+        assert!(!gate.abandon());
+        assert!(imports.lock().is_empty());
+        // The worker released its slot before its result was returned.
+        assert!(claim_import_worker(&slot).is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_import_that_is_not_canceled_completes() {
+        let slot = Arc::new(Semaphore::new(1));
+        let (imports, _, pending, gate) = registered();
+        let worker_gate = gate.clone();
+        let worker = claim_import_worker(&slot).unwrap();
+        let r = import_work(worker, Some(pending), Some(&*gate), move || Ok(worker_gate.begin_writes())).await;
+        assert_eq!(r, Ok(true), "the import claimed its writes");
+        assert!(!gate.abandon());
+        assert!(imports.lock().is_empty());
+        assert!(claim_import_worker(&slot).is_ok());
+    }
 }

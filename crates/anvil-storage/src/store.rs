@@ -186,11 +186,14 @@ fn aad(table: &str, kind: &str, id: &str) -> Vec<u8> {
 
 /// Associated data of a vault secret: its id and the workspace that owns it
 /// (`None`: no workspace does). A secret whose owner column is changed no
-/// longer decrypts, so it cannot be moved into another workspace.
+/// longer decrypts, so it cannot be moved into another workspace. The id and
+/// the owner are each prefixed with their length, so no other id and owner
+/// give the same bytes, and the `v2` prefix keeps it apart from every
+/// schema 1 [`aad`].
 fn secret_aad(id: &str, owner: Option<&str>) -> Vec<u8> {
     match owner {
-        Some(ws) => format!("anvil/v2/secrets/secret/{id}/workspace/{ws}").into_bytes(),
-        None => format!("anvil/v2/secrets/secret/{id}/profile").into_bytes(),
+        Some(ws) => format!("anvil/v2/secrets/secret/{}:{id}/workspace/{}:{ws}", id.len(), ws.len()).into_bytes(),
+        None => format!("anvil/v2/secrets/secret/{}:{id}/profile", id.len()).into_bytes(),
     }
 }
 
@@ -239,26 +242,114 @@ fn stored_schema_version(conn: &Connection) -> Result<i64> {
 }
 
 /// v2: re-seal each vault secret, sealed under [`aad`] until now, under
-/// [`secret_aad`] with the owner its row names. A secret that does not open
-/// fails the step, which then changes nothing.
-fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<()> {
+/// [`secret_aad`] with the owner its row names when the step runs. A row that
+/// does not open was already corrupt or altered, since schema 1 never changed
+/// its associated data: it is left as it is, still sealed under that data,
+/// which no [`secret_aad`] equals, so reading it keeps failing with
+/// `Integrity` and it can be deleted. Returns how many rows were left.
+fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
     let rows: Vec<(String, Option<String>, Vec<u8>)> = {
         let mut st = conn.prepare("SELECT id, workspace_id, payload FROM secrets")?;
         st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<std::result::Result<_, _>>()?
     };
+    let mut left = 0;
     for (id, owner, env) in rows {
-        let pt = crypto::open(key, &aad("secrets", "secret", &id), &env).map_err(|_| StoreError::Integrity)?;
+        let Ok(pt) = crypto::open(key, &aad("secrets", "secret", &id), &env) else {
+            left += 1;
+            continue;
+        };
         let env = crypto::seal(key, &secret_aad(&id, owner.as_deref()), &pt);
         conn.execute("UPDATE secrets SET payload=?1 WHERE id=?2", params![env, id])?;
     }
+    if left > 0 {
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('secrets_left_at_v2', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![left.to_string()],
+        )?;
+    }
+    Ok(left)
+}
+
+/// Check `key` against the sealed canary of the database on `conn` without
+/// writing: `false` when it has none yet, [`StoreError::Integrity`] when `key`
+/// does not open it.
+fn check_canary(conn: &Connection, key: &Key) -> Result<bool> {
+    let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
+    let Some(c) = canary else { return Ok(false) };
+    let env = hex::decode(c).map_err(|_| StoreError::Integrity)?;
+    crypto::open(key, b"anvil/v1/canary", &env).map_err(|_| StoreError::Integrity)?;
+    Ok(true)
+}
+
+/// A sealed canary proves `key` matches the database on `conn`; a database
+/// without one gets one sealed with `key`.
+fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
+    if !check_canary(conn, key)? {
+        let env = crypto::seal(key, b"anvil/v1/canary", b"ok");
+        conn.execute("INSERT INTO meta(key, value) VALUES('key_canary', ?1)", params![hex::encode(env)])?;
+    }
     Ok(())
+}
+
+/// Apply the pending migrations to the database on `conn` with `key`, which
+/// [`verify_key_on`] has checked first, so a wrong key fails before anything
+/// is re-sealed with it. Each step runs in its own write transaction that
+/// reads the version again first, so a step another connection has applied
+/// meanwhile is skipped, and a step that fails leaves nothing behind. With
+/// nothing pending it only reads the version.
+fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
+    let found = stored_schema_version(conn)?;
+    if found > DB_SCHEMA_VERSION {
+        return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
+    }
+    for (v, step) in (1i64..).zip(MIGRATIONS) {
+        if v <= found {
+            continue;
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let found = stored_schema_version(&tx)?;
+        if found > DB_SCHEMA_VERSION {
+            return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
+        }
+        // Dropping `tx` rolls it back; it has written nothing.
+        if v <= found {
+            continue;
+        }
+        let left = match step {
+            Migration::Sql(sql) => {
+                tx.execute_batch(sql)?;
+                0
+            }
+            Migration::SecretOwners => reseal_secret_owners(&tx, key)?,
+        };
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![v.to_string()],
+        )?;
+        tx.commit()?;
+        if left > 0 {
+            tracing::warn!(schema = v, left, "vault secrets that did not decrypt were left as they were");
+        }
+    }
+    Ok(())
+}
+
+/// Copy the database `src` over the one on `conn`, then check `key` against
+/// the copy and migrate it.
+fn restore_on(conn: &mut Connection, src: &Connection, key: &Key) -> Result<()> {
+    {
+        let backup = rusqlite::backup::Backup::new(src, conn)?;
+        backup.run_to_completion(256, Duration::from_millis(0), None)?;
+    }
+    verify_key_on(conn, key)?;
+    migrate_on(conn, key)
 }
 
 impl Store {
     /// Open (or create) the store in `dir`, applying pending migrations.
     pub fn open(dir: &Path, key: Key) -> Result<Store> {
         std::fs::create_dir_all(dir)?;
-        let conn = Connection::open(dir.join(DB_FILE))?;
+        let mut conn = Connection::open(dir.join(DB_FILE))?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;",
@@ -268,67 +359,10 @@ impl Store {
         if found > DB_SCHEMA_VERSION {
             return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
         }
-        let store = Store { dir: dir.to_path_buf(), conn: Mutex::new(conn), tx_owner: Mutex::new(None), key: RwLock::new(Some(key)) };
         // The key is checked before a migration re-seals anything with it.
-        store.verify_key()?;
-        store.migrate()?;
-        Ok(store)
-    }
-
-    /// Apply the pending migrations with the unlocked key. Each step runs in
-    /// its own write transaction that reads the version again first, so a
-    /// step another connection has applied meanwhile is skipped, and a step
-    /// that fails leaves nothing behind. Runs at open, at unlock and after a
-    /// checkpoint is restored; with nothing pending it only reads the version.
-    fn migrate(&self) -> Result<()> {
-        let key = self.key()?;
-        let mut conn = self.conn()?;
-        let found = stored_schema_version(&conn)?;
-        if found > DB_SCHEMA_VERSION {
-            return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
-        }
-        for (v, step) in (1i64..).zip(MIGRATIONS) {
-            if v <= found {
-                continue;
-            }
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let found = stored_schema_version(&tx)?;
-            if found > DB_SCHEMA_VERSION {
-                return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
-            }
-            // Dropping `tx` rolls it back; it has written nothing.
-            if v <= found {
-                continue;
-            }
-            match step {
-                Migration::Sql(sql) => tx.execute_batch(sql)?,
-                Migration::SecretOwners => reseal_secret_owners(&tx, &key)?,
-            }
-            tx.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![v.to_string()],
-            )?;
-            tx.commit()?;
-        }
-        Ok(())
-    }
-
-    /// A sealed canary proves the key matches this database.
-    fn verify_key(&self) -> Result<()> {
-        let key = self.key()?;
-        let conn = self.conn()?;
-        let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
-        match canary {
-            Some(c) => {
-                let env = hex::decode(c).map_err(|_| StoreError::Integrity)?;
-                crypto::open(&key, b"anvil/v1/canary", &env).map_err(|_| StoreError::Integrity)?;
-            }
-            None => {
-                let env = crypto::seal(&key, b"anvil/v1/canary", b"ok");
-                conn.execute("INSERT INTO meta(key, value) VALUES('key_canary', ?1)", params![hex::encode(env)])?;
-            }
-        }
-        Ok(())
+        verify_key_on(&conn, &key)?;
+        migrate_on(&mut conn, &key)?;
+        Ok(Store { dir: dir.to_path_buf(), conn: Mutex::new(conn), tx_owner: Mutex::new(None), key: RwLock::new(Some(key)) })
     }
 
     pub fn dir(&self) -> &Path {
@@ -381,16 +415,22 @@ impl Store {
         *self.key.write() = None;
     }
 
-    /// Unlock with `key`, then apply any pending migration (such as the
-    /// v2 re-seal of vault secrets) with it. A wrong key, or a migration that
-    /// fails, leaves the store locked.
+    /// Unlock with `key`: check it, apply any pending migration (such as the
+    /// v2 re-seal of vault secrets) with it, and only then keep it, all under
+    /// one hold of the connection, so no other call runs with a key that is
+    /// not yet checked or on a database not yet migrated. A wrong key, or a
+    /// migration that fails, leaves the store locked.
     pub fn unlock(&self, key: Key) -> Result<()> {
-        *self.key.write() = Some(key);
-        if let Err(e) = self.verify_key().and_then(|()| self.migrate()) {
+        let r = self.conn().and_then(|mut conn| {
+            verify_key_on(&conn, &key)?;
+            migrate_on(&mut conn, &key)?;
+            *self.key.write() = Some(key);
+            Ok(())
+        });
+        if r.is_err() {
             self.lock();
-            return Err(e);
         }
-        Ok(())
+        r
     }
 
     // ------------------------------------------------------------ objects
@@ -680,16 +720,24 @@ impl Store {
 
     /// Replace the live database with a checkpoint, discarding every change
     /// made since it was taken. Nothing calls this automatically. A
-    /// checkpoint taken before a migration is migrated again.
+    /// checkpoint written by a newer schema, or sealed with another key, is
+    /// refused before the live database is touched; one taken before a
+    /// migration is migrated again, under the same hold of the connection as
+    /// the copy. A copy or migration that fails leaves the store locked.
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
-        let _ = self.key()?;
-        {
-            let mut conn = self.conn()?;
-            let src = Connection::open(path)?;
-            let backup = rusqlite::backup::Backup::new(&src, &mut conn)?;
-            backup.run_to_completion(256, std::time::Duration::from_millis(0), None)?;
+        let key = self.key()?;
+        let src = Connection::open(path)?;
+        let found = stored_schema_version(&src)?;
+        if found > DB_SCHEMA_VERSION {
+            return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
         }
-        self.migrate()
+        check_canary(&src, &key)?;
+        let mut conn = self.conn()?;
+        let r = restore_on(&mut conn, &src, &key);
+        if r.is_err() {
+            *self.key.write() = None;
+        }
+        r
     }
 }
 

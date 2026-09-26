@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Instant, SystemTime};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 /// Cancellation tokens of running executions, by execution id. Each
@@ -70,6 +71,15 @@ pub struct DesktopState {
     pub app: RwLock<Option<Arc<App>>>,
     /// Running executions (for cancel and lock-time stop).
     pub running: Arc<Running>,
+    /// Bundle imports and previews started with an attempt id (for
+    /// `import_cancel` and lock-time stop). Apart from `running`, so an
+    /// import's id never cancels an execution, nor an execution's an import.
+    pub imports: Arc<Running>,
+    /// The one import worker allowed at a time. A canceled import's worker
+    /// keeps deriving its key (within the header's memory bound) until the
+    /// derivation ends, so a new import is refused until it has, rather than
+    /// run beside it; the worker holds the permit until it has ended.
+    pub import_worker: Arc<Semaphore>,
     /// Load runs in worker processes (for cancel and lock-time stop).
     pub load_runs: Arc<LoadRuns>,
     /// Load reports that finished while their profile was locked
@@ -94,6 +104,8 @@ impl DesktopState {
             profiles: ProfileManager::new(root),
             app: RwLock::new(None),
             running: Arc::new(Mutex::new(HashMap::new())),
+            imports: Arc::new(Mutex::new(HashMap::new())),
+            import_worker: Arc::new(Semaphore::new(1)),
             load_runs: Arc::new(Mutex::new(HashMap::new())),
             sessions: Mutex::new(HashMap::new()),
             pending_load_reports: PendingReports::default(),
@@ -182,9 +194,13 @@ impl DesktopState {
         self.stop_work();
     }
 
-    /// Cancel registered executions, stop load workers and abort sessions.
+    /// Cancel registered executions and imports, stop load workers and abort
+    /// sessions.
     fn stop_work(&self) {
         for (_, t) in self.running.lock().drain() {
+            t.cancel();
+        }
+        for (_, t) in self.imports.lock().drain() {
             t.cancel();
         }
         // Load workers are asked to stop and finalize a partial report
@@ -534,6 +550,28 @@ mod tests {
         // Work started from now on is not stopped by the earlier switch.
         let later = PendingEntry::register(&st.running, Id::new()).unwrap();
         assert!(!later.token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn imports_and_executions_are_canceled_in_their_own_registries() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let id = Id::new();
+        let execution = PendingEntry::register(&st.running, id).unwrap();
+        let import = PendingEntry::register(&st.imports, id).unwrap();
+        // The same id in the other registry is another entry.
+        assert!(cancel_pending(&st.imports, &id));
+        assert!(import.token().is_cancelled());
+        assert!(!execution.token().is_cancelled());
+        drop(import);
+        assert!(!cancel_pending(&st.imports, &id));
+        assert!(!execution.token().is_cancelled());
+        // A lock stops both.
+        let later = PendingEntry::register(&st.imports, Id::new()).unwrap();
+        st.lock();
+        assert!(execution.token().is_cancelled());
+        assert!(later.token().is_cancelled());
+        assert!(st.imports.lock().is_empty());
     }
 
     #[tokio::test]

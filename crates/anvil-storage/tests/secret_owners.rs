@@ -1,11 +1,12 @@
 //! A vault secret is sealed together with the workspace that owns it, and
 //! secrets sealed before that (schema 1) are re-sealed once, in one
-//! transaction, when the store is opened or unlocked.
+//! transaction, when the store is opened or unlocked. A schema 1 secret that
+//! does not decrypt is left as it is.
 
 use anvil_domain::Id;
 use anvil_storage::store::{DB_FILE, DB_SCHEMA_VERSION, StoreError};
 use anvil_storage::{KdfParams, Key, Store, crypto, vault};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 fn db(dir: &Path) -> Connection {
@@ -151,21 +152,39 @@ fn plant_good_and_bad(dir: &Path, key: &Key) -> (Id, Id) {
     (good, bad)
 }
 
+fn left_at_v2(dir: &Path) -> Option<String> {
+    let sql = "SELECT value FROM meta WHERE key='secrets_left_at_v2'";
+    db(dir).query_row(sql, [], |r| r.get(0)).optional().unwrap()
+}
+
+/// After the migration: the good row is re-sealed and opens, the bad row is
+/// left exactly as it was, still fails, and can be deleted.
+fn assert_bad_row_left(store: &Store, dir: &Path, good: &Id, bad: &Id, before: &(Vec<u8>, Vec<u8>)) {
+    assert_eq!(stored_version(dir), DB_SCHEMA_VERSION.to_string());
+    assert_ne!(payload(dir, good), before.0, "the good row is re-sealed");
+    assert_eq!(value(store, good), "legacy-good");
+    assert_eq!(payload(dir, bad), before.1, "the bad row is left as it was");
+    assert!(matches!(store.get_secret(bad), Err(StoreError::Integrity)));
+    assert_eq!(left_at_v2(dir).as_deref(), Some("1"));
+    store.delete_secret(bad).unwrap();
+    assert!(store.get_secret(bad).unwrap().is_none());
+    assert_eq!(value(store, good), "legacy-good");
+}
+
 #[test]
-fn a_secret_that_does_not_open_fails_the_migration_at_open_and_changes_nothing() {
+fn a_secret_that_does_not_open_is_left_as_it_is_at_open() {
     let (dir, dek) = profile();
     drop(Store::open(dir.path(), dek.clone()).unwrap());
     downgrade(dir.path());
     let (good, bad) = plant_good_and_bad(dir.path(), &dek);
     let before = (payload(dir.path(), &good), payload(dir.path(), &bad));
 
-    assert!(matches!(Store::open(dir.path(), dek), Err(StoreError::Integrity)));
-    assert_eq!(stored_version(dir.path()), "1");
-    assert_eq!((payload(dir.path(), &good), payload(dir.path(), &bad)), before);
+    let store = Store::open(dir.path(), dek).unwrap();
+    assert_bad_row_left(&store, dir.path(), &good, &bad, &before);
 }
 
 #[test]
-fn a_secret_that_does_not_open_fails_the_migration_at_unlock_and_changes_nothing() {
+fn a_secret_that_does_not_open_is_left_as_it_is_at_unlock() {
     let (dir, dek) = profile();
     let store = Store::open(dir.path(), dek.clone()).unwrap();
     store.lock();
@@ -173,10 +192,58 @@ fn a_secret_that_does_not_open_fails_the_migration_at_unlock_and_changes_nothing
     let (good, bad) = plant_good_and_bad(dir.path(), &dek);
     let before = (payload(dir.path(), &good), payload(dir.path(), &bad));
 
-    assert!(matches!(store.unlock(dek), Err(StoreError::Integrity)));
-    assert!(store.is_locked(), "a failed migration leaves the store locked");
+    store.unlock(dek).unwrap();
+    assert!(!store.is_locked());
+    assert_bad_row_left(&store, dir.path(), &good, &bad, &before);
+}
+
+#[test]
+fn a_wrong_key_fails_before_the_migration_and_changes_nothing() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek.clone()).unwrap();
+    store.lock();
+    downgrade(dir.path());
+    let (good, bad) = plant_good_and_bad(dir.path(), &dek);
+    let before = (payload(dir.path(), &good), payload(dir.path(), &bad));
+
+    assert!(matches!(Store::open(dir.path(), Key::random()), Err(StoreError::Integrity)));
+    assert!(matches!(store.unlock(Key::random()), Err(StoreError::Integrity)));
+    assert!(store.is_locked(), "a wrong key leaves the store locked");
     assert_eq!(stored_version(dir.path()), "1");
     assert_eq!((payload(dir.path(), &good), payload(dir.path(), &bad)), before);
+    assert_eq!(left_at_v2(dir.path()), None);
+}
+
+#[test]
+fn a_checkpoint_from_a_newer_schema_is_refused_before_the_live_database_is_touched() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek).unwrap();
+    let (ws, id) = (Id::new(), Id::new());
+    store.put_secret(&id, Some(&ws), "token", "live").unwrap();
+    let checkpoint = store.checkpoint("newer").unwrap();
+    let newer = (DB_SCHEMA_VERSION + 1).to_string();
+    Connection::open(&checkpoint).unwrap().execute("UPDATE meta SET value=?1 WHERE key='schema_version'", params![newer]).unwrap();
+    store.put_secret(&id, Some(&ws), "token", "after-checkpoint").unwrap();
+
+    assert!(matches!(store.restore_checkpoint(&checkpoint), Err(StoreError::FutureSchema { .. })));
+    assert!(!store.is_locked());
+    assert_eq!(stored_version(dir.path()), DB_SCHEMA_VERSION.to_string());
+    assert_eq!(store.get_workspace_secret(&id, &ws).unwrap().unwrap().1.as_str(), "after-checkpoint");
+}
+
+#[test]
+fn a_checkpoint_sealed_with_another_key_is_refused_before_the_live_database_is_touched() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek).unwrap();
+    let (ws, id) = (Id::new(), Id::new());
+    store.put_secret(&id, Some(&ws), "token", "live").unwrap();
+    let (other_dir, other_dek) = profile();
+    let other = Store::open(other_dir.path(), other_dek).unwrap();
+    let foreign = other.checkpoint("foreign").unwrap();
+
+    assert!(matches!(store.restore_checkpoint(&foreign), Err(StoreError::Integrity)));
+    assert!(!store.is_locked());
+    assert_eq!(store.get_workspace_secret(&id, &ws).unwrap().unwrap().1.as_str(), "live");
 }
 
 #[test]

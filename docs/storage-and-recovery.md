@@ -243,7 +243,12 @@ or import started with an `attempt` id can be canceled with `import_cancel`
 (a lock cancels it too): the command returns `CANCELED` at once, and the
 worker, which cannot interrupt the derivation, drops what it derived and
 writes nothing. A bundle import can be canceled until its key is derived and
-its contents checked; a full-backup restore only until it starts. The key a
+its contents checked; a full-backup restore only until it starts. One import
+or preview worker runs at a time: while one is still running, including one
+canceled and still finishing its derivation, a new preview or import is
+refused as busy. `import_cancel` cancels only imports and previews, never an
+execution. The desktop UI does not pass an `attempt` id yet, so for now a
+preview or import can be canceled only through the backend command. The key a
 preview derives is not kept for the import that follows, so the import
 derives it again: a preview can stay open indefinitely, and keeping the key
 would keep material that opens the bundle in memory for that long.
@@ -355,10 +360,22 @@ needs no confirmation.
   `DB_SCHEMA_VERSION`. Migrations run forward at open and at unlock, each
   step in one write transaction with the version bump that records it, so a
   step runs once and one that fails changes nothing.
-- Database schema 2 re-seals every vault secret so its AAD names its owner.
-  A secret that does not decrypt fails the step, and the profile stays
-  locked with its data unchanged. Earlier builds refuse a schema 2 database
-  as newer.
+- Database schema 2 re-seals every vault secret so its AAD names its owner
+  (id and owner each length-prefixed). The owner is taken from the secret's
+  owner column as the step finds it: the migration trusts that column, since
+  schema 1 did not bind it, and binds whatever it names from then on. The key
+  is checked against the database's canary first, so a wrong key fails the
+  unlock and changes nothing. A secret that does not decrypt under its
+  schema 1 AAD was already corrupt or altered (that AAD never changed): it is
+  left as it is, still sealed under the schema 1 AAD, which no schema 2 AAD
+  equals, so reading it keeps failing as before and it can be deleted. The
+  step still commits; the number left is logged and recorded in the
+  database's `meta` table (`secrets_left_at_v2`). Earlier builds refuse a
+  schema 2 database, and a full backup made from one, as newer.
+- Restoring a checkpoint refuses one written by a newer schema, or sealed
+  with another data key, before the live database is touched. A checkpoint
+  from an older schema is migrated under the same hold of the connection as
+  the copy; if the copy or the migration fails, the profile is left locked.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
 - Bundles carry `format_version`; unknown future formats are rejected, and so
