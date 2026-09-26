@@ -252,8 +252,12 @@ fn tunnel(o: &ExecutionOutput) -> Option<(u64, u64, MasqueTunnel)> {
     }
 }
 
-fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
+fn op_lines(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
     env.gateway.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(10).collect()
+}
+
+async fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
+    crate::fixtures_policy::wait_for_op_log(|| op_lines(env, from, proxy_id)).await
 }
 
 fn op_from(env: &Env) -> usize {
@@ -384,7 +388,7 @@ fn ctrl(env: &Env) -> Fut<'_> {
             "",
         );
         c.add(CheckKind::GroundTruth, "backend received the request relayed from QUIC", env.fx.echo.log.count_requests() > before, "");
-        let lines = op_log(env, from, "h3x-echo");
+        let lines = op_log(env, from, "h3x-echo").await;
         operator_status(&mut c, &lines, 200);
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
     })
@@ -433,7 +437,7 @@ fn proto018_h3(env: &Env) -> Fut<'_> {
             hdrs.iter().any(|(n, v)| n == "accept" && v == "text/event-stream"),
             format!("{hdrs:?}"),
         );
-        let lines = op_log(env, from, "h3x-sse");
+        let lines = op_log(env, from, "h3x-sse").await;
         operator_status(&mut c, &lines, 200);
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
     })
@@ -455,7 +459,7 @@ fn proto018_h3_idle(env: &Env) -> Fut<'_> {
         c.no_confirmed_claim(&o, "fail");
         c.absent_prefix(&o, "ferrum.token");
         let r = sse_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "h3x-sse") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "h3x-sse").await }
     })
 }
 
@@ -487,7 +491,7 @@ fn proto018_h3_cancel(env: &Env) -> Fut<'_> {
         );
         c.absent_prefix(&o, "ferrum.token");
         let r = sse_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "h3x-sse") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "h3x-sse").await }
     })
 }
 
@@ -525,7 +529,7 @@ fn trust007_sse_h3(env: &Env) -> Fut<'_> {
             format!("{:?}", codes(&o)),
         );
         let r = sse_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "h3x-sse-abort") }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "h3x-sse-abort").await }
     })
 }
 
@@ -579,7 +583,7 @@ fn proto018_h3_reconnect(env: &Env) -> Fut<'_> {
         );
         c.add(CheckKind::GroundTruth, "the backend aborted the first stream", fault_applied(&env.fx.sse_flaky.log, "sse_flaky_abort"), "");
         c.absent_prefix(&o, "ferrum.token");
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "h3x-sse-flaky") }
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "h3x-sse-flaky").await }
     })
 }
 
@@ -673,7 +677,7 @@ fn masque001(env: &Env) -> Fut<'_> {
             datagrams(&env.fx.udp_echo.log) >= before + 3,
             format!("{before} → {}", datagrams(&env.fx.udp_echo.log)),
         );
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         operator_status(&mut c, &lines, 200);
         operator_says(&mut c, &lines, "CONNECT-UDP (RFC 9298) tunnel established");
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
@@ -712,7 +716,7 @@ fn masque002(env: &Env) -> Fut<'_> {
             "",
         );
         let r = masque_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, MASQUE_PROXY_ID) }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, MASQUE_PROXY_ID).await }
     })
 }
 
@@ -766,7 +770,7 @@ fn masque003(env: &Env) -> Fut<'_> {
             datagrams(&env.fx.udp_unlisted.log) == before,
             "",
         );
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         operator_status(&mut c, &lines, 403);
         operator_says(&mut c, &lines, "connect_udp_target_not_allowed");
         let r = masque_recovery(env, &mut c).await;
@@ -784,7 +788,7 @@ fn masque004(env: &Env) -> Fut<'_> {
                 .await;
         refusal_checks(&mut c, &o, 400, "does not expand the connect-udp URI template", UDP_ECHO);
         c.add(CheckKind::GroundTruth, "the target received nothing", datagrams(&env.fx.udp_echo.log) == before, "");
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         operator_status(&mut c, &lines, 400);
         operator_says(&mut c, &lines, "template_anchor_missing");
         let r = masque_recovery(env, &mut c).await;
@@ -803,7 +807,7 @@ fn masque005(env: &Env) -> Fut<'_> {
         c.add(CheckKind::GroundTruth, "the route's method policy refused CONNECT (405)", status == 405, format!("{status}"));
         refusal_checks(&mut c, &o, 405, "", UDP_ECHO);
         c.add(CheckKind::GroundTruth, "the target received nothing", datagrams(&env.fx.udp_echo.log) == before, "");
-        let lines = op_log(env, from, "h3x-masque-get-only");
+        let lines = op_log(env, from, "h3x-masque-get-only").await;
         operator_status(&mut c, &lines, 405);
         let r = masque_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
@@ -883,7 +887,7 @@ fn masque008(env: &Env) -> Fut<'_> {
         );
         masque_findings_blame_only_the_proxy(&mut c, &o, UDP_ECHO);
         c.add(CheckKind::Diagnosis, "nothing was dispatched", o.record.outcome.dispatch == DispatchState::NotDispatched, "");
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         c.add(CheckKind::GroundTruth, "the gateway logged no CONNECT-UDP request", lines.is_empty(), format!("{lines:?}"));
         c.add(CheckKind::GroundTruth, "the target received nothing", datagrams(&env.fx.udp_echo.log) == before, "");
         // Recovery: the automatic mode uses capsules against the same gateway.
@@ -1037,7 +1041,7 @@ fn masque_dtls_001(env: &Env) -> Fut<'_> {
                 datagrams(&env.fx.dtls_echo.log)
             ),
         );
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         operator_status(&mut c, &lines, 200);
         operator_says(&mut c, &lines, "CONNECT-UDP (RFC 9298) tunnel established");
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
@@ -1092,7 +1096,7 @@ fn masque_dtls_002(env: &Env) -> Fut<'_> {
                 && datagrams(&env.fx.dtls_untrusted.log) == before,
             format!("handshakes {hs_before} → {}", handshakes(&env.fx.dtls_untrusted)),
         );
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         operator_status(&mut c, &lines, 200);
         let r = send(env, &dtls_ctx(env, DTLS_ECHO, &["recovered"], None)).await;
         c.add(
@@ -1130,7 +1134,7 @@ fn masque_dtls_003(env: &Env) -> Fut<'_> {
             env.fx.dtls_unlisted.log.entries().is_empty(),
             format!("{} entries", env.fx.dtls_unlisted.log.entries().len()),
         );
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         operator_status(&mut c, &lines, 403);
         operator_says(&mut c, &lines, "connect_udp_target_not_allowed");
         let r = send(env, &dtls_ctx(env, DTLS_ECHO, &["recovered"], None)).await;
@@ -1186,7 +1190,7 @@ fn masque_dtls_004(env: &Env) -> Fut<'_> {
             datagrams(&env.fx.udp_silent.log) > before,
             format!("{before} → {}", datagrams(&env.fx.udp_silent.log)),
         );
-        let lines = op_log(env, from, MASQUE_PROXY_ID);
+        let lines = op_log(env, from, MASQUE_PROXY_ID).await;
         operator_status(&mut c, &lines, 200);
         let r = send(env, &dtls_ctx(env, DTLS_ECHO, &["recovered"], None)).await;
         c.add(

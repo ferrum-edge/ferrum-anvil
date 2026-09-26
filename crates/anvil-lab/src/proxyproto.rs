@@ -266,15 +266,19 @@ fn op_from(g: &Gateway) -> usize {
 }
 
 /// New operator-log lines for `proxy_id` since line `from`.
-fn op_log(g: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
+fn op_lines(g: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
     g.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(20).collect()
+}
+
+async fn op_log(g: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
+    crate::fixtures_policy::wait_for_op_log(|| op_lines(g, from, proxy_id)).await
 }
 
 /// Poll the operator log (bounded) until a line for `proxy_id` contains every `needle`.
 async fn wait_op(g: &Gateway, from: usize, proxy_id: &str, needles: &[&str], max: Duration) -> Option<String> {
     let start = Instant::now();
     loop {
-        if let Some(l) = op_log(g, from, proxy_id).into_iter().find(|l| needles.iter().all(|n| l.contains(n))) {
+        if let Some(l) = op_lines(g, from, proxy_id).into_iter().find(|l| needles.iter().all(|n| l.contains(n))) {
             return Some(l);
         }
         if start.elapsed() > max {
@@ -292,7 +296,7 @@ async fn op_check(c: &mut Checks, g: &Gateway, from: usize, proxy_id: &str, need
         hit.is_some(),
         hit.clone().unwrap_or_else(|| format!("no line with {needles:?}")),
     );
-    op_log(g, from, proxy_id)
+    op_log(g, from, proxy_id).await
 }
 
 /// The header the gateway re-advertised to the TCP backend, after `before` events.
@@ -1157,7 +1161,7 @@ fn pp_http_001(env: &Env) -> Fut<'_> {
             env.fx.http_backend.log.count_requests() == before,
             format!("{before} → {}", env.fx.http_backend.log.count_requests()),
         );
-        let lines = op_log(&env.gateway, from, "pp-http");
+        let lines = op_log(&env.gateway, from, "pp-http").await;
         c.add(CheckKind::GroundTruth, "the gateway routed no transaction for pp-http", lines.is_empty(), format!("{lines:?}"));
         // Recovery: the same request without a header.
         let r = send(env, &http_ctx(env, &url, None)).await;
@@ -1217,7 +1221,7 @@ fn pp_http_002(env: &Env) -> Fut<'_> {
             env.fx.http_backend.log.count_requests() == before,
             format!("{before} → {}", env.fx.http_backend.log.count_requests()),
         );
-        let lines = op_log(&env.gateway, from, "pp-http");
+        let lines = op_log(&env.gateway, from, "pp-http").await;
         c.add(CheckKind::GroundTruth, "the gateway routed no transaction for pp-http", lines.is_empty(), format!("{lines:?}"));
         let r = send(env, &http_ctx(env, &url, None)).await;
         c.add(
