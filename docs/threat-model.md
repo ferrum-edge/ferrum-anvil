@@ -36,7 +36,14 @@ against it).
   response (its own profile and TLS requirement), never the original request's.
 - **Credential leakage via redirects or logs:** cross-origin credential stripping;
   redaction by name and by exact secret value across records, history, reports,
-  exports and support bundles; query-string key warning.
+  exports and support bundles; query-string key warning. Headers, query
+  parameters and form fields the user marks sensitive are redacted by name and
+  by value. URL path segments, query names and values and fragments are
+  compared after percent-decoding, and a component that hides a secret is
+  replaced whole, so no reversible encoding of it is kept; a URL that still
+  reveals one once decoded keeps only its scheme and authority. A collection
+  run drops a content-encoded response body it cannot check for sensitive run
+  values.
 - **Redirect hops:** every hop is evaluated for its own target. Once a redirect
   leaves the request's origin (scheme, host or port), unless
   `redirects.forward_credentials_cross_origin` is on, configured headers that

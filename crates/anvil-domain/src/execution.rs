@@ -780,6 +780,29 @@ pub enum BodyCompleteness {
     NoBody,
 }
 
+/// Outcome of removing the response's content-coding for display,
+/// assertions and extraction. Independent of the body completeness, which
+/// describes the raw bytes on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentDecoding {
+    /// The whole body was decoded.
+    Complete,
+    /// Decoding stopped at the local `max_decoded_bytes` ceiling; the decoded body is only a prefix.
+    TruncatedAtLimit,
+    /// The content-coding is not supported; the body stays encoded.
+    Unsupported,
+    /// The encoded bytes could not be decoded; the body stays encoded.
+    Failed,
+}
+
+impl ContentDecoding {
+    /// True when the decoded body is the complete content.
+    pub fn is_complete(self) -> bool {
+        self == ContentDecoding::Complete
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BodyCapture {
     pub completeness: BodyCompleteness,
@@ -798,6 +821,13 @@ pub struct BodyCapture {
     pub content_encoding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoded_bytes: Option<u64>,
+    /// Outcome of content decoding. Absent when the body has no content-coding
+    /// or automatic decompression is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoding: Option<ContentDecoding>,
+    /// Why content decoding did not complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoding_detail: Option<String>,
     /// Content-addressed id of the stored raw (captured) bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_sha256: Option<String>,

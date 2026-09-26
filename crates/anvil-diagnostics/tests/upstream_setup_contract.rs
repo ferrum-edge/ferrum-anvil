@@ -46,6 +46,8 @@ fn response(status: u16, headers: &[(&str, &str)], body: &[u8]) -> ResponseRecor
             content_type: Some("application/json".into()),
             content_encoding: None,
             decoded_bytes: None,
+            decoding: None,
+            decoding_detail: None,
             blob_sha256: None,
         },
     }

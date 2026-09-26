@@ -938,7 +938,7 @@
           "default": "basic_header"
         },
         "token_cache_id": {
-          "description": "Where the acquired access token is cached (vault) — id of the token\ncache entry, managed by the engine.",
+          "description": "Token-cache identity: profiles with different ids never share a\ncached token. When unset, the app uses the id of the workspace,\nfolder or request that defines the profile.",
           "anyOf": [
             {
               "$ref": "#/$defs/Id"

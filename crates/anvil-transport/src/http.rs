@@ -902,6 +902,8 @@ impl HttpTransport {
                 content_type,
                 content_encoding,
                 decoded_bytes: None,
+                decoding: None,
+                decoding_detail: None,
                 blob_sha256: blob,
             },
         };

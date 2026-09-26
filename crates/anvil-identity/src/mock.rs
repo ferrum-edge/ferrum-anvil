@@ -99,11 +99,13 @@ impl MockProvider {
         let resolved = OAuthResolved {
             grant: OAuthGrant::AuthorizationCodePkce,
             token_url: self.cfg.token_endpoint.clone(),
+            authorization_url: self.cfg.authorization_endpoint.clone(),
             client_id: self.cfg.client_id.clone(),
             client_secret: Zeroizing::new(String::new()),
             scope: self.cfg.scope.clone(),
             audience: String::new(),
             basic_client_auth: false,
+            token_cache_id: None,
             refresh_skew_secs: 30,
         };
         let token = tokio::select! {

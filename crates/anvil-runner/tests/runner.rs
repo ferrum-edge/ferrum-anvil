@@ -8,6 +8,7 @@ use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction,
 use anvil_domain::outcome::{ApplicationState, AssertionState, TransportState};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::runner::*;
+use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_domain::workspace::DatasetFormat;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::http as fx;
@@ -38,6 +39,15 @@ impl Recording {
         let id = Id::new();
         let mut ctx = ExecutionContext::standalone(spec);
         ctx.request_id = Some(id);
+        self.inner.insert(id, name, ctx);
+        id
+    }
+
+    fn add_with(&mut self, name: &str, spec: RequestSpec, settings: SettingsOverrides) -> Id {
+        let id = Id::new();
+        let mut ctx = ExecutionContext::standalone(spec);
+        ctx.request_id = Some(id);
+        ctx.settings_layers.push(("request".into(), settings));
         self.inner.insert(id, name, ctx);
         id
     }
@@ -513,4 +523,62 @@ async fn invalid_plans_are_rejected_before_any_traffic() {
     let mut slow = pl;
     slow.steps[0].delay_ms = anvil_runner::MAX_DELAY_MS + 1;
     assert!(anvil_runner::run(&engine, &p, slow, RunOptions::default(), CancellationToken::new()).await.is_err());
+}
+
+/// A run whose dataset makes `fixture payload` (text inside the fixture's
+/// gzip body) a sensitive run value, with one step: the response body kept
+/// for history and the report notes.
+async fn encoded_body_run(path: &str, settings: SettingsOverrides) -> (Vec<u8>, Vec<String>) {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let id = p.add_with("Encoded", RequestSpec::http("GET", &f.url(path)), settings);
+    let mut pl = plan(&[(id, "Encoded")]);
+    pl.dataset = Some(RunDataset::parse("rows", DatasetFormat::Csv, b"marker\nfixture payload\n", &["marker".into()]).unwrap());
+    let engine = Engine::new();
+    let r = anvil_runner::run(&engine, &p, pl, RunOptions::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!(r.totals.steps_executed, 1);
+    let records = p.records.lock();
+    assert_eq!(records.len(), 1);
+    (records[0].1.clone(), r.notes.clone())
+}
+
+fn assert_body_dropped(body: &[u8], notes: &[String]) {
+    assert!(body.is_empty(), "a content-encoded body that could not be checked was kept: {} bytes", body.len());
+    assert!(notes.iter().any(|n| n.contains("not kept in history")), "{notes:?}");
+}
+
+#[tokio::test]
+async fn encoded_body_with_a_secret_past_the_decode_limit_is_not_kept() {
+    // The decoded prefix ("compr") holds no secret, but the compressed bytes do.
+    let limits = Limits { max_decoded_bytes: 5, ..Limits::default() };
+    let (body, notes) = encoded_body_run("/gzip", SettingsOverrides { limits: Some(limits), ..Default::default() }).await;
+    assert_body_dropped(&body, &notes);
+}
+
+#[tokio::test]
+async fn malformed_compressed_body_is_not_kept() {
+    let path = "/status/200?header=Content-Encoding:gzip&body=not-gzip%20fixture%20payload&ct=text/plain";
+    let (body, notes) = encoded_body_run(path, SettingsOverrides::default()).await;
+    assert_body_dropped(&body, &notes);
+}
+
+#[tokio::test]
+async fn encoded_body_is_not_kept_when_decompression_is_off() {
+    let (body, notes) = encoded_body_run("/gzip", SettingsOverrides { decompress: Some(false), ..Default::default() }).await;
+    assert_body_dropped(&body, &notes);
+}
+
+#[tokio::test]
+async fn completely_decoded_body_without_a_run_secret_is_kept() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let id = p.add("Gzip", RequestSpec::http("GET", &f.url("/gzip")));
+    let mut pl = plan(&[(id, "Gzip")]);
+    pl.dataset = Some(RunDataset::parse("rows", DatasetFormat::Csv, b"marker\nnot-in-the-body\n", &["marker".into()]).unwrap());
+    let engine = Engine::new();
+    let r = anvil_runner::run(&engine, &p, pl, RunOptions::default(), CancellationToken::new()).await.unwrap();
+    assert!(!r.notes.iter().any(|n| n.contains("not kept in history")), "{:?}", r.notes);
+    assert!(!p.records.lock()[0].1.is_empty(), "the compressed body is kept");
 }

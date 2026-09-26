@@ -50,6 +50,8 @@ fn response(status: u16, headers: &[(&str, &str)], ct: &str, body: &[u8]) -> Res
             content_type: Some(ct.into()),
             content_encoding: None,
             decoded_bytes: None,
+            decoding: None,
+            decoding_detail: None,
             blob_sha256: None,
         },
     }
