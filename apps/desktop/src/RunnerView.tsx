@@ -1,6 +1,6 @@
 // Collection runner: scenarios (ordered saved requests with chaining) and
 // folder runs, live progress, and saved reports with per-step outcomes.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, onRunEvent, onRunFinished, type RunEvent, type RunReport, type Scenario, type TreeNode } from "./api";
 import type { Environment } from "./generated/contracts";
@@ -17,7 +17,19 @@ function flatFolders(nodes: TreeNode[], path: string[] = []): { id: string; labe
   return nodes.flatMap((n) => (n.kind === "folder" ? [{ id: n.id, label: [...path, n.name].join(" / ") }, ...flatFolders(n.children, [...path, n.name])] : []));
 }
 
-export function RunnerView(props: { workspaceId: string; tree: TreeNode[]; environments: Environment[]; activeEnvironment: string | null; notify: (m: string) => void }) {
+/**
+ * Stays mounted (only hidden) while another view is shown: a run continues in
+ * the backend, and this view holds its only live progress and Stop control.
+ */
+export function RunnerView(props: {
+  workspaceId: string;
+  tree: TreeNode[];
+  environments: Environment[];
+  activeEnvironment: string | null;
+  notify: (m: string) => void;
+  hidden?: boolean;
+  onLiveChange?: (live: boolean) => void;
+}) {
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [reports, setReports] = useState<RunReport[]>([]);
   const [sel, setSel] = useState<Sel>(null);
@@ -32,15 +44,21 @@ export function RunnerView(props: { workspaceId: string; tree: TreeNode[]; envir
     setScenarios(s);
     setReports(r);
   };
+  // The run listeners outlive renders: read the current workspace and callbacks.
+  const current = useRef({ reload, notify: props.notify });
+  current.current = { reload, notify: props.notify };
   useEffect(() => {
     void reload();
   }, [props.workspaceId]);
   useEffect(() => {
+    props.onLiveChange?.(!!live);
+  }, [!!live]);
+  useEffect(() => {
     const a = onRunEvent((ev) => setLive((l) => (l && l.runId === ev.run_id ? { ...l, events: [...l.events, ev].slice(-500) } : l)));
     const b = onRunFinished((f) => {
       setLive((l) => (l && l.runId === f.run_id ? null : l));
-      if (f.error) props.notify(`Run did not complete: ${f.error}`);
-      void reload().then(() => setSel({ kind: "report", id: f.run_id }));
+      if (f.error) current.current.notify(`Run did not complete: ${f.error}`);
+      void current.current.reload().then(() => setSel({ kind: "report", id: f.run_id }));
     });
     return () => {
       void a.then((f) => f());
@@ -60,7 +78,7 @@ export function RunnerView(props: { workspaceId: string; tree: TreeNode[]; envir
   const runScenario = (s: Scenario) => (s.trusted === false ? setConfirmUntrusted(s) : void start({ kind: "scenario", scenario_id: s.id }, s.name));
 
   return (
-    <div className="main" style={{ ["--sidebar-w" as string]: "290px" }}>
+    <div className="main" style={{ ["--sidebar-w" as string]: "290px", display: props.hidden ? "none" : undefined }}>
       <aside className="sidebar" aria-label="Scenarios and run reports">
         <div className="side-body">
           <div className="row" style={{ marginBottom: 6 }}>

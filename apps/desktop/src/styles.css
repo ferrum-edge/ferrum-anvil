@@ -233,6 +233,7 @@ fieldset.box legend { color: var(--text-3); font-size: 11px; text-transform: upp
 .viewswitch { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
 .viewswitch button { border: none; background: transparent; padding: 5px 12px; cursor: pointer; color: var(--text-2); }
 .viewswitch button[aria-pressed="true"] { background: var(--bg-active); color: var(--text); }
+.viewswitch .live-dot { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
 fieldset.choices { border: 0; padding: 0; margin: 0; display: grid; gap: 8px; }
 label.choice { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 label.choice.selected { border-color: var(--accent); }
