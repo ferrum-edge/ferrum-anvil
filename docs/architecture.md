@@ -125,6 +125,17 @@ CLI (`anvil`) = same anvil-app services without a webview.
    are not run, and a response below HTTP 400 gets the application status
    `not_evaluated`. A collection run keeps a content-encoded body in history
    only when it was fully decoded and holds no sensitive run value.
+   Complete transport consumption is also distinct from complete body
+   evidence. When only a prefix of the body is available (the body exceeded
+   `limits.capture_bytes`, or an HTTP response ended before its framing
+   completed, was canceled, or stopped at `max_response_bytes`), body
+   assertions fail as not evaluated and body extractions are not run, so a
+   prefix never passes a whole-body check or publishes a shortened value.
+   Status, header, trailer, latency and transport assertions still run. A
+   `partial_visibility` warning names the gap when the request has
+   assertions or extractions. For a streaming session (WebSocket, gRPC
+   stream, SSE, TCP, UDP), which ends on its own terms, only the capture
+   limit counts.
 5. **Diagnose.** `anvil-diagnostics` turns the typed evidence into
    findings. It uses Ferrum markers only for destinations declared as Ferrum
    gateways, caps their confidence (see `docs/diagnostics.md`), and orders

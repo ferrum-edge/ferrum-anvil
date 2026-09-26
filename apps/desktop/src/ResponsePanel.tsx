@@ -265,7 +265,7 @@ function Body({ view }: { view: ExecutionView }) {
       </div>
       {resp.body.display_truncated && (
         <div className="warn-box">
-          Showing the first {fmtBytes(resp.body.captured_bytes)} (display/history limit). The response itself {resp.body.completeness === "complete" ? "completed normally" : "did not complete"}.
+          Showing the first {fmtBytes(resp.body.captured_bytes)} (display/history limit). The response itself {resp.body.completeness === "complete" ? "completed normally" : "did not complete"}. Body assertions and extractions were not evaluated against this prefix.
         </div>
       )}
       {resp.body.completeness === "incomplete" && <div className="bad-box">This body is incomplete: the stream ended before its framing finished. Do not treat it as a full response.</div>}

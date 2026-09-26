@@ -19,7 +19,7 @@ request's own layers:
 | Field | Value | Why |
 |---|---|---|
 | `keepalive` | `true` for `persistent`, `false` for `fresh` | the plan's connection mode (HTTP pools and gRPC channels) |
-| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send; the full body is still read and counted |
+| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send; the full body is still read and counted, but body assertions and extractions are not evaluated when it exceeds the capture |
 
 It also appends iteration-scoped variable layers (lowest to highest
 precedence): `load` (`{{anvil.iteration}}`, `{{anvil.vu}}`), the dataset row,
@@ -421,7 +421,7 @@ Observations that shaped the implementation:
 | Virtual users / concurrency / `max_in_flight` | ≤ 5,000 / ≤ 5,000 / ≤ 10,000 |
 | Arrival rate / duration / iterations | ≤ 100,000/s / ≤ 24 h / ≤ 100 M |
 | Chain length | ≤ 64 steps |
-| In-memory response capture per send | ≤ 1 MiB (never above the request's setting) |
+| Response bytes captured per send | ≤ 1 MiB by default (the executor's `response_capture_bytes`; never above the request's `limits.capture_bytes`, which is 8 MiB by default) |
 | Metric shards | ≤ 8 |
 | Timeline | ≤ 3,600 buckets |
 | Failure categories / examples / example length | 32 / 5 / 400 chars |

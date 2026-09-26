@@ -405,6 +405,127 @@ async fn unsupported_content_coding_is_recorded_and_not_evaluated() {
     assert!(o.record.response.as_ref().unwrap().body.decoding_detail.as_deref().unwrap().contains("compress"));
 }
 
+fn with_limits(ctx: &mut ExecutionContext, limits: Limits) {
+    ctx.settings_layers.push(("run".into(), SettingsOverrides { limits: Some(limits), ..Default::default() }));
+}
+
+/// Whole-body checks a prefix would wrongly pass: the absence of a word that
+/// lies past the prefix, equality with the prefix itself, and a token that
+/// the prefix cuts short. The status check does not read the body.
+fn token_checks(ctx: &mut ExecutionContext) {
+    ctx.spec.assertions = vec![
+        labeled("absent", AssertionKind::Body { comparison: Comparison::NotContains, value: "FORBIDDEN".into() }),
+        labeled("equals", AssertionKind::Body { comparison: Comparison::Equals, value: "token=abc".into() }),
+        labeled("status", AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() }),
+    ];
+    let token = ExtractionSource::Regex { pattern: "token=(\\w+)".into(), group: 1 };
+    ctx.spec.extractions = vec![Extraction { variable: "token".into(), source: token, sensitive: false }];
+}
+
+/// A body that is only partly available: body assertions fail as not
+/// evaluated with `why` in their message, nothing is extracted, the status
+/// assertion still runs and a `partial_visibility` warning explains it.
+fn assert_partial_body_not_evaluated(o: &ExecutionOutput, body_labels: &[&str], why: &str) {
+    for label in body_labels {
+        let r = result(o, label);
+        assert!(!r.passed && r.message.contains(why), "{r:?}");
+    }
+    assert!(result(o, "status").passed, "assertions that do not read the body still run");
+    assert_eq!(o.record.outcome.assertions, AssertionState::Fail);
+    assert!(o.extracted.is_empty() && o.record.extracted.is_empty(), "no extraction from a partial body: {:?}", o.extracted);
+    assert!(
+        o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility && w.message.contains(why)),
+        "{:?}",
+        o.record.outcome.warnings
+    );
+}
+
+#[tokio::test]
+async fn capture_truncated_uncompressed_body_is_not_evaluated() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(&format!("/status/200?ct=text/plain&body={}", url_encode("token=abcDEF;FORBIDDEN"))));
+    with_limits(&mut ctx, Limits { capture_bytes: 9, ..Limits::default() });
+    token_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    // The transport read the whole body; only the retained evidence is partial.
+    assert_eq!(r.body.completeness, BodyCompleteness::Complete);
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+    assert_eq!((r.body.wire_bytes, r.body.captured_bytes, r.body.display_truncated), (22, 9, true));
+    assert_eq!(r.body.decoding, None, "no content-coding was involved");
+    assert_eq!(&o.body[..], b"token=abc", "the prefix stays viewable");
+    assert_partial_body_not_evaluated(&o, &["absent", "equals"], "only 9 of 22 received body bytes were captured");
+}
+
+#[tokio::test]
+async fn complete_capture_evaluates_the_whole_body() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(&format!("/status/200?ct=text/plain&body={}", url_encode("token=abcDEF;FORBIDDEN"))));
+    with_limits(&mut ctx, Limits { capture_bytes: 1024, ..Limits::default() });
+    token_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    assert!(!o.record.response.as_ref().unwrap().body.display_truncated);
+    assert!(!result(&o, "absent").passed && !result(&o, "absent").message.contains("captured"));
+    assert!(!result(&o, "equals").passed);
+    assert!(result(&o, "status").passed);
+    assert_eq!(o.extracted, vec![("token".to_string(), "abcDEF".to_string(), false)]);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+}
+
+#[tokio::test]
+async fn capture_truncation_without_checks_adds_no_warning() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(&format!("/status/200?ct=text/plain&body={}", url_encode("token=abcDEF;FORBIDDEN"))));
+    with_limits(&mut ctx, Limits { capture_bytes: 9, ..Limits::default() });
+    let o = run(&e, &ctx).await;
+    assert!(o.record.response.as_ref().unwrap().body.display_truncated);
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+}
+
+#[tokio::test]
+async fn interrupted_body_is_not_evaluated() {
+    init();
+    let f = raw::serve("127.0.0.1:0", RawMode::ShortBody { declared: 500, sent: 20 }, None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url(false, "/"));
+    ctx.spec.assertions = vec![
+        labeled("absent", AssertionKind::Body { comparison: Comparison::NotContains, value: "z".into() }),
+        labeled("status", AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() }),
+    ];
+    let run_of_y = ExtractionSource::Regex { pattern: "(y+)".into(), group: 1 };
+    ctx.spec.extractions = vec![Extraction { variable: "ys".into(), source: run_of_y, sensitive: false }];
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.body.completeness, BodyCompleteness::Incomplete);
+    assert!(!r.body.display_truncated, "everything received was captured");
+    assert_eq!(o.record.outcome.transport, TransportState::Incomplete);
+    assert_partial_body_not_evaluated(&o, &["absent"], "the response ended before its framing completed after 20 bytes");
+}
+
+#[tokio::test]
+async fn capture_truncated_compressed_body_is_not_evaluated() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = ctx_for(&f.url("/gzip"));
+    with_limits(&mut ctx, Limits { capture_bytes: 12, ..Limits::default() });
+    body_checks(&mut ctx);
+    let o = run(&e, &ctx).await;
+    let r = o.record.response.as_ref().unwrap();
+    assert_eq!(r.body.content_encoding.as_deref(), Some("gzip"));
+    assert_eq!(r.body.completeness, BodyCompleteness::Complete);
+    assert!(r.body.display_truncated && r.body.captured_bytes == 12, "{:?}", r.body);
+    // Whatever a decoder makes of the prefix, the capture is what is missing.
+    assert_partial_body_not_evaluated(&o, &["body"], "only 12 of");
+}
+
 /// True when `secret` can be read from `text` directly or after undoing up
 /// to three layers of percent-encoding (with `+` read either way).
 fn reveals(text: &str, secret: &str) -> bool {
