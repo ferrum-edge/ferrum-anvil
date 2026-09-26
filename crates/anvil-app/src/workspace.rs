@@ -160,10 +160,11 @@ impl App {
 
     /// Delete a folder, its subfolders and their requests.
     pub fn delete_folder(&self, id: &Id) -> Result<()> {
-        let f = self.folder(id)?;
-        // Read the tree inside the transaction, so a folder or request created
-        // under a doomed folder meanwhile is deleted with it, not orphaned.
-        self.store.atomically(|s| {
+        // Read the folder and its tree inside the transaction, so a folder or
+        // request created under a doomed folder meanwhile is deleted with it,
+        // not orphaned.
+        let deleted = self.store.atomically(|s| {
+            let Some(f) = s.get::<Folder>(kind::FOLDER, id)? else { return Ok(false) };
             let all: Vec<Folder> = s.list(kind::FOLDER, Some(&f.workspace_id))?;
             let mut doomed = vec![*id];
             let mut i = 0;
@@ -179,8 +180,11 @@ impl App {
             for d in &doomed {
                 s.delete(kind::FOLDER, d)?;
             }
-            Ok(())
+            Ok(true)
         })?;
+        if !deleted {
+            return Err(AppError::NotFound("folder".into()));
+        }
         Ok(())
     }
 

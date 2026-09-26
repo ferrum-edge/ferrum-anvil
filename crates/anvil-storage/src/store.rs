@@ -48,8 +48,14 @@ pub enum StoreError {
     TransactionActive,
     /// A transaction could not be rolled back, so the connection is still
     /// inside it. Nothing further runs on the connection until it has ended.
-    #[error("a store transaction could not be rolled back")]
-    TransactionNotEnded,
+    #[error("a store transaction could not be rolled back{}", after(.original))]
+    TransactionNotEnded {
+        /// Why the last rollback failed, when SQLite gave a reason.
+        #[source]
+        cause: Option<rusqlite::Error>,
+        /// The error the transaction was already failing with, if any.
+        original: Option<Box<StoreError>>,
+    },
     #[error("database: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("serialization: {0}")]
@@ -59,6 +65,10 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+fn after(original: &Option<Box<StoreError>>) -> String {
+    original.as_ref().map(|e| format!(" after: {e}")).unwrap_or_default()
+}
 
 /// Object kinds stored in the `objects` table.
 pub mod kind {
@@ -239,7 +249,7 @@ impl Store {
         let conn = self.conn.lock();
         // A transaction still open here was left by a failed rollback and
         // belongs to no caller: end it rather than run inside it.
-        end_transaction(&conn)?;
+        end_transaction(&conn, Ok(()))?;
         Ok(conn)
     }
 
@@ -556,24 +566,37 @@ impl Store {
     /// [`StoreError::TransactionActive`] instead of deadlocking. `f` must not
     /// wait on another thread that uses this store.
     pub fn atomically<R>(&self, f: impl FnOnce(&StoreTx<'_>) -> Result<R>) -> Result<R> {
+        self.transaction(TransactionBehavior::Immediate, f)
+    }
+
+    /// Run `f`, which only reads, against one consistent state of the store.
+    /// Same guarantees as [`Store::atomically`], but the transaction is
+    /// `DEFERRED`: it takes no write lock unless `f` writes.
+    pub fn read_consistently<R>(&self, f: impl FnOnce(&StoreTx<'_>) -> Result<R>) -> Result<R> {
+        self.transaction(TransactionBehavior::Deferred, f)
+    }
+
+    fn transaction<R>(&self, behavior: TransactionBehavior, f: impl FnOnce(&StoreTx<'_>) -> Result<R>) -> Result<R> {
         let _ = self.key()?;
         let mut conn = self.conn()?;
         // Declared after `conn` so the owner is cleared before the lock is
-        // released, and before `tx` so the transaction ends first.
+        // released.
         let _owner = TxOwner::claim(&self.tx_owner);
-        let tx = StoreTx { store: self, tx: conn.transaction_with_behavior(TransactionBehavior::Immediate)? };
-        let r = match f(&tx) {
-            Ok(r) => tx.tx.commit().map(|()| r).map_err(StoreError::from),
-            Err(e) => {
-                // A failed rollback is caught and reported just below.
-                let _ = tx.tx.rollback();
-                Err(e)
+        // The transaction borrows `conn`, so it ends with this block.
+        let r = {
+            let tx = StoreTx { store: self, tx: conn.transaction_with_behavior(behavior)? };
+            match f(&tx) {
+                Ok(r) => tx.tx.commit().map(|()| r).map_err(StoreError::from),
+                Err(e) => {
+                    // A failed rollback is caught and reported just below.
+                    let _ = tx.tx.rollback();
+                    Err(e)
+                }
             }
         };
         // A failed commit or rollback can leave the transaction open; never
         // release the connection inside it.
-        end_transaction(&conn)?;
-        r
+        end_transaction(&conn, r)
     }
 
     /// Consistent copy of the database (ciphertext) for restore checkpoints.
@@ -601,17 +624,18 @@ impl Store {
 }
 
 /// Roll back any transaction still open on `conn` and confirm it ended, so a
-/// connection is never handed on inside a transaction.
-fn end_transaction(conn: &Connection) -> Result<()> {
+/// connection is never handed on inside a transaction. `r` is the outcome of
+/// the work done on `conn`; if the transaction cannot be ended, its error is
+/// kept in the returned [`StoreError::TransactionNotEnded`].
+fn end_transaction<R>(conn: &Connection, r: Result<R>) -> Result<R> {
     if conn.is_autocommit() {
-        return Ok(());
+        return r;
     }
-    let r = conn.execute_batch("ROLLBACK");
+    let cause = conn.execute_batch("ROLLBACK").err();
     if conn.is_autocommit() {
-        return Ok(());
+        return r;
     }
-    r?;
-    Err(StoreError::TransactionNotEnded)
+    Err(StoreError::TransactionNotEnded { cause, original: r.err().map(Box::new) })
 }
 
 /// Marks the current thread as the transaction owner until dropped. Claimed

@@ -118,7 +118,7 @@ impl App {
     /// Dry run: validate and plan without mutating anything.
     pub fn import_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let opened = bundle::open(bytes, passphrase)?;
-        let plan = plan::plan(&opened.graph, &self.store.atomically(existing_ids)?, policy);
+        let plan = plan::plan(&opened.graph, &self.store.read_consistently(existing_ids)?, policy);
         Ok(ImportReport {
             plan,
             warnings: opened.warnings,

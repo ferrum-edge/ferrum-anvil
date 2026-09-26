@@ -221,3 +221,20 @@ fn every_transaction_ends_before_the_connection_is_released() {
     assert_no_open_transaction(dir.path());
     assert_eq!(name(&store, &id).as_deref(), Some("committed"));
 }
+
+#[test]
+fn consistent_reads_take_no_write_lock() {
+    let (dir, store, _dek) = open();
+    let id = Id::new();
+    store.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "kept"})).unwrap();
+
+    let r: Result<Option<Value>, StoreError> = store.read_consistently(|tx| {
+        let seen = tx.get(kind::WORKSPACE, &id)?;
+        let other = rusqlite::Connection::open(dir.path().join(DB_FILE)).unwrap();
+        other.busy_timeout(Duration::ZERO).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").expect("a consistent read took the write lock");
+        Ok(seen)
+    });
+    assert_eq!(r.unwrap().unwrap()["name"], "kept");
+    assert_no_open_transaction(dir.path());
+}
