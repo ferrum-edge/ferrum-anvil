@@ -272,6 +272,8 @@ struct Shared {
     warmup: Duration,
     bucket_width_secs: u64,
     engines: Vec<OnceLock<Arc<Engine>>>,
+    /// Idle connections each slot's engine keeps per pool ([`slot_idle_cap`]).
+    slot_idle: usize,
     tokens: Arc<anvil_auth::oauth::TokenCache>,
     ledger: Mutex<LedgerState>,
     shards: Vec<Mutex<Shard>>,
@@ -304,18 +306,52 @@ fn derive_seed(plan_seed: u64, ctx_seed: u64, iteration: u64, step: u64) -> u64 
     splitmix64(plan_seed ^ splitmix64(ctx_seed ^ splitmix64(iteration.wrapping_mul(1_000_003).wrapping_add(step))))
 }
 
+/// Bounds of the idle connections one slot's engine keeps in total, per
+/// pool.
+const SLOT_MIN_IDLE: usize = 4;
+const SLOT_MAX_IDLE: usize = 64;
+
+/// Idle connections one slot keeps in total: one per distinct request of the
+/// plan (chain steps or mix entries), within 4..=64. Each request sends to
+/// one pool key at a time, so a persistent chain or mix touching up to 64
+/// requests finds each one's connection still pooled on the next iteration
+/// instead of the global cap closing it just before its reuse. Requests
+/// beyond that (or redirects to other destinations) share the cap.
+fn slot_idle_cap(ids: &[Id]) -> usize {
+    let distinct: std::collections::HashSet<&Id> = ids.iter().collect();
+    distinct.len().clamp(SLOT_MIN_IDLE, SLOT_MAX_IDLE)
+}
+
+/// Idle HTTP/1.1 and HTTP/2 connections one slot's engine keeps. A slot
+/// sends one request at a time, so it rarely has more than one connection
+/// per destination to return; the caps keep a run with many slots from
+/// holding slots × 64 idle sockets (the default cap of an engine) unless
+/// its plan touches that many destinations.
+fn slot_http_pool(idle_total: usize) -> anvil_transport::http::PoolLimits {
+    anvil_transport::http::PoolLimits { max_idle_per_key: 2, max_idle_total: idle_total, ..Default::default() }
+}
+
+/// Idle QUIC connections one slot's engine keeps (one per destination).
+fn slot_h3_pool(idle_total: usize) -> anvil_transport::h3::PoolLimits {
+    anvil_transport::h3::PoolLimits { max_idle_total: idle_total, ..Default::default() }
+}
+
+/// The engine of one slot: its own small connection pools and gRPC
+/// channels, and the run's shared token cache.
+fn slot_engine(tokens: Arc<anvil_auth::oauth::TokenCache>, idle_total: usize) -> Engine {
+    let mut e = Engine::new();
+    e.http = Arc::new(anvil_transport::http::HttpTransport::with_pool_limits(slot_http_pool(idle_total)));
+    e.h3 = anvil_transport::h3::H3Transport::with_pool_limits(slot_h3_pool(idle_total));
+    e.tokens = tokens;
+    // gRPC calls reuse this slot's channels while keep-alive is on (the
+    // persistent connection mode); fresh mode turns it off.
+    e.grpc_channels = Some(Arc::new(anvil_transport::grpc::Channels::new()));
+    e
+}
+
 impl Shared {
     fn engine(&self, slot: usize) -> Arc<Engine> {
-        self.engines[slot]
-            .get_or_init(|| {
-                let mut e = Engine::new();
-                e.tokens = self.tokens.clone();
-                // gRPC calls reuse this slot's channels while keep-alive is on
-                // (the persistent connection mode); fresh mode turns it off.
-                e.grpc_channels = Some(Arc::new(anvil_transport::grpc::Channels::new()));
-                Arc::new(e)
-            })
-            .clone()
+        self.engines[slot].get_or_init(|| Arc::new(slot_engine(self.tokens.clone(), self.slot_idle))).clone()
     }
 
     fn shard(&self, slot: usize) -> &Mutex<Shard> {
@@ -814,6 +850,8 @@ pub struct LoadRun {
     mix_cumulative: Vec<u64>,
     dataset: Option<Dataset>,
     slots: usize,
+    /// Idle connections each slot's engine keeps per pool ([`slot_idle_cap`]).
+    slot_idle: usize,
     /// Validated total schedule length in seconds; 0 for fixed-iteration runs.
     /// Every deadline in [`LoadRun::execute_lockable`] derives from this value.
     planned_secs: u64,
@@ -934,6 +972,7 @@ impl LoadRun {
         if plan.mix.is_empty() && ids.len() > MAX_CHAIN_STEPS {
             return Err(LoadError::Invalid(format!("the chain has {} steps; the limit is {MAX_CHAIN_STEPS}", ids.len())));
         }
+        let slot_idle = slot_idle_cap(&ids);
         let limits = validate_workload(&plan)?;
         let slots = limits.slots;
         let planned_secs = limits.planned_secs;
@@ -987,7 +1026,7 @@ impl LoadRun {
             started_at: Utc::now(),
             unit,
         };
-        Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1), planned_secs })
+        Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1), slot_idle, planned_secs })
     }
 
     pub fn meta(&self) -> &RunMeta {
@@ -1004,7 +1043,7 @@ impl LoadRun {
     /// cancelling `lock` stops the run like a user cancel but records
     /// `stopped_by_lock`.
     pub async fn execute_lockable(self, cancel: CancellationToken, lock: CancellationToken, progress: Option<ProgressSink>) -> LoadReport {
-        let LoadRun { mut meta, opts, steps, units, mix_cumulative, dataset, slots, planned_secs } = self;
+        let LoadRun { mut meta, opts, steps, units, mix_cumulative, dataset, slots, slot_idle, planned_secs } = self;
         let plan = meta.plan.clone();
         let proto = Engine::new();
         let shard_count = slots.clamp(1, MAX_SHARDS);
@@ -1020,6 +1059,7 @@ impl LoadRun {
             warmup: Duration::from_secs(plan.warmup_secs),
             bucket_width_secs: planned_secs.div_ceil(MAX_TIMELINE_BUCKETS).max(1),
             engines: (0..slots).map(|_| OnceLock::new()).collect(),
+            slot_idle,
             tokens: proto.tokens.clone(),
             ledger: Mutex::new(LedgerState::default()),
             shards: (0..shard_count).map(|_| Mutex::new(Shard { metrics: Metrics::new(), pending: BTreeMap::new() })).collect(),
@@ -1187,6 +1227,30 @@ impl LoadRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_engines_keep_small_connection_pools() {
+        let e = slot_engine(Arc::new(anvil_auth::oauth::TokenCache::new()), 6);
+        let http = e.http.pool.limits();
+        assert_eq!((http.max_idle_per_key, http.max_idle_total), (2, 6));
+        assert_eq!(http.idle_ttl, anvil_transport::http::PoolLimits::default().idle_ttl);
+        assert_eq!(e.h3.pool_limits().max_idle_total, 6);
+        assert!(e.grpc_channels.is_some());
+    }
+
+    #[test]
+    fn slot_idle_cap_follows_the_distinct_requests_of_the_plan() {
+        let ids: Vec<Id> = (0..100).map(|_| Id::new()).collect();
+        assert_eq!(slot_idle_cap(&ids[..1]), SLOT_MIN_IDLE);
+        assert_eq!(slot_idle_cap(&ids[..6]), 6);
+        // A request used by several steps is one destination.
+        let repeated = [ids[0], ids[1], ids[0], ids[2], ids[1], ids[3], ids[4]];
+        assert_eq!(slot_idle_cap(&repeated), 5);
+        assert_eq!(slot_idle_cap(&ids[..MAX_CHAIN_STEPS]), MAX_CHAIN_STEPS);
+        assert_eq!(slot_idle_cap(&ids), SLOT_MAX_IDLE);
+        assert!(SLOT_MAX_IDLE <= anvil_transport::http::PoolLimits::default().max_idle_total);
+        assert!(SLOT_MAX_IDLE <= anvil_transport::h3::PoolLimits::default().max_idle_total);
+    }
 
     #[test]
     fn weighted_pick_is_seeded_and_proportional() {
