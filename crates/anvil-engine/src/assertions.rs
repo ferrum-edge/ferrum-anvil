@@ -131,10 +131,14 @@ fn not_fully_decoded(reason: &str) -> String {
     format!("the response body was not fully decoded ({reason})")
 }
 
+/// Comparisons and validation use the original values; only the evidence a
+/// result carries (label, actual value, messages) is redacted, since results
+/// are persisted in the execution record and printed by the CLI.
 pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor) -> Vec<AssertionResult> {
     let mut out = Vec::new();
     for a in assertions.iter().filter(|a| a.enabled) {
         let label = if a.label.is_empty() { default_label(&a.kind) } else { a.label.clone() };
+        let label = redactor.text(&label);
         let res: Result<(bool, Option<String>), String> = (|| {
             if let Some(reason) = o.body_unavailable
                 && reads_body(&a.kind)
@@ -156,7 +160,7 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                 }
                 AssertionKind::Trailer { name, comparison, value } => {
                     let v = o.response.and_then(|r| r.trailer_values(name).first().map(|s| s.to_string()));
-                    (compare(*comparison, v.as_deref(), value)?, v)
+                    (compare(*comparison, v.as_deref(), value)?, v.map(|x| redactor.header(name, &x)))
                 }
                 AssertionKind::JsonPath { path, comparison, value } => {
                     let v = json_path(o.body, path)?;
@@ -172,7 +176,8 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                     let validator = jsonschema::validator_for(&schema).map_err(|e| format!("invalid schema: {e}"))?;
                     let errors: Vec<String> =
                         validator.iter_errors(&instance).take(5).map(|e| format!("{} at {}", e, e.instance_path())).collect();
-                    (errors.is_empty(), if errors.is_empty() { None } else { Some(errors.join("; ")) })
+                    // Validator messages quote the offending instance values.
+                    (errors.is_empty(), if errors.is_empty() { None } else { Some(redactor.text(&errors.join("; "))) })
                 }
                 AssertionKind::Body { comparison, value } => {
                     let text = String::from_utf8_lossy(o.body);
@@ -199,6 +204,8 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                 }
             })
         })();
+        // Evaluation errors can quote the body or the assertion's own values.
+        let res = res.map_err(|e| redactor.text(&e));
         match res {
             Ok((passed, actual)) => out.push(AssertionResult {
                 label: label.clone(),

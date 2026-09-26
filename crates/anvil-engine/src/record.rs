@@ -244,7 +244,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
                 extracted.push(name.clone());
                 extracted_values.push((name, value, sensitive));
             }
-            Err(e) => warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: e }),
+            Err(e) => warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&e) }),
         }
     }
 
@@ -497,5 +497,83 @@ mod tests {
         assert_eq!(htu, format!("auth dpop.htu: https://h/u/{REDACTED}/x"));
         assert_eq!(redact_inferred("auth hmac.nonce: n-path-secret-7f3a", &r), format!("auth hmac.nonce: n-{REDACTED}"));
         assert_eq!(redact_inferred("Accept-Encoding: gzip, br", &r), "Accept-Encoding: gzip, br");
+    }
+
+    #[test]
+    fn extraction_regex_errors_are_redacted_in_the_stored_record() {
+        let secret = "known-secret-7f3a";
+        let spec = anvil_domain::request::RequestSpec {
+            extractions: vec![anvil_domain::assertions::Extraction {
+                variable: "value".into(),
+                source: anvil_domain::assertions::ExtractionSource::Regex { pattern: format!("{secret}("), group: 0 },
+                sensitive: false,
+            }],
+            ..anvil_domain::request::RequestSpec::http("GET", "https://example.test/")
+        };
+        let ctx = ExecutionContext::standalone(spec);
+        let redactor = Redactor::new(vec![secret.into()], vec![]);
+        let started_at = Utc::now();
+        let response = ResponseRecord {
+            status: 200,
+            reason: None,
+            http_version: "HTTP/1.1".into(),
+            headers: vec![],
+            trailers: vec![],
+            trailers_received: false,
+            body: BodyCapture {
+                completeness: BodyCompleteness::Complete,
+                wire_bytes: 4,
+                declared_length: Some(4),
+                captured_bytes: 4,
+                display_truncated: false,
+                content_type: None,
+                content_encoding: None,
+                decoded_bytes: None,
+                decoding: None,
+                decoding_detail: None,
+                blob_sha256: None,
+            },
+        };
+        let output = assemble(Assembly {
+            ctx: &ctx,
+            started_at,
+            prepared_method: "GET".into(),
+            prepared_url: "https://example.test/".into(),
+            prepared_headers: vec![],
+            prepared_body: Bytes::new(),
+            content_type: None,
+            auth_label: "none".into(),
+            auth_facts: vec![],
+            settings: EffectiveSettings::default(),
+            tls_profile: None,
+            proxy: None,
+            tls_verification_enabled: true,
+            inferred: vec![],
+            lint_bypassed: None,
+            attempts: vec![],
+            last: AttemptOutput {
+                observation: anvil_transport::session::new_attempt(0, AttemptReason::Initial, "GET", "https://example.test/"),
+                response: Some(response),
+                body: Bytes::from_static(b"body"),
+            },
+            trust: FerrumTrust::NotConfigured,
+            credentials_stripped: false,
+            protocol_fallback_from: None,
+            redactor: &redactor,
+            extra_findings: vec![],
+            stream: None,
+            protocol_status_override: None,
+            workload_api: None,
+        });
+
+        let warning = output
+            .record
+            .outcome
+            .warnings
+            .iter()
+            .find(|warning| warning.code == WarningCode::PartialVisibility)
+            .expect("invalid extraction regex should produce a warning");
+        assert!(!warning.message.contains(secret));
+        assert!(warning.message.contains(REDACTED));
     }
 }
