@@ -4,6 +4,10 @@ import { useEffect, useState } from "react";
 import { api, onLocked, type Status } from "./api";
 import { LockScreen } from "./LockScreen";
 import { Workbench } from "./Workbench";
+import logo from "./assets/ferrum-anvil-logo.webp";
+
+// Decode the lock-screen logo up front so a lock shows it immediately.
+if (typeof Image !== "undefined") new Image().src = logo;
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);

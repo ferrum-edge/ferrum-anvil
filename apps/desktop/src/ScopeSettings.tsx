@@ -32,25 +32,30 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
       wide
       onClose={props.onClose}
       footer={
-        <button
-          className="btn primary"
-          onClick={async () => {
-            setErr(null);
-            try {
-              if (props.target.kind === "folder" && folder) {
-                await api.saveFolder(folder);
-                props.onSaved();
-              } else if (ws) {
-                props.onSaved(await api.saveWorkspace(ws));
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button
+            className="btn primary"
+            onClick={async () => {
+              setErr(null);
+              try {
+                if (props.target.kind === "folder" && folder) {
+                  await api.saveFolder(folder);
+                  props.onSaved();
+                } else if (ws) {
+                  props.onSaved(await api.saveWorkspace(ws));
+                }
+                props.onClose();
+              } catch (e) {
+                setErr(String((e as Error).message));
               }
-              props.onClose();
-            } catch (e) {
-              setErr(String((e as Error).message));
-            }
-          }}
-        >
-          Save
-        </button>
+            }}
+          >
+            Save
+          </button>
+        </>
       }
     >
       <Tabs
@@ -81,7 +86,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
       )}
       {tab === "settings" && <SettingsOverridesEditor value={settings} onChange={(s) => patch({ settings: s })} profiles={props.profiles} />}
       {tab === "about" && (
-        <div className="col">
+        <div className="form">
           <label className="lbl">
             Name
             <input className="field" value={obj.name} onChange={(e) => patch({ name: e.target.value })} />

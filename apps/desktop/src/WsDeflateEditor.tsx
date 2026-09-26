@@ -24,7 +24,7 @@ export function WsDeflateEditor(props: { value?: WsDeflateOffer | null; onChange
     </label>
   );
   return (
-    <fieldset className="col" aria-label="Compression">
+    <fieldset aria-label="Compression">
       <legend>Compression</legend>
       <label className="check">
         <input type="checkbox" checked={!!v.enabled} onChange={(e) => set({ enabled: e.target.checked })} />
@@ -32,7 +32,7 @@ export function WsDeflateEditor(props: { value?: WsDeflateOffer | null; onChange
       </label>
       {v.enabled && (
         <>
-          <div className="row">
+          <div className="col tight">
             <label className="check">
               <input type="checkbox" checked={!!v.server_no_context_takeover} onChange={(e) => set({ server_no_context_takeover: e.target.checked })} />
               Ask the server to compress each message on its own (server_no_context_takeover)
@@ -42,7 +42,7 @@ export function WsDeflateEditor(props: { value?: WsDeflateOffer | null; onChange
               Compress each of Anvil's messages on its own (client_no_context_takeover)
             </label>
           </div>
-          <div className="row">
+          <div className="fields">
             {bits(v.server_max_window_bits, "Not requested", "server_max_window_bits", (b) => set({ server_max_window_bits: b }))}
             {bits(v.client_max_window_bits, "Offered without a value", "client_max_window_bits", (b) => set({ client_max_window_bits: b }))}
           </div>
@@ -75,7 +75,7 @@ export function WsExtensionsEvidence({ e }: { e: WsExtensions }) {
   const d = e.deflate;
   return (
     <div className="col" data-testid="ws-extensions">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>WebSocket extensions</h4>
+      <h4 className="section-title">WebSocket extensions</h4>
       <table className="grid">
         <tbody>
           <tr>

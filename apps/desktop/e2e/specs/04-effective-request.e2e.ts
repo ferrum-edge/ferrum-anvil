@@ -18,7 +18,7 @@ describe("effective request", () => {
   async function addHeader(name: string, value: string) {
     const names = () => $$('.editor .kv input[placeholder="name"]');
     const before = await names().length;
-    await $('//div[contains(concat(" ", normalize-space(@class), " "), " kv ")]//button[normalize-space()="+ Add"]').click();
+    await $('//div[contains(concat(" ", normalize-space(@class), " "), " kv ")]//button[normalize-space()="Add"]').click();
     await browser.waitUntil(async () => (await names().length) > before);
     await (await names())[before].setValue(name);
     await (await $$('.editor .kv input[placeholder="value or {{variable}}"]'))[before].setValue(value);

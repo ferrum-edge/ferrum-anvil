@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, onOAuthFlow, type FlowEvent, type JwtInspection, type SendInput, type TokenSummary } from "./api";
 import type { AuthConfig, DpopConfig, HmacConfig, JwtAlgorithm, OAuth2Config, SensitiveValue, WsseConfig } from "./generated/contracts";
 import { Modal, SecretField } from "./ui";
+import { Icon } from "./icons";
 import { JwtSvidFields, defaultJwtSvid } from "./WorkloadApi";
 
 const TYPES: { id: AuthConfig["type"]; label: string }[] = [
@@ -60,10 +61,11 @@ export function AuthEditor(props: {
   /** The request this auth belongs to (enables interactive OAuth sign-in). */
   signInInput?: SendInput | null;
 }) {
-  const a = props.value;
   const types = TYPES.filter((t) => (props.allowInherit === false ? t.id !== "inherit" : true) && (!props.nested || (t.id !== "multi" && t.id !== "inherit")));
+  // Where "inherit" is not offered (the workspace), there is nothing to inherit: it means no auth.
+  const a: AuthConfig = props.value.type === "inherit" && !types.some((t) => t.id === "inherit") ? { type: "none" } : props.value;
   return (
-    <div className="col" style={{ gap: 12, maxWidth: 760 }}>
+    <div className={props.nested ? "col" : "form"}>
       <label className="lbl">
         Type
         <select className="field" value={a.type} onChange={(e) => props.onChange(defaults(e.target.value as AuthConfig["type"]))}>
@@ -74,7 +76,7 @@ export function AuthEditor(props: {
           ))}
         </select>
       </label>
-      <Fields {...props} />
+      <Fields {...props} value={a} />
     </div>
   );
 }
@@ -98,7 +100,7 @@ function Fields({
     case "api_key":
       return (
         <>
-          <div className="row">
+          <div className="fields">
             <label className="lbl grow">
               Name
               <input className="field mono" value={a.name} onChange={(e) => onChange({ ...a, name: e.target.value })} />
@@ -130,7 +132,7 @@ function Fields({
       return (
         <>
           <SecretField label="Token" value={a.token} onChange={(token) => onChange({ ...a, token })} workspaceId={workspaceId} />
-          <label className="lbl" style={{ maxWidth: 200 }}>
+          <label className="lbl narrow">
             Prefix
             <input className="field mono" value={a.prefix ?? "Bearer"} onChange={(e) => onChange({ ...a, prefix: e.target.value })} />
           </label>
@@ -159,8 +161,8 @@ function Fields({
         <div className="col">
           <p className="hint">Each profile is applied in order to the same final request (for example an API key plus a JWT). Body-dependent signatures run last over the final bytes.</p>
           {a.profiles.map((p, i) => (
-            <fieldset key={i} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-              <legend className="faint">Profile {i + 1}</legend>
+            <fieldset key={i}>
+              <legend>Profile {i + 1}</legend>
               <AuthEditor
                 value={p}
                 nested
@@ -168,13 +170,15 @@ function Fields({
                 signInInput={signInInput}
                 onChange={(np) => onChange({ ...a, profiles: a.profiles.map((x, j) => (j === i ? np : x)) })}
               />
-              <button className="btn small danger" style={{ marginTop: 8 }} onClick={() => onChange({ ...a, profiles: a.profiles.filter((_, j) => j !== i) })}>
+              <button className="btn small ghost danger start" onClick={() => onChange({ ...a, profiles: a.profiles.filter((_, j) => j !== i) })}>
+                <Icon name="trash" size={13} />
                 Remove
               </button>
             </fieldset>
           ))}
-          <button className="btn small" style={{ alignSelf: "start" }} onClick={() => onChange({ ...a, profiles: [...a.profiles, defaults("api_key")] })}>
-            + Add profile
+          <button className="btn small start" onClick={() => onChange({ ...a, profiles: [...a.profiles, defaults("api_key")] })}>
+            <Icon name="plus" size={14} />
+            Add profile
           </button>
         </div>
       );
@@ -187,7 +191,7 @@ function JwtFields({ a, onChange, workspaceId }: { a: Extract<AuthConfig, { type
   const hmac = a.algorithm.startsWith("HS");
   return (
     <>
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Algorithm
           <select className="field" value={a.algorithm} onChange={(e) => onChange({ ...a, algorithm: e.target.value as JwtAlgorithm })}>
@@ -203,12 +207,12 @@ function JwtFields({ a, onChange, workspaceId }: { a: Extract<AuthConfig, { type
       </div>
       <SecretField label={hmac ? "Shared secret" : "Private key (PEM)"} multiline={!hmac} value={a.signing_key} onChange={(signing_key) => onChange({ ...a, signing_key })} workspaceId={workspaceId} />
       {!hmac && <PemFromFile label="Load private key file into the vault" workspaceId={workspaceId} onSecret={(signing_key) => onChange({ ...a, signing_key })} />}
-      <div className="row" style={{ flexWrap: "wrap" }}>
+      <div className="fields">
         <Text label="iss" value={c.iss} onChange={(iss) => setC({ iss })} />
         <Text label="sub" value={c.sub} onChange={(sub) => setC({ sub })} />
         <Text label="aud" value={c.aud} onChange={(aud) => setC({ aud })} />
       </div>
-      <div className="row">
+      <div className="fields">
         <Num label="Lifetime (s)" value={c.expires_in_secs} onChange={(expires_in_secs) => setC({ expires_in_secs })} />
         <Num label="nbf offset (s)" value={c.not_before_offset_secs} onChange={(not_before_offset_secs) => setC({ not_before_offset_secs })} />
       </div>
@@ -216,7 +220,7 @@ function JwtFields({ a, onChange, workspaceId }: { a: Extract<AuthConfig, { type
         Extra claims (JSON object, may use {"{{variables}}"})
         <textarea className="field" rows={4} value={c.extra_json ?? "{}"} onChange={(e) => setC({ extra_json: e.target.value })} />
       </label>
-      <div className="row">
+      <div className="fields">
         <Text label="Header" value={a.header_name ?? "Authorization"} onChange={(h) => onChange({ ...a, header_name: h ?? "Authorization" })} />
         <Text label="Prefix" value={a.prefix ?? "Bearer"} onChange={(p) => onChange({ ...a, prefix: p ?? "" })} />
       </div>
@@ -240,11 +244,11 @@ function OAuthFields({ c, onChange, workspaceId }: { c: OAuth2Config; onChange: 
       {c.grant === "authorization_code_pkce" && <Text label="Authorization URL" value={c.authorization_url} onChange={(authorization_url) => onChange({ ...c, authorization_url: authorization_url ?? "" })} />}
       <Text label="Client id" value={c.client_id} onChange={(client_id) => onChange({ ...c, client_id: client_id ?? "" })} />
       <SecretField label="Client secret (optional for public clients)" value={c.client_secret} onChange={(client_secret) => onChange({ ...c, client_secret: client_secret as OAuth2Config["client_secret"] })} workspaceId={workspaceId} />
-      <div className="row">
+      <div className="fields">
         <Text label="Scope" value={c.scope} onChange={(scope) => onChange({ ...c, scope: scope ?? "" })} />
         <Text label="Audience" value={c.audience} onChange={(audience) => onChange({ ...c, audience: audience ?? "" })} />
       </div>
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Client authentication
           <select className="field" value={c.client_auth ?? "basic_header"} onChange={(e) => onChange({ ...c, client_auth: e.target.value as "basic_header" })}>
@@ -288,6 +292,7 @@ function OAuthSignIn({ input }: { input: SendInput | null }) {
       <div className="row">
         {status ? (
           <span className="badge ok">
+            <Icon name="checkCircle" size={12} />
             signed in · {status.token_type}
             {status.expires_at ? ` · expires ${new Date(status.expires_at).toLocaleTimeString()}` : ""}
             {status.refresh_token_available ? " · refreshable" : ""}
@@ -372,7 +377,7 @@ function HmacFields({ c, onChange, workspaceId }: { c: HmacConfig; onChange: (c:
   const legacy = c.profile === "ferrum_v1_legacy";
   return (
     <>
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Profile
           <select className="field" value={c.profile ?? "ferrum_v2"} onChange={(e) => onChange({ ...c, profile: e.target.value as HmacConfig["profile"] })}>
@@ -424,6 +429,7 @@ function DpopFields({ c, onChange, workspaceId }: { c: DpopConfig; onChange: (c:
             onChange({ ...c, private_key_pem: { kind: "secret", secret: g.secret } });
           }}
         >
+          <Icon name="key" size={13} />
           Generate a new key in the vault
         </button>
         {jkt && (
@@ -449,7 +455,7 @@ function WsseFields({ c, onChange, workspaceId }: { c: WsseConfig; onChange: (c:
     <>
       <Text label="Username" value={c.username} onChange={(username) => onChange({ ...c, username: username ?? "" })} />
       <SecretField label="Password" value={c.password} onChange={(password) => onChange({ ...c, password })} workspaceId={workspaceId} />
-      <div className="row">
+      <div className="fields">
         <label className="lbl">
           Password type
           <select className="field" value={c.password_type ?? "password_digest"} onChange={(e) => onChange({ ...c, password_type: e.target.value as WsseConfig["password_type"] })}>
@@ -483,9 +489,10 @@ export function PemFromFile(props: { label: string; workspaceId: string | null; 
           }
         }}
       >
+        <Icon name="file" size={13} />
         {props.label}
       </button>
-      {err && <span className="faint">{err}</span>}
+      {err && <span className="bad-text">{err}</span>}
     </div>
   );
 }
@@ -497,14 +504,15 @@ function JwtInspectButton() {
   const [err, setErr] = useState<string | null>(null);
   return (
     <>
-      <button className="btn small ghost" style={{ alignSelf: "start" }} onClick={() => setOpen(true)}>
+      <button className="btn small start" onClick={() => setOpen(true)}>
+        <Icon name="search" size={13} />
         Inspect a JWT…
       </button>
       {openDlg && (
         <Modal title="Inspect JWT (decoded locally)" onClose={() => setOpen(false)}>
-          <textarea className="field" rows={4} value={token} onChange={(e) => setToken(e.target.value)} placeholder="eyJ…" />
+          <textarea className="field" rows={4} aria-label="JWT" value={token} onChange={(e) => setToken(e.target.value)} placeholder="eyJ…" />
           <button
-            className="btn"
+            className="btn start"
             onClick={async () => {
               setErr(null);
               try {
@@ -552,7 +560,7 @@ function Num(props: { label: string; value?: number | null; onChange: (v: number
   return (
     <label className="lbl">
       {props.label}
-      <input className="field mono" style={{ width: 150 }} inputMode="numeric" value={props.value ?? ""} onChange={(e) => props.onChange(e.target.value === "" ? null : Number(e.target.value))} />
+      <input className="field mono num" inputMode="numeric" value={props.value ?? ""} onChange={(e) => props.onChange(e.target.value === "" ? null : Number(e.target.value))} />
     </label>
   );
 }

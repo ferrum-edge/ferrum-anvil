@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ExecutionView } from "./api";
 import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation, TunnelObservation } from "./generated/contracts";
-import { Tabs, fmtBytes, fmtUs, humanize } from "./ui";
+import { Keys, Tabs, fmtBytes, fmtUs, humanize } from "./ui";
+import { Icon, type IconName } from "./icons";
 import { ProxyHeaderEvidence } from "./ProxyProtocolEditor";
 import { WsExtensionsEvidence } from "./WsDeflateEditor";
 import { WorkloadEvidenceView } from "./WorkloadApi";
@@ -39,14 +40,15 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
 
   if (running) {
     return (
-      <div className="resp">
+      <div className="resp running">
         <div className="progress" />
         <div className="empty">
           <div>
-            <div className="big">Sending…</div>
+            <div className="spinner" />
+            <div className="big spaced">Sending…</div>
             {props.progressBytes != null && <div className="faint">{fmtBytes(props.progressBytes)} received</div>}
-            <button className="btn" style={{ marginTop: 12 }} onClick={props.onCancel}>
-              Cancel (Esc)
+            <button className="btn" aria-label="Cancel (Esc)" onClick={props.onCancel}>
+              Cancel <kbd>Esc</kbd>
             </button>
           </div>
         </div>
@@ -55,10 +57,22 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
   }
   if (!view) {
     return (
-      <div className="empty">
-        <div>
-          <div className="big">Send the request. See what happened. Know what to check next.</div>
-          <div>⌘/Ctrl + Enter sends · ⌘/Ctrl + S saves</div>
+      <div className="resp idle">
+        <div className="empty">
+          <div>
+            <span className="empty-icon">
+              <Icon name="activity" size={22} />
+            </span>
+            <div className="big">Send the request. See what happened. Know what to check next.</div>
+            <div className="keys">
+              <span>
+                <Keys k="Enter" /> send
+              </span>
+              <span>
+                <Keys k="S" /> save
+              </span>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -84,16 +98,26 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
     <div className="resp">
       <div className="resp-head">
         {status != null ? <span className={`status-code s${String(status)[0]}`}>{status}</span> : !stream && <span className="status-code s5">No response</span>}
-        {resp?.reason && <span className="muted">{resp.reason}</span>}
+        {resp?.reason && <span className="resp-reason">{resp.reason}</span>}
         <ProtocolBadge p={r.outcome.protocol_status} tunnel={last?.connection?.tunnel} />
         <Dim label="Transport" value={r.outcome.transport} good={r.outcome.transport === "completed"} />
         <Dim label="Application" value={r.outcome.application} good={r.outcome.application === "success"} />
         <Dim label="Tests" value={r.outcome.assertions} good={r.outcome.assertions !== "fail"} />
         <Dim label="Dispatch" value={r.outcome.dispatch} good={r.outcome.dispatch !== "may_have_been_sent"} />
         <span className="spacer" />
-        <span className="faint">{fmtUs(last?.duration_us)}</span>
-        <span className="faint">{fmtBytes(resp?.body.wire_bytes)}</span>
-        {resp?.http_version && <span className="badge">{resp.http_version}</span>}
+        <span className="resp-stats">
+          <span title="Duration of the last attempt">
+            <Icon name="clock" size={13} />
+            {fmtUs(last?.duration_us)}
+          </span>
+          {resp && (
+            <span title="Response body bytes on the wire">
+              <Icon name="download" size={13} />
+              {fmtBytes(resp.body.wire_bytes)}
+            </span>
+          )}
+          {resp?.http_version && <span className="badge">{resp.http_version}</span>}
+        </span>
         {r.outcome.warnings.map((w) => (
           <span key={w.code} className="badge warn" title={w.message}>
             {humanize(w.code)}
@@ -127,10 +151,12 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
 }
 
 function Dim(props: { label: string; value: string; good: boolean }) {
+  // "not run" / "not evaluated" did not happen: neither a pass nor a failure.
+  const tone = props.value === "not_run" || props.value === "not_evaluated" ? "neutral" : props.good ? "ok" : "bad";
   return (
     <span className="dim">
       {props.label}
-      <b style={{ color: props.good ? "var(--ok)" : props.value === "not_run" || props.value === "not_evaluated" ? "var(--text-2)" : "var(--bad)" }}>{humanize(props.value)}</b>
+      <b className={tone}>{humanize(props.value)}</b>
     </span>
   );
 }
@@ -154,10 +180,10 @@ function Findings({ view }: { view: ExecutionView }) {
   };
   return (
     <div>
-      <div className="row" style={{ marginBottom: 10 }}>
-        <span className="summary-line">{r.outcome.summary}</span>
-        <span className="spacer" />
-        <button className="btn small" onClick={bundle}>
+      <div className="toolbar findings-bar">
+        <span className="summary-line grow">{r.outcome.summary}</span>
+        <button className="btn small" onClick={bundle} title="Copy this record, redacted, as JSON for a support ticket">
+          <Icon name={copied ? "check" : "copy"} size={13} />
           {copied ? "Copied" : "Copy redacted support bundle"}
         </button>
       </div>
@@ -171,19 +197,22 @@ function Findings({ view }: { view: ExecutionView }) {
   );
 }
 
+const SEVERITY_ICON: Record<string, IconName> = { error: "alertCircle", warning: "alertTriangle", info: "info" };
+
 export function FindingCard({ f }: { f: DiagnosticFinding }) {
   return (
     <article className={`finding sev-${f.severity}`} aria-label={f.title}>
       <div className="finding-head">
+        <span className="sev-icon">
+          <Icon name={SEVERITY_ICON[f.severity] ?? "info"} size={16} />
+        </span>
         <div className="grow">
           <div className="finding-title">{f.title}</div>
-          <div className="row" style={{ marginTop: 4, flexWrap: "wrap" }}>
+          <div className="finding-meta">
             <span className={`badge conf-${f.confidence}`}>{CONF_LABEL[f.confidence]}</span>
             <span className="badge">{SCOPE_LABEL[f.scope]}</span>
             <span className="owner">Owner: {humanize(f.owner)}</span>
-            <span className="faint mono" style={{ fontSize: 10 }}>
-              {f.code}
-            </span>
+            <span className="faint mono code-id">{f.code}</span>
           </div>
         </div>
       </div>
@@ -222,7 +251,7 @@ export function FindingCard({ f }: { f: DiagnosticFinding }) {
         {f.evidence.length > 0 && (
           <details className="evidence">
             <summary>Evidence ({f.evidence.length})</summary>
-            <table className="grid" style={{ marginTop: 6 }}>
+            <table className="grid wire compact">
               <thead>
                 <tr><th>Source</th><th>Key</th><th>Observed</th></tr>
               </thead>
@@ -245,23 +274,51 @@ export function FindingCard({ f }: { f: DiagnosticFinding }) {
 
 function Body({ view }: { view: ExecutionView }) {
   const [mode, setMode] = useState<"pretty" | "raw" | "hex">(view.body.pretty ? "pretty" : view.body.is_binary ? "hex" : "raw");
+  const [copied, setCopied] = useState(false);
   const b = view.body;
   const resp = view.record.response;
   if (!resp) return <div className="faint">No response body — the exchange ended before a response.</div>;
   const text = mode === "pretty" ? b.pretty ?? b.text : mode === "hex" ? b.hex : b.text;
   return (
     <div className="col">
-      <div className="row" style={{ flexWrap: "wrap" }}>
-        <div className="row" role="group" aria-label="Body view">
-          {b.pretty && <button className={`btn small ${mode === "pretty" ? "primary" : ""}`} onClick={() => setMode("pretty")}>Pretty</button>}
-          {!b.is_binary && <button className={`btn small ${mode === "raw" ? "primary" : ""}`} onClick={() => setMode("raw")}>Raw</button>}
-          {b.hex && <button className={`btn small ${mode === "hex" ? "primary" : ""}`} onClick={() => setMode("hex")}>Hex</button>}
+      <div className="toolbar">
+        <div className="segmented small" role="group" aria-label="Body view">
+          {b.pretty && (
+            <button aria-pressed={mode === "pretty"} onClick={() => setMode("pretty")}>
+              Pretty
+            </button>
+          )}
+          {!b.is_binary && (
+            <button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>
+              Raw
+            </button>
+          )}
+          {b.hex && (
+            <button aria-pressed={mode === "hex"} onClick={() => setMode("hex")}>
+              Hex
+            </button>
+          )}
         </div>
-        <span className="faint">
+        <span className="meta grow">
           {resp.body.content_type ?? "no content-type"}
           {resp.body.content_encoding ? ` · ${resp.body.content_encoding} (decoded ${fmtBytes(resp.body.decoded_bytes)})` : ""} · wire {fmtBytes(resp.body.wire_bytes)}
           {resp.body.declared_length != null ? ` of declared ${fmtBytes(resp.body.declared_length)}` : ""} · {humanize(resp.body.completeness)}
         </span>
+        {text ? (
+          <button
+            className="btn small ghost"
+            title="Copy the body as shown"
+            onClick={() =>
+              void navigator.clipboard.writeText(text).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1600);
+              })
+            }
+          >
+            <Icon name={copied ? "check" : "copy"} size={13} />
+            {copied ? "Copied" : "Copy"}
+          </button>
+        ) : null}
       </div>
       {resp.body.display_truncated && (
         <div className="warn-box">
@@ -279,7 +336,7 @@ function Headers({ view }: { view: ExecutionView }) {
   if (!resp) return <div className="faint">No response headers were received.</div>;
   return (
     <div className="col">
-      <table className="grid">
+      <table className="grid wire">
         <tbody>
           {resp.headers.map((h, i) => (
             <tr key={i}>
@@ -289,9 +346,9 @@ function Headers({ view }: { view: ExecutionView }) {
           ))}
         </tbody>
       </table>
-      <h4 className="faint">Trailers {resp.trailers_received ? "" : "(none received)"}</h4>
+      <h4 className="section-title">Trailers {resp.trailers_received ? "" : "(none received)"}</h4>
       {resp.trailers.length > 0 && (
-        <table className="grid">
+        <table className="grid wire">
           <tbody>
             {resp.trailers.map((h, i) => (
               <tr key={i}>
@@ -302,8 +359,8 @@ function Headers({ view }: { view: ExecutionView }) {
           </tbody>
         </table>
       )}
-      <h4 className="faint">Request as sent (redacted)</h4>
-      <table className="grid">
+      <h4 className="section-title">Request as sent (redacted)</h4>
+      <table className="grid wire">
         <tbody>
           {view.record.prepared.headers.map((h, i) => (
             <tr key={i}>
@@ -363,10 +420,15 @@ function PhaseRow({ p, total }: { p: PhaseTiming; total: number }) {
     <>
       <span>{humanize(p.phase)}</span>
       <div className="wf-bar" title={p.detail ?? undefined}>
-        {dur != null && <div className={`wf-fill ${p.status}`} style={{ left: `${left}%`, width: `${width}%` }} />}
-        {dur == null && <span className="faint" style={{ fontSize: 11, paddingLeft: 4 }}>{humanize(p.status)}{p.detail ? ` — ${p.detail}` : ""}</span>}
+        {dur != null && <div className={`wf-fill p-${p.phase} ${p.status}`} style={{ left: `${left}%`, width: `${width}%` }} />}
+        {dur == null && (
+          <span className="wf-note">
+            {humanize(p.status)}
+            {p.detail ? ` — ${p.detail}` : ""}
+          </span>
+        )}
       </div>
-      <span className="mono" style={{ textAlign: "right" }}>{dur != null ? fmtUs(dur) : ""}</span>
+      <span className="wf-time">{dur != null ? fmtUs(dur) : ""}</span>
     </>
   );
 }
@@ -414,7 +476,7 @@ function TunnelView({ t, dtls = false }: { t: TunnelObservation; dtls?: boolean 
   const udp = t.kind === "connect_udp";
   return (
     <div className="col">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>{udp ? "CONNECT-UDP (MASQUE) tunnel (outer leg)" : d ? "HBONE UDP tunnel (outer leg)" : "HBONE tunnel (outer leg)"}</h4>
+      <h4 className="section-title">{udp ? "CONNECT-UDP (MASQUE) tunnel (outer leg)" : d ? "HBONE UDP tunnel (outer leg)" : "HBONE tunnel (outer leg)"}</h4>
       <table className="grid">
         <tbody>
           <tr><td className="k">{udp ? "Proxy" : "Endpoint"}</td><td className="v">{t.endpoint}</td></tr>
@@ -456,7 +518,7 @@ function TlsView({ t, title = "TLS" }: { t: TlsObservation; title?: string }) {
   const v = t.verification;
   return (
     <div className="col">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>{title}</h4>
+      <h4 className="section-title">{title}</h4>
       <table className="grid">
         <tbody>
           <tr><td className="k">Server name (SNI)</td><td className="v">{t.sni ?? `none sent (${t.server_name})`}{t.server_name_overridden ? " — from the TLS profile override" : ""}</td></tr>
@@ -481,8 +543,10 @@ function TlsView({ t, title = "TLS" }: { t: TlsObservation; title?: string }) {
       </table>
       {t.peer_certificates.map((c, i) => (
         <details key={i} open={i === 0}>
-          <summary className="muted">{i === 0 ? "Peer certificate" : `Chain certificate ${i}`}: {c.subject}</summary>
-          <table className="grid">
+          <summary>
+            {i === 0 ? "Peer certificate" : `Chain certificate ${i}`}: {c.subject}
+          </summary>
+          <table className="grid wire compact">
             <tbody>
               <tr><td className="k">Issuer</td><td className="v">{c.issuer}</td></tr>
               <tr><td className="k">Valid</td><td className="v">{c.not_before} → {c.not_after}</td></tr>
@@ -546,7 +610,12 @@ function TestsView({ view }: { view: ExecutionView }) {
       <tbody>
         {res.map((a, i) => (
           <tr key={i}>
-            <td className="k" style={{ color: a.passed ? "var(--ok)" : "var(--bad)" }}>{a.passed ? "✓ pass" : "✗ fail"}</td>
+            <td className="k status-cell">
+              <span className={`badge ${a.passed ? "ok" : "bad"}`}>
+                <Icon name={a.passed ? "check" : "x"} size={11} strokeWidth={2.4} />
+                {a.passed ? "pass" : "fail"}
+              </span>
+            </td>
             <td>{a.label}</td>
             <td className="v">{a.message}</td>
           </tr>
@@ -619,15 +688,15 @@ function ProtocolBadge({ p, tunnel }: { p?: ProtocolStatus | null; tunnel?: Tunn
 function Messages({ t }: { t: StreamTranscript }) {
   return (
     <div className="col">
-      <div className="faint">
+      <div className="faint small-text">
         {t.sent_count} sent ({fmtBytes(t.sent_bytes)}) · {t.received_count} received ({fmtBytes(t.received_bytes)})
         {t.dropped_messages > 0 ? ` · ${t.dropped_messages} older messages not retained` : ""}
       </div>
-      <table className="grid">
+      <table className="grid messages">
         <thead>
           <tr>
             <th>Time</th>
-            <th></th>
+            <th aria-label="Direction"></th>
             <th>Kind</th>
             <th>Size</th>
             <th>Content</th>
@@ -637,7 +706,7 @@ function Messages({ t }: { t: StreamTranscript }) {
           {t.messages.map((m, i) => (
             <tr key={i}>
               <td className="k">{fmtUs(m.offset_us)}</td>
-              <td className="k" style={{ color: m.direction === "sent" ? "var(--info)" : "var(--ok)" }}>
+              <td className={`k dir ${m.direction}`} title={m.direction}>
                 {m.direction === "sent" ? "→" : "←"}
               </td>
               <td className="k">

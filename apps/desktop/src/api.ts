@@ -91,6 +91,8 @@ export interface TreeNode {
   kind: "folder" | "request";
   name: string;
   method?: string | null;
+  /** Wire protocol of a request (absent for folders and older backends). */
+  protocol?: Protocol | null;
   url?: string | null;
   favorite: boolean;
   children: TreeNode[];
@@ -110,6 +112,7 @@ export interface ExecutionView {
 }
 export interface HistoryItem {
   id: string;
+  /** Unix epoch milliseconds. */
   started_at: number;
   method: string;
   url: string;

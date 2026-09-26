@@ -35,7 +35,8 @@ import type {
 
 /// Plan with its optional list fields normalized for editing.
 type EditPlan = LoadPlan & { chain: string[]; mix: WeightedStep[] };
-import { Modal, fmtBytes, fmtUs, humanize, uid } from "./ui";
+import { Modal, SidebarResizer, fmtAgo, fmtBytes, fmtUs, humanize, uid } from "./ui";
+import { Icon } from "./icons";
 
 const UNIT_WORDS: Record<LoadUnitKind, [string, string]> = {
   http_request: ["request", "requests"],
@@ -181,52 +182,69 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
   }, [sel, plans]);
 
   return (
-    <div className="main" style={{ ["--sidebar-w" as string]: "290px" }}>
+    <div className="main">
       <aside className="sidebar" aria-label="Load plans and reports">
         <div className="side-body">
-          <div className="row" style={{ marginBottom: 6 }}>
-            <b className="grow">Load plans</b>
+          <div className="side-section-head">
+            <span>Load plans</span>
             <button
-              className="btn small"
+              className="btn ghost small"
+              title="New load plan"
               onClick={() => {
                 const p = newPlan(props.workspaceId);
                 setDraft(p);
                 setSel({ kind: "plan", id: p.id });
               }}
             >
-              + Plan
+              <Icon name="plus" size={14} />
+              New
             </button>
           </div>
-          {plans.length === 0 && <div className="faint" style={{ padding: 6 }}>No plans yet.</div>}
+          {plans.length === 0 && <div className="side-empty">No plans yet.</div>}
           {plans.map((p) => (
-            <div key={p.id} className={`tree-row ${sel?.kind === "plan" && sel.id === p.id ? "selected" : ""}`} role="button" tabIndex={0} onClick={() => setSel({ kind: "plan", id: p.id })}>
-              <span className="name grow">{p.name}</span>
+            <div
+              key={p.id}
+              className={`tree-row${sel?.kind === "plan" && sel.id === p.id ? " selected" : ""}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSel({ kind: "plan", id: p.id })}
+              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "plan", id: p.id })}
+            >
+              <Icon name="zap" size={14} className="row-icon" />
+              <span className="name">{p.name}</span>
               {!p.trusted && <span className="badge warn">imported</span>}
             </div>
           ))}
-          <div className="row" style={{ margin: "14px 0 6px" }}>
-            <b className="grow">Reports</b>
+          <div className="side-section-head">
+            <span>Reports</span>
           </div>
-          {reports.length === 0 && <div className="faint" style={{ padding: 6 }}>No runs yet.</div>}
+          {reports.length === 0 && <div className="side-empty">No runs yet.</div>}
           {reports.map((r) => (
-            <div key={r.run_id} className={`hist-row ${sel?.kind === "report" && sel.id === r.run_id ? "selected" : ""}`} role="button" tabIndex={0} onClick={() => setSel({ kind: "report", id: r.run_id })}>
-              <span className={`badge ${r.completion === "completed" && !r.partial ? "ok" : "warn"}`} style={{ justifySelf: "start" }}>
-                {r.partial ? "partial" : "done"}
-              </span>
-              <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {r.plan_name}
-              </span>
-              <span />
-              <span className="faint" style={{ fontSize: 11 }}>
-                {new Date(r.started_at).toLocaleString()} · {UNIT_WORDS[r.unit]?.[1] ?? "requests"} · {r.achieved_rate_per_sec.toFixed(1)}/s · p95{" "}
-                {r.p95_us === null ? "— (no successes)" : fmtUs(r.p95_us)} · {r.failures} failed
-              </span>
+            <div
+              key={r.run_id}
+              className={`hist-row${sel?.kind === "report" && sel.id === r.run_id ? " selected" : ""}`}
+              role="button"
+              tabIndex={0}
+              title={`${r.plan_name} — ${new Date(r.started_at).toLocaleString()}`}
+              onClick={() => setSel({ kind: "report", id: r.run_id })}
+              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "report", id: r.run_id })}
+            >
+              <div className="hist-line">
+                <span className="hist-title">{r.plan_name}</span>
+                <span className={`badge ${r.completion === "completed" && !r.partial ? "ok" : "warn"}`}>{r.partial ? "partial" : "done"}</span>
+              </div>
+              <div className="hist-line">
+                <span className="hist-meta">
+                  {r.achieved_rate_per_sec.toFixed(1)} {UNIT_WORDS[r.unit]?.[1] ?? "requests"}/s · p95 {r.p95_us === null ? "— (no successes)" : fmtUs(r.p95_us)} · {r.failures} failed
+                </span>
+                <span className="hist-when">{fmtAgo(Date.parse(r.started_at))}</span>
+              </div>
             </div>
           ))}
         </div>
       </aside>
-      <div className="resizer" />
-      <section className="work" style={{ gridTemplateRows: "1fr" }}>
+      <SidebarResizer />
+      <section className="work single">
         <div className="pane">
           {live && <LivePanel live={live} onCancel={() => void api.loadRunCancel(live.runKey)} />}
           {!live && sel?.kind === "plan" && draft && (
@@ -253,8 +271,22 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
           {!live && !sel && (
             <div className="empty">
               <div>
+                <span className="empty-icon">
+                  <Icon name="zap" size={22} />
+                </span>
                 <div className="big">Test under load with the same requests you send by hand.</div>
-                <div>Every iteration uses the same preparation, auth signing and TLS rules as Send. Runs execute in a separate worker process.</div>
+                <div className="sub">Every iteration uses the same preparation, auth signing and TLS rules as Send. Runs execute in a separate worker process.</div>
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    const p = newPlan(props.workspaceId);
+                    setDraft(p);
+                    setSel({ kind: "plan", id: p.id });
+                  }}
+                >
+                  <Icon name="plus" size={15} />
+                  New load plan
+                </button>
               </div>
             </div>
           )}
@@ -323,38 +355,43 @@ export function PlanEditor(props: {
   };
 
   return (
-    <div className="col" style={{ gap: 14, maxWidth: 900 }}>
-      <div className="row">
-        <input className="field grow" aria-label="Plan name" value={p.name} onChange={(e) => setP({ ...p, name: e.target.value })} style={{ fontSize: 15, fontWeight: 600 }} />
-        <button className="btn" onClick={() => void saveIt()}>
-          Save
-        </button>
-        <button
-          className="btn primary"
-          disabled={refused}
-          title={refused ? "This plan cannot be load tested; see the refusal below." : undefined}
-          onClick={async () => {
-            const saved = await saveIt();
-            if (!saved) return;
-            try {
-              setAck(false);
-              setPreflight(await api.loadPreflight(saved.id));
-            } catch (e) {
-              setErr(String((e as Error).message));
-            }
-          }}
-        >
-          Run…
-        </button>
-        <button
-          className="btn danger"
-          onClick={async () => {
-            await api.deleteLoadPlan(p.id).catch(() => undefined);
-            props.onDeleted();
-          }}
-        >
-          Delete
-        </button>
+    <div className="page narrow">
+      <div className="page-head">
+        <input className="field title-input grow" aria-label="Plan name" value={p.name} onChange={(e) => setP({ ...p, name: e.target.value })} />
+        <div className="page-actions">
+          <button className="btn" onClick={() => void saveIt()}>
+            Save
+          </button>
+          <button
+            className="btn primary"
+            disabled={refused}
+            title={refused ? "This plan cannot be load tested; see the refusal below." : undefined}
+            onClick={async () => {
+              const saved = await saveIt();
+              if (!saved) return;
+              try {
+                setAck(false);
+                setPreflight(await api.loadPreflight(saved.id));
+              } catch (e) {
+                setErr(String((e as Error).message));
+              }
+            }}
+          >
+            <Icon name="play" size={12} />
+            Run…
+          </button>
+          <button
+            className="btn ghost danger icon-btn"
+            aria-label="Delete plan"
+            title="Delete plan"
+            onClick={async () => {
+              await api.deleteLoadPlan(p.id).catch(() => undefined);
+              props.onDeleted();
+            }}
+          >
+            <Icon name="trash" />
+          </button>
+        </div>
       </div>
       {!p.trusted && <div className="warn-box">This plan was imported. Review it and save it before it can run.</div>}
       {err && <div className="bad-box">{err}</div>}
@@ -371,38 +408,42 @@ export function PlanEditor(props: {
           />
           Weighted mix (one request per iteration) instead of a sequential chain
         </label>
-        {!useMix &&
-          p.chain.map((id, i) => (
-            <div className="row" key={`${id}-${i}`}>
-              <span className="faint mono">{i + 1}.</span>
-              <ProtocolBadge protocol={protocolOf(id)} />
-              <span className="grow">{label(id)}</span>
-              <button className="btn ghost icon-btn" aria-label="Move up" disabled={i === 0} onClick={() => setP({ ...p, chain: swap(p.chain, i, i - 1) })}>
-                ↑
-              </button>
-              <button className="btn ghost icon-btn" aria-label="Move down" disabled={i === p.chain.length - 1} onClick={() => setP({ ...p, chain: swap(p.chain, i, i + 1) })}>
-                ↓
-              </button>
-              <button className="btn ghost icon-btn" aria-label="Remove" onClick={() => setP({ ...p, chain: p.chain.filter((_, j) => j !== i) })}>
-                ✕
-              </button>
-            </div>
-          ))}
-        {useMix &&
-          p.mix.map((m, i) => (
-            <div className="row" key={`${m.request_id}-${i}`}>
-              <ProtocolBadge protocol={protocolOf(m.request_id)} />
-              <span className="grow">{label(m.request_id)}</span>
-              <label className="lbl" style={{ flexDirection: "row", alignItems: "center" }}>
-                weight
-                <input className="field mono" style={{ width: 70 }} value={m.weight ?? 1} onChange={(e) => setP({ ...p, mix: p.mix.map((x, j) => (j === i ? { ...x, weight: Number(e.target.value) || 0 } : x)) })} />
-              </label>
-              <button className="btn ghost icon-btn" aria-label="Remove" onClick={() => setP({ ...p, mix: p.mix.filter((_, j) => j !== i) })}>
-                ✕
-              </button>
-            </div>
-          ))}
-        <div className="row">
+        {(useMix ? p.mix.length : p.chain.length) > 0 && (
+          <div className="step-list">
+            {!useMix &&
+              p.chain.map((id, i) => (
+                <div className="step-row" key={`${id}-${i}`}>
+                  <span className="step-n">{i + 1}</span>
+                  <ProtocolBadge protocol={protocolOf(id)} />
+                  <span className="step-name">{label(id)}</span>
+                  <button className="btn ghost small icon-btn" aria-label="Move up" title="Move up" disabled={i === 0} onClick={() => setP({ ...p, chain: swap(p.chain, i, i - 1) })}>
+                    <Icon name="arrowUp" size={14} />
+                  </button>
+                  <button className="btn ghost small icon-btn" aria-label="Move down" title="Move down" disabled={i === p.chain.length - 1} onClick={() => setP({ ...p, chain: swap(p.chain, i, i + 1) })}>
+                    <Icon name="arrowDown" size={14} />
+                  </button>
+                  <button className="btn ghost small icon-btn" aria-label="Remove" title="Remove" onClick={() => setP({ ...p, chain: p.chain.filter((_, j) => j !== i) })}>
+                    <Icon name="x" size={14} />
+                  </button>
+                </div>
+              ))}
+            {useMix &&
+              p.mix.map((m, i) => (
+                <div className="step-row" key={`${m.request_id}-${i}`}>
+                  <ProtocolBadge protocol={protocolOf(m.request_id)} />
+                  <span className="step-name">{label(m.request_id)}</span>
+                  <label className="lbl inline">
+                    Weight
+                    <input className="field mono tiny" value={m.weight ?? 1} onChange={(e) => setP({ ...p, mix: p.mix.map((x, j) => (j === i ? { ...x, weight: Number(e.target.value) || 0 } : x)) })} />
+                  </label>
+                  <button className="btn ghost small icon-btn" aria-label="Remove" title="Remove" onClick={() => setP({ ...p, mix: p.mix.filter((_, j) => j !== i) })}>
+                    <Icon name="x" size={14} />
+                  </button>
+                </div>
+              ))}
+          </div>
+        )}
+        <div className="row nowrap">
           <select className="field grow" aria-label="Add request" value={pick} onChange={(e) => setPick(e.target.value)}>
             <option value="">Choose a saved request…</option>
             {props.requests.map((r) => (
@@ -412,13 +453,14 @@ export function PlanEditor(props: {
             ))}
           </select>
           <button
-            className="btn small"
+            className="btn"
             disabled={!pick}
             onClick={() => {
               setP(useMix ? { ...p, mix: [...p.mix, { request_id: pick, weight: 1 }] } : { ...p, chain: [...p.chain, pick] });
               setPick("");
             }}
           >
+            <Icon name="plus" size={14} />
             Add
           </button>
         </div>
@@ -428,7 +470,7 @@ export function PlanEditor(props: {
 
       <fieldset className="box">
         <legend>Workload</legend>
-        <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div className="fields">
           <label className="lbl">
             Model
             <select
@@ -481,7 +523,7 @@ export function PlanEditor(props: {
 
       <fieldset className="box">
         <legend>Data and limits</legend>
-        <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div className="fields">
           <label className="lbl">
             Environment
             <select className="field" value={p.environment_id ?? ""} onChange={(e) => setP({ ...p, environment_id: e.target.value || null })}>
@@ -504,7 +546,8 @@ export function PlanEditor(props: {
               ))}
             </select>
           </label>
-          <button className="btn small" onClick={() => setDatasetDlg(true)}>
+          <button className="btn" onClick={() => setDatasetDlg(true)}>
+            <Icon name="file" size={14} />
             Add dataset…
           </button>
         </div>
@@ -517,7 +560,7 @@ export function PlanEditor(props: {
           Abort when failures exceed a rate
         </label>
         {p.abort && (
-          <div className="row">
+          <div className="fields">
             <Num label="Max failures (%)" value={p.abort.max_failure_permille / 10} onChange={(v) => setP({ ...p, abort: { ...p.abort!, max_failure_permille: Math.round(v * 10) } })} />
             <Num label="Window (s)" value={p.abort.window_secs} onChange={(v) => setP({ ...p, abort: { ...p.abort!, window_secs: v } })} />
           </div>
@@ -559,6 +602,7 @@ export function PlanEditor(props: {
                   }
                 }}
               >
+                <Icon name="play" size={12} />
                 Start load
               </button>
             </>
@@ -602,7 +646,7 @@ export function PlanEditor(props: {
               {w}
             </div>
           ))}
-          <label className="check" style={{ alignItems: "flex-start" }}>
+          <label className="check top ack">
             <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
             <span>I own these destinations or am authorized to load-test them, and I accept that this run sends real traffic.</span>
           </label>
@@ -651,17 +695,18 @@ function StagesEditor(props: { stages: Stage[]; unit: string; onChange: (s: Stag
   return (
     <div className="col">
       {props.stages.map((s, i) => (
-        <div className="row" key={i}>
-          <span className="faint">Stage {i + 1}:</span>
+        <div className="stage-row" key={i}>
+          <span className="stage-n">Stage {i + 1}</span>
           <Num label="Duration (s)" value={s.duration_secs} onChange={(v) => props.onChange(props.stages.map((x, j) => (j === i ? { ...x, duration_secs: v } : x)))} />
           <Num label={`Ramp to (${props.unit})`} value={s.target} onChange={(v) => props.onChange(props.stages.map((x, j) => (j === i ? { ...x, target: v } : x)))} />
-          <button className="btn ghost icon-btn" aria-label="Remove stage" disabled={props.stages.length === 1} onClick={() => props.onChange(props.stages.filter((_, j) => j !== i))}>
-            ✕
+          <button className="btn ghost icon-btn end" aria-label="Remove stage" title="Remove stage" disabled={props.stages.length === 1} onClick={() => props.onChange(props.stages.filter((_, j) => j !== i))}>
+            <Icon name="x" />
           </button>
         </div>
       ))}
-      <button className="btn small" style={{ alignSelf: "start" }} onClick={() => props.onChange([...props.stages, { ...props.stages[props.stages.length - 1] }])}>
-        + Stage (ramp, step or spike)
+      <button className="btn small start" onClick={() => props.onChange([...props.stages, { ...props.stages[props.stages.length - 1] }])}>
+        <Icon name="plus" size={14} />
+        Stage (ramp, step or spike)
       </button>
     </div>
   );
@@ -671,7 +716,7 @@ function Num(props: { label: string; value: number; onChange: (v: number) => voi
   return (
     <label className="lbl">
       {props.label}
-      <input className="field mono" style={{ width: 120 }} inputMode="numeric" value={props.value} onChange={(e) => props.onChange(Number(e.target.value) || 0)} />
+      <input className="field mono num" inputMode="numeric" value={props.value} onChange={(e) => props.onChange(Number(e.target.value) || 0)} />
     </label>
   );
 }
@@ -701,7 +746,7 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
         </button>
       }
     >
-      <div className="row">
+      <div className="row nowrap">
         <button
           className="btn"
           data-autofocus
@@ -713,9 +758,12 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
             }
           }}
         >
+          <Icon name="file" size={14} />
           Choose CSV/JSON…
         </button>
-        <span className="mono faint">{path ?? "No file selected"}</span>
+        <span className={`path-chip grow${path ? "" : " none"}`} title={path ?? undefined}>
+          {path ?? "No file selected"}
+        </span>
       </div>
       <label className="lbl">
         Name
@@ -739,15 +787,24 @@ function LivePanel(props: { live: { runKey: string; planName: string; progress: 
   const u = p?.snapshot.requests;
   const [, many] = unitWords(p?.snapshot.protocol);
   return (
-    <div className="col" style={{ gap: 14 }}>
-      <div className="row">
-        <b style={{ fontSize: 15 }}>{props.live.planName}</b>
-        <span className="badge accent">{p ? humanize(p.phase) : "starting worker…"}</span>
-        <span className="faint">{p ? `${p.elapsed_secs.toFixed(0)} s elapsed` : ""}</span>
-        <span className="spacer" />
-        <button className="btn" onClick={props.onCancel}>
-          Stop run
-        </button>
+    <div className="page">
+      <div className="page-head">
+        <div className="page-titles">
+          <div className="page-title">
+            <h2>{props.live.planName}</h2>
+            <span className="badge accent">
+              <span className="live-dot" />
+              {p ? humanize(p.phase) : "starting worker…"}
+            </span>
+          </div>
+          <div className="page-meta">{p ? `${p.elapsed_secs.toFixed(0)} s elapsed` : "Waiting for the worker process…"}</div>
+        </div>
+        <div className="page-actions">
+          <button className="btn" onClick={props.onCancel}>
+            <Icon name="stop" size={12} />
+            Stop run
+          </button>
+        </div>
       </div>
       <div className="progress" />
       {p && c && (
@@ -777,34 +834,59 @@ function LivePanel(props: { live: { runKey: string; planName: string; progress: 
 
 function Card(props: { label: string; value: string; sub?: string; bad?: boolean }) {
   return (
-    <div className="card">
-      <div className="card-label">{props.label}</div>
-      <div className="card-value" style={props.bad ? { color: "var(--bad)" } : undefined}>
-        {props.value}
+    <div className={`card${props.bad ? " bad" : ""}`}>
+      <div className="card-label" title={props.label}>
+        {props.label}
       </div>
-      {props.sub && <div className="faint" style={{ fontSize: 11 }}>{props.sub}</div>}
+      <div className="card-value">{props.value}</div>
+      {props.sub && (
+        <div className="card-sub" title={props.sub}>
+          {props.sub}
+        </div>
+      )}
     </div>
   );
 }
 
 function Timeline({ buckets }: { buckets: TimeBucket[] }) {
-  if (buckets.length < 2) return <div className="faint">Timeline appears after the first seconds of measurement.</div>;
+  if (buckets.length < 2) return <div className="empty-note">The timeline appears after the first seconds of measurement.</div>;
   const W = 760;
   const H = 150;
+  const top = 8;
+  const bottom = H - 18;
   const maxRate = Math.max(1, ...buckets.map((b) => b.started));
   const maxP99 = Math.max(1, ...buckets.map((b) => b.p99_us));
-  const x = (i: number) => (i / (buckets.length - 1)) * (W - 40) + 30;
-  const line = (f: (b: TimeBucket) => number, max: number) => buckets.map((b, i) => `${x(i)},${H - 20 - (f(b) / max) * (H - 40)}`).join(" ");
+  const x = (i: number) => (i / (buckets.length - 1)) * (W - 16) + 8;
+  const y = (v: number, max: number) => bottom - (v / max) * (bottom - top);
+  const line = (f: (b: TimeBucket) => number, max: number) => buckets.map((b, i) => `${x(i)},${y(f(b), max)}`).join(" ");
+  const failed = buckets.some((b) => b.failures > 0);
   return (
-    <figure style={{ margin: 0 }}>
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Started per second and p99 latency over time" style={{ background: "var(--bg-sunken)", borderRadius: 6 }}>
-        <polyline fill="none" stroke="var(--blue)" strokeWidth="2" points={line((b) => b.started, maxRate)} />
-        <polyline fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeDasharray="4 3" points={line((b) => b.p99_us, maxP99)} />
-        {buckets.map((b, i) => (b.failures > 0 ? <circle key={i} cx={x(i)} cy={H - 12} r="2.5" fill="var(--bad)" /> : null))}
-        <text x="30" y="14" fill="var(--text-3)" fontSize="10">
-          started/s (max {maxRate}) · p99 dashed (max {fmtUs(maxP99)}) · red dots = seconds with failures
-        </text>
+    <figure className="chart">
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Started per second and p99 latency over time">
+        {[0.25, 0.5, 0.75, 1].map((f) => (
+          <line key={f} x1="8" x2={W - 8} y1={y(f, 1)} y2={y(f, 1)} stroke="var(--border)" strokeWidth="1" />
+        ))}
+        <line x1="8" x2={W - 8} y1={bottom} y2={bottom} stroke="var(--border-strong)" strokeWidth="1" />
+        <polyline fill="none" stroke="var(--blue)" strokeWidth="2" strokeLinejoin="round" points={line((b) => b.started, maxRate)} />
+        <polyline fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeDasharray="4 3" strokeLinejoin="round" points={line((b) => b.p99_us, maxP99)} />
+        {buckets.map((b, i) => (b.failures > 0 ? <circle key={i} cx={x(i)} cy={H - 8} r="3" fill="var(--bad)" /> : null))}
       </svg>
+      <figcaption className="chart-legend">
+        <span>
+          <i className="sw-rate" />
+          Started per second (max {maxRate})
+        </span>
+        <span>
+          <i className="dashed sw-p99" />
+          p99 latency (max {fmtUs(maxP99)})
+        </span>
+        {failed && (
+          <span>
+            <i className="dot sw-fail" />
+            Seconds with failures
+          </span>
+        )}
+      </figcaption>
     </figure>
   );
 }
@@ -830,38 +912,50 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
     props.notify(`Exported ${fmtBytes(n)} to ${path}`);
   };
   return (
-    <div className="col" style={{ gap: 14 }}>
-      <div className="row" style={{ flexWrap: "wrap" }}>
-        <b style={{ fontSize: 15 }}>{r.plan.name}</b>
-        <span className={`badge ${r.completion === "completed" && !r.partial ? "ok" : "warn"}`}>{humanize(r.completion)}</span>
-        {r.partial && <span className="badge warn">partial report</span>}
-        <span className="faint">
-          {new Date(r.started_at).toLocaleString()} → {new Date(r.finished_at).toLocaleTimeString()} · {r.workload_label ?? ""}
-        </span>
-        <span className="spacer" />
-        <button className="btn small" onClick={() => void exportAs("html")}>
-          HTML
-        </button>
-        <button className="btn small" onClick={() => void exportAs("json")}>
-          JSON
-        </button>
-        <button className="btn small" onClick={() => void exportAs("csv")}>
-          CSV
-        </button>
-        <button className="btn small" onClick={() => void exportAs("timeline_csv")}>
-          Timeline CSV
-        </button>
-        <button
-          className="btn small danger"
-          onClick={async () => {
-            await api.deleteLoadReport(r.run_id);
-            props.onDeleted();
-          }}
-        >
-          Delete
-        </button>
+    <div className="page">
+      <div className="page-head">
+        <div className="page-titles">
+          <div className="page-title">
+            <h2>{r.plan.name}</h2>
+            <span className={`badge ${r.completion === "completed" && !r.partial ? "ok" : "warn"}`}>{humanize(r.completion)}</span>
+            {r.partial && <span className="badge warn">partial report</span>}
+          </div>
+          <div className="page-meta">
+            {new Date(r.started_at).toLocaleString()} → {new Date(r.finished_at).toLocaleTimeString()}
+            {r.workload_label ? ` · ${r.workload_label}` : ""}
+          </div>
+          <div className="page-meta">
+            <Icon name="globe" size={12} /> {r.destination_summary.join(", ")}
+          </div>
+        </div>
+        <div className="page-actions">
+          <div className="btn-group" role="group" aria-label="Export report">
+            <button className="btn small" title="Export as HTML" onClick={() => void exportAs("html")}>
+              <Icon name="upload" size={13} />
+              HTML
+            </button>
+            <button className="btn small" title="Export as JSON" onClick={() => void exportAs("json")}>
+              JSON
+            </button>
+            <button className="btn small" title="Export as CSV" onClick={() => void exportAs("csv")}>
+              CSV
+            </button>
+            <button className="btn small" title="Export the per-second timeline as CSV" onClick={() => void exportAs("timeline_csv")}>
+              Timeline CSV
+            </button>
+          </div>
+          <button
+            className="btn small ghost danger"
+            onClick={async () => {
+              await api.deleteLoadReport(r.run_id);
+              props.onDeleted();
+            }}
+          >
+            <Icon name="trash" size={13} />
+            Delete
+          </button>
+        </div>
       </div>
-      <div className="faint">Destinations: {r.destination_summary.join(", ")}</div>
       <div className="cards">
         <Card label="Achieved rate" value={`${r.achieved_rate_per_sec.toFixed(1)}/s`} sub={r.offered_rate_per_sec != null ? `offered ${r.offered_rate_per_sec.toFixed(1)}/s` : undefined} />
         <Card label="Iterations started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped (in-flight cap)` : undefined} />
@@ -873,10 +967,11 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
         <Card label="Assertion failures" value={String(u.assertion_failures)} bad={u.assertion_failures > 0} />
       </div>
       {r.protocol_metrics && <ProtocolPanel p={r.protocol_metrics} requests={u} />}
-      <table className="grid">
+      <h4 className="section-title">Latency</h4>
+      <table className="grid metrics">
         <thead>
           <tr>
-            <th>Latency</th>
+            <th>Distribution</th>
             <th>count</th>
             <th>p50</th>
             <th>p90</th>
@@ -917,32 +1012,36 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
         {r.protocol_metrics ? `${r.protocol_metrics.semantics.latency_means} ` : ""}Timeouts are censored (their true latency is unknown) and excluded from both distributions; they are counted above. Percentiles cover
         successful {many} only and come from merged HDR histograms, never averaged.
       </p>
+      <h4 className="section-title">Timeline</h4>
       <Timeline buckets={r.timeline} />
-      <div className="row" style={{ alignItems: "flex-start", gap: 24, flexWrap: "wrap" }}>
-        <div className="col grow">
-          <h4 className="faint" style={{ margin: 0 }}>Status codes</h4>
-          <table className="grid">
+      <div className="split-2">
+        <div className="col">
+          <h4 className="section-title">Status codes</h4>
+          {r.status_distribution.length === 0 && <div className="faint small-text">No responses.</div>}
+          <table className="grid metrics compact">
             <tbody>
               {r.status_distribution.map(([code, n]) => (
                 <tr key={String(code)}>
-                  <td className={`k s${String(code)[0]}`}>{String(code)}</td>
+                  <td>
+                    <span className={`status-pill s${String(code)[0]}`}>{String(code)}</span>
+                  </td>
                   <td className="v">{String(n)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <div className="col grow">
-          <h4 className="faint" style={{ margin: 0 }}>Failure categories (redacted samples)</h4>
-          {r.failure_categories.length === 0 && <div className="faint">None.</div>}
+        <div className="col">
+          <h4 className="section-title">Failure categories (redacted samples)</h4>
+          {r.failure_categories.length === 0 && <div className="faint small-text">None.</div>}
           {r.failure_categories.map((f) => (
-            <details key={f.category}>
+            <details key={f.category} className="failure-cat">
               <summary>
-                {humanize(f.category)} — {f.count}
+                {humanize(f.category)} <span className="badge bad">{f.count}</span>
               </summary>
-              <ul>
+              <ul className="plain-list">
                 {f.examples.map((x, i) => (
-                  <li key={i} className="mono" style={{ fontSize: 11 }}>
+                  <li key={i} className="mono">
                     {x}
                   </li>
                 ))}
@@ -952,7 +1051,7 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
         </div>
       </div>
       <details>
-        <summary className="muted">Load generator health</summary>
+        <summary>Load generator health</summary>
         <table className="grid">
           <tbody>
             <tr>
@@ -987,8 +1086,8 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
           ))}
         </div>
       )}
-      <div className="row">
-        <select className="field" aria-label="Compare with" value={cmpWith} onChange={(e) => setCmpWith(e.target.value)}>
+      <div className="row nowrap compare-row">
+        <select className="field grow" aria-label="Compare with" value={cmpWith} onChange={(e) => setCmpWith(e.target.value)}>
           <option value="">Compare with another run…</option>
           {props.reports
             .filter((x) => x.run_id !== r.run_id)
@@ -998,7 +1097,7 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
               </option>
             ))}
         </select>
-        <button className="btn small" disabled={!cmpWith} onClick={async () => setCmp(await api.compareLoadReports(r.run_id, cmpWith))}>
+        <button className="btn" disabled={!cmpWith} onClick={async () => setCmp(await api.compareLoadReports(r.run_id, cmpWith))}>
           Compare
         </button>
       </div>
@@ -1039,7 +1138,7 @@ function Rows(props: { rows: [string, string][]; testid?: string }) {
 
 function LatencyRows(props: { rows: [string, LatencySummary][] }) {
   return (
-    <table className="grid">
+    <table className="grid metrics">
       <thead>
         <tr>
           <th>Distribution</th>
@@ -1104,7 +1203,7 @@ export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; request
   const s = p.semantics;
   return (
     <section className="col" data-testid="protocol-panel" aria-label="Protocol metrics">
-      <h4 className="faint" style={{ margin: 0 }}>
+      <h4 className="section-title">
         Load unit: {s.unit_plural} ({humanize(p.unit)})
       </h4>
       <Rows

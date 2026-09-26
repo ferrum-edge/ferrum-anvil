@@ -24,7 +24,8 @@ import type {
 import { AuthEditor } from "./AuthEditor";
 import { DatagramEnvelopeEditor, ProxyHeaderEditor } from "./ProxyProtocolEditor";
 import { EarlyDataSettings } from "./EarlyData";
-import { KeyValueEditor, Tabs, fmtBytes, humanize, useDebounced } from "./ui";
+import { KeyValueEditor, Tabs, fmtBytes, humanize, shortcut, useDebounced } from "./ui";
+import { Icon } from "./icons";
 import { WsDeflateEditor } from "./WsDeflateEditor";
 
 export interface Profiles {
@@ -69,7 +70,7 @@ export function RequestEditor(props: {
   const tabs: { id: Sub; label: string; count?: number }[] = [
     { id: "params", label: "Params", count: spec.params?.filter((p) => p.enabled !== false && p.name).length },
     { id: "headers", label: "Headers", count: spec.headers?.filter((p) => p.enabled !== false && p.name).length },
-    ...(protocol === "http" ? [{ id: "body" as Sub, label: bodyKind === "none" ? "Body" : `Body · ${humanize(bodyKind)}` }] : [{ id: "protocol" as Sub, label: PROTOCOLS.find((p) => p.id === protocol)!.label }]),
+    ...(protocol === "http" ? [{ id: "body" as Sub, label: bodyKind === "none" ? "Body" : `Body · ${BODY_SHORT[bodyKind] ?? humanize(bodyKind)}` }] : [{ id: "protocol" as Sub, label: PROTOCOLS.find((p) => p.id === protocol)!.label }]),
     { id: "auth", label: "Auth" },
     { id: "tests", label: "Tests", count: (spec.assertions?.length ?? 0) + (spec.extractions?.length ?? 0) || undefined },
     { id: "settings", label: "Settings" },
@@ -86,57 +87,69 @@ export function RequestEditor(props: {
           props.running ? props.onCancel() : props.onSend(false);
         }}
       >
-        <select className="field" aria-label="Protocol" value={protocol} style={{ width: 110 }} onChange={(e) => set({ protocol: e.target.value as RequestSpec["protocol"] })}>
-          {PROTOCOLS.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        {(protocol === "http" || protocol === "sse") && (
-          <select className={`field method-select m-${spec.method ?? "GET"}`} aria-label="Method" value={spec.method ?? "GET"} onChange={(e) => set({ method: e.target.value })}>
-            {METHODS.map((m) => (
-              <option key={m}>{m}</option>
+        <div className="url-group">
+          <select className="field protocol-select" aria-label="Protocol" value={protocol} onChange={(e) => set({ protocol: e.target.value as RequestSpec["protocol"] })}>
+            {PROTOCOLS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
             ))}
           </select>
-        )}
-        <input
-          className="field url"
-          aria-label="URL"
-          spellCheck={false}
-          value={spec.url}
-          placeholder={placeholderFor(protocol)}
-          onChange={(e) => {
-            const url = e.target.value;
-            // A non-HTTP scheme typed into an HTTP request selects the matching protocol.
-            const inferred = protocol === "http" ? protocolForScheme(url) : null;
-            set(inferred ? { url, protocol: inferred } : { url });
-          }}
-        />
+          {(protocol === "http" || protocol === "sse") && (
+            <select className={`field method-select m-${spec.method ?? "GET"}`} aria-label="Method" value={spec.method ?? "GET"} onChange={(e) => set({ method: e.target.value })}>
+              {METHODS.map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          )}
+          <input
+            className="field url"
+            aria-label="URL"
+            spellCheck={false}
+            value={spec.url}
+            placeholder={placeholderFor(protocol)}
+            onChange={(e) => {
+              const url = e.target.value;
+              // A non-HTTP scheme typed into an HTTP request selects the matching protocol.
+              const inferred = protocol === "http" ? protocolForScheme(url) : null;
+              set(inferred ? { url, protocol: inferred } : { url });
+            }}
+          />
+        </div>
         {interactive(spec) && !props.running && (
           <button type="button" className="btn" disabled={props.connected} title="Open an interactive session: send and receive messages live" onClick={props.onConnect}>
+            <Icon name="plug" size={14} />
             {props.connected ? "Connected" : "Connect"}
           </button>
         )}
         {props.running ? (
-          <button type="submit" className="btn">
+          <button type="submit" className="btn" title="Cancel (Esc)">
+            <Icon name="stop" size={13} />
             Cancel
           </button>
         ) : (
-          <button type="submit" className="btn primary" disabled={props.connected} title={protocol === "http" ? "Send (⌘/Ctrl+Enter)" : "Run the scripted exchange and stop (⌘/Ctrl+Enter)"}>
+          <button
+            type="submit"
+            className="btn primary"
+            disabled={props.connected}
+            title={protocol === "http" ? `Send (${shortcut("Enter")})` : `Run the scripted exchange and stop (${shortcut("Enter")})`}
+          >
+            <Icon name={protocol === "http" ? "send" : "play"} size={protocol === "http" ? 14 : 12} />
             {protocol === "http" ? "Send" : "Run"}
           </button>
         )}
-        <button type="button" className="btn" onClick={props.onSave} disabled={!props.dirty} title="Save (⌘/Ctrl+S)">
+        <button type="button" className="btn" onClick={props.onSave} disabled={!props.dirty} title={`Save (${shortcut("S")})`}>
           Save
         </button>
       </form>
       <Tabs tabs={tabs} value={activeSub} onChange={setSub} />
       <div className="pane">
-        {activeSub === "params" && <KeyValueEditor rows={spec.params ?? []} onChange={(params) => set({ params })} nameLabel="Query parameter" />}
+        {activeSub === "params" && (
+          <KeyValueEditor rows={spec.params ?? []} onChange={(params) => set({ params })} nameLabel="Query parameter" emptyText="No query parameters." />
+        )}
         {activeSub === "headers" && (
           <div className="col">
-            <KeyValueEditor rows={spec.headers ?? []} onChange={(headers) => set({ headers })} nameLabel="Header" />
+            <KeyValueEditor rows={spec.headers ?? []} onChange={(headers) => set({ headers })} nameLabel="Header" emptyText="No custom headers." />
             <p className="hint">Content-Type, Content-Length and auth headers are added at send time; the Effective request tab shows exactly what will be sent and why.</p>
           </div>
         )}
@@ -213,6 +226,18 @@ const BODY_KINDS: { id: Body["type"]; label: string }[] = [
   { id: "soap", label: "SOAP" },
 ];
 
+/** Body kind as the Body tab names it. */
+const BODY_SHORT: Partial<Record<Body["type"], string>> = {
+  json: "JSON",
+  xml: "XML",
+  raw: "Text",
+  form_url_encoded: "Form",
+  multipart: "Multipart",
+  binary: "File",
+  graphql: "GraphQL",
+  soap: "SOAP",
+};
+
 function bodyDefault(t: Body["type"], prev?: Body): Body | undefined {
   const text = prev && "text" in prev ? prev.text : "";
   switch (t) {
@@ -252,8 +277,8 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
     setBody({ type: "binary", attachment, content_type: "application/octet-stream" });
   };
   return (
-    <div className="col" style={{ height: "100%" }}>
-      <div className="row">
+    <div className="col body-editor">
+      <div className="toolbar">
         <select
           className="field"
           aria-label="Body type"
@@ -271,8 +296,8 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
           ))}
         </select>
         {(b.type === "json" || b.type === "xml" || b.type === "soap") && (
-          <label className="lbl" style={{ flexDirection: "row", alignItems: "center" }}>
-            If invalid:
+          <label className="lbl inline">
+            If invalid
             <select className="field" value={spec.lint_policy ?? "warn"} onChange={(e) => set({ lint_policy: e.target.value as RequestSpec["lint_policy"] })}>
               <option value="warn">Warn and send</option>
               <option value="block">Block send</option>
@@ -281,26 +306,29 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
           </label>
         )}
       </div>
-      {b.type === "none" && <p className="hint">No body is sent.</p>}
+      {b.type === "none" && <p className="hint">This request has no body. Choose a type above to add one.</p>}
       {(b.type === "json" || b.type === "xml") && <LintedText kind={b.type} text={b.text} onChange={(text) => setBody({ ...b, text })} />}
       {b.type === "raw" && (
         <>
-          <label className="lbl" style={{ maxWidth: 320 }}>
+          <label className="lbl narrow">
             Content-Type
             <input className="field mono" value={b.content_type ?? ""} onChange={(e) => setBody({ ...b, content_type: e.target.value || null })} />
           </label>
-          <textarea className="field grow" style={{ minHeight: 160 }} spellCheck={false} value={b.text} onChange={(e) => setBody({ ...b, text: e.target.value })} />
+          <textarea className="field grow body-text" spellCheck={false} aria-label="Raw body" value={b.text} onChange={(e) => setBody({ ...b, text: e.target.value })} />
         </>
       )}
       {b.type === "form_url_encoded" && <KeyValueEditor rows={b.fields} onChange={(fields) => setBody({ ...b, fields })} nameLabel="Field" />}
       {b.type === "multipart" && <MultipartEditor parts={b.parts} onChange={(parts) => setBody({ ...b, parts })} />}
       {b.type === "binary" && (
-        <div className="row">
-          <span className="badge">{b.attachment.kind === "stored" ? `${b.attachment.file_name} · ${fmtBytes(b.attachment.size)}` : b.attachment.path}</span>
-          <button className="btn small" onClick={pickBinary}>
+        <div className="fields">
+          <span className="file-chip">
+            <Icon name="file" size={14} />
+            {b.attachment.kind === "stored" ? `${b.attachment.file_name} · ${fmtBytes(b.attachment.size)}` : b.attachment.path}
+          </span>
+          <button className="btn" onClick={pickBinary}>
             Choose another file…
           </button>
-          <label className="lbl" style={{ flexDirection: "row", alignItems: "center" }}>
+          <label className="lbl">
             Content-Type
             <input className="field mono" value={b.content_type ?? ""} onChange={(e) => setBody({ ...b, content_type: e.target.value || null })} />
           </label>
@@ -316,7 +344,7 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
             Variables (JSON)
             <LintedText kind="json" text={b.variables ?? "{}"} onChange={(variables) => setBody({ ...b, variables })} rows={4} />
           </label>
-          <label className="lbl" style={{ maxWidth: 320 }}>
+          <label className="lbl narrow">
             Operation name
             <input className="field mono" value={b.operation_name ?? ""} onChange={(e) => setBody({ ...b, operation_name: e.target.value || null })} />
           </label>
@@ -324,7 +352,7 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
       )}
       {b.type === "soap" && (
         <>
-          <div className="row">
+          <div className="fields">
             <label className="lbl">
               SOAP version
               <select className="field" value={b.version} onChange={(e) => setBody({ ...b, version: e.target.value as "soap11" })}>
@@ -359,10 +387,9 @@ function LintedText(props: { kind: "json" | "xml"; text: string; onChange: (t: s
   }, [debounced, props.kind]);
   const invalid = lint?.status === "invalid";
   return (
-    <div className="col grow" style={{ minHeight: 0 }}>
+    <div className="col grow linted">
       <textarea
-        className="field grow"
-        style={{ minHeight: props.rows ? undefined : 180, borderColor: invalid ? "var(--bad)" : undefined }}
+        className={`field grow${props.rows ? "" : " body-text"}`}
         rows={props.rows}
         spellCheck={false}
         aria-invalid={invalid}
@@ -370,18 +397,24 @@ function LintedText(props: { kind: "json" | "xml"; text: string; onChange: (t: s
         value={props.text}
         onChange={(e) => props.onChange(e.target.value)}
       />
-      <div className="row" aria-live="polite" style={{ fontSize: 12 }}>
-        {lint?.status === "valid" && <span style={{ color: "var(--ok)" }}>✓ Valid {props.kind.toUpperCase()}</span>}
+      <div className="lint-line" aria-live="polite">
+        {lint?.status === "valid" && (
+          <span className="lint-ok">
+            <Icon name="checkCircle" size={14} />
+            Valid {props.kind.toUpperCase()}
+          </span>
+        )}
         {lint?.status === "invalid" &&
           lint.issues.slice(0, 3).map((i, n) => (
-            <span key={n} style={{ color: "var(--bad)" }}>
+            <span key={n} className="lint-bad">
+              <Icon name="alertCircle" size={14} />
               Line {i.line}, column {i.column}: {i.message}
             </span>
           ))}
         {lint?.status === "skipped" && <span className="faint">{lint.reason}</span>}
         {props.kind === "json" && lint?.status === "valid" && (
           <button
-            className="btn ghost small"
+            className="btn small"
             onClick={() => {
               try {
                 props.onChange(JSON.stringify(JSON.parse(props.text), null, 2));
@@ -403,23 +436,27 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
   return (
     <div className="col">
       {parts.map((p, i) => (
-        <div className="row" key={i}>
+        <div className="rule-row" key={i}>
           <input type="checkbox" aria-label="Enabled" checked={p.enabled !== false} onChange={(e) => set(i, { ...p, enabled: e.target.checked })} />
-          <input className="field mono" style={{ width: 180 }} placeholder="name" value={p.name} onChange={(e) => set(i, { ...p, name: e.target.value })} />
+          <input className="field mono w-180" placeholder="name" aria-label="Part name" value={p.name} onChange={(e) => set(i, { ...p, name: e.target.value })} />
           {p.part_kind === "text" ? (
-            <input className="field mono grow" placeholder="value" value={p.value} onChange={(e) => set(i, { ...p, value: e.target.value })} />
+            <input className="field mono grow" placeholder="value" aria-label="Part value" value={p.value} onChange={(e) => set(i, { ...p, value: e.target.value })} />
           ) : (
-            <span className="badge grow">📎 {p.attachment.kind === "stored" ? `${p.attachment.file_name} · ${fmtBytes(p.attachment.size)}` : p.attachment.path}</span>
+            <span className="file-chip grow">
+              <Icon name="file" size={14} />
+              {p.attachment.kind === "stored" ? `${p.attachment.file_name} · ${fmtBytes(p.attachment.size)}` : p.attachment.path}
+            </span>
           )}
-          <input className="field mono" style={{ width: 170 }} placeholder="content-type (auto)" value={p.content_type ?? ""} onChange={(e) => set(i, { ...p, content_type: e.target.value || null })} />
-          <button className="btn ghost icon-btn" aria-label="Remove" onClick={() => onChange(parts.filter((_, j) => j !== i))}>
-            ✕
+          <input className="field mono w-170" placeholder="content-type (auto)" aria-label="Part content type" value={p.content_type ?? ""} onChange={(e) => set(i, { ...p, content_type: e.target.value || null })} />
+          <button className="btn ghost icon-btn" aria-label="Remove" title="Remove" onClick={() => onChange(parts.filter((_, j) => j !== i))}>
+            <Icon name="x" />
           </button>
         </div>
       ))}
       <div className="row">
         <button className="btn small" onClick={() => onChange([...parts, { name: "", part_kind: "text", value: "", enabled: true }])}>
-          + Text field
+          <Icon name="plus" size={14} />
+          Text field
         </button>
         <button
           className="btn small"
@@ -431,7 +468,8 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
             onChange([...parts, { name: "file", part_kind: "file", attachment, file_name: name, enabled: true }]);
           }}
         >
-          + File…
+          <Icon name="file" size={14} />
+          File…
         </button>
       </div>
       <p className="hint">Files are copied into the encrypted workspace so exports stay portable.</p>
@@ -446,7 +484,7 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
   if (p === "web_socket") {
     const ws = spec.websocket ?? {};
     return (
-      <div className="col" style={{ maxWidth: 760 }}>
+      <div className="form">
         <label className="lbl">
           Bootstrap
           <select className="field" value={ws.bootstrap ?? "http1_upgrade"} onChange={(e) => set({ websocket: { ...ws, bootstrap: e.target.value as "http1_upgrade" } })}>
@@ -468,7 +506,7 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
             onChange={(e) => set({ websocket: { ...ws, messages: e.target.value.split("\n").filter((l) => l.length > 0).map((text) => ({ kind: "text" as const, text })) } })}
           />
         </label>
-        <div className="row">
+        <div className="fields">
           <NumField label="Wait for inbound messages" value={ws.expect_messages} onChange={(v) => set({ websocket: { ...ws, expect_messages: v ?? undefined } })} />
           <NumField label="Close after idle (ms)" value={ws.idle_close_ms} onChange={(v) => set({ websocket: { ...ws, idle_close_ms: v ?? undefined } })} />
           <NumField
@@ -484,8 +522,8 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
   if (p === "sse") {
     const s = spec.sse ?? {};
     return (
-      <div className="col" style={{ maxWidth: 760 }}>
-        <div className="row">
+      <div className="form">
+        <div className="fields">
           <NumField label="Stop after events (0 = until idle)" value={s.max_events} onChange={(v) => set({ sse: { ...s, max_events: v ?? undefined } })} />
           <NumField label="Idle timeout (ms)" value={s.idle_timeout_ms} onChange={(v) => set({ sse: { ...s, idle_timeout_ms: v ?? undefined } })} />
         </div>
@@ -507,8 +545,8 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
     const web = wire !== "grpc";
     const streamingRequest = g.mode === "client_streaming" || g.mode === "bidirectional";
     return (
-      <div className="col" style={{ maxWidth: 760 }}>
-        <div className="row">
+      <div className="form">
+        <div className="fields">
           <label className="lbl grow">
             Service (package.Service)
             <input className="field mono" value={g.service} onChange={(e) => set({ grpc: { ...g, service: e.target.value } })} />
@@ -569,7 +607,7 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
           Messages (JSON, one per line; unary/server streaming send the first)
           <textarea className="field" rows={5} value={g.messages.join("\n")} onChange={(e) => set({ grpc: { ...g, messages: e.target.value.split("\n").filter((l) => l.trim()) } })} />
         </label>
-        <div className="row">
+        <div className="fields">
           <NumField label="Deadline (grpc-timeout, ms)" value={g.deadline_ms} onChange={(v) => set({ grpc: { ...g, deadline_ms: v } })} />
           {!web && (
             <label className="check">
@@ -599,8 +637,8 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
   if (p === "tcp") {
     const t = spec.tcp ?? { payloads: [] };
     return (
-      <div className="col" style={{ maxWidth: 760 }}>
-        <div className="row">
+      <div className="form">
+        <div className="fields">
           <label className="lbl">
             Framing
             <select className="field" value={t.framing ?? "none"} onChange={(e) => set({ tcp: { ...t, framing: e.target.value as "none" } })}>
@@ -627,9 +665,9 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
     const m = u.masque ?? null;
     const setMasque = (patch: Partial<MasqueSpec>) => m && set({ udp: { ...u, masque: { ...m, ...patch } } });
     return (
-      <div className="col" style={{ maxWidth: 760 }}>
+      <div className="form">
         <PayloadsEditor payloads={u.datagrams} onChange={(datagrams) => set({ udp: { ...u, datagrams } })} />
-        <div className="row">
+        <div className="fields">
           <NumField label="Response window (ms)" value={u.response_window_ms} onChange={(v) => set({ udp: { ...u, response_window_ms: v ?? undefined } })} />
           <NumField label="Max datagrams" value={u.max_datagrams} onChange={(v) => set({ udp: { ...u, max_datagrams: v ?? undefined } })} />
         </div>
@@ -644,7 +682,7 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
         </label>
         {m && (
           <div className="col">
-            <div className="row">
+            <div className="fields">
               <label className="lbl grow">
                 Proxy URL
                 <input className="field mono" aria-label="MASQUE proxy URL" placeholder="https://proxy.example:443" value={m.proxy_url} onChange={(e) => setMasque({ proxy_url: e.target.value })} />
@@ -687,20 +725,21 @@ function PayloadsEditor({ payloads, onChange }: { payloads: { data: string; enco
   return (
     <div className="col">
       {payloads.map((p, i) => (
-        <div className="row" key={i}>
-          <select className="field" value={p.encoding ?? "text"} onChange={(e) => onChange(payloads.map((x, j) => (j === i ? { ...x, encoding: e.target.value as "text" } : x)))}>
+        <div className="row nowrap" key={i}>
+          <select className="field w-110" aria-label="Encoding" value={p.encoding ?? "text"} onChange={(e) => onChange(payloads.map((x, j) => (j === i ? { ...x, encoding: e.target.value as "text" } : x)))}>
             <option value="text">Text</option>
             <option value="hex">Hex</option>
             <option value="base64">Base64</option>
           </select>
-          <input className="field mono grow" value={p.data} onChange={(e) => onChange(payloads.map((x, j) => (j === i ? { ...x, data: e.target.value } : x)))} />
-          <button className="btn ghost icon-btn" aria-label="Remove" onClick={() => onChange(payloads.filter((_, j) => j !== i))}>
-            ✕
+          <input className="field mono grow" aria-label="Payload" value={p.data} onChange={(e) => onChange(payloads.map((x, j) => (j === i ? { ...x, data: e.target.value } : x)))} />
+          <button className="btn ghost icon-btn" aria-label="Remove" title="Remove" onClick={() => onChange(payloads.filter((_, j) => j !== i))}>
+            <Icon name="x" />
           </button>
         </div>
       ))}
-      <button className="btn small" style={{ alignSelf: "start" }} onClick={() => onChange([...payloads, { data: "", encoding: "text" }])}>
-        + Payload
+      <button className="btn small start" onClick={() => onChange([...payloads, { data: "", encoding: "text" }])}>
+        <Icon name="plus" size={14} />
+        Payload
       </button>
     </div>
   );
@@ -760,11 +799,12 @@ function TestsEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Reques
   const setA = (i: number, a: Assertion) => set({ assertions: as.map((x, j) => (j === i ? a : x)) });
   const setE = (i: number, e: Extraction) => set({ extractions: ex.map((x, j) => (j === i ? e : x)) });
   return (
-    <div className="col" style={{ gap: 14 }}>
+    <div className="stack">
       <div className="col">
-        <h4 className="faint" style={{ margin: 0 }}>Assertions</h4>
+        <h4 className="section-title">Assertions</h4>
+        {as.length === 0 && <p className="hint">No assertions yet. Each one checks the response independently of transport and HTTP status.</p>}
         {as.map((a, i) => (
-          <div className="row" key={i} style={{ flexWrap: "wrap" }}>
+          <div className="rule-row" key={i}>
             <input type="checkbox" aria-label="Enabled" checked={a.enabled !== false} onChange={(e) => setA(i, { ...a, enabled: e.target.checked })} />
             <select className="field" value={a.type} onChange={(e) => setA(i, { ...assertionDefault(e.target.value as Assertion["type"]), enabled: a.enabled, label: a.label })}>
               {ASSERTION_TYPES.map((t) => (
@@ -774,21 +814,22 @@ function TestsEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Reques
               ))}
             </select>
             <AssertionFields a={a} onChange={(n) => setA(i, n)} />
-            <button className="btn ghost icon-btn" aria-label="Remove assertion" onClick={() => set({ assertions: as.filter((_, j) => j !== i) })}>
-              ✕
+            <button className="btn ghost icon-btn end" aria-label="Remove assertion" title="Remove assertion" onClick={() => set({ assertions: as.filter((_, j) => j !== i) })}>
+              <Icon name="x" />
             </button>
           </div>
         ))}
-        <button className="btn small" style={{ alignSelf: "start" }} onClick={() => set({ assertions: [...as, assertionDefault("status")] })}>
-          + Assertion
+        <button className="btn small start" onClick={() => set({ assertions: [...as, assertionDefault("status")] })}>
+          <Icon name="plus" size={14} />
+          Assertion
         </button>
         <p className="hint">Assertion results are reported separately from transport and HTTP status — a failed assertion never changes what the network did.</p>
       </div>
       <div className="col">
-        <h4 className="faint" style={{ margin: 0 }}>Extract into variables (for chained requests)</h4>
+        <h4 className="section-title">Extract into variables (for chained requests)</h4>
         {ex.map((x, i) => (
-          <div className="row" key={i}>
-            <input className="field mono" style={{ width: 160 }} placeholder="variable" value={x.variable} onChange={(e) => setE(i, { ...x, variable: e.target.value })} />
+          <div className="rule-row" key={i}>
+            <input className="field mono w-160" placeholder="variable" aria-label="Variable" value={x.variable} onChange={(e) => setE(i, { ...x, variable: e.target.value })} />
             <select
               className="field"
               value={x.from}
@@ -811,13 +852,14 @@ function TestsEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Reques
               <input type="checkbox" checked={!!x.sensitive} onChange={(e) => setE(i, { ...x, sensitive: e.target.checked })} />
               secret
             </label>
-            <button className="btn ghost icon-btn" aria-label="Remove extraction" onClick={() => set({ extractions: ex.filter((_, j) => j !== i) })}>
-              ✕
+            <button className="btn ghost icon-btn end" aria-label="Remove extraction" title="Remove extraction" onClick={() => set({ extractions: ex.filter((_, j) => j !== i) })}>
+              <Icon name="x" />
             </button>
           </div>
         ))}
-        <button className="btn small" style={{ alignSelf: "start" }} onClick={() => set({ extractions: [...ex, { variable: "", from: "json_path", path: "$." }] })}>
-          + Extraction
+        <button className="btn small start" onClick={() => set({ extractions: [...ex, { variable: "", from: "json_path", path: "$." }] })}>
+          <Icon name="plus" size={14} />
+          Extraction
         </button>
       </div>
     </div>
@@ -873,14 +915,14 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
         </>
       );
     case "latency_ms":
-      return <input className="field mono" style={{ width: 120 }} value={a.max} onChange={(e) => onChange({ ...a, max: Number(e.target.value) || 0 })} />;
+      return <input className="field mono num" aria-label="Maximum latency (ms)" value={a.max} onChange={(e) => onChange({ ...a, max: Number(e.target.value) || 0 })} />;
     case "grpc_status":
-      return <input className="field mono" style={{ width: 120 }} value={a.code} onChange={(e) => onChange({ ...a, code: Number(e.target.value) || 0 })} />;
+      return <input className="field mono num" aria-label="gRPC status code" value={a.code} onChange={(e) => onChange({ ...a, code: Number(e.target.value) || 0 })} />;
     case "message_count":
       return (
         <>
           {cmp(a.comparison, (comparison) => onChange({ ...a, comparison }))}
-          <input className="field mono" style={{ width: 120 }} value={a.value} onChange={(e) => onChange({ ...a, value: Number(e.target.value) || 0 })} />
+          <input className="field mono num" aria-label="Message count" value={a.value} onChange={(e) => onChange({ ...a, value: Number(e.target.value) || 0 })} />
         </>
       );
     case "diagnostic":
@@ -906,6 +948,8 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
 
 // --------------------------------------------------------------- settings
 
+const TOGGLE_LABEL = { decompress: "Decompress", cookies: "Cookies", keepalive: "Reuse connections" } as const;
+
 function tri(v: boolean | null | undefined): string {
   return v == null ? "inherit" : v ? "on" : "off";
 }
@@ -918,13 +962,9 @@ function fromTri(s: string): boolean | null {
 export function SettingsEditor({ spec, set, profiles }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; profiles: Profiles }) {
   const httpFamily = ["http", "web_socket", "grpc", "sse"].includes(spec.protocol ?? "http");
   return (
-    <div className="col" style={{ gap: 14 }}>
+    <div className="form wide">
       <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} protocol={spec.protocol} />
-      {httpFamily && (
-        <div style={{ maxWidth: 860 }}>
-          <ProxyHeaderEditor value={spec.proxy_protocol} onChange={(proxy_protocol) => set({ proxy_protocol })} http />
-        </div>
-      )}
+      {httpFamily && <ProxyHeaderEditor value={spec.proxy_protocol} onChange={(proxy_protocol) => set({ proxy_protocol })} http />}
     </div>
   );
 }
@@ -955,46 +995,49 @@ export function SettingsOverridesEditor({
   const udp = protocol === "udp";
   const selectedProxy = s.proxy_profile_id?.kind === "profile" ? profiles.proxy.find((p) => p.id === (s.proxy_profile_id as { id: string }).id) : undefined;
   return (
-    <div className="col" style={{ gap: 14, maxWidth: 860 }}>
+    <div className="form wide">
       <p className="hint">Blank or “inherit” uses the folder, workspace or app default. The Effective request tab shows the resolved value and which layer it came from.</p>
-      <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
-        <label className="lbl">
-          HTTP version
-          <select className="field" value={s.http_version ?? ""} onChange={(e) => upd({ http_version: (e.target.value || null) as HttpVersionPolicy | null })}>
-            <option value="">inherit</option>
-            <option value="auto">Auto (ALPN)</option>
-            <option value="http1_only">HTTP/1.1 only</option>
-            <option value="http2_only">HTTP/2 only</option>
-            <option value="h2c">h2c (cleartext HTTP/2)</option>
-            <option value="http3_only">HTTP/3 only</option>
-            <option value="http3_with_fallback">HTTP/3, fall back to TCP (safe requests only)</option>
-          </select>
-        </label>
-        <label className="lbl">
-          IP family
-          <select className="field" value={s.ip_preference ?? ""} onChange={(e) => upd({ ip_preference: (e.target.value || null) as SettingsOverrides["ip_preference"] })}>
-            <option value="">inherit</option>
-            <option value="system">System</option>
-            <option value="prefer_ipv4">Prefer IPv4</option>
-            <option value="prefer_ipv6">Prefer IPv6</option>
-            <option value="ipv4_only">IPv4 only</option>
-            <option value="ipv6_only">IPv6 only</option>
-          </select>
-        </label>
-        {(["decompress", "cookies", "keepalive"] as const).map((k) => (
-          <label className="lbl" key={k}>
-            {k === "keepalive" ? "Reuse connections" : humanize(k)}
-            <select className="field" value={tri(s[k])} onChange={(e) => upd({ [k]: fromTri(e.target.value) })}>
-              <option value="inherit">inherit</option>
-              <option value="on">on</option>
-              <option value="off">off</option>
+      <fieldset>
+        <legend>Connection</legend>
+        <div className="fields">
+          <label className="lbl">
+            HTTP version
+            <select className="field" value={s.http_version ?? ""} onChange={(e) => upd({ http_version: (e.target.value || null) as HttpVersionPolicy | null })}>
+              <option value="">inherit</option>
+              <option value="auto">Auto (ALPN)</option>
+              <option value="http1_only">HTTP/1.1 only</option>
+              <option value="http2_only">HTTP/2 only</option>
+              <option value="h2c">h2c (cleartext HTTP/2)</option>
+              <option value="http3_only">HTTP/3 only</option>
+              <option value="http3_with_fallback">HTTP/3, fall back to TCP (safe requests only)</option>
             </select>
           </label>
-        ))}
-      </div>
-      <fieldset style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-        <legend className="faint">Timeouts (ms)</legend>
-        <div className="row" style={{ flexWrap: "wrap" }}>
+          <label className="lbl">
+            IP family
+            <select className="field" value={s.ip_preference ?? ""} onChange={(e) => upd({ ip_preference: (e.target.value || null) as SettingsOverrides["ip_preference"] })}>
+              <option value="">inherit</option>
+              <option value="system">System</option>
+              <option value="prefer_ipv4">Prefer IPv4</option>
+              <option value="prefer_ipv6">Prefer IPv6</option>
+              <option value="ipv4_only">IPv4 only</option>
+              <option value="ipv6_only">IPv6 only</option>
+            </select>
+          </label>
+          {(["decompress", "cookies", "keepalive"] as const).map((k) => (
+            <label className="lbl" key={k}>
+              {TOGGLE_LABEL[k]}
+              <select className="field" value={tri(s[k])} onChange={(e) => upd({ [k]: fromTri(e.target.value) })}>
+                <option value="inherit">inherit</option>
+                <option value="on">on</option>
+                <option value="off">off</option>
+              </select>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Timeouts (ms)</legend>
+        <div className="fields">
           {(
             [
               ["dns_ms", "DNS"],
@@ -1010,102 +1053,108 @@ export function SettingsOverridesEditor({
           ))}
         </div>
       </fieldset>
-      <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
-        <label className="lbl">
-          Redirects
-          <select
-            className="field"
-            value={s.redirects == null ? "inherit" : s.redirects.follow ? "follow" : "no"}
-            onChange={(e) => upd({ redirects: e.target.value === "inherit" ? null : { follow: e.target.value === "follow", max: s.redirects?.max ?? 10, forward_credentials_cross_origin: s.redirects?.forward_credentials_cross_origin ?? false } })}
-          >
-            <option value="inherit">inherit</option>
-            <option value="follow">Follow</option>
-            <option value="no">Don't follow</option>
-          </select>
-        </label>
-        {s.redirects && (
-          <>
-            <NumField label="Max redirects" value={s.redirects.max} onChange={(v) => upd({ redirects: { ...s.redirects!, max: v ?? 10 } })} />
-            <label className="check">
-              <input type="checkbox" checked={s.redirects.forward_credentials_cross_origin} onChange={(e) => upd({ redirects: { ...s.redirects!, forward_credentials_cross_origin: e.target.checked } })} />
-              Forward credentials to other origins
-            </label>
-          </>
+      <fieldset>
+        <legend>Redirects and retries</legend>
+        <div className="fields">
+          <label className="lbl">
+            Redirects
+            <select
+              className="field"
+              value={s.redirects == null ? "inherit" : s.redirects.follow ? "follow" : "no"}
+              onChange={(e) => upd({ redirects: e.target.value === "inherit" ? null : { follow: e.target.value === "follow", max: s.redirects?.max ?? 10, forward_credentials_cross_origin: s.redirects?.forward_credentials_cross_origin ?? false } })}
+            >
+              <option value="inherit">inherit</option>
+              <option value="follow">Follow</option>
+              <option value="no">Don't follow</option>
+            </select>
+          </label>
+          {s.redirects && (
+            <>
+              <NumField label="Max redirects" value={s.redirects.max} onChange={(v) => upd({ redirects: { ...s.redirects!, max: v ?? 10 } })} />
+              <label className="check field-check">
+                <input type="checkbox" checked={s.redirects.forward_credentials_cross_origin} onChange={(e) => upd({ redirects: { ...s.redirects!, forward_credentials_cross_origin: e.target.checked } })} />
+                Forward credentials to other origins
+              </label>
+            </>
+          )}
+          <label className="lbl">
+            Automatic retries
+            <select
+              className="field"
+              value={s.retries == null ? "inherit" : String(s.retries.max_retries)}
+              onChange={(e) => upd({ retries: e.target.value === "inherit" ? null : { max_retries: Number(e.target.value), backoff_ms: s.retries?.backoff_ms ?? 200, only_safe: true } })}
+            >
+              <option value="inherit">inherit</option>
+              {[0, 1, 2, 3, 5].map((n) => (
+                <option key={n} value={n}>
+                  {n === 0 ? "Off" : `${n}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {s.redirects?.forward_credentials_cross_origin && <div className="warn-box">Credentials will be sent to whatever origin a redirect points at. Only enable this for origins you control.</div>}
+        {(s.retries?.max_retries ?? 0) > 0 && <p className="hint">Retries only happen when the request provably never left this machine, or the method is idempotent. A possibly-processed POST/PATCH is never replayed automatically.</p>}
+      </fieldset>
+      <fieldset>
+        <legend>TLS, proxy and gateway</legend>
+        <div className="fields">
+          <label className="lbl">
+            TLS profile
+            <select className="field" value={s.tls_profile_id ?? ""} onChange={(e) => upd({ tls_profile_id: e.target.value || null })}>
+              <option value="">inherit (system trust, verification on)</option>
+              {profiles.tls.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {p.verify === false ? " — verification OFF" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="lbl">
+            Proxy
+            <select
+              className="field"
+              value={s.proxy_profile_id == null ? "" : s.proxy_profile_id.kind === "none" ? "none" : s.proxy_profile_id.id}
+              onChange={(e) => upd({ proxy_profile_id: e.target.value === "" ? null : e.target.value === "none" ? { kind: "none" } : { kind: "profile", id: e.target.value } })}
+            >
+              <option value="">inherit</option>
+              <option value="none">No proxy</option>
+              {profiles.proxy.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.kind} {p.address}){udp ? ` — ${udpProxyLabel(p)}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="lbl">
+            Ferrum gateway profile
+            <select className="field" value={s.integration_profile_id ?? ""} onChange={(e) => upd({ integration_profile_id: e.target.value || null })}>
+              <option value="">inherit</option>
+              {profiles.integrations.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.compatibility_id})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {selectedTls?.verify === false && (
+          <div className="warn-box">
+            <b>Certificate verification is off for requests using “{selectedTls.name}”.</b> Traffic is still encrypted, but the server is not authenticated. This applies only to requests that select this profile.
+          </div>
         )}
-        <label className="lbl">
-          Automatic retries
-          <select
-            className="field"
-            value={s.retries == null ? "inherit" : String(s.retries.max_retries)}
-            onChange={(e) => upd({ retries: e.target.value === "inherit" ? null : { max_retries: Number(e.target.value), backoff_ms: s.retries?.backoff_ms ?? 200, only_safe: true } })}
-          >
-            <option value="inherit">inherit</option>
-            {[0, 1, 2, 3, 5].map((n) => (
-              <option key={n} value={n}>
-                {n === 0 ? "Off" : `${n}`}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      {s.redirects?.forward_credentials_cross_origin && <div className="warn-box">Credentials will be sent to whatever origin a redirect points at. Only enable this for origins you control.</div>}
-      {(s.retries?.max_retries ?? 0) > 0 && <p className="hint">Retries only happen when the request provably never left this machine, or the method is idempotent. A possibly-processed POST/PATCH is never replayed automatically.</p>}
-      <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-end" }}>
-        <label className="lbl">
-          TLS profile
-          <select className="field" value={s.tls_profile_id ?? ""} onChange={(e) => upd({ tls_profile_id: e.target.value || null })}>
-            <option value="">inherit (system trust, verification on)</option>
-            {profiles.tls.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.verify === false ? " — verification OFF" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="lbl">
-          Proxy
-          <select
-            className="field"
-            value={s.proxy_profile_id == null ? "" : s.proxy_profile_id.kind === "none" ? "none" : s.proxy_profile_id.id}
-            onChange={(e) => upd({ proxy_profile_id: e.target.value === "" ? null : e.target.value === "none" ? { kind: "none" } : { kind: "profile", id: e.target.value } })}
-          >
-            <option value="">inherit</option>
-            <option value="none">No proxy</option>
-            {profiles.proxy.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ({p.kind} {p.address}){udp ? ` — ${udpProxyLabel(p)}` : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="lbl">
-          Ferrum gateway profile
-          <select className="field" value={s.integration_profile_id ?? ""} onChange={(e) => upd({ integration_profile_id: e.target.value || null })}>
-            <option value="">inherit</option>
-            {profiles.integrations.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ({p.compatibility_id})
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      {selectedTls?.verify === false && (
-        <div className="warn-box">
-          <b>Certificate verification is off for requests using “{selectedTls.name}”.</b> Traffic is still encrypted, but the server is not authenticated. This applies only to requests that select this profile.
-        </div>
-      )}
-      {udp && selectedProxy?.kind === "hbone" && (
-        <p className="hint" data-testid="udp-proxy-help">
-          UDP goes through “{selectedProxy.name}” as an HBONE datagram tunnel: an HTTP/2 CONNECT to the request&apos;s host:port with {selectedProxy.hbone?.marker === "istio_protocol" ? "x-istio-protocol" : "x-ferrum-mesh-protocol"}: udp, then one [u16 length][payload] record per datagram (at most 65,535 bytes). The endpoint relays to the destination without acknowledgement, and ICMP errors reach the endpoint, not Anvil. With dtls:// the DTLS handshake runs inside the tunnel (one record per DTLS record; the request&apos;s TLS profile applies to the DTLS peer). A PROXY protocol envelope is refused through it.
-        </p>
-      )}
-      {udp && selectedProxy && selectedProxy.kind !== "hbone" && (
-        <div className="warn-box" role="alert">
-          UDP cannot go through “{selectedProxy.name}”: {selectedProxy.kind === "socks5" ? "SOCKS5" : "HTTP CONNECT"} tunnels carry TCP only. Choose an HBONE proxy profile or the MASQUE option on the UDP tab; otherwise the request is refused before anything is sent.
-        </div>
-      )}
+        {udp && selectedProxy?.kind === "hbone" && (
+          <p className="hint" data-testid="udp-proxy-help">
+            UDP goes through “{selectedProxy.name}” as an HBONE datagram tunnel: an HTTP/2 CONNECT to the request&apos;s host:port with {selectedProxy.hbone?.marker === "istio_protocol" ? "x-istio-protocol" : "x-ferrum-mesh-protocol"}: udp, then one [u16 length][payload] record per datagram (at most 65,535 bytes). The endpoint relays to the destination without acknowledgement, and ICMP errors reach the endpoint, not Anvil. With dtls:// the DTLS handshake runs inside the tunnel (one record per DTLS record; the request&apos;s TLS profile applies to the DTLS peer). A PROXY protocol envelope is refused through it.
+          </p>
+        )}
+        {udp && selectedProxy && selectedProxy.kind !== "hbone" && (
+          <div className="warn-box" role="alert">
+            UDP cannot go through “{selectedProxy.name}”: {selectedProxy.kind === "socks5" ? "SOCKS5" : "HTTP CONNECT"} tunnels carry TCP only. Choose an HBONE proxy profile or the MASQUE option on the UDP tab; otherwise the request is refused before anything is sent.
+          </div>
+        )}
+      </fieldset>
       <EarlyDataSettings value={s.early_data} onChange={(early_data) => upd({ early_data })} />
     </div>
   );
@@ -1116,8 +1165,7 @@ function NumField(props: { label: string; value?: number | null; onChange: (v: n
     <label className="lbl">
       {props.label}
       <input
-        className="field mono"
-        style={{ width: 120 }}
+        className="field mono num"
         inputMode="numeric"
         value={props.value ?? ""}
         onChange={(e) => {
@@ -1152,7 +1200,7 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
   if (err) return <div className="bad-box">This request cannot be prepared yet: {err}</div>;
   if (!eff) return <div className="faint">Resolving…</div>;
   return (
-    <div className="col">
+    <div className="col effective">
       <p className="hint">Exactly what Send will put on the wire, after variables, inheritance and auth. Secret values are redacted here; per-send values (signatures, nonces, JWT timestamps) change on every send.</p>
       <pre className="code">
         {eff.method} {eff.url}
@@ -1164,7 +1212,7 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
           <tr>
             <td className="k">TLS</td>
             <td className="v">
-              {eff.tls_profile ?? "system trust"} · {eff.tls_verification ? "verification on" : <b style={{ color: "var(--warn)" }}>verification OFF</b>}
+              {eff.tls_profile ?? "system trust"} · {eff.tls_verification ? "verification on" : <b className="warn-text">verification OFF</b>}
             </td>
           </tr>
           <tr><td className="k">Proxy</td><td className="v">{eff.proxy ?? "none"}</td></tr>
@@ -1182,8 +1230,8 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
         </tbody>
       </table>
       {eff.lint_warning && <div className="warn-box">{eff.lint_warning}</div>}
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>Headers</h4>
-      <table className="grid">
+      <h4 className="section-title">Headers</h4>
+      <table className="grid wire">
         <tbody>
           {eff.headers.map((h, i) => (
             <tr key={i}>
@@ -1195,8 +1243,8 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
       </table>
       {eff.inferred.length > 0 && (
         <>
-          <h4 className="faint" style={{ margin: "6px 0 0" }}>Added by Anvil</h4>
-          <ul style={{ margin: 0 }}>
+          <h4 className="section-title">Added by Anvil</h4>
+          <ul className="plain-list">
             {eff.inferred.map((x, i) => (
               <li key={i} className="muted">
                 {x}
@@ -1207,8 +1255,8 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
       )}
       {eff.variables_used.length > 0 && (
         <>
-          <h4 className="faint" style={{ margin: "6px 0 0" }}>Variables</h4>
-          <table className="grid">
+          <h4 className="section-title">Variables</h4>
+          <table className="grid wire">
             <tbody>
               {eff.variables_used.map(([k, src], i) => (
                 <tr key={i}>
@@ -1222,13 +1270,13 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
       )}
       {eff.body_preview && (
         <>
-          <h4 className="faint" style={{ margin: "6px 0 0" }}>Body preview</h4>
+          <h4 className="section-title">Body preview</h4>
           <pre className="code">{eff.body_preview}</pre>
         </>
       )}
       <details>
-        <summary className="muted">Settings sources</summary>
-        <table className="grid">
+        <summary>Settings sources</summary>
+        <table className="grid wire compact">
           <tbody>
             {eff.settings.sources.map((s, i) => (
               <tr key={i}>
