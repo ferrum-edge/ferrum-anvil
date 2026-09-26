@@ -26,8 +26,11 @@
 //!   `refuse=<status>` answers that status with a JSON body;
 //!   `reset_after=N` / `fin_after=N` reset (`H3_INTERNAL_ERROR`) or finish
 //!   the stream after N replies; `reset_after_ms=N` / `fin_after_ms=N` do so
-//!   N ms after the tunnel opened (independent of how many datagrams a
-//!   handshake inside the tunnel took). CONNECT-UDP while
+//!   N ms after the first client datagram arrived (independent of how many
+//!   datagrams a handshake inside the tunnel took). The client only sends
+//!   once it has the 2xx, so the end never overtakes the response headers,
+//!   and with `N = 0` it lands during a handshake the client already began.
+//!   CONNECT-UDP while
 //!   [`H3Options::connect_udp`] is off gets `501`, a path that is not a
 //!   template expansion `400`.
 //!
@@ -554,11 +557,18 @@ async fn connect_udp(
     }
     let reset_after = query_u64(&qs, "reset_after");
     let fin_after = query_u64(&qs, "fin_after");
-    let opened = tokio::time::Instant::now();
     let timed_end = match (query_u64(&qs, "reset_after_ms"), query_u64(&qs, "fin_after_ms")) {
-        (Some(ms), _) => Some((opened + std::time::Duration::from_millis(ms), true)),
-        (None, Some(ms)) => Some((opened + std::time::Duration::from_millis(ms), false)),
+        (Some(ms), _) => Some((std::time::Duration::from_millis(ms), true)),
+        (None, Some(ms)) => Some((std::time::Duration::from_millis(ms), false)),
         (None, None) => None,
+    };
+    // Armed by the first client datagram: a reset abandons unsent stream data,
+    // so one timed from the 2xx could reach the client before the headers did.
+    let mut end_at: Option<tokio::time::Instant> = None;
+    let arm = |end_at: &mut Option<tokio::time::Instant>| {
+        if end_at.is_none() {
+            *end_at = timed_end.map(|(after, _)| tokio::time::Instant::now() + after);
+        }
     };
     let quarter = stream.id().into_inner() / 4;
     let (tx_dgram, mut rx_dgram) = tokio::sync::mpsc::channel::<Bytes>(64);
@@ -580,6 +590,20 @@ async fn connect_udp(
     };
     loop {
         tokio::select! {
+            // A due end goes first, so a zero delay ends the tunnel before any
+            // reply to the first datagram can come back through it.
+            biased;
+            _ = tokio::time::sleep_until(end_at.unwrap_or_else(tokio::time::Instant::now)), if end_at.is_some() => {
+                if timed_end.map(|t| t.1).unwrap_or(false) {
+                    log.push(GroundTruth::FaultApplied { fault: "masque_reset".into() });
+                    send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                } else {
+                    log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
+                    let _ = send.finish().await;
+                }
+                ended = true;
+                break;
+            }
             c = recv.recv_data() => match c {
                 Ok(Some(mut chunk)) => {
                     let n = chunk.remaining();
@@ -597,6 +621,7 @@ async fn connect_udp(
                             && let Some(p) = relay(&value, "capsule")
                         {
                             let _ = sock.send(&p).await;
+                            arm(&mut end_at);
                         }
                     }
                 }
@@ -605,18 +630,8 @@ async fn connect_udp(
             Some(d) = rx_dgram.recv() => {
                 if let Some(p) = relay(&d, "quic_datagram") {
                     let _ = sock.send(&p).await;
+                    arm(&mut end_at);
                 }
-            }
-            _ = tokio::time::sleep_until(timed_end.map(|t| t.0).unwrap_or(opened)), if timed_end.is_some() => {
-                if timed_end.map(|t| t.1).unwrap_or(false) {
-                    log.push(GroundTruth::FaultApplied { fault: "masque_reset".into() });
-                    send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
-                } else {
-                    log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
-                    let _ = send.finish().await;
-                }
-                ended = true;
-                break;
             }
             r = sock.recv(&mut buf) => {
                 let Ok(n) = r else { break };
