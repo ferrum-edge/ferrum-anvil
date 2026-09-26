@@ -210,6 +210,40 @@ describe("switching workspaces", () => {
   });
 });
 
+describe("session controls", () => {
+  it("aborts an open still connecting without reporting it as an error", async () => {
+    backend();
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    const execId = calls("session_open")[0].executionId;
+
+    fireEvent.click(screen.getByRole("button", { name: "Abort" }));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy());
+    expect(connecting.size).toBe(0);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("a failed open clears only its own session, not a newer one", async () => {
+    backend();
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    const first = calls("session_open")[0].executionId as string;
+    // The first session is reported over before its open settles; a second one starts.
+    emit("session-ended", { execution_id: first });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(2));
+
+    await act(async () => connecting.get(first)!("connection refused"));
+    expect((await screen.findByRole("status")).textContent).toContain("connection refused");
+    expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+  });
+});
+
 describe("closing a tab with backend work", () => {
   it("asks before disconnecting a session, and Keep open leaves it connected", async () => {
     backend();
@@ -274,7 +308,10 @@ describe("closing a tab with backend work", () => {
     ask.mockResolvedValueOnce(true);
     fireEvent.click(within(screen.getByRole("treeitem", { name: /Socket/ })).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(calls("session_cancel")).toHaveLength(2));
+    // Let the delete resume after its failed stop before asserting it went no further.
+    await act(async () => {});
     expect(calls("request_delete")).toHaveLength(0);
+    expect(screen.getByRole("status").textContent).toContain("the delete was abandoned");
     expect(openTabs().getByRole("tab", { name: /Socket/ })).toBeTruthy();
     expect(screen.getByRole("treeitem", { name: /Socket/ })).toBeTruthy();
   });

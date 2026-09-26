@@ -63,6 +63,12 @@ jobs:
           ulimit -n 4096 2>/dev/null || true
           # Every failing test binary is reported in one run, not just the first.
           cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast
+      # The desktop shell's own unit tests (no window is created). Not on
+      # Windows: tauri-build embeds the common-controls manifest only in the app
+      # binary, and a test binary linking the dialog plugin fails to load without it.
+      - name: cargo test anvil-desktop (unit tests)
+        if: runner.os != 'Windows'
+        run: cargo test --locked -p anvil-desktop --lib
       # Keychain profiles ("Start now — no password") against the real OS
       # credential store on every platform. Linux needs a Secret Service: run
       # gnome-keyring, unlocked, inside a private D-Bus session.

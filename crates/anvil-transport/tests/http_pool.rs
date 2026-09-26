@@ -1,7 +1,9 @@
 //! The idle connection pool against real loopback sockets: a global idle
 //! cap closing the longest-idle connection first, idle expiry that does not
-//! wait for the same destination to be used again, no empty keys left
-//! behind, and HTTP/2 connections kept while they carry requests.
+//! wait for the same destination to be used again (also after the pool
+//! emptied once), a full key closing its longest-idle connection, no empty
+//! keys left behind, HTTP/2 connections kept while they carry requests, and
+//! the connection kept for the retry after `425 Too Early` expiring.
 
 use anvil_domain::execution::*;
 use anvil_domain::settings::{HttpVersionPolicy, Limits, Timeouts};
@@ -15,6 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 fn init() {
@@ -70,6 +73,10 @@ fn reused(o: &AttemptOutput) -> bool {
     o.observation.connection.as_ref().unwrap().reused
 }
 
+fn conn_id(o: &AttemptOutput) -> u64 {
+    o.observation.connection.as_ref().unwrap().id
+}
+
 /// Poll `cond` until it holds or `within` elapses.
 async fn eventually(within: Duration, mut cond: impl FnMut() -> bool) -> bool {
     let until = Instant::now() + within;
@@ -83,11 +90,15 @@ async fn eventually(within: Duration, mut cond: impl FnMut() -> bool) -> bool {
 }
 
 /// A keep-alive HTTP/1.1 origin that counts the connections it accepted and
-/// the ones the client closed.
+/// the ones the client closed. `/too-early` is answered with
+/// `425 Too Early`; `/hold` signals `held` and is answered once `release` is
+/// signaled; any other path at once with 200.
 struct Origin {
     url: String,
     accepted: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
+    held: Arc<Notify>,
+    release: Arc<Notify>,
 }
 
 impl Origin {
@@ -107,12 +118,13 @@ async fn origin(close_on: Option<usize>) -> Origin {
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let accepted = Arc::new(AtomicUsize::new(0));
     let closed = Arc::new(AtomicUsize::new(0));
-    let (a, c) = (accepted.clone(), closed.clone());
+    let (held, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let (a, c, h, r) = (accepted.clone(), closed.clone(), held.clone(), release.clone());
     tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else { return };
             a.fetch_add(1, Ordering::SeqCst);
-            let c = c.clone();
+            let (c, h, r) = (c.clone(), h.clone(), r.clone());
             tokio::spawn(async move {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -124,15 +136,17 @@ async fn origin(close_on: Option<usize>) -> Origin {
                     }
                     // Requests carry no body: each ends with its header block.
                     while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        buf.drain(..end + 4);
+                        let head: Vec<u8> = buf.drain(..end + 4).collect();
                         served += 1;
+                        if head.starts_with(b"GET /hold ") {
+                            h.notify_one();
+                            r.notified().await;
+                        }
+                        let status = if head.starts_with(b"GET /too-early ") { "425 Too Early" } else { "200 OK" };
                         let close = close_on == Some(served);
-                        let resp: &[u8] = if close {
-                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
-                        } else {
-                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"
-                        };
-                        if stream.write_all(resp).await.is_err() || close {
+                        let connection = if close { "connection: close\r\n" } else { "" };
+                        let resp = format!("HTTP/1.1 {status}\r\ncontent-length: 2\r\n{connection}\r\nok");
+                        if stream.write_all(resp.as_bytes()).await.is_err() || close {
                             break 'conn;
                         }
                     }
@@ -141,7 +155,7 @@ async fn origin(close_on: Option<usize>) -> Origin {
             });
         }
     });
-    Origin { url, accepted, closed }
+    Origin { url, accepted, closed, held, release }
 }
 
 #[tokio::test]
@@ -223,7 +237,7 @@ async fn an_http2_connection_carrying_a_request_is_not_expired() {
 
     // A request outlasting the TTL shares the pooled connection; the sweep
     // runs meanwhile and must leave the busy connection alone.
-    let mut slow = plan(&fx.url("/delay-headers/3000"));
+    let mut slow = plan(&fx.url("/delay-headers/5000"));
     slow.version = HttpVersionPolicy::H2c;
     let (done, during) = tokio::join!(run(&t, &slow), async {
         tokio::time::sleep(Duration::from_millis(2000)).await;
@@ -235,4 +249,92 @@ async fn an_http2_connection_carrying_a_request_is_not_expired() {
 
     // Idle once the request ended, then expired like any other.
     assert!(eventually(Duration::from_secs(10), || t.pool.stats() == PoolStats::default()).await);
+}
+
+#[tokio::test]
+async fn idle_connections_still_expire_after_the_pool_emptied_once() {
+    init();
+    let t = HttpTransport::with_pool_limits(PoolLimits { idle_ttl: Duration::from_millis(600), ..PoolLimits::default() });
+    let first = origin(None).await;
+    run(&t, &plan(&first.url)).await;
+    assert!(eventually(Duration::from_secs(10), || first.closed() == 1).await, "the first idle socket was left open");
+    assert_eq!(t.pool.stats(), PoolStats::default());
+
+    // The sweep stopped with the pool empty; the next pooled connection
+    // starts it again, so this one is closed after the TTL as well.
+    let second = origin(None).await;
+    run(&t, &plan(&second.url)).await;
+    assert_eq!(t.pool.stats(), PoolStats { keys: 1, connections: 1, idle: 1 });
+    assert!(eventually(Duration::from_secs(10), || second.closed() == 1).await, "the second idle socket was left open");
+    assert_eq!(t.pool.stats(), PoolStats::default());
+}
+
+#[tokio::test]
+async fn a_full_key_closes_its_longest_idle_connection_not_the_returned_one() {
+    init();
+    let t = HttpTransport::with_pool_limits(PoolLimits { max_idle_per_key: 1, ..PoolLimits::default() });
+    let o = origin(None).await;
+    let hold = plan(&format!("{}hold", o.url));
+
+    // The held request keeps its connection busy, so the other opens a
+    // second one and returns it to the pool first.
+    let (held, first_back) = tokio::join!(run(&t, &hold), async {
+        o.held.notified().await;
+        let fast = run(&t, &plan(&o.url)).await;
+        o.release.notify_one();
+        fast
+    });
+    assert_ne!(conn_id(&held), conn_id(&first_back));
+    assert_eq!(o.accepted(), 2);
+
+    // The key holds one: the connection idle longest was closed and the one
+    // returned last was kept.
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "no connection was closed for the per-key cap");
+    assert_eq!(t.pool.stats(), PoolStats { keys: 1, connections: 1, idle: 1 });
+    let again = run(&t, &plan(&o.url)).await;
+    assert!(reused(&again));
+    assert_eq!(conn_id(&again), conn_id(&held), "the freshest connection is the one kept");
+    assert_eq!(o.accepted(), 2);
+}
+
+/// Send `p` (early data asked for) to `/too-early`: the connection that
+/// answered is kept for the retry, not pooled for reuse.
+async fn answer_425(t: &HttpTransport, p: &HttpPlan) -> AttemptOutput {
+    let out = t.execute(p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await.pop().unwrap();
+    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
+    assert_eq!(out.observation.response_status, Some(425));
+    assert_eq!(t.pool.stats(), PoolStats::default(), "connection reuse is off: nothing is pooled for reuse");
+    out
+}
+
+#[tokio::test]
+async fn the_connection_kept_for_the_retry_after_425_expires() {
+    init();
+    let ttl = Duration::from_secs(2);
+    let t = HttpTransport::with_pool_limits(PoolLimits { idle_ttl: ttl, ..PoolLimits::default() });
+    let o = origin(None).await;
+    let mut p = plan(&format!("{}too-early", o.url));
+    p.keepalive = false;
+    p.early_data = EarlyDataIntent::Send;
+
+    // The retry, sent before the TTL, goes out on the kept connection.
+    let first = answer_425(&t, &p).await;
+    let mut retry = p.clone();
+    retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
+    let again = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await.pop().unwrap();
+    assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
+    assert!(reused(&again), "the retry opened a new connection");
+    assert_eq!(conn_id(&again), conn_id(&first));
+    assert_eq!(o.accepted(), 1);
+    // Connection reuse is off: it is closed once the retry is done.
+    assert!(eventually(Duration::from_secs(5), || o.closed() == 1).await, "the connection was left open after the retry");
+
+    // No retry is sent this time: the sweep alone closes the connection kept
+    // for it, once it was idle for the TTL.
+    let sent = Instant::now();
+    answer_425(&t, &p).await;
+    assert_eq!(o.accepted(), 2);
+    assert!(eventually(Duration::from_secs(10), || o.closed() == 2).await, "the connection kept for the retry was left open");
+    let after = sent.elapsed();
+    assert!(after >= ttl, "closed after {after:?}, before the TTL was up");
 }
