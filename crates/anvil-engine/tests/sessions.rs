@@ -5,7 +5,7 @@
 
 use anvil_domain::assertions::{Assertion, AssertionKind, Comparison};
 use anvil_domain::auth::AuthConfig;
-use anvil_domain::diagnostics::DiagnosticFinding;
+use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Severity};
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::*;
 use anvil_domain::outcome::*;
@@ -599,11 +599,59 @@ fn grpc_ctx(url: &str, method: &str, mode: GrpcMode, messages: &[&str], schema_p
         metadata: vec![],
         deadline_ms: None,
         plaintext: false,
+        wire: GrpcWire::Grpc,
     });
     let mut c = ctx(s);
     c.attachments = Arc::new(store);
     run_layer(&mut c, fast());
     c
+}
+
+/// A gRPC call with a wire format and an HTTP version policy (TLS URLs trust the lab root).
+fn grpc_wire_ctx(
+    url: &str,
+    method: &str,
+    mode: GrpcMode,
+    messages: &[&str],
+    wire: GrpcWire,
+    version: HttpVersionPolicy,
+) -> ExecutionContext {
+    let mut c = grpc_ctx(url, method, mode, messages, true);
+    c.spec.grpc.as_mut().unwrap().wire = wire;
+    run_layer(&mut c, SettingsOverrides { http_version: Some(version), ..Default::default() });
+    if url.starts_with("grpcs://") || url.starts_with("https://") {
+        lab_trust(&mut c);
+    }
+    c
+}
+
+fn with_metadata(mut c: ExecutionContext, name: &str, value: &str) -> ExecutionContext {
+    c.spec.grpc.as_mut().unwrap().metadata.push(KeyValue::new(name, value));
+    c
+}
+
+/// QUIC evidence for an HTTP/3 call: ALPN h3, a measured QUIC handshake, no TCP phase.
+fn assert_quic(o: &ExecutionOutput) {
+    let a = last(o);
+    let conn = a.connection.as_ref().expect("connection");
+    assert_eq!(conn.protocol.as_deref(), Some("h3"));
+    assert_eq!(conn.tls.as_ref().unwrap().alpn_negotiated.as_deref(), Some("h3"));
+    assert_eq!(conn.tls.as_ref().unwrap().verification, TlsVerification::Verified);
+    assert_eq!(phase(a, Phase::QuicHandshake).unwrap().status, PhaseStatus::Completed);
+    assert_eq!(phase(a, Phase::Connect).unwrap().status, PhaseStatus::NotApplicable, "no TCP connect is claimed for QUIC");
+    assert!(phase(a, Phase::TlsHandshake).is_none(), "TLS is part of the QUIC handshake");
+    assert_eq!(o.record.response.as_ref().unwrap().http_version, "HTTP/3");
+}
+
+fn fixture_saw(log: &anvil_fixtures::GroundTruthLog, path: &str) -> Option<Vec<(String, String)>> {
+    log.entries().into_iter().rev().find_map(|e| match e.event {
+        GroundTruth::RequestReceived { path: p, headers, .. } if p == path => Some(headers),
+        _ => None,
+    })
+}
+
+fn header_of<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    h.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
 }
 
 fn grpc_status(o: &ExecutionOutput) -> (Option<u16>, Option<i32>, GrpcStatusSource) {
@@ -792,6 +840,429 @@ async fn proto_017_reflection_denied_but_local_proto_works() {
     assert_eq!(grpc_status(&o).1, Some(0));
     assert!(o.record.prepared.inferred.iter().any(|i| i.contains("server reflection (grpc.reflection.v1)")));
     assert_eq!(stream(&o).received_count, 2);
+}
+
+// ------------------------------------------------------------ gRPC over HTTP/3
+
+#[tokio::test]
+async fn proto_016_grpc_over_h3_four_modes_with_quic_evidence_and_message_boundaries() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpcs://127.0.0.1:{}", f.addr.port());
+    let h3 = |m: &str, mode, msgs: &[&str]| grpc_wire_ctx(&url, m, mode, msgs, GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
+    let o = run(&e, &h3("Unary", GrpcMode::Unary, &[r#"{"message":"one"}"#])).await;
+    assert_eq!(grpc_status(&o), (Some(200), Some(0), GrpcStatusSource::Trailers), "{:?}", last(&o).failure);
+    assert_eq!(o.record.attempts.len(), 1, "forced HTTP/3 is a single attempt");
+    assert_quic(&o);
+    assert!(o.record.response.as_ref().unwrap().trailers_received, "the status came in HTTP/3 trailers");
+    assert_eq!(previews(&o, Direction::Received, "grpc_message"), vec![r#"{"message":"one"}"#]);
+    assert_eq!(o.record.outcome.application, ApplicationState::Success);
+    assert!(o.record.prepared.inferred.iter().any(|i| i.contains("never falls back to TCP")));
+    let o = run(&e, &h3("ServerStream", GrpcMode::ServerStreaming, &[r#"{"message":"s","count":4}"#])).await;
+    let got = previews(&o, Direction::Received, "grpc_message");
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert!(got[3].contains("\"index\":3"));
+    let o = run(&e, &h3("ClientStream", GrpcMode::ClientStreaming, &[r#"{"message":"a"}"#, r#"{"message":"b"}"#])).await;
+    assert_eq!(grpc_status(&o).1, Some(0));
+    assert_eq!(previews(&o, Direction::Received, "grpc_message"), vec![r#"{"message":"2 messages; last=b","index":2}"#]);
+    assert!(stream(&o).messages.iter().any(|m| m.kind == "half_close"));
+    let o = run(&e, &h3("Bidi", GrpcMode::Bidirectional, &[r#"{"message":"x"}"#, r#"{"message":"y"}"#])).await;
+    assert_eq!(previews(&o, Direction::Received, "grpc_message"), vec![r#"{"message":"x"}"#, r#"{"message":"y","index":1}"#]);
+    assert!(last(&o).bytes.connection_bytes_written.unwrap_or(0) > 0 && last(&o).bytes.connection_bytes_read.unwrap_or(0) > 0);
+    // Ground truth: every call arrived over QUIC as native gRPC.
+    for m in ["Unary", "ServerStream", "ClientStream", "Bidi"] {
+        let h = fixture_saw(&f.log, &format!("/anvil.lab.v1.Echo/{m}")).unwrap_or_else(|| panic!("{m} not seen"));
+        assert_eq!(header_of(&h, "content-type"), Some("application/grpc"));
+        assert_eq!(header_of(&h, "te"), Some("trailers"));
+    }
+    assert_eq!(f.connections(), 4, "one fresh QUIC connection per call");
+}
+
+#[tokio::test]
+async fn proto_014_grpc_over_h3_error_status_and_reset_before_status() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpcs://127.0.0.1:{}", f.addr.port());
+    // An immediate error: a trailers-only answer (the status in the HTTP/3 response headers).
+    let c =
+        grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[r#"{"message":"x","failWith":7}"#], GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
+    let o = run(&e, &c).await;
+    assert!(f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "grpc_h3_trailers_only".into() }));
+    assert_eq!(grpc_status(&o), (Some(200), Some(7), GrpcStatusSource::TrailersOnly));
+    assert!(!o.record.response.as_ref().unwrap().trailers_received);
+    assert_eq!(o.record.outcome.transport, TransportState::Completed, "the HTTP/3 exchange completed");
+    assert_eq!(o.record.outcome.application, ApplicationState::Failure, "HTTP 200 is not RPC success");
+    let g = finding(&o, "app.grpc_status");
+    assert!(g.title.contains("PERMISSION_DENIED"));
+    assert!(g.explanation.contains("trailers-only"), "{}", g.explanation);
+    // An error after messages: the status in the HTTP/3 trailers, the messages kept.
+    let c = grpc_wire_ctx(
+        &url,
+        "ServerStream",
+        GrpcMode::ServerStreaming,
+        &[r#"{"message":"m","count":2,"failWith":9}"#],
+        GrpcWire::Grpc,
+        HttpVersionPolicy::Http3Only,
+    );
+    let o = run(&e, &c).await;
+    assert_eq!(grpc_status(&o), (Some(200), Some(9), GrpcStatusSource::Trailers));
+    assert!(o.record.response.as_ref().unwrap().trailers_received);
+    assert_eq!(previews(&o, Direction::Received, "grpc_message").len(), 2);
+    assert!(finding(&o, "app.grpc_status").title.contains("FAILED_PRECONDITION"));
+    // PROTO-015 over HTTP/3: one reply, then the stream is reset before any status.
+    let msg = format!(r#"{{"message":"hi","failWith":{ABORT_WITHOUT_STATUS}}}"#);
+    let o = run(&e, &grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[&msg], GrpcWire::Grpc, HttpVersionPolicy::Http3Only)).await;
+    assert!(f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "grpc_abort_before_status".into() }));
+    assert_eq!(grpc_status(&o), (Some(200), None, GrpcStatusSource::Missing));
+    assert_eq!(o.record.outcome.transport, TransportState::Incomplete);
+    assert_ne!(o.record.outcome.application, ApplicationState::Success);
+    assert_eq!(last(&o).failure.as_ref().unwrap().kind, FailureKind::BodyReset, "{:?}", last(&o).failure);
+    finding(&o, "app.grpc_status_missing");
+    assert_eq!(stream(&o).received_count, 1, "the message before the reset is kept");
+}
+
+#[tokio::test]
+async fn grpc_over_h3_deadline_cancel_reflection_and_interactive_bidi() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpcs://127.0.0.1:{}", f.addr.port());
+    // Deadline: enforced locally, no DEADLINE_EXCEEDED is invented.
+    let mut c = grpc_wire_ctx(
+        &url,
+        "ServerStream",
+        GrpcMode::ServerStreaming,
+        &[r#"{"message":"slow","count":1000}"#],
+        GrpcWire::Grpc,
+        HttpVersionPolicy::Http3Only,
+    );
+    c.spec.grpc.as_mut().unwrap().deadline_ms = Some(250);
+    let o = run(&e, &c).await;
+    let fl = last(&o).failure.as_ref().unwrap();
+    assert_eq!((fl.kind, fl.deadline_ms), (FailureKind::TotalTimeout, Some(250)));
+    assert_eq!(grpc_status(&o).1, None, "no DEADLINE_EXCEEDED is invented locally");
+    assert_eq!(grpc_status(&o).2, GrpcStatusSource::Missing);
+    assert!(stream(&o).received_count > 0 && stream(&o).received_count < 1000);
+    let h = fixture_saw(&f.log, "/anvil.lab.v1.Echo/ServerStream").unwrap();
+    assert_eq!(header_of(&h, "grpc-timeout"), Some("250m"));
+    // Server reflection runs over the same QUIC connection as the call.
+    let mut c = grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[r#"{"message":"r"}"#], GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
+    c.spec.grpc.as_mut().unwrap().schema = GrpcSchemaSource::Reflection;
+    let before = f.connections();
+    let o = run(&e, &c).await;
+    assert_eq!(grpc_status(&o).1, Some(0), "{:?}", last(&o).failure);
+    assert!(o.record.prepared.inferred.iter().any(|i| i.contains("server reflection (grpc.reflection.v1)")));
+    assert_eq!(f.connections(), before + 1);
+    // Interactive bidirectional session over HTTP/3.
+    let c = grpc_wire_ctx(&url, "Bidi", GrpcMode::Bidirectional, &[r#"{"message":"first"}"#], GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
+    let h = e.open_session(c, EventCtx::none()).await;
+    h.send(SessionCommand::SendText { text: r#"{"message":"second"}"#.into() }).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    h.send(SessionCommand::HalfClose).await.unwrap();
+    let o = h.finish().await;
+    assert_eq!(grpc_status(&o).1, Some(0), "{:?}", last(&o).failure);
+    assert_eq!(previews(&o, Direction::Received, "grpc_message").len(), 2);
+    assert_quic(&o);
+    // Cancel mid-stream: canceled, status missing.
+    let c = grpc_wire_ctx(
+        &url,
+        "ServerStream",
+        GrpcMode::ServerStreaming,
+        &[r#"{"message":"c","count":1000}"#],
+        GrpcWire::Grpc,
+        HttpVersionPolicy::Http3Only,
+    );
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        c2.cancel();
+    });
+    let o = e.execute(&c, EventCtx::none(), cancel).await;
+    assert_eq!(o.record.outcome.transport, TransportState::Canceled);
+    assert!(last(&o).failure.as_ref().unwrap().message.contains("H3_REQUEST_CANCELLED"));
+    assert_eq!(grpc_status(&o).2, GrpcStatusSource::Missing);
+}
+
+#[tokio::test]
+async fn grpc_forced_h3_never_uses_tcp_and_fallback_is_a_recorded_second_attempt() {
+    init();
+    // TCP-only HTTPS gRPC fixture: nothing listens for QUIC on this port.
+    let tcp = fx::serve("127.0.0.1:0", Some(server_tls())).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpcs://127.0.0.1:{}", tcp.addr.port());
+    let short = |mut c: ExecutionContext| {
+        let mut t = fast();
+        t.timeouts.as_mut().unwrap().tls_handshake_ms = Some(Some(700));
+        run_layer(&mut c, t);
+        c
+    };
+    let o = run(
+        &e,
+        &short(grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[r#"{"message":"h3"}"#], GrpcWire::Grpc, HttpVersionPolicy::Http3Only)),
+    )
+    .await;
+    assert_eq!(o.record.attempts.len(), 1, "forced HTTP/3 never adds a TCP attempt");
+    let fl = last(&o).failure.as_ref().unwrap();
+    assert_eq!((fl.kind, fl.phase), (FailureKind::QuicHandshakeTimeout, Phase::QuicHandshake));
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+    finding(&o, "client.quic.handshake_timeout");
+    assert!(!tcp.log.saw_connection(), "no silent TCP call was made");
+    // With fallback: the failed HTTP/3 attempt, then the call over HTTP/2, both recorded.
+    let o = run(
+        &e,
+        &short(grpc_wire_ctx(
+            &url,
+            "Unary",
+            GrpcMode::Unary,
+            &[r#"{"message":"fb"}"#],
+            GrpcWire::Grpc,
+            HttpVersionPolicy::Http3WithFallback,
+        )),
+    )
+    .await;
+    assert_eq!(o.record.attempts.len(), 2);
+    assert_eq!(o.record.attempts[0].failure.as_ref().unwrap().kind, FailureKind::QuicHandshakeTimeout);
+    assert_eq!(o.record.attempts[1].reason, AttemptReason::ProtocolFallback { from: "h3".into() });
+    assert_eq!(o.record.attempts[1].connection.as_ref().unwrap().protocol.as_deref(), Some("h2"));
+    assert_eq!(grpc_status(&o), (Some(200), Some(0), GrpcStatusSource::Trailers));
+    assert_eq!(o.record.response.as_ref().unwrap().http_version, "HTTP/2", "HTTP/3 is not claimed");
+    let fb = finding(&o, "client.h3.fallback_used");
+    assert!(fb.explanation.contains("h2"), "{}", fb.explanation);
+    assert!(o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::ProtocolFallback));
+    assert_eq!(previews(&o, Direction::Received, "grpc_message"), vec![r#"{"message":"fb"}"#]);
+    assert_eq!(tcp.log.requests().iter().filter(|(_, p)| p == "/anvil.lab.v1.Echo/Unary").count(), 1, "called exactly once");
+}
+
+#[tokio::test]
+async fn grpc_over_h3_refusals_happen_before_traffic() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    // Cleartext URL: QUIC is always encrypted.
+    let c = grpc_wire_ctx(
+        &format!("grpc://127.0.0.1:{}", f.addr.port()),
+        "Unary",
+        GrpcMode::Unary,
+        &["{}"],
+        GrpcWire::Grpc,
+        HttpVersionPolicy::Http3Only,
+    );
+    let o = run(&e, &c).await;
+    let fl = last(&o).failure.as_ref().unwrap();
+    assert_eq!((fl.kind, fl.phase), (FailureKind::UnsupportedCombination, Phase::Prepare));
+    assert!(fl.message.contains("needs TLS"), "{}", fl.message);
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+    finding(&o, "local.unsupported_combination");
+    // Native gRPC never runs over HTTP/1.1.
+    let c = grpc_wire_ctx(
+        &format!("grpcs://127.0.0.1:{}", f.addr.port()),
+        "Unary",
+        GrpcMode::Unary,
+        &["{}"],
+        GrpcWire::Grpc,
+        HttpVersionPolicy::Http1Only,
+    );
+    let o = run(&e, &c).await;
+    assert!(last(&o).failure.as_ref().unwrap().message.contains("gRPC-Web"), "the refusal points at gRPC-Web for HTTP/1.1");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(f.connections(), 0, "nothing was sent");
+}
+
+// -------------------------------------------------------------------- gRPC-Web
+
+fn web_status(o: &ExecutionOutput) -> (Option<u16>, Option<i32>, GrpcStatusSource) {
+    grpc_status(o)
+}
+
+#[tokio::test]
+async fn grpc_web_binary_and_text_over_h1_h2_and_h3_keep_message_boundaries() {
+    init();
+    let plain = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let tls = fx::serve("127.0.0.1:0", Some(server_tls())).await.unwrap();
+    let quic = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let e = Engine::new();
+    let cases: Vec<(String, GrpcWire, HttpVersionPolicy, &str, &anvil_fixtures::GroundTruthLog)> = vec![
+        (format!("grpc://{}", plain.addr), GrpcWire::GrpcWeb, HttpVersionPolicy::Auto, "HTTP/1.1", &plain.log),
+        (format!("grpc://{}", plain.addr), GrpcWire::GrpcWebText, HttpVersionPolicy::H2c, "HTTP/2", &plain.log),
+        (format!("grpcs://127.0.0.1:{}", tls.addr.port()), GrpcWire::GrpcWeb, HttpVersionPolicy::Auto, "HTTP/2", &tls.log),
+        (format!("grpcs://127.0.0.1:{}", tls.addr.port()), GrpcWire::GrpcWebText, HttpVersionPolicy::Http1Only, "HTTP/1.1", &tls.log),
+        (format!("grpcs://127.0.0.1:{}", quic.addr.port()), GrpcWire::GrpcWeb, HttpVersionPolicy::Http3Only, "HTTP/3", &quic.log),
+        (format!("grpcs://127.0.0.1:{}", quic.addr.port()), GrpcWire::GrpcWebText, HttpVersionPolicy::Http3Only, "HTTP/3", &quic.log),
+    ];
+    for (url, wire, version, http, log) in cases {
+        let label = format!("{wire:?} {version:?} {url}");
+        let text = wire == GrpcWire::GrpcWebText;
+        let ct = if text { "application/grpc-web-text" } else { "application/grpc-web+proto" };
+        let o = run(&e, &grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[r#"{"message":"web"}"#], wire, version)).await;
+        assert_eq!(web_status(&o), (Some(200), Some(0), GrpcStatusSource::TrailerFrame), "{label}: {:?}", last(&o).failure);
+        assert_eq!(o.record.outcome.transport, TransportState::Completed, "{label}");
+        assert_eq!(o.record.outcome.application, ApplicationState::Success, "{label}");
+        let r = o.record.response.as_ref().unwrap();
+        assert_eq!(r.http_version, http, "{label}");
+        assert!(!r.trailers_received, "{label}: the status came in the body, not in HTTP trailers");
+        assert_eq!(r.body.content_type.as_deref(), Some(ct), "{label}");
+        assert_eq!(previews(&o, Direction::Received, "grpc_message"), vec![r#"{"message":"web"}"#], "{label}");
+        let tf: Vec<String> = stream(&o).messages.iter().filter(|m| m.kind == "trailer_frame").map(|m| m.preview.clone()).collect();
+        assert_eq!(tf, vec!["grpc-status: 0".to_string()], "{label}");
+        assert_eq!(o.record.prepared.content_type.as_deref(), Some(ct), "{label}");
+        assert!(o.record.prepared.inferred.iter().any(|i| i.contains("gRPC-Web")), "{label}");
+        assert!(!codes(&o).iter().any(|c| c.starts_with("grpc_web.") || c.starts_with("app.grpc")), "{label}: {:?}", codes(&o));
+        // Ground truth: the fixture received gRPC-Web, and text bodies were base64.
+        let seen = fixture_saw(log, "/anvil.lab.v1.Echo/Unary").unwrap();
+        assert_eq!(header_of(&seen, "content-type"), Some(ct), "{label}");
+        assert_eq!(header_of(&seen, "x-grpc-web"), Some("1"), "{label}");
+        assert_eq!(header_of(&seen, "accept"), Some(ct), "{label}");
+        let body_bytes = log.entries().into_iter().rev().find_map(|e| match e.event {
+            GroundTruth::RequestReceived { path, body_bytes, .. } if path == "/anvil.lab.v1.Echo/Unary" => Some(body_bytes),
+            _ => None,
+        });
+        assert_eq!(body_bytes, Some(o.record.prepared.body_bytes), "{label}: the fixture received exactly the prepared body");
+        if http == "HTTP/1.1" {
+            assert_eq!(header_of(&seen, "content-length"), Some(o.record.prepared.body_bytes.to_string().as_str()), "{label}");
+        }
+        // Server streaming: each message kept separately; text bodies carry padding mid-body.
+        let o = run(&e, &grpc_wire_ctx(&url, "ServerStream", GrpcMode::ServerStreaming, &[r#"{"message":"s","count":3}"#], wire, version))
+            .await;
+        assert_eq!(web_status(&o).1, Some(0), "{label}: {:?}", last(&o).failure);
+        let got = previews(&o, Direction::Received, "grpc_message");
+        assert_eq!(got, vec![r#"{"message":"s"}"#, r#"{"message":"s","index":1}"#, r#"{"message":"s","index":2}"#], "{label}");
+        if text {
+            let raw = String::from_utf8_lossy(&o.body).to_string();
+            assert!(raw.trim_end_matches('=').contains('='), "{label}: the fixture pads each frame separately: {raw}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn grpc_web_error_status_trailers_only_and_http_trailers_are_distinguished() {
+    init();
+    let f = fx::serve("127.0.0.1:0", Some(server_tls())).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpcs://127.0.0.1:{}", f.addr.port());
+    let web = |msg: &str| grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[msg], GrpcWire::GrpcWeb, HttpVersionPolicy::Http2Only);
+    // Error status in the trailer frame: an RPC failure on a completed exchange.
+    let o = run(&e, &web(r#"{"message":"x","failWith":5}"#)).await;
+    assert_eq!(web_status(&o), (Some(200), Some(5), GrpcStatusSource::TrailerFrame));
+    assert_eq!(o.record.outcome.transport, TransportState::Completed);
+    assert_eq!(o.record.outcome.application, ApplicationState::Failure);
+    let g = finding(&o, "app.grpc_status");
+    assert!(g.title.contains("NOT_FOUND"), "{}", g.title);
+    assert!(g.evidence.iter().any(|v| v.key == "status.source" && v.value == "TrailerFrame"));
+    // Trailers-only: the status is in the response headers, the body is empty.
+    let o = run(&e, &with_metadata(web(r#"{"message":"x","failWith":7}"#), "x-fixture-grpc-web", "trailers-only")).await;
+    assert_eq!(web_status(&o), (Some(200), Some(7), GrpcStatusSource::TrailersOnly));
+    assert!(!codes(&o).contains(&"grpc_web.no_trailer_frame".to_string()), "trailers-only is complete: {:?}", codes(&o));
+    finding(&o, "app.grpc_status");
+    // Status only in HTTP trailers: recorded, with a warning that gRPC-Web clients cannot read it.
+    let o = run(&e, &with_metadata(web(r#"{"message":"y"}"#), "x-fixture-grpc-web", "http-trailers")).await;
+    assert_eq!(web_status(&o), (Some(200), Some(0), GrpcStatusSource::Trailers));
+    let w = finding(&o, "grpc_web.no_trailer_frame");
+    assert_eq!(w.severity, Severity::Warning);
+    assert!(w.explanation.contains("HTTP trailers") && w.explanation.contains("cannot read"), "{}", w.explanation);
+    assert!(o.record.prepared.inferred.iter().any(|i| i.contains("not in a gRPC-Web trailer frame")));
+}
+
+#[tokio::test]
+async fn grpc_web_without_a_trailer_frame_is_incomplete_never_success() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpc://{}", f.addr);
+    for wire in [GrpcWire::GrpcWeb, GrpcWire::GrpcWebText] {
+        let c = with_metadata(
+            grpc_wire_ctx(
+                &url,
+                "ServerStream",
+                GrpcMode::ServerStreaming,
+                &[r#"{"message":"m","count":2}"#],
+                wire,
+                HttpVersionPolicy::Auto,
+            ),
+            "x-fixture-grpc-web",
+            "no-trailer-frame",
+        );
+        let o = run(&e, &c).await;
+        assert!(f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "grpc_web_no_trailer_frame".into() }));
+        assert_eq!(web_status(&o), (Some(200), None, GrpcStatusSource::Missing), "{wire:?}");
+        assert_eq!(o.record.outcome.transport, TransportState::Incomplete, "{wire:?}");
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{wire:?}: a missing status is never success");
+        assert_eq!(previews(&o, Direction::Received, "grpc_message").len(), 2, "the messages are kept");
+        finding(&o, "app.grpc_status_missing");
+        let n = finding(&o, "grpc_web.no_trailer_frame");
+        assert_eq!(n.severity, Severity::Error);
+        assert!(n.explanation.contains("0x80") && n.explanation.contains("not a success"), "{}", n.explanation);
+        assert!(n.does_not_prove.iter().any(|d| d.contains("gateway")), "no gateway translation claim either way");
+        assert!(n.confidence == Confidence::Confirmed);
+    }
+    // A reset before the status (no clean end) is a transport failure, not a missing frame.
+    let msg = format!(r#"{{"message":"hi","failWith":{ABORT_WITHOUT_STATUS}}}"#);
+    let o = run(&e, &grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[&msg], GrpcWire::GrpcWeb, HttpVersionPolicy::H2c)).await;
+    assert_eq!(web_status(&o), (Some(200), None, GrpcStatusSource::Missing));
+    assert!(last(&o).failure.is_some());
+    assert_eq!(o.record.outcome.transport, TransportState::Incomplete);
+    assert!(!codes(&o).contains(&"grpc_web.no_trailer_frame".to_string()), "{:?}", codes(&o));
+    finding(&o, "app.grpc_status_missing");
+}
+
+#[tokio::test]
+async fn grpc_web_appended_trailer_frame_is_invalid_framing_not_success() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    for wire in [GrpcWire::GrpcWeb, GrpcWire::GrpcWebText] {
+        let c = with_metadata(
+            grpc_wire_ctx(&format!("grpc://{}", f.addr), "Unary", GrpcMode::Unary, &[r#"{"message":"m"}"#], wire, HttpVersionPolicy::Auto),
+            "x-fixture-grpc-web",
+            "extra-trailer-frame",
+        );
+        let o = run(&e, &c).await;
+        assert!(f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "grpc_web_extra_trailer_frame".into() }));
+        // The first trailer frame ends the call per gRPC-Web; the extra frame makes the response malformed.
+        assert_eq!(web_status(&o), (Some(200), Some(0), GrpcStatusSource::TrailerFrame), "{wire:?}");
+        assert_eq!(o.record.response.as_ref().unwrap().body.completeness, BodyCompleteness::Complete, "the HTTP body itself completed");
+        assert_eq!(o.record.outcome.transport, TransportState::Incomplete, "{wire:?}");
+        let fl = last(&o).failure.as_ref().unwrap();
+        assert_eq!(fl.kind, FailureKind::HttpProtocolError);
+        let g = finding(&o, "grpc.framing_invalid");
+        assert!(g.title.contains("gRPC-Web"), "{}", g.title);
+        assert!(
+            g.explanation.contains("second trailer frame (grpc-status 2)") && g.explanation.contains("not a complete success"),
+            "{}",
+            g.explanation
+        );
+        assert!(g.does_not_prove.iter().any(|d| d.contains("Which hop")));
+        assert!(!codes(&o).contains(&"response.body_incomplete".to_string()), "the HTTP body did finish: {:?}", codes(&o));
+        let frames: Vec<String> = stream(&o).messages.iter().filter(|m| m.kind == "trailer_frame").map(|m| m.preview.clone()).collect();
+        assert_eq!(frames, vec!["grpc-status: 0".to_string(), "grpc-status: 2".to_string()], "both frames are kept as evidence");
+    }
+}
+
+#[tokio::test]
+async fn grpc_web_streaming_request_modes_and_reflection_are_refused_before_traffic() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpc://{}", f.addr);
+    for (method, mode) in [("ClientStream", GrpcMode::ClientStreaming), ("Bidi", GrpcMode::Bidirectional)] {
+        let o = run(&e, &grpc_wire_ctx(&url, method, mode, &[r#"{"message":"a"}"#], GrpcWire::GrpcWeb, HttpVersionPolicy::Auto)).await;
+        let fl = last(&o).failure.as_ref().unwrap();
+        assert_eq!((fl.kind, fl.phase), (FailureKind::UnsupportedCombination, Phase::Prepare));
+        assert_eq!(fl.field.as_deref(), Some("grpc.wire"));
+        assert!(fl.message.contains("unary and server-streaming"), "{}", fl.message);
+        assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+        // Interactive sessions are refused the same way.
+        let c = grpc_wire_ctx(&url, method, mode, &[], GrpcWire::GrpcWebText, HttpVersionPolicy::Auto);
+        let o = e.open_session(c, EventCtx::none()).await.finish().await;
+        assert_eq!(last(&o).failure.as_ref().unwrap().field.as_deref(), Some("grpc.wire"));
+    }
+    let mut c = grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &["{}"], GrpcWire::GrpcWeb, HttpVersionPolicy::Auto);
+    c.spec.grpc.as_mut().unwrap().schema = GrpcSchemaSource::Reflection;
+    let o = run(&e, &c).await;
+    assert_eq!(last(&o).failure.as_ref().unwrap().field.as_deref(), Some("grpc.schema"));
+    assert!(!f.log.saw_connection(), "nothing was sent");
 }
 
 // -------------------------------------------------------------------- SSE

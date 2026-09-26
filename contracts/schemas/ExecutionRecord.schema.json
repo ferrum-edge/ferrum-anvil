@@ -2032,15 +2032,19 @@
     "GrpcStatusSource": {
       "oneOf": [
         {
+          "description": "Status delivered in HTTP trailers.",
           "type": "string",
-          "enum": [
-            "trailers"
-          ]
+          "const": "trailers"
         },
         {
           "description": "Status delivered in response headers (trailers-only response).",
           "type": "string",
           "const": "trailers_only"
+        },
+        {
+          "description": "gRPC-Web: status delivered in the trailer frame (flag `0x80`) at the\nend of the response body.",
+          "type": "string",
+          "const": "trailer_frame"
         },
         {
           "description": "No terminal status was received — the RPC result is unknown.",

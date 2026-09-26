@@ -11,6 +11,9 @@
 //! * `/trailers` — body followed by trailers
 //! * `/grpc-status/{code}` — gRPC-style HTTP 200 with terminal grpc-status trailers
 //! * `/grpc-missing-status` — gRPC-style stream aborted before trailers
+//! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — gRPC echo and reflection
+//!   ([`crate::grpc`]); with an `application/grpc-web*` content type, the
+//!   gRPC-Web echo ([`crate::grpc_web`])
 //! * `/sse?count=&interval=` — server-sent events
 //! * `/gzip`, `/binary`, `/html`, `/injection`, `/soap-fault`, `/graphql-errors`
 //! * `/redirect?to=&status=`, `/set-cookie?name=&value=`
@@ -186,6 +189,9 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
         return websocket(req, qs, log).await;
     }
     if path.starts_with("/anvil.lab.v1.") || path.starts_with("/grpc.reflection.") {
+        if crate::grpc_web::is_grpc_web(req.headers()) {
+            return crate::grpc_web::handle(req, log).await;
+        }
         log.push(GroundTruth::RequestReceived { method: method.to_string(), path: raw_target, body_bytes: 0, headers });
         return crate::grpc::handle(req, log).await;
     }

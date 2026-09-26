@@ -60,9 +60,13 @@ pub struct OutcomeWarning {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcStatusSource {
+    /// Status delivered in HTTP trailers.
     Trailers,
     /// Status delivered in response headers (trailers-only response).
     TrailersOnly,
+    /// gRPC-Web: status delivered in the trailer frame (flag `0x80`) at the
+    /// end of the response body.
+    TrailerFrame,
     /// No terminal status was received — the RPC result is unknown.
     Missing,
 }

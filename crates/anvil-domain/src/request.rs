@@ -177,6 +177,30 @@ pub enum GrpcSchemaSource {
     Reflection,
 }
 
+/// How gRPC calls are carried on the wire. The HTTP version comes from the
+/// request's HTTP version policy (see `docs/protocols.md` §3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcWire {
+    /// Native gRPC (`application/grpc`) over HTTP/2 or HTTP/3; the status
+    /// arrives in HTTP trailers (or the headers of a trailers-only answer).
+    #[default]
+    Grpc,
+    /// gRPC-Web, binary (`application/grpc-web+proto`), over HTTP/1.1, HTTP/2
+    /// or HTTP/3. Unary and server streaming only; the status arrives in a
+    /// trailer frame (flag `0x80`) at the end of the response body.
+    GrpcWeb,
+    /// gRPC-Web, text (`application/grpc-web-text`): the same frames,
+    /// base64-encoded in both directions.
+    GrpcWebText,
+}
+
+impl GrpcWire {
+    pub fn is_web(self) -> bool {
+        !matches!(self, GrpcWire::Grpc)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GrpcSpec {
     /// Fully qualified `package.Service`.
@@ -192,9 +216,13 @@ pub struct GrpcSpec {
     /// `grpc-timeout` sent to the server, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
-    /// Use h2c (cleartext prior knowledge) for `http://` targets.
+    /// Use h2c (cleartext prior knowledge) for `http://` targets (native gRPC).
     #[serde(default)]
     pub plaintext: bool,
+    /// Wire format: native gRPC (default; records saved before this field
+    /// existed load as native), gRPC-Web binary or gRPC-Web text.
+    #[serde(default)]
+    pub wire: GrpcWire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -426,4 +454,21 @@ pub struct ImportSource {
     pub operation_key: String,
     /// Hash of the generated request spec at import time (detects user edits).
     pub generated_hash: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grpc_specs_saved_before_the_wire_field_load_as_native_grpc() {
+        let old = r#"{"service":"a.v1.S","method":"M","mode":"unary","schema":{"kind":"reflection"},"messages":["{}"],"plaintext":true}"#;
+        let s: GrpcSpec = serde_json::from_str(old).unwrap();
+        assert_eq!(s.wire, GrpcWire::Grpc);
+        assert!(s.plaintext);
+        let web: GrpcSpec = serde_json::from_str(&old.replace("\"plaintext\":true", "\"wire\":\"grpc_web_text\"")).unwrap();
+        assert_eq!(web.wire, GrpcWire::GrpcWebText);
+        assert!(web.wire.is_web() && !GrpcWire::Grpc.is_web());
+        assert!(serde_json::to_string(&web).unwrap().contains(r#""wire":"grpc_web_text""#));
+    }
 }

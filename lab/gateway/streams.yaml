@@ -3,7 +3,9 @@
 # Scenarios (crates/anvil-lab/src/streams.rs, docs/lab/streams-cpdp.md):
 #   HTTP/1.1 keep-alive, HTTP/2 (h2 over TLS + h2c), HTTP/3 through the QUIC listener,
 #   WebSocket (HTTP/1.1 Upgrade + RFC 8441 extended CONNECT), gRPC (4 call modes, error
-#   status, backend down, deadlines, missing trailers), SSE (events, idle, mid-stream abort),
+#   status, backend down, deadlines, missing trailers; over HTTP/2 and over HTTP/3 through the
+#   QUIC listener), gRPC-Web (binary + text via the grpc_web plugin, a pass-through lookalike
+#   route without it, a down backend), SSE (events, idle, mid-stream abort),
 #   TCP (echo, half-close, backend refused), TCP+TLS -> tcps, UDP (echo, silent, lossy), DTLS.
 # Settings:  streams.conf. Gateway: HTTP 127.0.0.1:18480 (h1 + h2c), HTTPS+H3 127.0.0.1:18443
 #            (TCP h1/h2 + UDP QUIC), admin 127.0.0.1:18490, streams 127.0.0.1:18401-18409.
@@ -16,9 +18,9 @@
 version: "1"
 
 resource_counts:
-  proxies: 18
+  proxies: 21
   consumers: 0
-  plugin_configs: 1
+  plugin_configs: 3
   upstreams: 0
 
 proxies:
@@ -72,6 +74,37 @@ proxies:
     backend_host: 127.0.0.1
     backend_port: 19402
     strip_listen_path: false
+
+  # GRPCWEB-001..004: gRPC-Web (binary and text) translated by the grpc_web plugin to native
+  # gRPC for the same h2c backend: /grpcweb/anvil.lab.v1.Echo/* -> /anvil.lab.v1.Echo/*.
+  - id: grpcweb-translated
+    listen_path: /grpcweb
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19402
+    strip_listen_path: true
+    plugins:
+      - plugin_config_id: grpcweb-translate
+
+  # GRPCWEB-lookalike: the same backend and the same gRPC-Web request, but NO grpc_web plugin:
+  # the gateway passes gRPC-Web through untranslated (the fixture answers gRPC-Web itself).
+  - id: grpcweb-passthrough
+    listen_path: /grpcweb-raw
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19402
+    strip_listen_path: true
+    pool_enable_http2: false
+
+  # GRPCWEB-down: gRPC-Web with the plugin to 19409, which is UNBOUND (gateway-authored status).
+  - id: grpcweb-down
+    listen_path: /grpcweb-down
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19409
+    strip_listen_path: true
+    plugins:
+      - plugin_config_id: grpcweb-down-translate
 
   # PROTO-014 (backend down): /grpc-down/anvil.lab.v1.Echo/* -> 19409, which is UNBOUND.
   - id: proto014-grpc-down
@@ -193,5 +226,20 @@ plugin_configs:
   - id: lab-access-log
     plugin_name: stdout_logging
     scope: global
+    enabled: true
+    config: {}
+
+  # gRPC-Web <-> native gRPC translation (docs/plugins.md "grpc_web"; its only key is expose_headers).
+  - id: grpcweb-translate
+    plugin_name: grpc_web
+    scope: proxy
+    proxy_id: grpcweb-translated
+    enabled: true
+    config: {}
+
+  - id: grpcweb-down-translate
+    plugin_name: grpc_web
+    scope: proxy
+    proxy_id: grpcweb-down
     enabled: true
     config: {}

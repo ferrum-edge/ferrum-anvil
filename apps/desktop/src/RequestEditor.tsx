@@ -172,7 +172,9 @@ function protocolForScheme(url: string): RequestSpec["protocol"] | null {
 function interactive(spec: RequestSpec): boolean {
   const p = spec.protocol ?? "http";
   if (p === "web_socket" || p === "tcp" || p === "udp" || p === "sse") return true;
-  return p === "grpc" && (spec.grpc?.mode === "client_streaming" || spec.grpc?.mode === "bidirectional");
+  // gRPC-Web has no client stream, so it is never an interactive session.
+  const nativeGrpc = (spec.grpc?.wire ?? "grpc") === "grpc";
+  return p === "grpc" && nativeGrpc && (spec.grpc?.mode === "client_streaming" || spec.grpc?.mode === "bidirectional");
 }
 
 function placeholderFor(p: string): string {
@@ -432,7 +434,7 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
 
 // -------------------------------------------------------------- protocols
 
-function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void }) {
+export function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void }) {
   const p = spec.protocol ?? "http";
   if (p === "web_socket") {
     const ws = spec.websocket ?? {};
@@ -487,6 +489,9 @@ function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Req
   }
   if (p === "grpc") {
     const g = spec.grpc ?? { service: "", method: "", schema: { kind: "reflection" as const }, messages: ["{}"] };
+    const wire = g.wire ?? "grpc";
+    const web = wire !== "grpc";
+    const streamingRequest = g.mode === "client_streaming" || g.mode === "bidirectional";
     return (
       <div className="col" style={{ maxWidth: 760 }}>
         <div className="row">
@@ -507,7 +512,22 @@ function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Req
               <option value="bidirectional">Bidirectional</option>
             </select>
           </label>
+          <label className="lbl">
+            Wire format
+            <select className="field" value={wire} onChange={(e) => set({ grpc: { ...g, wire: e.target.value as "grpc" } })}>
+              <option value="grpc">gRPC (application/grpc)</option>
+              <option value="grpc_web">gRPC-Web, binary (application/grpc-web+proto)</option>
+              <option value="grpc_web_text">gRPC-Web, text (application/grpc-web-text)</option>
+            </select>
+          </label>
         </div>
+        {web && streamingRequest && (
+          <p className="hint" role="alert">
+            gRPC-Web carries only unary and server-streaming calls: the whole request body is sent before the response is read, so there is no
+            client stream or half-close. This call will be refused before anything is sent; use native gRPC for client-streaming and
+            bidirectional methods.
+          </p>
+        )}
         <label className="lbl">
           Schema source
           <select
@@ -524,7 +544,9 @@ function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Req
               }
             }}
           >
-            <option value="reflection">Server reflection</option>
+            <option value="reflection" disabled={web}>
+              Server reflection{web ? " (native gRPC only)" : ""}
+            </option>
             <option value="proto_files">.proto files…</option>
             <option value="descriptor_set">Descriptor set (.pb)…</option>
           </select>
@@ -535,12 +557,28 @@ function ProtocolEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Req
         </label>
         <div className="row">
           <NumField label="Deadline (grpc-timeout, ms)" value={g.deadline_ms} onChange={(v) => set({ grpc: { ...g, deadline_ms: v } })} />
-          <label className="check">
-            <input type="checkbox" checked={!!g.plaintext} onChange={(e) => set({ grpc: { ...g, plaintext: e.target.checked } })} />
-            h2c (cleartext) for http:// targets
-          </label>
+          {!web && (
+            <label className="check">
+              <input type="checkbox" checked={!!g.plaintext} onChange={(e) => set({ grpc: { ...g, plaintext: e.target.checked } })} />
+              h2c (cleartext) for http:// targets
+            </label>
+          )}
         </div>
-        <p className="hint">gRPC status comes from trailers. An HTTP 200 with missing trailers is reported as incomplete, not success.</p>
+        {web ? (
+          <p className="hint" data-testid="grpc-http-version-help">
+            HTTP version (Settings → HTTP version): Auto offers h2 and HTTP/1.1 over TLS and uses HTTP/1.1 in cleartext; HTTP/1.1-only, HTTP/2-only,
+            h2c and HTTP/3 are used as chosen (HTTP/3 needs a TLS URL). gRPC-Web carries unary and server-streaming calls; the status comes from
+            the trailer frame at the end of the body{wire === "grpc_web_text" ? ", and both bodies are base64 text" : ""}. A body that ends
+            without a trailer frame is reported as incomplete, not success.
+          </p>
+        ) : (
+          <p className="hint" data-testid="grpc-http-version-help">
+            HTTP version (Settings → HTTP version): native gRPC uses HTTP/2 (ALPN h2 over TLS, h2c for grpc:// and http://). HTTP/3 calls over
+            QUIC (TLS URL, no proxy); HTTP/3 with fallback retries over HTTP/2 as a separate, recorded attempt only if QUIC fails before the call is
+            sent. HTTP/1.1-only is refused. The status comes from trailers; an HTTP 200 with missing trailers is reported as incomplete, not
+            success.
+          </p>
+        )}
       </div>
     );
   }

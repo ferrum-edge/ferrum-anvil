@@ -8,6 +8,9 @@
 //!   with the same `close_after` / `abnormal_after` / `max` query options as
 //!   the TCP fixture's `/ws`; a CONNECT elsewhere or without that protocol
 //!   gets 400
+//! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — native gRPC over HTTP/3
+//!   (all four call modes, full duplex, status in HTTP/3 trailers), or
+//!   gRPC-Web (binary/text) for an `application/grpc-web*` content type
 //!
 //! Ground truth records QUIC connections, the negotiated ALPN and every
 //! request, so tests can prove that a request really travelled over QUIC.
@@ -132,6 +135,24 @@ pub async fn serve_with(bind: &str, tls: TlsServerOptions, options: H3Options) -
                                 let Ok((req, mut stream)) = resolver.resolve_request().await else { return };
                                 if req.method() == http::Method::CONNECT {
                                     return websocket(req, stream, log).await;
+                                }
+                                let p = req.uri().path();
+                                if p.starts_with("/anvil.lab.v1.") || p.starts_with("/grpc.reflection.") {
+                                    if crate::grpc_web::is_grpc_web(req.headers()) {
+                                        return crate::grpc_web::handle_h3(req, stream, log).await;
+                                    }
+                                    let headers: Vec<(String, String)> = req
+                                        .headers()
+                                        .iter()
+                                        .map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+                                        .collect();
+                                    log.push(GroundTruth::RequestReceived {
+                                        method: req.method().to_string(),
+                                        path: p.to_string(),
+                                        body_bytes: 0,
+                                        headers,
+                                    });
+                                    return crate::grpc::handle_h3(req, stream, log).await;
                                 }
                                 let mut body_bytes = 0u64;
                                 while let Ok(Some(mut chunk)) = stream.recv_data().await {

@@ -18,6 +18,8 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 | WebSocket over HTTP/3 extended CONNECT (RFC 9220) | **Yes**, same commands | **Yes** | Not built | A separate bootstrap on a fresh QUIC connection. The client waits for the server's `SETTINGS_ENABLE_CONNECT_PROTOCOL` before sending `:protocol = websocket`. A 200 is success. Needs `wss://` and no proxy. QUIC phases as for HTTP/3 (no TCP phase). See §3.1. |
 | gRPC unary / server streaming (`grpc://`, `grpcs://`, `http(s)://`) | No, by design. Use `execute`. `open_session` returns `unsupported_combination`. | **Yes** | Not built (one connection per call, no channel reuse) | HTTP status and gRPC status reported separately. Trailers vs trailers-only vs missing. `grpc-message` is percent-decoded. `grpc-status-details-bin` is decoded. Message boundaries are kept, each shown as JSON. |
 | gRPC client streaming / bidirectional | **Yes.** `SendText` sends a JSON message, `SendBinaryHex` sends pre-encoded protobuf. `HalfClose` or `Close` ends the client stream. | **Yes.** Scripted messages, then a half-close. | Not built | As above. The half-close is recorded in the transcript. |
+| gRPC over HTTP/3 (native, `grpcs://`/`https://`, HTTP/3 policies) | **Yes** for client streaming / bidirectional, as over HTTP/2 | **Yes**, all four call modes | Not built (a fresh QUIC connection per call) | QUIC evidence as for HTTP/3 requests (DNS, QUIC handshake with TLS 1.3 inside, HTTP/3 setup; no TCP phase). Status from HTTP/3 trailers, trailers-only headers or missing. Forced HTTP/3 never uses TCP; HTTP/3-with-fallback records a separate HTTP/2 attempt only when QUIC failed before the call was sent. See §3.2. |
+| gRPC-Web binary / text (`grpc_web`, `grpc_web_text` wire) | No: gRPC-Web has no client stream, so there is nothing to drive interactively | **Yes**, unary and server streaming, over HTTP/1.1, HTTP/2 (TLS or h2c) or HTTP/3 per the version policy | Not built | Status source: the trailer frame (flag `0x80`) in the body, trailers-only headers, HTTP trailers (noted as unusual) or missing. Text mode is base64-decoded incrementally. A body without a trailer frame is incomplete, never success (`grpc_web.no_trailer_frame`); invalid framing is `grpc.framing_invalid`. Client/bidi streaming and server reflection are refused before traffic. See §3.2. |
 | SSE (`http(s)://`) | **Receive-only.** Close or cancel. Other commands are rejected. | **Yes.** Stops on `max_events`, idle, the deadline, cancel or the peer's end. Optional reconnect. | Not built | Every event is recorded with its id, type and data. `closed_by` is Client, Timeout, Peer or Abnormal. The raw stream is kept up to the capture limit. |
 | Raw TCP (`tcp://`) / TCP+TLS (`tls://`) | **Yes.** Send text or hex frames. `HalfClose` (FIN). `Close`. | **Yes.** Stops on expected frames, max bytes, read-idle, the peer's close or the deadline. | Not built | The same connector phases and TLS/mTLS evidence as HTTP. Framing presets. Half-close semantics. Bytes sent and received. Partial trailing frames. |
 | UDP (`udp://`) | **Yes.** Send datagrams. `Close`. | **Yes.** Sends datagrams, then waits out the response window. | Not built | A per-datagram transcript. Sent and received counts. ICMP port-unreachable when the OS reports it. A count of repeated payloads. It never infers delivery. |
@@ -36,7 +38,9 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 - **Combinations refused before traffic** (`unsupported_combination`, `phase = prepare`, `dispatch = not_dispatched`):
   - a proxy with UDP/DTLS (HTTP CONNECT and SOCKS5 CONNECT carry only TCP);
   - WebSocket over HTTP/3 with `ws://` (QUIC is always encrypted) or through a proxy;
-  - gRPC with the HTTP/1.1-only or HTTP/3 policies, or `plaintext` with a TLS URL;
+  - native gRPC with the HTTP/1.1-only policy (gRPC-Web runs over HTTP/1.1), or `plaintext` with a TLS URL;
+  - gRPC or gRPC-Web over HTTP/3 (both HTTP/3 policies) with a cleartext URL (QUIC is always encrypted) or through a proxy;
+  - gRPC-Web with a client-streaming or bidirectional method, or with server reflection as the schema source (reflection is itself a bidirectional-streaming RPC); gRPC-Web with h2c and a TLS URL, or HTTP/2-only and a cleartext URL;
   - SSE over HTTP/3;
   - a gRPC call mode that does not match the method descriptor. Unary alone never proves streaming.
 - **Proxies.** TCP-based sessions go through the configured HTTP or SOCKS5 proxy as a CONNECT tunnel. This includes `ws://` and cleartext SSE.
@@ -58,7 +62,7 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
   - `finish()` waits for the end and returns the full `ExecutionOutput`. It does not close the session, so call `close()` or `cancel()` first unless the peer is expected to end it.
   - Interactive sessions ignore the total deadline and the automation idle-close.
   - Dropping every command sender also ends the session gracefully.
-- **Engine-derived findings.** The generic rules have no finding for a few adapter observations. For these, the engine adds findings with inline wording: `grpc.reflection_unavailable`, `udp.icmp_port_unreachable` and `udp.repeated_payloads`. Each one states what it does not prove.
+- **Engine-derived findings.** The generic rules have no finding for a few adapter observations. For these, the engine adds findings with inline wording: `grpc.reflection_unavailable`, `udp.icmp_port_unreachable` and `udp.repeated_payloads`. It also adds `grpc_web.no_trailer_frame` and `grpc.framing_invalid`, whose wording is in the diagnostics catalog. Each one states what it does not prove.
 
 ## 3. Per-protocol details
 
@@ -81,22 +85,45 @@ Support is not one yes/no per protocol (build plan §7). Each protocol is rated 
 
 ### 3.2 gRPC
 
-- **Transport.**
-  - TLS with ALPN `h2` is required. Negotiating anything else is a `tls_alpn_mismatch`.
+- **Wire formats.** `GrpcSpec.wire` selects native gRPC (`grpc`, the default: records saved before the field existed load as native), gRPC-Web binary (`grpc_web`, `application/grpc-web+proto`) or gRPC-Web text (`grpc_web_text`, `application/grpc-web-text`). The HTTP version comes from the request's HTTP version policy:
+
+  | Policy | Native gRPC | gRPC-Web |
+  |---|---|---|
+  | Auto | HTTP/2: ALPN `h2` over TLS, h2c in cleartext | ALPN `h2`, `http/1.1` over TLS (the negotiated one is used); HTTP/1.1 in cleartext |
+  | HTTP/1.1 only | refused | HTTP/1.1 (ALPN `http/1.1` over TLS) |
+  | HTTP/2 only | HTTP/2 (as Auto) | ALPN `h2` only over TLS (a mismatch is `tls_alpn_mismatch`); refused for a cleartext URL |
+  | h2c | h2c | h2c; refused for a TLS URL |
+  | HTTP/3 only | HTTP/3 over QUIC | HTTP/3 over QUIC |
+  | HTTP/3 with fallback | HTTP/3, then HTTP/2 as a separate attempt | HTTP/3, then the Auto TCP choice as a separate attempt |
+
+  HTTP/3 needs a TLS URL and no proxy (refused before traffic otherwise).
+- **Transport (native).**
+  - TLS with ALPN `h2` is required over TCP. Negotiating anything else is a `tls_alpn_mismatch`.
   - Cleartext targets (`grpc://`, `http://`) use h2c with prior knowledge.
   - An optional URL path prefix goes in front of `/<service>/<method>`, for gateway routing.
-- **Request headers.** `content-type: application/grpc`, `te: trailers`, `user-agent: grpc-anvil/<version>`, the metadata entries, and the auth headers. `grpc-*` metadata keys are refused. `grpc-timeout` is sent from `deadline_ms`.
+- **gRPC over HTTP/3.** Each call opens a fresh QUIC connection with the shared `quic_connect` (DNS, then the QUIC handshake with TLS 1.3 inside and ALPN `h3`, then HTTP/3 setup; the connect phase is `not_applicable` and there is no TCP-TLS phase). The call is a `POST` request stream: its HEADERS carry the same fields as over HTTP/2, request DATA frames carry the length-prefixed messages (the stream's send side is finished for the half-close), and the status is read from the HTTP/3 trailers or the headers of a trailers-only answer. Both directions run concurrently, so bidirectional and interactive client-streaming calls work as over HTTP/2. A deadline, cancel or local failure resets the stream with `H3_REQUEST_CANCELLED`; the connection is then closed with `H3_NO_ERROR`. The attempt's byte counters are the request stream's DATA bytes, not QUIC packet bytes. Server reflection runs on the call's own QUIC connection.
+  - **Forced HTTP/3** never uses TCP: a UDP-blocked path is a `quic_handshake_timeout` with nothing dispatched.
+  - **HTTP/3 with fallback** falls back only when the HTTP/3 attempt failed **before the call was sent** (dispatch `not_dispatched`, no response, not a cancel or a local refusal). The second attempt has reason `protocol_fallback{from: h3}`, and the record carries `client.h3.fallback_used` and the `protocol_fallback` warning. A call that may have reached the server over HTTP/3 is never repeated, because an RPC is not assumed to be idempotent.
+- **gRPC-Web** (PROTOCOL-WEB).
+  - **Request.** `POST` with `content-type` and `accept` set to the wire's media type, `x-grpc-web: 1`, `grpc-timeout` from the deadline, the metadata and the auth headers. There is no `te: trailers`. The body is the single length-prefixed message, base64-encoded in text mode; its length is known, so HTTP/1.1 sends `Content-Length`. The prepared body (and what an auth profile signs) is exactly those bytes.
+  - **Only unary and server streaming.** A gRPC-Web client sends the whole request body before it reads the response, so there is no client stream and no half-close. Client-streaming and bidirectional calls are refused before traffic (`unsupported_combination`, field `grpc.wire`), and so is server reflection (field `grpc.schema`), because the reflection service is itself bidirectional. Load a `.proto` or a descriptor set instead.
+  - **Response framing.** The body mode follows the response `content-type` (`application/grpc-web-text*` is base64; any other `application/grpc*` type is binary; a missing type falls back to the request's mode). Text bodies are decoded incrementally, 4 characters at a time, so a server that base64-encodes each flush separately (with `=` padding in the middle of the body) is handled, and at most three characters are held between chunks. Frames are `0x00`/`0x01` messages and one `0x80` trailer frame whose payload is a `name: value` header block (bounded to 1 MiB and 1,024 entries). `0x81` is refused as undefined.
+  - **Status source**, reported separately from the HTTP status: `trailer_frame` (the trailer frame's `grpc-status`), `trailers_only` (the status in the response headers, empty body), `trailers` (the status arrived in HTTP trailers instead of a trailer frame: recorded, with a note that browser gRPC-Web clients cannot read HTTP trailers, and a `grpc_web.no_trailer_frame` warning), or `missing`. A body that ends cleanly without a trailer frame and without a trailers-only status is **missing**: transport `incomplete`, application never success, and `grpc_web.no_trailer_frame` (error) next to `app.grpc_status_missing`. Neither finding claims whether any gateway translated gRPC-Web.
+  - **Invalid framing.** Data after the trailer frame (including a second, appended trailer frame), an invalid flag, a malformed trailer block or invalid base64 stops parsing, but the HTTP body is still read to its end so its completeness is reported as observed. The failure is `http_protocol_error` and the finding is `grpc.framing_invalid` (instead of a misleading "body did not finish"). A status read before the problem is kept, but the call is not a complete success. A truncated frame or a base64 quantum cut off at the end remains `body_incomplete`.
+  - Native gRPC gets the same framing checks: a `0x80` frame in a native stream is invalid framing (it was previously misreported as a local size limit), and a response whose content type is not `application/grpc*` (for example an HTML error page) is kept as evidence instead of being parsed as frames.
+- **Request headers (native).** `content-type: application/grpc`, `te: trailers`, `user-agent: grpc-anvil/<version>`, the metadata entries, and the auth headers. `grpc-*` metadata keys are refused. `grpc-timeout` is sent from `deadline_ms`.
 - **Deadline.** The deadline is also enforced locally. When it elapses the stream is reset, the failure is `total_timeout` with `deadline_ms`, and the status is recorded as **missing**. Anvil does not invent a `DEADLINE_EXCEEDED`.
-- **Status.** It comes from the trailers, or from the headers of a trailers-only response, and is labeled with its source. `grpc-status-details-bin` is decoded as `google.rpc.Status` (code, message and detail type URLs), and the summary goes into the prepared inferred notes.
+- **Status.** It comes from the trailers, the trailer frame (gRPC-Web), or the headers of a trailers-only response, and is labeled with its source. `grpc-status-details-bin` is decoded as `google.rpc.Status` (code, message and detail type URLs), and the summary goes into the prepared inferred notes.
 - **Schemas.**
   - `.proto` sources are compiled in-process by `protox`. Imports resolve only among the provided files, by attachment file name, plus the bundled Google well-known types. Nothing is read from disk.
   - A serialized `FileDescriptorSet` is also accepted.
-  - The third source is server reflection. v1 is tried first; if it is UNIMPLEMENTED, v1alpha is tried. The dependency closure is fetched with `file_by_filename`, capped at 64 requests. Reflection runs on the same HTTP/2 connection as the call.
+  - The third source is server reflection (native gRPC only). v1 is tried first; if it is UNIMPLEMENTED, v1alpha is tried. The dependency closure is fetched with `file_by_filename`, capped at 64 requests. Reflection runs on the same HTTP/2 or HTTP/3 connection as the call.
   - A refused reflection (PROTO-017) produces `grpc.reflection_unavailable`. The method is not called, dispatch is `not_dispatched`, and there is no `app.grpc_status` finding about the service.
 - **JSON mapping.** `prost-reflect` handles JSON ↔ DynamicMessage using proto3 JSON mapping. Received messages are shown as JSON with default serialization options.
 - **Compression.** Inbound `grpc-encoding: gzip` messages are decompressed up to the per-message limit. Anvil never compresses outbound messages and does not advertise `grpc-accept-encoding`.
 - **Receive limit.** The default is 64 MiB per message, and it is also capped by `limits.max_response_bytes`.
-- **Not implemented.** gRPC-Web; gRPC over HTTP/3; retries, hedging and service config; load-balancing policies; outbound compression; keepalive pings as a session command. HTTP/2 PING is connection-level.
+- **Live.** Against Ferrum Edge v0.9.7 (`docs/lab/streams-cpdp.md`): gRPC over HTTP/3 in all four call modes through the QUIC listener, which bridges to an h2c backend; forced HTTP/3 on a UDP-blocked path; HTTP/3-with-fallback; and gRPC-Web binary and text through the `grpc_web` plugin over HTTP/1.1, HTTP/2 and HTTP/3. On a route **without** the plugin, v0.9.7 passes gRPC-Web through untranslated but, over HTTP/1.1 and HTTP/2, appends its own synthesized `grpc-status: 2` trailer frame after the backend's trailer frame; Anvil reports that as `grpc.framing_invalid`, not as a success.
+- **Not implemented.** Retries, hedging and service config; load-balancing policies; outbound compression; keepalive pings as a session command (HTTP/2 and QUIC PINGs are connection-level); gRPC-Web request trailer frames (Anvil sends none); gRPC-Web `+json` or other message-format suffixes (only protobuf); connection reuse across gRPC calls.
 - **Proto import names** must match the stored attachment file names. A project that imports `foo/bar.proto` must store the file under that name.
 
 ### 3.3 Server-sent events
@@ -172,6 +199,8 @@ The HTTP/3 transport already existed. This change adds an HTTP/3 fixture server 
 | PROTO-015 | `…::proto_015_grpc_missing_terminal_status_is_incomplete_not_success` |
 | PROTO-016 | `…::proto_016_grpc_four_modes_with_message_boundaries`, `…_deadline_is_sent_and_enforced_without_fabricating_a_status`, `…_cancellation_and_mode_mismatch`, `…_interactive_bidi_session`; `anvil-transport/tests/sessions_streams.rs::proto_016_grpc_adapter_with_a_compiled_proto_and_trailers` |
 | PROTO-017 | `…::proto_017_reflection_denied_but_local_proto_works` |
+| gRPC over HTTP/3 (PROTO-014/015/016 over QUIC) | `…::proto_016_grpc_over_h3_four_modes_with_quic_evidence_and_message_boundaries`, `…::proto_014_grpc_over_h3_error_status_and_reset_before_status`, `…::grpc_over_h3_deadline_cancel_reflection_and_interactive_bidi`, `…::grpc_forced_h3_never_uses_tcp_and_fallback_is_a_recorded_second_attempt`, `…::grpc_over_h3_refusals_happen_before_traffic`; `sessions_streams.rs::grpc_h3_adapter_uses_quic_and_reads_status_from_h3_trailers`; live in the streams lab (PROTO-016-h3, PROTO-014-h3, PROTO-014-h3-down, PROTO-016-h3-blocked, PROTO-016-h3-fallback) |
+| gRPC-Web (binary, text) | `…::grpc_web_binary_and_text_over_h1_h2_and_h3_keep_message_boundaries`, `…::grpc_web_error_status_trailers_only_and_http_trailers_are_distinguished`, `…::grpc_web_without_a_trailer_frame_is_incomplete_never_success`, `…::grpc_web_appended_trailer_frame_is_invalid_framing_not_success`, `…::grpc_web_streaming_request_modes_and_reflection_are_refused_before_traffic`; `sessions_streams.rs::grpc_web_text_adapter_decodes_padded_segments_and_records_the_trailer_frame`, `…::grpc_web_malformed_bodies_fail_typed_and_are_never_success`; unit tests in `anvil-transport/src/grpc_web.rs` (incremental base64 across every chunk split, frames, trailer blocks) and `grpc.rs` (refusal matrix); live in the streams lab (GRPCWEB-001/002/003, -down, -lookalike, -refused) |
 | PROTO-018 | `…::proto_018_sse_cancel_is_expected_and_keeps_bounded_history`; `sessions_streams.rs::proto_018_sse_history_is_bounded_but_counted` |
 | PROTO-019 | `…::proto_019_tcp_half_close_keeps_the_reply` |
 | PROTO-020 | `…::proto_020_udp_silence_is_only_no_response_observed`; `sessions_streams.rs::proto_020_udp_icmp_unreachable_is_recorded_as_such` |
@@ -185,15 +214,17 @@ New fixtures, all lab-only in `anvil-fixtures`:
 - `h3server`: HTTP/3 over quinn and h3.
 - `dtls`: a dimpl DTLS 1.2 echo server that validates client certificates itself and rejects an untrusted identity with a plaintext `unknown_ca` alert.
 - The gRPC echo `fail_with = -1` sentinel: reply once, then reset the stream before any status.
+- gRPC over HTTP/3 in `h3server` (the same echo service, full duplex on one request stream; the status in HTTP/3 trailers, or a genuine trailers-only answer when the status is the first thing the service produces).
+- `grpc_web`: a gRPC-Web echo (unary, server streaming; binary and text) served by the HTTP fixture for `application/grpc-web*` requests and by `h3server`. The `x-fixture-grpc-web` request header selects a trailers-only answer, no trailer frame, the status in HTTP trailers, or an extra appended trailer frame. Text responses base64-encode every frame separately.
 
 The HTTP fixture's WebSocket route now flushes its Close reply, so a client-initiated closing handshake completes. Before, it dropped the socket, which is correctly a 1006 for the client.
 
 ## 5. Honest limitations summary
 
-1. **WebSocket over HTTP/3 (RFC 9220)** depends on a vendored `h3` 0.0.8 carrying one upstream commit until an `h3` release includes it. Each session opens its own QUIC connection; there is no pooling across sessions.
+1. **WebSocket over HTTP/3 (RFC 9220)** depends on a vendored `h3` 0.0.8 carrying one upstream commit until an `h3` release includes it. Each session opens its own QUIC connection; there is no pooling across sessions. gRPC over HTTP/3 uses the same vendored `h3` (no extended CONNECT is needed there).
 2. **Load generation.** `anvil-load` drives HTTP-family requests only (see `docs/load.md`). Plan validation refuses every session protocol in this document, and HTTP/3 has not been exercised under load.
 3. **DTLS.** dimpl validates only the leaf and sends only the leaf. It is ECDSA-only, and it presents an ephemeral certificate when an identity is requested but none is configured. It does not expose the cipher suite. CertificateRequest cannot be observed for DTLS 1.3.
-4. **gRPC.** No gRPC-Web, no HTTP/3, no outbound compression, and no retry or service-config semantics. Proto imports resolve by attachment file name only.
+4. **gRPC.** No outbound compression, and no retry or service-config semantics. Proto imports resolve by attachment file name only. Each call opens its own connection (including a fresh QUIC connection over HTTP/3). gRPC-Web is limited by the protocol to unary and server streaming, cannot use server reflection, sends no request trailer frame, and supports protobuf messages only.
 5. **SSE.** No reconnect after a clean end of stream, which differs from browser behavior. Compressed streams are not supported.
 6. **UDP.** Connected-socket mode only. Replies from a different address or port are not accepted.
 7. **Connections.** Session adapters open a fresh connection per execution or session. Unlike HTTP/1.1, HTTP/2 and HTTP/3, they do not use the pool.

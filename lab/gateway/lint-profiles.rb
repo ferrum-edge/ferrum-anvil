@@ -119,6 +119,7 @@ PLUGIN_KEYS = {
                     max_concurrent_requests cache_ttl_seconds max_cache_entries consumer_mapping
                     hide_credentials allow_plaintext],                                # ldap_auth.rs:250-490 (keys read)
   'mtls_auth' => %w[cert_field allowed_issuers allowed_ca_fingerprints_sha256],         # mtls_auth.rs:995-1045 (keys read)
+  'grpc_web' => %w[expose_headers],                                                     # grpc_web.rs:1218 parse_expose_headers (only key; v0.9.7)
   'oidc_relying_party' => %w[providers session behavior],                               # oidc_relying_party.rs:89 (CONFIG_FIELDS)
   'soap_ws_security' => %w[reject_missing_security_header content_type timestamp username_token
                            x509_signature saml nonce] + REDIS                         # soap_ws_security.rs:648-664 (ROOT_CONFIG_KEYS)

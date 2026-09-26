@@ -122,7 +122,7 @@ results and reasoned statuses.
   - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).
   - Load testing is HTTP-family only, one worker on one machine.
   - HTTP/3 has not been exercised under load.
-  - No gRPC-Web, and no gRPC over HTTP/3.
+  - gRPC-Web carries only unary and server streaming (the protocol's limit) and cannot use server reflection; gRPC over HTTP/3 opens a fresh QUIC connection per call.
   - See `docs/protocols.md` §5.
 - **XML signing.** Anvil does not sign XML. AUTH-030/031 run live with lab-signed fixtures, which Anvil sends verbatim.
 - **Ferrum Edge 0.9.5 only.** Other gateway versions are not validated. The gateway does not relay plain-HTTP/2 trailers.
