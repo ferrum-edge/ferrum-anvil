@@ -223,18 +223,26 @@ fn every_transaction_ends_before_the_connection_is_released() {
 }
 
 #[test]
-fn consistent_reads_take_no_write_lock() {
-    let (dir, store, _dek) = open();
+fn consistent_reads_take_no_write_lock_and_see_one_state() {
+    let (dir, store, dek) = open();
     let id = Id::new();
     store.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "kept"})).unwrap();
+    // A second connection to the same database, as another process would have.
+    let other = Store::open(dir.path(), dek).unwrap();
 
-    let r: Result<Option<Value>, StoreError> = store.read_consistently(|tx| {
-        let seen = tx.get(kind::WORKSPACE, &id)?;
-        let other = rusqlite::Connection::open(dir.path().join(DB_FILE)).unwrap();
-        other.busy_timeout(Duration::ZERO).unwrap();
-        other.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").expect("a consistent read took the write lock");
-        Ok(seen)
+    let r: Result<(Option<Value>, Option<Value>), StoreError> = store.read_consistently(|tx| {
+        let first = tx.get(kind::WORKSPACE, &id)?;
+        let raw = rusqlite::Connection::open(dir.path().join(DB_FILE)).unwrap();
+        raw.busy_timeout(Duration::ZERO).unwrap();
+        raw.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").expect("a consistent read took the write lock");
+        // A write committed elsewhere mid-read is not seen by this read.
+        other.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "changed"})).unwrap();
+        let second = tx.get(kind::WORKSPACE, &id)?;
+        Ok((first, second))
     });
-    assert_eq!(r.unwrap().unwrap()["name"], "kept");
+    let (first, second) = r.unwrap();
+    assert_eq!(first.unwrap()["name"], "kept");
+    assert_eq!(second.unwrap()["name"], "kept", "a consistent read saw a write committed during it");
     assert_no_open_transaction(dir.path());
+    assert_eq!(name(&store, &id).as_deref(), Some("changed"));
 }

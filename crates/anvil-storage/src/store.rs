@@ -48,10 +48,9 @@ pub enum StoreError {
     TransactionActive,
     /// A transaction could not be rolled back, so the connection is still
     /// inside it. Nothing further runs on the connection until it has ended.
-    #[error("a store transaction could not be rolled back{}", after(.original))]
+    #[error("a store transaction could not be rolled back{}{}", because(.cause), after(.original))]
     TransactionNotEnded {
         /// Why the last rollback failed, when SQLite gave a reason.
-        #[source]
         cause: Option<rusqlite::Error>,
         /// The error the transaction was already failing with, if any.
         original: Option<Box<StoreError>>,
@@ -65,6 +64,10 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+fn because(cause: &Option<rusqlite::Error>) -> String {
+    cause.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
+}
 
 fn after(original: &Option<Box<StoreError>>) -> String {
     original.as_ref().map(|e| format!(" after: {e}")).unwrap_or_default()
@@ -569,11 +572,11 @@ impl Store {
         self.transaction(TransactionBehavior::Immediate, f)
     }
 
-    /// Run `f`, which only reads, against one consistent state of the store.
-    /// Same guarantees as [`Store::atomically`], but the transaction is
-    /// `DEFERRED`: it takes no write lock unless `f` writes.
-    pub fn read_consistently<R>(&self, f: impl FnOnce(&StoreTx<'_>) -> Result<R>) -> Result<R> {
-        self.transaction(TransactionBehavior::Deferred, f)
+    /// Run `f` against one consistent state of the store. Same guarantees as
+    /// [`Store::atomically`], but `f` gets a read-only [`StoreRead`] and the
+    /// transaction is `DEFERRED`, so it never takes the write lock.
+    pub fn read_consistently<R>(&self, f: impl FnOnce(&StoreRead<'_>) -> Result<R>) -> Result<R> {
+        self.transaction(TransactionBehavior::Deferred, |tx| f(&tx.as_read()))
     }
 
     fn transaction<R>(&self, behavior: TransactionBehavior, f: impl FnOnce(&StoreTx<'_>) -> Result<R>) -> Result<R> {
@@ -668,6 +671,11 @@ impl StoreTx<'_> {
         Ok(Records { key: self.store.key()?, conn: &self.tx })
     }
 
+    /// The read-only operations of this transaction.
+    pub fn as_read(&self) -> StoreRead<'_> {
+        StoreRead { store: self.store, conn: &self.tx }
+    }
+
     pub fn put<T: Serialize>(
         &self,
         kind: &str,
@@ -707,6 +715,36 @@ impl StoreTx<'_> {
 
     pub fn delete_secret(&self, id: &Id) -> Result<()> {
         self.records()?.delete_secret(id)
+    }
+}
+
+/// Read-only access to an open transaction: from [`Store::read_consistently`]
+/// or [`StoreTx::as_read`]. It has no operation that writes.
+pub struct StoreRead<'a> {
+    store: &'a Store,
+    conn: &'a Connection,
+}
+
+impl StoreRead<'_> {
+    fn records(&self) -> Result<Records<'_>> {
+        Ok(Records { key: self.store.key()?, conn: self.conn })
+    }
+
+    pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
+        self.records()?.get(kind, id)
+    }
+
+    pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+        self.records()?.list(kind, workspace_id)
+    }
+
+    pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
+        self.records()?.object_meta(kind)
+    }
+
+    /// Returns (label, value).
+    pub fn get_secret(&self, id: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
+        self.records()?.get_secret(id)
     }
 }
 

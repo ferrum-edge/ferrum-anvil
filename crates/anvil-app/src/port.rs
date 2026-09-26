@@ -6,7 +6,7 @@ use anvil_domain::workspace::Workspace;
 use anvil_portability::bundle::{self, BundleKind, ExportMode, ExportOptions, ExportPreview};
 use anvil_portability::plan::{self, ConflictPolicy, ImportPlan};
 use anvil_portability::{PortableGraph, SecretValue};
-use anvil_storage::{KdfParams, StoreTx, kind};
+use anvil_storage::{KdfParams, StoreRead, kind};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -144,7 +144,7 @@ impl App {
         let plan = self.store.atomically(|s| {
             // Read inside the transaction, so merge and naming decisions see
             // exactly what the writes below land on.
-            let existing = existing_ids(s)?;
+            let existing = existing_ids(&s.as_read())?;
             let plan = plan::plan(&g, &existing, policy);
             if policy == ConflictPolicy::Duplicate {
                 plan::remap_all(&mut g);
@@ -235,7 +235,7 @@ impl App {
 }
 
 /// Ids of every stored object, read through `s`.
-fn existing_ids(s: &StoreTx<'_>) -> anvil_storage::store::Result<HashSet<Id>> {
+fn existing_ids(s: &StoreRead<'_>) -> anvil_storage::store::Result<HashSet<Id>> {
     let mut ids = HashSet::new();
     for k in kind::ALL {
         for m in s.object_meta(k)? {

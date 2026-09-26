@@ -1,9 +1,10 @@
 //! A failed store transaction never takes an unrelated, acknowledged
-//! `App::save_workspace` down with it.
+//! `App::save_workspace` down with it, and a transaction always ends.
 
 use anvil_app::App;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::Id;
+use anvil_domain::request::RequestSpec;
 use anvil_storage::{KdfParams, StoreError, kind};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -53,4 +54,26 @@ fn failed_transaction_does_not_roll_back_a_concurrent_workspace_save() {
     let (h, dek) = ProfileManager::unlock(&s.dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
     let app = App::open(s.dir.clone(), h, dek).unwrap();
     assert_eq!(app.workspace(&ws.meta.id).unwrap().name, "new name");
+}
+
+#[test]
+fn deleting_a_folder_in_a_parent_cycle_terminates() {
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, dek, _recovery) = pm.create_passphrase("cycle", PASSPHRASE, KdfParams::testing()).unwrap();
+    let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+    let app = App::open(s.dir.clone(), h, dek).unwrap();
+    let ws = app.create_workspace("cycle").unwrap();
+    let a = app.create_folder(&ws.meta.id, None, "a").unwrap();
+    let b = app.create_folder(&ws.meta.id, Some(a.meta.id), "b").unwrap();
+    let req = app.create_request(&ws.meta.id, Some(b.meta.id), "in b", RequestSpec::http("GET", "http://127.0.0.1/")).unwrap();
+    // `save_folder` does not validate ancestry, so it can close the cycle
+    // a -> b -> a, as an imported bundle could.
+    let mut a = app.folder(&a.meta.id).unwrap();
+    a.parent_id = Some(b.meta.id);
+    let a = app.save_folder(a).unwrap();
+
+    app.delete_folder(&a.meta.id).unwrap();
+    assert!(app.folders(&ws.meta.id).unwrap().is_empty());
+    assert!(app.requests(&ws.meta.id).unwrap().iter().all(|r| r.meta.id != req.meta.id));
 }

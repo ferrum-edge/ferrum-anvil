@@ -12,6 +12,7 @@ use anvil_domain::workspace::*;
 use anvil_storage::kind;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeNode {
@@ -166,15 +167,18 @@ impl App {
         let deleted = self.store.atomically(|s| {
             let Some(f) = s.get::<Folder>(kind::FOLDER, id)? else { return Ok(false) };
             let all: Vec<Folder> = s.list(kind::FOLDER, Some(&f.workspace_id))?;
+            // `seen` stops the walk at a parent cycle (possible in saved or
+            // imported data) instead of looping forever.
+            let mut seen = HashSet::from([*id]);
             let mut doomed = vec![*id];
             let mut i = 0;
             while i < doomed.len() {
                 let cur = doomed[i];
-                doomed.extend(all.iter().filter(|x| x.parent_id == Some(cur)).map(|x| x.meta.id));
+                doomed.extend(all.iter().filter(|x| x.parent_id == Some(cur) && seen.insert(x.meta.id)).map(|x| x.meta.id));
                 i += 1;
             }
             let reqs: Vec<RequestDefinition> = s.list(kind::REQUEST, Some(&f.workspace_id))?;
-            for r in reqs.iter().filter(|r| r.folder_id.map(|fid| doomed.contains(&fid)).unwrap_or(false)) {
+            for r in reqs.iter().filter(|r| r.folder_id.is_some_and(|fid| seen.contains(&fid))) {
                 s.delete(kind::REQUEST, &r.meta.id)?;
             }
             for d in &doomed {
