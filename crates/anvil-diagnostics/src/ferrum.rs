@@ -1,5 +1,11 @@
-//! Ferrum Edge compatibility catalog: the source-audited outcome inventory
-//! (`catalog/ferrum/<compat-id>/outcomes.json`) and public-signal matching.
+//! Ferrum Edge compatibility catalogs: the source-audited outcome inventory
+//! of each supported release (`catalog/ferrum/<compat-id>/outcomes.json`)
+//! and public-signal matching.
+//!
+//! Every catalog is keyed by the `compatibility_id` an integration profile
+//! declares. A profile whose id has no embedded catalog gets no catalog at
+//! all — never another release's — so rules fall back to the
+//! version-independent token vocabulary ([`shared_tokens`]).
 //!
 //! Matching compares *observable* signals only (status, `X-Gateway-Error`,
 //! body text, gRPC status). Outcomes that share an identical public signal
@@ -9,10 +15,18 @@
 use crate::facts::BodyFacts;
 use regex::Regex;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.5";
-const RAW: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.5/outcomes.json");
+/// The compatibility id new integration profiles default to: the newest
+/// audited release.
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.7";
+
+/// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
+const EMBEDDED: &[(&str, &str)] = &[
+    ("ferrum-edge-0.9.5", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.5/outcomes.json")),
+    ("ferrum-edge-0.9.7", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.7/outcomes.json")),
+];
 
 #[derive(Debug, Deserialize)]
 struct RawCatalog {
@@ -25,6 +39,28 @@ struct RawCatalog {
     outcomes: Vec<RawOutcome>,
     #[serde(default)]
     gateway: serde_json::Value,
+    #[serde(default)]
+    marker_semantics: RawMarkerSemantics,
+}
+
+/// Release-specific sentences a catalog adds to the release-neutral wording
+/// of the marker findings (`ferrum.token.<t>`, `ferrum.marker.absent`).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ReleaseNotes {
+    #[serde(default)]
+    pub explanation: String,
+    #[serde(default)]
+    pub alternatives: Vec<String>,
+    #[serde(default)]
+    pub does_not_prove: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMarkerSemantics {
+    #[serde(default)]
+    tokens: HashMap<String, ReleaseNotes>,
+    #[serde(default)]
+    absent: ReleaseNotes,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,12 +122,18 @@ pub struct Outcome {
 #[derive(Debug)]
 pub struct FerrumCatalog {
     pub compatibility_id: String,
+    /// Gateway release tag the catalog was audited at (e.g. `v0.9.7`).
+    pub release_tag: String,
     pub source_sha: String,
     pub tokens: Vec<String>,
     pub outcomes: Vec<Outcome>,
     /// Whether a backend can make `X-Gateway-Error` appear on a response:
     /// `Some(false)` only when the audit established the gateway strips/overrides it.
     pub marker_spoofable: Option<bool>,
+    /// Release-specific notes per public token.
+    pub token_notes: HashMap<String, ReleaseNotes>,
+    /// Release-specific notes for a 5xx that carries no marker.
+    pub absent_notes: ReleaseNotes,
 }
 
 fn strings(v: &serde_json::Value) -> Vec<String> {
@@ -167,9 +209,49 @@ fn parse_bodies(v: &serde_json::Value) -> (Vec<BodyPattern>, bool) {
     (pats, passthrough)
 }
 
-pub fn catalog() -> &'static FerrumCatalog {
-    static C: OnceLock<FerrumCatalog> = OnceLock::new();
-    C.get_or_init(|| load(RAW).expect("embedded Ferrum catalog is valid"))
+/// Every embedded catalog, oldest release first.
+pub fn catalogs() -> &'static [FerrumCatalog] {
+    static C: OnceLock<Vec<FerrumCatalog>> = OnceLock::new();
+    C.get_or_init(|| {
+        EMBEDDED
+            .iter()
+            .map(|(id, raw)| {
+                let c = load(raw).unwrap_or_else(|e| panic!("embedded Ferrum catalog {id} is invalid: {e}"));
+                assert_eq!(c.compatibility_id, *id, "catalog file declares a different compatibility id");
+                c
+            })
+            .collect()
+    })
+}
+
+/// Compatibility ids that have an embedded catalog, oldest release first.
+pub fn compatibility_ids() -> impl Iterator<Item = &'static str> {
+    EMBEDDED.iter().map(|(id, _)| *id)
+}
+
+/// The catalog for exactly this compatibility id. `None` for any other id:
+/// an unknown release never borrows another release's catalog.
+pub fn catalog_for(compatibility_id: &str) -> Option<&'static FerrumCatalog> {
+    let id = compatibility_id.trim();
+    catalogs().iter().find(|c| c.compatibility_id == id)
+}
+
+/// The catalog of [`DEFAULT_COMPATIBILITY_ID`].
+pub fn default_catalog() -> &'static FerrumCatalog {
+    catalog_for(DEFAULT_COMPATIBILITY_ID).expect("the default compatibility id has an embedded catalog")
+}
+
+/// Public tokens every embedded catalog defines. This is the only vocabulary
+/// rules use for a trusted profile whose compatibility id has no catalog,
+/// and only with the coarse meaning the audited releases share.
+pub fn shared_tokens() -> &'static [String] {
+    static T: OnceLock<Vec<String>> = OnceLock::new();
+    T.get_or_init(|| {
+        let all = catalogs();
+        all.first()
+            .map(|first| first.tokens.iter().filter(|t| all.iter().all(|c| c.tokens.contains(*t))).cloned().collect())
+            .unwrap_or_default()
+    })
 }
 
 pub fn load(raw: &str) -> Result<FerrumCatalog, serde_json::Error> {
@@ -202,7 +284,17 @@ pub fn load(raw: &str) -> Result<FerrumCatalog, serde_json::Error> {
     let marker_spoofable =
         rc.headers.iter().find(|h| h.name.eq_ignore_ascii_case("x-gateway-error")).and_then(|h| h.spoofable_by_backend.as_bool());
     let source_sha = rc.gateway.get("source_sha").and_then(|s| s.as_str()).unwrap_or("").to_string();
-    Ok(FerrumCatalog { compatibility_id: rc.compatibility_id, source_sha, tokens, outcomes, marker_spoofable })
+    let release_tag = rc.gateway.get("release_tag").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    Ok(FerrumCatalog {
+        compatibility_id: rc.compatibility_id,
+        release_tag,
+        source_sha,
+        tokens,
+        outcomes,
+        marker_spoofable,
+        token_notes: rc.marker_semantics.tokens,
+        absent_notes: rc.marker_semantics.absent,
+    })
 }
 
 /// Observable signals of an HTTP-family response.
@@ -223,6 +315,12 @@ pub enum MatchStrength {
 }
 
 impl FerrumCatalog {
+    /// Human-readable release name, e.g. `Ferrum Edge 0.9.7`.
+    pub fn release_label(&self) -> String {
+        let v = self.release_tag.trim_start_matches('v');
+        if v.is_empty() { self.compatibility_id.clone() } else { format!("Ferrum Edge {v}") }
+    }
+
     pub fn is_known_token(&self, t: &str) -> bool {
         self.tokens.iter().any(|k| k == t)
     }
@@ -277,50 +375,78 @@ mod tests {
     use super::*;
     use crate::facts::body_facts;
 
+    const TOKENS: [&str; 7] =
+        ["connection_failure", "backend_timeout", "backend_error", "circuit_breaker_open", "overload", "config_stale", "concurrency_limit"];
+
     #[test]
-    fn embedded_catalog_loads_and_has_all_public_tokens() {
-        let c = catalog();
-        for t in [
-            "connection_failure",
-            "backend_timeout",
-            "backend_error",
-            "circuit_breaker_open",
-            "overload",
-            "config_stale",
-            "concurrency_limit",
-        ] {
-            assert!(c.is_known_token(t), "missing token {t}");
+    fn every_embedded_catalog_loads_under_its_own_id_with_all_public_tokens() {
+        let ids: Vec<&str> = compatibility_ids().collect();
+        assert_eq!(ids, ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7"]);
+        for id in ids {
+            let c = catalog_for(id).expect("embedded");
+            assert_eq!(c.compatibility_id, id);
+            assert_eq!(format!("ferrum-edge-{}", c.release_tag.trim_start_matches('v')), id, "release tag matches the id");
+            assert_eq!(c.source_sha.len(), 40, "{id}: full source sha");
+            for t in TOKENS {
+                assert!(c.is_known_token(t), "{id}: missing token {t}");
+            }
+            assert!(c.outcomes.len() > 50);
+            let mut seen = std::collections::HashSet::new();
+            assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
-        assert!(c.outcomes.len() > 50);
+        assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.7");
+    }
+
+    #[test]
+    fn unknown_compatibility_ids_get_no_catalog_and_only_the_shared_vocabulary() {
+        for id in ["ferrum-edge-0.9.6", "ferrum-edge-1.0.0", "", "FERRUM-EDGE-0.9.7"] {
+            assert!(catalog_for(id).is_none(), "{id:?} must not borrow another release's catalog");
+        }
+        assert!(catalog_for(" ferrum-edge-0.9.5 ").is_some(), "surrounding whitespace is not a different release");
+        let shared: Vec<&str> = shared_tokens().iter().map(String::as_str).collect();
+        assert_eq!(shared, TOKENS, "the coarse vocabulary is identical in every audited release");
     }
 
     #[test]
     fn backend_unavailable_signal_is_shared_by_many_upstream_causes() {
-        let c = catalog();
-        let body = br#"{"error":"Backend unavailable"}"#;
-        let bf = body_facts(Some("application/json"), body);
-        let m = c.match_signal(&Signal {
-            status: 502,
-            token: Some("connection_failure"),
-            body_text: std::str::from_utf8(body).unwrap(),
-            body: &bf,
-            grpc_status: None,
-        });
-        assert!(m.len() > 3, "DNS/TCP/TLS/pool causes share one public signal: {:?}", m.iter().map(|x| &x.0.id).collect::<Vec<_>>());
+        for c in catalogs() {
+            let body = br#"{"error":"Backend unavailable"}"#;
+            let bf = body_facts(Some("application/json"), body);
+            let m = c.match_signal(&Signal {
+                status: 502,
+                token: Some("connection_failure"),
+                body_text: std::str::from_utf8(body).unwrap(),
+                body: &bf,
+                grpc_status: None,
+            });
+            assert!(
+                m.len() > 3,
+                "{}: DNS/TCP/TLS/pool causes share one public signal: {:?}",
+                c.compatibility_id,
+                m.iter().map(|x| &x.0.id).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
     fn placeholder_bodies_match_as_patterns() {
-        let c = catalog();
-        let body = br#"{"error":"Query parameter count (120) exceeds maximum of 100"}"#;
-        let bf = body_facts(Some("application/json"), body);
-        let m = c.match_signal(&Signal {
-            status: 400,
-            token: None,
-            body_text: std::str::from_utf8(body).unwrap(),
-            body: &bf,
-            grpc_status: None,
-        });
-        assert!(m.iter().any(|(o, _)| o.id == "size.query_param_count_exceeded"), "{:?}", m.iter().map(|x| &x.0.id).collect::<Vec<_>>());
+        for c in catalogs() {
+            let body = br#"{"error":"Query parameter count (120) exceeds maximum of 100"}"#;
+            let bf = body_facts(Some("application/json"), body);
+            let m = c.match_signal(&Signal {
+                status: 400,
+                token: None,
+                body_text: std::str::from_utf8(body).unwrap(),
+                body: &bf,
+                grpc_status: None,
+            });
+            assert!(
+                m.iter().any(|(o, _)| o.id == "size.query_param_count_exceeded"),
+                "{}: {:?}",
+                c.compatibility_id,
+                m.iter().map(|x| &x.0.id).collect::<Vec<_>>()
+            );
+        }
     }
 }

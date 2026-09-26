@@ -1,7 +1,7 @@
 //! Public-signal contract tests for gateway-to-upstream setup outcomes that
-//! the v0.9.5 lab cannot (or may not) reproduce live:
+//! the lab cannot (or may not) reproduce live on 0.9.5 or 0.9.7:
 //!
-//! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): 0.9.5 has no
+//! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): neither release has a
 //!   dial-admission hook, and exhausting the lab host's real ephemeral ports
 //!   is unsafe;
 //! * UP-019 trust withdrawn: emitted only by the mesh HBONE / sidecar-mTLS
@@ -12,8 +12,9 @@
 //!   HTTP/1.1 (reqwest) lane of UP-018 runs live in `anvil-lab run admission`.
 //!
 //! These are NOT live reproductions and NOT hook-based tests: they feed only
-//! the exact public signal the source-audited catalog records for each outcome
-//! (`catalog/ferrum/ferrum-edge-0.9.5/outcomes.json`) through the engine's
+//! the exact public signal the source-audited catalogs record for each outcome
+//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7}/outcomes.json`; every test runs
+//! against each embedded release's catalog) through the engine's
 //! diagnosis and assert what Anvil may and may not conclude from it. No
 //! private ground truth (operator `error_class`) is ever an input.
 
@@ -68,10 +69,16 @@ fn diagnose_http(r: &ResponseRecord, body: &[u8], trust: FerrumTrust) -> Diagnos
     })
 }
 
-/// The strongest trust Anvil can have in a 0.9.5 gateway: a trusted profile
-/// over verified TLS. Markers stay spoofable, so nothing may exceed `likely`.
-fn trusted_verified() -> FerrumTrust {
-    FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: "ferrum-edge-0.9.5".into(), channel_authenticated: true }
+/// The strongest trust Anvil can have in an audited gateway release: a trusted
+/// profile over verified TLS. Markers stay spoofable on every audited release
+/// (0.9.5 and 0.9.7), so nothing may exceed `likely`.
+fn trusted_verified(compat: &str) -> FerrumTrust {
+    FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: true }
+}
+
+/// Every embedded release catalog.
+fn releases() -> Vec<&'static str> {
+    anvil_diagnostics::ferrum::compatibility_ids().collect()
 }
 
 fn coarse_connection_failure(trust: FerrumTrust) -> Diagnosis {
@@ -128,7 +135,7 @@ fn ambiguous_candidates(d: &Diagnosis) -> (&DiagnosticFinding, Vec<String>) {
 }
 
 /// UP-017 — public-signal contract test, NOT a live reproduction and NOT a
-/// dial hook: Ferrum Edge 0.9.5 has no lab dial-admission hook, and draining
+/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 have no lab dial-admission hook, and draining
 /// the host's ephemeral ports would be unsafe. The gateway answers port
 /// exhaustion with the same `502 connection_failure {"error":"Backend
 /// unavailable"}` as DNS, refused, TLS and pool failures, so Anvil must keep
@@ -136,14 +143,16 @@ fn ambiguous_candidates(d: &Diagnosis) -> (&DiagnosticFinding, Vec<String>) {
 /// resources as the cause.
 #[test]
 fn up_017_port_exhaustion_signal_is_coarse_and_hook_free() {
-    for trust in [
-        trusted_verified(),
-        FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: "ferrum-edge-0.9.5".into(), channel_authenticated: false },
-    ] {
+    for trust in releases().into_iter().flat_map(|compat| {
+        [
+            trusted_verified(compat),
+            FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: false },
+        ]
+    }) {
         let d = coarse_connection_failure(trust);
         // The coarse token keeps its coarse meaning, capped at likely.
         let tok = d.findings.iter().find(|f| f.code == "ferrum.token.connection_failure").expect("coarse token finding");
-        assert_eq!(tok.confidence, Confidence::Likely, "spoofable 0.9.5 marker caps at likely");
+        assert_eq!(tok.confidence, Confidence::Likely, "spoofable marker caps at likely on every audited release");
         assert_eq!(tok.scope, SourceScope::GatewayToUpstream);
         // No precise cause at likely or above: port exhaustion and host
         // resources are never stated; DNS / TLS / certificate / refused are
@@ -185,22 +194,24 @@ fn up_017_untrusted_destination_gets_no_gateway_family() {
 /// confirmed or likely — nor blame the caller's certificate.
 #[test]
 fn up_019_trust_withdrawn_signal_makes_no_certificate_claim() {
-    let d = coarse_connection_failure(trusted_verified());
-    assert_no_claim_at_likely(
-        &d,
-        &["certificate", "malformed", "expired", "untrusted", "trust withdrawn", "withdrawn", "revoked", "tls handshake", "mtls"],
-    );
-    assert_no_specific_cause_at_likely(&d, &["tls", "certificate", "trust"]);
-    assert!(!d.findings.iter().any(|f| f.confidence == Confidence::Confirmed && f.code.starts_with("ferrum.")));
-    let (amb, ids) = ambiguous_candidates(&d);
-    assert_eq!(amb.confidence, Confidence::Unknown);
-    assert!(ids.iter().any(|i| i == "upstream.trust_withdrawn"), "{ids:?}");
-    // The token finding keeps "TLS failed" explicitly unproven and never
-    // blames the client's own identity.
-    let tok = d.findings.iter().find(|f| f.code == "ferrum.token.connection_failure").expect("coarse token finding");
-    assert!(tok.does_not_prove.iter().any(|s| s.contains("That TLS failed")), "{:?}", tok.does_not_prove);
-    assert!(tok.does_not_prove.iter().any(|s| s.to_lowercase().contains("client certificate")), "{:?}", tok.does_not_prove);
-    assert!(!codes(&d).iter().any(|c| c.starts_with("client.tls") || c.starts_with("local.client_identity")), "{:?}", codes(&d));
+    for compat in releases() {
+        let d = coarse_connection_failure(trusted_verified(compat));
+        assert_no_claim_at_likely(
+            &d,
+            &["certificate", "malformed", "expired", "untrusted", "trust withdrawn", "withdrawn", "revoked", "tls handshake", "mtls"],
+        );
+        assert_no_specific_cause_at_likely(&d, &["tls", "certificate", "trust"]);
+        assert!(!d.findings.iter().any(|f| f.confidence == Confidence::Confirmed && f.code.starts_with("ferrum.")));
+        let (amb, ids) = ambiguous_candidates(&d);
+        assert_eq!(amb.confidence, Confidence::Unknown);
+        assert!(ids.iter().any(|i| i == "upstream.trust_withdrawn"), "{compat}: {ids:?}");
+        // The token finding keeps "TLS failed" explicitly unproven and never
+        // blames the client's own identity.
+        let tok = d.findings.iter().find(|f| f.code == "ferrum.token.connection_failure").expect("coarse token finding");
+        assert!(tok.does_not_prove.iter().any(|s| s.contains("That TLS failed")), "{:?}", tok.does_not_prove);
+        assert!(tok.does_not_prove.iter().any(|s| s.to_lowercase().contains("client certificate")), "{:?}", tok.does_not_prove);
+        assert!(!codes(&d).iter().any(|c| c.starts_with("client.tls") || c.starts_with("local.client_identity")), "{:?}", codes(&d));
+    }
 }
 
 /// UP-018, pooled lanes (direct H2 / gRPC / H3 / mesh pools): the connection
@@ -210,12 +221,14 @@ fn up_019_trust_withdrawn_signal_makes_no_certificate_claim() {
 /// backend-down or application claim.
 #[test]
 fn up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family() {
-    let d = coarse_connection_failure(trusted_verified());
-    let (amb, ids) = ambiguous_candidates(&d);
-    assert_eq!(amb.confidence, Confidence::Unknown);
-    assert!(ids.iter().any(|i| i == "upstream.connection_limit.pooled"), "{ids:?}");
-    assert_no_claim_at_likely(&d, &["connection limit", "connection ceiling", "maxconnections", "crash", "backend is down"]);
-    assert!(!d.findings.iter().any(|f| f.scope == SourceScope::UpstreamApplication && f.confidence >= Confidence::Likely));
+    for compat in releases() {
+        let d = coarse_connection_failure(trusted_verified(compat));
+        let (amb, ids) = ambiguous_candidates(&d);
+        assert_eq!(amb.confidence, Confidence::Unknown);
+        assert!(ids.iter().any(|i| i == "upstream.connection_limit.pooled"), "{compat}: {ids:?}");
+        assert_no_claim_at_likely(&d, &["connection limit", "connection ceiling", "maxconnections", "crash", "backend is down"]);
+        assert!(!d.findings.iter().any(|f| f.scope == SourceScope::UpstreamApplication && f.confidence >= Confidence::Likely));
+    }
 }
 
 /// UP-018, HTTP/1.1 (reqwest) lane — the same public signal the live
@@ -225,9 +238,15 @@ fn up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family() {
 /// down or that the application returned 503.
 #[test]
 fn up_018_reqwest_lane_ceiling_is_a_gateway_limit_not_a_backend_failure() {
+    for compat in releases() {
+        up_018_reqwest_lane_for(compat);
+    }
+}
+
+fn up_018_reqwest_lane_for(compat: &str) {
     let body = br#"{"error":"Backend connection limit exceeded"}"#;
     let r = response(503, &[("content-type", "application/json"), ("x-gateway-error", "backend_error"), ("via", "1.1 ferrum-edge")], body);
-    let d = diagnose_http(&r, body, trusted_verified());
+    let d = diagnose_http(&r, body, trusted_verified(compat));
     let o = d.findings.iter().find(|f| f.code == "ferrum.outcome").expect("single catalog match");
     assert!(o.evidence.iter().any(|e| e.key == "catalog.outcome" && e.value == "upstream.connection_limit.reqwest"));
     assert_eq!(o.confidence, Confidence::Likely);
@@ -242,6 +261,6 @@ fn up_018_reqwest_lane_ceiling_is_a_gateway_limit_not_a_backend_failure() {
     // backend_error, its own body) is not called a connection ceiling.
     let app = br#"{"error":"service unavailable","source":"application"}"#;
     let r = response(503, &[("content-type", "application/json"), ("x-gateway-error", "backend_error"), ("via", "1.1 ferrum-edge")], app);
-    let d = diagnose_http(&r, app, trusted_verified());
+    let d = diagnose_http(&r, app, trusted_verified(compat));
     assert!(!d.findings.iter().flat_map(|f| f.evidence.iter()).any(|e| e.value.contains("upstream.connection_limit")), "{:?}", codes(&d));
 }

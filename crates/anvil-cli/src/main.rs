@@ -592,7 +592,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     name: format!("Ferrum gateway {host}"),
                     kind: IntegrationKind::FerrumGateway {
                         hosts: vec![HostBinding { host: host.clone(), port: None }],
-                        compatibility_id: "ferrum-edge-0.9.5".into(),
+                        compatibility_id: anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID.into(),
                         require_verified_tls: false,
                         detail: None,
                         console_url: None,
