@@ -186,6 +186,8 @@ export interface ImportReport {
   workspace_ids: string[];
   /** A full backup (restored) rather than a bundle. */
   full_backup: boolean;
+  /** SHA-256 of the file as read; applying passes it back so the approval holds only for the previewed file. */
+  bundle_sha256: string;
 }
 export interface JwtInspection {
   header: unknown;
@@ -539,9 +541,23 @@ export const api = {
   exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
     call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
   importPreview: (grant: string, passphrase: string | null, conflictPolicy: string) => call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy }),
-  /** `existingWorkspaces`: ids from the preview's `plan.existing_workspaces` the user confirmed writing into. */
-  importApply: (grant: string, passphrase: string | null, conflictPolicy: string, existingWorkspaces: string[] = []) =>
-    call<ImportReport>("import_apply", { grant, passphrase, conflictPolicy, approval: { existing_workspaces: existingWorkspaces } }),
+  /**
+   * `existingWorkspaces`: ids from the preview's `plan.existing_workspaces` the user confirmed writing into.
+   * `bundleSha256`: the preview's `bundle_sha256`; the import is refused if the file changed since.
+   */
+  importApply: (
+    grant: string,
+    passphrase: string | null,
+    conflictPolicy: string,
+    existingWorkspaces: string[] = [],
+    bundleSha256: string | null = null,
+  ) =>
+    call<ImportReport>("import_apply", {
+      grant,
+      passphrase,
+      conflictPolicy,
+      approval: { existing_workspaces: existingWorkspaces, bundle_sha256: bundleSha256 },
+    }),
   attachmentAdd: (grant: string, mediaType: string | null) => call<AttachmentRef>("attachment_add", { grant, mediaType }),
 
   loadPlans: (workspaceId: string) => call<LoadPlan[]>("load_plans", { workspaceId }),

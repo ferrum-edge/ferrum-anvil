@@ -9,6 +9,7 @@ use anvil_app::runner::RunSettings;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{AttachmentRef, Body, MultipartContent, MultipartPart, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::workspace::{
@@ -68,8 +69,8 @@ fn edit_manifest(bytes: &[u8], edit: impl Fn(&mut serde_json::Value)) -> Vec<u8>
 }
 
 /// Approval to write into the stored workspace `ws`.
-fn into(ws: &Id) -> ImportApproval {
-    ImportApproval { existing_workspaces: vec![*ws] }
+fn into(ws: &Id, file: &[u8]) -> ImportApproval {
+    ImportApproval::for_file(file, vec![*ws])
 }
 
 async fn send(app: &App, ws: &Id, request: &Id) -> u16 {
@@ -227,7 +228,7 @@ fn merge_import_keeps_an_existing_secret() {
     let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
     a.store.put_secret(&token.id, Some(&ws.meta.id), "bearer", "placeholder-rotated-token").unwrap();
-    a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws.meta.id)).unwrap();
+    a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws.meta.id, &bytes)).unwrap();
     let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
     assert_eq!(value.as_str(), "placeholder-rotated-token", "Merge keeps what already exists");
 }
@@ -277,7 +278,7 @@ fn replace_import_restores_a_secret_its_own_workspace_owns() {
     let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
     a.store.put_secret(&token.id, Some(&ws.meta.id), "bearer", "placeholder-rotated-token").unwrap();
-    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace, &into(&ws.meta.id)).unwrap();
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace, &into(&ws.meta.id, &bytes)).unwrap();
     assert!(rep.plan.foreign_secrets.is_empty() && rep.plan.foreign_objects.is_empty(), "{:?}", rep.plan);
     assert!(rep.plan.conflicts.contains(&format!("secret 'bearer' ({})", token.id)), "{:?}", rep.plan.conflicts);
     let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
@@ -399,7 +400,7 @@ async fn a_bundle_that_claims_a_stored_workspace_is_refused_until_approved() {
         // ...and applying without approving it, or approving another one, is refused.
         let e = a.import(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
         assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Payments'")), "{policy:?}: {e}");
-        let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&Id::new())).unwrap_err();
+        let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&Id::new(), &bytes)).unwrap_err();
         assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Payments'")), "{policy:?}: {e}");
     }
     // Nothing was written: the workspace, its requests and its secret are as they were.
@@ -418,7 +419,7 @@ async fn a_bundle_that_claims_a_stored_workspace_is_refused_until_approved() {
     assert_eq!(fx.log.count_requests(), 0, "the stored workspace's secret was never sent");
 
     // Once the user approves the stored workspace, Merge writes into it.
-    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws.meta.id)).unwrap();
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws.meta.id, &bytes)).unwrap();
     assert_eq!(rep.workspace_ids, vec![ws.meta.id.to_string()]);
     assert_eq!(a.requests(&ws.meta.id).unwrap().len(), 1);
     assert_eq!(a.workspace(&ws.meta.id).unwrap(), ws, "Merge keeps the stored workspace itself");
@@ -510,7 +511,7 @@ fn every_stored_workspace_a_bundle_claims_needs_approval() {
         let preview = a.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap();
         assert_eq!(preview.plan.existing_workspaces.len(), 2, "{policy:?}");
         // Approving only one of them refuses the whole import, naming the other.
-        let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&payments.meta.id)).unwrap_err();
+        let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&payments.meta.id, &bytes)).unwrap_err();
         assert!(
             matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Billing'") && !m.contains("'Payments'")),
             "{policy:?}: {e}"
@@ -520,7 +521,7 @@ fn every_stored_workspace_a_bundle_claims_needs_approval() {
     assert!(a.requests(&payments.meta.id).unwrap().is_empty(), "nothing was imported");
 
     // Approving both, Merge writes into them.
-    let both = ImportApproval { existing_workspaces: vec![payments.meta.id, billing.meta.id] };
+    let both = ImportApproval::for_file(&bytes, vec![payments.meta.id, billing.meta.id]);
     a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &both).unwrap();
     assert_eq!(a.requests(&billing.meta.id).unwrap().len(), 1);
 }
@@ -762,4 +763,128 @@ fn bundles_describing_a_full_backup_are_never_written_or_restored() {
     // The same bundle with its own manifest imports.
     b.import(&all, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
+}
+
+fn load_plan(ws: Id, request: Id) -> LoadPlan {
+    LoadPlan {
+        id: Id::new(),
+        workspace_id: ws,
+        name: "smoke".into(),
+        workload: Workload::Iterations { iterations: 2, concurrency: 1 },
+        chain: vec![request],
+        mix: vec![],
+        dataset_id: None,
+        environment_id: None,
+        connection_mode: Default::default(),
+        warmup_secs: 0,
+        abort: None,
+        seed: 1,
+        trusted: true,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn an_import_stores_the_load_plans_and_history_the_bundle_carries() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let request = a.create_request(&ws.meta.id, None, "Echo", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
+    let opts = SendOptions { record_history: true, ..Default::default() };
+    a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
+    let sent = a.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
+    assert_eq!(sent.len(), 1);
+    let plan = a.save_load_plan(load_plan(ws.meta.id, request.meta.id)).unwrap();
+    // A plan whose request was deleted since would make the bundle
+    // unimportable; it stays behind.
+    let gone = a.create_request(&ws.meta.id, None, "Gone", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
+    a.save_load_plan(load_plan(ws.meta.id, gone.meta.id)).unwrap();
+    a.delete_request(&gone.meta.id).unwrap();
+    let (bytes, preview) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, true).unwrap();
+    assert_eq!((preview.manifest.counts["load_plans"], preview.manifest.counts["history"]), (1, 1));
+
+    // Into another profile, under the bundle's own ids.
+    let b = new_app(root.path(), "b");
+    let rep = b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    assert!(rep.plan.conflicts.is_empty(), "nothing is stored there yet: {:?}", rep.plan.conflicts);
+    let plans = b.load_plans(&ws.meta.id).unwrap();
+    assert_eq!(plans.iter().map(|p| p.id).collect::<Vec<_>>(), vec![plan.id]);
+    assert!(!plans[0].trusted, "an imported plan never starts on its own");
+    let history = b.store.list_history(Some(&ws.meta.id), Some(&request.meta.id), 10).unwrap();
+    assert_eq!(history.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec![sent[0].id.as_str()]);
+    // Merging the same bundle again keeps what is there.
+    let again = b.import_approved(&bytes, None, ConflictPolicy::Merge, &into(&ws.meta.id, &bytes)).unwrap();
+    assert!(again.plan.conflicts.contains(&format!("history ({})", sent[0].id)), "{:?}", again.plan.conflicts);
+    assert!(again.plan.conflicts.contains(&format!("load_plan 'smoke' ({})", plan.id)), "{:?}", again.plan.conflicts);
+    assert_eq!(b.load_plans(&ws.meta.id).unwrap().len(), 1);
+    assert_eq!(b.store.list_history(Some(&ws.meta.id), None, 10).unwrap().len(), 1);
+
+    // A Duplicate copy gets its own plan and record, linked to the copied request.
+    let dup = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
+    let copy: Id = dup.workspace_ids[0].parse().unwrap();
+    let copy_request = a.requests(&copy).unwrap().remove(0);
+    let copy_plan = a.load_plans(&copy).unwrap().remove(0);
+    assert_ne!(copy_plan.id, plan.id);
+    assert_eq!(copy_plan.chain, vec![copy_request.meta.id]);
+    let copied = a.store.list_history(Some(&copy), None, 10).unwrap();
+    assert_eq!(copied.len(), 1);
+    assert_ne!(copied[0].id, sent[0].id, "a copied record never reuses the source's id");
+    assert_eq!(copied[0].request_id, Some(copy_request.meta.id.to_string()));
+    let source = a.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
+    assert_eq!(source.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec![sent[0].id.as_str()], "the source's history is untouched");
+    assert_eq!(a.load_plans(&ws.meta.id).unwrap().len(), 2, "and so are its plans");
+}
+
+#[test]
+fn an_approval_holds_only_for_the_previewed_file() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let probe = request_in(ws.meta.id, "Probe", RequestSpec::http("GET", "https://api.example.test/"));
+    let previewed = encrypted(&PortableGraph { workspaces: vec![ws.clone()], requests: vec![probe], ..Default::default() });
+    // Another file that claims the same workspace, as if the previewed one
+    // were replaced before the import was applied.
+    let other = request_in(ws.meta.id, "Other", RequestSpec::http("GET", "https://elsewhere.example.test/"));
+    let replaced = encrypted(&PortableGraph { workspaces: vec![ws.clone()], requests: vec![other], ..Default::default() });
+
+    let preview = a.import_preview(&previewed, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert_eq!(preview.bundle_sha256, anvil_app::port::file_sha256(&previewed));
+    assert_eq!(preview.plan.existing_workspaces.len(), 1);
+    let approval = ImportApproval { existing_workspaces: vec![ws.meta.id], bundle_sha256: Some(preview.bundle_sha256.clone()) };
+    let e = a.import_approved(&replaced, Some(EXPORT_PASS), ConflictPolicy::Merge, &approval).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains("not the one that was previewed")), "{e}");
+    // An approval of a stored workspace that names no file approves nothing.
+    let unbound = ImportApproval { existing_workspaces: vec![ws.meta.id], bundle_sha256: None };
+    let e = a.import_approved(&previewed, Some(EXPORT_PASS), ConflictPolicy::Merge, &unbound).unwrap_err();
+    assert!(matches!(&e, AppError::Invalid(m) if m.contains("bundle_sha256")), "{e}");
+    assert!(a.requests(&ws.meta.id).unwrap().is_empty(), "nothing was imported");
+
+    // The previewed file imports under the approval given for it.
+    let rep = a.import_approved(&previewed, Some(EXPORT_PASS), ConflictPolicy::Merge, &approval).unwrap();
+    assert_eq!(rep.bundle_sha256, preview.bundle_sha256);
+    let names: Vec<String> = a.requests(&ws.meta.id).unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(names, vec!["Probe".to_string()]);
+}
+
+#[test]
+fn a_passphrase_is_refused_for_a_bundle_that_is_not_encrypted() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    a.create_request(&ws.meta.id, None, "Probe", RequestSpec::http("GET", "https://api.example.test/")).unwrap();
+    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let b = new_app(root.path(), "b");
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+        let e = b.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
+        assert!(matches!(e, AppError::Bundle(BundleError::NotEncrypted)), "{policy:?}: {e}");
+        let e = b.import_approved(&bytes, Some(EXPORT_PASS), policy, &ImportApproval::default()).unwrap_err();
+        assert!(matches!(e, AppError::Bundle(BundleError::NotEncrypted)), "{policy:?}: {e}");
+    }
+    assert!(b.workspaces().unwrap().is_empty(), "nothing was imported");
+    // Without one, it imports.
+    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1);
 }

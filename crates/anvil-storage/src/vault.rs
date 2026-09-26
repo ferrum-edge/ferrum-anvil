@@ -89,15 +89,28 @@ fn unb64(s: &str) -> Result<Vec<u8>, VaultError> {
     base64::engine::general_purpose::STANDARD.decode(s).map_err(|e| VaultError::Header(e.to_string()))
 }
 
+/// Refuse key-derivation settings outside the bounds bundles and backups
+/// use ([`KdfParams::check_bounds`]). The header is plaintext on disk, so
+/// they are checked before any derivation.
+fn check_kdf(kdf: &KdfParams, salt: &[u8]) -> Result<(), VaultError> {
+    kdf.check_bounds()
+        .and_then(|()| crypto::check_salt(salt))
+        .map_err(|why| VaultError::Header(format!("unsupported key-derivation settings ({why})")))
+}
+
 fn wrap_with_passphrase(dek: &Key, passphrase: &str, kdf: KdfParams, label: &[u8]) -> Result<WrappedKey, VaultError> {
     let salt = crypto::random_bytes(16);
+    // A key wrapped with settings unlock would refuse could never be unwrapped.
+    check_kdf(&kdf, &salt)?;
     let kek = crypto::derive(passphrase.as_bytes(), &salt, &kdf)?;
     Ok(WrappedKey { kdf: Some(kdf), salt: b64(&salt), envelope: b64(&crypto::seal(&kek, label, dek.as_bytes())) })
 }
 
 fn unwrap_with_passphrase(w: &WrappedKey, passphrase: &str, label: &[u8]) -> Result<Key, VaultError> {
     let kdf = w.kdf.ok_or_else(|| VaultError::Header("missing KDF parameters".into()))?;
-    let kek = crypto::derive(passphrase.as_bytes(), &unb64(&w.salt)?, &kdf)?;
+    let salt = unb64(&w.salt)?;
+    check_kdf(&kdf, &salt)?;
+    let kek = crypto::derive(passphrase.as_bytes(), &salt, &kdf)?;
     let dek = crypto::open(&kek, label, &unb64(&w.envelope)?).map_err(|_| VaultError::WrongSecret)?;
     Ok(Key::from_bytes(&dek)?)
 }

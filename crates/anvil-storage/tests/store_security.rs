@@ -156,3 +156,46 @@ fn history_retention_prunes_by_size() {
     assert!(left.len() < 20 && !left.is_empty());
     assert!(left.iter().map(|h| h.size).sum::<i64>() <= 50_000);
 }
+
+#[test]
+fn unlock_refuses_key_derivation_settings_outside_the_bounds() {
+    use anvil_storage::crypto::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM};
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let recovery = created.recovery_key.clone().unwrap();
+    let header = vault::read_header(dir.path()).unwrap();
+    let with = |kdf: Option<KdfParams>, salt: Option<&str>| {
+        let mut h = header.clone();
+        for w in [h.passphrase_wrap.as_mut().unwrap(), h.recovery_wrap.as_mut().unwrap()] {
+            if let Some(kdf) = kdf {
+                w.kdf = Some(kdf);
+            }
+            if let Some(salt) = salt {
+                w.salt = salt.into();
+            }
+        }
+        h
+    };
+    let testing = KdfParams::testing();
+    let refused = [
+        ("memory", with(Some(KdfParams { m_cost: MAX_KDF_MEMORY_KIB + 1, ..testing }), None)),
+        ("passes", with(Some(KdfParams { t_cost: MAX_KDF_ITERATIONS + 1, ..testing }), None)),
+        ("no passes", with(Some(KdfParams { t_cost: 0, ..testing }), None)),
+        ("lanes", with(Some(KdfParams { p_cost: MAX_KDF_PARALLELISM + 1, ..testing }), None)),
+        ("memory x passes", with(Some(KdfParams { m_cost: MAX_KDF_MEMORY_KIB, t_cost: 5, ..testing }), None)),
+        ("short salt", with(None, Some("AAAAAA=="))),
+    ];
+    // Refused before any derivation: none of these costs is ever paid.
+    for (why, h) in &refused {
+        let e = vault::unlock_with_passphrase(h, "pw").unwrap_err();
+        assert!(matches!(&e, vault::VaultError::Header(m) if m.contains("unsupported key-derivation settings")), "{why}: {e}");
+        let e = vault::unlock_with_recovery(h, &recovery).unwrap_err();
+        assert!(matches!(&e, vault::VaultError::Header(m) if m.contains("unsupported key-derivation settings")), "{why}: {e}");
+    }
+    // The header as written still unlocks.
+    assert_eq!(vault::unlock_with_passphrase(&header, "pw").unwrap().as_bytes(), created.dek.as_bytes());
+    // A key is never wrapped with settings unlock would refuse.
+    let other = tempfile::tempdir().unwrap();
+    let costly = KdfParams { m_cost: MAX_KDF_MEMORY_KIB + 1, ..testing };
+    assert!(vault::create_passphrase_profile(other.path(), "t", "pw", costly).is_err());
+}

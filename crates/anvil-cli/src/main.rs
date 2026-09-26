@@ -17,10 +17,10 @@
 mod collection;
 mod specs_load;
 
-use anvil_app::App;
 use anvil_app::exec::SendOptions;
 use anvil_app::port::ImportApproval;
 use anvil_app::profiles::{ProfileManager, Unlock};
+use anvil_app::{App, AppError};
 use anvil_domain::diagnostics::{Confidence, Severity};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::outcome::{
@@ -28,8 +28,8 @@ use anvil_domain::outcome::{
 };
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::tls::HostBinding;
-use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
+use anvil_portability::{BundleError, ExportMode};
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use anyhow::{Context, Result, anyhow, bail};
@@ -117,6 +117,11 @@ enum Cmd {
         /// `plan.existing_workspaces`. Only for files you trust.
         #[arg(long = "into-existing", value_name = "WORKSPACE_ID")]
         into_existing: Vec<String>,
+        /// The `bundle_sha256` of the dry run you reviewed: the import is
+        /// refused unless the file still has it. Without it,
+        /// `--into-existing` approves the file as this command reads it.
+        #[arg(long = "bundle-sha256", value_name = "SHA256")]
+        bundle_sha256: Option<String>,
     },
     /// Decode a JWT locally (never verifies it).
     Jwt { token: String },
@@ -915,7 +920,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     println!("{}", serde_json::to_string_pretty(&app.backup_preview()?)?);
                     return Ok(0);
                 }
-                let Some(pass) = std::env::var("ANVIL_EXPORT_PASSPHRASE").ok().map(Zeroizing::new) else {
+                let Some(pass) = export_passphrase().map(Zeroizing::new) else {
                     bail!("encrypted exports need ANVIL_EXPORT_PASSPHRASE (the recipient needs it to restore)");
                 };
                 let (bytes, p) = app.export_backup(&pass)?;
@@ -935,7 +940,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 println!("{}", serde_json::to_string_pretty(&p)?);
                 return Ok(0);
             }
-            let pass = if matches!(m, ExportMode::ShareSafely) { None } else { std::env::var("ANVIL_EXPORT_PASSPHRASE").ok() };
+            let pass = if matches!(m, ExportMode::ShareSafely) { None } else { export_passphrase() };
             if !matches!(m, ExportMode::ShareSafely) && pass.is_none() {
                 bail!("encrypted exports need ANVIL_EXPORT_PASSPHRASE (the recipient needs it to restore)");
             }
@@ -954,9 +959,9 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Cmd::Import { file, policy, dry_run, into_existing } => {
+        Cmd::Import { file, policy, dry_run, into_existing, bundle_sha256 } => {
             let bytes = std::fs::read(file)?;
-            let pass = std::env::var("ANVIL_EXPORT_PASSPHRASE").ok();
+            let pass = export_passphrase();
             let pol = match policy {
                 Policy::Merge => ConflictPolicy::Merge,
                 Policy::Replace => ConflictPolicy::Replace,
@@ -966,18 +971,35 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             for w in into_existing {
                 approval.existing_workspaces.push(w.parse().with_context(|| format!("invalid workspace id '{w}'"))?);
             }
+            // Workspaces named here are approved for the file this command
+            // read, unless `--bundle-sha256` names the file a dry run showed.
+            if !approval.existing_workspaces.is_empty() || bundle_sha256.is_some() {
+                approval.bundle_sha256 = Some(bundle_sha256.clone().unwrap_or_else(|| anvil_app::port::file_sha256(&bytes)));
+            }
             // A full backup is restored; anything else is imported as a bundle.
             let rep = match (anvil_app::backup::is_backup(&bytes), *dry_run) {
-                (true, true) => app.restore_preview(&bytes, pass.as_deref(), pol)?,
-                (true, false) => app.restore_approved(&bytes, pass.as_deref(), pol, &approval)?,
-                (false, true) => app.import_preview(&bytes, pass.as_deref(), pol)?,
-                (false, false) => app.import_approved(&bytes, pass.as_deref(), pol, &approval)?,
+                (true, true) => app.restore_preview(&bytes, pass.as_deref(), pol),
+                (true, false) => app.restore_approved(&bytes, pass.as_deref(), pol, &approval),
+                (false, true) => app.import_preview(&bytes, pass.as_deref(), pol),
+                (false, false) => app.import_approved(&bytes, pass.as_deref(), pol, &approval),
             };
+            let rep = rep.map_err(|e| match e {
+                AppError::Bundle(BundleError::NotEncrypted) => anyhow!(
+                    "this bundle is not encrypted; unset ANVIL_EXPORT_PASSPHRASE (or leave it empty) to import it; nothing was imported"
+                ),
+                e => e.into(),
+            })?;
             println!("{}", serde_json::to_string_pretty(&rep)?);
             Ok(0)
         }
         _ => unreachable!(),
     }
+}
+
+/// The export passphrase from `ANVIL_EXPORT_PASSPHRASE`. An empty value is
+/// no passphrase: a bundle without a vault refuses any passphrase.
+fn export_passphrase() -> Option<String> {
+    std::env::var("ANVIL_EXPORT_PASSPHRASE").ok().filter(|p| !p.is_empty())
 }
 
 #[allow(dead_code)]

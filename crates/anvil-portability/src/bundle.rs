@@ -31,17 +31,9 @@ const VAULT_BINDING: &str = "anvil-portable-vault-v2";
 /// between this and the new version.
 pub const MIN_SCHEMA_VERSION: u32 = 1;
 
-/// Largest Argon2id memory cost (KiB) a bundle may ask for.
-pub const MAX_KDF_MEMORY_KIB: u32 = 256 * 1024;
-/// Largest Argon2id pass count a bundle may ask for.
-pub const MAX_KDF_ITERATIONS: u32 = 10;
-/// Largest Argon2id lane count a bundle may ask for.
-pub const MAX_KDF_PARALLELISM: u32 = 4;
-/// Largest memory x passes product (KiB-passes) a bundle may ask for: 1 GiB
-/// in total, e.g. 256 MiB for 4 passes. Exports use 64 MiB for 3 passes.
-pub const MAX_KDF_WORK: u64 = 1024 * 1024;
-const MIN_SALT_LEN: usize = 8;
-const MAX_SALT_LEN: usize = 64;
+/// Bounds on the Argon2id costs a bundle may ask for: the same as for a
+/// profile's own passphrase-wrapped key.
+pub use anvil_storage::crypto::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM, MAX_KDF_WORK};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
@@ -381,23 +373,7 @@ fn safe_name(name: &str) -> Result<(), BundleError> {
 /// derived before the vault can authenticate, so a bundle's costs are
 /// unauthenticated input; they are checked before any derivation.
 pub fn check_kdf(p: &KdfParams) -> Result<(), BundleError> {
-    let refuse = |why: String| Err(BundleError::UnsupportedKdf(why));
-    if !(1..=MAX_KDF_ITERATIONS).contains(&p.t_cost) {
-        return refuse(format!("{} passes; allowed 1 to {MAX_KDF_ITERATIONS}", p.t_cost));
-    }
-    if !(1..=MAX_KDF_PARALLELISM).contains(&p.p_cost) {
-        return refuse(format!("{} lanes; allowed 1 to {MAX_KDF_PARALLELISM}", p.p_cost));
-    }
-    // Argon2 needs at least 8 KiB per lane.
-    let min_memory = 8 * p.p_cost;
-    if !(min_memory..=MAX_KDF_MEMORY_KIB).contains(&p.m_cost) {
-        return refuse(format!("{} KiB of memory; allowed {min_memory} to {MAX_KDF_MEMORY_KIB} KiB", p.m_cost));
-    }
-    let work = u64::from(p.m_cost) * u64::from(p.t_cost);
-    if work > MAX_KDF_WORK {
-        return refuse(format!("{} KiB for {} passes exceeds the budget of {MAX_KDF_WORK} KiB-passes", p.m_cost, p.t_cost));
-    }
-    Ok(())
+    p.check_bounds().map_err(BundleError::UnsupportedKdf)
 }
 
 /// Refuse schema versions this build cannot read.
@@ -554,9 +530,7 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
         // Checked before asking for the passphrase and before deriving.
         check_kdf(&v.kdf)?;
         let salt = base64::engine::general_purpose::STANDARD.decode(&v.salt_b64).map_err(|_| BundleError::Invalid("vault salt".into()))?;
-        if !(MIN_SALT_LEN..=MAX_SALT_LEN).contains(&salt.len()) {
-            return Err(BundleError::UnsupportedKdf(format!("{}-byte salt; allowed {MIN_SALT_LEN} to {MAX_SALT_LEN}", salt.len())));
-        }
+        crypto::check_salt(&salt).map_err(BundleError::UnsupportedKdf)?;
         let pass = passphrase.ok_or(BundleError::PassphraseRequired)?;
         let enc = entries.get(VAULT_ENTRY).ok_or_else(|| BundleError::Checksum(format!("{VAULT_ENTRY} (missing)")))?;
         let key = crypto::derive(pass.as_bytes(), &salt, &v.kdf).map_err(|e| BundleError::Invalid(e.to_string()))?;
@@ -594,5 +568,8 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
         }
     }
     let warnings = crate::validate::validate_and_normalize(&mut graph)?;
+    // Each imported OAuth 2 profile caches its token under the object that
+    // defines it, never under a cache id the bundle names.
+    crate::validate::clear_token_cache_ids(&mut graph);
     Ok(Opened { manifest, graph, warnings, secrets_restored })
 }
