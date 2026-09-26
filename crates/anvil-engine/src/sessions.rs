@@ -30,7 +30,7 @@ use anvil_transport::dns::DnsConfig;
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::session::{CommandRx, RedactFn, SessionFacts, SessionOutput, TranscriptLimits};
 use anvil_transport::tls::{ClientIdentityMaterial, PreparedTls};
-use anvil_transport::{dtls, grpc, masque, rawtcp, sse, udp, ws};
+use anvil_transport::{dtls, grpc, hbone_udp, masque, rawtcp, sse, udp, ws};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use http::{HeaderName, HeaderValue};
@@ -53,6 +53,7 @@ enum Plan {
     Udp(udp::UdpPlan),
     Dtls(dtls::DtlsPlan),
     Masque(masque::MasquePlan),
+    HboneUdp(hbone_udp::HboneUdpPlan),
 }
 
 /// Everything a session run needs, frozen before any traffic.
@@ -682,11 +683,15 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     if spec.masque.is_none() {
         no_auth(&b.prep, "UDP")?;
     }
-    if let Some(p) = &b.prep.proxy {
+    // An HBONE proxy carries UDP as a datagram tunnel (§3.9); HTTP CONNECT
+    // and SOCKS5 tunnels carry TCP only, and no tunnel carries the QUIC
+    // connection a MASQUE proxy needs.
+    let hbone = b.prep.proxy.clone().filter(|p| p.kind == anvil_domain::tls::ProxyKind::Hbone && spec.masque.is_none());
+    if let Some(p) = b.prep.proxy.as_ref().filter(|_| hbone.is_none()) {
         let why = if spec.masque.is_some() {
             "the MASQUE proxy is reached over QUIC, which HTTP CONNECT, SOCKS5 and HBONE tunnels do not carry"
         } else {
-            "HTTP CONNECT, SOCKS5 and HBONE tunnels carry TCP only"
+            "HTTP CONNECT and SOCKS5 tunnels carry TCP only; UDP goes through an HBONE proxy profile or a MASQUE proxy"
         };
         return Err(unsupported(format!("UDP/DTLS cannot be sent through the proxy '{}' ({why})", p.label), "settings.proxy"));
     }
@@ -710,6 +715,24 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
             ));
         }
         return prepare_masque(engine, ctx, r, b, &spec, m, &target, datagrams).await;
+    }
+    if let Some(p) = hbone {
+        if use_dtls {
+            return Err(unsupported(
+                format!(
+                    "DTLS through the HBONE proxy '{}' is not implemented yet: the HBONE datagram tunnel carries UDP payloads, and Anvil's DTLS adapter cannot yet run its handshake over that channel. Use udp:// through the HBONE proxy, or dtls:// without a proxy",
+                    p.label
+                ),
+                "settings.proxy",
+            ));
+        }
+        if envelope.is_some() {
+            return Err(unsupported(
+                "a PROXY protocol datagram envelope cannot be sent through an HBONE tunnel: mesh relays carry the peer's identity instead and never read the envelope, so it would reach the destination as payload",
+                "udp.proxy_protocol",
+            ));
+        }
+        return prepare_hbone_udp(ctx, b, &spec, p, &target, datagrams);
     }
     if let Some(e) = &envelope {
         b.inferred.push(crate::proxy_protocol::envelope_note(e));
@@ -759,6 +782,64 @@ async fn prepare_udp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> R
     let body = concat(&datagrams);
     let mut p = finish_prep(b, plan, scheme.to_ascii_uppercase(), url, vec![], body, vec![]);
     p.content_type = None;
+    Ok(p)
+}
+
+/// UDP through an HBONE proxy profile: a datagram tunnel (`CONNECT` with the
+/// `udp` marker, `[u16 length][payload]` records). The endpoint's mTLS and
+/// identity come from the proxy profile, exactly as for TCP through HBONE;
+/// the request URL stays the UDP destination.
+fn prepare_hbone_udp(
+    ctx: &ExecutionContext,
+    mut b: Base,
+    spec: &UdpSpec,
+    mut proxy: anvil_transport::connector::ProxyPlan,
+    target: &Target,
+    datagrams: Vec<Bytes>,
+) -> Result<SessionPrep, TransportFailure> {
+    for (i, d) in datagrams.iter().enumerate() {
+        if d.len() > hbone_udp::MAX_RECORD_PAYLOAD {
+            return Err(local(
+                FailureKind::RequestTooLargeLocal,
+                format!(
+                    "a {}-byte datagram exceeds the {} bytes one HBONE datagram record can carry ([u16 length][payload])",
+                    d.len(),
+                    hbone_udp::MAX_RECORD_PAYLOAD
+                ),
+                &format!("udp.datagrams[{i}]"),
+            ));
+        }
+    }
+    let settings = b.prep.settings.clone();
+    proxy.connect_headers = http_exec::hbone_datagram_connect_headers(ctx, &settings)?;
+    let marker = proxy
+        .connect_headers
+        .first()
+        .map(|(n, v)| format!("{}: {}", n.as_str(), String::from_utf8_lossy(v.as_bytes())))
+        .unwrap_or_default();
+    b.inferred.push(format!(
+        "sent through the HBONE proxy {} as a datagram tunnel: CONNECT {} with {marker}; each datagram is one [u16 length][payload] record on the CONNECT stream (Ferrum Mesh datagram-over-HBONE)",
+        proxy.label, target.authority
+    ));
+    let url = format!("udp://{}", target.authority);
+    let label = proxy.label.clone();
+    let plan = hbone_udp::HboneUdpPlan {
+        host: target.host.clone(),
+        port: target.port,
+        proxy,
+        dns: dns_config(&settings),
+        timeouts: settings.timeouts,
+        datagrams: datagrams.clone(),
+        response_window_ms: spec.response_window_ms,
+        max_datagrams: spec.max_datagrams,
+        display_url: b.redactor.url(&url),
+        transcript: TranscriptLimits::default(),
+        redact: Some(redact_fn(&b.redactor)),
+    };
+    let body = concat(&datagrams);
+    let mut p = finish_prep(b, Plan::HboneUdp(plan), "UDP".into(), url, vec![], body, vec![]);
+    p.content_type = None;
+    p.proxy = Some(label);
     Ok(p)
 }
 
@@ -1076,6 +1157,7 @@ async fn run_plan(plan: &Plan, events: &EventCtx, cancel: &CancellationToken, co
         Plan::Udp(p) => udp::run(p, events, cancel, commands).await,
         Plan::Dtls(p) => dtls::run(p, events, cancel, commands).await,
         Plan::Masque(p) => masque::run(p, events, cancel, commands).await,
+        Plan::HboneUdp(p) => hbone_udp::run(p, events, cancel, commands).await,
     }
 }
 

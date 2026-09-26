@@ -19,6 +19,7 @@ pub mod grpc;
 pub mod grpc_web;
 pub mod h3;
 pub mod hbone;
+pub mod hbone_udp;
 pub mod http;
 pub mod masque;
 pub mod net;

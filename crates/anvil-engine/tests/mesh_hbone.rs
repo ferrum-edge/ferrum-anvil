@@ -135,6 +135,7 @@ async fn endpoint(auth: ClientAuth, allowed: Vec<String>) -> HboneFixture {
             alpn: vec!["h2".into()],
             allowed,
             unavailable: vec!["127.0.0.1:9".into()],
+            udp_faults: vec![],
         },
     )
     .await

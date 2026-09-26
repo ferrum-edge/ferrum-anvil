@@ -157,6 +157,59 @@ describe("ResponsePanel", () => {
     expect(screen.getByText(/2 received in 800 ms · via MASQUE 127\.0\.0\.1:18843 \(capsules\)/)).toBeTruthy();
   });
 
+  it("names the HBONE endpoint for UDP through a datagram tunnel, how the tunnel ended, and its refusal", () => {
+    const udpThroughHbone = (connect_status: number, closed_by: string, patch: Record<string, unknown> = {}) => {
+      const v = view({ findings: [] });
+      const rec = v.record as unknown as { outcome: { protocol_status: unknown }; attempts: Record<string, unknown>[] };
+      const open = connect_status === 200;
+      rec.outcome.protocol_status = { protocol: "udp", datagrams_sent: open ? 3 : 0, datagrams_received: open ? 1 : 0, window_ms: 1000, masque: null };
+      rec.attempts[0].connection = {
+        id: 1,
+        reused: false,
+        resolved_addresses: [],
+        connect_attempts: [],
+        protocol: "udp",
+        via_proxy: "lab mesh HBONE (127.0.0.1:17606)",
+        prior_requests: 0,
+        tunnel: {
+          kind: "hbone",
+          endpoint: "lab mesh HBONE (127.0.0.1:17606)",
+          authority: "127.0.0.1:17802",
+          resolved_addresses: [],
+          connect_attempts: [],
+          phases: [],
+          connect_headers: [{ name: "x-ferrum-mesh-protocol", value: "udp" }],
+          connect_status,
+          response_headers: [],
+          datagrams: { records_sent: open ? 3 : 0, records_received: open ? 1 : 0, oversize_refused: 0, truncated_tail_bytes: 0, closed_by, ...patch },
+        },
+      };
+      return v;
+    };
+    render(<ResponsePanel view={udpThroughHbone(200, "peer")} running={false} progressBytes={null} onCancel={() => {}} />);
+    const badge = screen.getByText(/3 sent · 1 received in 1000 ms · via HBONE lab mesh HBONE \(127\.0\.0\.1:17606\) · ended by the endpoint/);
+    expect(badge.className).toBe("badge");
+    expect(badge.getAttribute("title")).toContain("127.0.0.1:17802");
+    fireEvent.click(screen.getByRole("tab", { name: /Connection/ }));
+    expect(screen.getByText("HBONE UDP tunnel (outer leg)")).toBeTruthy();
+    expect(screen.getByText(/3 sent · 1 received \(\[u16 length\]\[payload\] on the CONNECT stream\)/)).toBeTruthy();
+    expect(screen.getByText("x-ferrum-mesh-protocol: udp")).toBeTruthy();
+    cleanup();
+
+    // An abnormal end with a reset code and a truncated record is flagged, with both facts shown.
+    render(<ResponsePanel view={udpThroughHbone(200, "abnormal", { reset_code: "CANCEL", truncated_tail_bytes: 6, oversize_refused: 1 })} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByText(/via HBONE lab mesh HBONE/).className).toBe("badge bad");
+    fireEvent.click(screen.getByRole("tab", { name: /Connection/ }));
+    expect(screen.getByText(/Abnormal \(CANCEL\)/i)).toBeTruthy();
+    expect(screen.getByText(/6 byte\(s\) of an incomplete record discarded/)).toBeTruthy();
+    expect(screen.getByText(/1 datagram\(s\) over 65,535 bytes, not sent/)).toBeTruthy();
+    cleanup();
+
+    // A refused datagram CONNECT names the endpoint, never the UDP destination.
+    render(<ResponsePanel view={udpThroughHbone(403, "not_closed")} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByText(/HBONE endpoint lab mesh HBONE \(127\.0\.0\.1:17606\) refused \(403\)/)).toBeTruthy();
+  });
+
   it("shows a cancel control while a request is running", () => {
     const onCancel = vi.fn();
     render(<ResponsePanel view={null} running progressBytes={2048} onCancel={onCancel} />);

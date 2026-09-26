@@ -19,9 +19,11 @@ explicitly bounded troubleshooting for Ferrum Edge gateways.
   or HTTP/2 or HTTP/3 extended CONNECT); gRPC in all four modes over HTTP/2
   or HTTP/3; gRPC-Web (binary and text); SSE over HTTP/1.1, HTTP/2 or
   HTTP/3; TCP/TLS; UDP/DTLS, direct or through an HTTP/3 CONNECT-UDP (MASQUE)
-  proxy. Interactive sessions let you send and receive messages live.
+  proxy, and UDP through a mesh HBONE tunnel. Interactive sessions let you
+  send and receive messages live.
 - **Mesh and edge features**: HBONE tunnels (HTTP/2 CONNECT over mTLS) for
-  HTTP, WebSocket, gRPC, SSE and raw TCP; SPIFFE ID or trust-domain server
+  HTTP, WebSocket, gRPC, SSE and raw TCP, and for UDP as a Ferrum Mesh
+  datagram tunnel; SPIFFE ID or trust-domain server
   verification with X.509-SVID client identities; SNI override; PROXY
   protocol v1/v2 headers on TCP/TLS and signed datagram envelopes on
   UDP/DTLS. See `docs/protocols.md`.

@@ -34,7 +34,7 @@ use crate::scenario::{CheckKind, Checks, ScenarioResult};
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::*;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
-use anvil_domain::request::{KeyValue, RequestSpec};
+use anvil_domain::request::{KeyValue, PayloadEncoding, Protocol, RequestSpec, StreamPayload, UdpSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{ProxySelection, SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::{
@@ -44,6 +44,7 @@ use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::http as fx;
 use anvil_fixtures::mesh_pki::{self as ids, MeshPki};
 use anvil_fixtures::pki::Pem;
+use anvil_fixtures::streams::{self, StreamFixture, UdpMode};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -57,6 +58,13 @@ pub const AMBIENT_HBONE_PORT: u16 = 17618;
 pub const PERMISSIVE_PORT: u16 = 17626;
 /// The workload's application: the echo fixture (mesh-*.json workload port).
 pub const BACKEND_PORT: u16 = 17801;
+/// The workload's UDP ports (mesh-sidecar.json `udp` ports): an echo, a
+/// silent receiver, one that closes after its first reply (bound per
+/// scenario), and a declared port nothing listens on.
+pub const UDP_ECHO_PORT: u16 = 17802;
+pub const UDP_SILENT_PORT: u16 = 17803;
+pub const UDP_CLOSING_PORT: u16 = 17804;
+pub const UDP_UNBOUND_PORT: u16 = 17805;
 /// A port no workload declares (relay destination guard stimulus; unbound).
 const UNDECLARED_PORT: u16 = 17899;
 const SIDECAR_ADMIN: u16 = 17690;
@@ -74,6 +82,9 @@ pub struct Env {
     pub engine: Engine,
     pub pki: MeshPki,
     pub backend: fx::Fixture,
+    /// The workload's UDP applications (mesh_udp.rs): echo and silent.
+    pub udp_echo: StreamFixture,
+    pub udp_silent: StreamFixture,
     pub sidecar: Gateway,
     pub ambient: Gateway,
     pub permissive: Gateway,
@@ -92,7 +103,7 @@ impl LabEnv for Env {
 
 /// Which client SVID the TLS profile presents.
 #[derive(Clone, Copy)]
-enum Svid {
+pub(crate) enum Svid {
     /// `spiffe://cluster.local/ns/ferrum/sa/anvil-lab-client` (mesh root).
     Client,
     None,
@@ -107,7 +118,7 @@ impl Env {
 
     /// A verified TLS profile: trust the lab mesh bundle, verify the server
     /// by `expect_id` (SPIFFE), present `svid`.
-    fn tls(&self, name: &str, svid: Svid, expect_id: &str, sni: Option<&str>) -> TlsProfile {
+    pub(crate) fn tls(&self, name: &str, svid: Svid, expect_id: &str, sni: Option<&str>) -> TlsProfile {
         let identity = |leaf: &Pem, ca: &Pem| ClientIdentity::Pem {
             cert_chain_pem: leaf.chain_with(ca),
             private_key_pem: SensitiveValue::template(leaf.key.clone()),
@@ -133,7 +144,7 @@ impl Env {
         }
     }
 
-    fn base(&self, spec: RequestSpec) -> (ExecutionContext, SettingsOverrides) {
+    pub(crate) fn base(&self, spec: RequestSpec) -> (ExecutionContext, SettingsOverrides) {
         let mut c = ExecutionContext::standalone(spec);
         c.isolation = self.isolation();
         if self.trusted {
@@ -204,14 +215,58 @@ impl Env {
         c.settings_layers.push(("run".into(), o));
         c
     }
+
+    /// `udp://<authority>` with `datagrams` through an HBONE proxy at
+    /// 127.0.0.1:`endpoint` (a datagram tunnel: the CONNECT carries the
+    /// `udp` marker, whatever `marker` says about its header name).
+    pub(crate) fn via_hbone_udp(
+        &self,
+        endpoint: u16,
+        authority: &str,
+        datagrams: &[&str],
+        window_ms: u64,
+        tls: TlsProfile,
+        marker: HboneMarker,
+    ) -> ExecutionContext {
+        let mut spec = RequestSpec::http("GET", &format!("udp://{authority}"));
+        spec.protocol = Protocol::Udp;
+        spec.udp = Some(UdpSpec {
+            dtls: false,
+            datagrams: datagrams.iter().map(|d| StreamPayload { data: d.to_string(), encoding: PayloadEncoding::Text }).collect(),
+            response_window_ms: window_ms,
+            max_datagrams: 100,
+            masque: None,
+            proxy_protocol: None,
+        });
+        let (mut c, mut o) = self.base(spec);
+        let proxy = ProxyProfile {
+            id: anvil_domain::Id::new(),
+            workspace_id: anvil_domain::Id::new(),
+            name: "lab mesh HBONE (UDP)".into(),
+            kind: ProxyKind::Hbone,
+            address: format!("127.0.0.1:{endpoint}"),
+            username: None,
+            password: None,
+            no_proxy: String::new(),
+            tls_profile_id: Some(tls.id),
+            hbone: Some(HboneOptions { marker, baggage: None, extra_headers: vec![] }),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        o.proxy_profile_id = Some(ProxySelection::Profile { id: proxy.id });
+        c.proxy_profiles.push(proxy);
+        c.tls_profiles.push(tls);
+        c.settings_layers.push(("run".into(), o));
+        c
+    }
 }
 
-type Def = harness::Def<Env>;
-type Fut<'a> = Pin<Box<dyn Future<Output = Outcome> + 'a>>;
+pub(crate) type Def = harness::Def<Env>;
+pub(crate) type Fut<'a> = Pin<Box<dyn Future<Output = Outcome> + 'a>>;
 
 // ------------------------------------------------------------- helpers ---
 
-fn attempt(o: &ExecutionOutput) -> Option<&AttemptObservation> {
+pub(crate) fn attempt(o: &ExecutionOutput) -> Option<&AttemptObservation> {
     o.record.attempts.last()
 }
 
@@ -219,12 +274,12 @@ fn tls_of(o: &ExecutionOutput) -> Option<&TlsObservation> {
     attempt(o).and_then(|a| a.connection.as_ref()).and_then(|c| c.tls.as_ref())
 }
 
-fn tunnel_of(o: &ExecutionOutput) -> Option<&TunnelObservation> {
+pub(crate) fn tunnel_of(o: &ExecutionOutput) -> Option<&TunnelObservation> {
     attempt(o).and_then(|a| a.connection.as_ref()).and_then(|c| c.tunnel.as_ref())
 }
 
 /// Operator-log lines since `from` that contain every needle (ground truth).
-fn op_lines(gw: &Gateway, from: usize, needles: &[&str]) -> Vec<String> {
+pub(crate) fn op_lines(gw: &Gateway, from: usize, needles: &[&str]) -> Vec<String> {
     gw.log_lines()
         .into_iter()
         .skip(from)
@@ -236,7 +291,7 @@ fn op_lines(gw: &Gateway, from: usize, needles: &[&str]) -> Vec<String> {
 
 /// Like [`op_lines`], polling up to 3 s: access lines are written when the
 /// exchange (or the tunnel relay) ends, just after Anvil's own result.
-async fn wait_op_lines(gw: &Gateway, from: usize, needles: &[&str]) -> Vec<String> {
+pub(crate) async fn wait_op_lines(gw: &Gateway, from: usize, needles: &[&str]) -> Vec<String> {
     for _ in 0..30 {
         let l = op_lines(gw, from, needles);
         if !l.is_empty() {
@@ -248,10 +303,10 @@ async fn wait_op_lines(gw: &Gateway, from: usize, needles: &[&str]) -> Vec<Strin
 }
 
 /// The v0.9.7 relay-synthesis refusal (debug operator line) with its reason.
-const SYNTHESIS_REFUSAL: &str = "not one this proxy terminates for";
+pub(crate) const SYNTHESIS_REFUSAL: &str = "not one this proxy terminates for";
 
 /// Transaction (access) lines since `from`.
-fn transactions(gw: &Gateway, from: usize) -> Vec<String> {
+pub(crate) fn transactions(gw: &Gateway, from: usize) -> Vec<String> {
     op_lines(gw, from, &["\"http_method\""])
 }
 
@@ -271,7 +326,7 @@ fn backend_received(c: &mut Checks, env: &Env, before: usize, path: &str) {
     );
 }
 
-fn not_dispatched(c: &mut Checks, o: &ExecutionOutput) {
+pub(crate) fn not_dispatched(c: &mut Checks, o: &ExecutionOutput) {
     c.add(
         CheckKind::Diagnosis,
         "dispatch is not_dispatched (nothing reached the destination)",
@@ -280,14 +335,14 @@ fn not_dispatched(c: &mut Checks, o: &ExecutionOutput) {
     );
 }
 
-fn failure_kind(c: &mut Checks, o: &ExecutionOutput, kind: FailureKind) {
+pub(crate) fn failure_kind(c: &mut Checks, o: &ExecutionOutput, kind: FailureKind) {
     let got = attempt(o).and_then(|a| a.failure.as_ref()).map(|f| f.kind);
     c.add(CheckKind::Diagnosis, format!("typed failure {kind:?}"), got == Some(kind), format!("{got:?}"));
 }
 
 /// An mTLS refusal on the tunnel leg: typed as the endpoint's TLS failure,
 /// or (alert lost) as an HTTP/2 failure right after the handshake.
-fn tunnel_leg_failure(c: &mut Checks, o: &ExecutionOutput) {
+pub(crate) fn tunnel_leg_failure(c: &mut Checks, o: &ExecutionOutput) {
     let got = attempt(o).and_then(|a| a.failure.as_ref()).map(|f| f.kind);
     c.add(
         CheckKind::Diagnosis,
@@ -328,7 +383,7 @@ fn no_destination_blame(c: &mut Checks, o: &ExecutionOutput) {
     not_dispatched(c, o);
 }
 
-fn outcome(o: ExecutionOutput, c: Checks, log: Vec<String>) -> Outcome {
+pub(crate) fn outcome(o: ExecutionOutput, c: Checks, log: Vec<String>) -> Outcome {
     Outcome { main: Some(o), recovery: None, checks: c, operator_log: log }
 }
 
@@ -723,7 +778,7 @@ fn mesh015(env: &Env) -> Fut<'_> {
 }
 
 fn all() -> Vec<Def> {
-    vec![
+    let mut v = vec![
         Def { id: "MESH-001", title: "Sidecar inbound mTLS, server verified by SPIFFE ID, client SVID presented", run: mesh001 },
         Def { id: "MESH-002", title: "Wrong expected server SPIFFE ID: client-side failure, nothing sent", run: mesh002 },
         Def { id: "MESH-003", title: "SNI override (east-west name) sent; SPIFFE decides the identity", run: mesh003 },
@@ -739,7 +794,9 @@ fn all() -> Vec<Def> {
         Def { id: "MESH-013", title: "Ambient HBONE with an untrusted-trust-domain SVID refused at mTLS", run: mesh013 },
         Def { id: "MESH-014", title: "Wrong expected HBONE endpoint SPIFFE ID: client-side failure", run: mesh014 },
         Def { id: "MESH-015", title: "PERMISSIVE sidecar: marker-only unauthenticated CONNECT refused 403", run: mesh015 },
-    ]
+    ];
+    v.extend(crate::mesh_udp::defs());
+    v
 }
 
 const SKIPPED: &[(&str, &str, &str)] = &[
@@ -768,10 +825,10 @@ const SKIPPED: &[(&str, &str, &str)] = &[
 pub fn profile() -> Profile {
     Profile {
         name: "mesh",
-        about: "Mesh client: SPIFFE-verified sidecar mTLS 17606 (STRICT) / 17626 (PERMISSIVE), HBONE ambient 17618, workload 17801",
+        about: "Mesh client: SPIFFE-verified sidecar mTLS 17606 (STRICT) / 17626 (PERMISSIVE), HBONE ambient 17618, workload 17801 (UDP 17802-17805)",
         scenarios: || {
             let mut v: Vec<(&'static str, &'static str)> = all().into_iter().map(|d| (d.id, d.title)).collect();
-            v.extend(SKIPPED.iter().map(|(id, t, _)| (*id, *t)));
+            v.extend(SKIPPED.iter().chain(crate::mesh_udp::SKIPPED).map(|(id, t, _)| (*id, *t)));
             v
         },
         run: |args| Box::pin(run(args)) as BoxFut<_>,
@@ -830,6 +887,8 @@ async fn start() -> anyhow::Result<Env> {
     pki.write_to(&pki_dir)?;
     let pki_dir = pki_dir.display().to_string();
     let backend = fx::serve(&format!("127.0.0.1:{BACKEND_PORT}"), None).await?;
+    let udp_echo = streams::udp(&format!("127.0.0.1:{UDP_ECHO_PORT}"), UdpMode::Echo).await?;
+    let udp_silent = streams::udp(&format!("127.0.0.1:{UDP_SILENT_PORT}"), UdpMode::Silent).await?;
     let sidecar = launch(
         "mesh-sidecar",
         "mesh-sidecar.conf",
@@ -878,7 +937,7 @@ async fn start() -> anyhow::Result<Env> {
         }
     };
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    Ok(Env { engine: Engine::new(), pki, backend, sidecar, ambient, permissive, trusted: true, n: AtomicU64::new(0) })
+    Ok(Env { engine: Engine::new(), pki, backend, udp_echo, udp_silent, sidecar, ambient, permissive, trusted: true, n: AtomicU64::new(0) })
 }
 
 async fn stop(env: Env) {
@@ -898,6 +957,7 @@ async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
         }
     };
     results.extend(skips(&ctx, &args.only, SKIPPED));
+    results.extend(skips(&ctx, &args.only, crate::mesh_udp::SKIPPED));
     let finished = harness::finish(&ctx, &env, &results);
     stop(env).await;
     finished?;
@@ -912,6 +972,7 @@ async fn up() -> anyhow::Result<()> {
     println!("  ambient HBONE STRICT  127.0.0.1:{AMBIENT_HBONE_PORT}  (server SPIFFE {})", ids::ZTUNNEL_SPIFFE_ID);
     println!("  sidecar inbound PERMISSIVE https://127.0.0.1:{PERMISSIVE_PORT}");
     println!("  workload echo         http://127.0.0.1:{BACKEND_PORT}");
+    println!("  workload UDP          echo udp://127.0.0.1:{UDP_ECHO_PORT}, silent udp://127.0.0.1:{UDP_SILENT_PORT} (through HBONE)");
     println!("  client SVID {}/client.pem + client.key, trust bundle {}/ca.pem", pki.display(), pki.display());
     harness::wait_for_shutdown().await?;
     stop(env).await;
@@ -966,7 +1027,12 @@ mod tests {
                 for p in w["ports"].as_array().unwrap() {
                     assert!((17800..18000).contains(&p["port"].as_u64().unwrap()), "{f}: workload port outside 178xx/179xx");
                 }
-                assert_eq!(w["addresses"], serde_json::json!(["127.0.0.1"]), "{f}");
+                // Loopback only; the Ambient UDP scenarios add declared names that never
+                // resolve publicly (.test via a gateway DNS override, .invalid not at all).
+                for a in w["addresses"].as_array().unwrap() {
+                    let a = a.as_str().unwrap();
+                    assert!(a == "127.0.0.1" || a.ends_with(".anvil-lab.test") || a.ends_with(".anvil-lab.invalid"), "{f}: {a}");
+                }
             }
         }
         assert_eq!(super::BACKEND_PORT, 17801);

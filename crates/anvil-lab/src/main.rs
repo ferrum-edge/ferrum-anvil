@@ -30,6 +30,7 @@ mod gateway;
 mod h3x;
 mod harness;
 mod mesh;
+mod mesh_udp;
 mod policy;
 mod profiles;
 mod proxyproto;

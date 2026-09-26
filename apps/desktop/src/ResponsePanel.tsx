@@ -80,7 +80,7 @@ export function ResponsePanel(props: { view: ExecutionView | null; running: bool
       <div className="resp-head">
         {status != null ? <span className={`status-code s${String(status)[0]}`}>{status}</span> : !stream && <span className="status-code s5">No response</span>}
         {resp?.reason && <span className="muted">{resp.reason}</span>}
-        <ProtocolBadge p={r.outcome.protocol_status} />
+        <ProtocolBadge p={r.outcome.protocol_status} tunnel={last?.connection?.tunnel} />
         <Dim label="Transport" value={r.outcome.transport} good={r.outcome.transport === "completed"} />
         <Dim label="Application" value={r.outcome.application} good={r.outcome.application === "success"} />
         <Dim label="Tests" value={r.outcome.assertions} good={r.outcome.assertions !== "fail"} />
@@ -369,12 +369,21 @@ function Connection({ attempt }: { attempt?: AttemptObservation }) {
 }
 
 function TunnelView({ t }: { t: TunnelObservation }) {
+  const d = t.datagrams;
   return (
     <div className="col">
-      <h4 className="faint" style={{ margin: "6px 0 0" }}>HBONE tunnel (outer leg)</h4>
+      <h4 className="faint" style={{ margin: "6px 0 0" }}>{d ? "HBONE UDP tunnel (outer leg)" : "HBONE tunnel (outer leg)"}</h4>
       <table className="grid">
         <tbody>
           <tr><td className="k">Endpoint</td><td className="v">{t.endpoint}</td></tr>
+          {d && (
+            <>
+              <tr><td className="k">Datagram records</td><td className="v">{d.records_sent} sent · {d.records_received} received ([u16 length][payload] on the CONNECT stream)</td></tr>
+              <tr><td className="k">Tunnel ended</td><td className="v">{humanize(d.closed_by)}{d.reset_code ? ` (${d.reset_code})` : ""}</td></tr>
+              {(d.oversize_refused ?? 0) > 0 && <tr><td className="k">Refused locally</td><td className="v">{d.oversize_refused} datagram(s) over 65,535 bytes, not sent</td></tr>}
+              {(d.truncated_tail_bytes ?? 0) > 0 && <tr><td className="k">Truncated record</td><td className="v">{d.truncated_tail_bytes} byte(s) of an incomplete record discarded</td></tr>}
+            </>
+          )}
           <tr><td className="k">Remote / local</td><td className="v">{t.remote_address ?? "—"} / {t.local_address ?? "—"}</td></tr>
           <tr><td className="k">CONNECT :authority</td><td className="v">{t.authority}</td></tr>
           <tr><td className="k">CONNECT status</td><td className="v">{t.connect_status ?? "no answer"}</td></tr>
@@ -486,7 +495,7 @@ function TestsView({ view }: { view: ExecutionView }) {
   );
 }
 
-function ProtocolBadge({ p }: { p?: ProtocolStatus | null }) {
+function ProtocolBadge({ p, tunnel }: { p?: ProtocolStatus | null; tunnel?: TunnelObservation | null }) {
   if (!p) return null;
   switch (p.protocol) {
     case "grpc":
@@ -513,13 +522,26 @@ function ProtocolBadge({ p }: { p?: ProtocolStatus | null }) {
       );
     case "udp": {
       const m = p.masque;
+      // UDP through an HBONE proxy: the tunnel facts live in the connection evidence.
+      const h = tunnel?.datagrams ? tunnel : null;
+      const hRefused = h && h.connect_status != null && (h.connect_status < 200 || h.connect_status > 299);
       const via = m
         ? m.connect_status != null && (m.connect_status < 200 || m.connect_status > 299)
           ? ` · MASQUE proxy ${m.proxy} refused (${m.connect_status})`
           : ` · via MASQUE ${m.proxy}${m.encoding ? ` (${m.encoding === "capsule" ? "capsules" : "QUIC datagrams"})` : ""}`
-        : "";
+        : h
+          ? hRefused
+            ? ` · HBONE endpoint ${h.endpoint} refused (${h.connect_status})`
+            : ` · via HBONE ${h.endpoint}${h.datagrams?.closed_by === "peer" ? " · ended by the endpoint" : ""}`
+          : "";
+      const abnormal = (m && m.closed_by === "abnormal") || h?.datagrams?.closed_by === "abnormal";
+      const title = m
+        ? `CONNECT-UDP tunnel to ${m.target}; closed by ${humanize(m.closed_by)}`
+        : h
+          ? `HBONE datagram tunnel to ${h.authority}; closed by ${humanize(h.datagrams?.closed_by ?? "not_closed")}`
+          : undefined;
       return (
-        <span className={`badge${m && m.closed_by === "abnormal" ? " bad" : ""}`} title={m ? `CONNECT-UDP tunnel to ${m.target}; closed by ${humanize(m.closed_by)}` : undefined}>
+        <span className={`badge${abnormal ? " bad" : ""}`} title={title}>
           UDP · {p.datagrams_sent} sent · {p.datagrams_received} received in {p.window_ms} ms{via}
         </span>
       );

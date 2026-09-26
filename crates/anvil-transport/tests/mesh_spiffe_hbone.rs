@@ -295,6 +295,7 @@ async fn hbone_endpoint(client_auth: ClientAuth, alpn: &[&str], extra_allowed: &
             alpn: alpn.iter().map(|s| s.to_string()).collect(),
             allowed,
             unavailable: vec!["127.0.0.1:9".into()],
+            udp_faults: vec![],
         },
     )
     .await
@@ -370,6 +371,7 @@ async fn hbone_tunnel_carries_inner_tls_and_http2_to_the_destination() {
             alpn: vec!["h2".into()],
             allowed: vec![format!("localhost:{}", echo.addr.port())],
             unavailable: vec![],
+            udp_faults: vec![],
         },
     )
     .await

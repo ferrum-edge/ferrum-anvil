@@ -15,6 +15,26 @@
             "port": 17801,
             "protocol": "http",
             "name": "http"
+          },
+          {
+            "port": 17802,
+            "protocol": "udp",
+            "name": "udp-echo"
+          },
+          {
+            "port": 17803,
+            "protocol": "udp",
+            "name": "udp-silent"
+          },
+          {
+            "port": 17804,
+            "protocol": "udp",
+            "name": "udp-closing"
+          },
+          {
+            "port": 17805,
+            "protocol": "udp",
+            "name": "udp-unbound"
           }
         ],
         "selector": {

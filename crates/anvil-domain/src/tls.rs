@@ -146,6 +146,11 @@ pub struct ProxyProfile {
 /// Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;
 /// Ferrum accepts either marker (value `hbone`) or none. A marker is a wire
 /// shape hint only and never authenticates the peer.
+///
+/// A UDP request (`udp://`) through the profile always sends a marker with
+/// the value `udp` (Ferrum Mesh datagram-over-HBONE): `x-istio-protocol:
+/// udp` for [`HboneMarker::IstioProtocol`], `x-ferrum-mesh-protocol: udp`
+/// otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HboneMarker {

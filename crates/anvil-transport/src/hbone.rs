@@ -17,6 +17,9 @@
 //!
 //! One fresh HBONE connection is used per inner connection (never pooled):
 //! the tunnel's identity and headers belong to one execution.
+//!
+//! The outer leg up to the verified mTLS stream ([`endpoint_leg`]) is shared
+//! with the UDP datagram tunnel ([`crate::hbone_udp`]).
 
 use crate::connector::{BoxIo, ProxyPlan};
 use crate::dns::{self, DnsConfig};
@@ -34,12 +37,13 @@ use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Refusal bodies are evidence, bounded.
-const MAX_REFUSAL_BODY: usize = 8 * 1024;
+pub(crate) const MAX_REFUSAL_BODY: usize = 8 * 1024;
 
 /// The open tunnel stream. Holds the HTTP/2 request handle so the HBONE
 /// connection lives exactly as long as the inner connection.
@@ -71,11 +75,11 @@ pub fn authority(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
 }
 
-fn ms(d: Option<u64>) -> Option<Duration> {
+pub(crate) fn ms(d: Option<u64>) -> Option<Duration> {
     d.map(Duration::from_millis)
 }
 
-fn blank(p: &ProxyPlan, authority: &str) -> TunnelObservation {
+pub(crate) fn blank(p: &ProxyPlan, authority: &str) -> TunnelObservation {
     TunnelObservation {
         kind: TunnelKind::Hbone,
         endpoint: p.label.clone(),
@@ -97,10 +101,11 @@ fn blank(p: &ProxyPlan, authority: &str) -> TunnelObservation {
         refusal_body: None,
         refusal_body_truncated: false,
         failure: None,
+        datagrams: None,
     }
 }
 
-fn status_for(f: &TransportFailure) -> PhaseStatus {
+pub(crate) fn status_for(f: &TransportFailure) -> PhaseStatus {
     match f.kind {
         FailureKind::DnsTimeout | FailureKind::ConnectTimeout | FailureKind::TlsHandshakeTimeout => PhaseStatus::TimedOut,
         _ if f.deadline_ms.is_some() => PhaseStatus::TimedOut,
@@ -110,7 +115,7 @@ fn status_for(f: &TransportFailure) -> PhaseStatus {
 
 /// The attempt-level failure for a tunnel-leg failure `inner` (kept verbatim
 /// in the tunnel observation).
-fn outer_failure(kind: FailureKind, inner: &TransportFailure, message: String) -> TransportFailure {
+pub(crate) fn outer_failure(kind: FailureKind, inner: &TransportFailure, message: String) -> TransportFailure {
     let mut f = TransportFailure::new(Phase::ProxyTunnel, kind, message);
     f.tls_alert = inner.tls_alert.clone();
     f.h2_error_code = inner.h2_error_code;
@@ -124,7 +129,7 @@ fn outer_failure(kind: FailureKind, inner: &TransportFailure, message: String) -
 /// Prefer a typed TLS error seen on the mTLS stream (e.g. the endpoint's
 /// `certificate_required` alert after a TLS 1.3 client handshake) over the
 /// generic HTTP/2 error it surfaced as.
-fn tls_tap(f: &mut TransportFailure, stats: &ConnStats) -> bool {
+pub(crate) fn tls_tap(f: &mut TransportFailure, stats: &ConnStats) -> bool {
     if let Some((kind, alert)) = stats.tls_error() {
         f.kind = kind;
         f.tls_alert = alert;
@@ -134,16 +139,44 @@ fn tls_tap(f: &mut TransportFailure, stats: &ConnStats) -> bool {
     false
 }
 
-/// Open an HBONE tunnel to `target_host:target_port` through `p`. Records the
-/// outer phases in the tunnel observation (same clock as `rec`).
-pub async fn open(
+/// The mutual-TLS stream to the HBONE endpoint (ALPN `h2` negotiated), ready
+/// for the HTTP/2 connection preface.
+pub(crate) type EndpointTls = TlsErrorTap<tokio_rustls::client::TlsStream<CountingIo<tokio::net::TcpStream>>>;
+
+/// The outer leg up to a verified mTLS stream with ALPN `h2`. Shared by the
+/// byte-stream tunnel ([`open`]) and the datagram tunnel
+/// ([`crate::hbone_udp`]), so both record the same evidence.
+pub(crate) struct Leg {
+    /// Outer phases so far (same clock as the attempt's recorder).
+    pub sub: Recorder,
+    pub t: TunnelObservation,
+    pub stream: EndpointTls,
+    pub stats: Arc<ConnStats>,
+    pub authority: String,
+}
+
+/// A tunnel-leg failure: the attempt-level failure and the tunnel evidence
+/// (whose `failure` holds the precise inner failure).
+pub(crate) type LegFailure = (TransportFailure, TunnelObservation);
+
+/// Close the open outer phases and keep `inner` in the tunnel observation.
+pub(crate) fn leg_failure(mut sub: Recorder, mut t: TunnelObservation, attempt: TransportFailure, inner: TransportFailure) -> LegFailure {
+    sub.close_open(status_for(&inner));
+    t.phases = std::mem::take(&mut sub.phases);
+    t.failure = Some(inner);
+    (attempt, t)
+}
+
+/// DNS, TCP and mutual TLS (client SVID, server identity, ALPN `h2`) with
+/// the HBONE endpoint of `p`, for a tunnel to `target_host:target_port`.
+pub(crate) async fn endpoint_leg(
     rec: &Recorder,
     p: &ProxyPlan,
     target_host: &str,
     target_port: u16,
     dns_cfg: &DnsConfig,
     timeouts: &Timeouts,
-) -> Result<(BoxIo, TunnelObservation), (TransportFailure, TunnelObservation)> {
+) -> Result<Leg, LegFailure> {
     let authority = authority(target_host.trim_start_matches('[').trim_end_matches(']'), target_port);
     let mut t = blank(p, &authority);
     let mut sub = Recorder { t0: rec.t0, phases: vec![], attempt: rec.attempt, events: EventCtx::none() };
@@ -152,10 +185,7 @@ pub async fn open(
         ($attempt:expr, $inner:expr) => {{
             let attempt: TransportFailure = $attempt;
             let inner: TransportFailure = $inner;
-            sub.close_open(status_for(&inner));
-            t.phases = std::mem::take(&mut sub.phases);
-            t.failure = Some(inner);
-            return Err((attempt, t));
+            return Err(leg_failure(sub, t, attempt, inner));
         }};
     }
 
@@ -259,7 +289,30 @@ pub async fn open(
         );
         bail!(a, f)
     }
-    let tls_stream = TlsErrorTap::new(tls_stream, outer_stats.clone());
+    let stream = TlsErrorTap::new(tls_stream, outer_stats.clone());
+    Ok(Leg { sub, t, stream, stats: outer_stats, authority })
+}
+
+/// Open an HBONE tunnel to `target_host:target_port` through `p`. Records the
+/// outer phases in the tunnel observation (same clock as `rec`).
+pub async fn open(
+    rec: &Recorder,
+    p: &ProxyPlan,
+    target_host: &str,
+    target_port: u16,
+    dns_cfg: &DnsConfig,
+    timeouts: &Timeouts,
+) -> Result<(BoxIo, TunnelObservation), (TransportFailure, TunnelObservation)> {
+    let Leg { mut sub, mut t, stream: tls_stream, stats: outer_stats, authority } =
+        endpoint_leg(rec, p, target_host, target_port, dns_cfg, timeouts).await?;
+    let endpoint = &p.label;
+    macro_rules! bail {
+        ($attempt:expr, $inner:expr) => {{
+            let attempt: TransportFailure = $attempt;
+            let inner: TransportFailure = $inner;
+            return Err(leg_failure(sub, t, attempt, inner));
+        }};
+    }
 
     // ---- HTTP/2 preface ----
     let h2_idx = sub.start(Phase::ProtocolHandshake);

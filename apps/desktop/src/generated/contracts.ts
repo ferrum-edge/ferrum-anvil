@@ -1160,6 +1160,11 @@ export type ConnectionMode = "persistent" | "fresh";
  * Ferrum accepts either marker (value `hbone`) or none. A marker is a wire
  * shape hint only and never authenticates the peer.
  *
+ * A UDP request (`udp://`) through the profile always sends a marker with
+ * the value `udp` (Ferrum Mesh datagram-over-HBONE): `x-istio-protocol:
+ * udp` for [`HboneMarker::IstioProtocol`], `x-ferrum-mesh-protocol: udp`
+ * otherwise.
+ *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "HboneMarker".
  */
@@ -1976,6 +1981,11 @@ export interface TunnelObservation {
    * (e.g. `tls_spiffe_id_mismatch` at `tls_handshake`).
    */
   failure?: TransportFailure | null;
+  /**
+   * The datagram channel of a UDP tunnel (`CONNECT` with the `udp`
+   * protocol marker); absent for a byte-stream tunnel.
+   */
+  datagrams?: HboneDatagramChannel | null;
 }
 /**
  * A measured phase. Offsets are microseconds from attempt start on a
@@ -2028,6 +2038,45 @@ export interface TransportFailure {
    * The configured deadline that elapsed, for timeouts.
    */
   deadline_ms?: number | null;
+}
+/**
+ * A UDP datagram channel carried by an HBONE `CONNECT` stream (Ferrum Mesh
+ * datagram-over-HBONE framing): every datagram is one
+ * `[u16 big-endian length][payload]` record on the stream, in both
+ * directions. Counts cover only what Anvil wrote to and read from the
+ * stream; delivery to the destination is never inferred.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "HboneDatagramChannel".
+ */
+export interface HboneDatagramChannel {
+  /**
+   * Records (datagrams) Anvil wrote on the `CONNECT` stream.
+   */
+  records_sent: number;
+  /**
+   * Complete records read from the stream.
+   */
+  records_received: number;
+  /**
+   * Datagrams refused locally, before sending, because they exceed the
+   * 65,535 bytes one record can carry.
+   */
+  oversize_refused?: number;
+  /**
+   * Bytes of an incomplete record the endpoint's stream ended inside
+   * (discarded; never counted as a received datagram).
+   */
+  truncated_tail_bytes?: number;
+  /**
+   * How the `CONNECT` stream (the tunnel) ended.
+   */
+  closed_by: ("peer" | "client" | "timeout" | "not_closed") | "abnormal";
+  /**
+   * The HTTP/2 error code (name) when the endpoint reset the stream or
+   * the connection (`RST_STREAM` / `GOAWAY`).
+   */
+  reset_code?: string | null;
 }
 /**
  * Byte accounting for one attempt. Logical header sizes on HTTP/2/3 are
@@ -2943,6 +2992,11 @@ export interface HboneOptions {
    * Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;
    * Ferrum accepts either marker (value `hbone`) or none. A marker is a wire
    * shape hint only and never authenticates the peer.
+   *
+   * A UDP request (`udp://`) through the profile always sends a marker with
+   * the value `udp` (Ferrum Mesh datagram-over-HBONE): `x-istio-protocol:
+   * udp` for [`HboneMarker::IstioProtocol`], `x-ferrum-mesh-protocol: udp`
+   * otherwise.
    */
   marker?: "none" | "ferrum_mesh_protocol" | "istio_protocol";
   /**

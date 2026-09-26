@@ -212,32 +212,10 @@ pub fn classify_hyper(e: &hyper::Error, stage: HyperStage) -> TransportFailure {
         return f;
     }
 
-    if let Some(h2e) = find::<h2::Error>(dynerr) {
-        if let Some(reason) = h2e.reason() {
-            f.h2_error_code = Some(u32::from(reason));
-            // Only a GOAWAY / RST_STREAM the *peer* sent is a peer signal. When
-            // Anvil's own h2 library detects invalid bytes (e.g. a TLS alert
-            // or HTTP/1 answer read as a frame) it raises a local GOAWAY:
-            // that is a protocol mismatch, not the server closing.
-            let remote = h2e.is_remote();
-            f.kind = if remote && reason == h2::Reason::REFUSED_STREAM {
-                FailureKind::H2RefusedStream
-            } else if remote && h2e.is_go_away() {
-                FailureKind::H2GoAway
-            } else if remote && h2e.is_reset() {
-                FailureKind::H2StreamReset
-            } else {
-                FailureKind::HttpProtocolError
-            };
-            return f;
-        }
-        if h2e.is_io()
-            && let Some(ioe) = h2e.get_io()
-        {
-            f.io_error_kind = Some(io_kind_name(ioe.kind()));
-            f.kind = io_to_exchange_kind(ioe.kind(), stage);
-            return f;
-        }
+    if let Some(h2e) = find::<h2::Error>(dynerr)
+        && apply_h2(h2e, stage, &mut f)
+    {
+        return f;
     }
 
     if let Some(ioe) = find::<io::Error>(dynerr) {
@@ -273,6 +251,58 @@ pub fn classify_hyper(e: &hyper::Error, stage: HyperStage) -> TransportFailure {
     } else {
         FailureKind::HttpProtocolError
     };
+    f
+}
+
+/// Type an `h2` error into `f`: a peer `GOAWAY` / `RST_STREAM` (with its
+/// code), or the connection's I/O error. `false` when neither applies.
+fn apply_h2(h2e: &h2::Error, stage: HyperStage, f: &mut TransportFailure) -> bool {
+    if let Some(reason) = h2e.reason() {
+        f.h2_error_code = Some(u32::from(reason));
+        // Only a GOAWAY / RST_STREAM the *peer* sent is a peer signal. When
+        // Anvil's own h2 library detects invalid bytes (e.g. a TLS alert
+        // or HTTP/1 answer read as a frame) it raises a local GOAWAY:
+        // that is a protocol mismatch, not the server closing.
+        let remote = h2e.is_remote();
+        f.kind = if remote && reason == h2::Reason::REFUSED_STREAM {
+            FailureKind::H2RefusedStream
+        } else if remote && h2e.is_go_away() {
+            FailureKind::H2GoAway
+        } else if remote && h2e.is_reset() {
+            FailureKind::H2StreamReset
+        } else {
+            FailureKind::HttpProtocolError
+        };
+        return true;
+    }
+    if h2e.is_io()
+        && let Some(ioe) = h2e.get_io()
+    {
+        f.io_error_kind = Some(io_kind_name(ioe.kind()));
+        f.os_error_code = ioe.raw_os_error();
+        f.kind = io_to_exchange_kind(ioe.kind(), stage);
+        return true;
+    }
+    false
+}
+
+/// Classify an error from `h2` driven directly (the HBONE datagram tunnel)
+/// with the same typed rules as [`classify_hyper`].
+pub fn classify_h2(e: &h2::Error, stage: HyperStage) -> TransportFailure {
+    let phase = match stage {
+        HyperStage::AwaitHeaders => Phase::AwaitResponseHeaders,
+        HyperStage::Body => Phase::ResponseBody,
+        HyperStage::Handshake => Phase::ProtocolHandshake,
+    };
+    let mut f = TransportFailure::new(phase, FailureKind::HttpProtocolError, display_chain(e));
+    // TLS alerts delivered after the handshake (e.g. TLS 1.3 client-cert rejection).
+    if let Some(r) = find::<rustls::Error>(e) {
+        let (k, alert) = classify_rustls(r, true);
+        f.kind = k;
+        f.tls_alert = alert;
+        return f;
+    }
+    apply_h2(e, stage, &mut f);
     f
 }
 

@@ -96,6 +96,9 @@ pub enum UdpMode {
     DropEveryOther,
     /// Answer each datagram twice (duplicate delivery).
     Duplicate,
+    /// Answer the first datagram, then close the socket: later datagrams
+    /// meet a closed port (ICMP port unreachable to their sender).
+    CloseAfterFirst,
 }
 
 pub async fn udp(bind: &str, mode: UdpMode) -> anyhow::Result<StreamFixture> {
@@ -127,6 +130,11 @@ pub async fn udp(bind: &str, mode: UdpMode) -> anyhow::Result<StreamFixture> {
                 UdpMode::Duplicate => {
                     let _ = sock.send_to(&buf[..n], peer).await;
                     let _ = sock.send_to(&buf[..n], peer).await;
+                }
+                UdpMode::CloseAfterFirst => {
+                    let _ = sock.send_to(&buf[..n], peer).await;
+                    l2.push(GroundTruth::FaultApplied { fault: "udp_socket_closed".into() });
+                    break;
                 }
             }
         }
