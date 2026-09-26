@@ -2813,6 +2813,24 @@
           "format": "uint64",
           "minimum": 0
         },
+        "decoding": {
+          "description": "Outcome of content decoding. Absent when the body has no content-coding\nor automatic decompression is off.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentDecoding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decoding_detail": {
+          "description": "Why content decoding did not complete.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "blob_sha256": {
           "description": "Content-addressed id of the stored raw (captured) bytes.",
           "type": [
@@ -2854,6 +2872,31 @@
           "description": "No body by protocol (HEAD, 204, 304, 1xx).",
           "type": "string",
           "const": "no_body"
+        }
+      ]
+    },
+    "ContentDecoding": {
+      "description": "Outcome of removing the response's content-coding for display,\nassertions and extraction. Independent of the body completeness, which\ndescribes the raw bytes on the wire.",
+      "oneOf": [
+        {
+          "description": "The whole body was decoded.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "Decoding stopped at the local `max_decoded_bytes` ceiling; the decoded body is only a prefix.",
+          "type": "string",
+          "const": "truncated_at_limit"
+        },
+        {
+          "description": "The content-coding is not supported; the body stays encoded.",
+          "type": "string",
+          "const": "unsupported"
+        },
+        {
+          "description": "The encoded bytes could not be decoded; the body stays encoded.",
+          "type": "string",
+          "const": "failed"
         }
       ]
     },

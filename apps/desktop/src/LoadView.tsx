@@ -3,7 +3,7 @@
 // measures one load unit (HTTP requests, gRPC calls or streams, SSE streams,
 // WebSocket sessions, TCP or UDP/DTLS exchanges); the editor shows which one,
 // or the typed refusal, before anything can run (LOAD-013).
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   onLoadFinished,
@@ -136,7 +136,18 @@ function newPlan(workspaceId: string): LoadPlan {
 
 type Sel = { kind: "plan"; id: string } | { kind: "report"; id: string } | null;
 
-export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environments: Environment[]; notify: (m: string) => void }) {
+/**
+ * Stays mounted (only hidden) while another view is shown: the worker keeps
+ * running, and this view holds its only live progress and Stop control.
+ */
+export function LoadView(props: {
+  workspaceId: string;
+  tree: TreeNode[];
+  environments: Environment[];
+  notify: (m: string) => void;
+  hidden?: boolean;
+  onLiveChange?: (live: boolean) => void;
+}) {
   const [plans, setPlans] = useState<LoadPlan[]>([]);
   const [reports, setReports] = useState<LoadReportSummary[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -145,15 +156,27 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
   const [live, setLive] = useState<{ runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] } | null>(null);
   const requests = useMemo(() => flatten(props.tree), [props.tree]);
 
+  const wsRef = useRef(props.workspaceId);
+  wsRef.current = props.workspaceId;
+  /** The workspace's reports, or null when the workspace changed meanwhile. */
   const reload = async () => {
-    const [p, r, d] = await Promise.all([api.loadPlans(props.workspaceId), api.loadReports(props.workspaceId), api.datasets(props.workspaceId)]);
+    const w = props.workspaceId;
+    const [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
+    if (w !== wsRef.current) return null;
     setPlans(p);
     setReports(r);
     setDatasets(d);
+    return r;
   };
+  // The run listeners outlive renders: read the current workspace and callbacks.
+  const current = useRef({ reload, notify: props.notify });
+  current.current = { reload, notify: props.notify };
   useEffect(() => {
     void reload();
   }, [props.workspaceId]);
+  useEffect(() => {
+    props.onLiveChange?.(!!live);
+  }, [!!live]);
 
   useEffect(() => {
     const a = onLoadProgress((e) =>
@@ -166,8 +189,9 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
     );
     const b = onLoadFinished((e) => {
       setLive((l) => (l && l.runKey === e.run_key ? null : l));
-      if (e.error) props.notify(`Load run ended without a saved report: ${e.error}`);
-      void reload().then(() => e.run_id && setSel({ kind: "report", id: e.run_id }));
+      if (e.error) current.current.notify(`Load run ended without a saved report: ${e.error}`);
+      // A run started in another workspace saves its report there: do not select it here.
+      void current.current.reload().then((r) => e.run_id && r?.some((x) => x.run_id === e.run_id) && setSel({ kind: "report", id: e.run_id }));
     });
     return () => {
       void a.then((f) => f());
@@ -181,7 +205,7 @@ export function LoadView(props: { workspaceId: string; tree: TreeNode[]; environ
   }, [sel, plans]);
 
   return (
-    <div className="main" style={{ ["--sidebar-w" as string]: "290px" }}>
+    <div className="main" style={{ ["--sidebar-w" as string]: "290px", display: props.hidden ? "none" : undefined }}>
       <aside className="sidebar" aria-label="Load plans and reports">
         <div className="side-body">
           <div className="row" style={{ marginBottom: 6 }}>

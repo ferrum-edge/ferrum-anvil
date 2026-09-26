@@ -47,7 +47,7 @@ impl Engine {
     pub fn preview(&self, ctx: &ExecutionContext) -> Result<EffectiveRequest, TransportFailure> {
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let prep = http_exec::prepare_all(self, ctx, &resolver, &["https", "http"])?;
-        let mut redactor = Redactor::new(resolver.used_secrets.lock().clone(), ctx.redaction_names.clone());
+        let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
         let signable = anvil_auth::SignableRequest {
             method: prep.http.method.clone(),
             scheme: prep.http.target.scheme.clone(),

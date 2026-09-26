@@ -51,6 +51,13 @@ CLI (`anvil`) = same anvil-app services without a webview.
   (`anvil_app::token_files`, never exported or imported), and the desktop
   confines the app so a token-file path that is not bound is refused before
   anything is read.
+- **Pooled HTTP connections are bounded.** Each engine keeps at most 8 idle
+  HTTP/1.1 or HTTP/2 connections per pool key (isolation, destination and
+  security context) and 64 in total; one more closes the connection idle
+  longest. A background sweep closes connections idle for 90 s even when their
+  destination is never used again, and stops while the pool is empty. An
+  HTTP/2 connection counts as idle only with no request in flight, so neither
+  expiry nor eviction cuts a request short.
 - **Load traffic never runs in the UI process.** The desktop re-launches its
   own executable with a fixed, non-secret flag and sends the job over stdin.
   The job carries only the secrets its requests reference.
@@ -68,7 +75,7 @@ CLI (`anvil`) = same anvil-app services without a webview.
 | `anvil-engine` | Variable resolution (precedence, cycles, helpers), request preparation and lint, per-send auth, redirects with cross-origin credential stripping, safe-retry rules, assertions and extraction, redaction by name and by exact secret value, the effective-request preview, session execution, and record assembly. |
 | `anvil-diagnostics` | Deterministic rules over typed evidence that produce findings with confidence, scope, owner, evidence, alternatives, "does not prove" statements, remediation and confirm-with steps. Includes Ferrum catalog matching with trust and confidence ceilings. Wording lives in `catalog/diagnostics/findings.en.json`. |
 | `anvil-storage` | SQLite store in which every payload is sealed with XChaCha20-Poly1305 and a record-bound AAD. Data keys are wrapped by an Argon2id passphrase key and a recovery key, or held in the OS keychain. Covers migrations, checkpoints and the plaintext-leak audit. |
-| `anvil-portability` | Workspace and whole-app bundles: share-safely (placeholders), encrypted transfer and full backup. Import is hardened (limits, traversal, symlinks, bombs, checksums), normalises trust, uses conflict policies, and applies atomically with rollback. |
+| `anvil-portability` | Workspace and whole-app bundles: share-safely (placeholders), encrypted transfer and full backup. Import is hardened (limits, traversal, symlinks, bombs, checksums), normalises trust, uses conflict policies, and writes objects and secrets in one transaction that a failure rolls back (see `storage-and-recovery.md`). |
 | `anvil-import` | OpenAPI 2.0/3.0/3.1/3.2, WSDL 1.1, Postman, Insomnia, cURL and HAR importers with reports and reimport diffs. |
 | `anvil-load` | Open, closed and iteration workloads over the same engine; mergeable HDR histograms; balanced ledgers; generator health; the worker protocol; JSON, CSV and HTML reports; run comparison. |
 | `anvil-runner` | Collection runner: scenarios and folders, datasets, chained extraction, stop-on-failure, JUnit/HTML/JSON reports. |
@@ -96,6 +103,15 @@ CLI (`anvil`) = same anvil-app services without a webview.
 4. **Assemble the record.** The engine combines attempts (redirects and safe
    retries) into one redacted `ExecutionRecord` with three separate
    dimensions: transport completion, application status and assertions.
+   Content decoding is recorded separately from wire completeness
+   (`response.body.decoding`). Decoding does not complete when it stops at
+   `max_decoded_bytes`, when the bytes do not decode, or when the coding is
+   unsupported, including bogus codings such as `Content-Encoding: none`.
+   Then a `partial_visibility` warning says so, body assertions fail with
+   "could not evaluate" (the body was not fully decoded), body extractions
+   are not run, and a response below HTTP 400 gets the application status
+   `not_evaluated`. A collection run keeps a content-encoded body in history
+   only when it was fully decoded and holds no sensitive run value.
 5. **Diagnose.** `anvil-diagnostics` turns the typed evidence into
    findings. It uses Ferrum markers only for destinations declared as Ferrum
    gateways, caps their confidence (see `docs/diagnostics.md`), and orders

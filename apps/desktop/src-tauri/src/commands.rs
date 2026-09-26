@@ -530,7 +530,9 @@ pub fn history_get(st: State<'_, DesktopState>, history_id: String) -> R<Executi
     let raw = body.map(|b| b.to_vec()).unwrap_or_default();
     let ct = rec.response.as_ref().and_then(|r| r.body.content_type.clone());
     let enc = rec.response.as_ref().and_then(|r| r.body.content_encoding.clone());
-    let decoded = match anvil_transport::decode::decode(enc.as_deref(), &raw, 64 * 1024 * 1024) {
+    // The recorded limit, so the viewer shows what assertions saw.
+    let limit = rec.prepared.settings.limits.max_decoded_bytes;
+    let decoded = match anvil_transport::decode::decode(enc.as_deref(), &raw, limit) {
         anvil_transport::decode::DecodeOutcome::Decoded { bytes, .. } => Some(bytes),
         _ => None,
     };

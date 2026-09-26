@@ -11,6 +11,7 @@ use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::execution::FailureKind;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SensitiveValue;
+use anvil_domain::workspace::Folder;
 use anvil_fixtures::idp::{IdpFixture, IdpOptions, simulate_browser};
 use anvil_identity::mock::{MockProvider, MockProviderConfig};
 use anvil_identity::{Availability, FlowOptions, IdentityProvider, NoEvents, VerifiedIdentity};
@@ -315,4 +316,54 @@ async fn target_api_sign_in_through_the_app_is_session_only() {
     assert_eq!(kind(&send(&app, &ws.meta.id, rid).await), Some(FailureKind::OAuthInteractionRequired));
     assert_eq!(idp.api_requests(), (1, 1));
     assert!(!idp.grants_seen().iter().any(|g| g == "client_credentials"));
+}
+
+#[tokio::test]
+async fn oauth_tokens_are_cached_per_workspace_folder_or_request_that_defines_the_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "bob");
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir, h, key).unwrap();
+    let ws = app.create_workspace("Tenants").unwrap();
+    let oauth = AuthConfig::OAuth2 {
+        config: OAuth2Config {
+            grant: OAuthGrant::AuthorizationCodePkce,
+            token_url: "https://issuer.test/token".into(),
+            authorization_url: "https://issuer.test/authorize".into(),
+            client_id: "client".into(),
+            client_secret: SensitiveValue::default(),
+            scope: "orders.read".into(),
+            audience: String::new(),
+            client_auth: OAuthClientAuth::RequestBody,
+            token_cache_id: None,
+            refresh_skew_secs: 30,
+        },
+    };
+    // Two folders carry the same OAuth profile.
+    let mut folders: Vec<Folder> = vec![];
+    for name in ["tenant-a", "tenant-b"] {
+        let mut f = app.create_folder(&ws.meta.id, None, name).unwrap();
+        f.auth = oauth.clone();
+        folders.push(app.save_folder(f).unwrap());
+    }
+    let key_of = |folder: Option<&Folder>, auth: AuthConfig| {
+        let mut spec = RequestSpec::http("GET", "https://api.test/orders");
+        spec.auth = auth;
+        let req = app.create_request(&ws.meta.id, folder.map(|f| f.meta.id), "List orders", spec).unwrap();
+        let ctx = app.build_context(Some(req.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
+        anvil_engine::oauth_http::interactive_oauth(&ctx).unwrap().cache_key().clone()
+    };
+
+    let a1 = key_of(Some(&folders[0]), AuthConfig::Inherit);
+    let a2 = key_of(Some(&folders[0]), AuthConfig::Inherit);
+    let b1 = key_of(Some(&folders[1]), AuthConfig::Inherit);
+    assert_eq!(a1, a2, "requests that inherit one folder's profile share its sign-in");
+    assert_eq!(a1.token_cache_id, Some(folders[0].meta.id));
+    assert_ne!(a1, b1, "the same settings defined in another folder need their own sign-in");
+
+    // A profile defined on a request belongs to that request.
+    let r1 = key_of(None, oauth.clone());
+    let r2 = key_of(None, oauth.clone());
+    assert_ne!(r1, r2);
+    assert_ne!(r1, a1);
 }
