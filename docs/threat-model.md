@@ -101,6 +101,14 @@ against it).
   the source's own auth, variables and settings. A source without auth of its
   own gets an explicit "no auth" there, so none of its requests picks up the
   auth configured on the destination workspace.
+- **Bundle key-derivation costs:** the Argon2id costs in a bundle manifest are
+  read before the vault authenticates, so costs outside documented bounds
+  (memory, passes, lanes, memory × passes, salt length; see
+  [storage-and-recovery.md](storage-and-recovery.md#export-and-import)) are
+  refused before any derivation.
+- **Bundle identities:** bundle secrets must belong to a workspace in the
+  bundle, object ids must be unique, and a Duplicate import gives every object,
+  revision and secret a new id.
 - **Lock bypass:** backend refuses privileged commands while locked; key dropped;
   sessions/executions/load runs stopped.
 - **Test backdoors shipped:** E2E WebDriver and env unlock only under the `e2e`

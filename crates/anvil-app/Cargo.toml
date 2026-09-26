@@ -43,6 +43,8 @@ tokio-util.workspace = true
 anvil-fixtures = { path = "../anvil-fixtures" }
 # CI-only provider for the linked-identity tests (never in release builds).
 anvil-identity = { workspace = true, features = ["mock-provider"] }
+# Re-packs bundles in the import tests.
+zip.workspace = true
 
 [lints]
 workspace = true

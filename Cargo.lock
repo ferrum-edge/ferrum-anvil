@@ -227,6 +227,7 @@ dependencies = [
  "uuid",
  "winapi-util",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
