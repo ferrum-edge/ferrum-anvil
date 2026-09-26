@@ -893,7 +893,7 @@ export function ImportDialog(props: {
           <option value="replace">Replace existing</option>
         </select>
       </label>
-      <p className="hint">Nothing is changed until you press Import. Imports never run requests, scripts or load plans, and never enable a TLS bypass. A checkpoint is taken first so the import can be rolled back.</p>
+      <p className="hint">Nothing is changed until you press Import. Imports never run requests, scripts or load plans, and never enable a TLS bypass. Objects are written in one transaction; a checkpoint copy is kept on disk.</p>
       {preview && (
         <div className="col">
           <table className="grid">
