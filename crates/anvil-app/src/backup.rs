@@ -29,8 +29,12 @@
 //! import, it writes into a workspace stored here only once the user approves
 //! it: a backup's passphrase says nothing about who made it. App settings
 //! apply to every workspace's requests, so Replace also keeps this profile's
-//! app settings while it holds a workspace the backup does not claim. Like a
-//! bundle import, a restore seals every workspace it writes from this
+//! app settings while it holds a workspace the backup does not claim, and the
+//! preview says whether they are kept or replaced. User profiles are restored
+//! as carried: nothing reads them yet, so they affect no request. History
+//! records are never dated after the restore, and history records and load
+//! reports of a workspace outside the backup are left out with a warning. Like
+//! a bundle import, a restore seals every workspace it writes from this
 //! device's workload identity until the user allows it on this device
 //! (`crate::device_identity`).
 
@@ -129,6 +133,7 @@ const MERGE_NOTE: &str =
     "Merge keeps this profile's settings and every item that already exists here; Replace restores the backup's versions.";
 const KEPT_SETTINGS_NOTE: &str =
     "Replace keeps this profile's app settings: they apply to every workspace here, and some are not in the backup.";
+const REPLACED_SETTINGS_NOTE: &str = "Replace restores the backup's app settings (default request settings such as DNS overrides, resolver, proxy and TLS, and the lock, history and redaction policies): they apply to every workspace here, including ones created later.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
@@ -804,8 +809,8 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
             return Err(invalid(format!("history record {} is not unique or holds another record", h.id)));
         }
         // A record is written under the workspace it names; one outside the
-        // backup (its workspace was deleted) would land in an unrelated
-        // local workspace.
+        // backup would land in an unrelated local workspace. Deleting a
+        // workspace deletes its history, so only an edited backup holds one.
         if rec.workspace_id.is_some_and(|w| !ws.contains(&w)) {
             outside_history += 1;
             continue;
@@ -818,13 +823,18 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
         d.history.push((rec, body));
     }
     let mut report_ids = HashSet::new();
+    let mut outside_reports = 0;
     for v in &c.load_reports {
         check_record_schema(v, "load report", run_id(v))?;
         let r: LoadReport = serde_json::from_value(v.clone()).map_err(|e| invalid(format!("load report {}: {e}", run_id(v))))?;
         if !report_ids.insert(r.run_id) {
             return Err(invalid(format!("load report {} appears twice", r.run_id)));
         }
-        owned("load report", &r.plan.name, &r.plan.workspace_id)?;
+        // Left out like a history record of a workspace outside the backup.
+        if !ws.contains(&r.plan.workspace_id) {
+            outside_reports += 1;
+            continue;
+        }
         d.items.push((LOAD_REPORT.into(), r.run_id.to_string()));
         d.load_reports.push(r);
     }
@@ -848,6 +858,9 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     d.warnings = anvil_portability::validate::validate_and_normalize(&mut d.graph).map_err(|e| invalid(e.to_string()))?;
     if outside_history > 0 {
         d.warnings.push(format!("{outside_history} history record(s) of workspaces that are not in the backup were left out."));
+    }
+    if outside_reports > 0 {
+        d.warnings.push(format!("{outside_reports} load report(s) of workspaces that are not in the backup were left out."));
     }
     // Stored attachments named without their bytes, as after the loss of a
     // blob: checked against this device's attachments before writing.
@@ -924,11 +937,13 @@ fn keeps_local_settings(d: &Decoded, local: &Local, policy: ConflictPolicy) -> b
 }
 
 /// Warnings a restore reports before writing: each item that names a stored
-/// file the backup does not include, and app settings kept under Replace.
+/// file the backup does not include, and whether Replace keeps or replaces
+/// this profile's app settings.
 fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<Vec<String>> {
     let mut notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
-    if policy == ConflictPolicy::Replace && keeps_local_settings(d, local, policy) {
-        notes.push(KEPT_SETTINGS_NOTE.into());
+    if policy == ConflictPolicy::Replace && d.graph.app_settings.is_some() {
+        let kept = keeps_local_settings(d, local, policy);
+        notes.push(if kept { KEPT_SETTINGS_NOTE } else { REPLACED_SETTINGS_NOTE }.into());
     }
     Ok(notes)
 }
@@ -1140,6 +1155,8 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     {
         w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, x)?;
     }
+    // Nothing reads user profiles yet (no request uses one), so they are
+    // restored as carried, without a gate.
     for x in &d.user_profiles {
         w.put(kind::USER_PROFILE, &x.meta.id, None, None, 0.0, x)?;
     }
@@ -1170,10 +1187,15 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
         let index = serde_json::json!({"attachment": sha, "blob": blob});
         w.tx.put(kind::IMPORT_SOURCE, &attachment_index_id(sha), None, None, 0.0, &index)?;
     }
+    // A record is never dated after its restore, so age-based retention
+    // always reaches it, as after a bundle import.
+    let restored_at = chrono::Utc::now();
     for (rec, body) in &d.history {
         if !w.keep(HISTORY, &rec.id.to_string()) {
+            let mut rec = rec.clone();
+            rec.started_at = rec.started_at.min(restored_at);
             let started_at = rec.started_at.timestamp_millis();
-            w.tx.add_history(&rec.id, rec.workspace_id.as_ref(), rec.request_id.as_ref(), started_at, rec, body.as_deref())?;
+            w.tx.add_history(&rec.id, rec.workspace_id.as_ref(), rec.request_id.as_ref(), started_at, &rec, body.as_deref())?;
         }
     }
     for r in &d.load_reports {
