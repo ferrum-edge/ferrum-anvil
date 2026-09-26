@@ -36,7 +36,7 @@ diff -ru <unpacked h3-0.0.8> vendor/h3-0.0.8-rfc9220   # only src/ext.rs differs
 `h3-quinn` 0.0.10 exactly as published on crates.io (checksum
 `8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4`, built
 from hyperium/h3 `2dc3412bdf6083451920d5bfd7a9484d054c1859`), without the
-published `Cargo.lock` and `.cargo_vcs_info.json`, and with one change:
+published `Cargo.lock`, and with one change:
 `patches/h3-quinn-0.0.10-stop-sending.patch`, confined to `RecvStream` in
 `src/lib.rs`.
 
@@ -68,14 +68,17 @@ above. The license is upstream's MIT license (`h3-quinn-0.0.10-stop-sending/LICE
 **Retire it** when an `h3-quinn` release applies `stop_sending` while a read is
 outstanding (hyperium/h3#361): bump `h3-quinn` in `Cargo.toml`, delete the
 `[patch.crates-io]` entry, this directory and the patch, and regenerate
-`THIRD_PARTY_LICENSES.md`.
+`THIRD_PARTY_LICENSES.md`. That depends on the `h3` vendor above: each
+`h3-quinn` release so far has required the `h3` released with it, so the fixed
+`h3-quinn` will most likely need an `h3` newer than 0.0.8. Retire the `h3`
+vendor first (or re-vendor that `h3` with the RFC 9220 patch), then this one.
 
 To check the vendored copy against crates.io:
 
 ```bash
 cargo download h3-quinn@0.0.10   # or unpack ~/.cargo/registry/src/*/h3-quinn-0.0.10
-cd <unpacked h3-quinn-0.0.10> && patch -p1 < vendor/patches/h3-quinn-0.0.10-stop-sending.patch
-diff -r <unpacked h3-quinn-0.0.10> vendor/h3-quinn-0.0.10-stop-sending   # only Cargo.lock and .cargo_vcs_info.json differ
+patch -d <unpacked h3-quinn-0.0.10> -p1 < vendor/patches/h3-quinn-0.0.10-stop-sending.patch
+diff -r <unpacked h3-quinn-0.0.10> vendor/h3-quinn-0.0.10-stop-sending   # only Cargo.lock differs
 ```
 
 ## `tungstenite-0.30.0-deflate/`
@@ -155,6 +158,6 @@ To check the vendored copy against crates.io:
 
 ```bash
 cargo download tungstenite@0.30.0   # or unpack ~/.cargo/registry/src/*/tungstenite-0.30.0
-cd <unpacked tungstenite-0.30.0> && patch -p1 < vendor/patches/tungstenite-0.30.0-permessage-deflate.patch
+patch -d <unpacked tungstenite-0.30.0> -p1 < vendor/patches/tungstenite-0.30.0-permessage-deflate.patch
 diff -r <unpacked tungstenite-0.30.0> vendor/tungstenite-0.30.0-deflate   # only Cargo.lock and .cargo-ok differ
 ```

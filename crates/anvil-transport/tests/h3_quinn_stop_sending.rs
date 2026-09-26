@@ -31,10 +31,9 @@ async fn connected() -> (quinn::Connection, quinn::Connection) {
     let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     client.set_default_client_config(quinn::ClientConfig::new(Arc::new(client_tls)));
     let addr = server.local_addr().unwrap();
-    tokio::join!(
-        async { client.connect(addr, "localhost").unwrap().await.unwrap() },
-        async { server.accept().await.unwrap().await.unwrap() },
-    )
+    let connect = async { client.connect(addr, "localhost").unwrap().await.unwrap() };
+    let accept = async { server.accept().await.unwrap().await.unwrap() };
+    tokio::join!(connect, accept)
 }
 
 #[tokio::test]
@@ -51,12 +50,16 @@ async fn stop_sending_during_a_pending_read_sends_the_code_at_once() {
     assert_eq!(&first[..], b"x");
     // The next read waits for data and takes the QUIC stream with it.
     assert!(poll_fn(|cx| Poll::Ready(recv.poll_data(cx))).await.is_pending());
-    assert_eq!(recv.recv_id(), id);
+    // 0.0.10 panics here: `stop_sending` unwraps the stream the read holds.
     let cancelled = h3::error::Code::H3_REQUEST_CANCELLED.value();
     recv.stop_sending(cancelled);
     // `recv` is still alive, so this STOP_SENDING came from `stop_sending`,
     // not from quinn dropping the stream.
     let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await.expect("no STOP_SENDING while the stream was open");
     assert_eq!(stopped.unwrap(), Some(quinn::VarInt::from_u64(cancelled).unwrap()));
+    // The stream is back and stopped: a read ends at once instead of waiting.
+    assert_eq!(recv.recv_id(), id);
+    let end = tokio::time::timeout(Duration::from_secs(5), poll_fn(|cx| recv.poll_data(cx))).await.expect("a read after stop_sending hung");
+    assert!(matches!(end, Ok(None)), "a read after stop_sending ends the stream: {end:?}");
     drop(recv);
 }
