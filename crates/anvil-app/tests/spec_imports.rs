@@ -5,15 +5,20 @@
 
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
+use anvil_app::runner::RunSettings;
 use anvil_app::specs::SpecTarget;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
+use anvil_domain::assertions::{Extraction, ExtractionSource};
 use anvil_domain::auth::AuthConfig;
-use anvil_domain::request::RequestSpec;
+use anvil_domain::request::{KeyValue, RequestSpec};
+use anvil_domain::runner::RunStepStatus;
 use anvil_domain::secret::SensitiveValue;
+use anvil_domain::tls::{ClientIdentity, HostBinding, TlsProfile};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
 use anvil_domain::workspace::{Environment, Variable, Workspace};
 use anvil_engine::ExecutionContext;
+use anvil_fixtures::GroundTruth;
 use anvil_import::{ImportOptions, ReimportApproval};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
@@ -21,6 +26,7 @@ use anvil_storage::KdfParams;
 use anvil_storage::store::DB_FILE;
 use std::collections::HashSet;
 use std::path::Path;
+use tokio_util::sync::CancellationToken;
 
 fn new_app(root: &Path) -> App {
     let pm = ProfileManager::new(root);
@@ -488,4 +494,125 @@ fn an_imported_collection_does_not_use_this_devices_workload_identity_by_default
     for q in &requests {
         app.build_context(Some(q.meta.id), &dest.meta.id, None, &SendOptions::default()).expect(&q.name);
     }
+}
+
+#[test]
+fn an_imported_collection_does_not_use_a_client_identity_bound_to_no_host() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut dest = destination_with_credentials(&app);
+    let done = import(&app, COLLECTION.as_bytes(), into(&dest.meta.id));
+    let root_id = done.root_folder_id.unwrap();
+    // The destination selects a TLS profile whose client certificate goes to
+    // any host (no bindings).
+    let identity = ClientIdentity::Pem {
+        cert_chain_pem: "-----BEGIN CERTIFICATE-----".into(),
+        private_key_pem: SensitiveValue::Template { value: "destination-key".into() },
+    };
+    let tls = app
+        .save_tls_profile(TlsProfile {
+            id: Id::new(),
+            workspace_id: dest.meta.id,
+            name: "device cert".into(),
+            verify: true,
+            use_system_roots: true,
+            extra_roots_pem: vec![],
+            client_identity: Some(identity),
+            bindings: vec![],
+            min_version: Default::default(),
+            server_name_override: None,
+            server_spiffe: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    dest.settings.tls_profile_id = Some(tls.id);
+    let dest = app.save_workspace(dest).unwrap();
+    let deep = app.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap();
+    let build = || app.build_context(Some(deep.meta.id), &dest.meta.id, None, &SendOptions::default());
+
+    let err = refused(build(), "a client identity bound to no host");
+    assert!(err.contains("TLS profile 'device cert'"), "{err}");
+    // Bound to hosts, it is presented only to them.
+    let mut bound = tls.clone();
+    bound.bindings = vec![HostBinding { host: "internal.example.invalid".into(), port: None }];
+    app.save_tls_profile(bound).unwrap();
+    build().expect("a bound client identity");
+    app.save_tls_profile(tls).unwrap();
+    refused(build(), "unbound again");
+    // The workspace's own requests, and the import root once the user opens
+    // it, use the profile as before.
+    let spec = RequestSpec::http("GET", "https://api.example.invalid/mine");
+    let mine = app.create_request(&dest.meta.id, None, "mine", spec).unwrap();
+    app.build_context(Some(mine.meta.id), &dest.meta.id, None, &SendOptions::default()).expect("a workspace request");
+    app.set_import_root_workspace_scope(&root_id, true).unwrap();
+    build().expect("an opened import root");
+}
+
+fn token_login(url: &str, token: &str) -> RequestSpec {
+    let mut s = RequestSpec::http("POST", url);
+    s.params.push(KeyValue::new("body", format!(r#"{{"token":"{token}"}}"#)));
+    s.extractions.push(Extraction {
+        variable: "token".into(),
+        source: ExtractionSource::JsonPath { path: "$.token".into() },
+        sensitive: true,
+    });
+    s
+}
+
+fn token_echo(url: &str, step: &str) -> RequestSpec {
+    let mut s = RequestSpec::http("GET", url);
+    s.headers.push(KeyValue::new("X-Step", step));
+    s.headers.push(KeyValue::new("X-Token", "{{token}}"));
+    s
+}
+
+/// `(X-Step, X-Token)` of every request the fixture received.
+fn received_tokens(f: &anvil_fixtures::http::Fixture) -> Vec<(String, String)> {
+    f.log
+        .entries()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            GroundTruth::RequestReceived { headers, .. } => {
+                let get = |n: &str| headers.iter().find(|(h, _)| h.eq_ignore_ascii_case(n)).map(|(_, v)| v.clone());
+                Some((get("x-step")?, get("x-token")?))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_workspace_run_keeps_extracted_values_on_their_side_of_an_import_root() {
+    anvil_fixtures::init();
+    let f = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Destination").unwrap().meta.id;
+    let (login, echo) = (f.url("/status/200"), f.url("/echo"));
+    let auth = app.create_folder(&ws, None, "Auth").unwrap().meta.id;
+    app.create_request(&ws, Some(auth), "Login", token_login(&login, "user-session-0001")).unwrap();
+    app.create_request(&ws, Some(auth), "Me", token_echo(&echo, "me")).unwrap();
+    let staging = br#"{
+      "name": "Staging",
+      "_postman_variable_scope": "environment",
+      "values": [{ "key": "k", "value": "v", "enabled": true }]
+    }"#;
+    let import_root = import(&app, staging, into(&ws)).root_folder_id.unwrap();
+    app.create_request(&ws, Some(import_root), "Leak", token_echo(&echo, "leak")).unwrap();
+    app.create_request(&ws, Some(import_root), "Imported login", token_login(&login, "imported-0002")).unwrap();
+    app.create_request(&ws, Some(import_root), "Imported", token_echo(&echo, "imported")).unwrap();
+    app.create_request(&ws, None, "After", token_echo(&echo, "after")).unwrap();
+
+    // "Run workspace": the user's folder, then the import root, then the
+    // workspace's own requests.
+    let r = app.run_folder(&ws, None, RunSettings::default(), CancellationToken::new()).await.unwrap();
+    let steps = &r.iterations[0].steps;
+    let order: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(order, ["Login", "Me", "Leak", "Imported login", "Imported", "After"]);
+    assert_ne!(steps[2].status, RunStepStatus::Passed, "the user's token is not there to send");
+    // Ground truth: what reached the peer.
+    let sent = received_tokens(&f);
+    let expected = [("me", "user-session-0001"), ("imported", "imported-0002"), ("after", "user-session-0001")];
+    assert_eq!(sent, expected.map(|(s, t)| (s.to_string(), t.to_string())));
 }

@@ -11,6 +11,7 @@ use anvil_domain::runner::*;
 use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_domain::workspace::DatasetFormat;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
+use anvil_fixtures::GroundTruth;
 use anvil_fixtures::http as fx;
 use anvil_runner::provider::MemoryProvider;
 use anvil_runner::{PlannedStep, ProvidedStep, RunDataset, RunError, RunOptions, RunPlan, StepError, StepProvider};
@@ -39,6 +40,16 @@ impl Recording {
         let id = Id::new();
         let mut ctx = ExecutionContext::standalone(spec);
         ctx.request_id = Some(id);
+        self.inner.insert(id, name, ctx);
+        id
+    }
+
+    /// A step prepared under a sealed import root (`ExecutionContext::scope`).
+    fn add_scoped(&mut self, name: &str, spec: RequestSpec, scope: Option<Id>) -> Id {
+        let id = Id::new();
+        let mut ctx = ExecutionContext::standalone(spec);
+        ctx.request_id = Some(id);
+        ctx.scope = scope;
         self.inner.insert(id, name, ctx);
         id
     }
@@ -118,6 +129,75 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     assert_eq!(header(&seen, "x-token"), Some("tok-chain-0001"));
     assert_eq!(header(&seen, "x-step"), Some("0/1"), "anvil.iteration / anvil.step builtins");
     assert_eq!(p.records.lock().len(), 2, "each executed step is handed over for history");
+}
+
+fn token_login(f: &fx::Fixture, token: &str) -> RequestSpec {
+    let mut s = RequestSpec::http("POST", &f.url("/status/200"));
+    s.params.push(KeyValue::new("body", format!(r#"{{"token":"{token}"}}"#)));
+    s.extractions.push(Extraction {
+        variable: "auth_token".into(),
+        source: ExtractionSource::JsonPath { path: "$.token".into() },
+        sensitive: true,
+    });
+    s
+}
+
+fn step_echo(f: &fx::Fixture, step: &str, headers: &[(&str, &str)]) -> RequestSpec {
+    let mut s = RequestSpec::http("GET", &f.url("/echo"));
+    s.headers.push(KeyValue::new("X-Step", step));
+    for (name, value) in headers {
+        s.headers.push(KeyValue::new(*name, *value));
+    }
+    s
+}
+
+/// `(X-Step, X-Token, X-Pass)` of every request the fixture received.
+fn received_steps(f: &fx::Fixture) -> Vec<(String, Option<String>, Option<String>)> {
+    f.log
+        .entries()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            GroundTruth::RequestReceived { headers, .. } => {
+                let get = |n: &str| header(&headers, n).map(str::to_string);
+                Some((get("x-step")?, get("x-token"), get("x-pass")))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn extracted_values_and_dataset_rows_stay_on_their_side_of_an_import_root() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let root = Some(Id::new());
+    let mut p = Recording::default();
+    let login = p.add("Login", token_login(&f, "tok-user-0001"));
+    // Under a sealed import root: a value extracted outside it and the run's
+    // dataset row are not there, so these two are never sent.
+    let leak = p.add_scoped("Leak", step_echo(&f, "leak", &[("X-Token", "{{auth_token}}")]), root);
+    let row = p.add_scoped("Row", step_echo(&f, "row", &[("X-Pass", "{{password}}")]), root);
+    // What the root's own steps extract stays under it.
+    let own = p.add_scoped("Own", token_login(&f, "tok-imported-0002"), root);
+    let imported = p.add_scoped("Imported", step_echo(&f, "imported", &[("X-Token", "{{auth_token}}")]), root);
+    let me = p.add("Me", step_echo(&f, "me", &[("X-Token", "{{auth_token}}"), ("X-Pass", "{{password}}")]));
+    let mut pl = plan(&[(login, "Login"), (leak, "Leak"), (row, "Row"), (own, "Own"), (imported, "Imported"), (me, "Me")]);
+    pl.dataset = Some(RunDataset::parse("users", DatasetFormat::Csv, b"password\npw-row-secret-1\n", &["password".into()]).unwrap());
+
+    let engine = Engine::new();
+    let r = anvil_runner::run(&engine, &p, pl, RunOptions::default(), CancellationToken::new()).await.unwrap();
+    let steps = &r.iterations[0].steps;
+    assert_ne!(steps[1].status, RunStepStatus::Passed);
+    assert_ne!(steps[2].status, RunStepStatus::Passed);
+    assert_eq!(steps[4].status, RunStepStatus::Passed, "{r:#?}");
+    assert_eq!(steps[5].status, RunStepStatus::Passed, "{r:#?}");
+    // Ground truth: what reached the peer.
+    let some = |s: &str| Some(s.to_string());
+    let expected = [
+        ("imported".to_string(), some("tok-imported-0002"), None),
+        ("me".to_string(), some("tok-user-0001"), some("pw-row-secret-1")),
+    ];
+    assert_eq!(received_steps(&f), expected);
 }
 
 #[tokio::test]

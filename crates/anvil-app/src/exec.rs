@@ -100,7 +100,10 @@ impl App {
     /// JWT-SVID from this device's Workload API or a token file is refused,
     /// until the user opens the root to the workspace on this device
     /// (`use_workspace_scope`). Settings still apply from the workspace
-    /// down: TLS and proxy profiles are bound to the hosts they name.
+    /// down, but a TLS profile whose client identity is bound to no host is
+    /// refused. The context is tagged with the sealed root
+    /// (`ExecutionContext::scope`) so a run or load chain keeps values
+    /// extracted outside it, and its dataset, away from it.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -208,9 +211,11 @@ impl App {
             send_anyway: opts.send_anyway,
             seed: opts.seed,
             redaction_names: settings_app.redaction_names.clone(),
+            scope: sealed.map(|i| chain[i].meta.id),
         };
         if sealed.is_some() {
             refuse_device_identity(&ctx.effective_auth().1)?;
+            refuse_unbound_client_identity(&ctx)?;
         }
         self.check_token_files(&ctx.effective_auth().1)?;
         Ok(ctx)
@@ -269,6 +274,26 @@ fn refuse_device_identity(auth: &AuthConfig) -> Result<()> {
         return Err(AppError::Invalid(
             "an imported collection does not use this device's workload identity or token files until opened to the workspace".into(),
         ));
+    }
+    Ok(())
+}
+
+/// Refuse a TLS profile with a client identity (a certificate or this
+/// device's X.509-SVID) and no host bindings, which would present it to any
+/// destination, for a request under an import root that the user has not
+/// opened to the workspace. A bound profile presents it only to the hosts
+/// it names.
+fn refuse_unbound_client_identity(ctx: &ExecutionContext) -> Result<()> {
+    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
+    if let Some(p) = profile
+        && p.client_identity.is_some()
+        && p.bindings.is_empty()
+    {
+        return Err(AppError::Invalid(format!(
+            "an imported collection does not use TLS profile '{}' (a client identity bound to no host) until opened to the workspace",
+            p.name
+        )));
     }
     Ok(())
 }

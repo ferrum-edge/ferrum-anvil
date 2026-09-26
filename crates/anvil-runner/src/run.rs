@@ -170,7 +170,9 @@ impl Run {
         self.totals.iterations_started += 1;
         self.emitter.emit(RunEvent::IterationStarted { run_id: self.run_id, iteration: it, dataset_row }, Class::Normal);
 
-        let mut extracted: Vec<VarEntry> = Vec::new();
+        // Run-local values, each with the scope of the step that extracted
+        // it (`ExecutionContext::scope`).
+        let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
         let mut stopped_at: Option<u32> = None;
         let mut failed = false;
         let mut stop = false;
@@ -244,11 +246,18 @@ impl Run {
                     VarEntry { name: "anvil.step".into(), value: pos.to_string(), secret: false },
                 ],
             });
-            if let Some(l) = &dataset_layer {
+            // A step under a sealed import root sees only values extracted
+            // under that root, and no dataset row (the dataset is the
+            // workspace's); a step outside it never sees what it extracted.
+            let scope = ctx.scope;
+            if scope.is_none()
+                && let Some(l) = &dataset_layer
+            {
                 ctx.var_layers.push(l.clone());
             }
-            if !extracted.is_empty() {
-                ctx.var_layers.push(VarLayer { label: "extracted (this iteration)".into(), vars: extracted.clone() });
+            let visible: Vec<VarEntry> = extracted.iter().filter(|(s, _)| *s == scope).map(|(_, e)| e.clone()).collect();
+            if !visible.is_empty() {
+                ctx.var_layers.push(VarLayer { label: "extracted (this iteration)".into(), vars: visible });
             }
             for n in self.secrets.names() {
                 if !ctx.redaction_names.iter().any(|x| x.eq_ignore_ascii_case(n)) {
@@ -268,8 +277,8 @@ impl Run {
                     new_secrets.push(value.clone());
                     self.secrets.add_name(&var);
                 }
-                extracted.retain(|e| e.name != var);
-                extracted.push(VarEntry { name: var, value, secret: sensitive });
+                extracted.retain(|(s, e)| *s != scope || e.name != var);
+                extracted.push((scope, VarEntry { name: var, value, secret: sensitive }));
             }
             self.secrets.add_values(new_secrets);
             self.secrets.scrub_record(&mut out.record);

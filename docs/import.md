@@ -96,23 +96,40 @@ collection's own scope (`App::build_context`):
 
 - variables of the import root and the folders under it, and of an
   environment the import brought with it when that one is selected;
-- auth of the import root, the folders under it and the request.
+- auth of the import root, the folders under it and the request;
+- in a collection run or a load chain, values extracted in the same
+  iteration by requests under the same import root.
 
 The destination workspace's variables and auth, folders above the import
 root, and every other environment (including the destination's active one,
 even when chosen for a send) are left out, whether or not their values are
-secret. A JWT-SVID drawn from this device's SPIFFE Workload API or from a
-token file is refused. So an imported `Bearer {{token}}` can never pick up
-the destination's `token`: it stays unresolved and the request is not sent.
+secret. So are the run-local values of the workspace: a value extracted in
+the same iteration by a request outside the import root, and the row of the
+run's or load plan's dataset. Each prepared request carries the import root
+it was sealed under (`ExecutionContext::scope`, `None` outside one), and
+the runner and the load executor hand a step only the extracted values of
+its own scope and, outside an import root only, the dataset row. It works
+the other way too: a value extracted under the import root is not visible
+to the workspace's own requests. Runs of requests that are not under an
+import root are unchanged.
+
+A JWT-SVID drawn from this device's SPIFFE Workload API or from a token file
+is refused, and so is a TLS profile whose client identity (a certificate or
+this device's X.509-SVID) is bound to no host, since it would be presented
+to any host the collection names. So an imported `Bearer {{token}}` can
+never pick up the destination's `token`, whether it is a variable of the
+destination or a value its own login request extracted earlier in the same
+run: it stays unresolved and the request is not sent.
 
 The user can open an import root to its workspace on this device
-(`use_workspace_scope`, set only by `App::set_import_root_workspace_scope`,
-the desktop command `folder_set_workspace_scope`; the folder settings control
-for it is still to come). Then the workspace's variables, active environment
-and auth, and this device's workload identity, apply under it as under any
-folder. An import never sets it: a spec import creates the root with it off,
-saving a folder keeps the stored value, and a bundle import turns it off with
-a warning (the import root itself is kept).
+(`use_workspace_scope`, set only by `App::set_import_root_workspace_scope`
+and the desktop command `folder_set_workspace_scope`; the desktop control
+that calls it is pending). Then the workspace's variables, active
+environment and auth, this device's workload identity and TLS client
+identities, and the run's extracted values and dataset rows apply under it
+as under any folder. An import never sets it: a spec import creates the root
+with it off, saving a folder keeps the stored value, and a bundle import
+turns it off with a warning (the import root itself is kept).
 
 Precedence. In a workspace of its own the source's collection variables are
 workspace variables, below the environment. Under an import root they rank
@@ -122,12 +139,12 @@ environment, then the folders under the import root and the run's
 iteration values. An existing-workspace import therefore prepares
 exactly like a new-workspace import of the same source.
 
-Settings are not part of the boundary: TLS and proxy profiles, DNS
-overrides and gateway profiles selected by the destination workspace or an
-outer folder still apply under an import root. A TLS client identity is
-presented only to the hosts its profile is bound to, and a proxy only
-carries the connection, so neither hands a destination credential to a host
-the collection names.
+Other settings still apply under an import root: TLS trust (verification,
+roots, minimum version), proxy profiles, DNS overrides and gateway profiles
+selected by the destination workspace or an outer folder. A TLS profile with
+a client identity applies only when it is bound to hosts, and then the
+identity is presented only to those hosts. A proxy carries the connection
+and its own TLS profile is used only for the connection to the proxy.
 
 ## Reimport (DATA-012)
 

@@ -112,6 +112,10 @@ pub struct WorkerRequest {
     pub seed: Option<u64>,
     #[serde(default)]
     pub redaction_names: Vec<String>,
+    /// The sealed import root the request was prepared under
+    /// (`ExecutionContext::scope`).
+    #[serde(default)]
+    pub scope: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +354,7 @@ impl WorkerJob {
                 send_anyway: ctx.send_anyway,
                 seed: ctx.seed,
                 redaction_names: ctx.redaction_names.clone(),
+                scope: ctx.scope,
             });
         }
         let dataset = job.dataset.as_ref().map(|d| WireDataset {
@@ -411,6 +416,7 @@ impl WorkerJob {
             ctx.send_anyway = r.send_anyway;
             ctx.seed = r.seed;
             ctx.redaction_names = r.redaction_names;
+            ctx.scope = r.scope;
             requests.insert(r.request_id, ctx);
         }
         let dataset = match self.dataset {
