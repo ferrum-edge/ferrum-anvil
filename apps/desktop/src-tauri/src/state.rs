@@ -336,7 +336,10 @@ impl ImportGate {
 
     /// Abandon the import; `false` once its writes have begun.
     pub fn abandon(&self) -> bool {
-        self.0.compare_exchange(Self::OPEN, Self::ABANDONED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        match self.0.compare_exchange(Self::OPEN, Self::ABANDONED, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => true,
+            Err(state) => state == Self::ABANDONED,
+        }
     }
 }
 
