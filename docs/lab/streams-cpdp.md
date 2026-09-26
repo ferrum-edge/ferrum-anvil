@@ -191,6 +191,16 @@ and PROTO-013 skipped once. A streams run takes about 24 s and a cpdp run about 
 After RFC 9220 support was added, three more consecutive streams runs gave 62 passed,
 0 failed, 0 skipped each (31 scenarios × 2 passes).
 
+After gRPC over HTTP/3 and gRPC-Web were added (Ferrum Edge **v0.9.7**, sha256
+`f3bd0027…`, 2026-09-26), three consecutive `run streams --untrusted-pass` runs gave
+**84 passed, 0 failed, 0 skipped** each (42 scenarios × 2 passes, about 30–40 s per run), with
+no `ferrum.*` finding in any untrusted record. The GRPCWEB-lookalike observation (an appended
+`grpc-status: 2` trailer frame over HTTP/1.1 and HTTP/2, none over HTTP/3) was the same in
+every run. An earlier batch had one failure in three runs: UP-002-tcp read the operator log
+before the gateway had written the stream's transaction line (the line was present a moment
+later). The `error_class` checks of UP-002-tcp, UP-004-tcps, PROTO-014-down and UP-010-grpc
+now wait up to 3 s for the line, as the new gRPC-Web and HTTP/3 scenarios do.
+
 | Run | streams (29 × 2 + 1 skip) | cpdp (5 × 2) |
 |---|---|---|
 | 1 | 58 passed, 0 failed, 1 skipped | 10 passed, 0 failed |

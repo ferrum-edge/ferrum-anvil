@@ -1032,7 +1032,7 @@ fn proto014_down(env: &Env) -> Fut<'_> {
             "",
         );
         c.operator_class(
-            &op_log(env, from, "proto014-grpc-down"),
+            &op_log_settled(env, from, "proto014-grpc-down", 1).await,
             "proto014-grpc-down",
             &["connection_refused", "connection_pool_error", "request_error"],
         );
@@ -1212,7 +1212,7 @@ fn up010_grpc(env: &Env) -> Fut<'_> {
             env.fx.grpc_slow.log.count_requests() > before,
             "",
         );
-        c.operator_class(&op_log(env, from, "proto016-grpc-slow"), "proto016-grpc-slow", &["read_write_timeout"]);
+        c.operator_class(&op_log_settled(env, from, "proto016-grpc-slow", 1).await, "proto016-grpc-slow", &["read_write_timeout"]);
         let r = grpc_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto016-grpc-slow") }
     })
@@ -2245,7 +2245,7 @@ fn up002_tcp(env: &Env) -> Fut<'_> {
         c.not_success(&o);
         c.has(&o, "tcp.closed_without_data");
         c.max_confidence(&o, "tcp.closed_without_data", Confidence::Confirmed);
-        c.operator_class(&op_log(env, from, "tcp-refused"), "tcp-refused", &["connection_refused"]);
+        c.operator_class(&op_log_settled(env, from, "tcp-refused", 1).await, "tcp-refused", &["connection_refused"]);
         let r = tcp_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcp-refused") }
     })
@@ -2273,7 +2273,7 @@ fn up004_tcps(env: &Env) -> Fut<'_> {
             connections(&env.fx.tcps_untrusted.log) > before,
             "",
         );
-        c.operator_class(&op_log(env, from, "tcps-untrusted"), "tcps-untrusted", &["tls_error"]);
+        c.operator_class(&op_log_settled(env, from, "tcps-untrusted", 1).await, "tcps-untrusted", &["tls_error"]);
         // Recovery: the same shape through the tcps route whose backend the gateway trusts.
         let r = send(env, &tcp_ctx(env, "tls://127.0.0.1:18406", TcpFraming::NewlineDelimited, &["ok"], false, 1)).await;
         c.add(
