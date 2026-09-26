@@ -9,7 +9,7 @@ use anvil_domain::runner::{RunEvent, RunReport};
 use anvil_domain::workspace::{Scenario, ScenarioStep};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
 pub fn scenarios_list(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec<Scenario>> {
@@ -69,8 +69,12 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
     let pending = PendingEntry::register(&st.running, run_id)?;
     let app = st.app()?;
     let h2 = handle.clone();
+    let owner = app.clone();
     let sink: anvil_runner::RunEventSink = Arc::new(move |ev: RunEvent| {
-        let _ = h2.emit("run-event", &ev);
+        // Only to the window of the profile the run started under.
+        if h2.state::<DesktopState>().is_current(&owner) {
+            let _ = h2.emit("run-event", &ev);
+        }
     });
     let settings = RunSettings {
         environment: input.environment_id.as_deref().map(id).transpose()?,

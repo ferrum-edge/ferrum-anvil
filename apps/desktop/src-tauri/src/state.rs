@@ -75,8 +75,9 @@ pub struct DesktopState {
     /// (stop-on-lock, or another profile opened), by the vault they belong to;
     /// saved when that profile is next unlocked. Reports are already redacted.
     pub pending_load_reports: PendingReports<LoadReport>,
-    /// Open interactive sessions by execution id.
-    pub sessions: Mutex<HashMap<String, crate::cmd_sessions::SessionSlot>>,
+    /// Open interactive sessions by execution id, with the profile each was
+    /// opened under.
+    pub sessions: Mutex<HashMap<String, (Arc<App>, crate::cmd_sessions::SessionSlot)>>,
     /// Files the user chose in native dialogs this session; file commands
     /// accept only these grants, never a path from the webview.
     pub file_grants: FileGrants,
@@ -190,7 +191,7 @@ impl DesktopState {
             lock.cancel();
         }
         // Interactive sessions are aborted; their watcher records the result.
-        let open: Vec<_> = self.sessions.lock().values().cloned().collect();
+        let open: Vec<_> = self.sessions.lock().values().map(|(_, slot)| slot.clone()).collect();
         for slot in open {
             tauri::async_runtime::spawn(async move {
                 if let Some(s) = slot.lock().await.as_ref() {

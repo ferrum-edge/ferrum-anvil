@@ -22,7 +22,7 @@ use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub(crate) type R<T> = Result<T, String>;
 
@@ -472,8 +472,13 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
     let h2 = handle.clone();
+    let owner = app.clone();
     let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
+        // Only to the window of the profile the send started under.
+        if !h2.state::<DesktopState>().is_current(&owner) {
+            return;
+        }
         if matches!(ev, ExecutionEvent::BodyProgress { .. }) {
             let mut l = last_progress.lock();
             if l.elapsed() < std::time::Duration::from_millis(100) {

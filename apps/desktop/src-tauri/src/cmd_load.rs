@@ -85,9 +85,11 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
         loop {
             tokio::select! {
                 p = controller.next_progress() => match p {
-                    Some(progress) => {
+                    // Only to the window of the profile the run started under.
+                    Some(progress) if handle.state::<DesktopState>().is_current(&app) => {
                         let _ = handle.emit("load-progress", LoadProgressEvent { run_key: key.clone(), progress });
                     }
+                    Some(_) => {}
                     None => break,
                 },
                 _ = cancel.cancelled(), if !canceled => {

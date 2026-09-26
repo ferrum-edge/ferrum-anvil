@@ -49,13 +49,17 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
     };
     let ctx = app.build_context(rid, &ws, input.spec, &opts).map_err(e)?;
     let h2 = handle.clone();
+    let owner = app.clone();
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
-        let _ = h2.emit("execution-event", &ev);
+        // Only to the window of the profile the session was opened under.
+        if h2.state::<DesktopState>().is_current(&owner) {
+            let _ = h2.emit("execution-event", &ev);
+        }
     });
     let open = app.engine.open_session(ctx, EventCtx { execution_id: exec_id, sink: Some(sink) });
     let publish = |session| {
         let slot: SessionSlot = Arc::new(tokio::sync::Mutex::new(Some(session)));
-        st.sessions.lock().insert(execution_id.clone(), slot.clone());
+        st.sessions.lock().insert(execution_id.clone(), (app.clone(), slot.clone()));
         slot
     };
     let Some((slot, canceled)) = pending.open(open, publish).await else {
@@ -113,7 +117,12 @@ where
     F: for<'a> FnOnce(&'a SessionHandle) -> std::pin::Pin<Box<dyn std::future::Future<Output = R<()>> + Send + 'a>>,
 {
     st.app()?;
-    let slot = st.sessions.lock().get(execution_id).cloned().ok_or_else(|| "the session is no longer open".to_string())?;
+    let closed = || "the session is no longer open".to_string();
+    let (owner, slot) = st.sessions.lock().get(execution_id).cloned().ok_or_else(closed)?;
+    // A session of a profile that is no longer open is not driven from another.
+    if !st.is_current(&owner) {
+        return Err(closed());
+    }
     let guard = slot.lock().await;
     match guard.as_ref() {
         Some(s) => f(s).await,
