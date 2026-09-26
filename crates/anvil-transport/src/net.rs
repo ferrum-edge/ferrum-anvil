@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub struct ConnectResult {
-    pub stream: TcpStream,
+pub struct ConnectResult<S = TcpStream> {
+    pub stream: S,
     pub attempts: Vec<ConnectAttempt>,
     pub remote: SocketAddr,
 }
@@ -30,6 +30,22 @@ pub async fn connect_tcp(
     addrs: &[SocketAddr],
     deadline: Option<Duration>,
 ) -> Result<ConnectResult, (TransportFailure, Vec<ConnectAttempt>)> {
+    let r = race(addrs, deadline, TcpStream::connect).await?;
+    let _ = r.stream.set_nodelay(true);
+    Ok(r)
+}
+
+/// The [`connect_tcp`] race over any connector, so tests can script when each
+/// address refuses or accepts instead of relying on how fast the OS refuses.
+async fn race<S, F, Fut>(
+    addrs: &[SocketAddr],
+    deadline: Option<Duration>,
+    connect: F,
+) -> Result<ConnectResult<S>, (TransportFailure, Vec<ConnectAttempt>)>
+where
+    F: Fn(SocketAddr) -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
     use futures::stream::{FuturesUnordered, StreamExt};
     let started = Instant::now();
     let overall = deadline.map(|d| tokio::time::Instant::now() + d);
@@ -41,9 +57,10 @@ pub async fn connect_tcp(
         let addr = addrs[i];
         attempts.push(ConnectAttempt { address: addr.to_string(), failure: None, duration_us: None });
         let slot = attempts.len() - 1;
+        let dial = connect(addr);
         async move {
             let t = Instant::now();
-            let r = TcpStream::connect(addr).await;
+            let r = dial.await;
             (slot, addr, r, t.elapsed().as_micros() as u64)
         }
     };
@@ -59,7 +76,6 @@ pub async fn connect_tcp(
         tokio::select! {
             Some((slot, addr, res, dur)) = in_flight.next() => match res {
                 Ok(stream) => {
-                    let _ = stream.set_nodelay(true);
                     attempts[slot].duration_us = Some(dur);
                     for (k, a) in attempts.iter_mut().enumerate() {
                         if k != slot && a.failure.is_none() && a.duration_us.is_none() {
@@ -388,13 +404,64 @@ mod happy_eyeballs_tests {
         assert_eq!(r.attempts[1].failure, None);
     }
 
-    /// Where a refusal is immediate (Linux, macOS) the next address is tried at
-    /// once, without waiting out the stagger. Windows retransmits the SYN to a
-    /// closed loopback port for about 2 s before reporting the refusal, so there
-    /// the attempt is still pending when the stagger starts the next address and
-    /// is recorded as superseded.
-    #[tokio::test]
+    /// Drives [`race`] on paused time with a scripted connector: the first
+    /// address refuses (after `refusal`, or at once), the second accepts at
+    /// once. Returns the result and when, after the start, each address was
+    /// dialled.
+    async fn scripted(refusal: Option<Duration>) -> (ConnectResult<SocketAddr>, Vec<(SocketAddr, Duration)>) {
+        let (first, second): (SocketAddr, SocketAddr) = ("192.0.2.1:9".parse().unwrap(), "192.0.2.2:9".parse().unwrap());
+        let start = tokio::time::Instant::now();
+        let dialled = std::sync::Mutex::new(Vec::new());
+        let r = race(&[first, second], Some(Duration::from_secs(5)), |addr| {
+            dialled.lock().unwrap().push((addr, start.elapsed()));
+            async move {
+                if addr != first {
+                    return Ok(addr);
+                }
+                if let Some(after) = refusal {
+                    tokio::time::sleep(after).await;
+                }
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+            }
+        })
+        .await
+        .map_err(|(f, _)| f)
+        .unwrap();
+        (r, dialled.into_inner().unwrap())
+    }
+
+    /// A refusal starts the next address at once, without waiting out the
+    /// stagger, and is recorded as refused.
+    #[tokio::test(start_paused = true)]
     async fn a_refused_first_address_moves_on_immediately() {
+        let (r, dialled) = scripted(None).await;
+        assert_eq!(r.remote, dialled[1].0);
+        assert!(dialled[1].1 < ATTEMPT_DELAY, "dialled on the refusal, not the stagger: {dialled:?}");
+        assert_eq!(r.attempts.len(), 2);
+        assert_eq!(r.attempts[0].failure, Some(FailureKind::ConnectRefused), "{:?}", r.attempts);
+        assert_eq!(r.attempts[1].failure, None);
+    }
+
+    /// A refusal slower than the stagger (Windows retransmits the SYN to a
+    /// closed loopback port for about two seconds) does not hold up the next
+    /// address, and the refused attempt is recorded as superseded, not refused.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_refusal_is_superseded_at_the_attempt_delay() {
+        let (r, dialled) = scripted(Some(Duration::from_secs(2))).await;
+        assert_eq!(r.remote, dialled[1].0);
+        let at = dialled[1].1;
+        assert!(at >= ATTEMPT_DELAY && at < Duration::from_secs(2), "dialled by the stagger, before the refusal: {dialled:?}");
+        assert_eq!(r.attempts.len(), 2);
+        assert_eq!(r.attempts[0].failure, Some(FailureKind::Canceled), "{:?}", r.attempts);
+        assert_eq!(r.attempts[1].failure, None);
+    }
+
+    /// The same race against the OS. A closed loopback port refuses at once on
+    /// Linux and macOS; on Windows the refusal comes after the stagger, so the
+    /// live address wins and the closed one is recorded as superseded. Both
+    /// records are truthful; a timeout or a lost live address is not.
+    #[tokio::test]
+    async fn a_closed_loopback_port_does_not_cost_the_connect_budget() {
         let closed = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap()
@@ -403,15 +470,16 @@ mod happy_eyeballs_tests {
         let live = l.local_addr().unwrap();
         let t = Instant::now();
         let r = connect_tcp(&[closed, live], Some(Duration::from_secs(5))).await.map_err(|(f, _)| f).unwrap();
+        let took = t.elapsed();
         assert_eq!(r.remote, live);
         assert_eq!(r.attempts.len(), 2);
         assert_eq!(r.attempts[1].failure, None);
-        if cfg!(windows) {
-            assert_eq!(r.attempts[0].failure, Some(FailureKind::Canceled), "{:?}", r.attempts);
-            assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
-        } else {
-            assert_eq!(r.attempts[0].failure, Some(FailureKind::ConnectRefused), "{:?}", r.attempts);
-            assert!(t.elapsed() < ATTEMPT_DELAY, "moved on before the stagger: {:?}", t.elapsed());
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+        match r.attempts[0].failure {
+            Some(FailureKind::ConnectRefused) => {}
+            // Only the stagger starts the next address while one is pending.
+            Some(FailureKind::Canceled) => assert!(took >= ATTEMPT_DELAY, "superseded before the stagger: {took:?}"),
+            other => panic!("the closed port must be refused or superseded, not {other:?}: {:?}", r.attempts),
         }
     }
 

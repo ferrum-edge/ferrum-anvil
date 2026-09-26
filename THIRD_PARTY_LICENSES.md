@@ -316,7 +316,7 @@ the modified file under MPL-2.0.
 | gtk3-macros | 0.18.2 | MIT | https://github.com/gtk-rs/gtk3-rs |
 | h2 | 0.4.19 | MIT | https://github.com/hyperium/h2 |
 | h3 | 0.0.8 | MIT | https://github.com/hyperium/h3 (vendored with a patch: vendor/h3-0.0.8-rfc9220) |
-| h3-quinn | 0.0.10 | MIT | https://github.com/hyperium/h3 |
+| h3-quinn | 0.0.10 | MIT | https://github.com/hyperium/h3 (vendored with a patch: vendor/h3-quinn-0.0.10-stop-sending) |
 | hashbrown | 0.12.3 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
