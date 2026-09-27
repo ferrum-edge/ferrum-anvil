@@ -79,12 +79,9 @@ fn encode_target_part(s: &str) -> String {
     out
 }
 
-const QUERY_COMPONENT: &percent_encoding::AsciiSet =
-    &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
-
-pub fn encode_component(s: &str) -> String {
-    percent_encoding::utf8_percent_encode(s, QUERY_COMPONENT).to_string()
-}
+/// The one query encoder, shared with multi-auth so an HMAC profile signs
+/// the query parameters an earlier profile added exactly as they are sent.
+pub use anvil_auth::encode_query_component as encode_component;
 
 /// Parse a resolved URL into a target without normalizing the path.
 pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<String>) -> Result<Target, TransportFailure> {

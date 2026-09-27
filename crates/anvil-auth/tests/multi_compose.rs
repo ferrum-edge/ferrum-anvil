@@ -9,7 +9,6 @@ use anvil_auth::hmac_sig::{mac, signing_string};
 use anvil_auth::{Applied, HmacParams, ResolvedAuth, SignableRequest};
 use anvil_domain::auth::{BodyDigestHeader, HmacAlgorithm, HmacProfile, KeyLocation, WssePasswordType};
 use base64::Engine;
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><m:Ping xmlns:m="urn:x">1</m:Ping></soap:Body></soap:Envelope>"#;
@@ -46,6 +45,15 @@ fn hmac() -> ResolvedAuth {
     ResolvedAuth::Hmac(hmac_params(BodyDigestHeader::ContentDigest))
 }
 
+fn dpop() -> ResolvedAuth {
+    ResolvedAuth::Dpop {
+        access_token: Zeroizing::new("bound-access-token".into()),
+        private_key_pem: Zeroizing::new(anvil_auth::dpop::generate_key_pem().unwrap()),
+        dpop_scheme: true,
+        nonce: None,
+    }
+}
+
 fn wsse() -> ResolvedAuth {
     ResolvedAuth::Wsse {
         username: "alice".into(),
@@ -74,7 +82,7 @@ fn fact<'a>(a: &'a Applied, name: &str) -> &'a str {
 
 /// Rebuild the canonical string from the Date, digest and nonce `apply`
 /// returned, over the authority, query and body of the request as sent, and
-/// check both the recorded signing-string hash and the signature against it.
+/// check that the signature sent is the one computed over it.
 fn assert_signed_over(a: &Applied, authority: &str, raw_query: &str, body: &[u8]) {
     let p = hmac_params(BodyDigestHeader::ContentDigest);
     let date = header(a, "Date").expect("Date header");
@@ -92,10 +100,10 @@ fn assert_signed_over(a: &Applied, authority: &str, raw_query: &str, body: &[u8]
         digest_value,
         Some(fact(a, "hmac.nonce")),
     );
-    assert_eq!(fact(a, "hmac.signing_string_sha256"), hex::encode(Sha256::digest(ss.as_bytes())), "signed query {raw_query:?}");
     let sig = base64::engine::general_purpose::STANDARD.encode(mac(p.algorithm, p.secret.as_bytes(), ss.as_bytes()));
     let auth = header(a, "Authorization").expect("Authorization header");
-    assert!(auth.contains(&format!("signature=\"{sig}\"")), "{auth}");
+    assert!(auth.contains(&format!("signature=\"{sig}\"")), "signed query {raw_query:?}: {auth}");
+    assert!(a.facts.iter().all(|(n, _)| n != "hmac.signing_string_sha256"), "no signing-string hash is recorded");
 }
 
 // ------------------------------------------------------------ cookies
@@ -128,6 +136,27 @@ fn a_profile_cookie_replaces_a_request_cookie_of_the_same_name() {
     let req = request("GET", "", &[("Cookie", "First=kept")], b"");
     let a = apply(key("first", "one", KeyLocation::Cookie), &req).unwrap();
     assert_eq!(header(&a, "cookie"), Some("First=kept; first=one"));
+}
+
+#[test]
+fn a_cookie_key_that_would_inject_another_cookie_is_refused() {
+    let req = request("GET", "", &[("Cookie", "sid=abc")], b"");
+    for value in ["a; x=y", "a,x=y", "a b", "a\tb", "a\r\nX-Injected: 1", "a\"b", "a\\b", "caf\u{e9}"] {
+        let err = apply(key("session", value, KeyLocation::Cookie), &req).unwrap_err();
+        assert!(err.contains("cookie API key 'session'"), "{value:?}: {err}");
+        assert!(!err.contains(value), "the message never repeats the value: {err}");
+        let err = multi(vec![key("first", "one", KeyLocation::Cookie), key("session", value, KeyLocation::Cookie)], &req).unwrap_err();
+        assert!(err.contains("cookie API key 'session'"), "{value:?}: {err}");
+    }
+    for name in ["x=y", "a;b", "a b", "a,b", "a\"b", "a\u{1}b"] {
+        let err = apply(key(name, "one", KeyLocation::Cookie), &req).unwrap_err();
+        assert!(err.contains("not a valid cookie name") && !err.contains("one"), "{name:?}: {err}");
+    }
+    // Cookie-octets, an empty value and a quoted value are all sent as given.
+    for value in ["tok-1/2+3=4:5!#$%&'()*<>?@[]^_`{|}~", "", "\"quoted\""] {
+        let a = apply(key("session", value, KeyLocation::Cookie), &req).unwrap();
+        assert_eq!(header(&a, "cookie"), Some(format!("sid=abc; session={value}").as_str()));
+    }
 }
 
 #[test]
@@ -213,6 +242,46 @@ fn a_digest_header_set_before_hmac_is_refused_by_the_signer() {
     let req = request("POST", "", &[], b"{}");
     let err = multi(vec![key("Content-Digest", "sha-256=:abc:", KeyLocation::Header), hmac()], &req).unwrap_err();
     assert!(err.contains("Digest"), "{err}");
+}
+
+#[test]
+fn a_multi_auth_set_holds_one_hmac_profile() {
+    let req = request("POST", "", &[], b"{}");
+    let err = multi(vec![hmac(), hmac()], &req).unwrap_err();
+    assert_eq!(err, "a multi-auth set can hold one HMAC profile");
+    let nested = ResolvedAuth::Multi(vec![hmac()]);
+    let err = multi(vec![key("key", "audit-only-key", KeyLocation::Query), hmac(), nested], &req).unwrap_err();
+    assert_eq!(err, "a multi-auth set can hold one HMAC profile");
+}
+
+// ------------------------------------------------------------ DPoP
+
+#[test]
+fn a_multi_auth_set_holds_one_dpop_profile() {
+    let req = request("GET", "", &[], b"");
+    let err = multi(vec![dpop(), dpop()], &req).unwrap_err();
+    assert_eq!(err, "a multi-auth set can hold one DPoP profile");
+}
+
+#[test]
+fn a_host_header_after_dpop_is_refused() {
+    let req = request("GET", "", &[], b"");
+    let err = multi(vec![dpop(), key("Host", "gw.example.com", KeyLocation::Header)], &req).unwrap_err();
+    assert!(err.contains("change the Host header after dpop"), "{err}");
+    // Before DPoP, the proof's htu names the Host that is sent.
+    let a = multi(vec![key("Host", "gw.example.com", KeyLocation::Header), dpop()], &req).unwrap();
+    assert_eq!(fact(&a, "dpop.htu"), "https://gw.example.com/api/orders");
+}
+
+#[test]
+fn a_query_key_and_ws_security_after_dpop_are_allowed() {
+    // DPoP's htu excludes the query, and the proof does not cover the body.
+    let req = request("POST", "", &[], ENVELOPE.as_bytes());
+    let a = multi(vec![dpop(), key("key", "audit-only-key", KeyLocation::Query), wsse()], &req).unwrap();
+    assert_eq!(a.append_query, vec![("key".to_string(), "audit-only-key".to_string())]);
+    assert!(String::from_utf8_lossy(a.body.as_deref().expect("WS-Security rewrites the body")).contains("<wsse:Security"));
+    assert!(header(&a, "Authorization").is_some_and(|v| v.starts_with("DPoP ")));
+    assert_eq!(fact(&a, "dpop.htu"), "https://api.example.com/api/orders");
 }
 
 // ------------------------------------------------------------ WS-Security + HMAC
