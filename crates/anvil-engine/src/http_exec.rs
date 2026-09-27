@@ -482,25 +482,32 @@ fn invalid_header(msg: String, field: &str) -> TransportFailure {
     TransportFailure::new(Phase::Prepare, FailureKind::InvalidHeader, msg).with_field(field)
 }
 
-/// Refuse a header an auth profile produced that is not valid on the wire (a
-/// line break pasted with a token, a header name with a space) rather than
-/// send the request without it. The message names the header, never its
-/// value: the value is a credential.
-pub(crate) fn check_auth_headers(applied: &anvil_auth::Applied) -> Result<(), TransportFailure> {
+/// Why a header an auth profile produced is not valid on the wire (a line
+/// break pasted with a token, a header name with a space), naming the header,
+/// never its value: the value is a credential. `None` when every header is
+/// valid.
+pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<String> {
     let label = &applied.label;
     for (n, v) in &applied.set_headers {
-        let why = if http::HeaderName::from_bytes(n.as_bytes()).is_err() {
-            format!("the auth profile {label} would send a header named {n:?}, which is not a valid header name")
-        } else if http::HeaderValue::from_str(v).is_err() {
-            format!(
+        if http::HeaderName::from_bytes(n.as_bytes()).is_err() {
+            return Some(format!("the auth profile {label} would send a header named {n:?}, which is not a valid header name"));
+        }
+        if http::HeaderValue::from_str(v).is_err() {
+            return Some(format!(
                 "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break, control or non-ASCII character, for example pasted with the credential)"
-            )
-        } else {
-            continue;
-        };
-        return Err(invalid_header(format!("{why}; the request was not sent"), "auth"));
+            ));
+        }
     }
-    Ok(())
+    None
+}
+
+/// Refuse a header an auth profile produced that is not valid on the wire
+/// rather than send the request without it (see [`auth_header_problem`]).
+pub(crate) fn check_auth_headers(applied: &anvil_auth::Applied) -> Result<(), TransportFailure> {
+    match auth_header_problem(applied) {
+        Some(why) => Err(invalid_header(format!("{why}; the request was not sent"), "auth")),
+        None => Ok(()),
+    }
 }
 
 /// The request's final headers for the wire. A header that is not valid on
@@ -652,8 +659,9 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     let started_at = Utc::now();
     // Taken first: what this execution prepares or receives after a lock (a
     // new epoch) is not kept: its prepared TLS material, its cookies, its
-    // connections and its session tickets.
-    let epoch = engine.sensitive_epoch();
+    // connections and its session tickets. A workspace delete since then
+    // keeps its cookies out of the deleted workspace's jar too.
+    let epoch = engine.execution_epoch(&ctx.isolation);
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
     // Canceling the execution abandons a Workload API call in flight.
@@ -758,6 +766,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                     if attempts.is_empty() {
                         return record::local_failure_with(ctx, &resolver, started_at, f, workload);
                     }
+                    prep.inferred.push(format!("the follow-up attempt to {} was not sent: {}", current.target.authority, f.message));
                     break;
                 }
             }

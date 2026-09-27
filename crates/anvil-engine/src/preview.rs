@@ -79,13 +79,19 @@ impl Engine {
             for s in &applied.secrets {
                 redactor.add_secret(s);
             }
-            for (n, v) in applied.set_headers {
-                headers.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
-                headers.push((n, v));
-            }
-            for (k, v) in applied.append_query {
-                let sep = if url.contains('?') { '&' } else { '?' };
-                url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
+            // The engine refuses an auth header that is not valid on the wire:
+            // say so rather than show a request that would not be sent.
+            if let Some(why) = http_exec::auth_header_problem(&applied) {
+                inferred.push(format!("the request would not be sent: {why}"));
+            } else {
+                for (n, v) in applied.set_headers {
+                    headers.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
+                    headers.push((n, v));
+                }
+                for (k, v) in applied.append_query {
+                    let sep = if url.contains('?') { '&' } else { '?' };
+                    url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
+                }
             }
         }
         let body_preview: String = String::from_utf8_lossy(&prep.http.body[..prep.http.body.len().min(64 * 1024)]).into_owned();

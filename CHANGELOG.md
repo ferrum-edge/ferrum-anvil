@@ -119,8 +119,21 @@
   that match their URL (a `ws://` or `wss://` URL counts as its `http://` or
   `https://` counterpart, so `Secure` and `HttpOnly` cookies apply), within
   the workspace only, and the `Set-Cookie` of their handshake responses is
-  stored when the session ends, unless the profile was locked since the
-  session started. With Cookies off they neither send nor store cookies.
+  stored when the session ends, unless the profile was locked or the
+  workspace deleted since the session started. With Cookies off they
+  neither send nor store cookies.
+- A request or session still in flight when its workspace is deleted no
+  longer recreates that workspace's cookie jar with the cookies it
+  receives, so a workspace restored from a backup with the same id does not
+  send them.
+- An SSE `Last-Event-ID` that resolves to a value that is not a valid header
+  value now fails the request before anything is sent, with an
+  invalid-header error naming `sse.last_event_id`. Before, the header was
+  left out and the stream was opened without it.
+- The effective-request preview now says a request would not be sent when
+  its auth profile produces a header that is not valid on the wire, instead
+  of showing it. A redirect or retry whose freshly applied auth is refused
+  is noted in the prepared request.
 - A stored cookie with the same name as a cookie the request sends itself
   (a `Cookie` header or a cookie API key) is no longer sent as well: the
   request's own cookie wins, and the jar's other cookies follow it.

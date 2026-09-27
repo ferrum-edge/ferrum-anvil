@@ -81,8 +81,22 @@ pub struct Engine {
 /// opened from is no longer borrowed.
 #[derive(Clone)]
 pub(crate) struct CookieJars {
-    jars: Arc<Mutex<HashMap<String, cookie_store::CookieStore>>>,
+    jars: Arc<Mutex<Jars>>,
     epoch: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct Jars {
+    by_isolation: HashMap<String, cookie_store::CookieStore>,
+    /// Advanced for an isolation by [`Engine::clear_isolation`] (a workspace
+    /// delete) when it removes that isolation's jar; 0 when never cleared.
+    generations: HashMap<String, u64>,
+}
+
+impl Jars {
+    fn generation(&self, isolation: &str) -> u64 {
+        self.generations.get(isolation).copied().unwrap_or(0)
+    }
 }
 
 impl CookieJars {
@@ -91,25 +105,43 @@ impl CookieJars {
     pub(crate) fn header(&self, isolation: &str, t: &prepare::Target) -> Option<String> {
         let url = url::Url::parse(&t.url()).ok()?;
         let jars = self.jars.lock();
-        let jar = jars.get(isolation)?;
+        let jar = jars.by_isolation.get(isolation)?;
         let pairs: Vec<String> = jar.get_request_values(&url).map(|(n, v)| format!("{n}={v}")).collect();
         if pairs.is_empty() { None } else { Some(pairs.join("; ")) }
     }
 
     /// Keep the response's cookies, unless the jars were cleared since
-    /// `epoch` (a lock while the request was in flight).
+    /// `epoch` (a lock while the request was in flight) or the isolation's
+    /// jar was removed since then (its workspace was deleted).
     pub(crate) fn store(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
-        let Ok(url) = url::Url::parse(&t.url()) else { return };
-        let mut jars = self.jars.lock();
-        // Checked under the jar's lock: a clear either advanced the epoch
-        // before this point or empties the jar after it.
-        if self.epoch.load(Ordering::SeqCst) != epoch.epoch {
+        let set_cookie = r.header_values("set-cookie");
+        if set_cookie.is_empty() {
             return;
         }
-        let jar = jars.entry(isolation.to_string()).or_default();
-        for v in r.header_values("set-cookie") {
+        let Ok(url) = url::Url::parse(&t.url()) else { return };
+        let mut jars = self.jars.lock();
+        // Checked under the jars' lock: a lock or a workspace delete either
+        // advanced its counter before this point or empties the jar after it.
+        if self.epoch.load(Ordering::SeqCst) != epoch.epoch || epoch.jar != Some(jars.generation(isolation)) {
+            return;
+        }
+        let jar = jars.by_isolation.entry(isolation.to_string()).or_default();
+        for v in set_cookie {
             let _ = jar.parse(v, &url);
         }
+    }
+
+    fn generation(&self, isolation: &str) -> u64 {
+        self.jars.lock().generation(isolation)
+    }
+
+    /// Remove the isolation's jar and start its next generation: a store of
+    /// an execution that started before this is refused.
+    fn clear_isolation(&self, isolation: &str) {
+        let mut jars = self.jars.lock();
+        jars.by_isolation.remove(isolation);
+        let g = jars.generations.entry(isolation.to_string()).or_default();
+        *g = g.wrapping_add(1);
     }
 }
 
@@ -118,11 +150,17 @@ impl CookieJars {
 /// ([`Engine::clear_sensitive_state`]) starts a new epoch, and what an
 /// execution of an earlier epoch prepares or receives afterwards is not
 /// kept: its cookies, its prepared TLS material (client identity keys and
-/// session-ticket stores), its connections and its session tickets.
+/// session-ticket stores), its connections and its session tickets. An
+/// execution's epoch ([`Engine::execution_epoch`]) also holds its workspace
+/// cookie jar's generation: after a workspace delete
+/// ([`Engine::clear_isolation`]) its cookies are not kept either.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SensitiveEpoch {
     epoch: u64,
     transport: CacheFence,
+    /// The generation of the execution's workspace cookie jar; `None` for an
+    /// epoch taken for no workspace, which keeps no cookies.
+    jar: Option<u64>,
 }
 
 impl SensitiveEpoch {
@@ -155,7 +193,8 @@ impl Engine {
         }
     }
 
-    /// The current sensitive-state epoch, taken when an execution starts.
+    /// The current sensitive-state epoch, for work outside a workspace
+    /// execution (it keeps no cookies).
     pub fn sensitive_epoch(&self) -> SensitiveEpoch {
         loop {
             let epoch = self.epoch.load(Ordering::SeqCst);
@@ -163,9 +202,17 @@ impl Engine {
             // A lock advances the epoch before it clears the transports: an
             // unchanged epoch means the generations are not newer than it.
             if self.epoch.load(Ordering::SeqCst) == epoch {
-                return SensitiveEpoch { epoch, transport };
+                return SensitiveEpoch { epoch, transport, jar: None };
             }
         }
+    }
+
+    /// The current sensitive-state epoch with the generation of
+    /// `isolation`'s cookie jar, taken when an execution in that workspace
+    /// starts.
+    pub fn execution_epoch(&self, isolation: &str) -> SensitiveEpoch {
+        let jar = self.cookies.generation(isolation);
+        SensitiveEpoch { jar: Some(jar), ..self.sensitive_epoch() }
     }
 
     fn is_current(&self, epoch: SensitiveEpoch) -> bool {
@@ -221,7 +268,8 @@ impl Engine {
     }
 
     /// Keep the response's cookies in the workspace jar, unless the jar was
-    /// cleared since `epoch` (a lock while the request was in flight).
+    /// cleared since `epoch` (a lock or a workspace delete while the request
+    /// was in flight).
     pub fn store_cookies(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
         self.cookies.store(epoch, isolation, t, r);
     }
@@ -229,6 +277,11 @@ impl Engine {
     /// The workspace cookie jars, for a session task to store into.
     pub(crate) fn cookie_jars(&self) -> CookieJars {
         self.cookies.clone()
+    }
+
+    /// Whether `isolation` has a cookie jar (for tests).
+    pub fn has_cookie_jar(&self, isolation: &str) -> bool {
+        self.cookies.jars.lock().by_isolation.contains_key(isolation)
     }
 
     /// Clear every per-session sensitive cache (on vault lock, workspace
@@ -252,14 +305,16 @@ impl Engine {
         self.tokens.clear();
         self.workload.clear();
         self.tls.lock().clear();
-        self.cookies.jars.lock().clear();
+        self.cookies.jars.lock().by_isolation.clear();
     }
 
+    /// Clear one workspace's caches (on workspace delete). A cookie store of
+    /// an execution in that workspace that started before this is refused.
     pub fn clear_isolation(&self, isolation: &str) {
         self.http.pool.clear_isolation(isolation);
         self.http.tickets.clear_isolation(isolation);
         self.h3.clear_isolation(isolation);
-        self.cookies.jars.lock().remove(isolation);
+        self.cookies.clear_isolation(isolation);
     }
 
     /// Session tickets held for 0-RTT, over TCP and QUIC (for tests and the

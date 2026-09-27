@@ -84,8 +84,9 @@ struct SessionPrep {
 
 /// The workspace jar a session handshake keeps its `Set-Cookie` in: the
 /// execution's isolation, the URL the handshake stands for in the jar, and
-/// the engine's epoch when the execution started, so the cookies of a
-/// session that spans a lock are not kept.
+/// the engine's epoch (with the jar's generation) when the execution
+/// started, so the cookies of a session that spans a lock or the deletion of
+/// its workspace are not kept.
 struct SessionCookies {
     jars: crate::CookieJars,
     epoch: SensitiveEpoch,
@@ -496,6 +497,15 @@ async fn prepare_sse(
         b.inferred.push("Accept-Encoding: identity (events are parsed as they arrive)".into());
     }
     let last_event_id = spec.last_event_id.as_ref().map(|v| r.resolve(v, "sse.last_event_id")).transpose()?;
+    // Refused rather than left out of the handshake (the message never holds
+    // the value, which may come from a secret).
+    if last_event_id.as_deref().is_some_and(|id| HeaderValue::from_str(id).is_err()) {
+        return Err(local(
+            FailureKind::InvalidHeader,
+            "sse.last_event_id resolves to a value that is not a valid Last-Event-ID header value (it holds a line break, control or non-ASCII character); the request was not sent",
+            "sse.last_event_id",
+        ));
+    }
     let body = b.prep.http.body.clone();
     let method = b.prep.http.method.clone();
     let (mut headers, query, facts) =
@@ -1379,7 +1389,7 @@ async fn run_prepared(
 ) -> ExecutionOutput {
     let out = run_plan(&prep.plan, &events, &cancel, commands).await;
     // The handshake responses' cookies, kept in the workspace jar unless the
-    // engine was locked since the execution started.
+    // engine was locked or the workspace deleted since the execution started.
     if let Some(c) = &prep.cookies {
         for r in out.attempts.iter().filter_map(|a| a.response.as_ref()) {
             c.jars.store(c.epoch, &c.isolation, &c.target, r);
@@ -1458,8 +1468,10 @@ async fn run_prepared(
 /// Automation execution for WebSocket, gRPC, SSE, TCP/TLS and UDP/DTLS.
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
     let started_at = Utc::now();
-    // Taken first: TLS material prepared after a lock is not cached.
-    let epoch = engine.sensitive_epoch();
+    // Taken first: TLS material prepared after a lock is not cached, and
+    // handshake cookies received after a lock or a workspace delete are not
+    // kept.
+    let epoch = engine.execution_epoch(&ctx.isolation);
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // Canceling the execution abandons a Workload API call in flight.
     let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
@@ -1573,8 +1585,10 @@ impl Engine {
     /// idle auto-close do not apply to interactive sessions.
     pub async fn open_session(&self, ctx: ExecutionContext, events: EventCtx) -> SessionHandle {
         let started_at = Utc::now();
-        // Taken first: TLS material prepared after a lock is not cached.
-        let epoch = self.sensitive_epoch();
+        // Taken first: TLS material prepared after a lock is not cached, and
+        // handshake cookies received after a lock or a workspace delete are
+        // not kept.
+        let epoch = self.execution_epoch(&ctx.isolation);
         let protocol = ctx.spec.protocol;
         let execution_id = events.execution_id;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);

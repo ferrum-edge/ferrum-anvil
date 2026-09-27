@@ -2,26 +2,83 @@
 //! (SSE, WebSocket) as to HTTP requests: stored cookies are sent under the
 //! same matching rules and workspace isolation, the handshake's `Set-Cookie`
 //! is kept, the cookies setting turns both off, a cookie the request sends
-//! itself wins over a stored one of the same name, and the cookies of a
-//! session that spans a lock are not kept. Fixture ground truth shows what
-//! the server received.
+//! itself wins over a stored one of the same name, a `wss` handshake stands
+//! for `https` (so `Secure` applies), and the cookies of a session that spans
+//! a lock or the deletion of its workspace are not kept. Fixture ground truth
+//! shows what the server received.
 
+use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
+use anvil_domain::events::ExecutionEvent;
+use anvil_domain::execution::Direction;
 use anvil_domain::request::{KeyValue, Protocol, RequestSpec, SseSpec, WsBootstrap, WsMessage, WsSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::settings::SettingsOverrides;
+use anvil_domain::settings::{DnsOverride, SettingsOverrides};
+use anvil_domain::tls::{TlsMinVersion, TlsProfile};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
-use anvil_fixtures::GroundTruth;
-use anvil_fixtures::gate;
 use anvil_fixtures::http as fx;
-use anvil_transport::recorder::EventCtx;
-use std::sync::Arc;
+use anvil_fixtures::{GroundTruth, LabPki, TlsServerOptions, gate};
+use anvil_transport::recorder::{EventCtx, EventFn};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 fn init() {
     anvil_transport::init();
     anvil_fixtures::init();
+}
+
+fn pki() -> &'static LabPki {
+    static P: OnceLock<LabPki> = OnceLock::new();
+    P.get_or_init(LabPki::generate)
+}
+
+fn server_tls() -> TlsServerOptions {
+    TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone())
+}
+
+/// A name the lab server certificate covers that is not a loopback name, so
+/// the jar applies `Secure` to it as to a remote origin.
+const TEST_HOST: &str = "api.anvil.test";
+
+/// `c` with [`TEST_HOST`] resolved to 127.0.0.1 and the lab root trusted.
+fn on_test_host(mut c: ExecutionContext) -> ExecutionContext {
+    let p = TlsProfile {
+        id: Id::new(),
+        workspace_id: Id::new(),
+        name: "lab".into(),
+        verify: true,
+        use_system_roots: false,
+        extra_roots_pem: vec![pki().ca.cert.clone()],
+        client_identity: None,
+        bindings: vec![],
+        min_version: TlsMinVersion::Tls12,
+        server_name_override: None,
+        server_spiffe: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let dns = DnsOverride { host: TEST_HOST.into(), addresses: vec!["127.0.0.1".into()] };
+    let run = SettingsOverrides { tls_profile_id: Some(p.id), dns_overrides: vec![dns], ..Default::default() };
+    c.settings_layers.push(("run".into(), run));
+    c.tls_profiles.push(p);
+    c
+}
+
+/// Events that signal the first message the session receives (the handshake
+/// has completed by then).
+fn on_first_received() -> (EventCtx, Arc<Notify>) {
+    let received = Arc::new(Notify::new());
+    let r = received.clone();
+    let sink: EventFn = Arc::new(move |e: ExecutionEvent| {
+        if let ExecutionEvent::Message { message, .. } = e
+            && message.direction == Direction::Received
+        {
+            r.notify_one();
+        }
+    });
+    (EventCtx { execution_id: Id::new(), sink: Some(sink) }, received)
 }
 
 fn get(url: &str) -> ExecutionContext {
@@ -236,13 +293,14 @@ async fn a_lock_between_session_start_and_its_set_cookie_leaves_the_jar_empty() 
     // after the lock, and keeps nothing either.
     let g = gate::tcp(api.addr, 0).await.unwrap();
     let base = g.addr.unwrap();
-    let h = e.open_session(ws(&format!("ws://{base}/ws?set_cookie=ws_sid%3Dbefore-lock")), EventCtx::none()).await;
+    let (events, received) = on_first_received();
+    let h = e.open_session(ws(&format!("ws://{base}/ws?set_cookie=ws_sid%3Dbefore-lock")), events).await;
     tokio::time::timeout(Duration::from_secs(10), g.held()).await.expect("the handshake never connected");
     e.clear_sensitive_state();
     g.release();
-    // Let the handshake finish before closing (a session that already ended
-    // refuses the close; its record says why).
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Close once the scripted message is echoed: the handshake has finished
+    // and the session is open.
+    tokio::time::timeout(Duration::from_secs(10), received.notified()).await.expect("the scripted message was never echoed");
     let _ = h.close().await;
     let o = h.finish().await;
     let response = o.record.response.as_ref().expect("the WebSocket handshake was answered");
@@ -254,4 +312,71 @@ async fn a_lock_between_session_start_and_its_set_cookie_leaves_the_jar_empty() 
     ok(&e, &sse(&api.url("/sse?count=1&interval=1&set_cookie=sse_sid%3Dafter-unlock"))).await;
     ok(&e, &get(&api.url("/echo"))).await;
     assert_eq!(cookie_on(&api, "/echo").as_deref(), Some("sse_sid=after-unlock"));
+}
+
+#[tokio::test]
+async fn a_workspace_delete_while_a_session_or_request_is_in_flight_leaves_no_jar_for_it() {
+    init();
+    let api = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Arc::new(Engine::new());
+    // Another workspace's cookie: the delete leaves it alone.
+    ok(&e, &in_workspace(get(&api.url("/set-cookie?name=other&value=kept")), "workspace-b")).await;
+
+    // An SSE session of the deleted workspace, answered after the delete,
+    // then an HTTP request held the same way.
+    let urls = ["/sse?count=1&interval=1&set_cookie=sse_sid%3Dbefore-delete", "/set-cookie?name=sid&value=before-delete"];
+    for (i, path) in urls.into_iter().enumerate() {
+        let g = gate::tcp(api.addr, 0).await.unwrap();
+        let base = g.addr.unwrap();
+        let c = if i == 0 { sse(&format!("http://{base}{path}")) } else { get(&format!("http://{base}{path}")) };
+        let c = in_workspace(c, "workspace-a");
+        let task = {
+            let (e, c) = (e.clone(), c.clone());
+            tokio::spawn(async move { run(&e, &c).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), g.held()).await.expect("the request never connected");
+        e.clear_isolation("workspace-a");
+        g.release();
+        let o = task.await.unwrap();
+        let response = o.record.response.as_ref().unwrap_or_else(|| panic!("{path} was not answered"));
+        assert_eq!(response.header_values("set-cookie").len(), 1, "{path}");
+        assert!(!e.has_cookie_jar("workspace-a"), "{path}, answered after its workspace was deleted, recreated its jar");
+    }
+
+    ok(&e, &in_workspace(get(&api.url("/echo")), "workspace-a")).await;
+    assert_eq!(cookie_on(&api, "/echo"), None, "a cookie received after the workspace delete was sent");
+    ok(&e, &in_workspace(get(&api.url("/echo")), "workspace-b")).await;
+    assert_eq!(cookie_on(&api, "/echo").as_deref(), Some("other=kept"));
+
+    // A session that starts after the delete (a workspace restored with the
+    // same id) keeps its cookie again.
+    ok(&e, &in_workspace(sse(&api.url("/sse?count=1&interval=1&set_cookie=sse_sid%3Dafter-delete")), "workspace-a")).await;
+    ok(&e, &in_workspace(get(&api.url("/echo")), "workspace-a")).await;
+    assert_eq!(cookie_on(&api, "/echo").as_deref(), Some("sse_sid=after-delete"));
+}
+
+#[tokio::test]
+async fn a_secure_cookie_from_a_wss_handshake_is_kept_for_https_and_not_sent_over_ws() {
+    init();
+    let tls = fx::serve("127.0.0.1:0", Some(server_tls())).await.unwrap();
+    let plain = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let (tls_port, plain_port) = (tls.addr.port(), plain.addr.port());
+
+    // A wss:// handshake stands for https:// in the jar: its Secure cookie is
+    // kept, and sent over https:// and on the next wss:// handshake.
+    let set = format!("wss://{TEST_HOST}:{tls_port}/ws?close_after=1&set_cookie=sec%3Dfrom-wss%3B%20Secure");
+    let o = ok(&e, &on_test_host(ws(&set))).await;
+    assert!(o.record.response.as_ref().unwrap().header_values("set-cookie")[0].contains("Secure"));
+    ok(&e, &on_test_host(get(&format!("https://{TEST_HOST}:{tls_port}/echo")))).await;
+    assert_eq!(cookie_on(&tls, "/echo").as_deref(), Some("sec=from-wss"));
+    ok(&e, &on_test_host(ws(&format!("wss://{TEST_HOST}:{tls_port}/ws?close_after=1")))).await;
+    assert_eq!(cookie_on(&tls, "/ws").as_deref(), Some("sec=from-wss"));
+
+    // Not over ws:// or http:// to the same host (a cookie is not bound to a
+    // port).
+    ok(&e, &on_test_host(ws(&format!("ws://{TEST_HOST}:{plain_port}/ws?close_after=1")))).await;
+    assert_eq!(cookie_on(&plain, "/ws"), None, "a Secure cookie was sent over ws://");
+    ok(&e, &on_test_host(get(&format!("http://{TEST_HOST}:{plain_port}/echo")))).await;
+    assert_eq!(cookie_on(&plain, "/echo"), None, "a Secure cookie was sent over http://");
 }
