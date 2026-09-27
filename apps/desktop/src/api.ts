@@ -319,12 +319,11 @@ export interface LoadPreflight {
 export interface LoadRefusal {
   code:
     | "mixed_unit_kinds"
-    | "grpc_client_streaming"
-    | "grpc_bidirectional"
+    | "mixed_tunnels"
     | "grpc_reflection"
+    | "grpc_unsupported_combination"
+    | "masque_through_proxy"
     | "sse_reconnect"
-    | "udp_masque"
-    | "udp_hbone"
     | "hbone_persistent"
     | "early_data"
     | "incomplete_request";

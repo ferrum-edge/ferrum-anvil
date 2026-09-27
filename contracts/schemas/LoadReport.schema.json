@@ -946,7 +946,7 @@
       ]
     },
     "ProtocolLoadMetrics": {
-      "description": "Protocol-specific denominators of a run (LOAD-013). Exactly one family\nblock is set for the plan's unit kind (gRPC streams set `grpc` and `stream`).",
+      "description": "Protocol-specific denominators of a run (LOAD-013). Exactly one family\nblock is set for the plan's unit kind (streaming gRPC calls set `grpc` and `stream`).",
       "type": "object",
       "properties": {
         "version": {
@@ -1045,6 +1045,16 @@
           "description": "One server-streaming gRPC or gRPC-Web call.",
           "type": "string",
           "const": "grpc_stream"
+        },
+        {
+          "description": "One client-streaming gRPC call: the request's scripted messages, a\nhalf-close, then the single response and terminal status.",
+          "type": "string",
+          "const": "grpc_client_stream"
+        },
+        {
+          "description": "One bidirectional gRPC call: the request's scripted messages and a\nhalf-close, while the server's messages are read until its terminal status.",
+          "type": "string",
+          "const": "grpc_bidi_stream"
         },
         {
           "description": "One server-sent-events stream.",
@@ -1197,12 +1207,21 @@
       ]
     },
     "StreamLoadMetrics": {
-      "description": "Server-streaming gRPC calls and SSE streams.",
+      "description": "Streaming gRPC calls (server, client and bidirectional) and SSE streams.",
       "type": "object",
       "properties": {
         "opened": {
           "description": "Streams whose response head was accepted (gRPC: HTTP 200; SSE: 2xx).",
           "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "messages_sent": {
+          "description": "Client-streaming and bidirectional gRPC only: request messages sent,\nover all measured streams (the half-close is not a message). Sent\ncounts what Anvil wrote, never what the server processed.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
@@ -1498,6 +1517,17 @@
               "type": "null"
             }
           ]
+        },
+        "tunnels": {
+          "description": "Exchanges through a tunnel (a MASQUE CONNECT-UDP proxy or a mesh\nHBONE datagram tunnel) only: every exchange opens its own tunnel.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TunnelLoadMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1546,6 +1576,79 @@
         "failed",
         "timed_out",
         "duration"
+      ]
+    },
+    "TunnelLoadMetrics": {
+      "description": "The per-exchange tunnels of datagram exchanges through a MASQUE or HBONE\nproxy. A tunnel is set up per exchange (never pooled), so these are one\ntunnel per exchange that got past preparation. Datagram counts above are\nwhat Anvil wrote into and read from the tunnel; the tunnel endpoint's\nrelaying is never inferred from them.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TunnelKind"
+        },
+        "attempted": {
+          "description": "Tunnel setups started (DNS, connection and handshake to the proxy, CONNECT).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "established": {
+          "description": "The proxy answered the CONNECT with a 2xx and the tunnel opened.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "refused": {
+          "description": "The proxy answered the CONNECT with another status: the proxy's\nanswer, never a claim about the target.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "failed": {
+          "description": "The setup failed before an answer (DNS, connect, TLS or QUIC, a\nmissing capability, a reset).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timed_out": {
+          "description": "A deadline elapsed during setup.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "canceled": {
+          "description": "The exchange was canceled during setup (the run stopped). Every\nattempted tunnel is exactly one of established, refused, failed,\ntimed out or canceled.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "setup": {
+          "description": "Setup time of established tunnels: exchange start → tunnel open.",
+          "$ref": "#/$defs/LatencySummary"
+        }
+      },
+      "required": [
+        "kind",
+        "attempted",
+        "established",
+        "refused",
+        "failed",
+        "timed_out",
+        "canceled",
+        "setup"
+      ]
+    },
+    "TunnelKind": {
+      "oneOf": [
+        {
+          "description": "HTTP/2 `CONNECT` over mutual TLS (mesh HBONE).",
+          "type": "string",
+          "const": "hbone"
+        },
+        {
+          "description": "HTTP/3 extended `CONNECT` with `:protocol = connect-udp` (RFC 9298\nMASQUE): the QUIC connection to the proxy a DTLS session runs inside.\nThe tunnel's datagram accounting is in `ProtocolStatus::Udp::masque`.",
+          "type": "string",
+          "const": "connect_udp"
+        }
       ]
     }
   }

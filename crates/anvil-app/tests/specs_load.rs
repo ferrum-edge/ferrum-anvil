@@ -227,3 +227,141 @@ async fn load_plan_check_names_the_unit_and_preflight_refuses_mixed_protocols() 
     assert!(err.contains("LOAD-013"), "{err}");
     assert!(fx.log.entries().is_empty(), "checks and preflights send nothing");
 }
+
+/// Datagram tunnels at the app boundary: the plan check describes one tunnel
+/// per exchange, the preflight names the proxy every exchange reaches first,
+/// and a plan mixing direct and tunneled exchanges is refused.
+#[test]
+fn load_preflight_names_the_masque_proxy_and_refuses_mixed_datagram_paths() {
+    use anvil_domain::request::{MASQUE_DEFAULT_TEMPLATE, MasqueSpec, PayloadEncoding, Protocol, StreamPayload, UdpSpec};
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let udp = |masque: bool| {
+        let mut s = RequestSpec::http("GET", "udp://127.0.0.1:9");
+        s.protocol = Protocol::Udp;
+        s.udp = Some(UdpSpec {
+            dtls: false,
+            datagrams: vec![StreamPayload { data: "x".into(), encoding: PayloadEncoding::Text }],
+            response_window_ms: 100,
+            max_datagrams: 1,
+            masque: masque.then(|| MasqueSpec {
+                proxy_url: "https://127.0.0.1:4433".into(),
+                uri_template: MASQUE_DEFAULT_TEMPLATE.into(),
+                datagrams: Default::default(),
+            }),
+            proxy_protocol: None,
+        });
+        s
+    };
+    let tunneled = app.create_request(&ws.meta.id, None, "via masque", udp(true)).unwrap();
+    let direct = app.create_request(&ws.meta.id, None, "direct", udp(false)).unwrap();
+
+    let p = app.save_load_plan(plan(ws.meta.id, tunneled.meta.id)).unwrap();
+    let check = app.load_plan_check(&p).unwrap();
+    assert_eq!(check.unit, Some(anvil_domain::load::LoadUnitKind::UdpExchange));
+    let sem = check.semantics.unwrap();
+    assert!(sem.connection_mode_means.contains("its own MASQUE (CONNECT-UDP) tunnel"), "{}", sem.connection_mode_means);
+    let pre = app.load_preflight(&p).unwrap();
+    assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via MASQUE proxy https://127.0.0.1:4433".to_string()]);
+    assert!(!pre.warnings.iter().any(|w| w.contains("Traffic leaves")), "target and proxy are both local: {:?}", pre.warnings);
+    assert!(pre.semantics.completed_means.contains("never an exchange with no response observed"));
+
+    let mixed = app.save_load_plan(LoadPlan { chain: vec![direct.meta.id, tunneled.meta.id], ..plan(ws.meta.id, direct.meta.id) }).unwrap();
+    let check = app.load_plan_check(&mixed).unwrap();
+    let r = check.refusal.expect("mixed datagram paths are refused");
+    assert_eq!(r.code, anvil_load::RefusalCode::MixedTunnels);
+    assert_eq!(r.request_id, Some(tunneled.meta.id));
+    assert!(app.load_preflight(&mixed).is_err());
+}
+
+/// The "traffic leaves this machine" warning judges the target and a
+/// tunnel's proxy each on its own host: a loopback address in one never
+/// hides the other. The MASQUE proxy URL resolves variables like the target.
+#[test]
+fn load_preflight_warns_when_either_the_target_or_the_tunnel_proxy_is_remote() {
+    use anvil_domain::request::{MASQUE_DEFAULT_TEMPLATE, MasqueSpec, PayloadEncoding, Protocol, StreamPayload, UdpSpec};
+    use anvil_domain::settings::ProxySelection;
+    use anvil_domain::tls::{ProxyKind, ProxyProfile};
+    use anvil_domain::workspace::Variable;
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let env = app
+        .create_environment(
+            &ws.meta.id,
+            "lab",
+            vec![Variable::plain("local_proxy", "127.0.0.1:4433"), Variable::plain("remote_proxy", "proxy.example.test:4433")],
+        )
+        .unwrap();
+    let udp = |url: &str, proxy_url: Option<&str>| {
+        let mut s = RequestSpec::http("GET", url);
+        s.protocol = Protocol::Udp;
+        s.udp = Some(UdpSpec {
+            dtls: false,
+            datagrams: vec![StreamPayload { data: "x".into(), encoding: PayloadEncoding::Text }],
+            response_window_ms: 100,
+            max_datagrams: 1,
+            masque: proxy_url.map(|u| MasqueSpec {
+                proxy_url: u.into(),
+                uri_template: MASQUE_DEFAULT_TEMPLATE.into(),
+                datagrams: Default::default(),
+            }),
+            proxy_protocol: None,
+        });
+        s
+    };
+    let preflight = |spec: RequestSpec| {
+        let req = app.create_request(&ws.meta.id, None, "udp", spec).unwrap();
+        let p = app.save_load_plan(LoadPlan { environment_id: Some(env.meta.id), ..plan(ws.meta.id, req.meta.id) }).unwrap();
+        app.load_preflight(&p).unwrap()
+    };
+    let leaves = |w: &[String]| w.iter().any(|w| w.contains("Traffic leaves this machine"));
+
+    // A remote target through a local MASQUE proxy (named by a variable).
+    let pre = preflight(udp("udp://192.0.2.10:9", Some("https://{{local_proxy}}")));
+    assert_eq!(pre.destinations, vec!["UDP udp://192.0.2.10:9 via MASQUE proxy https://127.0.0.1:4433".to_string()]);
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    // A local target through a remote MASQUE proxy.
+    let pre = preflight(udp("udp://127.0.0.1:9", Some("https://{{remote_proxy}}")));
+    assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via MASQUE proxy https://proxy.example.test:4433".to_string()]);
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    // Both local, including IPv6 loopback and `localhost`: no warning.
+    let pre = preflight(udp("udp://[::1]:9", Some("https://localhost:4433")));
+    assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
+
+    // A local target through a remote HBONE proxy profile, whose host merely
+    // contains "localhost".
+    let hbone = |address: &str| {
+        let profile = app
+            .save_proxy_profile(ProxyProfile {
+                id: Id::new(),
+                workspace_id: ws.meta.id,
+                name: "mesh".into(),
+                kind: ProxyKind::Hbone,
+                address: address.into(),
+                username: None,
+                password: None,
+                no_proxy: String::new(),
+                tls_profile_id: None,
+                hbone: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let mut s = udp("udp://127.0.0.1:9", None);
+        s.settings.proxy_profile_id = Some(ProxySelection::Profile { id: profile.id });
+        s
+    };
+    let pre = preflight(hbone("localhost.example.test:15008"));
+    assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via HBONE proxy localhost.example.test:15008".to_string()]);
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    // A remote target through a local HBONE proxy profile.
+    let mut s = hbone("[::1]:15008");
+    s.url = "udp://203.0.113.7:9".into();
+    let pre = preflight(s);
+    assert_eq!(pre.destinations, vec!["UDP udp://203.0.113.7:9 via HBONE proxy [::1]:15008".to_string()]);
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    let pre = preflight(hbone("127.0.0.1:15008"));
+    assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
+}
