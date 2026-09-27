@@ -585,7 +585,8 @@ fn window_forms(decoded: &[u8], start: usize, end: usize, forms: &mut Vec<String
 }
 
 /// The head of a decoded field that a transcript preview shows: its hex, and
-/// its text when the field is UTF-8.
+/// its text when the field is UTF-8. Every session plan uses the default
+/// transcript limits; if a plan ever gets custom limits, pass them here.
 fn preview_forms(decoded: &[u8], forms: &mut Vec<String>) {
     let limit = anvil_transport::session::TranscriptLimits::default().preview_bytes;
     forms.push(hex::encode(&decoded[..decoded.len().min(limit / 2)]));
@@ -720,7 +721,7 @@ mod tests {
         assert_eq!(b64(field), "AQJtaXNhbGlnbmVk");
         note_decoded_secrets(&r, 0, PayloadEncoding::Base64, field);
         // Characters 3..11 lie in the groups of bytes 0..9.
-        assert_eq!(*r.decoded_secrets.lock(), vec![hex::encode(&field[..9]), "\x01\x02misali".to_string()]);
+        assert_eq!(*r.decoded_secrets.lock(), vec![hex::encode(&field[..9]), "\x01\x02misalig".to_string()]);
         assert_eq!(Redactor::for_execution(&r, &[]).text("got 01026d6973616c69676e6564"), format!("got {REDACTED}6e6564"));
     }
 
