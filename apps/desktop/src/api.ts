@@ -173,6 +173,11 @@ export interface ExportPreview {
   };
   secrets_included: number;
   literals_moved: number;
+  /**
+   * Each linked local file path the bundle carries, with the request or dataset that names it
+   * (`request 'Upload': /path/to/file`). A full-backup preview leaves it out.
+   */
+  linked_files?: string[];
 }
 export interface ImportReport {
   plan: {

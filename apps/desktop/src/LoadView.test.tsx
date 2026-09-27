@@ -579,6 +579,31 @@ describe("LoadView workspace switch", () => {
     expect(screen.queryByLabelText("Plan name")).toBeNull();
   });
 
+  it("keeps another plan selected meanwhile when a save lands", async () => {
+    const save = deferred<void>();
+    backend({
+      load_plan_save: async (a) => {
+        await save.promise;
+        return saveInto(a);
+      },
+    });
+    plans.A = [loadPlan("pa", "A", "Plan A"), loadPlan("pb", "A", "Plan B")];
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "Edited A" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+
+    fireEvent.click(screen.getByText("Plan B"));
+    expect(planName().value).toBe("Plan B");
+    await act(async () => save.resolve());
+    await waitFor(() => expect(within(sidebar()).queryByText("unsaved")).toBeNull());
+    await act(async () => {});
+    // Saved, but the selection made meanwhile stays.
+    expect(planName().value).toBe("Plan B");
+    expect(within(sidebar()).getByText("Edited A")).toBeTruthy();
+  });
+
   it("keeps B's selection when a report delete from A completes after the switch", async () => {
     const del = deferred<void>();
     backend({

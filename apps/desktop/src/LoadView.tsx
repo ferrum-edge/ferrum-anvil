@@ -363,7 +363,8 @@ export function LoadView(props: {
                 // Switched workspace meanwhile: do not select it in another workspace's view.
                 // Discarded meanwhile: it is saved, but not reopened.
                 if (listed === null || discarded.current.has(p.id)) return;
-                setSel({ kind: "plan", id: p.id });
+                // Another plan or report selected meanwhile: keep that selection.
+                setSel((s) => (s === null || (s.kind === "plan" && s.id === p.id) ? { kind: "plan", id: p.id } : s));
               }}
               onDeleted={async () => {
                 dropDraft(props.workspaceId, selPlan.id);
