@@ -14,14 +14,16 @@
 //!   what the token authorizes, so a profile never reuses a token issued for
 //!   another grant, audience, client, scope, issuer, authorization URL or
 //!   token-cache identity;
-//! * clearing the cache (lock), forgetting a token (sign-out) or storing a
-//!   new sign-in starts a new generation: an acquisition, refresh or code
-//!   redemption that began before it can no longer store or return its token.
-//!   When a newer sign-in is all that happened, the send is served with that
-//!   sign-in's token instead of failing;
+//! * clearing the cache (lock), clearing a partition (workspace delete),
+//!   forgetting a token (sign-out) or storing a new sign-in starts a new
+//!   generation: an acquisition, refresh or code redemption that began before
+//!   it can no longer store or return its token. When a newer sign-in is all
+//!   that happened, the send is served with that sign-in's token instead of
+//!   failing;
 //! * a refresh runs to completion on a task of its own, so a caller that
 //!   stops waiting never abandons a refresh token the issuer may already have
-//!   rotated. A lock or a sign-out of its key aborts it;
+//!   rotated. A lock, a delete of its partition or a sign-out of its key
+//!   aborts it;
 //! * every cached token expires: a response without `expires_in` is given
 //!   [`DEFAULT_EXPIRES_IN_SECS`], and an `expires_in` that is not a whole
 //!   number of seconds up to [`MAX_EXPIRES_IN_SECS`] fails the acquisition.
@@ -145,11 +147,13 @@ impl CachedToken {
 
 /// The cache generation an acquisition started in, for one key. A token
 /// obtained under it may be stored only while it is still current, i.e. no
-/// [`TokenCache::clear`], [`TokenCache::remove`] or
-/// [`TokenCache::store_sign_in`] of that key happened since.
+/// [`TokenCache::clear`], [`TokenCache::clear_partition`] of its partition,
+/// [`TokenCache::remove`] or [`TokenCache::store_sign_in`] of that key
+/// happened since.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Generation {
     cache: u64,
+    partition: u64,
     removal: u64,
     sign_in: u64,
 }
@@ -159,13 +163,16 @@ struct CacheState {
     entries: HashMap<TokenKey, CachedToken>,
     /// Bumped by [`TokenCache::clear`].
     generation: u64,
+    /// Bumped per partition by [`TokenCache::clear_partition`].
+    partitions: HashMap<String, u64>,
     /// Bumped per key by [`TokenCache::remove`].
     removals: HashMap<TokenKey, u64>,
     /// Bumped per key by [`TokenCache::store_sign_in`]. Counted apart from
     /// removals: a send overtaken only by a sign-in can use its token.
     sign_ins: HashMap<TokenKey, u64>,
     /// The refresh in flight per key (with its sequence number), aborted by
-    /// [`TokenCache::clear`] and [`TokenCache::remove`].
+    /// [`TokenCache::clear`], [`TokenCache::clear_partition`] and
+    /// [`TokenCache::remove`].
     refreshes: HashMap<TokenKey, (u64, AbortHandle)>,
     next_refresh: u64,
 }
@@ -173,7 +180,8 @@ struct CacheState {
 impl CacheState {
     fn generation(&self, key: &TokenKey) -> Generation {
         let of = |counts: &HashMap<TokenKey, u64>| counts.get(key).copied().unwrap_or(0);
-        Generation { cache: self.generation, removal: of(&self.removals), sign_in: of(&self.sign_ins) }
+        let partition = self.partitions.get(&key.partition).copied().unwrap_or(0);
+        Generation { cache: self.generation, partition, removal: of(&self.removals), sign_in: of(&self.sign_ins) }
     }
 
     fn bump(counts: &mut HashMap<TokenKey, u64>, key: &TokenKey) {
@@ -183,11 +191,11 @@ impl CacheState {
 
     /// The answer of an acquisition that started in `generation` and can no
     /// longer store its own token. When a newer sign-in is all that happened
-    /// since, a valid token is cached and the caller gets it; after a lock or
-    /// a sign-out it gets [`superseded`].
+    /// since, a valid token is cached and the caller gets it; after a lock, a
+    /// delete of its partition or a sign-out it gets [`superseded`].
     fn superseded_answer(&self, key: &TokenKey, generation: Generation, skew: i64) -> Result<CachedToken, AuthError> {
         let current = self.generation(key);
-        let only_signed_in = current.cache == generation.cache && current.removal == generation.removal;
+        let only_signed_in = Generation { sign_in: generation.sign_in, ..current } == generation;
         match self.entries.get(key) {
             Some(t) if only_signed_in && t.usable(Utc::now(), skew) => Ok(t.clone()),
             _ => Err(superseded()),
@@ -309,12 +317,40 @@ impl TokenCache {
     pub fn clear(&self) {
         let mut st = self.state.lock();
         st.entries.clear();
+        st.partitions.clear();
         st.removals.clear();
         st.sign_ins.clear();
         for (_, (_, refresh)) in st.refreshes.drain() {
             refresh.abort();
         }
         st.generation = st.generation.wrapping_add(1);
+    }
+
+    /// Forget every token cached under `partition` (a workspace delete),
+    /// invalidate every acquisition of its keys still in flight, whether or
+    /// not a token is cached for them, and abort their refreshes. Other
+    /// partitions keep their tokens and acquisitions.
+    pub fn clear_partition(&self, partition: &str) {
+        {
+            let mut st = self.state.lock();
+            let g = st.partitions.entry(partition.to_string()).or_insert(0);
+            *g = g.wrapping_add(1);
+            // The per-key counters go with the entries: the partition's new
+            // generation already tells every earlier acquisition apart.
+            st.entries.retain(|k, _| k.partition != partition);
+            st.removals.retain(|k, _| k.partition != partition);
+            st.sign_ins.retain(|k, _| k.partition != partition);
+            st.refreshes.retain(|k, (_, refresh)| {
+                let other = k.partition != partition;
+                if !other {
+                    refresh.abort();
+                }
+                other
+            });
+        }
+        // A caller still queued on one of these locks belongs to the earlier
+        // generation and stores nothing, so a later caller need not wait for it.
+        self.locks.lock().retain(|k, _| k.partition != partition);
     }
 
     fn lock_for(&self, key: &TokenKey) -> Arc<tokio::sync::Mutex<()>> {
@@ -332,10 +368,11 @@ impl TokenCache {
     ///   [`AuthError::InteractionRequired`]. No other grant is ever tried.
     ///
     /// The call belongs to the cache generation current when it starts. If
-    /// the cache is cleared or `key` is forgotten before it finishes, it
-    /// fails with [`AuthError::Canceled`] and caches nothing. If a new
-    /// sign-in is stored meanwhile, what it obtained is discarded as well,
-    /// and it answers with the sign-in's token while that is usable.
+    /// the cache or `key`'s partition is cleared, or `key` is forgotten,
+    /// before it finishes, it fails with [`AuthError::Canceled`] and caches
+    /// nothing. If a new sign-in is stored meanwhile, what it obtained is
+    /// discarded as well, and it answers with the sign-in's token while that
+    /// is usable.
     ///
     /// Dropping the future abandons a client-credentials request. A refresh
     /// runs on a task of its own that keeps the single-flight lock until the
@@ -351,6 +388,40 @@ impl TokenCache {
         now: DateTime<Utc>,
     ) -> Result<CachedToken, AuthError> {
         let (generation, cached) = self.snapshot(key);
+        self.acquire_in(key, generation, cached, cfg, http, now).await
+    }
+
+    /// [`get_or_acquire`](Self::get_or_acquire) for a call that belongs to
+    /// `since`, a generation its caller took earlier (before it checked that
+    /// the partition may still be used): if the cache moved on since then,
+    /// the call is answered as one superseded while in flight, without
+    /// reading the cache or asking the issuer.
+    pub async fn get_or_acquire_since(
+        &self,
+        key: &TokenKey,
+        since: Generation,
+        cfg: &OAuthResolved,
+        http: &dyn TokenHttp,
+        now: DateTime<Utc>,
+    ) -> Result<CachedToken, AuthError> {
+        let (generation, cached) = self.snapshot(key);
+        if generation != since {
+            return self.state.lock().superseded_answer(key, since, cfg.refresh_skew_secs);
+        }
+        self.acquire_in(key, generation, cached, cfg, http, now).await
+    }
+
+    /// The body of [`get_or_acquire`](Self::get_or_acquire), for a call of
+    /// `generation` that read `cached` with it.
+    async fn acquire_in(
+        &self,
+        key: &TokenKey,
+        generation: Generation,
+        cached: Option<CachedToken>,
+        cfg: &OAuthResolved,
+        http: &dyn TokenHttp,
+        now: DateTime<Utc>,
+    ) -> Result<CachedToken, AuthError> {
         if let Some(t) = cached
             && t.usable(now, cfg.refresh_skew_secs)
         {
@@ -391,7 +462,8 @@ impl TokenCache {
 
     /// Run a refresh on its own task, which holds `single_flight` and stores
     /// the refreshed token (or forgets a rejected refresh token) itself. The
-    /// task is registered under `key` so a lock or a sign-out aborts it.
+    /// task is registered under `key` so a lock, a delete of its partition or
+    /// a sign-out aborts it.
     async fn refresh_detached(
         &self,
         key: &TokenKey,
@@ -409,7 +481,8 @@ impl TokenCache {
         // sign-in cannot slip between them. A refresh that was superseded
         // before registration does not spawn: it answers like
         // `superseded_answer`, with the newer sign-in's token when only a
-        // sign-in happened since, and `Canceled` after a lock or a sign-out.
+        // sign-in happened since, and `Canceled` after a lock, a delete or a
+        // sign-out.
         let task = {
             let mut st = self.state.lock();
             if st.generation(key) != generation {
@@ -453,7 +526,8 @@ impl TokenCache {
         };
         match task.await {
             Ok(r) => r,
-            // Aborted by a lock or a sign-out of this key.
+            // Aborted by a lock, a delete of this key's partition or a sign-out
+            // of this key.
             Err(e) if e.is_cancelled() => Refreshed::Done(Err(superseded())),
             Err(e) => Refreshed::Done(Err(AuthError::Acquisition(format!("the token refresh ended unexpectedly: {e}")))),
         }
@@ -462,7 +536,7 @@ impl TokenCache {
 
 fn superseded() -> AuthError {
     AuthError::Canceled(
-        "a lock, a sign-out or a new sign-in superseded this OAuth token while it was being acquired; the token was discarded".into(),
+        "a lock, a workspace delete, a sign-out or a new sign-in superseded this OAuth token in flight; the token was discarded".into(),
     )
 }
 

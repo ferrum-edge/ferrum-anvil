@@ -2,18 +2,22 @@
 //! a changed profile never reuses a token issued for another grant, audience
 //! or authorization URL; a cancel or lock while a token request is in flight
 //! wins over the late issuer answer; and a send canceled during a refresh
-//! does not lose the refresh token the issuer rotated.
+//! does not lose the refresh token the issuer rotated. A workspace delete
+//! forgets that workspace's tokens only, wins over its token requests in
+//! flight, and a workspace restored with the same id never gets a token
+//! from before the delete; an execution or sign-in whose context was built
+//! before the delete caches nothing for the workspace.
 //!
 //! The fixture is one HTTP/1.1 listener serving `/token` (a scriptable
 //! issuer that can hold its answer) and `/api` (records the Authorization
 //! header it receives). Its counters only check that conditions were reached.
 
-use anvil_auth::oauth::CachedToken;
+use anvil_auth::oauth::{CachedToken, TokenKey};
 use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::execution::{DispatchState, FailureKind};
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SensitiveValue;
-use anvil_engine::oauth_http::interactive_oauth;
+use anvil_engine::oauth_http::{interactive_oauth, redeem_authorization_code, sign_in_generation};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_transport::recorder::EventCtx;
 use std::net::SocketAddr;
@@ -152,6 +156,20 @@ fn sign_in(engine: &Engine, ctx: &ExecutionContext, t: CachedToken) {
     let target = interactive_oauth(ctx).unwrap();
     let key = target.cache_key();
     assert!(engine.tokens.store_sign_in(key, engine.tokens.generation(key), t));
+}
+
+/// `c` in `isolation`.
+fn in_workspace(mut c: ExecutionContext, isolation: &str) -> ExecutionContext {
+    c.isolation = isolation.into();
+    c
+}
+
+/// `c` with its epoch taken now, as the app takes it when it builds a
+/// context from storage.
+fn built_now(engine: &Engine, c: &ExecutionContext) -> ExecutionContext {
+    let mut c = c.clone();
+    c.epoch = Some(engine.context_epoch(&c.isolation));
+    c
 }
 
 fn failure_kind(o: &ExecutionOutput) -> Option<FailureKind> {
@@ -333,4 +351,178 @@ async fn canceling_a_send_during_a_refresh_keeps_the_rotated_refresh_token() {
     assert_eq!(status(&o), Some(200), "{:?}", o.record.attempts);
     assert_eq!(fx.api_hits(), ["Bearer late-or-live-1"]);
     assert_eq!(fx.token_requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_workspace_delete_forgets_its_tokens_and_a_restored_workspace_acquires_its_own() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let engine = Engine::new();
+    let a = ctx(addr, oauth(addr, OAuthGrant::ClientCredentials, "api-a"));
+    let b = in_workspace(a.clone(), "workspace-b");
+    let signed_in_a = ctx(addr, oauth(addr, OAuthGrant::AuthorizationCodePkce, "api-a"));
+    sign_in(&engine, &signed_in_a, token("signed-in-a", "rt-a", 3600));
+
+    for c in [&a, &b, &a, &b, &signed_in_a] {
+        assert_eq!(status(&send(&engine, c).await), Some(200));
+    }
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 2, "each workspace cached its own token");
+    let key = |c: &ExecutionContext| interactive_oauth(c).unwrap().cache_key().clone();
+    assert!(engine.tokens.get(&key(&signed_in_a)).is_some());
+
+    engine.clear_isolation("workspace-under-test");
+    assert!(engine.tokens.get(&key(&signed_in_a)).is_none(), "the sign-in survived its workspace's delete");
+
+    // Restored with the same id: the sign-in is gone and a new token is
+    // acquired; workspace-b keeps its token.
+    let o = send(&engine, &signed_in_a).await;
+    assert_eq!(failure_kind(&o), Some(FailureKind::OAuthInteractionRequired));
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+    assert_eq!(status(&send(&engine, &a).await), Some(200));
+    assert_eq!(status(&send(&engine, &b).await), Some(200));
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 3);
+    let hits = fx.api_hits();
+    assert_eq!(
+        hits,
+        [
+            "Bearer late-or-live-1",
+            "Bearer late-or-live-2",
+            "Bearer late-or-live-1",
+            "Bearer late-or-live-2",
+            "Bearer signed-in-a",
+            "Bearer late-or-live-3",
+            "Bearer late-or-live-2",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_workspace_delete_during_a_token_request_discards_the_late_token() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let engine = Arc::new(Engine::new());
+    let c = ctx(addr, oauth(addr, OAuthGrant::ClientCredentials, "api-a"));
+    fx.hold.store(true, Ordering::SeqCst);
+
+    let run = {
+        let (engine, c) = (engine.clone(), c.clone());
+        tokio::spawn(async move { send(&engine, &c).await })
+    };
+    fx.received.notified().await;
+    engine.clear_isolation("workspace-under-test");
+    fx.release.notify_one();
+    let o = tokio::time::timeout(Duration::from_secs(10), run).await.expect("the execution finished").unwrap();
+    assert_eq!(failure_kind(&o), Some(FailureKind::Canceled), "{:?}", o.record.attempts);
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched, "the late token was not sent");
+
+    // The restored workspace finds nothing cached.
+    fx.hold.store(false, Ordering::SeqCst);
+    fx.issuer_down.store(true, Ordering::SeqCst);
+    let o = send(&engine, &c).await;
+    assert_eq!(failure_kind(&o), Some(FailureKind::AuthPreparationFailed), "the late token repopulated the cache");
+    assert!(fx.api_hits().is_empty());
+}
+
+/// A refresh the send stopped waiting for runs on: the delete aborts it, and
+/// its rotated token is not stored for the restored workspace.
+#[tokio::test]
+async fn a_workspace_delete_aborts_a_detached_refresh() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let engine = Arc::new(Engine::new());
+    let c = ctx(addr, oauth(addr, OAuthGrant::AuthorizationCodePkce, "api-a"));
+    sign_in(&engine, &c, token("expired", "rt-0", -10));
+    fx.rotate.store(true, Ordering::SeqCst);
+    fx.hold.store(true, Ordering::SeqCst);
+
+    let cancel = CancellationToken::new();
+    let run = {
+        let (engine, c, cancel) = (engine.clone(), c.clone(), cancel.clone());
+        tokio::spawn(async move { engine.execute(&c, EventCtx::none(), cancel).await })
+    };
+    fx.received.notified().await;
+    cancel.cancel();
+    let o = tokio::time::timeout(Duration::from_secs(5), run).await.expect("the canceled send ended").unwrap();
+    assert_eq!(failure_kind(&o), Some(FailureKind::Canceled));
+    engine.clear_isolation("workspace-under-test");
+    fx.hold.store(false, Ordering::SeqCst);
+    fx.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let key = interactive_oauth(&c).unwrap().cache_key().clone();
+    assert!(engine.tokens.get(&key).is_none(), "the refresh stored its token after the workspace delete");
+    let o = send(&engine, &c).await;
+    assert_eq!(failure_kind(&o), Some(FailureKind::OAuthInteractionRequired));
+    assert!(fx.api_hits().is_empty());
+}
+
+/// Contexts built before their workspace's delete and executed only after
+/// it: a client-credentials token is acquired for the send only, nothing is
+/// cached for the workspace, and a token the restored workspace cached is
+/// never sent for them.
+#[tokio::test]
+async fn an_execution_whose_context_was_built_before_its_workspace_delete_caches_no_token() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let engine = Engine::new();
+    let cc = ctx(addr, oauth(addr, OAuthGrant::ClientCredentials, "api-a"));
+    let pkce = ctx(addr, oauth(addr, OAuthGrant::AuthorizationCodePkce, "api-a"));
+    let (stale_cc, stale_pkce) = (built_now(&engine, &cc), built_now(&engine, &pkce));
+    engine.clear_isolation("workspace-under-test");
+
+    assert_eq!(status(&send(&engine, &stale_cc).await), Some(200));
+    // The key the engine caches `cc`'s token under.
+    let cc_key = TokenKey {
+        partition: "workspace-under-test".into(),
+        token_url: format!("http://{addr}/token"),
+        authorization_url: String::new(),
+        client_id: "client".into(),
+        basic_client_auth: false,
+        grant: OAuthGrant::ClientCredentials,
+        audience: "api-a".into(),
+        scope: "api.read".into(),
+        token_cache_id: None,
+    };
+    assert!(engine.tokens.get(&cc_key).is_none(), "a token was cached for the deleted workspace");
+
+    // The restored workspace caches its own tokens; the stale contexts never
+    // use them.
+    assert_eq!(status(&send(&engine, &built_now(&engine, &cc)).await), Some(200));
+    sign_in(&engine, &pkce, token("restored", "rt", 3600));
+    assert_eq!(status(&send(&engine, &stale_cc).await), Some(200));
+    let o = send(&engine, &stale_pkce).await;
+    assert_eq!(failure_kind(&o), Some(FailureKind::OAuthInteractionRequired), "the restored workspace's sign-in was used");
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 3, "every stale send acquired its own token");
+    assert_eq!(fx.api_hits(), ["Bearer late-or-live-1", "Bearer late-or-live-2", "Bearer late-or-live-3"]);
+    assert_eq!(engine.tokens.get(&cc_key).unwrap().access_token.as_str(), "late-or-live-2", "the restored workspace's token was kept");
+}
+
+/// A sign-in to a workspace deleted after its context was built redeems
+/// nothing, and one whose workspace is deleted while it runs stores nothing.
+#[tokio::test]
+async fn a_sign_in_across_its_workspace_delete_caches_no_token() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let engine = Engine::new();
+    let c = ctx(addr, oauth(addr, OAuthGrant::AuthorizationCodePkce, "api-a"));
+    let redirect = "http://127.0.0.1:1/callback";
+    let never = CancellationToken::new();
+
+    // Built before the delete, redeemed after it.
+    let built = built_now(&engine, &c);
+    let target = interactive_oauth(&built).unwrap();
+    let generation = sign_in_generation(&engine, &target);
+    engine.clear_isolation("workspace-under-test");
+    let r = redeem_authorization_code(&engine, &built, &target, generation, "code", "verifier", redirect, &never).await;
+    assert!(matches!(r, Err(anvil_auth::AuthError::Canceled(_))), "{r:?}");
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 0, "the code was redeemed for the deleted workspace");
+
+    // The browser step spans the delete.
+    let target = interactive_oauth(&c).unwrap();
+    let generation = sign_in_generation(&engine, &target);
+    engine.clear_isolation("workspace-under-test");
+    let r = redeem_authorization_code(&engine, &c, &target, generation, "code", "verifier", redirect, &never).await;
+    assert!(matches!(r, Err(anvil_auth::AuthError::Canceled(_))), "{r:?}");
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 1);
+    assert!(engine.tokens.get(target.cache_key()).is_none(), "the redeemed token was cached after the delete");
 }
