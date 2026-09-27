@@ -103,6 +103,15 @@ fn failure_ratio(r: &LoadReport) -> f64 {
     failed as f64 / finished as f64
 }
 
+/// How datagram exchanges travelled: direct, or the tunnel kind (empty for
+/// other units, so the difference never appears for them).
+fn datagram_path(r: &LoadReport) -> String {
+    match r.protocol_metrics.as_ref().and_then(|p| p.datagram.as_ref()) {
+        None => String::new(),
+        Some(d) => d.tunnels.as_ref().map(|t| format!("{} tunnel", crate::report::tunnel_name(t.kind))).unwrap_or_else(|| "direct".into()),
+    }
+}
+
 fn unit(r: &LoadReport) -> LoadUnitKind {
     r.protocol_metrics.as_ref().map(|p| p.unit).unwrap_or_default()
 }
@@ -118,7 +127,10 @@ fn protocol_deltas(a: &LoadReport, b: &LoadReport, mk: &dyn Fn(&str, f64, f64) -
         out.push(mk("missing-status ratio", per(x.missing_status, a.requests.started), per(y.missing_status, b.requests.started)));
     }
     if let (Some(x), Some(y)) = (&pa.stream, &pb.stream) {
-        out.push(mk("messages per opened stream", per(x.messages_received, x.opened), per(y.messages_received, y.opened)));
+        if let (Some(sx), Some(sy)) = (x.messages_sent, y.messages_sent) {
+            out.push(mk("messages sent per opened stream", per(sx, x.opened), per(sy, y.opened)));
+        }
+        out.push(mk("messages received per opened stream", per(x.messages_received, x.opened), per(y.messages_received, y.opened)));
         if x.time_to_first_message.count > 0 && y.time_to_first_message.count > 0 {
             out.push(mk("time to first message p50 (µs)", x.time_to_first_message.p50_us as f64, y.time_to_first_message.p50_us as f64));
             out.push(mk("time to first message p99 (µs)", x.time_to_first_message.p99_us as f64, y.time_to_first_message.p99_us as f64));
@@ -151,6 +163,13 @@ fn protocol_deltas(a: &LoadReport, b: &LoadReport, mk: &dyn Fn(&str, f64, f64) -
             per(x.exchanges_silent, a.requests.completed),
             per(y.exchanges_silent, b.requests.completed),
         ));
+        if let (Some(tx), Some(ty)) = (&x.tunnels, &y.tunnels) {
+            out.push(mk("tunnels established (ratio)", per(tx.established, tx.attempted), per(ty.established, ty.attempted)));
+            if tx.setup.count > 0 && ty.setup.count > 0 {
+                out.push(mk("tunnel setup p50 (µs)", tx.setup.p50_us as f64, ty.setup.p50_us as f64));
+                out.push(mk("tunnel setup p99 (µs)", tx.setup.p99_us as f64, ty.setup.p99_us as f64));
+            }
+        }
     }
     out
 }
@@ -210,6 +229,13 @@ pub fn compare(a: &LoadReport, b: &LoadReport) -> Comparison {
         "Different warmup handling changes which samples (cold connections, caches, JIT) are in the distributions.",
     );
     diff("protocol", protocols(a), protocols(b), Blocking, "HTTP/1.1, HTTP/2 and HTTP/3 have different connection and multiplexing costs.");
+    diff(
+        "datagram path",
+        datagram_path(a),
+        datagram_path(b),
+        Blocking,
+        "Exchanges through a tunnel pay a tunnel setup each and reach the target through the proxy; direct exchanges do not.",
+    );
     let mode_applies = crate::protocol::connection_mode_applies(ua);
     diff(
         "connection mode",
@@ -370,6 +396,47 @@ mod tests {
         let LatencyComparison::Comparable { deltas } = &c.latency else { panic!() };
         let p99 = deltas.iter().find(|x| x.metric.starts_with("success p99")).unwrap();
         assert_eq!(p99.delta_percent, Some(100.0));
+    }
+
+    /// Direct and tunneled datagram runs, or two kinds of tunnel, measure
+    /// different paths: their latencies are withheld; the same path compares.
+    #[test]
+    fn datagram_runs_over_different_paths_are_not_comparable() {
+        use anvil_domain::execution::TunnelKind;
+        use anvil_domain::load::{DatagramLoadMetrics, LatencySummary, ProtocolLoadMetrics, TunnelLoadMetrics};
+        let base = sample_report();
+        let with_path = |tunnel: Option<TunnelKind>| {
+            let mut r = base.clone();
+            r.run_id = Id::new();
+            r.protocol_metrics = Some(ProtocolLoadMetrics {
+                unit: LoadUnitKind::UdpExchange,
+                datagram: Some(DatagramLoadMetrics {
+                    tunnels: tunnel.map(|kind| TunnelLoadMetrics {
+                        kind,
+                        attempted: 4,
+                        established: 4,
+                        refused: 0,
+                        failed: 0,
+                        timed_out: 0,
+                        canceled: 0,
+                        setup: LatencySummary::default(),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            r
+        };
+        let (direct, masque, hbone) = (with_path(None), with_path(Some(TunnelKind::ConnectUdp)), with_path(Some(TunnelKind::Hbone)));
+        for (a, b) in [(&direct, &masque), (&masque, &hbone)] {
+            let c = compare(a, b);
+            assert!(!c.compatible);
+            assert!(c.differences.iter().any(|x| x.aspect == "datagram path" && x.impact == Impact::Blocking), "{:?}", c.differences);
+        }
+        let c = compare(&masque, &with_path(Some(TunnelKind::ConnectUdp)));
+        assert!(c.compatible, "{:?}", c.differences);
+        let LatencyComparison::Comparable { deltas } = &c.latency else { panic!() };
+        assert!(deltas.iter().any(|d| d.metric == "tunnels established (ratio)"));
     }
 
     fn obs(terminal: Terminal, application_failure: bool, assertion_failure: bool) -> SendObservation {

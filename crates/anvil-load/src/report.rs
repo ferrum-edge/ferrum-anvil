@@ -334,8 +334,9 @@ pub fn protocol_lines(p: &ProtocolLoadMetrics) -> Vec<String> {
     }
     if let Some(s) = &p.stream {
         out.push(format!(
-            "streams: {} opened, {} message(s)/event(s) received, {} with at least one; first message p50 {} p99 {}",
+            "streams: {} opened, {}{} message(s)/event(s) received, {} with at least one; first message p50 {} p99 {}",
             s.opened,
+            s.messages_sent.map(|n| format!("{n} message(s) sent, ")).unwrap_or_default(),
             s.messages_received,
             s.with_messages,
             us_or_dash(&s.time_to_first_message, s.time_to_first_message.p50_us),
@@ -385,8 +386,29 @@ pub fn protocol_lines(p: &ProtocolLoadMetrics) -> Vec<String> {
                 us_or_dash(&h.duration, h.duration.p50_us)
             ));
         }
+        if let Some(t) = &d.tunnels {
+            out.push(format!(
+                "{} tunnels (one per exchange): {} attempted, {} established, {} refused by the proxy, {} failed, {} timed out, {} canceled; setup p50 {}",
+                tunnel_name(t.kind),
+                t.attempted,
+                t.established,
+                t.refused,
+                t.failed,
+                t.timed_out,
+                t.canceled,
+                us_or_dash(&t.setup, t.setup.p50_us)
+            ));
+        }
     }
     out
+}
+
+/// Short name of a datagram tunnel.
+pub fn tunnel_name(k: anvil_domain::execution::TunnelKind) -> &'static str {
+    match k {
+        anvil_domain::execution::TunnelKind::ConnectUdp => "MASQUE (CONNECT-UDP)",
+        anvil_domain::execution::TunnelKind::Hbone => "HBONE",
+    }
 }
 
 /// The protocol denominators agree with the unit ledger (LOAD-013). Exact
@@ -468,6 +490,16 @@ pub fn check_protocol_balance(r: &LoadReport) -> Result<(), String> {
                 h.completed + h.failed + h.timed_out <= h.attempted && h.attempted <= settled,
                 format!("DTLS handshakes {h:?} vs settled {settled}"),
             )?;
+        }
+        if let Some(t) = &d.tunnels {
+            // Every attempted tunnel ended exactly one way.
+            ensure(
+                t.established + t.refused + t.failed + t.timed_out + t.canceled == t.attempted && t.attempted <= settled,
+                format!("tunnels {t:?} vs settled {settled}"),
+            )?;
+            ensure(t.setup.count == t.established, "tunnel setup samples ≠ established tunnels".into())?;
+            // A completed exchange ran inside an open tunnel.
+            ensure(q.completed <= t.established, format!("completed {} > established tunnels {}", q.completed, t.established))?;
         }
     }
     Ok(())
@@ -659,6 +691,9 @@ fn protocol_csv(p: &ProtocolLoadMetrics, add: &mut impl FnMut(&str, &str, String
     }
     if let Some(s) = &p.stream {
         add("stream", "opened", s.opened.to_string());
+        if let Some(n) = s.messages_sent {
+            add("stream", "messages_sent", n.to_string());
+        }
         add("stream", "messages_received", s.messages_received.to_string());
         add("stream", "with_messages", s.with_messages.to_string());
         latency_csv("stream_time_to_first_message_us", &s.time_to_first_message, add);
@@ -718,6 +753,16 @@ fn protocol_csv(p: &ProtocolLoadMetrics, add: &mut impl FnMut(&str, &str, String
             add("dtls_handshake", "failed", h.failed.to_string());
             add("dtls_handshake", "timed_out", h.timed_out.to_string());
             latency_csv("dtls_handshake_duration_us", &h.duration, add);
+        }
+        if let Some(t) = &d.tunnels {
+            add("tunnel", "kind", snake(&t.kind));
+            add("tunnel", "attempted", t.attempted.to_string());
+            add("tunnel", "established", t.established.to_string());
+            add("tunnel", "refused", t.refused.to_string());
+            add("tunnel", "failed", t.failed.to_string());
+            add("tunnel", "timed_out", t.timed_out.to_string());
+            add("tunnel", "canceled", t.canceled.to_string());
+            latency_csv("tunnel_setup_us", &t.setup, add);
         }
     }
 }

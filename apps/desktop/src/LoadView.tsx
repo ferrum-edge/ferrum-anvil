@@ -29,6 +29,7 @@ import type {
   RequestCounts,
   Stage,
   TimeBucket,
+  TunnelKind,
   WeightedStep,
   Workload,
 } from "./generated/contracts";
@@ -43,6 +44,8 @@ const UNIT_WORDS: Record<LoadUnitKind, [string, string]> = {
   http_request: ["request", "requests"],
   grpc_call: ["call", "calls"],
   grpc_stream: ["stream", "streams"],
+  grpc_client_stream: ["call", "calls"],
+  grpc_bidi_stream: ["stream", "streams"],
   sse_stream: ["stream", "streams"],
   websocket_session: ["session", "sessions"],
   tcp_exchange: ["exchange", "exchanges"],
@@ -1200,6 +1203,8 @@ function LatencyRows(props: { rows: [string, LatencySummary][] }) {
 
 const ratio = (n: number, d: number) => (d === 0 ? "—" : (n / d).toFixed(3));
 
+const TUNNEL_NAME: Record<TunnelKind, string> = { connect_udp: "MASQUE (CONNECT-UDP)", hbone: "HBONE" };
+
 /** Compact live cards for the protocol denominators. */
 export function ProtocolCards({ p }: { p: ProtocolLoadMetrics }) {
   return (
@@ -1212,6 +1217,7 @@ export function ProtocolCards({ p }: { p: ProtocolLoadMetrics }) {
           <Card label="No terminal status" value={String(p.grpc.missing_status)} bad={p.grpc.missing_status > 0} />
         </>
       )}
+      {p.stream && p.stream.messages_sent != null && <Card label="Messages sent" value={String(p.stream.messages_sent)} />}
       {p.stream && <Card label={p.unit === "sse_stream" ? "Events received" : "Messages received"} value={String(p.stream.messages_received)} sub={`${p.stream.opened} streams opened`} />}
       {p.websocket && (
         <>
@@ -1225,6 +1231,20 @@ export function ProtocolCards({ p }: { p: ProtocolLoadMetrics }) {
           <Card label="Datagrams sent" value={String(p.datagram.datagrams_sent)} />
           <Card label="Datagrams received" value={String(p.datagram.datagrams_received)} sub="a separate count, not deliveries" />
           <Card label="No response observed" value={String(p.datagram.exchanges_silent)} sub="exchanges; not failures" />
+          {p.datagram.tunnels && (
+            <Card
+              label={`${TUNNEL_NAME[p.datagram.tunnels.kind]} tunnels open`}
+              value={`${p.datagram.tunnels.established} / ${p.datagram.tunnels.attempted}`}
+              sub={
+                p.datagram.tunnels.refused
+                  ? `${p.datagram.tunnels.refused} refused by the proxy`
+                  : p.datagram.tunnels.canceled
+                    ? `${p.datagram.tunnels.canceled} canceled when the run stopped`
+                    : "one per exchange"
+              }
+              bad={p.datagram.tunnels.refused + p.datagram.tunnels.failed + p.datagram.tunnels.timed_out > 0}
+            />
+          )}
         </>
       )}
     </div>
@@ -1281,6 +1301,7 @@ export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; request
           <Rows
             rows={[
               ["Streams opened", String(p.stream.opened)],
+              ...(p.stream.messages_sent != null ? ([["Messages sent (scripted, before the half-close)", String(p.stream.messages_sent)]] as [string, string][]) : []),
               [p.unit === "sse_stream" ? "Events received" : "Messages received", String(p.stream.messages_received)],
               ["Opened streams with at least one", String(p.stream.with_messages)],
               ["Mean per opened stream", ratio(p.stream.messages_received, p.stream.opened)],
@@ -1347,17 +1368,29 @@ export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; request
                     ],
                   ] as [string, string][])
                 : []),
+              ...(p.datagram.tunnels
+                ? ([
+                    [`${TUNNEL_NAME[p.datagram.tunnels.kind]} tunnels attempted (one per exchange)`, String(p.datagram.tunnels.attempted)],
+                    [
+                      "Established / refused by the proxy / failed / timed out / canceled",
+                      `${p.datagram.tunnels.established} / ${p.datagram.tunnels.refused} / ${p.datagram.tunnels.failed} / ${p.datagram.tunnels.timed_out} / ${p.datagram.tunnels.canceled}`,
+                    ],
+                  ] as [string, string][])
+                : []),
             ]}
           />
           <LatencyRows
             rows={[
               ["Time to first response", p.datagram.time_to_first_datagram],
               ...(p.datagram.dtls_handshakes ? ([["DTLS handshake (completed)", p.datagram.dtls_handshakes.duration]] as [string, LatencySummary][]) : []),
+              ...(p.datagram.tunnels ? ([["Tunnel setup (established)", p.datagram.tunnels.setup]] as [string, LatencySummary][]) : []),
             ]}
           />
           <p className="hint">
             Sent and received are separate counts. UDP has no acknowledgement: nothing here claims delivery or loss, and received datagrams are not attributed to
             sent ones. Silence means only that no response was observed.
+            {p.datagram.tunnels &&
+              " Through a tunnel, the counts are what Anvil wrote into and read from the tunnel; what the proxy relayed is not inferred, and a refused tunnel is the proxy's answer, not a claim about the target."}
           </p>
         </>
       )}
