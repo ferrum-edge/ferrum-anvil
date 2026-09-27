@@ -43,9 +43,14 @@ fn addr(r: &Resolver, v: &Option<String>, field: &str) -> Result<Option<SocketAd
         .map_err(|_| invalid(format!("'{text}' is not an address:port (use 203.0.113.7:4242 or [2001:db8::7]:4242)"), field))
 }
 
+/// The bytes a hex field decodes to. The header is sent, and shown in a
+/// transcript, with those bytes: its secrets are redacted in that form too.
 fn hex_bytes(r: &Resolver, raw: &str, field: &str) -> Result<Vec<u8>, TransportFailure> {
+    let since = r.used_secrets.lock().len();
     let text = r.resolve(raw, field)?;
-    anvil_transport::session::decode_hex(&text).map_err(|e| invalid(e, field))
+    let bytes = anvil_transport::session::decode_hex(&text).map_err(|e| invalid(e, field))?;
+    crate::redact::note_decoded_secrets(r, since, anvil_domain::request::PayloadEncoding::Hex, &bytes);
+    Ok(bytes)
 }
 
 /// Resolve a connection-header spec configured at `field` (`tcp.proxy_protocol`

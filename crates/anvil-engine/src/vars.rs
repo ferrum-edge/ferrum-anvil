@@ -38,6 +38,10 @@ pub struct Resolver {
     rng: Mutex<rand::rngs::StdRng>,
     /// Secret values substituted so far (for exact-value redaction).
     pub used_secrets: Mutex<Vec<String>>,
+    /// What secrets substituted into a hex- or base64-encoded session payload
+    /// decode to, as text and as hex (for exact-value redaction; see
+    /// `redact::note_decoded_secrets`).
+    pub decoded_secrets: Mutex<Vec<String>>,
     /// Names (and winning scope) of variables used.
     pub used: Mutex<Vec<(String, String)>>,
     /// Names of request fields (headers, query parameters, form fields) the
@@ -57,6 +61,7 @@ impl Resolver {
             secret_substitutions: AtomicU64::new(0),
             rng: Mutex::new(rng),
             used_secrets: Mutex::new(vec![]),
+            decoded_secrets: Mutex::new(vec![]),
             used: Mutex::new(vec![]),
             sensitive_names: Mutex::new(vec![]),
         }

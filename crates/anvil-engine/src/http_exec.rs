@@ -499,6 +499,11 @@ pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<Strin
                 "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break or control character, for example pasted with the credential)"
             ));
         }
+        if n.eq_ignore_ascii_case("host")
+            && let Some(why) = prepare::host_problem(v)
+        {
+            return Some(format!("the auth profile {label} would send a Host header that is not a host with an optional port: {why}"));
+        }
     }
     None
 }

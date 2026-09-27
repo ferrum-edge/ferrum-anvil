@@ -297,6 +297,11 @@ pub enum Schema {
     Reflection,
 }
 
+/// Signs a call for the body it sends: given the call's framed request
+/// message, the call's headers (metadata and auth) with the signature over
+/// that body. An error fails the call before it is sent.
+pub type SignFn = Arc<dyn Fn(&Bytes) -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct GrpcPlan {
     /// TLS; `None` = cleartext (h2c for native gRPC; HTTP/1.1 or h2c for gRPC-Web).
@@ -316,6 +321,14 @@ pub struct GrpcPlan {
     pub messages: Vec<String>,
     /// Metadata and auth headers.
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// With server reflection, the call's headers are signed here, once the
+    /// schema is resolved and the message encoded, over the framed message of
+    /// a unary or server-streaming call. They replace `headers` for the call;
+    /// the reflection request is sent with `headers`. `None`: the call is
+    /// sent with `headers`. The engine sets it only for a unary or
+    /// server-streaming call; a call that streams requests is signed when it
+    /// is prepared.
+    pub sign: Option<SignFn>,
     pub deadline_ms: Option<u64>,
     pub timeouts: Timeouts,
     pub limits: Limits,
@@ -436,10 +449,11 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
     }
 }
 
-/// Request headers for a call (metadata, auth, and the wire's own fields).
-fn call_headers(plan: &GrpcPlan, h1: bool) -> HeaderMap {
+/// Request headers for a call: `meta` (metadata and auth) and the wire's own
+/// fields.
+fn call_headers(plan: &GrpcPlan, meta: &[(HeaderName, HeaderValue)], h1: bool) -> HeaderMap {
     let mut h = HeaderMap::new();
-    for (n, v) in &plan.headers {
+    for (n, v) in meta {
         if n == http::header::HOST
             || n == http::header::CONNECTION
             || n == http::header::TRANSFER_ENCODING
@@ -1060,7 +1074,7 @@ async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stat
     drop(tx);
     let mut out = OneShot::empty(None, None);
     let ctl = StreamCtl::new(stats.clone());
-    let fut = match start(conn, plan, path, call_headers(plan, conn.is_h1()), rx, None, &ctl) {
+    let fut = match start(conn, plan, path, call_headers(plan, &plan.headers, conn.is_h1()), rx, None, &ctl) {
         Ok(f) => f,
         Err(f) => {
             out.failure = Some(f);
@@ -1682,12 +1696,26 @@ async fn exchange(
     // gRPC-Web sends one complete body, so its length is known up front.
     let exact = web.then(|| pending.iter().map(|(b, _)| wire_bytes(b).len() as u64).sum::<u64>());
     obs.bytes.request_body = exact.unwrap_or_else(|| pending.iter().map(|(b, _)| 5 + b.len() as u64).sum());
+    // Auth over the framed message now that it is encoded (server reflection).
+    let signed = match &plan.sign {
+        Some(sign) => {
+            let body = match plan.mode {
+                GrpcMode::Unary | GrpcMode::ServerStreaming => pending.iter().map(|(b, _)| wire_bytes(b)).collect::<Vec<_>>().concat(),
+                GrpcMode::ClientStreaming | GrpcMode::Bidirectional => vec![],
+            };
+            match sign(&Bytes::from(body)) {
+                Ok(h) => Some(h),
+                Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
+            }
+        }
+        None => None,
+    };
 
     // ---- the call ----
     let (tx, rx) = mpsc::channel::<Bytes>(64);
     let mut tx = Some(tx);
     let path = format!("/{}/{}", plan.service, plan.method);
-    let mut headers = call_headers(plan, conn.is_h1());
+    let mut headers = call_headers(plan, signed.as_deref().unwrap_or(&plan.headers), conn.is_h1());
     if let Some(ms) = plan.deadline_ms
         && let Ok(v) = HeaderValue::from_str(&grpc_timeout(ms))
     {

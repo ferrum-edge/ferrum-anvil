@@ -14,9 +14,11 @@
 //! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — gRPC echo and reflection
 //!   ([`crate::grpc`]); with an `application/grpc-web*` content type, the
 //!   gRPC-Web echo ([`crate::grpc_web`])
-//! * `/sse?count=&interval=&set_cookie=&id=&abort=` — server-sent events;
+//! * `/sse?count=&interval=&set_cookie=&id=&no_id=&abort=` — server-sent events;
 //!   `set_cookie` (`name=value`) answers with that cookie (`Path=/; HttpOnly`),
-//!   `id` is sent as every event's id (instead of its index), and `abort=1`
+//!   `id` is sent as every event's id (instead of its index), `no_id=1` sends
+//!   events without an `id:` field (each keeps the last event ID the client
+//!   had, such as its `Last-Event-ID`), and `abort=1`
 //!   sends `retry: 50` first and aborts the stream after the events (H1
 //!   truncation / H2 RST_STREAM)
 //! * `/gzip`, `/binary`, `/html`, `/injection`, `/soap-fault`, `/graphql-errors`
@@ -345,6 +347,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
             let count: u32 = q(&qs, "count").and_then(|s| s.parse().ok()).unwrap_or(3).min(10_000);
             let interval: u64 = q(&qs, "interval").and_then(|s| s.parse().ok()).unwrap_or(50).min(60_000);
             let id = q(&qs, "id").map(str::to_string);
+            let no_id = q(&qs, "no_id") == Some("1");
             let abort = q(&qs, "abort") == Some("1");
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
@@ -353,7 +356,8 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
                 }
                 for i in 0..count {
                     let id = id.clone().unwrap_or_else(|| i.to_string());
-                    let ev = format!("id: {id}\nevent: tick\ndata: {{\"n\":{i}}}\n\n");
+                    let id_field = if no_id { String::new() } else { format!("id: {id}\n") };
+                    let ev = format!("{id_field}event: tick\ndata: {{\"n\":{i}}}\n\n");
                     if tx.send(Ok(Frame::data(Bytes::from(ev)))).await.is_err() {
                         return;
                     }

@@ -142,6 +142,8 @@ enum Src {
 struct FrameReader {
     src: Src,
     buf: BytesMut,
+    /// Every byte read so far, as it arrived.
+    received: BytesMut,
 }
 
 impl FrameReader {
@@ -175,7 +177,10 @@ impl FrameReader {
                 }
             }
             match self.chunk().await {
-                Some(Ok(d)) => self.buf.extend_from_slice(&d),
+                Some(Ok(d)) => {
+                    self.received.extend_from_slice(&d);
+                    self.buf.extend_from_slice(&d);
+                }
                 Some(Err(e)) => return Some(Err(e)),
                 None => {
                     return if self.buf.is_empty() { None } else { Some(Err("truncated gRPC frame".into())) };
@@ -191,7 +196,7 @@ pub async fn handle(req: Request<Incoming>, log: GroundTruthLog) -> Response<FxB
     let set_cookie = req.headers().get("x-fixture-set-cookie").cloned();
     let (tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
     let body: FxBody = BodyExt::boxed(StreamBody::new(rx));
-    let reader = FrameReader { src: Src::Hyper(req.into_body()), buf: BytesMut::new() };
+    let reader = FrameReader { src: Src::Hyper(req.into_body()), buf: BytesMut::new(), received: BytesMut::new() };
     tokio::spawn(run(path, reader, tx, log, deny_reflection));
     let mut resp = Response::builder().status(200).header("content-type", "application/grpc");
     if let Some(c) = set_cookie {
@@ -233,7 +238,8 @@ pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTrut
         }
     });
     let (tx, mut rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
-    tokio::spawn(run(path, FrameReader { src: Src::Chan(drx), buf: BytesMut::new() }, tx, log.clone(), deny_reflection));
+    let reader = FrameReader { src: Src::Chan(drx), buf: BytesMut::new(), received: BytesMut::new() };
+    tokio::spawn(run(path, reader, tx, log.clone(), deny_reflection));
     // Response headers wait for the first frame, so an immediate status is a
     // genuine trailers-only answer (one HEADERS frame, then FIN), as real
     // servers send it.
@@ -292,6 +298,7 @@ async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruth
                 return;
             };
             log.push(GroundTruth::MessageReceived { bytes: m.len() as u64 });
+            log.push(GroundTruth::GrpcBodyReceived { path: path.clone(), body: reader.received.to_vec() });
             let req = EchoRequest::decode(m).unwrap_or_default();
             if req.fail_with == ABORT_WITHOUT_STATUS {
                 // Lab-only fault: reply, then reset the stream before any terminal status.
