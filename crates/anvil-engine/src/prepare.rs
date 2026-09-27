@@ -161,6 +161,69 @@ pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<Stri
     Ok(Target { scheme, host, port, authority, path, query: encode_target_part(query) })
 }
 
+/// Why an explicit `Host` value is not `uri-host [":" port]` (RFC 9110
+/// §7.2, RFC 3986 §3.2.2): a host name or IPv4 address, or an IPv6 address
+/// in brackets, each with an optional port. `None` when it is one. The
+/// value is the authority the request names, and its signature covers; it
+/// never changes where the connection goes.
+pub(crate) fn host_problem(v: &str) -> Option<String> {
+    if v.is_empty() {
+        return Some("it is empty".into());
+    }
+    if v.chars().any(char::is_whitespace) {
+        return Some("it contains whitespace".into());
+    }
+    for (c, part) in [('@', "userinfo"), ('/', "a path"), ('?', "a query"), ('#', "a fragment")] {
+        if v.contains(c) {
+            return Some(format!("it contains {part} ('{c}')"));
+        }
+    }
+    let (host, port) = match v.strip_prefix('[') {
+        Some(rest) => {
+            let Some((literal, after)) = rest.split_once(']') else { return Some("the IPv6 address has no closing ']'".into()) };
+            if literal.parse::<std::net::Ipv6Addr>().is_err() {
+                return Some("the address in brackets is not an IPv6 address".into());
+            }
+            match after.strip_prefix(':') {
+                Some(port) => (None, Some(port)),
+                None if after.is_empty() => (None, None),
+                None => return Some("only a port may follow the IPv6 address".into()),
+            }
+        }
+        None if v.matches(':').count() > 1 => return Some("an IPv6 address must be in brackets ([...])".into()),
+        None => match v.split_once(':') {
+            Some((host, port)) => (Some(host), Some(port)),
+            None => (Some(v), None),
+        },
+    };
+    if host.is_some_and(|h| h.is_empty()) {
+        return Some("it has no host".into());
+    }
+    if host.is_some_and(|h| !is_reg_name(h)) {
+        return Some("the host is not a host name or an IPv4 address".into());
+    }
+    if port.is_some_and(|p| !p.bytes().all(|b| b.is_ascii_digit()) || p.parse::<u16>().is_err()) {
+        return Some("the port is not a number from 0 to 65535".into());
+    }
+    None
+}
+
+/// An RFC 3986 `reg-name` (which covers an IPv4 address): unreserved and
+/// sub-delim characters and percent-encoded octets.
+fn is_reg_name(h: &str) -> bool {
+    let mut bytes = h.bytes();
+    while let Some(b) = bytes.next() {
+        let ok = match b {
+            b'%' => bytes.next().is_some_and(|x| x.is_ascii_hexdigit()) && bytes.next().is_some_and(|x| x.is_ascii_hexdigit()),
+            b => b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b),
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 fn has_header(h: &[(String, String)], name: &str) -> bool {
     h.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
@@ -216,6 +279,19 @@ pub fn prepare_http(
             return Err(local(
                 FailureKind::InvalidHeader,
                 format!("the value of '{n}' contains characters not allowed in a header"),
+                &format!("headers[{i}].value"),
+            ));
+        }
+        // Sent as the Host (HTTP/1.1) or :authority (HTTP/2, HTTP/3) of
+        // every HTTP-based protocol, and signed as such.
+        if n.eq_ignore_ascii_case("host")
+            && let Some(why) = host_problem(&v)
+        {
+            return Err(local(
+                FailureKind::InvalidHeader,
+                format!(
+                    "the Host header must be a host with an optional port (a host name, an IPv4 address or an IPv6 address in brackets, then optionally :port), and {why}; the request was not sent"
+                ),
                 &format!("headers[{i}].value"),
             ));
         }
@@ -514,6 +590,36 @@ mod tests {
             }],
         };
         assert!(prepared(&spec).body_uses_secret);
+    }
+
+    #[test]
+    fn an_explicit_host_is_uri_host_with_an_optional_port() {
+        for ok in ["api.example.test", "A.test:8443", "192.0.2.10", "192.0.2.10:8080", "[2001:db8::1]", "[::1]:443", "a%2Db.test"] {
+            assert_eq!(host_problem(ok), None, "{ok}");
+        }
+        for (bad, why) in [
+            ("", "empty"),
+            ("a.test/admin", "a path"),
+            ("user@a.test", "userinfo"),
+            ("user:pw@a.test", "userinfo"),
+            ("a.test?x=1", "a query"),
+            ("a.test#top", "a fragment"),
+            ("a.test extra", "whitespace"),
+            ("a.test\t", "whitespace"),
+            ("2001:db8::1", "brackets"),
+            ("[2001:db8::1", "closing"),
+            ("[a.test]", "not an IPv6 address"),
+            ("[::1]x", "only a port"),
+            (":443", "no host"),
+            ("a.test:", "port"),
+            ("a.test:+80", "port"),
+            ("a.test:65536", "port"),
+            ("a\\b.test", "not a host name"),
+            ("a%zz.test", "not a host name"),
+        ] {
+            let problem = host_problem(bad).unwrap_or_else(|| panic!("{bad:?} was accepted"));
+            assert!(problem.contains(why), "{bad:?}: {problem}");
+        }
     }
 
     #[test]
