@@ -15,6 +15,7 @@
 
 use crate::dns;
 use crate::errors::display_chain;
+use crate::fence::Generations;
 use crate::http::{AttemptOutput, CacheGenerations, EarlyDataIntent, HttpPlan, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
 use crate::tickets::{HandshakeGuard, ResumptionContext, TicketCache, TicketTransport};
@@ -168,8 +169,9 @@ pub struct PoolStats {
 /// The sweep runs only while the pool holds connections. A connection the
 /// pool gives up is closed at once when idle, else when its last request
 /// ends; closing happens outside the pool lock. A connection opened by an
-/// attempt whose execution began before a [`Pool::clear`] (a vault lock) is
-/// never pooled: it serves that attempt only (see [`HttpPlan::fence`]).
+/// attempt whose execution began before a [`Pool::clear`] (a vault lock), or
+/// before a [`Pool::clear_isolation`] of its isolation (a workspace delete),
+/// is never pooled: it serves that attempt only (see [`HttpPlan::fence`]).
 struct Pool {
     shared: Arc<PoolShared>,
 }
@@ -181,9 +183,9 @@ struct PoolShared {
 
 #[derive(Default)]
 struct PoolState {
-    /// Advanced by [`Pool::clear`]; an attempt takes it before it acquires
-    /// a connection.
-    generation: u64,
+    /// Advanced by [`Pool::clear`] and [`Pool::clear_isolation`]; an attempt
+    /// takes the generation before it acquires a connection.
+    generations: Generations,
     conns: HashMap<String, H3Conn>,
     /// The connection that answered `425 Too Early`, kept (even with
     /// connection reuse off) for the one retry the engine sends on it after
@@ -247,18 +249,19 @@ impl Pool {
     }
 
     fn generation(&self) -> u64 {
-        self.shared.state.lock().generation
+        self.shared.state.lock().generations.current()
     }
 
     /// Pool a new connection for `key`, leased for the request that opened
     /// it. It replaces the key's previous connection, if any; that one is
     /// closed once no request is in flight on it. After a [`clear`](Self::clear)
-    /// since `generation`, it is only leased (closed when the request ends).
+    /// since `generation`, or a [`clear_isolation`](Self::clear_isolation) of
+    /// its key's isolation, it is only leased (closed when the request ends).
     fn checkin(&self, key: &str, c: H3Conn, generation: u64) -> StreamLease {
         let (lease, closing) = {
             let mut state = self.shared.state.lock();
             let lease = self.lease(key, &c);
-            if state.generation != generation {
+            if !state.generations.admits(generation, key) {
                 return lease;
             }
             let mut removed = Vec::new();
@@ -306,7 +309,7 @@ impl Pool {
     fn keep_too_early(&self, key: &str, c: H3Conn, generation: u64) {
         let closing = {
             let mut state = self.shared.state.lock();
-            if state.generation != generation {
+            if !state.generations.admits(generation, key) {
                 // Cleared since the attempt began: not kept for the retry.
                 return;
             }
@@ -341,7 +344,7 @@ impl Pool {
     fn clear(&self) {
         let closing = {
             let mut state = self.shared.state.lock();
-            state.generation = state.generation.wrapping_add(1);
+            state.generations.clear();
             let removed = std::mem::take(&mut state.conns).into_iter().chain(std::mem::take(&mut state.too_early)).collect();
             state.to_close(removed)
         };
@@ -352,6 +355,7 @@ impl Pool {
         let prefix = format!("{isolation}|");
         let closing = {
             let mut state = self.shared.state.lock();
+            state.generations.clear_isolation(isolation);
             let mut removed: Vec<_> = state.conns.extract_if(|k, _| k.starts_with(&prefix)).collect();
             removed.extend(state.too_early.extract_if(|k, _| k.starts_with(&prefix)));
             state.to_close(removed)
@@ -1052,7 +1056,9 @@ impl H3Transport {
         self.tickets.clear();
     }
 
-    /// Drop the pooled connections and session tickets of one isolation.
+    /// Drop the pooled connections and session tickets of one isolation. An
+    /// attempt of that isolation that began before this pools no connection
+    /// and keeps no ticket (see [`HttpPlan::fence`]).
     pub fn clear_isolation(&self, isolation: &str) {
         self.pool.clear_isolation(isolation);
         self.tickets.clear_isolation(isolation);

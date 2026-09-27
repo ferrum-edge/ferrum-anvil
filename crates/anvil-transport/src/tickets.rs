@@ -16,10 +16,12 @@
 //! identity, SNI override, minimum version and the client certificate chain)
 //! and ALPN list. Tickets live in memory only: they are never persisted,
 //! exported or shared, and [`TicketCache::clear`] drops them with the vault
-//! lock, as pooled connections and OAuth tokens are dropped. A connection
-//! whose attempt began before that clear resumes nothing and keeps none of
-//! the tickets it receives.
+//! lock, as pooled connections and OAuth tokens are dropped
+//! ([`TicketCache::clear_isolation`] drops one workspace's with the
+//! workspace). A connection whose attempt began before that clear resumes
+//! nothing and keeps none of the tickets it receives.
 
+use crate::fence::Generations;
 use crate::tls::{self, ObservationHandle, ObservingClientCert, ObservingVerifier, PreparedTls, SlotCell, SlotHandle};
 use anvil_domain::execution::TransportFailure;
 use parking_lot::Mutex;
@@ -28,7 +30,7 @@ use rustls::{ClientConfig, NamedGroup};
 use rustls_pki_types::ServerName;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Tickets kept per context (rustls' own in-memory cache keeps 8 per server).
 const MAX_TICKETS: usize = 8;
@@ -46,9 +48,10 @@ pub enum TicketTransport {
 #[derive(Default)]
 pub struct TicketCache {
     contexts: Mutex<HashMap<String, Arc<ResumptionContext>>>,
-    /// Advanced by [`TicketCache::clear`] while it holds the `contexts`
-    /// lock, and compared under that lock.
-    generation: AtomicU64,
+    /// Advanced by [`TicketCache::clear`] and [`TicketCache::clear_isolation`]
+    /// while they hold the `contexts` lock, and compared under that lock
+    /// (always taken first).
+    generations: Mutex<Generations>,
 }
 
 impl TicketCache {
@@ -61,20 +64,24 @@ impl TicketCache {
     /// receives are dropped with it.
     pub fn clear(&self) {
         let mut map = self.contexts.lock();
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.generations.lock().clear();
         map.clear();
     }
 
     /// The current generation, taken when an attempt begins and handed to
     /// [`context`](Self::context).
     pub(crate) fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+        self.generations.lock().current()
     }
 
-    /// Forget the tickets of one workspace isolation.
+    /// Forget the tickets of one workspace isolation (a workspace delete).
+    /// A connection of that isolation whose attempt began before this keeps
+    /// none of the tickets it receives, as after a [`clear`](Self::clear).
     pub fn clear_isolation(&self, isolation: &str) {
         let prefix = format!("{isolation}|");
-        self.contexts.lock().retain(|k, _| !k.starts_with(&prefix));
+        let mut map = self.contexts.lock();
+        self.generations.lock().clear_isolation(isolation);
+        map.retain(|k, _| !k.starts_with(&prefix));
     }
 
     /// Session tickets currently held, over all contexts.
@@ -88,9 +95,10 @@ impl TicketCache {
     }
 
     /// The context for one isolation key, created on first use. For an
-    /// attempt that began before a [`clear`](Self::clear) (its `generation`
-    /// is no longer current) a fresh context that the cache does not hold:
-    /// nothing is resumed, and the tickets it receives are not kept.
+    /// attempt that began before a [`clear`](Self::clear), or before a
+    /// [`clear_isolation`](Self::clear_isolation) of `isolation`, a fresh
+    /// context that the cache does not hold: nothing is resumed, and the
+    /// tickets it receives are not kept.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn context(
         &self,
@@ -114,7 +122,7 @@ impl TicketCache {
             alpn.join(",")
         );
         let mut map = self.contexts.lock();
-        if self.generation.load(Ordering::SeqCst) != generation {
+        if !self.generations.lock().admits(generation, &key) {
             return Arc::new(ResumptionContext::new(prepared));
         }
         if let Some(c) = map.get(&key) {
@@ -323,5 +331,26 @@ mod tests {
         let now = cache.context(cache.generation(), "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
         assert!(!Arc::ptr_eq(&late, &now));
         assert_eq!(cache.contexts(), 1);
+    }
+
+    #[test]
+    fn an_attempt_that_began_before_its_workspace_was_deleted_gets_a_context_the_cache_does_not_keep() {
+        let cache = TicketCache::new();
+        let p = prepared(false);
+        let before = cache.generation();
+        let held = cache.context(before, "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
+        let other = cache.context(before, "ws-b", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
+        cache.clear_isolation("ws-a");
+        assert_eq!(cache.contexts(), 1);
+        let late = cache.context(before, "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
+        assert!(!Arc::ptr_eq(&held, &late));
+        assert_eq!(cache.contexts(), 1, "nothing the deleted workspace's earlier attempt opens is held");
+        // Another workspace's attempt of the same age still uses the cache.
+        assert!(Arc::ptr_eq(&other, &cache.context(before, "ws-b", TicketTransport::Tls, "example.test", 443, &p, &["h2"])));
+        cache.context(before, "ws-b", TicketTransport::Quic, "example.test", 443, &p, &["h3"]);
+        assert_eq!(cache.contexts(), 2);
+        // An attempt that begins after the delete uses the cache again.
+        cache.context(cache.generation(), "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
+        assert_eq!(cache.contexts(), 3);
     }
 }

@@ -8,6 +8,7 @@
 use crate::connector::{self, BoxIo, Established, ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
+use crate::fence::Generations;
 use crate::recorder::{EventCtx, Recorder};
 use crate::stats::ConnStats;
 use crate::tls::PreparedTls;
@@ -70,9 +71,10 @@ pub struct HttpPlan {
     /// How the 0-RTT early-data opt-in applies to this attempt.
     pub early_data: EarlyDataIntent,
     /// The pool and ticket-cache generations when the execution this attempt
-    /// belongs to began. After a clear since (a vault lock), the attempt pools
-    /// no connection and keeps no ticket, however many attempts, redirects
-    /// or retries later it runs. `None`: taken when the attempt begins.
+    /// belongs to began. After a clear since (a vault lock, or a delete of the
+    /// plan's workspace isolation), the attempt pools no connection and keeps
+    /// no ticket, however many attempts, redirects or retries later it runs.
+    /// `None`: taken when the attempt begins.
     pub fence: Option<CacheFence>,
 }
 
@@ -309,12 +311,13 @@ pub struct PoolStats {
 /// closes those idle longer than the TTL even when their key is never used
 /// again. The sweep runs only while the pool holds connections.
 ///
-/// [`Pool::clear`] starts a new generation. An attempt takes the generation
-/// (its execution's, see [`HttpPlan::fence`]) before it checks a connection
-/// out or opens one, and the connection is returned only while that
-/// generation is current (checked under the pool lock): a request still in
-/// flight when the pool is cleared (a vault lock) closes its connection
-/// instead of pooling it again.
+/// [`Pool::clear`] and [`Pool::clear_isolation`] start a new generation. An
+/// attempt takes the generation (its execution's, see [`HttpPlan::fence`])
+/// before it checks a connection out or opens one, and the connection is
+/// returned only while no clear since then covered its key (checked under
+/// the pool lock): a request still in flight when the pool is cleared (a
+/// vault lock) or its workspace is deleted closes its connection instead of
+/// pooling it again.
 pub struct Pool {
     shared: Arc<PoolShared>,
 }
@@ -326,8 +329,8 @@ struct PoolShared {
 
 #[derive(Default)]
 struct PoolState {
-    /// Advanced by [`Pool::clear`].
-    generation: u64,
+    /// Advanced by [`Pool::clear`] and [`Pool::clear_isolation`].
+    generations: Generations,
     idle: HashMap<String, Vec<Pooled>>,
     /// The connection that answered `425 Too Early` to early data, kept
     /// (even with connection reuse off) for the engine's one retry on it
@@ -366,7 +369,7 @@ impl Pool {
     /// The current generation, taken by an attempt before it acquires a
     /// connection and handed back with it.
     fn generation(&self) -> u64 {
-        self.shared.state.lock().generation
+        self.shared.state.lock().generations.current()
     }
 
     fn checkout(&self, key: &str) -> Option<(Pooled, Option<StreamLease>)> {
@@ -395,14 +398,15 @@ impl Pool {
     }
 
     /// Return a connection an attempt of `generation` used. After a
-    /// [`clear`](Self::clear) since, it is closed instead.
+    /// [`clear`](Self::clear) since, or a [`clear_isolation`](Self::clear_isolation)
+    /// of its key's isolation, it is closed instead.
     fn checkin(&self, key: &str, mut p: Pooled, generation: u64) {
         let limits = self.shared.limits;
         p.idle_since = Instant::now();
         let mut dropped = Vec::new();
         {
             let mut state = self.shared.state.lock();
-            if state.generation != generation {
+            if !state.generations.admits(generation, key) {
                 // Dropped after the lock is released.
                 return;
             }
@@ -468,7 +472,7 @@ impl Pool {
         p.idle_since = Instant::now();
         let replaced = {
             let mut state = self.shared.state.lock();
-            if state.generation != generation {
+            if !state.generations.admits(generation, key) {
                 // Cleared since the attempt began: not kept for the retry.
                 return;
             }
@@ -505,17 +509,20 @@ impl Pool {
     pub fn clear(&self) {
         let removed = {
             let mut state = self.shared.state.lock();
-            state.generation = state.generation.wrapping_add(1);
+            state.generations.clear();
             (std::mem::take(&mut state.idle), std::mem::take(&mut state.too_early))
         };
         drop(removed);
     }
 
-    /// Drop pooled connections whose key starts with an isolation prefix.
+    /// Drop pooled connections whose key starts with an isolation prefix
+    /// (a workspace delete) and start a new generation: a connection of that
+    /// isolation in use now is not pooled again when its request ends.
     pub fn clear_isolation(&self, isolation: &str) {
         let prefix = format!("{isolation}|");
         let removed: (Vec<_>, Vec<_>) = {
             let mut state = self.shared.state.lock();
+            state.generations.clear_isolation(isolation);
             let idle = state.idle.extract_if(|k, _| k.starts_with(&prefix)).collect();
             let too_early = state.too_early.extract_if(|k, _| k.starts_with(&prefix)).collect();
             (idle, too_early)

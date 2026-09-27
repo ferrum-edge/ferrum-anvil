@@ -146,9 +146,16 @@
   its responses are not stored, the TLS configuration it prepares (which
   holds a client identity's private key) is not cached, its connections
   (HTTP/1.1, HTTP/2 and HTTP/3) are closed instead of pooled, and its TLS or
-  QUIC connections keep none of the session tickets they receive. Not yet
-  fenced: the gRPC channels of a load run's virtual users, and a workspace
-  delete while work is in flight.
+  QUIC connections keep none of the session tickets they receive.
+- Work still in flight when its workspace is deleted no longer refills that
+  workspace's caches: a request, session or gRPC call of the deleted
+  workspace closes its connections instead of pooling them and keeps none
+  of the session tickets it receives, even on a later redirect or retry.
+  Other workspaces' work in flight at the same time is not affected. A gRPC
+  call in flight at a lock no longer returns its connection to a load run's
+  pooled channels, and pooled gRPC channels are no longer shared between
+  workspaces. The lock check now also counts the session tickets kept by
+  prepared TLS configurations (connections without the early-data opt-in).
 - A spec reimport now compares the import's scoped configuration too, not
   only its requests: the source's own variables, auth, settings and
   description (on the new workspace, or on the import root in an existing

@@ -27,6 +27,7 @@ pub mod workload;
 
 use anvil_domain::execution::{ExecutionRecord, ResponseRecord, TransportFailure};
 use anvil_domain::request::Protocol;
+use anvil_transport::grpc::ChannelUse;
 use anvil_transport::http::{CacheFence, HttpTransport};
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::tls::{PreparedTls, TlsSettings};
@@ -150,14 +151,20 @@ impl CookieJars {
 /// ([`Engine::clear_sensitive_state`]) starts a new epoch, and what an
 /// execution of an earlier epoch prepares or receives afterwards is not
 /// kept: its cookies, its prepared TLS material (client identity keys and
-/// session-ticket stores), its connections and its session tickets. An
-/// execution's epoch ([`Engine::execution_epoch`]) also holds its workspace
-/// cookie jar's generation: after a workspace delete
-/// ([`Engine::clear_isolation`]) its cookies are not kept either.
+/// session-ticket stores), its connections, its gRPC channels and its
+/// session tickets. A workspace delete ([`Engine::clear_isolation`]) does
+/// not start a new epoch: it starts a new generation of that workspace's
+/// cookie jar (held by an execution's epoch, see
+/// [`Engine::execution_epoch`]) and of the transports' caches for that
+/// workspace, and an execution in it that started before the delete keeps
+/// none of its cookies, connections, gRPC channels or session tickets.
+/// Other workspaces' executions are not affected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SensitiveEpoch {
     epoch: u64,
     transport: CacheFence,
+    /// The generation of the engine's gRPC channels (0 when it keeps none).
+    channels: u64,
     /// The generation of the execution's workspace cookie jar; `None` for an
     /// epoch taken for no workspace, which keeps no cookies.
     jar: Option<u64>,
@@ -199,10 +206,11 @@ impl Engine {
         loop {
             let epoch = self.epoch.load(Ordering::SeqCst);
             let transport = CacheFence { tcp: self.http.cache_generations(), quic: self.h3.cache_generations() };
+            let channels = self.grpc_channels.as_ref().map_or(0, |c| c.generation());
             // A lock advances the epoch before it clears the transports: an
             // unchanged epoch means the generations are not newer than it.
             if self.epoch.load(Ordering::SeqCst) == epoch {
-                return SensitiveEpoch { epoch, transport, jar: None };
+                return SensitiveEpoch { epoch, transport, channels, jar: None };
             }
         }
     }
@@ -213,6 +221,13 @@ impl Engine {
     pub fn execution_epoch(&self, isolation: &str) -> SensitiveEpoch {
         let jar = self.cookies.generation(isolation);
         SensitiveEpoch { jar: Some(jar), ..self.sensitive_epoch() }
+    }
+
+    /// The engine's gRPC channels for a call of an execution of `epoch` in
+    /// `isolation`; `None` when the engine keeps none.
+    pub(crate) fn grpc_channels_for(&self, epoch: SensitiveEpoch, isolation: &str) -> Option<ChannelUse> {
+        let channels = self.grpc_channels.clone()?;
+        Some(ChannelUse { channels, isolation: isolation.to_string(), generation: epoch.channels })
     }
 
     fn is_current(&self, epoch: SensitiveEpoch) -> bool {
@@ -308,18 +323,32 @@ impl Engine {
         self.cookies.jars.lock().by_isolation.clear();
     }
 
-    /// Clear one workspace's caches (on workspace delete). A cookie store of
-    /// an execution in that workspace that started before this is refused.
+    /// Clear one workspace's caches (on workspace delete). An execution in
+    /// that workspace that started before this keeps nothing it receives
+    /// afterwards in them: no cookie, pooled connection, gRPC channel or
+    /// session ticket. The sensitive-state epoch is not advanced, so other
+    /// workspaces' executions are not affected.
     pub fn clear_isolation(&self, isolation: &str) {
         self.http.pool.clear_isolation(isolation);
         self.http.tickets.clear_isolation(isolation);
         self.h3.clear_isolation(isolation);
+        if let Some(c) = &self.grpc_channels {
+            c.clear_isolation(isolation);
+        }
         self.cookies.clear_isolation(isolation);
     }
 
-    /// Session tickets held for 0-RTT, over TCP and QUIC (for tests and the
-    /// lock check).
+    /// Session tickets and sessions held for resumption (for tests and the
+    /// lock check): the 0-RTT ticket caches over TCP and QUIC, and the
+    /// session stores of the prepared TLS configurations.
     pub fn session_tickets_held(&self) -> usize {
+        let prepared: usize = self.tls.lock().values().map(|p| p.sessions_held()).sum();
+        self.early_data_tickets_held() + prepared
+    }
+
+    /// Session tickets held for 0-RTT (the early-data ticket caches over TCP
+    /// and QUIC only; for tests).
+    pub fn early_data_tickets_held(&self) -> usize {
         self.http.tickets.tickets_held() + self.h3.tickets.tickets_held()
     }
 }
