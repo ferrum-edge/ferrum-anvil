@@ -1,23 +1,20 @@
 # Gateway failure lab: `auth` and `tls` profiles
 
-These two profiles drive a **real, pinned Ferrum Edge release binary** with
-controllable fixtures and check what Anvil's shared engine concludes from the
-public evidence alone. The default pin is v0.9.7 (`lab/gateway/RELEASE.lock`);
-v0.9.5 runs with `--release v0.9.5` (`lab/gateway/releases/v0.9.5.lock`). The
-lab's trusted Ferrum profile declares the running release's compatibility id,
-so diagnoses use that release's catalog. Nothing is faked: no
-injected headers, no injected failure enums, no fixture pretending to be the
-gateway. Every result records the gateway release, source SHA, binary sha256
-and platform.
+These two profiles drive a **real, pinned Ferrum Edge release binary** (v0.9.7
+by default, v0.9.5 with `--release v0.9.5`) with controllable fixtures, and
+check what Anvil's shared engine concludes from the public evidence alone.
+Nothing is faked: no injected headers, no injected failure enums, no fixture
+pretending to be the gateway. Every result records the gateway release, source
+SHA, binary sha256 and platform.
 
-The observations below were first recorded on 0.9.5 and re-observed on 0.9.7:
-every scenario passes on both releases with the same expectations, except two
-whose verdict is release-dependent (see `docs/audit/gateway-0.9.7-delta.md`):
+Every scenario passes on both releases with the same expectations, except two
+whose verdict is release-dependent (see
+[gateway-0.9.7-delta.md](../audit/gateway-0.9.7-delta.md)):
 `AUTH-009.iss-array` (0.9.5 accepts a multi-valued `iss`; 0.9.7 rejects it with
-the ordinary 401 bodies, #5522) and `AUTH-X01.nbf` (0.9.5 ignores a future
-introspection `nbf`; 0.9.7 answers 401 `Token is not yet valid`, #5523).
+the ordinary 401 bodies) and `AUTH-X01.nbf` (0.9.5 ignores a future
+introspection `nbf`; 0.9.7 answers 401 `Token is not yet valid`).
 
-Three kinds of evidence are kept apart (build plan §15.1):
+Three kinds of evidence are kept apart:
 
 | Kind | Source | Used for |
 |---|---|---|
@@ -33,23 +30,15 @@ positive recovery request after the fault is removed.
 ## Running
 
 ```sh
-export ANVIL_LAB_FERRUM_BIN=/path/to/ferrum-edge-macos-aarch64   # or lab/bin/<release>/<asset>, see gateway.rs::binary()
-ulimit -n 4096
-cargo run -p anvil-lab -- verify                      # checks the pinned sha256
-cargo run -p anvil-lab -- --release v0.9.5 run auth --untrusted-pass   # the earlier supported release
 cargo run -p anvil-lab -- list tls                    # scenario ids (skips included)
 cargo run -p anvil-lab -- run tls  --untrusted-pass
 cargo run -p anvil-lab -- run auth --untrusted-pass
 cargo run -p anvil-lab -- run auth --scenario AUTH-X04   # one scenario
+cargo run -p anvil-lab -- --release v0.9.5 run auth --untrusted-pass
 cargo run -p anvil-lab -- up tls                      # keep fixtures + gateways up for manual work
 ```
 
-Results go to `results/lab/<UTC stamp>-<profile>/` (`summary.json`, one
-`<id>.json` per scenario, `<id>.record.json` with the full redacted execution
-record, and the archived gateway logs). `--untrusted-pass` repeats every
-scenario with the destination **not** configured as a trusted Ferrum profile;
-the harness then also asserts that no `ferrum.token*` / `ferrum.outcome*`
-finding appears.
+Setup, binary lookup, results layout and the two passes: [README.md](README.md).
 
 **Ids.** A result id is the failure-matrix id (`docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json`),
 optionally followed by `.<variant>` (for example `TLS-005.tls12`). Ids with an
@@ -95,10 +84,9 @@ under `lab/.run/auth/soap/` and trusted only by the lab gateway's routes. Each
 signed element is canonicalized in a standalone form declaring exactly the
 namespaces it visibly uses, so it equals the in-context exclusive canonical
 form; the gateway's own, independent canonicalizer accepting the result is
-the cross-check. `xmlsec1` is not installed on this host and was not
-downloaded. Without `xmllint`, AUTH-030/031 are reported as skipped with that
-reason; `openssl` is required to start the auth profile at all (the gateway
-config references the certificates).
+the cross-check; `xmlsec1` is not used. Without `xmllint`, AUTH-030/031 are
+reported as skipped with that reason; `openssl` is required to start the auth
+profile at all (the gateway config references the certificates).
 
 ## `tls` scenarios
 
@@ -171,7 +159,7 @@ records redact `WWW-Authenticate`.
 | AUTH-015 | AUTH-015 | OAuth token endpoint returns 503 | `local.auth_preparation_failed`: nothing sent, no HTTP finding; the gateway and backend never saw a request |
 | AUTH-016 | AUTH-016 | Client credentials → opaque token → gateway introspects it → 200 | One token request, gateway introspection at the IdP, cached token reused, client secret not recorded |
 | AUTH-X01 | — | Token the IdP says is inactive → 401 `Inactive token` + `Bearer error="invalid_token"` | Credential rejection (401), never "unavailable"; the gateway did ask the IdP |
-| AUTH-X01.nbf | — | The IdP reports an active token whose `nbf` is 600 s in the future | **Release-dependent** (#5523): 0.9.5 ignores `nbf` and forwards (200); 0.9.7 answers 401 `Token is not yet valid` + `Bearer error="invalid_token"`, a credential verdict (never "unavailable"), matched against the 0.9.7 catalog at most likely; backend untouched |
+| AUTH-X01.nbf | — | The IdP reports an active token whose `nbf` is 600 s in the future | **Release-dependent:** 0.9.5 ignores `nbf` and forwards (200); 0.9.7 answers 401 `Token is not yet valid` + `Bearer error="invalid_token"`, a credential verdict (never "unavailable"), matched against the 0.9.7 catalog at most likely; backend untouched |
 | AUTH-X02 | — | Introspection endpoint refused (and, as a variant, the IdP answering 503) → 503 `Token introspection unavailable`, no challenge | Dependency failure: 503, never an unauthorized/credential claim; same credential works once the IdP is reachable |
 | AUTH-018 | AUTH-018 | Engine-signed `ferrum-hmac-v2` GET and POST | Accepted; one fresh nonce per send; secret not recorded |
 | AUTH-018.skew | AUTH-018 | Date header 10 min old → 401 `Missing or expired Date header` | No confirmed clock claim |
@@ -182,7 +170,7 @@ records redact `WWW-Authenticate`.
 | AUTH-023 | AUTH-023 | Legacy `ferrum-hmac-v1` without the unsafe opt-in | Refused locally; nothing reaches the gateway |
 | AUTH-024 | AUTH-024 | DPoP-bound ES256 token + per-send proof | Accepted; binding facts (jkt/htu/jti) recorded without the key; missing proof → `DPoP proof required`, proof for another URL and proof from an unbound key are rejected |
 | AUTH-025 | AUTH-025 | Captured proof replayed → 401 `DPoP replay` | No `DPoP-Nonce` challenge (0.9.5 or 0.9.7) and no automatic retry loop; fresh proofs per send accepted |
-| AUTH-009.iss-array | AUTH-009 | HS256 token with `iss: [issuer, other]` on `jwt_auth` (no issuer configured) and an ES256 token with the same array on `jwks_auth` (issuer configured) | **Release-dependent** (#5522): 0.9.5 accepts both (200); 0.9.7 answers 401 `Invalid JWT token` / 401 `Invalid or unrecognized JWT`, matched against the 0.9.7 catalog at most likely; no confirmed issuer claim either way |
+| AUTH-009.iss-array | AUTH-009 | HS256 token with `iss: [issuer, other]` on `jwt_auth` (no issuer configured) and an ES256 token with the same array on `jwks_auth` (issuer configured) | **Release-dependent:** 0.9.5 accepts both (200); 0.9.7 answers 401 `Invalid JWT token` / 401 `Invalid or unrecognized JWT`, matched against the 0.9.7 catalog at most likely; no confirmed issuer claim either way |
 | AUTH-027 | AUTH-027 | Wrong LDAP password → 401 `LDAP authentication failed` | Directory really rejected the bind; no "unavailable/unreachable" claim |
 | AUTH-028 | AUTH-028 | Directory unreachable → 500 `LDAP authentication temporarily unavailable` | Never a password/credential claim; the same credentials work against the reachable directory |
 | AUTH-032 | AUTH-032 | Multi-auth: JWT(alice)+key(bob) → 403 `Consumer is not allowed`; bad JWT + key(bob) → 200; key(bob) → 200 | The first successful identity is judged alone (no privilege union); a later valid mechanism wins over an earlier rejection |
@@ -209,51 +197,44 @@ Skip reasons name the release under test (`Ferrum Edge 0.9.5` / `0.9.7`); each f
 | TLS-017, TLS-018 | Out of this profile (forward-proxy leg; Anvil's own redirect policy). |
 | AUTH-011..014 | Client-side OAuth flows with no gateway leg; covered by anvil-auth unit tests. |
 | AUTH-025.nonce | Infeasible: neither 0.9.5 nor 0.9.7 has a DPoP-Nonce / `use_dpop_nonce` challenge. |
-| AUTH-030, AUTH-031 (conditional) | Only on hosts without `xmllint`: the lab cannot produce signed fixtures without an audited canonicalizer, and Anvil itself never signs XML. Present on this host, so both ran live. |
+| AUTH-030, AUTH-031 (conditional) | Only on hosts without `xmllint`: the lab cannot produce signed fixtures without an audited canonicalizer, and Anvil itself never signs XML. Both ran live in the recorded runs. |
 
 ## Diagnostics fixes found by these profiles
 
-1. **DTLS refusal reported as silent UDP** (PROTO-022). After refusing a
-   client certificate, the 0.9.5 DTLS 1.3 frontend lets the client finish its
-   handshake flight and then sends `close_notify`. Anvil said
-   `udp.no_response`, whose alternatives include "nothing is listening" —
-   contradicted by a completed handshake. New finding
-   `dtls.closed_without_response` (confirmed observation, client-to-peer,
-   cause left open). Tests: `crates/anvil-diagnostics/tests/lab_dtls_close.rs`.
-2. **TLS 1.3 refusal whose alert was lost** (TLS-005/006/014). In some runs
-   the gateway reset the connection so quickly after refusing a missing or
-   untrusted client certificate that the TLS 1.3 alert never reached Anvil,
-   which then said only "connection closed before a response" although it had
-   observed the certificate request and a fresh TLS 1.3 connection. New
-   finding `client.tls.closed_after_certificate_request`: likely when no
-   certificate was presented, unknown when one was; never on reused
-   connections, without an observed request, on TLS 1.2 or when an alert was
-   read. Tests: `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`.
-3. **Backend 401 attributed to a gateway auth plugin** (AUTH-X04/X05). The lab
-   showed that 0.9.5 builds authentication/authorization rejections without a
-   `Via` header, while every response on its backend path carries
-   `Via: 1.1 ferrum-edge`. When that hop is present and every exact catalog
-   candidate is such a pre-dispatch rejection, the new
-   `ferrum.relayed_backend_response` finding (likely, upstream application)
-   replaces the gateway attribution. Genuine gateway rejections, foreign `Via`
-   hops, untrusted destinations and gateway-built upstream failures are
-   unchanged. Tests: `crates/anvil-diagnostics/tests/lab_via_relay.rs`.
-4. **A login page reported as a successful API exchange** (AUTH-017). A
-   browser-shaped request to the OIDC route was redirected to the identity
-   provider; Anvil followed it and reported the provider's 200 login page as
-   a complete success, with nothing explaining that a browser session is not
-   shared. New rule `auth.session` emits `auth.browser_session_required`
-   (likely) from typed evidence only — a followed redirect or a 3xx
-   `Location` carrying the RFC 6749 authorization-request parameters
-   (`response_type` and `client_id`), or a 401 challenge naming the `oidc`
-   realm — and `Diagnosis.stopped_at_login` makes the engine record such an
-   exchange as application *not evaluated* (one line in
-   `crates/anvil-engine/src/record.rs`). Ordinary redirects, plain bearer
-   challenges and requests sent directly to an authorization endpoint are
-   unchanged. Tests: `crates/anvil-diagnostics/tests/lab_browser_session.rs`.
-   Catalog version `2026.09.25-7` (the current wording catalog is
-   `2026.09.25-8`, which moved release-specific sentences into each Ferrum
-   catalog's `marker_semantics`).
+Each of these findings exists because a lab run showed Anvil saying too little
+or the wrong thing.
+
+1. **`dtls.closed_without_response`** (PROTO-022). After refusing a client
+   certificate, the DTLS 1.3 frontend lets the client finish its handshake
+   flight and then sends `close_notify`. `udp.no_response` would suggest
+   "nothing is listening", which a completed handshake contradicts; this
+   finding is a confirmed observation (client-to-peer) with the cause left
+   open. Tests: `crates/anvil-diagnostics/tests/lab_dtls_close.rs`.
+2. **`client.tls.closed_after_certificate_request`** (TLS-005/006/014). The
+   gateway can reset the connection so fast after refusing a missing or
+   untrusted client certificate that the TLS 1.3 alert never arrives. When
+   Anvil observed the certificate request on a fresh TLS 1.3 connection, it
+   explains the close with this finding: likely when no certificate was
+   presented, unknown when one was. Never on reused connections, without an
+   observed request, on TLS 1.2, or when an alert was read. Tests:
+   `crates/anvil-diagnostics/tests/lab_tls13_refusal.rs`.
+3. **`ferrum.relayed_backend_response`** (AUTH-X04/X05). The gateway builds
+   authentication/authorization rejections without a `Via` header, while every
+   response on its backend path carries `Via: 1.1 ferrum-edge`. When that hop
+   is present and every exact catalog candidate is such a pre-dispatch
+   rejection, this finding (likely, upstream application) replaces the gateway
+   attribution. Genuine gateway rejections, foreign `Via` hops, untrusted
+   destinations and gateway-built upstream failures are not affected. Tests:
+   `crates/anvil-diagnostics/tests/lab_via_relay.rs`.
+4. **`auth.browser_session_required`** (AUTH-017). Rule `auth.session` emits it
+   (likely) from typed evidence only: a followed redirect or a 3xx `Location`
+   carrying the RFC 6749 authorization-request parameters (`response_type` and
+   `client_id`), or a 401 challenge naming the `oidc` realm.
+   `Diagnosis.stopped_at_login` then makes the engine record the exchange as
+   application *not evaluated* (`crates/anvil-engine/src/record.rs`), so a
+   followed login page is never a success. Ordinary redirects, plain bearer
+   challenges and requests sent directly to an authorization endpoint are not
+   affected. Tests: `crates/anvil-diagnostics/tests/lab_browser_session.rs`.
 
 ## Gateway behaviour observed live (0.9.5, re-observed on 0.9.7; macOS arm64)
 
@@ -294,7 +275,7 @@ Skip reasons name the release under test (`Ferrum Edge 0.9.5` / `0.9.7`); each f
 ## Known limitations
 
 - Marker- and body-derived claims stay at **likely** even with a trusted
-  gateway (the markers and bodies are backend-spoofable on 0.9.5; the auth
+  gateway (the markers and bodies are backend-spoofable on 0.9.5 and 0.9.7; the auth
   profile is plain HTTP). That ceiling is deliberate, not a test gap.
 - On the TCP+TLS listener (TLS-005.tcp) the payload is written before the
   gateway's `certificate_required` alert arrives, so Anvil conservatively adds
@@ -306,11 +287,9 @@ Skip reasons name the release under test (`Ferrum Edge 0.9.5` / `0.9.7`); each f
   the pool-cancellation path is accepted but not forced.
 - The relay rule keys on the default `ferrum-edge` Via pseudonym; a renamed or
   disabled pseudonym falls back to the previous (body-based, likely) behaviour.
-- Both profiles need a free port block (18180/18190, 19100–19199; 18380,
-  18343, 18344, 18390, 18391, 18301, 18302, 19300–19399).
 - WS-Security rejections other than `invalid credentials`, `nonce replay
   detected` and `SAML assertion has already been used` are recorded in the
-  0.9.5 outcome catalog as one `{"error":"{message}"}` family, so Anvil gives
+  outcome catalogs as one `{"error":"{message}"}` family, so Anvil gives
   them only the generic 401 meaning (no gateway attribution, no specific
   cause). Honest, but less specific than the body text.
 - AUTH-030/031 depend on `xmllint` and `openssl` on the host (signed fixtures
@@ -323,46 +302,28 @@ Skip reasons name the release under test (`Ferrum Edge 0.9.5` / `0.9.7`); each f
 
 ## Stability
 
-Both releases, `anvil-lab [--release v0.9.5] run all --untrusted-pass`
-(2026-09-26, macOS 26 arm64): tls 66 passed, 0 failed, 7 skipped and auth
-80 passed, 0 failed, 5 skipped on **v0.9.7** (`f3bd0027…`) and on **v0.9.5**
-(`6a531f2c…`); `AUTH-009.iss-array` and `AUTH-X01.nbf` pass on both with their
+`anvil-lab [--release v0.9.5] run all --untrusted-pass` (2026-09-26, macOS 26
+arm64) gave the same counts on **v0.9.7** (`f3bd0027…`) and **v0.9.5**
+(`6a531f2c…`): tls 66 passed, 0 failed, 7 skipped; auth 80 passed, 0 failed,
+5 skipped. `AUTH-009.iss-array` and `AUTH-X01.nbf` pass on both with their
 release-dependent expectations.
 
-Earlier batches (Ferrum Edge v0.9.5 only):
-
-Command per run: `cargo run -p anvil-lab -- run <profile> --untrusted-pass`
-(macOS 26 arm64, Ferrum Edge v0.9.5 `6a531f2c…`), each run starting and
-stopping its own gateways and fixtures. Counts include both passes (trusted
-and untrusted destination); skips are reported separately and never counted
-as passes.
+Earlier batches, v0.9.5 only (`cargo run -p anvil-lab -- run <profile>
+--untrusted-pass`, macOS 26 arm64, `6a531f2c…`; counts include both passes):
 
 | Batch | tls (per run) | auth (per run) |
 |---|---|---|
-| With AUTH-017/029/030/031 live (current), 4 consecutive auth runs + 1 tls run | 66 passed, 0 failed, 7 skipped ×1 | 76 passed, 0 failed, 5 skipped ×4 |
+| With AUTH-017/029/030/031 live, 4 consecutive auth runs + 1 tls run | 66 passed, 0 failed, 7 skipped ×1 | 76 passed, 0 failed, 5 skipped ×4 |
 | Before AUTH-017/029/030/031, 3 consecutive runs | 66 passed, 0 failed, 7 skipped ×3 | 62 passed, 0 failed, 9 skipped ×3 |
 | Before AUTH-026 moved into tls, 5 consecutive runs | 64 passed, 0 failed, 7 skipped ×5 | 62 passed, 0 failed, 10 skipped ×5 |
 | With AUTH-026 in tls, 5 consecutive runs | 66 passed, 0 failed, 7 skipped ×5 | 62 passed, 0 failed, 9 skipped ×5 |
 
 One earlier batch failed 3 of 64 tls results (TLS-005/006/014, untrusted
 pass): the TLS 1.3 alert was lost to the gateway's reset and Anvil reported
-only "connection closed before a response". That was a diagnostics gap, not
-a flaky test; it is fixed by `client.tls.closed_after_certificate_request`
-(fix 2 above), and the scenarios accept exactly that alternative shape.
+only "connection closed before a response". That was a diagnostics gap, not a
+flaky test; `client.tls.closed_after_certificate_request` (fix 2 above) covers
+it, and the scenarios accept exactly that alternative shape.
 
-After every batch `pgrep -fl ferrum-edge` showed no gateway left from this
-lab.
-
-The `core` profile (`run core --untrusted-pass`, 36 scenarios) could not be
-re-run from this worktree while this work was done: another session held the
-core port block with `anvil-lab up core`. None of the diagnostics changes
-can fire on core's evidence (no UDP/DTLS, no TLS client leg, no
-authentication or authorization catalog candidates, no redirect into an
-authorization endpoint and no `oidc`-realm challenge), and the engine and
-diagnostics test suites pass.
-
-`python3 scripts/matrix-coverage.py` (with the newest auth/tls runs above and
-the other profiles' baseline runs) moves AUTH-017, AUTH-029, AUTH-030 and
-AUTH-031 from *skipped (live)* to *verified live*: 94 verified live,
-74 automated test, 1 executed check, 6 blocked, 2 partial, 2 not applicable,
-3 not covered (UP-017/018/019, owned by the admission profile).
+After every batch `pgrep -fl ferrum-edge` showed no gateway left from the lab.
+Current per-scenario coverage is in
+[matrix-coverage.md](../verification/matrix-coverage.md).

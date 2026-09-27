@@ -1,8 +1,8 @@
 # Failure lab: `h3x` profile (SSE over HTTP/3, CONNECT-UDP, DTLS in the tunnel)
 
-This profile runs Anvil's shared engine against the **real, pinned Ferrum Edge v0.9.7
-release binary** (`lab/gateway/RELEASE.lock`). It exercises two HTTP/3 extensions through
-the gateway's QUIC listener:
+This profile runs Anvil's shared engine against the **real, pinned Ferrum Edge release
+binary** (v0.9.7 by default, v0.9.5 with `--release v0.9.5`). It exercises HTTP/3 extensions
+through the gateway's QUIC listener:
 
 - **Server-sent events over HTTP/3.** The event stream is parsed from the HTTP/3 request
   stream's DATA frames as they arrive (`docs/protocols.md` §3.3).
@@ -24,25 +24,18 @@ relay), plus the HTTP and UDP stream fixtures and the DTLS echo (`dtls.rs`).
 ## 1. Running
 
 ```sh
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH
-export ANVIL_LAB_FERRUM_BIN=/path/to/lab-bin/ferrum-edge-macos-aarch64   # verified against RELEASE.lock
-ulimit -n 4096
-
 cargo run -p anvil-lab -- list h3x
 cargo run -p anvil-lab -- run h3x --untrusted-pass     # ~27 s, 3 gateway processes
 cargo run -p anvil-lab -- run h3x --scenario MASQUE-003
 cargo run -p anvil-lab -- up h3x                       # keep fixtures + gateways up
 ```
 
-Results go to `results/lab/<UTC stamp>-h3x/` as for the other profiles. The directory holds
-`summary.json`, `<ID>.json`, `<ID>.record.json`, and the three operator logs
-(`gateway-operator.log` for 18843, `-1` for 18844, `-2` for 18845). With `--untrusted-pass`
-every scenario runs again with the gateway *not* declared as a trusted Ferrum destination.
-In that pass no `ferrum.token.*` or `ferrum.outcome` finding may appear. For CONNECT-UDP,
-trust follows the MASQUE proxy, which is the only HTTP peer.
+Setup, binary lookup, results layout and the two passes: [README.md](README.md). The run
+directory holds three operator logs: `gateway-operator.log` (18843), `-1` (18844) and `-2`
+(18845). For CONNECT-UDP, trust follows the MASQUE proxy, which is the only HTTP peer.
 
-Before every start the harness runs the real binary's `ferrum-edge validate` on each
-rendered configuration (`lab/.run/h3x*/`). All three pass on v0.9.7.
+Before every start the harness runs the binary's `ferrum-edge validate` on each rendered
+configuration (`lab/.run/h3x*/`).
 
 ### Ports
 
@@ -105,25 +98,24 @@ rendered configuration (`lab/.run/h3x*/`). All three pass on v0.9.7.
 | MASQUE-DTLS-003 | To a live DTLS echo that is not admitted (19810) | The same refusal checks as MASQUE-003 (403, body kept, `masque.proxy_refused` confirmed); the attempt stays the CONNECT with no `dtls_handshake` phase, no tunnel evidence and no DTLS/TLS finding: no DTLS was attempted | The unlisted echo saw nothing; operator log 403 and `connect_udp_target_not_allowed`. Recovery to 19808 |
 | MASQUE-DTLS-004 | To the silent target (19806), DTLS handshake deadline 1.5 s | `dtls_handshake_timeout` with `deadline_ms = 1500`; the tunnel was fine (200, ClientHello and retransmissions sent as capsules, none received, `closed_by = client`); `client.dtls.handshake_timeout` names the target and does not claim it is down; no MASQUE finding, no `udp.no_response`; nothing dispatched | The silent target received the handshake datagrams through the gateway; operator log 200. Recovery to 19808 |
 
-The harness adds its untrusted-pass checks on top: no `ferrum.token.*` and no
-`ferrum.outcome` finding without a trusted profile. In the trusted pass, the 405 of
+In the trusted pass, the 405 of
 MASQUE-005 matches a catalog outcome (`ferrum.outcome`, capped at **likely**). The 501 of
 MASQUE-006 yields `ferrum.marker.absent` (**unknown**). No CONNECT-UDP refusal carries
 `X-Gateway-Error`.
 
 ## 4. Results
 
-Three consecutive runs of `anvil-lab run h3x --untrusted-pass` on macOS aarch64 with
-v0.9.7 (sha256 `f3bd0027…`): **34 passed, 0 failed, 0 skipped** each time (17 scenarios
-× trusted and untrusted passes). After the merge into the main branch (2026-09-26), `run all`
-gave h3x **34/0/0 on both v0.9.7 and v0.9.5**.
+| Date | Release | Runs | Result per run |
+|---|---|---|---|
+| before DTLS (17 scenarios) | v0.9.7 | 3 consecutive, macOS aarch64, sha256 `f3bd0027…` | 34 passed, 0 failed, 0 skipped |
+| 2026-09-26, `run all` (17 scenarios) | v0.9.7 and v0.9.5 | 1 each | 34/0/0 |
+| 2026-09-26, with MASQUE-DTLS-001…004 (20 scenarios) | v0.9.7 | 3 consecutive | 40/0/0 |
+| 2026-09-26, 20 scenarios | v0.9.5 | 1 | 40/0/0 |
 
-With DTLS inside the tunnel (2026-09-26; MASQUE-010, the former local refusal, replaced by
-MASQUE-DTLS-001…004): three consecutive runs on v0.9.7 gave **40 passed, 0 failed, 0 skipped**
-each time (20 scenarios × both passes), and one run on v0.9.5 (`--release v0.9.5`) **40/0/0**.
+Each result counts both the trusted and the untrusted pass.
 
-Observations about v0.9.7 that the scenarios rely on, each confirmed by the operator log
-or the wire:
+Gateway behaviour the scenarios rely on, each confirmed by the operator log or the wire
+(v0.9.7; v0.9.5 behaves the same in these scenarios):
 
 - HTTP/3 SSE through the gateway streams: events arrive about 60 ms apart as sent by the
   backend, not buffered.
@@ -137,7 +129,7 @@ or the wire:
   target and the handshake completes with retransmission timers unaffected. The admission
   check (403 `connect_udp_target_not_allowed` for a target that is not a configured
   destination, `admit_connect_udp_destination`) runs before any socket exists, so a refused
-  DTLS target never sees a ClientHello. v0.9.5 behaves the same in these scenarios.
+  DTLS target never sees a ClientHello.
 
 ## 5. Limitations
 
@@ -148,7 +140,7 @@ or the wire:
   gateway, not against a Ferrum `dtls` listener (a gateway-terminated DTLS listener behind a
   gateway's own CONNECT-UDP route would test the same relay twice). Mutual TLS inside the
   tunnel is covered by the engine tests (`crates/anvil-engine/tests/dtls_masque.rs`).
-- The gateway's QUIC-datagram path cannot be exercised live because v0.9.7 never negotiates
+- The gateway's QUIC-datagram path cannot be exercised live because Ferrum Edge never negotiates
   `SETTINGS_H3_DATAGRAM`. QUIC DATAGRAM frames in both directions are covered by the
   `h3server` fixture tests (`crates/anvil-transport/tests/h3_sse_masque.rs`).
 - Authorization-lifetime resets of authenticated tunnels, the session limit (503) and DNS

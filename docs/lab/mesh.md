@@ -1,14 +1,14 @@
 # Failure lab: `mesh` profile (Ferrum Mesh client)
 
-Anvil tested as a **mesh client** against the real, pinned Ferrum Edge **v0.9.7** release binary
-(`lab/gateway/RELEASE.lock`) in **mesh mode**. There is no Kubernetes, no control plane and no
-traffic capture: every gateway runs the documented localized file source
-(`FERRUM_MESH_CONFIG_PROTOCOL=file`, docs/mesh.md "Localized file source (no control plane)") with
-file-based SVIDs (`FERRUM_GATEWAY_SVID_*`, "File-Based SVIDs: Two-Process Local Mesh"), and Anvil
+Anvil tested as a **mesh client** against the real, pinned Ferrum Edge release binary (v0.9.7 by
+default, v0.9.5 with `--release v0.9.5`) in **mesh mode**. There is no Kubernetes, no control plane and
+no traffic capture: every gateway runs the localized file source (`FERRUM_MESH_CONFIG_PROTOCOL=file`,
+Ferrum Edge `docs/mesh.md` "Localized file source (no control plane)") with file-based SVIDs
+(`FERRUM_GATEWAY_SVID_*`, "File-Based SVIDs: Two-Process Local Mesh"), and Anvil
 dials the mesh listeners directly. Anvil verifies every listener by **SPIFFE ID** (no verification
 bypass) and presents the lab client SVID.
 
-The profile exercises the client features added for mesh testing (`docs/protocols.md` §3.9):
+The profile exercises Anvil's mesh client features ([protocols.md §3.9](../protocols.md)):
 the HBONE proxy profile, SPIFFE server-identity verification, the SNI override, UDP through an HBONE
 tunnel (Ferrum Mesh datagram-over-HBONE, MESH-018 to MESH-028), and DTLS inside that tunnel (MESH-031 to
 MESH-034).
@@ -23,22 +23,18 @@ the relayed byte counts).
 ## 1. Running
 
 ```sh
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH    # macOS/Homebrew rustup
-export ANVIL_LAB_FERRUM_BIN=/path/to/ferrum-edge-macos-aarch64   # checked against RELEASE.lock
-ulimit -n 4096
 cargo run -p anvil-lab -- run mesh --untrusted-pass
 cargo run -p anvil-lab -- run mesh --scenario MESH-008     # one scenario
-cargo run -p anvil-lab -- up mesh                          # keep everything up for manual use
+cargo run -p anvil-lab -- --release v0.9.5 run mesh --untrusted-pass
+cargo run -p anvil-lab -- up mesh                          # keep everything up; prints listeners and client SVID paths
 ```
 
-Results go to `results/lab/<stamp>-mesh/` (`summary.json`, `<ID>.json`, `<ID>.record.json`,
-`gateway-operator*.log`). The per-run SPIFFE PKI is generated into `lab/.run/mesh/pki/`
-(`ca.pem`, `svc.pem`/`.key`, `ztunnel.pem`/`.key`, `client.pem`/`.key`, `foreign-client.pem`/`.key`,
-`foreign-ca.pem`); CA private keys are never written, nothing is committed and nothing is added to a
-system trust store. `up mesh` prints the listeners and the client SVID paths for desktop use.
+Setup, binary lookup, results layout and the two passes: [README.md](README.md).
 
-Every gateway configuration is validated by the real binary (`ferrum-edge validate -m mesh -s … -c …`)
-before it starts.
+The per-run SPIFFE PKI is generated into `lab/.run/mesh/pki/` (`ca.pem`, `svc.pem`/`.key`,
+`ztunnel.pem`/`.key`, `client.pem`/`.key`, `foreign-client.pem`/`.key`, `foreign-ca.pem`). CA private
+keys are never written, nothing is committed and nothing is added to a system trust store. Every gateway
+configuration is validated with `ferrum-edge validate -m mesh -s … -c …` before it starts.
 
 ### Instances and ports
 
@@ -67,8 +63,8 @@ DTLS records are opaque datagrams). The Ambient workload also declares two names
 `FERRUM_DNS_OVERRIDES`) and `udp-unresolvable.anvil-lab.invalid` (RFC 6761 `.invalid`, never resolves).
 The Ambient instance clears `FERRUM_MESH_NODE_WAYPOINT_POD_REGISTRY_DIR`: with the default directory and
 no node agent, the absent registry is authoritative and refuses every declared name at relay synthesis
-(`denial = unresolvable_authority`, seen in the first lab run; ferrum-edge/ferrum-edge#5766), so the names
-could never reach the UDP relay's own checks.
+(`denial = unresolvable_authority`; ferrum-edge/ferrum-edge#5766), so the names could never reach the UDP
+relay's own checks.
 
 Ambient on macOS: the Ambient UDP placement guard withholds `/health` readiness on a host without the
 node-agent netns producer, while every TCP listener serves. The lab waits on `/live` for that instance.
@@ -76,9 +72,6 @@ The relay-synthesis refusal reason is only logged at debug level, so the lab sta
 `RUST_LOG=info,ferrum_edge::proxy=debug`.
 
 ## 2. Scenarios
-
-Every scenario also runs untrusted (the listeners not declared as a Ferrum gateway) and must then make
-no gateway attribution.
 
 | ID | Stimulus | Anvil's conclusion (public evidence) | Ground truth |
 |---|---|---|---|
@@ -151,26 +144,25 @@ no gateway attribution.
   reaches a DTLS handshake (MESH-033/034).
 - **Failed DNS is retried in the background.** After MESH-025 the gateway keeps logging `DNS failed
   retry` warnings for the `.invalid` name (its failed-lookup retry); the public answer stays 502.
-
 - **Relay-guard refusals are 404, not 403, on 0.9.7.** docs/mesh.md says an inbound CONNECT to a
   destination the terminator does not own is refused `403` with
   `mesh_authz.deny_policy=hbone_relay_destination_denied`. At relay synthesis the code returns `None`
   and the caller answers the generic route-miss `404 {"error":"Not Found"}`, logging the reason only at
-  debug level (ferrum-edge/ferrum-edge#5763). The public signal is therefore identical to "no route". Anvil reports the refusal with
-  its status and body and lists "no route or relay for this authority" among the alternatives; it never
-  claims the guard as the cause.
+  debug level (ferrum-edge/ferrum-edge#5763). The public signal is therefore identical to "no route".
+  Anvil reports the refusal with its status and body and lists "no route or relay for this authority"
+  among the alternatives; it never claims the guard as the cause.
 - **The unauthenticated-peer gate runs after relay synthesis.** On Ambient over loopback every CONNECT is
   refused at synthesis first, so `hbone_unauthenticated_peer` is reachable only where synthesis admits
   the authority: MESH-015 uses a PERMISSIVE **sidecar** (same `handle_hbone_request` gate).
 - **An untrusted-trust-domain SVID is refused with `handshake_failure` after the client's TLS 1.3
-  Finished** (operator: `SPIFFE inbound verify: no trust bundle for peer's trust domain`). Anvil used to
-  report that alert as a generic peer alert. After its own Finished, with a client certificate
-  presented, the peer's only remaining handshake decision is the client certificate, so Anvil now
-  reports `client.tls.client_cert_rejected` / `hbone.client_svid_rejected` (likely), for direct TLS and
-  for the HBONE endpoint alike. The same alert *during* the handshake stays generic.
+  Finished** (operator: `SPIFFE inbound verify: no trust bundle for peer's trust domain`). After Anvil's
+  own Finished, with a client certificate presented, the peer's only remaining handshake decision is the
+  client certificate, so Anvil reports `client.tls.client_cert_rejected` / `hbone.client_svid_rejected`
+  (likely), for direct TLS and for the HBONE endpoint alike. The same alert *during* the handshake stays
+  a generic peer alert.
 - **Lost TLS 1.3 alerts.** The gateway's `certificate_required` alert follows Anvil's finished handshake,
-  and its reset sometimes discards it (MESH-005/006/012/013 each saw both shapes across runs). The tunnel then fails
-  with a broken pipe on the `CONNECT`; Anvil explains that shape as
+  and its reset sometimes discards it (MESH-005/006/012/013 each saw both shapes across runs). The tunnel
+  then fails with a broken pipe on the `CONNECT`; Anvil explains that shape as
   `hbone.closed_after_certificate_request` (likely without an SVID, unknown with one), mirroring
   `client.tls.closed_after_certificate_request`.
 - **Plaintext on STRICT** (MESH-004): the listener answers the plaintext request bytes with a TLS alert
@@ -180,53 +172,29 @@ no gateway attribution.
 
 ## 4. Stability
 
-Three consecutive `anvil-lab run mesh --untrusted-pass` runs on 2026-09-26 on the final code
-(macOS arm64, Ferrum Edge v0.9.7 `ferrum-edge-macos-aarch64`, sha256 from `lab/gateway/RELEASE.lock`):
+All runs are `anvil-lab run mesh --untrusted-pass` on 2026-09-26, macOS arm64, with the
+`ferrum-edge-macos-aarch64` binaries pinned by the lock files. Each count covers both passes; skipped
+scenarios are reported once per run.
 
-| Run | Result |
-|---|---|
-| 1 (`results/lab/20260926T023532Z-mesh`) | 30 passed, 0 failed, 2 skipped |
-| 2 (`results/lab/20260926T023540Z-mesh`) | 30 passed, 0 failed, 2 skipped |
-| 3 (`results/lab/20260926T023547Z-mesh`) | 30 passed, 0 failed, 2 skipped |
-| after the merge, `run all` on v0.9.7 | 30 passed, 0 failed, 2 skipped |
-| after the merge, `--release v0.9.5 run all` (v0.9.5 in mesh mode) | 30 passed, 0 failed, 2 skipped |
+| Scope | Release | Runs (`results/lab/…-mesh`) | Result per run |
+|---|---|---|---|
+| MESH-001…017 (15 scenarios, skips 016 and 017) | v0.9.7 | `20260926T023532Z`, `…023540Z`, `…023547Z`, then `run all` | 30 passed, 0 failed, 2 skipped |
+| same | v0.9.5 | `--release v0.9.5 run all` | 30/0/2 |
+| + UDP through HBONE, MESH-018…030 (26 scenarios, skips 016, 017, 029, 030) | v0.9.7 | `20260926T043340Z`, `…043354Z`, `…043404Z` | 52/0/4 |
+| same | v0.9.5 | `20260926T043415Z` | 52/0/4 |
+| + DTLS through HBONE, MESH-031…034 (30 scenarios, same skips) | v0.9.7 | `20260926T054744Z`, `…054757Z`, `…054809Z` | 60/0/4 |
+| same | v0.9.5 | `20260926T054821Z` | 60/0/4 |
 
-30 = 15 scenarios × (trusted + untrusted pass). No untrusted run produced a `ferrum.token.*` or
-`ferrum.outcome*` finding. The lost-alert shapes appeared in every run (MESH-006 in run 1, MESH-013 in
-runs 2 and 3) and were explained by the lost-alert findings, as designed; the other runs of the same
-scenarios read the alert.
+An earlier set of the same four DTLS runs (`20260926T053733Z`…`053810Z`) had the same results.
 
-With UDP through HBONE (MESH-018 to MESH-028, commit "UDP through HBONE tunnels"), on 2026-09-26 on the
-final code (macOS arm64, `ferrum-edge-macos-aarch64` pinned by `lab/gateway/RELEASE.lock` and
-`lab/gateway/releases/v0.9.5.lock`):
-
-| Run | Result |
-|---|---|
-| v0.9.7 run 1 (`results/lab/20260926T043340Z-mesh`) | 52 passed, 0 failed, 4 skipped |
-| v0.9.7 run 2 (`results/lab/20260926T043354Z-mesh`) | 52 passed, 0 failed, 4 skipped |
-| v0.9.7 run 3 (`results/lab/20260926T043404Z-mesh`) | 52 passed, 0 failed, 4 skipped |
-| v0.9.5 (`--release v0.9.5`, `results/lab/20260926T043415Z-mesh`) | 52 passed, 0 failed, 4 skipped |
-
-52 = 26 scenarios × (trusted + untrusted pass); the skips are MESH-016, 017, 029 and 030. No untrusted
-run produced a `ferrum.token.*` or `ferrum.outcome*` finding. In every run and pass, MESH-026 and MESH-027
-saw the endpoint's `END_STREAM` (`closed_by = peer`), never a reset. The lost-alert shapes appeared in runs
-2 and 3 (MESH-012) and on v0.9.5 (MESH-006, MESH-013), explained by the lost-alert findings.
-
-With DTLS through HBONE (MESH-031 to MESH-034, commit "DTLS through HBONE datagram tunnels"), on
-2026-09-26 on the final code (macOS arm64, the pinned `ferrum-edge-macos-aarch64` binaries):
-
-| Run | Result |
-|---|---|
-| v0.9.7 run 1 (`results/lab/20260926T054744Z-mesh`) | 60 passed, 0 failed, 4 skipped |
-| v0.9.7 run 2 (`results/lab/20260926T054757Z-mesh`) | 60 passed, 0 failed, 4 skipped |
-| v0.9.7 run 3 (`results/lab/20260926T054809Z-mesh`) | 60 passed, 0 failed, 4 skipped |
-| v0.9.5 (`--release v0.9.5`, `results/lab/20260926T054821Z-mesh`) | 60 passed, 0 failed, 4 skipped |
-
-(An earlier set of the same four runs before formatting, `20260926T053733Z`…`053810Z`, had the same results.)
-
-60 = 30 scenarios × (trusted + untrusted pass); the skips are unchanged. MESH-031 counted 6 DTLS records
-sent and 5 received in every run and pass; MESH-032 2 and 2 (the ClientHello and its cookie retry, then the
-server's flights until Anvil rejected the certificate). No untrusted run produced a Ferrum-marker finding.
+- **Lost alerts.** The lost-alert shapes appeared in every set and were explained by the lost-alert
+  findings: MESH-006 (run 1) and MESH-013 (runs 2 and 3) in the first set; MESH-012 (v0.9.7 runs 2 and 3)
+  and MESH-006, MESH-013 (v0.9.5) in the UDP set. The other runs of the same scenarios read the alert.
+- **Tunnel end.** In every run and pass, MESH-026 and MESH-027 saw the endpoint's `END_STREAM`
+  (`closed_by = peer`), never a reset.
+- **DTLS records.** MESH-031 counted 6 DTLS records sent and 5 received in every run and pass; MESH-032
+  2 and 2 (the ClientHello and its cookie retry, then the server's flights until Anvil rejected the
+  certificate).
 
 ## 5. Limitations
 
@@ -238,5 +206,6 @@ server's flights until Anvil rejected the certificate). No untrusted run produce
   reach, as for UDP); the DTLS workloads are dimpl DTLS 1.2 echoes (ECDSA only, as the lab SVIDs are).
 - No control plane: VirtualService-driven route overrides, and so the post-plugin `403` relay refusal,
   are out of reach (MESH-017).
-- The Ferrum compatibility catalog is still 0.9.5 (`ferrum-edge-0.9.5`); mesh-mode public bodies are
-  not in it, and the `hbone.*` findings make no Ferrum-specific attribution by design.
+- The profile's trusted Ferrum destination declares the `ferrum-edge-0.9.5` catalog on every release
+  (`crates/anvil-lab/src/mesh.rs` `COMPAT`). The `hbone.*` findings make no Ferrum-specific attribution
+  by design.
