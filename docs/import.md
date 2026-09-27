@@ -211,13 +211,19 @@ these parts, and a request is classified by all of them together:
   changed one of them;
 - applying a change (a safe update, or an approved conflict) writes only the
   parts that changed upstream (`ReimportChange::upstream_fields`: `spec`,
-  `name`, `description`, `tags`) and keeps the rest as the user left it.
+  `name`, `description`, `tags`) and keeps the rest as the user left it;
+- a declined conflict keeps only the parts that conflict
+  (`ReimportChange::conflicting_fields`: those changed both upstream and by
+  the user). The other parts that changed upstream are still written, as a
+  safe update would write them.
 
 So a request the user renamed keeps the user's name when only its spec
 changed upstream (the spec is still updated), and a rename upstream of a
 request the user also renamed is a conflict kept until its id is in
-`ReimportApproval::overwrite`. A rename upstream of a request the user did not
-rename is a safe update. `changed_fields` lists the differing spec fields,
+`ReimportApproval::overwrite`. If its spec changed upstream too and the user
+did not edit the spec, declining the conflict still updates the spec and
+keeps only the user's name; the name conflict is offered again next time. A
+rename upstream of a request the user did not rename is a safe update. `changed_fields` lists the differing spec fields,
 then `name`, `description` and `tags` when they differ.
 
 What was generated is recorded with the scope's hashes:
@@ -270,8 +276,10 @@ the hashes to keep after applying: the fresh import's (its scope's and its
 requests' names, descriptions and tags), except that a declined conflict or
 removal keeps its earlier hash (for a whole environment, those of it and its
 variables), so it is offered again next time, as a declined request conflict
-is. A declined request conflict, and a removed request that is kept, keep the
-earlier hashes of their names, descriptions and tags. A declined conflict with
+is. A removed request that is kept keeps the earlier hashes of its name,
+description and tags; a declined request conflict keeps those of the parts in
+its `conflicting_fields`, and gets the fresh hashes of the parts it applied.
+A declined conflict with
 no earlier hash is offered again too. A declined removal with no earlier hash
 (a unit that, as far as is known, only the user had) is left out, so the next
 reimport keeps it as the user's own instead of offering to delete it again.
@@ -294,7 +302,8 @@ same way. A reimport of an import root that was deleted is refused.
 
 The apply is one transaction after a restore checkpoint. It first reads the
 linked requests, the workspace's or import root's scope, the environments and
-the source record again; if any of them changed since the diff was made, the
+the source record again, with the folders it compared; if any of them changed
+since the diff was made (a folder renamed or its variables edited, say), the
 apply is refused with nothing written ("changed since the diff; re-run the
 reimport diff"). It then writes updated and added requests, the merged scope
 onto the workspace or import root, changed folders, and changed or added
@@ -313,9 +322,12 @@ bytes just applied are stored as the original attachment, and the record's
 version and import time of that file, and the new import id) describe them.
 The earlier import id is appended to `previous_import_ids`, and the id
 namespace stays the same. Anything that reads the stored original afterwards
-reads the version last applied. The earlier original is not deleted: it stays
-in the attachment store, where `App::release_attachment` can remove it once
-nothing references it. A refused apply leaves the record as it was.
+reads the version last applied. The original it replaces is released in the
+same transaction, by the same reference check as `App::release_attachment`:
+it is deleted unless another object still references it (another import of
+the same bytes, a request body, a revision, a dataset, a scenario or a load
+plan). A refused apply leaves the record, and the earlier original, as they
+were.
 
 ## OpenAPI and Swagger
 

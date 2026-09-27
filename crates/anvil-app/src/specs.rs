@@ -3,7 +3,7 @@
 //! previews, persists with provenance, and plans reimports. Nothing imported
 //! is ever sent or run as part of importing.
 
-use crate::workspace::{put_attachment_in, spec_hash};
+use crate::workspace::{put_attachment_in, release_attachment_in, spec_hash};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -289,7 +289,8 @@ impl App {
     /// A request whose spec changes gets a new revision, written in the same
     /// transaction; an unchanged one keeps its revision. The source record
     /// is refreshed in that transaction too: it then holds `bytes` as the
-    /// stored original, their hash and `file_name`.
+    /// stored original, their hash and `file_name`, and the original it held
+    /// before is released unless something else references it.
     pub fn spec_reimport_apply(&self, import_id: &Id, bytes: &[u8], file_name: &str, approval: &ReimportApproval) -> Result<usize> {
         let r = self.reimport(import_id, bytes)?;
         self.apply_reimport(r, bytes, file_name, approval)
@@ -432,13 +433,19 @@ impl App {
                 AttachmentRef::LinkedFile { .. } => String::new(),
             };
             let mut rec = rec.clone();
+            let replaced = std::mem::replace(&mut rec.original_sha256, original_sha256);
             rec.previous_import_ids.push(rec.source.import_id);
             rec.source = result.source.clone();
-            rec.original_sha256 = original_sha256;
             rec.file_name = file_name.to_string();
             rec.generated_scope = Some(baseline.clone());
             s.delete(kind::SPEC_SOURCE, &rec.previous_import_ids[rec.previous_import_ids.len() - 1])?;
             s.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec)?;
+            // The version it replaces is released, unless something else
+            // still references it: another import of the same bytes, a
+            // request body or a dataset.
+            if !replaced.is_empty() && replaced != rec.original_sha256 {
+                release_attachment_in(s, &replaced)?;
+            }
             Ok(Ok(()))
         })??;
         Ok(next.len())
@@ -607,5 +614,52 @@ mod tests {
         assert_ne!(rec.source.import_id, done.import_id);
         assert_eq!(rec.file_name, "audit-v2.json");
         assert_eq!(app.get_attachment(&rec.original_sha256).unwrap().as_deref(), Some(newer.as_bytes()));
+    }
+
+    /// A Postman collection whose folder has a variable of its own.
+    const ADMIN: &str = r#"{
+  "info": { "name": "Admin API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+  "item": [
+    { "name": "Admin", "variable": [{ "key": "scope", "value": "read" }], "item": [
+      { "name": "Users", "request": { "method": "GET", "url": { "raw": "https://api.example.invalid/users/{{scope}}" } } }
+    ] }
+  ]
+}"#;
+
+    #[test]
+    fn a_reimport_is_refused_when_a_folder_it_compared_changed_before_it_was_written() {
+        let root = tempfile::tempdir().unwrap();
+        let pm = ProfileManager::new(root.path());
+        let (s, dek, _recovery) = pm.create_passphrase("t", "correct horse battery", KdfParams::testing()).unwrap();
+        let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+        let app = App::open(s.dir, h, dek).unwrap();
+        let done = app.spec_import(ADMIN.as_bytes(), "admin.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let ws = done.workspace_id;
+        let folder = app.folders(&ws).unwrap().into_iter().find(|f| f.name == "Admin").unwrap().meta.id;
+        let newer = ADMIN.replace(r#""value": "read""#, r#""value": "write""#);
+        for edit in ["rename", "variable"] {
+            let r = app.reimport(&done.import_id, newer.as_bytes()).unwrap();
+            let key = format!("folders/{folder}/variables/scope");
+            assert!(r.plan.scope_updated.iter().any(|c| c.key == key), "{edit}: {:?}", r.plan);
+
+            // The user edits the folder after the diff was made, before it is
+            // written.
+            let mut f = app.folder(&folder).unwrap();
+            if edit == "rename" {
+                f.name = "Mine".into();
+            } else {
+                f.variables.push(Variable::plain("token", "mine"));
+            }
+            let f = app.save_folder(f).unwrap();
+            let requests = app.requests(&ws).unwrap();
+            let err = app.apply_reimport(r, newer.as_bytes(), "admin-v2.json", &ReimportApproval::default()).unwrap_err();
+            assert!(err.to_string().contains("re-run the reimport diff"), "{edit}: {err}");
+            assert_eq!(app.folder(&folder).unwrap(), f, "{edit}: the folder is as the user left it");
+            assert_eq!(app.requests(&ws).unwrap(), requests, "{edit}: no request was written");
+            let rec = app.spec_sources(&ws).unwrap().pop().unwrap();
+            assert_eq!(rec.source.import_id, done.import_id, "{edit}");
+            assert_eq!(rec.file_name, "admin.json", "{edit}: the source record is not refreshed");
+            assert_eq!(app.get_attachment(&rec.original_sha256).unwrap().as_deref(), Some(ADMIN.as_bytes()), "{edit}");
+        }
     }
 }

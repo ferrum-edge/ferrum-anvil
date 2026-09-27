@@ -539,22 +539,7 @@ impl App {
     /// so nothing can reference the attachment between them. Returns whether
     /// it was deleted.
     pub fn release_attachment(&self, sha256: &str) -> Result<bool> {
-        Ok(self.store.atomically(|s| {
-            for k in [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN] {
-                let objects: Vec<serde_json::Value> = s.list(k, None)?;
-                if objects.iter().any(|o| o.to_string().contains(sha256)) {
-                    return Ok(false);
-                }
-            }
-            let id = attachment_index_id(sha256);
-            let idx: Option<serde_json::Value> = s.get(kind::IMPORT_SOURCE, &id)?;
-            let Some(idx) = idx else { return Ok(false) };
-            if let Some(blob) = idx.get("blob").and_then(|b| b.as_str()) {
-                s.release_blob(blob)?;
-            }
-            s.delete(kind::IMPORT_SOURCE, &id)?;
-            Ok(true)
-        })?)
+        Ok(self.store.atomically(|s| release_attachment_in(s, sha256))?)
     }
 
     pub fn get_attachment(&self, sha256: &str) -> Result<Option<Vec<u8>>> {
@@ -578,6 +563,26 @@ pub(crate) fn put_attachment_in(
     s.pin_blob(&blob)?;
     s.put(kind::IMPORT_SOURCE, &attachment_index_id(&sha), None, None, 0.0, &serde_json::json!({"attachment": sha, "blob": blob}))?;
     Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+}
+
+/// [`App::release_attachment`] inside the caller's transaction: what the
+/// caller wrote before it is checked as a reference too, and the release is
+/// rolled back with everything else the caller writes.
+pub(crate) fn release_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
+    for k in [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN] {
+        let objects: Vec<serde_json::Value> = s.list(k, None)?;
+        if objects.iter().any(|o| o.to_string().contains(sha256)) {
+            return Ok(false);
+        }
+    }
+    let id = attachment_index_id(sha256);
+    let idx: Option<serde_json::Value> = s.get(kind::IMPORT_SOURCE, &id)?;
+    let Some(idx) = idx else { return Ok(false) };
+    if let Some(blob) = idx.get("blob").and_then(|b| b.as_str()) {
+        s.release_blob(blob)?;
+    }
+    s.delete(kind::IMPORT_SOURCE, &id)?;
+    Ok(true)
 }
 
 /// Deterministic object id for the attachment index entry of a content hash.

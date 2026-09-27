@@ -16,7 +16,9 @@
 //! A request's name, description and tags are not part of its spec hash.
 //! Each is compared on its own, by the same rules: a request the user
 //! renamed keeps the user's name when only its spec changed upstream, and a
-//! rename upstream of a request the user also renamed is a conflict.
+//! rename upstream of a request the user also renamed is a conflict. A
+//! declined conflict keeps only the parts the user edited: the rest of what
+//! changed upstream is applied as a safe update would be.
 //!
 //! The same rules apply to the import's scoped configuration
 //! ([`ImportedScope`]: the source's own variables, auth, settings and
@@ -54,6 +56,11 @@ pub struct ReimportChange {
     /// changed upstream.
     #[serde(default)]
     pub upstream_fields: Vec<String>,
+    /// The parts of `upstream_fields` the user edited too: what makes this
+    /// change a conflict. A declined conflict keeps these as the user left
+    /// them and still takes the rest of `upstream_fields`.
+    #[serde(default)]
+    pub conflicting_fields: Vec<String>,
     /// The freshly generated request (its id is the fresh import's id; the
     /// applied update keeps `existing_id`).
     pub fresh: RequestDefinition,
@@ -131,6 +138,15 @@ fn detail(q: &RequestDefinition, part: &str) -> Value {
         "name" => Value::String(q.name.clone()),
         "description" => Value::String(q.description.clone()),
         _ => to_json(&q.tags),
+    }
+}
+
+impl ReimportChange {
+    /// Whether declining this change keeps `part` as the user left it: a
+    /// part in `conflicting_fields`, or any part when that is empty (a plan
+    /// from before it was kept).
+    fn keeps(&self, part: &str) -> bool {
+        self.conflicting_fields.is_empty() || self.conflicting_fields.iter().any(|f| f == part)
     }
 }
 
@@ -314,7 +330,8 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             }
             continue;
         }
-        let user_edited = differing.iter().any(|(_, _, up, edited)| *up && *edited);
+        let conflicting: Vec<String> = differing.iter().filter(|(_, _, up, edited)| *up && *edited).map(|(p, ..)| p.to_string()).collect();
+        let user_edited = !conflicting.is_empty();
         let mut changed = spec_fields;
         changed.extend(differing.iter().map(|(p, ..)| *p).filter(|p| *p != "spec").map(String::from));
         let change = ReimportChange {
@@ -323,6 +340,7 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             user_edited,
             changed_fields: changed,
             upstream_fields: upstream,
+            conflicting_fields: conflicting,
             fresh: f.clone(),
         };
         if user_edited {
@@ -557,7 +575,9 @@ fn merge_variables(prefix: &str, current: &[Variable], fresh: &[Variable], take:
 impl ReimportPlan {
     /// Apply the plan to `previous`: safe updates always, conflicts and
     /// deletions only when approved, additions appended. An update writes
-    /// only its [`ReimportChange::upstream_fields`]. Existing ids, folders,
+    /// only its [`ReimportChange::upstream_fields`]; a declined conflict
+    /// writes those not in its [`ReimportChange::conflicting_fields`], so the
+    /// parts the user edited stay as they are. Existing ids, folders,
     /// ordering and favorites are kept; added requests are moved into the
     /// previous requests' workspace. A request whose spec is updated loses
     /// its `revision_id`: that revision holds the old spec, so the caller
@@ -568,13 +588,11 @@ impl ReimportPlan {
             if self.removed.iter().any(|r| r.existing_id == prev.meta.id) && approval.delete.contains(&prev.meta.id) {
                 continue;
             }
-            let change =
-                self.updated.iter().find(|c| c.existing_id == prev.meta.id).or_else(|| {
-                    self.conflicts.iter().find(|c| c.existing_id == prev.meta.id && approval.overwrite.contains(&c.existing_id))
-                });
+            let change = self.updated.iter().chain(&self.conflicts).find(|c| c.existing_id == prev.meta.id);
+            let taken = change.map(|c| self.taken_fields(c, approval)).unwrap_or_default();
             match change {
-                Some(c) => {
-                    let takes = |part: &str| c.upstream_fields.iter().any(|f| f == part);
+                Some(c) if !taken.is_empty() => {
+                    let takes = |part: &str| taken.contains(&part);
                     let mut r = prev.clone();
                     if takes("spec") {
                         r.spec = c.fresh.spec.clone();
@@ -592,7 +610,7 @@ impl ReimportPlan {
                     r.meta.updated_at = c.fresh.meta.updated_at;
                     out.push(r);
                 }
-                None => out.push(prev.clone()),
+                _ => out.push(prev.clone()),
             }
         }
         let ws = previous.first().map(|p| p.workspace_id);
@@ -604,6 +622,14 @@ impl ReimportPlan {
             out.push(r);
         }
         out
+    }
+
+    /// The parts of `c` that applying it with `approval` writes: all of its
+    /// upstream fields for a safe update or an approved conflict, only those
+    /// the user did not edit for a declined conflict.
+    fn taken_fields<'c>(&self, c: &'c ReimportChange, approval: &ReimportApproval) -> Vec<&'c str> {
+        let declined = self.conflicts.iter().any(|x| x.existing_id == c.existing_id) && !approval.overwrite.contains(&c.existing_id);
+        c.upstream_fields.iter().map(String::as_str).filter(|part| !(declined && c.keeps(part))).collect()
     }
 
     /// Apply the scope part of the plan to `current`: safe updates always,
@@ -679,8 +705,9 @@ impl ReimportPlan {
     /// A declined conflict with no earlier hash gets one that matches
     /// nothing; a declined removal with none is left out, so the next
     /// reimport keeps it as the user's own instead of offering to delete it
-    /// again. A declined request conflict, or a kept removed request, keeps
-    /// the earlier hashes of its name, description and tags.
+    /// again. A kept removed request keeps the earlier hashes of its name,
+    /// description and tags; a declined request conflict keeps those of the
+    /// parts in its [`ReimportChange::conflicting_fields`].
     pub fn next_generated_scope(
         &self,
         fresh: &ImportedScope,
@@ -690,17 +717,22 @@ impl ReimportPlan {
     ) -> BTreeMap<String, String> {
         let mut out = fresh.unit_hashes();
         out.extend(request_unit_hashes(fresh_requests));
-        let declined = self.conflicts.iter().filter(|c| !approval.overwrite.contains(&c.existing_id)).map(|c| (&c.operation_key, false));
-        let kept = self.removed.iter().filter(|r| !approval.delete.contains(&r.existing_id)).map(|r| (&r.operation_key, true));
-        for (operation_key, removal) in declined.chain(kept) {
-            for part in DETAILS {
-                let key = request_key(operation_key, part);
-                match generated.and_then(|g| g.get(&key)) {
-                    Some(h) => out.insert(key, h.clone()),
-                    None if removal => out.remove(&key),
-                    None => out.insert(key, DECLINED.to_string()),
-                };
-            }
+        // A declined conflict applied the parts the user did not edit; only
+        // the others keep their earlier hashes.
+        let mut earlier: Vec<(&String, &str, bool)> = vec![];
+        for c in self.conflicts.iter().filter(|c| !approval.overwrite.contains(&c.existing_id)) {
+            earlier.extend(DETAILS.into_iter().filter(|part| c.keeps(part)).map(|part| (&c.operation_key, part, false)));
+        }
+        for r in self.removed.iter().filter(|r| !approval.delete.contains(&r.existing_id)) {
+            earlier.extend(DETAILS.into_iter().map(|part| (&r.operation_key, part, true)));
+        }
+        for (operation_key, part, removal) in earlier {
+            let key = request_key(operation_key, part);
+            match generated.and_then(|g| g.get(&key)) {
+                Some(h) => out.insert(key, h.clone()),
+                None if removal => out.remove(&key),
+                None => out.insert(key, DECLINED.to_string()),
+            };
         }
         let conflicts = self.scope_conflicts.iter().filter(|c| !approval.overwrite_scope.contains(&c.key)).map(|c| (c, false));
         let removals = self.scope_removed.iter().filter(|c| !approval.delete_scope.contains(&c.key)).map(|c| (c, true));

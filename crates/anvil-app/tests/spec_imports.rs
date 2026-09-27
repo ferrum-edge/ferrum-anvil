@@ -13,7 +13,7 @@ use anvil_domain::assertions::{Extraction, ExtractionSource};
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::load::{LoadPlan, Workload};
-use anvil_domain::request::{KeyValue, RequestSpec};
+use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::runner::RunStepStatus;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::ProxySelection;
@@ -967,10 +967,8 @@ fn a_reimport_refreshes_the_source_record_with_the_version_it_applied() {
     let app = new_app(root.path());
     let existing = app.create_workspace("Existing").unwrap().meta.id;
     let newer_collection = COLLECTION.replace("https://api.example.invalid", "https://api2.example.invalid").into_bytes();
-    let sources = [
-        ("openapi", SERVER_V1.as_bytes(), server("https://new.example.test")),
-        ("postman", COLLECTION.as_bytes(), newer_collection),
-    ];
+    let sources =
+        [("openapi", SERVER_V1.as_bytes(), server("https://new.example.test")), ("postman", COLLECTION.as_bytes(), newer_collection)];
     for (source, v1, v2) in sources {
         for (target_label, target) in [("new workspace", SpecTarget::NewWorkspace), ("import root", into(&existing))] {
             let label = format!("{source}, {target_label}");
@@ -989,7 +987,7 @@ fn a_reimport_refreshes_the_source_record_with_the_version_it_applied() {
             assert_eq!(after.source.sha256, after.original_sha256, "{label}");
             assert_ne!(after.source.sha256, before.source.sha256, "{label}");
             assert_eq!(after.source.size_bytes, v2.len() as u64, "{label}");
-            assert_eq!(app.get_attachment(&before.original_sha256).unwrap(), Some(v1.to_vec()), "{label}: v1 is not deleted");
+            assert_eq!(app.get_attachment(&before.original_sha256).unwrap(), None, "{label}: nothing else references v1: released");
 
             // Compared with the version it holds now, v2 changes nothing.
             let plan = app.spec_reimport_plan(&after.source.import_id, &v2).unwrap();
@@ -997,6 +995,34 @@ fn a_reimport_refreshes_the_source_record_with_the_version_it_applied() {
             assert!(plan.scope_updated.is_empty() && plan.scope_conflicts.is_empty(), "{label}: {plan:?}");
         }
     }
+}
+
+#[test]
+fn a_reimport_keeps_the_version_it_replaces_while_something_else_references_it() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let newer = server("https://new.example.test");
+    // Another import of the same file holds v1.
+    let one = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let two = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let v1 = record(&app, &one.workspace_id, None).original_sha256;
+    assert_eq!(record(&app, &two.workspace_id, None).original_sha256, v1);
+    app.spec_reimport_apply(&one.import_id, &newer, "v2.json", &ReimportApproval::default()).unwrap();
+    assert_eq!(app.get_attachment(&v1).unwrap().as_deref(), Some(SERVER_V1.as_bytes()), "the other import still holds v1");
+
+    // Once that one moves on too, a request that sends v1 as its body holds it.
+    let file = app.put_attachment("audit.json", SERVER_V1.as_bytes(), None).unwrap();
+    let upload = RequestSpec {
+        body: Body::Binary { attachment: file, content_type: None },
+        ..RequestSpec::http("POST", "https://upload.example.invalid/")
+    };
+    app.create_request(&one.workspace_id, None, "Upload", upload).unwrap();
+    app.spec_reimport_apply(&two.import_id, &newer, "v2.json", &ReimportApproval::default()).unwrap();
+    assert_eq!(app.get_attachment(&v1).unwrap().as_deref(), Some(SERVER_V1.as_bytes()), "the request body still holds v1");
+    // Both records now hold v2, which stays.
+    let v2 = record(&app, &one.workspace_id, None).original_sha256;
+    assert_eq!(record(&app, &two.workspace_id, None).original_sha256, v2);
+    assert_eq!(app.get_attachment(&v2).unwrap(), Some(newer));
 }
 
 /// A Postman collection whose folder has a variable of its own that the
@@ -1106,4 +1132,109 @@ fn a_reimport_keeps_a_users_rename_until_the_user_approves_the_sources() {
         app.spec_reimport_apply(&current_import(&app, &ws), renamed.as_bytes(), "source.txt", &approval).unwrap();
         assert_eq!(app.request(&q.meta.id).unwrap().name, "Health check", "{label}");
     }
+}
+
+#[test]
+fn a_declined_rename_conflict_still_takes_the_sources_new_spec() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, COLLECTION.as_bytes(), SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    let mut q = app.requests(&ws).unwrap().into_iter().find(|q| q.name == "Health").unwrap();
+    q.name = "Ping".into();
+    let q = app.save_request(q).unwrap();
+
+    // Moved and renamed upstream: the name conflicts, the spec does not.
+    let v2 = COLLECTION.replace("{{base}}/health", "{{base}}/healthz").replace(r#""name": "Health""#, r#""name": "Health check""#);
+    let plan = app.spec_reimport_plan(&done.import_id, v2.as_bytes()).unwrap();
+    let conflict = plan.conflicts.iter().find(|c| c.existing_id == q.meta.id).unwrap_or_else(|| panic!("{plan:?}"));
+    assert_eq!(conflict.upstream_fields, vec!["spec".to_string(), "name".to_string()]);
+    assert_eq!(conflict.conflicting_fields, vec!["name".to_string()]);
+    app.spec_reimport_apply(&done.import_id, v2.as_bytes(), "source.txt", &ReimportApproval::default()).unwrap();
+    let after = app.request(&q.meta.id).unwrap();
+    assert_eq!(after.name, "Ping", "declined: the user's name is kept");
+    assert!(after.spec.url.ends_with("/healthz"), "the spec the user did not edit is updated: {}", after.spec.url);
+    assert_ne!(after.revision_id, q.revision_id, "and recorded as a new revision");
+
+    // Only the name is offered again; approved, it is applied.
+    let plan = app.spec_reimport_plan(&current_import(&app, &ws), v2.as_bytes()).unwrap();
+    let conflict = plan.conflicts.iter().find(|c| c.existing_id == q.meta.id).unwrap_or_else(|| panic!("{plan:?}"));
+    assert_eq!(conflict.upstream_fields, vec!["name".to_string()], "{plan:?}");
+    let approval = ReimportApproval { overwrite: vec![q.meta.id], ..Default::default() };
+    app.spec_reimport_apply(&current_import(&app, &ws), v2.as_bytes(), "source.txt", &approval).unwrap();
+    let after = app.request(&q.meta.id).unwrap();
+    assert_eq!(after.name, "Health check");
+    assert!(after.spec.url.ends_with("/healthz"), "{}", after.spec.url);
+}
+
+/// Store `rec` as a build that kept only the scope's hashes wrote it: no
+/// `folders/…` or `requests/…` units.
+fn legacy(app: &App, mut rec: SpecSourceRecord) {
+    let generated = rec.generated_scope.as_mut().expect("a record of what was generated");
+    generated.retain(|k, _| !k.starts_with("folders/") && !k.starts_with("requests/"));
+    app.store.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec).unwrap();
+}
+
+#[test]
+fn a_record_from_before_folder_and_request_units_gets_them_from_its_stored_original() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = app.spec_import(ADMIN.as_bytes(), "admin.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+    let ws = done.workspace_id;
+    let folder = app.folders(&ws).unwrap().into_iter().find(|f| f.name == "Admin").unwrap().meta.id;
+    let mut q = app.requests(&ws).unwrap().pop().unwrap();
+    q.name = "Mine".into();
+    let q = app.save_request(q).unwrap();
+    let rec = record(&app, &ws, None);
+    assert!(rec.previous_import_ids.is_empty(), "never reimported");
+    legacy(&app, rec);
+
+    // The same version: the rename is the user's own.
+    let plan = app.spec_reimport_plan(&done.import_id, ADMIN.as_bytes()).unwrap();
+    assert_eq!(plan.preserved_edits, vec![q.meta.id], "{plan:?}");
+    assert!(plan.updated.is_empty() && plan.conflicts.is_empty(), "{plan:?}");
+    assert!(plan.scope_updated.is_empty() && plan.scope_conflicts.is_empty(), "{plan:?}");
+
+    // A newer one: the folder's changes are safe updates, and the rename is kept.
+    let v2 = admin("write");
+    let plan = app.spec_reimport_plan(&done.import_id, &v2).unwrap();
+    let scope = format!("folders/{folder}/variables/scope");
+    assert!(plan.scope_updated.iter().any(|c| c.key == scope), "{plan:?}");
+    assert!(plan.scope_conflicts.is_empty(), "{plan:?}");
+    assert_eq!(plan.preserved_edits, vec![q.meta.id], "{plan:?}");
+    app.spec_reimport_apply(&done.import_id, &v2, "admin.json", &ReimportApproval::default()).unwrap();
+    let (url, auth, _) = prepared(&app, &ws, "Mine");
+    assert!(url.ends_with("/users/write"), "{url}");
+    assert!(matches!(&auth, AuthConfig::ApiKey { name, .. } if name == "X-Admin"), "{auth:?}");
+}
+
+#[test]
+fn a_reimported_record_from_before_folder_and_request_units_asks_before_changing_them() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = app.spec_import(ADMIN.as_bytes(), "admin.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+    let ws = done.workspace_id;
+    let folder = app.folders(&ws).unwrap().into_iter().find(|f| f.name == "Admin").unwrap().meta.id;
+    app.spec_reimport_apply(&done.import_id, ADMIN.as_bytes(), "admin.json", &ReimportApproval::default()).unwrap();
+    let mut q = app.requests(&ws).unwrap().pop().unwrap();
+    q.name = "Mine".into();
+    let q = app.save_request(q).unwrap();
+    let rec = record(&app, &ws, None);
+    assert_eq!(rec.previous_import_ids, vec![done.import_id], "reimported once");
+    let latest = rec.source.import_id;
+    legacy(&app, rec);
+
+    // What was generated for the folder and the name is unknown: every
+    // difference awaits approval.
+    let v2 = admin("write");
+    let plan = app.spec_reimport_plan(&latest, &v2).unwrap();
+    assert_eq!(plan.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![q.meta.id], "{plan:?}");
+    assert_eq!(plan.conflicts[0].conflicting_fields, vec!["name".to_string()]);
+    let scope = format!("folders/{folder}/variables/scope");
+    assert!(plan.scope_conflicts.iter().any(|c| c.key == scope && c.user_edited), "{plan:?}");
+    assert!(!plan.scope_updated.iter().any(|c| c.key.starts_with("folders/")), "{plan:?}");
+    app.spec_reimport_apply(&latest, &v2, "admin.json", &ReimportApproval::default()).unwrap();
+    let (url, auth, _) = prepared(&app, &ws, "Mine");
+    assert!(url.ends_with("/users/read"), "declined: the folder is kept: {url}");
+    assert!(!matches!(auth, AuthConfig::ApiKey { .. }), "{auth:?}");
 }

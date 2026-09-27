@@ -652,3 +652,45 @@ fn a_postman_request_the_user_renamed_keeps_its_name_unless_the_user_approves_th
     assert_eq!(plan.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![health]);
     assert!(plan.updated.is_empty());
 }
+
+#[test]
+fn a_declined_conflict_still_takes_the_parts_the_user_did_not_edit() {
+    let first = import(HEALTH_V1.as_bytes(), &opts()).unwrap();
+    let health = first.requests[0].meta.id;
+    let mut previous = first.requests.clone();
+    previous[0].name = "Ping".into();
+
+    // Moved and renamed upstream: only the name conflicts.
+    let v2 = HEALTH_V1.replace("/health", "/healthz").replace(r#""name": "Health""#, r#""name": "Health check""#);
+    let fresh = reimport(&first, &v2);
+    let plan = diff(&first, &previous, &fresh);
+    assert_eq!(plan.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![health], "{plan:?}");
+    assert_eq!(plan.conflicts[0].upstream_fields, vec!["spec".to_string(), "name".to_string()]);
+    assert_eq!(plan.conflicts[0].conflicting_fields, vec!["name".to_string()]);
+    let kept = plan.apply(&previous, &ReimportApproval::default());
+    assert_eq!(named(&kept, health).name, "Ping", "declined: the user's name is kept");
+    assert_eq!(named(&kept, health).spec, fresh.requests[0].spec, "the spec the user did not edit is updated");
+    assert_eq!(named(&kept, health).revision_id, None);
+
+    // Only the name is offered again.
+    let generated = baseline(&first);
+    let fresh_scope = ImportedScope::generated(&fresh);
+    let next = plan.next_generated_scope(&fresh_scope, &fresh.requests, Some(&generated), &ReimportApproval::default());
+    let current = ImportedScope::generated(&first);
+    let again = reimport_diff(&kept, &fresh, ScopeDiff { current: &current, generated: Some(&next), fresh: &fresh_scope });
+    assert_eq!(again.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![health], "{again:?}");
+    assert_eq!(again.conflicts[0].upstream_fields, vec!["name".to_string()]);
+    assert!(again.updated.is_empty(), "{again:?}");
+
+    // The user's spec edit conflicts instead: the source's new name arrives.
+    let mut edited = first.requests.clone();
+    edited[0].spec.headers.push(KeyValue::new("X-Mine", "1"));
+    let plan = diff(&first, &edited, &fresh);
+    assert_eq!(plan.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![health], "{plan:?}");
+    assert_eq!(plan.conflicts[0].conflicting_fields, vec!["spec".to_string()]);
+    let kept = plan.apply(&edited, &ReimportApproval::default());
+    assert_eq!(named(&kept, health).name, "Health check", "the source's rename is applied");
+    assert_eq!(named(&kept, health).spec, edited[0].spec, "the user's spec is kept");
+    let approval = ReimportApproval { overwrite: vec![health], ..Default::default() };
+    assert_eq!(named(&plan.apply(&edited, &approval), health).spec, fresh.requests[0].spec);
+}

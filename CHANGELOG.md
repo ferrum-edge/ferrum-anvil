@@ -104,6 +104,34 @@
   the profile's mode is known, and stays open until a new recovery key is
   confirmed stored. A conversion reports the old entry as removed whenever
   the delete succeeded.
+- A spec reimport now also compares the settings of the folders inside the
+  import: a folder's name, description, settings, variables and auth (a
+  Postman folder's auth or variables, an OpenAPI tag's description), by the
+  same rules as the import's own scope (keys `folders/<id>/…`). A folder
+  only the source or only your workspace has is not compared: a new one
+  still arrives with the requests added in it, and one gone from the source
+  is left in place. An apply is refused, with nothing written, when one of
+  these folders changed after the diff was made.
+- A reimport no longer overwrites a request you renamed. A request's name,
+  description and tags are each compared on their own, like its spec: a
+  request you renamed keeps your name when only its spec changed upstream
+  (the spec is still updated), and one the source renamed too is a conflict
+  kept until you approve overwriting it. A declined conflict keeps only the
+  parts you edited: the rest of what changed upstream is still applied, so a
+  request whose name conflicts gets the source's new spec and keeps your
+  name (`ReimportChange::conflicting_fields` lists the parts that conflict).
+  A rename by the source alone is now applied; before, it was ignored unless
+  the spec changed as well. For an import made by an earlier build, this
+  works from its stored original file unless it was reimported since; then
+  a name that differs from the source's awaits approval.
+- A reimport now refreshes the import's source record in the same
+  transaction: it then holds the file just applied as the stored original,
+  with its name, hash, size and import time, instead of the first import's.
+  The file it replaces is released from the attachment store in that
+  transaction unless something else still references it (another import of
+  the same file, a request body or a dataset).
+- **Breaking (API):** `App::spec_reimport_apply` takes the name of the file
+  it applies: `spec_reimport_apply(import_id, bytes, file_name, approval)`.
 
 ### Fixed
 
@@ -144,27 +172,6 @@
   or history record names the spec that was actually sent. The revision of
   its old spec stays as it was; a request the reimport leaves unchanged
   keeps its revision and gains none.
-- A spec reimport now also compares the settings of the folders inside the
-  import: a folder's name, description, settings, variables and auth (a
-  Postman folder's auth or variables, an OpenAPI tag's description), by the
-  same rules as the import's own scope (keys `folders/<id>/…`). A folder
-  only the source or only your workspace has is not compared: a new one
-  still arrives with the requests added in it, and one gone from the source
-  is left in place.
-- A reimport no longer overwrites a request you renamed. A request's name,
-  description and tags are each compared on their own, like its spec: a
-  request you renamed keeps your name when only its spec changed upstream
-  (the spec is still updated), and one the source renamed too is a conflict
-  kept until you approve overwriting it. A rename by the source alone is now
-  applied; before, it was ignored unless the spec changed as well. For an
-  import made by an earlier build, this works from its stored original file
-  unless it was reimported since; then a name that differs from the
-  source's awaits approval.
-- A reimport now refreshes the import's source record in the same
-  transaction: it then holds the file just applied as the stored original,
-  with its name, hash, size and import time, instead of the first import's.
-  The earlier file is kept in the attachment store, not deleted.
-  `App::spec_reimport_apply` takes the file name.
 - Desktop Runner: **Run folder** and **Run** start one run at a time. A
   second click while the start is still pending no longer starts another
   run, and a run that finishes before the start answers (an empty folder,
