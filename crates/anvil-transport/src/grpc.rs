@@ -297,10 +297,11 @@ pub enum Schema {
     Reflection,
 }
 
-/// Signs a call for the body it sends: given the call's framed request
-/// message, the call's headers (metadata and auth) with the signature over
-/// that body. An error fails the call before it is sent.
-pub type SignFn = Arc<dyn Fn(&Bytes) -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> + Send + Sync>;
+/// Signs a request for the path and body it sends: given its path (the
+/// URL's path prefix included) and its framed request message, the
+/// request's headers (metadata and auth) with the signature over them. An
+/// error fails the request before it is sent.
+pub type SignFn = Arc<dyn Fn(&str, &Bytes) -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct GrpcPlan {
@@ -323,12 +324,17 @@ pub struct GrpcPlan {
     pub headers: Vec<(HeaderName, HeaderValue)>,
     /// With server reflection, the call's headers are signed here, once the
     /// schema is resolved and the message encoded, over the framed message of
-    /// a unary or server-streaming call. They replace `headers` for the call;
-    /// the reflection request is sent with `headers`. `None`: the call is
-    /// sent with `headers`. The engine sets it only for a unary or
-    /// server-streaming call; a call that streams requests is signed when it
-    /// is prepared.
+    /// a unary or server-streaming call. They replace `headers` for the call.
+    /// `None`: the call is sent with `headers`. The engine sets it only for a
+    /// unary or server-streaming call; a call that streams requests is signed
+    /// when it is prepared.
     pub sign: Option<SignFn>,
+    /// With server reflection, each reflection request is signed here for
+    /// its own path and framed message (a fresh signature, nonce or DPoP
+    /// proof), and sent with the headers returned in place of `headers`,
+    /// which were signed for the call. `None` (no auth): reflection
+    /// requests are sent with `headers`.
+    pub sign_reflection: Option<SignFn>,
     pub deadline_ms: Option<u64>,
     pub timeouts: Timeouts,
     pub limits: Limits,
@@ -1051,6 +1057,8 @@ struct OneShot {
     grpc_status: Option<i32>,
     grpc_message: Option<String>,
     failure: Option<TransportFailure>,
+    /// `failure` is auth's: the request could not be signed and was not sent.
+    sign_failed: bool,
 }
 
 impl OneShot {
@@ -1064,17 +1072,33 @@ impl OneShot {
             grpc_status,
             grpc_message: None,
             failure: None,
+            sign_failed: false,
         }
     }
 }
 
 async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stats: &Arc<ConnStats>, cancel: &CancellationToken) -> OneShot {
-    let (tx, rx) = mpsc::channel(1);
-    let _ = tx.try_send(frame(msg));
-    drop(tx);
+    let body = frame(msg);
     let mut out = OneShot::empty(None, None);
+    // Signed for the reflection request's own path and body, never sent
+    // with the signature made for the call.
+    let signed = match &plan.sign_reflection {
+        Some(sign) => match sign(&plan.origin(path), &body) {
+            Ok(h) => Some(h),
+            Err(f) => {
+                out.failure = Some(f);
+                out.sign_failed = true;
+                return out;
+            }
+        },
+        None => None,
+    };
+    let (tx, rx) = mpsc::channel(1);
+    let _ = tx.try_send(body);
+    drop(tx);
     let ctl = StreamCtl::new(stats.clone());
-    let fut = match start(conn, plan, path, call_headers(plan, &plan.headers, conn.is_h1()), rx, None, &ctl) {
+    let headers = call_headers(plan, signed.as_deref().unwrap_or(&plan.headers), conn.is_h1());
+    let fut = match start(conn, plan, path, headers, rx, None, &ctl) {
         Ok(f) => f,
         Err(f) => {
             out.failure = Some(f);
@@ -1193,7 +1217,12 @@ async fn reflect(
                 grpc_message: r.grpc_message.clone(),
                 succeeded: false,
                 problem: Some(problem),
+                auth_failed: r.sign_failed,
             };
+            if let Some(f) = r.failure.as_ref().filter(|_| r.sign_failed) {
+                let o = outcome(format!("auth could not be prepared for the reflection request, so it was not sent: {}", f.message), &r);
+                return Err(ReflectError::Refused(Box::new(r), o));
+            }
             if r.failure.is_some() {
                 let o = outcome("the reflection exchange failed at the transport level".into(), &r);
                 return Err(ReflectError::Refused(Box::new(r), o));
@@ -1264,6 +1293,7 @@ async fn reflect(
             grpc_message: None,
             succeeded: true,
             problem: None,
+            auth_failed: false,
         };
         return match pool.add_file_descriptor_protos(files.into_values()) {
             Ok(()) => Ok((pool, outcome)),
@@ -1287,6 +1317,7 @@ async fn reflect(
                 grpc_message: None,
                 succeeded: false,
                 problem: Some("server reflection was not attempted".into()),
+                auth_failed: false,
             },
         )),
     }
@@ -1696,6 +1727,7 @@ async fn exchange(
     // gRPC-Web sends one complete body, so its length is known up front.
     let exact = web.then(|| pending.iter().map(|(b, _)| wire_bytes(b).len() as u64).sum::<u64>());
     obs.bytes.request_body = exact.unwrap_or_else(|| pending.iter().map(|(b, _)| 5 + b.len() as u64).sum());
+    let path = format!("/{}/{}", plan.service, plan.method);
     // Auth over the framed message now that it is encoded (server reflection).
     let signed = match &plan.sign {
         Some(sign) => {
@@ -1703,7 +1735,7 @@ async fn exchange(
                 GrpcMode::Unary | GrpcMode::ServerStreaming => pending.iter().map(|(b, _)| wire_bytes(b)).collect::<Vec<_>>().concat(),
                 GrpcMode::ClientStreaming | GrpcMode::Bidirectional => vec![],
             };
-            match sign(&Bytes::from(body)) {
+            match sign(&plan.origin(&path), &Bytes::from(body)) {
                 Ok(h) => Some(h),
                 Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
             }
@@ -1714,7 +1746,6 @@ async fn exchange(
     // ---- the call ----
     let (tx, rx) = mpsc::channel::<Bytes>(64);
     let mut tx = Some(tx);
-    let path = format!("/{}/{}", plan.service, plan.method);
     let mut headers = call_headers(plan, signed.as_deref().unwrap_or(&plan.headers), conn.is_h1());
     if let Some(ms) = plan.deadline_ms
         && let Ok(v) = HeaderValue::from_str(&grpc_timeout(ms))

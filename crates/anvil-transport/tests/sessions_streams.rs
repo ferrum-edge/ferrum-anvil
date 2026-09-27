@@ -262,6 +262,7 @@ async fn proto_016_grpc_adapter_with_a_compiled_proto_and_trailers() {
         messages: vec![r#"{"message":"m","count":3,"failWith":5}"#.into()],
         headers: vec![],
         sign: None,
+        sign_reflection: None,
         deadline_ms: Some(5_000),
         timeouts: timeouts(),
         limits: Limits::default(),
@@ -333,6 +334,7 @@ fn echo_plan(
         messages: vec![message.into()],
         headers: vec![],
         sign: None,
+        sign_reflection: None,
         deadline_ms: None,
         timeouts: timeouts(),
         limits: Limits::default(),
@@ -419,6 +421,27 @@ async fn grpc_h3_adapter_uses_quic_and_reads_status_from_h3_trailers() {
     let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     assert_eq!(status_of(&out), (Some(0), GrpcStatusSource::TrailerFrame), "{:?}", failure_of(&out));
     assert!(!out.attempts[0].response.as_ref().unwrap().trailers_received);
+}
+
+#[tokio::test]
+async fn a_reflection_request_auth_cannot_sign_is_not_sent_and_is_reported_as_an_auth_failure() {
+    init();
+    let f = fxhttp::serve("127.0.0.1:0", None).await.unwrap();
+    let mut plan = echo_plan(f.addr.port(), false, "Unary", GrpcMode::Unary, "{}", GrpcWire::Grpc, HttpVersionPolicy::Auto);
+    plan.schema = grpc::Schema::Reflection;
+    let refuse: grpc::SignFn = Arc::new(|_: &str, _: &Bytes| -> Result<Vec<(http::HeaderName, http::HeaderValue)>, TransportFailure> {
+        Err(TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, "the signing key is not usable"))
+    });
+    plan.sign_reflection = Some(refuse);
+    let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    let r = out.facts.grpc_reflection.clone().expect("no reflection outcome");
+    assert!(!r.succeeded && r.auth_failed, "{r:?}");
+    let problem = r.problem.unwrap_or_default();
+    assert!(problem.contains("auth could not be prepared for the reflection request"), "{problem}");
+    assert!(problem.contains("the signing key is not usable") && !problem.contains("transport level"), "{problem}");
+    assert_eq!(failure_of(&out).map(|f| f.kind), Some(FailureKind::AuthPreparationFailed));
+    let sent = f.log.requests();
+    assert!(!sent.iter().any(|(_, p)| p.starts_with("/grpc.reflection.") || p.starts_with("/anvil.lab.v1.")), "{sent:?}");
 }
 
 /// One-shot HTTP/1.1 responder: reads a request (headers + Content-Length

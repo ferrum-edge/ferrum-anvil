@@ -83,6 +83,9 @@ struct SessionPrep {
     /// What a gRPC call whose schema comes from server reflection was signed
     /// for and sent with, once the transport encoded its message.
     resigned: Option<ResignedSlot>,
+    /// The secrets of every gRPC request signed in the transport (the call and
+    /// each server reflection request), for the record's redactor.
+    signed_secrets: Option<SignedSecrets>,
 }
 
 /// A gRPC call signed over the framed message it sent, once server
@@ -91,11 +94,15 @@ struct SessionPrep {
 struct Resigned {
     headers: Vec<(String, String)>,
     body: Bytes,
-    secrets: Vec<String>,
     facts: Vec<(String, String)>,
 }
 
 type ResignedSlot = Arc<parking_lot::Mutex<Option<Resigned>>>;
+
+/// The secrets requests signed in the transport were signed with (a token
+/// minted for each signature), whether or not the record keeps the request:
+/// a server can echo a reflection request's credential in its refusal.
+type SignedSecrets = Arc<parking_lot::Mutex<Vec<String>>>;
 
 /// The redactor of a live transcript that can learn secrets once the session
 /// is planned: those a gRPC call signed once server reflection resolved its
@@ -322,35 +329,43 @@ async fn apply_auth(
     Ok(Authorized { headers, query, facts: applied.facts, set: applied.set_headers })
 }
 
-/// Signs a unary or server-streaming gRPC call whose schema comes from
-/// server reflection once its message is encoded, over the framed message
-/// it sends (a call with a local schema is signed so when it is prepared).
-/// The fields auth sets otherwise than it set them when the call was
-/// prepared (`first`, over an empty body) replace those in `sent`, the
-/// call's prepared headers; what the call is sent with is kept in `slot`
-/// for the record, and the secrets it is signed with (a freshly minted
-/// token) join the `live` transcript redactor.
-fn sign_after_reflection(
+/// Signs a gRPC request in the transport, once its path and body are known:
+/// a unary or server-streaming call whose schema comes from server
+/// reflection, over the framed message it sends (a call with a local schema
+/// is signed so when it is prepared), and each server reflection request,
+/// for its own path and framed message, so neither is sent with a signature
+/// or DPoP proof made for another request. The fields auth sets otherwise
+/// than it set them when the call was prepared (`first`, over an empty
+/// body) replace those in `sent`, the call's prepared headers. What a call
+/// is sent with is kept in `slot` for the record (a reflection request has
+/// none), and the secrets it is signed with (a freshly minted token) join
+/// the `live` transcript redactor and `signed`, for the record's redactor.
+fn sign_in_transport(
     auth: ResolvedAuth,
     request: &SessionRequest,
     first: &[(String, String)],
     sent: &[(String, String)],
-    slot: ResignedSlot,
+    slot: Option<ResignedSlot>,
     live: SharedRedactor,
+    signed: SignedSecrets,
 ) -> grpc::SignFn {
     let (request, first, sent) = (request.clone(), first.to_vec(), sent.to_vec());
-    Arc::new(move |body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
-        let applied = sign_request(&auth, &SessionRequest { body: body.clone(), ..request.clone() })?;
+    Arc::new(move |path: &str, body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
+        let target = Target { path: path.to_string(), ..request.target.clone() };
+        let applied = sign_request(&auth, &SessionRequest { target, body: body.clone(), ..request.clone() })?;
         {
             let mut live = live.write();
             for s in &applied.secrets {
                 live.add_secret(s);
             }
         }
+        signed.lock().extend(applied.secrets);
         let mut headers = sent.clone();
         set_headers(&mut headers, applied.set_headers.into_iter().filter(|h| !first.contains(h)).collect());
         let wire = header_pairs(&headers)?;
-        *slot.lock() = Some(Resigned { headers, body: body.clone(), secrets: applied.secrets, facts: applied.facts });
+        if let Some(slot) = &slot {
+            *slot.lock() = Some(Resigned { headers, body: body.clone(), facts: applied.facts });
+        }
         Ok(wire)
     })
 }
@@ -457,6 +472,7 @@ fn finish_prep(
         extra_findings: vec![],
         cookies: None,
         resigned: None,
+        signed_secrets: None,
     }
 }
 
@@ -913,8 +929,14 @@ pub(crate) fn grpc_call(
     }
     let service = r.resolve(&spec.service, "grpc.service")?;
     let method = r.resolve(&spec.method, "grpc.method")?;
-    let messages =
+    let mut messages =
         spec.messages.iter().enumerate().map(|(i, m)| r.resolve(m, &format!("grpc.messages[{i}]"))).collect::<Result<Vec<_>, _>>()?;
+    // A unary or server-streaming call with no message sends the empty
+    // message, as the transport encodes it: auth signs that frame, and the
+    // prepared body is it.
+    if messages.is_empty() && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming) {
+        messages.push("{}".into());
+    }
     let schema = load_schema(ctx, &spec)?;
     // Local schema: the method, call mode and every message are validated before traffic.
     let mut unary_body = Bytes::new();
@@ -1025,10 +1047,15 @@ async fn prepare_grpc(
     let cookies = jar_cookies(engine, ctx, &mut b, call_target, &mut headers);
     // With server reflection the message is encoded once the schema is
     // resolved: the call is signed then, over the framed message it sends.
-    let reflected = matches!(schema, grpc::Schema::Reflection) && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
-    let resigned: Option<ResignedSlot> = (reflected && !matches!(b.prep.auth, ResolvedAuth::None)).then(Default::default);
+    let reflection = matches!(schema, grpc::Schema::Reflection) && !matches!(b.prep.auth, ResolvedAuth::None);
+    let reflected = reflection && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
+    let resigned: Option<ResignedSlot> = reflected.then(Default::default);
     let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
-    let sign = resigned.clone().map(|slot| sign_after_reflection(b.prep.auth.clone(), &request, &set, &headers, slot, live.clone()));
+    let signed = SignedSecrets::default();
+    let signer = |slot| sign_in_transport(b.prep.auth.clone(), &request, &set, &headers, slot, live.clone(), signed.clone());
+    let sign = resigned.clone().map(|slot| signer(Some(slot)));
+    // Each reflection request is signed for its own path and body.
+    let sign_reflection = reflection.then(|| signer(None));
     let display = format!("{}://{}{}", call_target.scheme, call_target.authority, call_target.path);
     let plan = grpc::GrpcPlan {
         tls: if tls_url { b.prep.tls.clone() } else { None },
@@ -1045,6 +1072,7 @@ async fn prepare_grpc(
         messages,
         headers: header_pairs(&headers)?,
         sign,
+        sign_reflection,
         deadline_ms: spec.deadline_ms,
         timeouts: b.prep.settings.timeouts,
         limits: b.prep.settings.limits,
@@ -1069,6 +1097,7 @@ async fn prepare_grpc(
     p.cookies = cookies;
     p.content_type = request.content_type;
     p.resigned = resigned;
+    p.signed_secrets = reflection.then_some(signed);
     Ok(p)
 }
 
@@ -1654,10 +1683,14 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
                 r.problem.clone().unwrap_or_else(|| "Server reflection failed.".into())
             ),
         ));
-        d.extra_remediation.push(Remediation {
-            text: "Import the service's .proto files or a descriptor set and call it without reflection, or ask the operator to allow reflection for this caller.".into(),
-            owner: Owner::Caller,
-        });
+        // A reflection request auth could not sign was never sent: the server
+        // did not refuse reflection, so allowing it would change nothing.
+        let text = if r.auth_failed {
+            "Fix the request's auth profile so it can sign the reflection request, or import the service's .proto files or a descriptor set and call it without reflection."
+        } else {
+            "Import the service's .proto files or a descriptor set and call it without reflection, or ask the operator to allow reflection for this caller."
+        };
+        d.extra_remediation.push(Remediation { text: text.into(), owner: Owner::Caller });
         out.push(d);
     }
     if facts.icmp_port_unreachable && protocol == Protocol::Udp {
@@ -1751,15 +1784,17 @@ async fn run_prepared(
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
     redactor.refresh_used_secrets(resolver);
+    // The secrets of the call and of each reflection request signed in the
+    // transport: any of them can be echoed in the response, notes or findings.
+    if let Some(signed) = &prep.signed_secrets {
+        for s in signed.lock().iter() {
+            redactor.add_secret(s);
+        }
+    }
     // A call signed once server reflection resolved its schema: the request
     // as it was signed and sent.
     let (headers, body, auth_facts) = match prep.resigned.as_ref().and_then(|s| s.lock().take()) {
-        Some(r) => {
-            for s in &r.secrets {
-                redactor.add_secret(s);
-            }
-            (r.headers, r.body, r.facts)
-        }
+        Some(r) => (r.headers, r.body, r.facts),
         None => (headers, body, auth_facts),
     };
     let mut attempts = out.attempts;
