@@ -160,6 +160,19 @@
 
 ### Fixed
 
+- The effective-request preview now shows what a WebSocket, SSE or gRPC
+  request sends. A `ws://`, `wss://`, `grpc://` or `grpcs://` URL is
+  previewed (before, it was refused, and a URL without a scheme was
+  previewed as `https://`). A WebSocket over HTTP/2 or HTTP/3 shows its
+  `CONNECT`, a gRPC or gRPC-Web call shows `POST` to the method's path with
+  its request message as redacted JSON (and the size of the framed message
+  sent), and each shows the headers the session transport adds or leaves
+  out. The preview and the session build the request with the same code. An HMAC or DPoP signature in the preview
+  covers the same method, path, authority and body as the one sent, with a
+  `ws`/`grpc` URL signed as its `http` counterpart. An auth profile the
+  session refuses (one that rewrites the body, or adds query parameters to
+  a gRPC call) is shown as a request that would not be sent. Raw TCP and UDP
+  say the preview is not supported for them.
 - WebSocket over HTTP/2 and HTTP/3, SSE over HTTP/2 and gRPC (native and
   gRPC-Web, every HTTP version) now send an explicit `Host` header as the
   request's authority (`:authority`, or `Host` over HTTP/1.1), as HTTP
