@@ -8,7 +8,9 @@
 //! early-data opt-in no session ticket is kept at all
 //! ([`Engine::session_tickets_held`] stays 0). A gRPC channel in use at a
 //! lock is not kept either. A gate (`anvil_fixtures::gate`) holds the request
-//! until the test has deleted the workspace.
+//! until the test has deleted the workspace. An execution whose context was
+//! built before the delete ([`ExecutionContext::epoch`]) keeps none of them
+//! either, even when it starts after the delete.
 
 use anvil_domain::Id;
 use anvil_domain::outcome::ProtocolStatus;
@@ -384,4 +386,57 @@ async fn a_tls_configuration_prepared_by_an_execution_that_spans_its_workspace_d
         assert_eq!(e.prepared_tls_len(), usize::from(kept), "{workspace}: TLS configurations cached after workspace-a's delete");
         assert_eq!(e.session_tickets_held(), 0, "{workspace}: session tickets kept outside the early-data opt-in");
     }
+}
+
+/// `c` in workspace-a, with its epoch taken now, as the app takes it when it
+/// builds a context from storage.
+fn built_in_workspace_a(e: &Engine, c: &ExecutionContext) -> ExecutionContext {
+    let mut c = in_workspace(c.clone(), "workspace-a");
+    c.epoch = Some(e.context_epoch("workspace-a"));
+    c
+}
+
+/// Contexts built before workspace-a's delete and executed only after it:
+/// they are answered, but keep nothing for the deleted workspace, no cookie,
+/// prepared TLS configuration, pooled connection, session ticket or gRPC
+/// channel. The same contexts built after the delete (a workspace restored
+/// with the same id) keep all of them.
+#[tokio::test]
+async fn an_execution_whose_context_was_built_before_its_workspace_delete_keeps_nothing() {
+    init();
+    let api = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let tls = early_data::serve_tls("127.0.0.1:0", server_tls(), EarlyMode::Accept).await.unwrap();
+    let mut e = Engine::new();
+    e.grpc_channels = Some(Arc::new(Channels::new()));
+    let channels = e.grpc_channels.clone().unwrap();
+    let https = lab_trust(with_version(get(&tls.url("/echo")), HttpVersionPolicy::Http1Only));
+    let contexts = [get(&api.url("/set-cookie?name=sid&value=before-the-delete")), https.clone(), early(https)];
+    let call = grpc_call(&format!("grpc://{}", api.addr));
+
+    // Built, then the workspace is deleted, then executed.
+    let built: Vec<_> = contexts.iter().map(|c| built_in_workspace_a(&e, c)).collect();
+    let built_call = built_in_workspace_a(&e, &call);
+    e.clear_isolation("workspace-a");
+    for c in &built {
+        let o = run(&e, c).await;
+        let failures: Vec<_> = o.record.attempts.iter().map(|a| a.failure.as_ref().map(|f| f.kind)).collect();
+        assert_eq!(status(&o), Some(200), "{}: {failures:?}", c.spec.url);
+    }
+    grpc_ok(&run(&e, &built_call).await);
+    assert!(!e.has_cookie_jar("workspace-a"), "a cookie was kept for the deleted workspace");
+    assert_eq!(e.prepared_tls_len(), 0, "a TLS configuration was cached for the deleted workspace");
+    assert_eq!(e.http.pool.stats().connections, 0, "a connection was pooled for the deleted workspace");
+    assert_eq!(e.session_tickets_held(), 0, "session tickets were kept for the deleted workspace");
+    assert_eq!(channels.len(), 0, "a gRPC channel was kept for the deleted workspace");
+
+    // Restored with the same id: contexts built from now on keep them again.
+    for c in &contexts {
+        assert_eq!(status(&run(&e, &built_in_workspace_a(&e, c)).await), Some(200), "{}", c.spec.url);
+    }
+    grpc_ok(&run(&e, &built_in_workspace_a(&e, &call)).await);
+    assert!(e.has_cookie_jar("workspace-a"), "the restored workspace's cookie was refused");
+    assert!(e.prepared_tls_len() >= 1, "the restored workspace's TLS configuration was not cached");
+    assert!(e.http.pool.stats().connections >= 1, "the restored workspace's connections were not pooled");
+    assert!(e.session_tickets_held() >= 1, "the restored workspace's session tickets were refused");
+    assert_eq!(channels.len(), 1, "the restored workspace's gRPC channel was not kept");
 }

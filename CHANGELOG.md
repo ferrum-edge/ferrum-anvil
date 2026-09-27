@@ -286,7 +286,18 @@
   flight at the same time is not affected. An execution that starts while
   its workspace is being deleted is now fenced on one side of the delete
   for all of its caches: before, it could keep its connections and session
-  tickets while its cookies were refused.
+  tickets while its cookies were refused. A send, interactive session or
+  collection run step whose context the app prepared from storage before
+  the delete is fenced too, even when it starts executing after the delete:
+  it takes the workspace's generations when the context is built, not when
+  it executes. Before, it could keep cookies, a prepared TLS
+  configuration (with a client identity's private key), pooled connections
+  and session tickets under the deleted workspace, where a workspace
+  restored with the same id would find them. Requests of the restored
+  workspace, built after the delete, are not affected.
+- `Engine::execute` now runs each protocol's execution boxed, so the future
+  a caller awaits is small. Before, a caller that awaited several gRPC
+  calls inline could overflow its thread's stack in a debug build.
 - Prepared TLS configurations are now kept per workspace (every workspace
   without a TLS profile shared one configuration), and a workspace delete
   drops them. Connections without the early-data opt-in still never resume
