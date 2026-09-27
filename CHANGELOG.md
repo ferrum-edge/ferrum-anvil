@@ -106,6 +106,16 @@
   connection in use at the lock is closed instead of being pooled again
   (HTTP/1.1, HTTP/2 and HTTP/3), and a TLS or QUIC connection whose attempt
   began before the lock keeps none of the session tickets it receives.
+- Server-sent events: an event whose data (its `data:` lines joined with
+  newlines) passes the parser's event bound, four times the line bound
+  (`min(max_response_bytes, 1 MiB)`, at least 1 KiB), now stops the attempt
+  with `response_too_large_local` instead of being dispatched with the
+  extra data lines silently dropped. Events completed earlier in the same
+  read are still recorded.
+- Server-sent events: a leading UTF-8 byte order mark is now stripped even
+  when its three bytes arrive in separate reads; the stream's first event
+  was lost when the transport split it. A BOM later in the stream is still
+  not stripped.
 - A load run now hands its worker every vault secret the plan's requests
   resolve: the datagram PROXY-protocol authentication secret of a UDP
   request, and the client identity of the selected proxy's own TLS profile
