@@ -2,8 +2,12 @@
 // load unit or shows the typed refusal (and then cannot start a run), and
 // reports show protocol denominators with honest wording — sent and received
 // datagrams stay separate, a round trip exists only when defined, and a
-// distribution without samples shows "—", never 0 µs. jsdom only.
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+// distribution without samples shows "—", never 0 µs. The view keeps its
+// editor, confirmation and unsaved drafts to the workspace that owns them: a
+// switch never shows, saves or starts the previous workspace's plan, a live
+// run keeps its Stop control, and switching back restores the unsaved draft.
+// jsdom only.
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 
 const invoke = vi.fn();
@@ -11,13 +15,16 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) =
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
-import type { LoadPlanCheck } from "./api";
+import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
-import { PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
+import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
+
+const notify = vi.fn();
 
 afterEach(() => {
   cleanup();
   invoke.mockReset();
+  notify.mockReset();
 });
 
 const none: LatencySummary = { count: 0, min_us: 0, max_us: 0, mean_us: 0, p50_us: 0, p90_us: 0, p95_us: 0, p99_us: 0 };
@@ -209,6 +216,7 @@ function plan(): LoadPlan {
 }
 
 const editorProps = {
+  workspaceId: "ws-1",
   requests: [
     { id: "req-ws", label: "Socket", method: "GET" },
     { id: "req-http", label: "Echo", method: "GET" },
@@ -257,6 +265,215 @@ describe("PlanEditor", () => {
     // Removing the request clears the unit (nothing to measure).
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     await waitFor(() => expect(screen.queryByTestId("load-unit")).toBeNull());
+  });
+
+  it("refuses to save, run or delete a plan of another workspace", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      throw new Error(`unexpected ${cmd}`);
+    });
+    render(<PlanEditor plan={{ ...plan(), chain: [] }} {...editorProps} workspaceId="ws-2" />);
+    for (const name of ["Save", "Run…", "Delete plan"]) {
+      const b = screen.getByRole("button", { name }) as HTMLButtonElement;
+      expect(b.disabled).toBe(true);
+      fireEvent.click(b);
+    }
+    await act(async () => {});
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+// ------------------------------------------------------------ workspace scoping
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+const loadPlan = (id: string, ws: string, name: string): LoadPlan => ({ ...plan(), id, workspace_id: ws, name, chain: [] });
+
+const preflight: LoadPreflight = {
+  destinations: ["http://a.test"],
+  workload: "10 iterations",
+  max_duration_secs: 0,
+  peak_target: 2,
+  dataset_rows: null,
+  trusted: true,
+  warnings: [],
+  unit: "http_request",
+  unit_label: "HTTP requests",
+  semantics: sem("request", "requests"),
+};
+
+let plans: Record<string, LoadPlan[] | Promise<LoadPlan[]>>;
+
+function backend(overrides: Record<string, (args: Record<string, unknown>) => unknown> = {}) {
+  plans = { A: [loadPlan("pa", "A", "Plan A")], B: [] };
+  invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+    if (overrides[cmd]) return overrides[cmd](args);
+    switch (cmd) {
+      case "load_plans":
+        return plans[args.workspaceId as string] ?? [];
+      case "load_reports":
+      case "datasets_list":
+        return [];
+      default:
+        throw new Error(`unexpected command ${cmd}`);
+    }
+  });
+}
+
+/** A save that stores the plan in its workspace's list, as the backend does. */
+const saveInto = (a: Record<string, unknown>) => {
+  const p = a.plan as LoadPlan;
+  const own = plans[p.workspace_id] as LoadPlan[];
+  plans[p.workspace_id] = [...own.filter((x) => x.id !== p.id), p];
+  return p;
+};
+
+const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1] as Record<string, unknown>);
+const button = (name: string) => screen.getByRole("button", { name }) as HTMLButtonElement;
+const planName = () => screen.getByLabelText("Plan name") as HTMLInputElement;
+const view = (ws: string) => <LoadView workspaceId={ws} tree={[]} environments={[]} notify={notify} />;
+
+/** Waits until workspace `ws`'s lists were requested and answered. */
+async function listed(ws: string) {
+  await waitFor(() => expect(calls("load_plans").some((c) => c.workspaceId === ws)).toBe(true));
+  await act(async () => {});
+}
+
+describe("LoadView workspace switch", () => {
+  it("drops A's plan editor on a switch to an empty B, and saves nothing into A from B", async () => {
+    backend({ load_plan_save: saveInto });
+    const r = render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    expect(planName().value).toBe("Plan A");
+
+    r.rerender(view("B"));
+    await listed("B");
+    expect(screen.getByText("No plans yet.")).toBeTruthy();
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Run…" })).toBeNull();
+
+    // A plan made in B is saved into B.
+    fireEvent.click(button("New load plan"));
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+    expect(calls("load_plan_save").map((c) => (c.plan as LoadPlan).workspace_id)).toEqual(["B"]);
+  });
+
+  it("keeps A's unsaved edit out of B and restores it on the way back to A", async () => {
+    backend({ load_plan_save: saveInto });
+    plans.B = [loadPlan("pb", "B", "Plan B")];
+    const r = render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "Edited A" } });
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+
+    r.rerender(view("B"));
+    await screen.findByText("Plan B");
+    expect(screen.queryByText("unsaved")).toBeNull();
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    fireEvent.click(screen.getByText("Plan B"));
+    expect(planName().value).toBe("Plan B");
+    expect(screen.queryByText("unsaved")).toBeNull();
+
+    r.rerender(view("A"));
+    await screen.findByText("Plan A");
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    expect(screen.getAllByText("unsaved")).toHaveLength(1);
+    fireEvent.click(screen.getByText("Plan A"));
+    expect(planName().value).toBe("Edited A");
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+    expect(calls("load_plan_save")).toHaveLength(0);
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    expect(calls("load_plan_save").map((c) => c.plan as LoadPlan)).toMatchObject([{ id: "pa", workspace_id: "A", name: "Edited A" }]);
+    expect(planName().value).toBe("Edited A");
+  });
+
+  it("keeps an unsaved new plan in its own workspace", async () => {
+    backend();
+    const r = render(view("A"));
+    await screen.findByText("Plan A");
+    fireEvent.click(button("New"));
+    fireEvent.change(planName(), { target: { value: "Draft A" } });
+    expect(screen.getByText("Draft A")).toBeTruthy();
+
+    r.rerender(view("B"));
+    await listed("B");
+    expect(screen.getByText("No plans yet.")).toBeTruthy();
+    expect(screen.queryByText("Draft A")).toBeNull();
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+
+    r.rerender(view("A"));
+    fireEvent.click(await screen.findByText("Draft A"));
+    expect(planName().value).toBe("Draft A");
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+  });
+
+  it("closes a pending run confirmation and never starts A's plan from B", async () => {
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => "key-1" });
+    const r = render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.click(button("Run…"));
+    await screen.findByText("Confirm load run");
+    fireEvent.click(screen.getByLabelText(/I own these destinations/));
+
+    r.rerender(view("B"));
+    expect(screen.queryByText("Confirm load run")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start load" })).toBeNull();
+    await listed("B");
+    expect(screen.queryByText("Confirm load run")).toBeNull();
+    expect(calls("load_run_start")).toHaveLength(0);
+
+    // Back in A the confirmation is not reopened: it asks again.
+    r.rerender(view("A"));
+    await screen.findByText("Plan A");
+    expect(screen.queryByText("Confirm load run")).toBeNull();
+  });
+
+  it("shows no stale list or editor while B's lists load, nor after A's late reply", async () => {
+    backend();
+    const aLate = deferred<LoadPlan[]>();
+    const bLists = deferred<LoadPlan[]>();
+    const r = render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+
+    plans.B = bLists.promise;
+    r.rerender(view("B"));
+    expect(screen.queryByText("Plan A")).toBeNull();
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+
+    plans.A = aLate.promise;
+    r.rerender(view("A"));
+    r.rerender(view("B"));
+    await act(async () => bLists.resolve([loadPlan("pb", "B", "Plan B")]));
+    await screen.findByText("Plan B");
+    await act(async () => aLate.resolve([loadPlan("pa", "A", "Plan A")]));
+    expect(screen.queryByText("Plan A")).toBeNull();
+    expect(screen.getByText("Plan B")).toBeTruthy();
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+  });
+
+  it("keeps a live run's Stop control", async () => {
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => "key-1", load_run_cancel: () => true });
+    const r = render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.click(button("Run…"));
+    await screen.findByText("Confirm load run");
+    fireEvent.click(screen.getByLabelText(/I own these destinations/));
+    fireEvent.click(button("Start load"));
+    await screen.findByRole("button", { name: "Stop run" });
+
+    r.rerender(view("B"));
+    await listed("B");
+    fireEvent.click(button("Stop run"));
+    await waitFor(() => expect(calls("load_run_cancel")).toEqual([{ runKey: "key-1" }]));
   });
 });
 

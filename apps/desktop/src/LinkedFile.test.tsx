@@ -357,6 +357,7 @@ describe("where linked files are chosen", () => {
     const noop = () => {};
     render(
       <PlanEditor
+        workspaceId={plan.workspace_id}
         plan={plan}
         requests={[{ id: "req-1", label: "Upload", method: "POST" }]}
         environments={[]}

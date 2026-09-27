@@ -216,6 +216,16 @@
 
 ### Fixed
 
+- Desktop Load: switching workspaces now clears the selected plan or report
+  and closes a pending run confirmation, so the Load view never shows, saves,
+  runs or deletes the previous workspace's plan; the plan editor also refuses
+  to save or start a plan that belongs to another workspace. A live run's
+  Stop control is kept. Unsaved plan edits and unsaved new plans are kept per
+  workspace for the session (not written to disk): they are hidden while
+  another workspace is shown, marked **unsaved** on return, and an edit is
+  dropped once its plan is no longer in its workspace. The previous
+  workspace's plans and reports leave the sidebar at once instead of staying
+  until the new workspace's lists arrive.
 - The load preflight's "Traffic leaves this machine" warning now compares
   each destination's whole host: a host that only contains `localhost` or
   `127.0.0.1` (such as `localhost.example.com`) no longer counts as this
