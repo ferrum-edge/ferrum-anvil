@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Desktop: an imported collection's root folder has a **Workspace scope** tab
+  in its folder settings. It shows whether the collection is isolated from
+  its workspace (the default) or opened to it on this device, and which
+  variables, environments, auth, run values and identities its requests
+  resolve either way. **Open to workspace…** asks for confirmation first;
+  **Isolate again** does not. Ordinary folders have no such tab, and an
+  import still never opens a collection.
+
 ### Changed
 
 - Encrypted-transfer bundles now use bundle format 2: the encrypted vault is

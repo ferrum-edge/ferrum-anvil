@@ -127,8 +127,9 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   values they extract stay inside it); never present this device's JWT-SVID
   (Workload API or token file); and are refused a TLS profile whose client
   identity (certificate or X.509-SVID) is bound to no host, including the
-  proxy's. Opening a root (`App::set_import_root_workspace_scope`) is never
-  imported, and the desktop does not offer a control for it yet. TLS trust
+  proxy's. Opening a root (`App::set_import_root_workspace_scope`, the
+  desktop's **Workspace scope** tab after a confirmation) is never imported.
+  TLS trust
   settings and proxies selected by the destination still apply, and a client
   identity bound to hosts is presented only to those hosts. Cookies and
   cached OAuth tokens are per workspace, not per import root; cookies follow

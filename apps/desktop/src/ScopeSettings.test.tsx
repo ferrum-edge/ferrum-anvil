@@ -1,10 +1,12 @@
-// Renderer tests for the workspace settings' device-identity seal (jsdom; IPC
-// mocked). A bundle import or backup restore seals a workspace from this
-// device's workload identity; the dialog says so and lifts the seal only
-// after the user confirms. The seal itself is enforced by the backend
-// (anvil-app tests).
+// Renderer tests for the workspace settings' device-identity seal and an
+// import root's workspace scope (jsdom; IPC mocked). A bundle import or
+// backup restore seals a workspace from this device's workload identity; the
+// dialog says so and lifts the seal only after the user confirms. An
+// imported collection's root folder is isolated from its workspace until the
+// user confirms opening it; isolating it again needs no confirmation. Both
+// are enforced by the backend (anvil-app tests).
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { Workspace } from "./generated/contracts";
+import type { Folder, Workspace } from "./generated/contracts";
 
 const invoke = vi.fn();
 const ask = vi.fn();
@@ -71,4 +73,160 @@ test("a workspace that is not sealed shows no seal", async () => {
   await waitFor(() => expect(calls("workspace_device_identity_sealed")).toEqual([{ workspaceId: ws.id }]));
   expect(screen.queryByText(BANNER)).toBeNull();
   expect(screen.queryByRole("button", { name: "Allow on this device" })).toBeNull();
+});
+
+// ------------------------------------------------------ import root scope
+
+const root = {
+  id: "f-root",
+  name: "Petstore",
+  schema_version: 1,
+  created_at: now,
+  updated_at: now,
+  workspace_id: ws.id,
+  sort_key: 1,
+  import_root: true,
+  import_environment_ids: ["env-1"],
+} as Folder;
+const ISOLATED = /Isolated from the workspace/;
+const OPENED = /Opened to the workspace on this device/;
+const OPEN_BUTTON = { name: /Open to workspace/ };
+const ISOLATE_BUTTON = { name: "Isolate again" };
+
+// `scope` answers folder_set_workspace_scope: the stored folder, or an error
+// the backend reports (as the IPC does, a string).
+function folderBackend(folder: Folder, scope?: (allow: boolean) => Promise<Folder>) {
+  let stored = { ...folder };
+  invoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+    switch (cmd) {
+      case "folder_get":
+        return stored;
+      case "folder_set_workspace_scope": {
+        const allow = args?.allow as boolean;
+        if (scope) return scope(allow);
+        stored = { ...stored, use_workspace_scope: allow };
+        return stored;
+      }
+      case "folder_save":
+        return args?.folder;
+      default:
+        return new Promise(() => {});
+    }
+  });
+}
+
+function renderFolder(id = root.id) {
+  const profiles = { tls: [], proxy: [], integrations: [] };
+  const onSaved = vi.fn();
+  render(<ScopeSettingsDialog target={{ kind: "folder", id }} workspaceId={ws.id} profiles={profiles} onClose={() => {}} onSaved={onSaved} />);
+  return onSaved;
+}
+
+async function openScopeTab() {
+  fireEvent.click(await screen.findByRole("tab", { name: "Workspace scope" }));
+}
+
+test("an ordinary folder has no workspace scope control", async () => {
+  const folder = { ...root, id: "f-plain", name: "Plain", import_root: false, import_environment_ids: undefined } as Folder;
+  folderBackend(folder);
+  renderFolder(folder.id);
+  await screen.findByRole("tab", { name: "Auth" });
+  expect(screen.queryByRole("tab", { name: "Workspace scope" })).toBeNull();
+  expect(screen.queryByRole("button", OPEN_BUTTON)).toBeNull();
+  expect(calls("folder_set_workspace_scope")).toEqual([]);
+});
+
+test("an import root is isolated by default and opens only after the user confirms", async () => {
+  folderBackend(root);
+  renderFolder();
+  await openScopeTab();
+  expect(screen.getByText(ISOLATED)).toBeTruthy();
+  expect(screen.getByText("Not used while isolated")).toBeTruthy();
+  expect(screen.getByText(/environments the import brought \(1\)/)).toBeTruthy();
+
+  // Declining the confirmation changes nothing.
+  ask.mockResolvedValueOnce(false);
+  fireEvent.click(screen.getByRole("button", OPEN_BUTTON));
+  await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+  expect(ask.mock.calls[0][1]).toMatchObject({ kind: "warning" });
+  await waitFor(() => expect((screen.getByRole("button", OPEN_BUTTON) as HTMLButtonElement).disabled).toBe(false));
+  expect(calls("folder_set_workspace_scope")).toEqual([]);
+  expect(screen.getByText(ISOLATED)).toBeTruthy();
+
+  ask.mockResolvedValueOnce(true);
+  fireEvent.click(screen.getByRole("button", OPEN_BUTTON));
+  await screen.findByText(OPENED);
+  expect(calls("folder_set_workspace_scope")).toEqual([{ folderId: root.id, allow: true }]);
+  expect(screen.getByText("Also used, because it is opened")).toBeTruthy();
+  expect(screen.getByRole("button", ISOLATE_BUTTON)).toBeTruthy();
+});
+
+test("an opened import root is isolated again without a confirmation", async () => {
+  folderBackend({ ...root, use_workspace_scope: true });
+  renderFolder();
+  await openScopeTab();
+  expect(screen.getByText(OPENED)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", ISOLATE_BUTTON));
+  await screen.findByText(ISOLATED);
+  expect(ask).not.toHaveBeenCalled();
+  expect(calls("folder_set_workspace_scope")).toEqual([{ folderId: root.id, allow: false }]);
+});
+
+test("a click while the change is pending is ignored", async () => {
+  let resolve: (f: Folder) => void = () => {};
+  folderBackend({ ...root, use_workspace_scope: true }, () => new Promise<Folder>((r) => (resolve = r)));
+  renderFolder();
+  await openScopeTab();
+  const button = screen.getByRole("button", ISOLATE_BUTTON) as HTMLButtonElement;
+  fireEvent.click(button);
+  await waitFor(() => expect(button.disabled).toBe(true));
+  fireEvent.click(button);
+  expect(calls("folder_set_workspace_scope")).toHaveLength(1);
+  resolve({ ...root, use_workspace_scope: false });
+  await screen.findByText(ISOLATED);
+});
+
+test("a refused change is shown and leaves the scope as it was", async () => {
+  folderBackend(root, () => Promise.reject("invalid: only the root folder of an imported collection has a scope of its own"));
+  renderFolder();
+  await openScopeTab();
+  ask.mockResolvedValueOnce(true);
+  fireEvent.click(screen.getByRole("button", OPEN_BUTTON));
+  await screen.findByText(/only the root folder of an imported collection/);
+  expect(screen.getByText(ISOLATED)).toBeTruthy();
+  expect(screen.queryByText(OPENED)).toBeNull();
+  expect((screen.getByRole("button", OPEN_BUTTON) as HTMLButtonElement).disabled).toBe(false);
+});
+
+test("a locked profile says so and leaves the scope as it was", async () => {
+  const onLocked = vi.fn();
+  window.addEventListener("anvil-locked", onLocked);
+  try {
+    folderBackend({ ...root, use_workspace_scope: true }, () => Promise.reject("LOCKED"));
+    renderFolder();
+    await openScopeTab();
+    fireEvent.click(screen.getByRole("button", ISOLATE_BUTTON));
+    await screen.findByText("The profile is locked. Unlock it and try again.");
+    expect(onLocked).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(OPENED)).toBeTruthy();
+    expect(screen.queryByText("LOCKED")).toBeNull();
+  } finally {
+    window.removeEventListener("anvil-locked", onLocked);
+  }
+});
+
+test("changing the scope keeps unsaved edits in the other tabs", async () => {
+  folderBackend(root);
+  renderFolder();
+  fireEvent.click(await screen.findByRole("tab", { name: "Name & description" }));
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Petstore v2" } });
+  await openScopeTab();
+  ask.mockResolvedValueOnce(true);
+  fireEvent.click(screen.getByRole("button", OPEN_BUTTON));
+  await screen.findByText(OPENED);
+  expect(screen.getByRole("dialog", { name: "Folder settings — Petstore v2" })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(calls("folder_save")).toHaveLength(1));
+  expect(calls("folder_save")[0].folder).toMatchObject({ id: root.id, name: "Petstore v2", use_workspace_scope: true });
 });

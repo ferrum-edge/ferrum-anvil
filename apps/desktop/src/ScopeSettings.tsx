@@ -3,7 +3,7 @@
 // request tab shows which layer each value came from.
 import { useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import type { AuthConfig, Folder, SettingsOverrides, Variable, Workspace } from "./generated/contracts";
 import { AuthEditor } from "./AuthEditor";
 import { VariablesEditor } from "./Dialogs";
@@ -11,7 +11,7 @@ import { SettingsOverridesEditor, type Profiles } from "./RequestEditor";
 import { Modal, Tabs } from "./ui";
 
 type Target = { kind: "folder"; id: string } | { kind: "workspace"; workspace: Workspace };
-type Tab = "auth" | "variables" | "settings" | "about";
+type Tab = "auth" | "variables" | "settings" | "scope" | "about";
 
 export function ScopeSettingsDialog(props: { target: Target; workspaceId: string; profiles: Profiles; onClose: () => void; onSaved: (w?: Workspace) => void }) {
   const [folder, setFolder] = useState<Folder | null>(null);
@@ -38,8 +38,35 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
       setErr(String((e as Error).message));
     }
   };
+  // Opening an import root to its workspace is a device-local choice made
+  // only here (or by `folder_set_workspace_scope`); saving the folder keeps
+  // the stored value whatever this dialog holds.
+  const [scopeBusy, setScopeBusy] = useState(false);
+  const [scopeErr, setScopeErr] = useState<string | null>(null);
+  const setWorkspaceScope = async (f: Folder, allow: boolean) => {
+    if (scopeBusy) return;
+    setScopeBusy(true);
+    setScopeErr(null);
+    try {
+      if (allow) {
+        const ok = await ask(
+          `Open “${f.name}” to this workspace on this device? Its requests will also use the workspace's variables, active environment and auth, variables of folders above it, values extracted and dataset rows from the rest of a run, and this device's workload identity (JWT-SVID or X.509-SVID) and TLS client identities. Only do this if you trust what was imported.`,
+          { title: "Open imported collection to the workspace", kind: "warning", okLabel: "Open to workspace" },
+        );
+        if (!ok) return;
+      }
+      const saved = await api.setFolderWorkspaceScope(f.id, allow);
+      // Keep unsaved edits in the other tabs; only the scope flag changed.
+      setFolder((cur) => (cur ? { ...cur, use_workspace_scope: saved.use_workspace_scope ?? false } : cur));
+    } catch (e) {
+      setScopeErr(e instanceof ApiError && e.locked ? "The profile is locked. Unlock it and try again." : String((e as Error).message));
+    } finally {
+      setScopeBusy(false);
+    }
+  };
   const obj = props.target.kind === "folder" ? folder : ws;
   if (!obj) return null;
+  const importRoot = props.target.kind === "folder" && folder?.import_root === true ? folder : null;
   const auth = (obj.auth as AuthConfig | undefined) ?? { type: "inherit" };
   const vars: Variable[] = obj.variables ?? [];
   const settings: SettingsOverrides = obj.settings ?? {};
@@ -81,6 +108,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
           { id: "auth" as Tab, label: "Auth" },
           { id: "variables" as Tab, label: "Variables", count: vars.length || undefined },
           { id: "settings" as Tab, label: "Settings" },
+          ...(importRoot ? [{ id: "scope" as Tab, label: "Workspace scope" }] : []),
           { id: "about" as Tab, label: "Name & description" },
         ]}
         value={tab}
@@ -113,6 +141,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
         </>
       )}
       {tab === "settings" && <SettingsOverridesEditor value={settings} onChange={(s) => patch({ settings: s })} profiles={props.profiles} />}
+      {tab === "scope" && importRoot && <ImportRootScope folder={importRoot} busy={scopeBusy} error={scopeErr} onSet={(allow) => void setWorkspaceScope(importRoot, allow)} />}
       {tab === "about" && (
         <div className="form">
           <label className="lbl">
@@ -127,5 +156,58 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
       )}
       {err && <div className="bad-box">{err}</div>}
     </Modal>
+  );
+}
+
+// What an imported collection's root folder resolves, sealed (the default)
+// or opened to its workspace on this device (`Folder::use_workspace_scope`).
+function ImportRootScope(props: { folder: Folder; busy: boolean; error: string | null; onSet: (allow: boolean) => void }) {
+  const open = props.folder.use_workspace_scope === true;
+  const envs = props.folder.import_environment_ids?.length ?? 0;
+  return (
+    <div className="form">
+      <p className="hint">
+        This folder is the root of an imported collection. Its requests resolve only the collection's own scope unless you open it to the workspace on this device. The choice applies to this
+        device only and an import never carries it: this collection imported anywhere else starts isolated.
+      </p>
+      {open ? (
+        <div className="warn-box row" role="status">
+          <span className="grow">Opened to the workspace on this device. Requests in this collection resolve the workspace's scope like any other folder.</span>
+          <button className="btn small" disabled={props.busy} onClick={() => props.onSet(false)}>
+            Isolate again
+          </button>
+        </div>
+      ) : (
+        <div className="info-box row" role="status">
+          <span className="grow">Isolated from the workspace (the default for imported collections).</span>
+          <button className="btn small" disabled={props.busy} onClick={() => props.onSet(true)}>
+            Open to workspace…
+          </button>
+        </div>
+      )}
+      <div>
+        <strong>Always used</strong>
+        <ul className="hint">
+          <li>variables and auth of this folder, the folders under it and each request;</li>
+          <li>environments the import brought ({envs === 0 ? "none" : envs}), when one is selected;</li>
+          <li>values extracted in a run by requests in this collection.</li>
+        </ul>
+      </div>
+      <div>
+        <strong>{open ? "Also used, because it is opened" : "Not used while isolated"}</strong>
+        <ul className="hint">
+          <li>the workspace's variables and auth, the active environment, and folders above this one;</li>
+          <li>values extracted by requests outside this collection, and the dataset rows of a run or load test;</li>
+          <li>this device's workload identity (JWT-SVID or X.509-SVID) and TLS client identities not bound to hosts.</li>
+        </ul>
+      </div>
+      {!open && (
+        <p className="hint">
+          So a <code>{"{{token}}"}</code> defined only by the workspace or its environment stays unresolved here and the request is not sent. Define it in this folder, or open the
+          collection to the workspace if you trust it.
+        </p>
+      )}
+      {props.error && <div className="bad-box">{props.error}</div>}
+    </div>
   );
 }

@@ -135,13 +135,21 @@ the request is not sent.
 **Opening an import root.** The user can open an import root to its
 workspace on this device (`use_workspace_scope`, set only by
 `App::set_import_root_workspace_scope` and the desktop command
-`folder_set_workspace_scope`; the desktop does not offer a control for it
-yet). The workspace's variables, active environment and auth, this device's
-workload identity and TLS client identities, and the run's extracted values
-and dataset rows then apply under it as under any folder. An import never
-sets it: a spec import creates the root with it off, saving a folder keeps
-the stored value, and a bundle import turns it off with a warning (the
-import root itself is kept).
+`folder_set_workspace_scope`). The workspace's variables, active environment
+and auth, this device's workload identity and TLS client identities, and the
+run's extracted values and dataset rows then apply under it as under any
+folder. An import never sets it: a spec import creates the root with it off,
+saving a folder keeps the stored value, and a bundle import turns it off with
+a warning (the import root itself is kept).
+
+In the desktop, the import root's folder settings have a **Workspace scope**
+tab; ordinary folders have none. It shows whether the collection is isolated
+(the default) or opened, what its requests always resolve and what they
+resolve only once opened, and why an imported `{{token}}` defined only by the
+workspace stays unresolved. **Open to workspace…** asks for confirmation
+first; **Isolate again** takes effect at once. The change is saved
+immediately, apart from the dialog's **Save**, and a refused change (for
+example, a locked profile) is shown in the tab and leaves the scope as it was.
 
 **Variable precedence.** In a workspace of its own, the source's collection
 variables are workspace variables, below the environment. Under an import
