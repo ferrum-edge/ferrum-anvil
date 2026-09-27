@@ -11,6 +11,7 @@ use anvil_domain::request::AttachmentRef;
 use anvil_domain::workspace::{Environment, Folder, Meta, RequestDefinition, RequestRevision, Workspace};
 use anvil_import::{
     Detected, ImportOptions, ImportReport, ImportResult, ImportedScope, ImportedSource, ReimportApproval, ReimportPlan, ScopeDiff,
+    request_unit_hashes,
 };
 use anvil_storage::store::{StoreRead, kind};
 use serde::{Deserialize, Serialize};
@@ -48,12 +49,15 @@ pub struct SpecImported {
 }
 
 /// Stored provenance: the source description plus where it was imported.
+/// A reimport refreshes it: `source`, `original_sha256` and `file_name` then
+/// describe the version it applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecSourceRecord {
     pub source: ImportedSource,
     pub workspace_id: Id,
     pub root_folder_id: Option<Id>,
-    /// Content-addressed attachment holding the original bytes.
+    /// Content-addressed attachment holding the original bytes of the
+    /// version last imported.
     pub original_sha256: String,
     pub file_name: String,
     /// Import ids of earlier versions; requests keep the id of the import
@@ -61,9 +65,12 @@ pub struct SpecSourceRecord {
     #[serde(default)]
     pub previous_import_ids: Vec<Id>,
     /// [`ImportedScope::unit_hashes`] of the scoped configuration (the
-    /// workspace's or import root's scope, and the environments) the import
-    /// last generated, so a reimport tells user edits from upstream
-    /// changes. Missing on records written before it was kept.
+    /// workspace's or import root's scope, the environments and the
+    /// folders) and [`request_unit_hashes`] of the requests' names,
+    /// descriptions and tags the import last generated, so a reimport tells
+    /// user edits from upstream changes. Missing on records written before
+    /// it was kept; without folder and request units on records written
+    /// before those were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_scope: Option<BTreeMap<String, String>>,
 }
@@ -74,11 +81,13 @@ const CHANGED: &str = "the import's requests or configuration changed since the 
 /// A reimport compared with what is stored.
 struct Reimport {
     rec: SpecSourceRecord,
-    /// The environments [`stored`] was asked for.
-    environment_ids: HashSet<Id>,
+    /// The environments and folders [`stored`] was asked for.
+    ids: HashSet<Id>,
     previous: Vec<RequestDefinition>,
     current: ImportedScope,
     generated: Option<BTreeMap<String, String>>,
+    /// The fresh import.
+    result: ImportResult,
     fresh: ImportedScope,
     plan: ReimportPlan,
 }
@@ -144,7 +153,7 @@ impl App {
                 Some(root)
             }
         };
-        let scope_hashes = generated_scope(&r, root.is_some()).unit_hashes();
+        let scope_hashes = baseline(&r, root.is_some());
         // Kept for a manual restore only; see `App::import`.
         self.store.checkpoint("before-spec-import")?;
         let workspace_id = self.store.atomically(|s| {
@@ -214,18 +223,34 @@ impl App {
         self.store.get(kind::SPEC_SOURCE, import_id)?.ok_or_else(|| AppError::NotFound(format!("import {import_id}")))
     }
 
-    /// What the import last generated for its scoped configuration. A record
-    /// from before that was kept gets it by importing its stored original
-    /// again, unless it was reimported since; otherwise, or when that
-    /// original cannot be read, it is unknown.
+    /// What the import last generated for its scoped configuration and its
+    /// requests' names. A record from before that was kept gets it by
+    /// importing its stored original again, unless it was reimported since;
+    /// otherwise, or when that original cannot be read, it is unknown. A
+    /// record from before folder and request units were kept gets those the
+    /// same way.
     fn scope_baseline(&self, rec: &SpecSourceRecord) -> Option<BTreeMap<String, String>> {
-        if rec.generated_scope.is_some() || !rec.previous_import_ids.is_empty() {
-            return rec.generated_scope.clone();
+        let reimported = !rec.previous_import_ids.is_empty();
+        let details = |k: &String| k.starts_with("folders/") || k.starts_with("requests/");
+        match &rec.generated_scope {
+            Some(g) if reimported || g.keys().any(details) => Some(g.clone()),
+            None if reimported => None,
+            None => self.original_baseline(rec),
+            Some(g) => {
+                let mut g = g.clone();
+                g.extend(self.original_baseline(rec).into_iter().flatten().filter(|(k, _)| details(k)));
+                Some(g)
+            }
         }
+    }
+
+    /// What importing the record's stored original generates, if it can be
+    /// read.
+    fn original_baseline(&self, rec: &SpecSourceRecord) -> Option<BTreeMap<String, String>> {
         let Ok(Some(bytes)) = self.get_attachment(&rec.original_sha256) else { return None };
         let mut opts = rec.source.options.clone();
         opts.id_namespace = Some(rec.source.id_namespace);
-        anvil_import::import(&bytes, &opts).ok().map(|r| generated_scope(&r, rec.root_folder_id.is_some()).unit_hashes())
+        anvil_import::import(&bytes, &opts).ok().map(|r| baseline(&r, rec.root_folder_id.is_some()))
     }
 
     /// Import a newer version of the source in the original id namespace
@@ -238,39 +263,46 @@ impl App {
         let r = run(bytes, &opts)?;
         let generated = self.scope_baseline(&rec);
         let fresh = generated_scope(&r, rec.root_folder_id.is_some());
-        let mut environment_ids: HashSet<Id> = fresh.environments.iter().map(|e| e.meta.id).collect();
+        let mut ids: HashSet<Id> = fresh.environments.iter().map(|e| e.meta.id).collect();
         let earlier = generated.iter().flat_map(|g| g.keys()).filter_map(|k| k.strip_prefix("environments/")?.parse::<Id>().ok());
-        environment_ids.extend(earlier);
-        let Stored { requests: previous, scope: current } = self.store.read_consistently(|s| stored(s, &rec, &environment_ids))??;
+        ids.extend(earlier);
+        // Only a folder both sides have is compared.
+        ids.extend(fresh.folders.iter().map(|f| f.meta.id));
+        let Stored { requests: previous, scope: current } = self.store.read_consistently(|s| stored(s, &rec, &ids))??;
         let scope = ScopeDiff { current: &current, generated: generated.as_ref(), fresh: &fresh };
         let plan = anvil_import::reimport_diff(&previous, &r, scope);
-        Ok(Reimport { rec, environment_ids, previous, current, generated, fresh, plan })
+        Ok(Reimport { rec, ids, previous, current, generated, result: r, fresh, plan })
     }
 
     /// Compare a newer version of an imported source with what is saved:
-    /// its requests and its scoped configuration (the source's own
-    /// variables, auth, settings and description, and its environments,
-    /// where a changed server shows up as a changed `baseUrl`).
+    /// its requests (their specs, names, descriptions and tags) and its
+    /// scoped configuration (the source's own variables, auth, settings and
+    /// description, its environments, where a changed server shows up as a
+    /// changed `baseUrl`, and its folders' own settings).
     pub fn spec_reimport_plan(&self, import_id: &Id, bytes: &[u8]) -> Result<ReimportPlan> {
         Ok(self.reimport(import_id, bytes)?.plan)
     }
 
-    /// Apply a reimport. User edits are overwritten and removed operations,
+    /// Apply a reimport of `bytes`, read from `file_name`. User edits
+    /// (renames included) are overwritten and removed operations,
     /// variables and environments deleted only when listed in `approval`.
     /// A request whose spec changes gets a new revision, written in the same
-    /// transaction; an unchanged one keeps its revision.
-    pub fn spec_reimport_apply(&self, import_id: &Id, bytes: &[u8], approval: &ReimportApproval) -> Result<usize> {
+    /// transaction; an unchanged one keeps its revision. The source record
+    /// is refreshed in that transaction too: it then holds `bytes` as the
+    /// stored original, their hash and `file_name`.
+    pub fn spec_reimport_apply(&self, import_id: &Id, bytes: &[u8], file_name: &str, approval: &ReimportApproval) -> Result<usize> {
         let r = self.reimport(import_id, bytes)?;
-        self.apply_reimport(r, approval)
+        self.apply_reimport(r, bytes, file_name, approval)
     }
 
-    /// Write `r` with `approval`. It is refused, and nothing is written, when
-    /// what `r` was compared with changed before the write transaction began.
-    fn apply_reimport(&self, r: Reimport, approval: &ReimportApproval) -> Result<usize> {
-        let Reimport { rec, environment_ids, previous, current, generated, fresh, plan } = r;
+    /// Write `r`, a reimport of `bytes` read from `file_name`, with
+    /// `approval`. It is refused, and nothing is written, when what `r` was
+    /// compared with changed before the write transaction began.
+    fn apply_reimport(&self, r: Reimport, bytes: &[u8], file_name: &str, approval: &ReimportApproval) -> Result<usize> {
+        let Reimport { rec, ids, previous, current, generated, result, fresh, plan } = r;
         let next = plan.apply(&previous, approval);
         let scope = plan.apply_scope(&current, &fresh, approval);
-        let baseline = plan.next_generated_scope(&fresh, generated.as_ref(), approval);
+        let baseline = plan.next_generated_scope(&fresh, &result.requests, generated.as_ref(), approval);
         let existing_folders: Vec<Id> = self.folders(&rec.workspace_id)?.iter().map(|f| f.meta.id).collect();
         let new_folders: Vec<Folder> = plan
             .added_folders
@@ -301,6 +333,16 @@ impl App {
             .collect();
         let deleted_environments: Vec<Id> =
             current.environments.iter().map(|e| e.meta.id).filter(|id| !scope.environments.iter().any(|e| e.meta.id == *id)).collect();
+        let changed_folders: Vec<Folder> = scope
+            .folders
+            .iter()
+            .filter(|f| !current.folders.contains(f))
+            .cloned()
+            .map(|mut f| {
+                f.meta.updated_at = now;
+                f
+            })
+            .collect();
         let scope_changed = scope.description != current.description
             || scope.settings != current.settings
             || scope.variables != current.variables
@@ -312,10 +354,10 @@ impl App {
             // transaction; a change made since would be overwritten.
             let unchanged = Stored { requests: previous.clone(), scope: current.clone() };
             let source = s.get::<SpecSourceRecord>(kind::SPEC_SOURCE, &rec.source.import_id)?;
-            if source.is_none() || stored(&s.as_read(), &rec, &environment_ids)?.ok() != Some(unchanged) {
+            if source.is_none() || stored(&s.as_read(), &rec, &ids)?.ok() != Some(unchanged) {
                 return Ok(Err(AppError::Invalid(CHANGED.into())));
             }
-            for f in &new_folders {
+            for f in new_folders.iter().chain(&changed_folders) {
                 s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, f)?;
             }
             for q in &next {
@@ -383,9 +425,17 @@ impl App {
                     s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
                 }
             }
+            // The record describes the version just applied, so anything that
+            // reads the stored original reads this one.
+            let original_sha256 = match put_attachment_in(s, file_name, bytes, None)? {
+                AttachmentRef::Stored { sha256, .. } => sha256,
+                AttachmentRef::LinkedFile { .. } => String::new(),
+            };
             let mut rec = rec.clone();
             rec.previous_import_ids.push(rec.source.import_id);
-            rec.source.import_id = plan.import_id;
+            rec.source = result.source.clone();
+            rec.original_sha256 = original_sha256;
+            rec.file_name = file_name.to_string();
             rec.generated_scope = Some(baseline.clone());
             s.delete(kind::SPEC_SOURCE, &rec.previous_import_ids[rec.previous_import_ids.len() - 1])?;
             s.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec)?;
@@ -397,10 +447,10 @@ impl App {
 
 /// What a reimport of `rec` compares with, read from `s`: the requests linked
 /// to the import, and its scoped configuration (the scope of its workspace or
-/// import root, and those of `environments`, plus the import root's own, that
-/// still exist).
-fn stored(s: &StoreRead<'_>, rec: &SpecSourceRecord, environments: &HashSet<Id>) -> anvil_storage::store::Result<Result<Stored>> {
-    let mut ids = environments.clone();
+/// import root, and those of the environments and folders in `ids`, plus the
+/// import root's own environments, that still exist).
+fn stored(s: &StoreRead<'_>, rec: &SpecSourceRecord, ids: &HashSet<Id>) -> anvil_storage::store::Result<Result<Stored>> {
+    let mut ids = ids.clone();
     let (description, settings, variables, auth) = match rec.root_folder_id {
         None => {
             let Some(w) = s.get::<Workspace>(kind::WORKSPACE, &rec.workspace_id)? else {
@@ -420,7 +470,8 @@ fn stored(s: &StoreRead<'_>, rec: &SpecSourceRecord, environments: &HashSet<Id>)
     let requests = s.list::<RequestDefinition>(kind::REQUEST, Some(&rec.workspace_id))?.into_iter().filter(linked).collect();
     let environments =
         s.list::<Environment>(kind::ENVIRONMENT, Some(&rec.workspace_id))?.into_iter().filter(|e| ids.contains(&e.meta.id)).collect();
-    Ok(Ok(Stored { requests, scope: ImportedScope { description, settings, variables, auth, environments } }))
+    let folders = s.list::<Folder>(kind::FOLDER, Some(&rec.workspace_id))?.into_iter().filter(|f| ids.contains(&f.meta.id)).collect();
+    Ok(Ok(Stored { requests, scope: ImportedScope { description, settings, variables, auth, environments, folders } }))
 }
 
 /// The scoped configuration `r` generates, as the import stores it. On an
@@ -432,6 +483,14 @@ fn generated_scope(r: &ImportResult, rooted: bool) -> ImportedScope {
         scope.auth = root_auth(&scope.auth);
     }
     scope
+}
+
+/// The baseline to keep for what `r` generated: its scope's unit hashes and
+/// its requests' ([`request_unit_hashes`]).
+fn baseline(r: &ImportResult, rooted: bool) -> BTreeMap<String, String> {
+    let mut hashes = generated_scope(r, rooted).unit_hashes();
+    hashes.extend(request_unit_hashes(&r.requests));
+    hashes
 }
 
 fn root_auth(auth: &AuthConfig) -> AuthConfig {
@@ -532,15 +591,21 @@ mod tests {
         let mut env = app.environments(&ws).unwrap().pop().unwrap();
         env.variables.push(Variable::plain("token", "mine"));
         let env = app.save_environment(env).unwrap();
-        let err = app.apply_reimport(r, &ReimportApproval::default()).unwrap_err();
+        let err = app.apply_reimport(r, newer.as_bytes(), "audit-v2.json", &ReimportApproval::default()).unwrap_err();
         assert!(err.to_string().contains("re-run the reimport diff"), "{err}");
         assert_eq!(app.environments(&ws).unwrap(), vec![env], "nothing was written");
-        assert_eq!(app.spec_sources(&ws).unwrap()[0].source.import_id, done.import_id);
+        let rec = app.spec_sources(&ws).unwrap().pop().unwrap();
+        assert_eq!(rec.source.import_id, done.import_id);
+        assert_eq!(rec.file_name, "audit.json", "the source record is not refreshed");
+        assert_eq!(app.get_attachment(&rec.original_sha256).unwrap().as_deref(), Some(SERVER.as_bytes()));
 
         // Diffed again, it applies and keeps the edit.
-        app.spec_reimport_apply(&done.import_id, newer.as_bytes(), &ReimportApproval::default()).unwrap();
+        app.spec_reimport_apply(&done.import_id, newer.as_bytes(), "audit-v2.json", &ReimportApproval::default()).unwrap();
         let env = app.environments(&ws).unwrap().pop().unwrap();
         assert!(env.variables.iter().any(|v| v.name == "token"), "the user's variable is kept");
-        assert_ne!(app.spec_sources(&ws).unwrap()[0].source.import_id, done.import_id);
+        let rec = app.spec_sources(&ws).unwrap().pop().unwrap();
+        assert_ne!(rec.source.import_id, done.import_id);
+        assert_eq!(rec.file_name, "audit-v2.json");
+        assert_eq!(app.get_attachment(&rec.original_sha256).unwrap().as_deref(), Some(newer.as_bytes()));
     }
 }

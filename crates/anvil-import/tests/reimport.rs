@@ -1,13 +1,16 @@
 mod common;
 
 use anvil_domain::Id;
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::KeyValue;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::{RequestDefinition, Variable};
 use anvil_import::{
     ImportOptions, ImportResult, ImportedScope, ReimportApproval, ReimportPlan, ScopeChange, ScopeDiff, import, reimport_diff,
+    request_unit_hashes,
 };
 use common::*;
+use std::collections::BTreeMap;
 
 const V1: &str = r#"
 openapi: 3.0.3
@@ -45,11 +48,19 @@ paths:
       responses: { '204': { description: ok } }
 "#;
 
+/// What `r` generated, as the app keeps it: the scope's unit hashes and the
+/// requests' names, descriptions and tags.
+fn baseline(r: &ImportResult) -> BTreeMap<String, String> {
+    let mut generated = ImportedScope::generated(r).unit_hashes();
+    generated.extend(request_unit_hashes(&r.requests));
+    generated
+}
+
 /// Diff `previous` against `fresh`, with the scoped configuration as `first`
 /// generated it and left untouched.
 fn diff(first: &ImportResult, previous: &[RequestDefinition], fresh: &ImportResult) -> ReimportPlan {
     let (current, fresh_scope) = (ImportedScope::generated(first), ImportedScope::generated(fresh));
-    let generated = current.unit_hashes();
+    let generated = baseline(first);
     reimport_diff(previous, fresh, ScopeDiff { current: &current, generated: Some(&generated), fresh: &fresh_scope })
 }
 
@@ -100,10 +111,13 @@ fn data_012_reimport_preserves_edits_and_never_deletes() {
     assert_eq!(plan.unchanged, vec![get_id]);
     assert_eq!(plan.removed.len(), 1);
     assert_eq!(plan.removed[0].existing_id, del_id);
+    assert!(!plan.removed[0].user_edited);
     assert_eq!(plan.added.len(), 1);
     assert_eq!(plan.added[0].name, "cancelOrder");
     assert_eq!(plan.added_folders.len(), 1);
     assert_eq!(plan.added_folders[0].name, "admin");
+    // The new folder arrives with its request, not as a change of scope.
+    assert!(plan.scope_updated.is_empty() && plan.scope_conflicts.is_empty(), "{:?}", plan.scope_updated);
 
     // Default apply: safe update applied, edit preserved, nothing deleted.
     let applied = plan.apply(&previous, &ReimportApproval::default());
@@ -244,7 +258,7 @@ fn a_server_the_user_changed_is_a_conflict_kept_unless_approved() {
     let kept = plan.apply_scope(&current, &fresh, &ReimportApproval::default());
     assert_eq!(base_url(&kept, env), SensitiveValue::template("http://localhost:8080"));
     assert!(kept.environments[0].variables.iter().any(|v| v.name == "token"));
-    let next = plan.next_generated_scope(&fresh, Some(&generated), &ReimportApproval::default());
+    let next = plan.next_generated_scope(&fresh, &fresh_result.requests, Some(&generated), &ReimportApproval::default());
     let again = reimport_diff(&first.requests, &fresh_result, ScopeDiff { current: &kept, generated: Some(&next), fresh: &fresh });
     assert_eq!(again.scope_conflicts.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec![key.as_str()]);
 
@@ -253,7 +267,7 @@ fn a_server_the_user_changed_is_a_conflict_kept_unless_approved() {
     let applied = plan.apply_scope(&current, &fresh, &approval);
     assert_eq!(base_url(&applied, env), SensitiveValue::template("https://new.example.test"));
     assert!(applied.environments[0].variables.iter().any(|v| v.name == "token"));
-    let next = plan.next_generated_scope(&fresh, Some(&generated), &approval);
+    let next = plan.next_generated_scope(&fresh, &fresh_result.requests, Some(&generated), &approval);
     let again = reimport_diff(&first.requests, &fresh_result, ScopeDiff { current: &applied, generated: Some(&next), fresh: &fresh });
     assert!(again.scope_conflicts.is_empty() && again.scope_updated.is_empty());
 }
@@ -363,7 +377,7 @@ fn an_environment_the_user_deleted_is_a_conflict_when_its_server_changed_upstrea
 
     // Declined: still deleted, and offered again next time.
     assert!(plan.apply_scope(&current, &fresh, &ReimportApproval::default()).environments.is_empty());
-    let next = plan.next_generated_scope(&fresh, Some(&generated), &ReimportApproval::default());
+    let next = plan.next_generated_scope(&fresh, &fresh_result.requests, Some(&generated), &ReimportApproval::default());
     let again = reimport_diff(&first.requests, &fresh_result, ScopeDiff { current: &current, generated: Some(&next), fresh: &fresh });
     assert_eq!(keys(&again.scope_conflicts), vec![key.as_str()]);
 
@@ -402,7 +416,7 @@ fn an_environment_removed_upstream_is_user_edited_when_its_variables_were() {
     // Declined: kept as the user left it, and offered again next time.
     let kept = plan.apply_scope(&edited, &fresh, &ReimportApproval::default());
     assert_eq!(base_url(&kept, staging), SensitiveValue::template("http://localhost:8080"));
-    let next = plan.next_generated_scope(&fresh, Some(&generated), &ReimportApproval::default());
+    let next = plan.next_generated_scope(&fresh, &back.requests, Some(&generated), &ReimportApproval::default());
     let again = reimport_diff(&two.requests, &back, ScopeDiff { current: &kept, generated: Some(&next), fresh: &fresh });
     assert_eq!(keys(&again.scope_removed), vec![key.as_str()]);
     assert!(again.scope_removed[0].user_edited);
@@ -420,11 +434,221 @@ fn a_declined_removal_with_no_record_of_what_was_generated_is_kept_as_the_users_
     // Not knowing what was generated, it may be the source's own: listed.
     let plan = reimport_diff(&first.requests, &again, ScopeDiff { current: &current, generated: None, fresh: &fresh });
     assert_eq!(keys(&plan.scope_removed), vec![key.as_str()]);
-    let next = plan.next_generated_scope(&fresh, None, &ReimportApproval::default());
+    let next = plan.next_generated_scope(&fresh, &again.requests, None, &ReimportApproval::default());
     assert!(!next.contains_key(&key), "{next:?}");
 
     // Declined, it is the user's own from then on.
     let plan = reimport_diff(&first.requests, &again, ScopeDiff { current: &current, generated: Some(&next), fresh: &fresh });
     assert!(plan.scope_removed.is_empty(), "{:?}", plan.scope_removed);
     assert_eq!(plan.scope_preserved_edits, vec![key]);
+}
+
+// ---------------------------------------------------------------- folders
+
+/// A Postman folder with its own description, variables and (in newer
+/// versions) auth.
+const ADMIN_V1: &str = r#"{
+  "info": { "name": "Admin API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+  "variable": [{ "key": "base", "value": "https://api.example.invalid" }],
+  "item": [
+    { "name": "Admin", "description": "first", "variable": [{ "key": "scope", "value": "read" }], "item": [
+      { "name": "Users", "request": { "method": "GET", "url": { "raw": "{{base}}/users/{{scope}}" } } }
+    ] }
+  ]
+}"#;
+
+/// The folder in [`admin_v2`]: renamed, described again and given an API key.
+const ADMIN_V2_FOLDER: &str = r#""name": "Administration", "description": "second", "auth": {
+      "type": "apikey", "apikey": [{ "key": "key", "value": "X-Admin" }, { "key": "value", "value": "{{admin}}" }] },"#;
+
+/// [`ADMIN_V1`] with [`ADMIN_V2_FOLDER`] and `scope` set to `scope`.
+fn admin_v2(scope: &str) -> String {
+    let scope = format!(r#""value": "{scope}""#);
+    ADMIN_V1.replace(r#""value": "read""#, &scope).replace(r#""name": "Admin", "description": "first","#, ADMIN_V2_FOLDER)
+}
+
+#[test]
+fn a_postman_folders_own_settings_changed_upstream_are_applied() {
+    let first = import(ADMIN_V1.as_bytes(), &opts()).unwrap();
+    let folder = first.folders[0].meta.id;
+    let fresh = reimport(&first, &admin_v2("write"));
+    assert_eq!(fresh.folders[0].meta.id, folder, "the same folder");
+    let plan = diff(&first, &first.requests, &fresh);
+    assert_eq!(plan.unchanged, vec![first.requests[0].meta.id], "the request only says `{{{{scope}}}}`");
+    let at = format!("folders/{folder}");
+    let expected = [at.clone(), format!("{at}/description"), format!("{at}/auth"), format!("{at}/variables/scope")];
+    let mut got = keys(&plan.scope_updated);
+    got.sort();
+    let mut want: Vec<&str> = expected.iter().map(String::as_str).collect();
+    want.sort();
+    assert_eq!(got, want);
+    assert!(plan.scope_updated.iter().all(|c| !c.user_edited && c.label.starts_with("folder \"Administration\"")), "{plan:?}");
+    assert!(plan.scope_conflicts.is_empty() && plan.scope_removed.is_empty() && plan.scope_preserved_edits.is_empty());
+
+    let current = ImportedScope::generated(&first);
+    let applied = plan.apply_scope(&current, &ImportedScope::generated(&fresh), &ReimportApproval::default());
+    assert_eq!(applied.folders, fresh.folders, "the folder now has the source's name, description, auth and variables");
+    assert!(matches!(&applied.folders[0].auth, AuthConfig::ApiKey { name, .. } if name == "X-Admin"), "{:?}", applied.folders[0].auth);
+
+    // The same source again changes nothing.
+    let plan = diff(&first, &first.requests, &reimport(&first, ADMIN_V1));
+    assert!(plan.scope_updated.is_empty() && plan.scope_conflicts.is_empty() && plan.scope_removed.is_empty());
+}
+
+#[test]
+fn a_postman_folder_setting_the_user_changed_is_a_conflict_kept_unless_approved() {
+    let first = import(ADMIN_V1.as_bytes(), &opts()).unwrap();
+    let generated = baseline(&first);
+    let key = format!("folders/{}/variables/scope", first.folders[0].meta.id);
+    let mut current = ImportedScope::generated(&first);
+    current.folders[0].variables[0].value = SensitiveValue::template("mine");
+    let fresh_result = reimport(&first, &admin_v2("write"));
+    let fresh = ImportedScope::generated(&fresh_result);
+    let plan = reimport_diff(&first.requests, &fresh_result, ScopeDiff { current: &current, generated: Some(&generated), fresh: &fresh });
+    assert_eq!(keys(&plan.scope_conflicts), vec![key.as_str()]);
+    assert!(plan.scope_conflicts[0].user_edited);
+    assert!(plan.scope_conflicts[0].label.ends_with("variable scope"), "{}", plan.scope_conflicts[0].label);
+    assert_eq!(plan.scope_updated.len(), 3, "its name, description and auth are the source's to change: {:?}", plan.scope_updated);
+
+    // Declined: the user's value stays, the rest is applied, and the
+    // conflict is offered again next time.
+    let kept = plan.apply_scope(&current, &fresh, &ReimportApproval::default());
+    assert_eq!(kept.folders[0].variables[0].value, SensitiveValue::template("mine"));
+    assert_eq!(kept.folders[0].name, "Administration");
+    let next = plan.next_generated_scope(&fresh, &fresh_result.requests, Some(&generated), &ReimportApproval::default());
+    let again = reimport_diff(&first.requests, &fresh_result, ScopeDiff { current: &kept, generated: Some(&next), fresh: &fresh });
+    assert_eq!(keys(&again.scope_conflicts), vec![key.as_str()]);
+    assert!(again.scope_updated.is_empty(), "{:?}", again.scope_updated);
+
+    // Approved: the source's value replaces it.
+    let approval = ReimportApproval { overwrite_scope: vec![key], ..Default::default() };
+    let applied = plan.apply_scope(&current, &fresh, &approval);
+    assert_eq!(applied.folders, fresh.folders);
+
+    // Unchanged upstream, the user's value is a kept edit.
+    let same = reimport(&first, ADMIN_V1);
+    let same_scope = ImportedScope::generated(&same);
+    let plan = reimport_diff(&first.requests, &same, ScopeDiff { current: &current, generated: Some(&generated), fresh: &same_scope });
+    assert_eq!(plan.scope_preserved_edits.len(), 1);
+    assert!(plan.scope_conflicts.is_empty() && plan.scope_updated.is_empty());
+}
+
+#[test]
+fn an_openapi_tag_description_is_its_folders_and_is_compared() {
+    let first = import(V1.as_bytes(), &opts()).unwrap();
+    let orders = first.folders.iter().find(|f| f.name == "orders").unwrap().meta.id;
+    let described = V1.replace("tags: [{ name: orders }]", "tags: [{ name: orders, description: Order operations }]");
+    let fresh = reimport(&first, &described);
+    let key = format!("folders/{orders}/description");
+    let plan = diff(&first, &first.requests, &fresh);
+    assert_eq!(keys(&plan.scope_updated), vec![key.as_str()]);
+    assert_eq!(plan.scope_updated[0].label, "folder \"orders\": description");
+    let applied = plan.apply_scope(&ImportedScope::generated(&first), &ImportedScope::generated(&fresh), &ReimportApproval::default());
+    assert_eq!(applied.folders.iter().find(|f| f.meta.id == orders).unwrap().description, "Order operations");
+
+    // One the user described differently is a conflict.
+    let generated = baseline(&first);
+    let mut current = ImportedScope::generated(&first);
+    current.folders[0].description = "Mine".into();
+    let fresh_scope = ImportedScope::generated(&fresh);
+    let plan = reimport_diff(&first.requests, &fresh, ScopeDiff { current: &current, generated: Some(&generated), fresh: &fresh_scope });
+    assert_eq!(keys(&plan.scope_conflicts), vec![key.as_str()]);
+    assert_eq!(plan.apply_scope(&current, &fresh_scope, &ReimportApproval::default()).folders[0].description, "Mine");
+
+    // A folder the user deleted is not brought back as a change of scope.
+    current.folders.clear();
+    let plan = reimport_diff(&first.requests, &fresh, ScopeDiff { current: &current, generated: Some(&generated), fresh: &fresh_scope });
+    assert!(plan.scope_updated.is_empty() && plan.scope_conflicts.is_empty() && plan.scope_removed.is_empty(), "{plan:?}");
+}
+
+// ---------------------------------------------------------------- renames
+
+fn named(requests: &[RequestDefinition], id: Id) -> &RequestDefinition {
+    requests.iter().find(|q| q.meta.id == id).expect("the request")
+}
+
+#[test]
+fn an_openapi_request_the_user_renamed_keeps_its_name_unless_the_user_approves_the_sources() {
+    let first = import(V1.as_bytes(), &opts()).unwrap();
+    let list = req(&first, "listOrders").meta.id;
+    let mut previous = first.requests.clone();
+    previous.iter_mut().find(|q| q.meta.id == list).unwrap().name = "My orders".into();
+
+    // Only its spec changed upstream: the spec is updated, the name kept.
+    let fresh = reimport(&first, &v2());
+    let plan = diff(&first, &previous, &fresh);
+    let change = plan.updated.iter().find(|c| c.existing_id == list).expect("a safe update");
+    assert_eq!(change.upstream_fields, vec!["spec".to_string()]);
+    assert!(change.changed_fields.contains(&"params".to_string()) && change.changed_fields.contains(&"name".to_string()));
+    let applied = plan.apply(&previous, &ReimportApproval::default());
+    let after = named(&applied, list);
+    assert_eq!(after.name, "My orders", "the user's name is kept");
+    assert!(after.spec.params.iter().any(|p| p.name == "status"), "the spec is updated");
+
+    // Unchanged upstream, the rename is a kept edit.
+    let plan = diff(&first, &previous, &reimport(&first, V1));
+    assert_eq!(plan.preserved_edits, vec![list]);
+
+    // Renamed upstream too: a conflict, kept until approved.
+    let summarized = V1.replace("      operationId: listOrders\n", "      operationId: listOrders\n      summary: List orders\n");
+    let fresh = reimport(&first, &summarized);
+    assert_eq!(req(&fresh, "listOrders").name, "List orders");
+    let generated = baseline(&first);
+    let plan = diff(&first, &previous, &fresh);
+    assert_eq!(plan.conflicts.len(), 1, "{plan:?}");
+    assert_eq!((plan.conflicts[0].existing_id, plan.conflicts[0].user_edited), (list, true));
+    assert_eq!(plan.conflicts[0].upstream_fields, vec!["name".to_string()]);
+    let kept = plan.apply(&previous, &ReimportApproval::default());
+    assert_eq!(named(&kept, list).name, "My orders");
+    let fresh_scope = ImportedScope::generated(&fresh);
+    let next = plan.next_generated_scope(&fresh_scope, &fresh.requests, Some(&generated), &ReimportApproval::default());
+    let current = ImportedScope::generated(&first);
+    let again = reimport_diff(&kept, &fresh, ScopeDiff { current: &current, generated: Some(&next), fresh: &fresh_scope });
+    assert_eq!(again.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![list], "declined, it is offered again");
+    let approval = ReimportApproval { overwrite: vec![list], ..Default::default() };
+    let applied = plan.apply(&previous, &approval);
+    assert_eq!(named(&applied, list).name, "List orders");
+    assert_eq!(named(&applied, list).spec, named(&previous, list).spec, "only the name changed upstream");
+
+    // Not renamed by the user, the source's new name is a safe update.
+    let plan = diff(&first, &first.requests, &fresh);
+    assert_eq!(plan.updated.len(), 1);
+    assert_eq!(plan.updated[0].upstream_fields, vec!["name".to_string()]);
+    assert_eq!(named(&plan.apply(&first.requests, &ReimportApproval::default()), list).name, "List orders");
+}
+
+const HEALTH_V1: &str = r#"{
+  "info": { "name": "Echo", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+  "item": [{ "name": "Health", "request": { "method": "GET", "url": { "raw": "https://api.example.invalid/health" } } }]
+}"#;
+
+#[test]
+fn a_postman_request_the_user_renamed_keeps_its_name_unless_the_user_approves_the_sources() {
+    let first = import(HEALTH_V1.as_bytes(), &opts()).unwrap();
+    let health = first.requests[0].meta.id;
+    let mut previous = first.requests.clone();
+    previous[0].name = "Ping".into();
+
+    // Its URL changed upstream: updated, still called "Ping".
+    let moved = reimport(&first, &HEALTH_V1.replace("/health", "/healthz"));
+    let plan = diff(&first, &previous, &moved);
+    assert_eq!(plan.updated.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![health]);
+    let applied = plan.apply(&previous, &ReimportApproval::default());
+    assert_eq!(applied[0].name, "Ping");
+    assert!(applied[0].spec.url.ends_with("/healthz"), "{}", applied[0].spec.url);
+
+    // Renamed upstream as well: a conflict on the name.
+    let renamed = reimport(&first, &HEALTH_V1.replace(r#""name": "Health""#, r#""name": "Health check""#));
+    let plan = diff(&first, &previous, &renamed);
+    assert_eq!(plan.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![health]);
+    assert_eq!(plan.apply(&previous, &ReimportApproval::default())[0].name, "Ping");
+    let approval = ReimportApproval { overwrite: vec![health], ..Default::default() };
+    assert_eq!(plan.apply(&previous, &approval)[0].name, "Health check");
+
+    // Not knowing what was generated, a different name needs approval.
+    let current = ImportedScope::generated(&first);
+    let fresh = ImportedScope::generated(&moved);
+    let plan = reimport_diff(&previous, &moved, ScopeDiff { current: &current, generated: None, fresh: &fresh });
+    assert_eq!(plan.conflicts.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![health]);
+    assert!(plan.updated.is_empty());
 }

@@ -129,13 +129,32 @@
   your own from then on. A reimport of an import root that was deleted is
   refused, and so is an apply when the import's requests, scope or
   environments changed after the diff was made; nothing is written then.
-  Folder-level configuration, the stored source file and request renames
-  are not handled yet (#146).
 - A reimport that changes a saved request now records a new revision for
   it, in the same transaction, and points the request at it, so a send, run
   or history record names the spec that was actually sent. The revision of
   its old spec stays as it was; a request the reimport leaves unchanged
   keeps its revision and gains none.
+- A spec reimport now also compares the settings of the folders inside the
+  import: a folder's name, description, settings, variables and auth (a
+  Postman folder's auth or variables, an OpenAPI tag's description), by the
+  same rules as the import's own scope (keys `folders/<id>/…`). A folder
+  only the source or only your workspace has is not compared: a new one
+  still arrives with the requests added in it, and one gone from the source
+  is left in place.
+- A reimport no longer overwrites a request you renamed. A request's name,
+  description and tags are each compared on their own, like its spec: a
+  request you renamed keeps your name when only its spec changed upstream
+  (the spec is still updated), and one the source renamed too is a conflict
+  kept until you approve overwriting it. A rename by the source alone is now
+  applied; before, it was ignored unless the spec changed as well. For an
+  import made by an earlier build, this works from its stored original file
+  unless it was reimported since; then a name that differs from the
+  source's awaits approval.
+- A reimport now refreshes the import's source record in the same
+  transaction: it then holds the file just applied as the stored original,
+  with its name, hash, size and import time, instead of the first import's.
+  The earlier file is kept in the attachment store, not deleted.
+  `App::spec_reimport_apply` takes the file name.
 - Desktop Runner: **Run folder** and **Run** start one run at a time. A
   second click while the start is still pending no longer starts another
   run, and a run that finishes before the start answers (an empty folder,
