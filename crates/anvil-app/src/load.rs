@@ -9,6 +9,7 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport, LoadUnitKind, UnitSemantics};
 use anvil_domain::request::{AttachmentRef, Protocol};
+use anvil_domain::tls::{ProxyKind, ProxyProfile};
 use anvil_domain::workspace::DatasetFormat as DomainDatasetFormat;
 use anvil_domain::workspace::Workspace;
 use anvil_load::{Dataset, DatasetFormat, LoadJob, Refusal, RunOptions, WorkerJob};
@@ -277,15 +278,23 @@ impl App {
         let (unit, steps) = anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode)
             .map_err(|r| AppError::Invalid(format!("this plan cannot be load tested: {r}")))?;
         let mut destinations = Vec::new();
-        // Whether a unit's target, or a datagram tunnel's proxy, is off this
-        // machine; each host is judged on its own. Other proxies are not judged.
+        // Whether a unit's target, or the proxy its traffic reaches first
+        // (a MASQUE proxy, or the selected proxy profile unless its NO_PROXY
+        // list bypasses the target), is off this machine; each host is
+        // judged on its own.
         let mut leaves = false;
         for id in ids {
             let ctx = &job.requests[&id];
             let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
                     let preview = self.engine.preview(ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
-                    (format!("{} {}", preview.method, url_origin(&preview.url)), url_is_loopback(&preview.url))
+                    let mut d = format!("{} {}", preview.method, url_origin(&preview.url));
+                    let mut local = url_is_loopback(&preview.url);
+                    if let Some(proxy) = anvil_load::protocol::route(ctx, &preview.url, Protocol::Http).and_then(|(_, p)| p) {
+                        d.push_str(&proxy_label(proxy));
+                        local &= address_is_loopback(&proxy.address);
+                    }
+                    (d, local)
                 }
                 other => session_destination(ctx, other),
             };
@@ -388,8 +397,9 @@ fn validate_plan(p: &LoadPlan) -> Result<()> {
 
 /// `WS ws://host:port`-style destination of a session request, from its URL
 /// with the context's variables resolved (nothing is sent), and whether all
-/// of its traffic stays on this machine: the target and a datagram tunnel's
-/// proxy are judged separately, so either one off this machine counts.
+/// of its traffic stays on this machine: the target and the proxy it reaches
+/// first (a MASQUE proxy, or the proxy profile the engine routes it through)
+/// are judged separately, so either one off this machine counts.
 fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol) -> (String, bool) {
     let r = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None);
     let resolve = |raw: &str, field: &str| r.resolve(raw, field).unwrap_or_else(|_| raw.to_string());
@@ -405,20 +415,27 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
     let mut d = format!("{label} {}", url_origin(&url));
     let mut local = url_is_loopback(&url);
     // A datagram tunnel sends every exchange's traffic to the proxy first.
+    // (The plan check refuses a MASQUE request a proxy profile also routes.)
     if let Some(m) = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| protocol == Protocol::Udp) {
         let proxy_url = resolve(&m.proxy_url, "udp.masque.proxy_url");
         d.push_str(&format!(" via MASQUE proxy {}", url_origin(&proxy_url)));
         local &= url_is_loopback(&proxy_url);
-    } else if protocol == Protocol::Udp
-        && let Some(proxy) = anvil_engine::settings::resolve(&ctx.settings_layers)
-            .proxy_profile_id
-            .and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id))
-            .filter(|p| p.kind == anvil_domain::tls::ProxyKind::Hbone)
-    {
-        d.push_str(&format!(" via HBONE proxy {}", proxy.address));
+    } else if let Some(proxy) = anvil_load::protocol::route(ctx, &url, protocol).and_then(|(_, p)| p) {
+        d.push_str(&proxy_label(proxy));
         local &= address_is_loopback(&proxy.address);
     }
     (d, local)
+}
+
+/// ` via HTTP proxy host:port`-style suffix of a destination.
+fn proxy_label(proxy: &ProxyProfile) -> String {
+    let kind = match proxy.kind {
+        ProxyKind::Http => "HTTP",
+        ProxyKind::Https => "HTTPS",
+        ProxyKind::Socks5 => "SOCKS5",
+        ProxyKind::Hbone => "HBONE",
+    };
+    format!(" via {kind} proxy {}", proxy.address)
 }
 
 /// Whether `url`'s host is this machine: a loopback address or `localhost`.

@@ -251,6 +251,13 @@
   each destination's whole host: a host that only contains `localhost` or
   `127.0.0.1` (such as `localhost.example.com`) no longer counts as this
   machine, and a tunnel's proxy is judged apart from its target.
+- The load preflight now judges the proxy profile a request is actually sent
+  through, whatever its kind: a loopback target behind a remote HTTP, HTTPS
+  or SOCKS5 proxy (as well as MASQUE or HBONE) warns that traffic leaves
+  this machine, and each destination names that proxy. The profile's
+  `NO_PROXY` list is applied as the engine applies it, so a bypassed target
+  (including a UDP target under an HBONE profile, which was labelled "via
+  HBONE proxy") is shown as direct and the proxy's host is not judged.
 - The effective-request preview now shows what a WebSocket, SSE or gRPC
   request sends. A `ws://`, `wss://`, `grpc://` or `grpcs://` URL is
   previewed (before, it was refused, and a URL without a scheme was

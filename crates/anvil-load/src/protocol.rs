@@ -129,8 +129,8 @@ pub fn label(kind: LoadUnitKind) -> &'static str {
 /// selected profile is HBONE and its `NO_PROXY` list does not bypass the
 /// target. A URL that does not resolve is never tunneled; every send then
 /// fails on the URL itself.
-fn is_hbone(ctx: &ExecutionContext, schemes: &[&str]) -> bool {
-    send_route(ctx, schemes).and_then(|(_, p)| p).is_some_and(|p| p.kind == ProxyKind::Hbone)
+fn is_hbone(ctx: &ExecutionContext, protocol: Protocol) -> bool {
+    send_route(ctx, protocol).and_then(|(_, p)| p).is_some_and(|p| p.kind == ProxyKind::Hbone)
 }
 
 fn uses_dtls(ctx: &ExecutionContext) -> bool {
@@ -148,9 +148,30 @@ fn uses_dtls(ctx: &ExecutionContext) -> bool {
 /// preparation routes it through (`NO_PROXY` applied), from a throwaway
 /// resolver. `None` when the URL does not resolve or parse: every send then
 /// fails on the URL itself.
-fn send_route<'a>(ctx: &'a ExecutionContext, schemes: &[&str]) -> Option<(Target, Option<&'a ProxyProfile>)> {
+fn send_route(ctx: &ExecutionContext, protocol: Protocol) -> Option<(Target, Option<&ProxyProfile>)> {
     let url = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None).resolve(&ctx.spec.url, "url").ok()?;
-    let target = anvil_engine::prepare::parse_target(&url, schemes, &mut Vec::new()).ok()?;
+    route(ctx, &url, protocol)
+}
+
+/// The URL schemes the engine sends a request of `protocol` with (the first
+/// is used for a URL without one).
+pub fn send_schemes(protocol: Protocol) -> &'static [&'static str] {
+    match protocol {
+        Protocol::Http | Protocol::Sse => &["https", "http"],
+        Protocol::WebSocket => &["wss", "ws"],
+        Protocol::Grpc => &["grpcs", "grpc", "https", "http"],
+        Protocol::Tcp => &["tcp", "tls"],
+        Protocol::Udp => &["udp", "dtls"],
+    }
+}
+
+/// The target of an already resolved `url` for a request of `protocol`,
+/// and the proxy profile the engine's preparation routes it through: the
+/// selected profile, unless its `NO_PROXY` list bypasses the target's host
+/// and port. `None` when the URL does not parse: every send then fails on
+/// the URL itself.
+pub fn route<'a>(ctx: &'a ExecutionContext, url: &str, protocol: Protocol) -> Option<(Target, Option<&'a ProxyProfile>)> {
+    let target = anvil_engine::prepare::parse_target(url, send_schemes(protocol), &mut Vec::new()).ok()?;
     let proxy = anvil_engine::settings::resolve(&ctx.settings_layers)
         .proxy_profile_id
         .and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id))
@@ -170,7 +191,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             "the request enables 0-RTT early data, which load runs do not support (handshakes that share session tickets are serialized and the report does not count early data); turn early data off for the requests of this plan".into(),
         );
     }
-    let hbone_persistent = |schemes: &[&str]| mode == ConnectionMode::Persistent && is_hbone(ctx, schemes);
+    let hbone_persistent = |protocol: Protocol| mode == ConnectionMode::Persistent && is_hbone(ctx, protocol);
     let hbone_msg = |what: &str| {
         format!(
             "{what} through a mesh HBONE proxy cannot use the persistent connection mode: an HBONE tunnel carries one execution's identity and headers and is never pooled, so every unit would open its own tunnel. Choose the fresh connection mode, which is what would happen"
@@ -178,7 +199,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
     };
     match ctx.spec.protocol {
         Protocol::Http => {
-            if hbone_persistent(&["https", "http"]) {
+            if hbone_persistent(Protocol::Http) {
                 return refuse(RefusalCode::HbonePersistent, hbone_msg("HTTP requests"));
             }
             let application_from_body = matches!(ctx.spec.body, Body::Soap { .. } | Body::GraphQl { .. });
@@ -201,8 +222,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             }
             // The engine's own pre-traffic check, with the inputs its
             // preparation uses: a call it refuses fails every unit.
-            let schemes = ["grpcs", "grpc", "https", "http"];
-            if let Some((target, proxy)) = send_route(ctx, &schemes) {
+            if let Some((target, proxy)) = send_route(ctx, Protocol::Grpc) {
                 let version = anvil_engine::settings::resolve(&ctx.settings_layers).http_version;
                 let tls = matches!(target.scheme.as_str(), "grpcs" | "https");
                 let refused = anvil_transport::grpc::unsupported_combination(g.wire, g.mode, false, version, tls, proxy.is_some());
@@ -213,7 +233,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
                     );
                 }
             }
-            if hbone_persistent(&schemes) {
+            if hbone_persistent(Protocol::Grpc) {
                 return refuse(RefusalCode::HbonePersistent, hbone_msg("gRPC calls"));
             }
             Ok(StepUnit::of(kind))
@@ -241,7 +261,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             // the selected proxy profile. Either way every exchange opens its
             // own tunnel, counted in the tunnel denominators.
             let masque = ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some());
-            if masque && let Some((_, Some(p))) = send_route(ctx, &["udp", "dtls"]) {
+            if masque && let Some((_, Some(p))) = send_route(ctx, Protocol::Udp) {
                 return refuse(
                     RefusalCode::MasqueThroughProxy,
                     format!(
@@ -252,7 +272,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             }
             let tunnel = if masque {
                 Some(TunnelKind::ConnectUdp)
-            } else if is_hbone(ctx, &["udp", "dtls"]) {
+            } else if is_hbone(ctx, Protocol::Udp) {
                 Some(TunnelKind::Hbone)
             } else {
                 None
