@@ -97,6 +97,15 @@
 
 ### Fixed
 
+- Desktop Runner: **Run folder** and **Run** start one run at a time. A
+  second click while the start is still pending no longer starts another
+  run, and a run that finishes before the start answers (an empty folder,
+  for example) is no longer shown as running with a Stop control that does
+  nothing. **Stop run** pressed while a run is starting stops it as soon as
+  it starts, and a run the backend no longer has is cleared when stopped.
+  Switching workspaces now clears the Runner's selected scenario, report,
+  folder choice and pending confirmation, so the Runner never offers to run
+  the previous workspace's scenario; a live run's Stop control is kept.
 - A load run now hands its worker every vault secret the plan's requests
   resolve: the datagram PROXY-protocol authentication secret of a UDP
   request, and the client identity of the selected proxy's own TLS profile
