@@ -80,7 +80,27 @@ struct SessionPrep {
     /// Where the handshake responses' cookies are kept (WebSocket, SSE and
     /// gRPC with the cookies setting on).
     cookies: Option<SessionCookies>,
+    /// What a gRPC call whose schema comes from server reflection was signed
+    /// for and sent with, once the transport encoded its message.
+    resigned: Option<ResignedSlot>,
 }
+
+/// A gRPC call signed over the framed message it sent, once server
+/// reflection resolved its schema: the record's prepared request, in place
+/// of the one prepared (and signed over an empty body) before it was known.
+struct Resigned {
+    headers: Vec<(String, String)>,
+    body: Bytes,
+    secrets: Vec<String>,
+    facts: Vec<(String, String)>,
+}
+
+type ResignedSlot = Arc<parking_lot::Mutex<Option<Resigned>>>;
+
+/// The redactor of a live transcript that can learn secrets once the session
+/// is planned: those a gRPC call signed once server reflection resolved its
+/// schema (before the call's first message is recorded).
+type SharedRedactor = Arc<parking_lot::RwLock<Redactor>>;
 
 /// The workspace jar a session handshake keeps its `Set-Cookie` in: the
 /// execution's isolation, the URL the handshake stands for in the jar, and
@@ -96,6 +116,17 @@ struct SessionCookies {
 
 fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFailure {
     TransportFailure::new(Phase::Prepare, kind, msg).with_field(field)
+}
+
+/// A binary or ping message's hex, resolved and checked. The message is sent,
+/// and shown in the transcript, as the bytes it decodes to: its secrets are
+/// redacted in that form too.
+fn ws_hex(r: &Resolver, raw: &str, field: &str) -> Result<String, TransportFailure> {
+    let since = r.used_secrets.lock().len();
+    let hex = r.resolve(raw, field)?;
+    let bytes = anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, field))?;
+    crate::redact::note_decoded_secrets(r, since, PayloadEncoding::Hex, &bytes);
+    Ok(hex)
 }
 
 fn unsupported(msg: impl Into<String>, field: &str) -> TransportFailure {
@@ -190,6 +221,7 @@ const SSE_NOT_SENT_OVER_H2_H3: &[&str] = &["host", "connection", "transfer-encod
 /// gRPC call, a MASQUE `CONNECT`), before auth and cookies. The session and
 /// the effective-request preview build it with the same code; only the
 /// session applies auth and plans the transport.
+#[derive(Clone)]
 pub(crate) struct SessionRequest {
     pub(crate) method: String,
     /// Where the request is sent. Auth signs for its HTTP counterpart
@@ -226,9 +258,39 @@ pub(crate) fn auth_refusal(applied: &anvil_auth::Applied, path_only: bool) -> Op
     None
 }
 
+/// A session request's headers and query once auth is applied.
+struct Authorized {
+    headers: Vec<(String, String)>,
+    query: String,
+    facts: Vec<(String, String)>,
+    /// The fields auth set, as it set them.
+    set: Vec<(String, String)>,
+}
+
+/// Per-send auth for `req`, refused before anything is sent when a header
+/// it produced is not valid on the wire or the session cannot carry it.
+fn sign_request(auth: &ResolvedAuth, req: &SessionRequest) -> Result<anvil_auth::Applied, TransportFailure> {
+    let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
+    let applied =
+        anvil_auth::apply(auth, &signable, Utc::now()).map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
+    http_exec::check_auth_headers(&applied)?;
+    if let Some(why) = auth_refusal(&applied, req.path_only) {
+        return Err(unsupported(why, "auth"));
+    }
+    Ok(applied)
+}
+
+/// Set each field in `set` on `headers`, replacing any of the same name.
+fn set_headers(headers: &mut Vec<(String, String)>, set: Vec<(String, String)>) {
+    for (n, v) in set {
+        headers.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
+        headers.push((n, v));
+    }
+}
+
 /// OAuth acquisition (same transport and trust as HTTP) and per-send auth.
-/// Returns the final headers and query, auth facts, and scrubs every secret
-/// used through the redactor.
+/// Returns the final headers and query and the auth facts, and scrubs every
+/// secret used through the redactor.
 async fn apply_auth(
     engine: &Engine,
     ctx: &ExecutionContext,
@@ -236,7 +298,7 @@ async fn apply_auth(
     redactor: &mut Redactor,
     req: &SessionRequest,
     cancel: &CancellationToken,
-) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), TransportFailure> {
+) -> Result<Authorized, TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
         match crate::oauth_http::acquire(engine, prep.epoch, ctx, &prep.settings, key, cfg, cancel).await {
             Ok(t) => replace_oauth(&mut prep.auth, &t),
@@ -244,29 +306,53 @@ async fn apply_auth(
         }
     }
     if matches!(prep.auth, ResolvedAuth::None) {
-        return Ok((req.headers.clone(), req.target.query.clone(), vec![]));
+        return Ok(Authorized { headers: req.headers.clone(), query: req.target.query.clone(), facts: vec![], set: vec![] });
     }
-    let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
-    let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
-        .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
-    http_exec::check_auth_headers(&applied)?;
-    if let Some(why) = auth_refusal(&applied, req.path_only) {
-        return Err(unsupported(why, "auth"));
-    }
+    let applied = sign_request(&prep.auth, req)?;
     for s in &applied.secrets {
         redactor.add_secret(s);
     }
-    let mut out = req.headers.clone();
-    for (n, v) in applied.set_headers {
-        out.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
-        out.push((n, v));
-    }
+    let mut headers = req.headers.clone();
+    set_headers(&mut headers, applied.set_headers.clone());
     let mut query = req.target.query.clone();
     for (k, v) in applied.append_query {
         let pair = format!("{}={}", prepare::encode_component(&k), prepare::encode_component(&v));
         query = if query.is_empty() { pair } else { format!("{query}&{pair}") };
     }
-    Ok((out, query, applied.facts))
+    Ok(Authorized { headers, query, facts: applied.facts, set: applied.set_headers })
+}
+
+/// Signs a unary or server-streaming gRPC call whose schema comes from
+/// server reflection once its message is encoded, over the framed message
+/// it sends (a call with a local schema is signed so when it is prepared).
+/// The fields auth sets otherwise than it set them when the call was
+/// prepared (`first`, over an empty body) replace those in `sent`, the
+/// call's prepared headers; what the call is sent with is kept in `slot`
+/// for the record, and the secrets it is signed with (a freshly minted
+/// token) join the `live` transcript redactor.
+fn sign_after_reflection(
+    auth: ResolvedAuth,
+    request: &SessionRequest,
+    first: &[(String, String)],
+    sent: &[(String, String)],
+    slot: ResignedSlot,
+    live: SharedRedactor,
+) -> grpc::SignFn {
+    let (request, first, sent) = (request.clone(), first.to_vec(), sent.to_vec());
+    Arc::new(move |body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
+        let applied = sign_request(&auth, &SessionRequest { body: body.clone(), ..request.clone() })?;
+        {
+            let mut live = live.write();
+            for s in &applied.secrets {
+                live.add_secret(s);
+            }
+        }
+        let mut headers = sent.clone();
+        set_headers(&mut headers, applied.set_headers.into_iter().filter(|h| !first.contains(h)).collect());
+        let wire = header_pairs(&headers)?;
+        *slot.lock() = Some(Resigned { headers, body: body.clone(), secrets: applied.secrets, facts: applied.facts });
+        Ok(wire)
+    })
 }
 
 /// Client identity material (PEM) for DTLS, following the TLS profile's
@@ -304,9 +390,13 @@ fn decode_payloads(r: &Resolver, payloads: &[StreamPayload], field: &str) -> Res
         .iter()
         .enumerate()
         .map(|(i, p)| {
+            let since = r.used_secrets.lock().len();
             let data = r.resolve(&p.data, &format!("{field}[{i}].data"))?;
-            anvil_transport::session::decode_payload(&StreamPayload { data, encoding: p.encoding })
-                .map_err(|e| local(FailureKind::BodySerialization, e, &format!("{field}[{i}]")))
+            let bytes = anvil_transport::session::decode_payload(&StreamPayload { data, encoding: p.encoding })
+                .map_err(|e| local(FailureKind::BodySerialization, e, &format!("{field}[{i}]")))?;
+            // Sent, and shown in the transcript, decoded.
+            crate::redact::note_decoded_secrets(r, since, p.encoding, &bytes);
+            Ok(bytes)
         })
         .collect()
 }
@@ -366,12 +456,18 @@ fn finish_prep(
         redactor,
         extra_findings: vec![],
         cookies: None,
+        resigned: None,
     }
 }
 
 fn redact_fn(r: &Redactor) -> RedactFn {
     let r = r.clone();
     Arc::new(move |s: &str| r.text(s))
+}
+
+fn shared_redact_fn(r: &SharedRedactor) -> RedactFn {
+    let r = r.clone();
+    Arc::new(move |s: &str| r.read().text(s))
 }
 
 /// `cancel` ends a wait for an OAuth token (nothing is sent). `epoch` is the
@@ -481,16 +577,8 @@ impl WsOffer {
             let field = format!("websocket.messages[{i}]");
             script.push(match m {
                 WsMessage::Text { text } => WsMessage::Text { text: r.resolve(text, &field)? },
-                WsMessage::Binary { hex } => {
-                    let hex = r.resolve(hex, &field)?;
-                    anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                    WsMessage::Binary { hex }
-                }
-                WsMessage::Ping { hex } => {
-                    let hex = r.resolve(hex, &field)?;
-                    anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                    WsMessage::Ping { hex }
-                }
+                WsMessage::Binary { hex } => WsMessage::Binary { hex: ws_hex(r, hex, &field)? },
+                WsMessage::Ping { hex } => WsMessage::Ping { hex: ws_hex(r, hex, &field)? },
                 WsMessage::Close { code, reason } => WsMessage::Close { code: *code, reason: r.resolve(reason, &field)? },
             });
         }
@@ -545,7 +633,11 @@ async fn prepare_ws(
     let offer = ws_offer(ctx)?;
     let mut b = base(engine, epoch, ctx, r, &["wss", "ws"])?;
     let WsHandshake { request, spec, deflate, script, subprotocols } = offer.handshake(ctx, r, &b.prep, &mut b.inferred)?;
-    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    // The messages and subprotocols were resolved after the redactor was
+    // built: every redaction below (transcript, URL, PROXY header) covers
+    // their secrets.
+    b.redactor.refresh_used_secrets(r);
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
@@ -660,7 +752,9 @@ async fn prepare_sse(
 ) -> Result<SessionPrep, TransportFailure> {
     let mut b = base(engine, epoch, ctx, r, &["https", "http"])?;
     let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
-    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    // Covers a secret in the Last-Event-ID, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = sse::SsePlan {
@@ -754,7 +848,7 @@ pub(crate) struct GrpcCall {
 /// path, with the framed request message of a unary or server-streaming
 /// call as its body. A local schema validates the method, call mode and
 /// every message before traffic. An `interactive` session refuses a call
-/// that does not stream requests.
+/// that does not stream requests, and every call a URL with a query.
 pub(crate) fn grpc_call(
     ctx: &ExecutionContext,
     r: &Resolver,
@@ -765,6 +859,14 @@ pub(crate) fn grpc_call(
 ) -> Result<GrpcCall, TransportFailure> {
     let version = prep.settings.http_version;
     let target = &prep.http.target;
+    // The call is sent to the method's path alone: a query would be signed
+    // and never sent.
+    if !target.query.is_empty() {
+        return Err(unsupported(
+            "a gRPC URL cannot have a query or query parameters: the call is sent to /<service>/<method> under the URL's path, with no query, so the query would be signed but never sent; remove it",
+            "url",
+        ));
+    }
     let tls_url = matches!(target.scheme.as_str(), "grpcs" | "https");
     let reflection = matches!(spec.schema, GrpcSchemaSource::Reflection);
     if let Some((msg, field)) = grpc::unsupported_combination(spec.wire, spec.mode, reflection, version, tls_url, prep.proxy.is_some()) {
@@ -914,10 +1016,19 @@ async fn prepare_grpc(
     let mut b = base(engine, epoch, ctx, r, &["grpcs", "grpc", "https", "http"])?;
     let GrpcCall { request, spec, schema, messages, service, method, prefix, tls_url } =
         grpc_call(ctx, r, &b.prep, &mut b.inferred, spec, interactive)?;
+    // Covers the secrets of the service, method, messages and metadata,
+    // resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
     // An auth profile that adds query parameters is refused (the path is fixed).
-    let (mut headers, _, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let Authorized { mut headers, facts, set, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let call_target = &request.target;
     let cookies = jar_cookies(engine, ctx, &mut b, call_target, &mut headers);
+    // With server reflection the message is encoded once the schema is
+    // resolved: the call is signed then, over the framed message it sends.
+    let reflected = matches!(schema, grpc::Schema::Reflection) && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
+    let resigned: Option<ResignedSlot> = (reflected && !matches!(b.prep.auth, ResolvedAuth::None)).then(Default::default);
+    let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
+    let sign = resigned.clone().map(|slot| sign_after_reflection(b.prep.auth.clone(), &request, &set, &headers, slot, live.clone()));
     let display = format!("{}://{}{}", call_target.scheme, call_target.authority, call_target.path);
     let plan = grpc::GrpcPlan {
         tls: if tls_url { b.prep.tls.clone() } else { None },
@@ -933,6 +1044,7 @@ async fn prepare_grpc(
         schema,
         messages,
         headers: header_pairs(&headers)?,
+        sign,
         deadline_ms: spec.deadline_ms,
         timeouts: b.prep.settings.timeouts,
         limits: b.prep.settings.limits,
@@ -941,7 +1053,7 @@ async fn prepare_grpc(
         display_url: b.redactor.url(&display),
         max_message_bytes: b.prep.settings.limits.max_response_bytes.min(GRPC_MAX_MESSAGE) as usize,
         transcript: TranscriptLimits::default(),
-        redact: Some(redact_fn(&b.redactor)),
+        redact: Some(shared_redact_fn(&live)),
         wire: spec.wire,
         version: b.prep.settings.http_version,
         proxy_header: b
@@ -956,6 +1068,7 @@ async fn prepare_grpc(
     let mut p = finish_prep(b, Plan::Grpc(plan), request.method, display, headers, request.body, facts);
     p.cookies = cookies;
     p.content_type = request.content_type;
+    p.resigned = resigned;
     Ok(p)
 }
 
@@ -1004,6 +1117,8 @@ fn prepare_tcp(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r
         .as_ref()
         .map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some(), "tcp.proxy_protocol"))
         .transpose()?;
+    // Covers the secrets of the payloads and PROXY header, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(p) = &spec.proxy_protocol {
         b.inferred.push(crate::proxy_protocol::header_note(p));
@@ -1071,6 +1186,8 @@ async fn prepare_udp(
     let datagrams = decode_payloads(r, &spec.datagrams, "udp.datagrams")?;
     let envelope =
         spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::envelope_plan(p, ctx, r, &mut b.redactor, use_dtls)).transpose()?;
+    // Covers the secrets of the datagrams and envelope, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(m) = &spec.masque {
         if envelope.is_some() {
@@ -1364,6 +1481,8 @@ async fn prepare_masque(
         None => (expanded.clone(), String::new()),
     };
     let proxy_target = Target { path, query, ..pt };
+    // Covers the secrets of the proxy URL and URI template, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
     b.inferred.extend(notes);
     let settings = b.prep.settings.clone();
     let (tls, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &settings, &proxy_target, &mut b.inferred)?;
@@ -1393,7 +1512,7 @@ async fn prepare_masque(
         host_from_authority: false,
         path_only: false,
     };
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
+    let Authorized { headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
     let t = Target { query, ..connect.target };
     let connect_url = t.url();
     let display_url = b.redactor.url(&connect_url);
@@ -1585,6 +1704,18 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
     out
 }
 
+/// The transcript as it is stored: every preview and event field redacted
+/// again with the record's redactor, which holds every secret the execution
+/// used (the transcript was redacted as it was emitted).
+fn redact_transcript(mut t: StreamTranscript, r: &Redactor) -> StreamTranscript {
+    for m in &mut t.messages {
+        m.preview = r.text(&m.preview);
+        m.event_id = m.event_id.as_deref().map(|v| r.text(v));
+        m.event_type = m.event_type.as_deref().map(|v| r.text(v));
+    }
+    t
+}
+
 async fn run_plan(plan: &Plan, events: &EventCtx, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
     match plan {
         Plan::Ws(p) => ws::run(p, events, cancel, commands).await,
@@ -1619,9 +1750,18 @@ async fn run_prepared(
     }
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
-    for s in resolver.used_secrets.lock().iter() {
-        redactor.add_secret(s);
-    }
+    redactor.refresh_used_secrets(resolver);
+    // A call signed once server reflection resolved its schema: the request
+    // as it was signed and sent.
+    let (headers, body, auth_facts) = match prep.resigned.as_ref().and_then(|s| s.lock().take()) {
+        Some(r) => {
+            for s in &r.secrets {
+                redactor.add_secret(s);
+            }
+            (r.headers, r.body, r.facts)
+        }
+        None => (headers, body, auth_facts),
+    };
     let mut attempts = out.attempts;
     let Some(last) = attempts.pop() else {
         let f = TransportFailure::new(Phase::Session, FailureKind::Internal, "the session adapter returned no attempt");
@@ -1678,7 +1818,7 @@ async fn run_prepared(
         protocol_fallback_from: fallback_from,
         redactor: &redactor,
         extra_findings: extra,
-        stream: out.transcript,
+        stream: out.transcript.map(|t| redact_transcript(t, &redactor)),
         protocol_status_override: Some(out.status),
         workload_api: workload,
     };

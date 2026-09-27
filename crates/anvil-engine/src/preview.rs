@@ -153,7 +153,8 @@ impl Engine {
         shape.transport_headers(&mut headers, &authority);
         let body_preview = if let Some(m) = &shape.message {
             // A gRPC call's message as the JSON it is encoded from; its body
-            // size is still that of the framed bytes sent.
+            // size is still that of the framed bytes sent (none yet when the
+            // schema comes from server reflection).
             redactor.json_text(m)
         } else {
             let text: String = String::from_utf8_lossy(&body[..body.len().min(64 * 1024)]).into_owned();

@@ -1105,6 +1105,12 @@ export function ImportDialog(props: {
               {w}
             </div>
           ))}
+          {preview.linked_files.length > 0 && (
+            <p className="hint" data-testid="import-linked-files">
+              After the {backup ? "restore" : "import"}, choose each linked file on this device with Choose file… beside the request&apos;s body or gRPC schema, or beside
+              the dataset in a load plan. Until then Anvil never reads it.
+            </p>
+          )}
         </div>
       )}
       {notice && (

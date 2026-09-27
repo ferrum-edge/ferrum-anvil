@@ -88,8 +88,14 @@ impl Transcript {
         }
     }
 
+    /// The payload's redacted preview: printable text, or else hex (which
+    /// the redactor sees too: it knows secrets' hex forms).
     fn preview(&self, payload: &[u8], force_hex: bool) -> (String, bool, bool) {
         let limit = self.limits.preview_bytes;
+        let redact = |s: &str| match &self.redact {
+            Some(r) => r(s),
+            None => s.to_string(),
+        };
         if !force_hex
             && let Ok(s) = std::str::from_utf8(payload)
             && printable(s)
@@ -98,14 +104,10 @@ impl Transcript {
             while !s.is_char_boundary(end) {
                 end -= 1;
             }
-            let text = match &self.redact {
-                Some(r) => r(&s[..end]),
-                None => s[..end].to_string(),
-            };
-            return (text, false, end < s.len());
+            return (redact(&s[..end]), false, end < s.len());
         }
         let n = payload.len().min(limit / 2);
-        (hex::encode(&payload[..n]), true, n < payload.len())
+        (redact(&hex::encode(&payload[..n])), true, n < payload.len())
     }
 
     fn push(&mut self, m: StreamMessage) {
@@ -146,7 +148,7 @@ impl Transcript {
             preview_is_hex,
             preview_truncated,
             event_id: event_id.map(redact),
-            event_type,
+            event_type: event_type.map(redact),
         }
     }
 
@@ -632,6 +634,19 @@ mod tests {
         assert_eq!(s.messages[0].preview, "token=‹redacted›");
         assert!(s.messages[1].preview_is_hex && s.messages[1].preview == "dead");
         assert!(s.messages[2].preview_is_hex, "non-UTF-8 bytes are shown as hex");
+    }
+
+    #[test]
+    fn hex_previews_and_event_types_are_redacted() {
+        let redact: RedactFn = Arc::new(|s: &str| s.replace("c0ffee00", "‹redacted›").replace("sekret-type", "‹redacted›"));
+        let mut t = Transcript::new(Instant::now(), TranscriptLimits::default(), EventCtx::none(), Some(redact));
+        t.data(Direction::Sent, "binary", &[0x01, 0xc0, 0xff, 0xee, 0x00]);
+        t.control(Direction::Sent, "ping", &[0xc0, 0xff, 0xee, 0x00]);
+        t.event(Direction::Received, "event", b"data", Some("id-1".into()), Some("sekret-type".into()));
+        let s = t.finish();
+        assert!(s.messages[0].preview_is_hex && s.messages[0].preview == "01‹redacted›", "{:?}", s.messages[0]);
+        assert!(s.messages[1].preview_is_hex && s.messages[1].preview == "‹redacted›", "{:?}", s.messages[1]);
+        assert_eq!(s.messages[2].event_type.as_deref(), Some("‹redacted›"));
     }
 
     #[test]

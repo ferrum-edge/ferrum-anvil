@@ -52,6 +52,13 @@ pub enum GroundTruth {
     MessageReceived {
         bytes: u64,
     },
+    /// The request body a gRPC fixture received for a unary call, as it
+    /// arrived (the length-prefixed message), so a test can check a body
+    /// digest and signature against it.
+    GrpcBodyReceived {
+        path: String,
+        body: Vec<u8>,
+    },
     DatagramRelayed {
         bytes: u64,
         via: String,

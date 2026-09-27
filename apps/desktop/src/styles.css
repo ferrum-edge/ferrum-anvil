@@ -440,6 +440,11 @@ body.dragging-y, body.dragging-y * { cursor: row-resize !important; user-select:
 label.lbl.narrow { max-width: 320px; }
 .file-chip { display: inline-flex; align-items: center; gap: 7px; height: var(--h); padding: 0 11px; border: 1px dashed var(--border-hover); border-radius: var(--radius-sm); color: var(--text); font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-chip .icon { color: var(--text-3); }
+.file-chip .mono { overflow: hidden; text-overflow: ellipsis; }
+/* A linked local file: its path, binding state and Choose file… / Rebind…; the explanation wraps below. */
+.linked-file { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.linked-file > .file-chip { flex: 1 1 200px; }
+.linked-file > .hint, .linked-file > .bad-box { flex-basis: 100%; margin: 0; }
 .rule-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 7px 7px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); min-width: 0; }
 .rule-row > .field:not(.grow):not(.num):not([class*="w-"]) { flex: 0 1 auto; }
 .rule-row > textarea.field { min-width: 240px; }

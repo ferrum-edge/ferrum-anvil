@@ -18,6 +18,18 @@
   `--json` prints it as JSON; `--now` runs a pass first. The desktop exposes
   the same record through the `storage_cleanup_last` command
   (`api.storageCleanupLast()`); it has no screen for it yet.
+- Desktop: a linked local file that a saved request or dataset names (for
+  example one from an imported bundle) can now be chosen on this device. The
+  request's binary body or multipart part, its gRPC schema, and a load
+  plan's dataset show the file with its binding state: chosen on this
+  device, not chosen, or chosen but missing or changed since. **Choose
+  file…** or **Rebind…** opens the native dialog for that request or
+  dataset. The backend still binds only the exact file the reference names
+  (canonical path, regular file, and that request or dataset), and the new
+  read-only `linked_file_status` command reads no file and never looks at a
+  path that was not chosen. The import preview points to where linked files
+  are chosen, and the refusal of an unchosen linked file names Choose file…
+  instead of saying the chooser is not available.
 - Diagnostics: a `ferrum-edge-0.9.8` compatibility catalog for Ferrum Edge
   v0.9.8 (540 source-audited outcomes, `docs/audit/gateway-0.9.8-delta.md`).
   It knows the new `X-Gateway-Error: request_timeout` token: a route's total
@@ -522,3 +534,48 @@
   auth the signing string can include an earlier profile's query API key,
   and its hash could be checked against guesses of that key offline. The
   nonce is still recorded.
+- An explicit `Host` header must now be a host with an optional port
+  (`uri-host[:port]`: a host name, an IPv4 address or an IPv6 address in
+  brackets). A value with userinfo, a path, a query, a fragment or
+  whitespace, or an IPv6 address without brackets, is refused before
+  anything is sent, for HTTP/1.1, HTTP/2 and HTTP/3 requests, WebSocket,
+  SSE and gRPC, and so is such a `Host` set by an auth profile. An empty
+  `Host` is refused too; before, it was sent empty (leave the header out to
+  send the URL's host and port). The message names the reason, never the
+  value. Before, a `Host` such as
+  `a.test/admin` changed the path an HTTP/2 or HTTP/3 request was sent
+  with, while the signature covered the original path.
+- A gRPC URL with a query, or a gRPC request with query parameters, is now
+  refused before anything is sent (`unsupported_combination`, field `url`),
+  by a send, an interactive session and the preview. The call is sent to the
+  method's path without a query, so the query was signed but never sent and
+  an HMAC signature always failed verification.
+- A gRPC call whose schema comes from server reflection is now signed over
+  the framed request message it sends, once reflection has resolved the
+  schema and the message is encoded, as a call with a `.proto` file or a
+  descriptor set is. Before, the message was encoded after signing, so an
+  HMAC `Content-Digest` and signature covered an empty body and a gateway
+  that checks the digest refused the call. The record's prepared request is
+  the one signed and sent. The effective-request preview shows the request
+  message as redacted JSON and says that a digest or signature it shows
+  covers an empty body, since the call is signed when it is sent.
+
+### Security
+
+- A secret variable used only in what a session sends once it is open (a
+  WebSocket message or subprotocol, a gRPC message, method or metadata
+  value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted
+  in the live transcript events and in the stored history, like a secret
+  used in the URL or a header. The session's redactor was built before
+  those values were resolved; it now takes them in once they are, before
+  anything is redacted with it, and the stored transcript is redacted again
+  with the record's redactor. Hex previews (binary messages, pings and
+  payloads that are not printable text) are now redacted too, live and
+  stored: a secret's lowercase hex is recognised. An SSE event type is now
+  redacted in live events, as it was in the stored record. A secret in a
+  hex- or base64-encoded field (a WebSocket binary message or ping, a TCP
+  payload, a UDP datagram, a PROXY header TLV) is also redacted as the bytes
+  it decodes to, as text and as hex, when they are at least 4 bytes long.
+  The secrets a gRPC call signs with once server reflection resolves its
+  schema (such as a freshly minted token) are now redacted in live events
+  too, not only in the stored record.
