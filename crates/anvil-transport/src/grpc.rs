@@ -323,9 +323,11 @@ pub struct GrpcPlan {
     pub headers: Vec<(HeaderName, HeaderValue)>,
     /// With server reflection, the call's headers are signed here, once the
     /// schema is resolved and the message encoded, over the framed message of
-    /// a unary or server-streaming call (an empty body for a streaming
-    /// request). They replace `headers` for the call; the reflection request
-    /// is sent with `headers`. `None`: the call is sent with `headers`.
+    /// a unary or server-streaming call. They replace `headers` for the call;
+    /// the reflection request is sent with `headers`. `None`: the call is
+    /// sent with `headers`. The engine sets it only for a unary or
+    /// server-streaming call; a call that streams requests is signed when it
+    /// is prepared.
     pub sign: Option<SignFn>,
     pub deadline_ms: Option<u64>,
     pub timeouts: Timeouts,
