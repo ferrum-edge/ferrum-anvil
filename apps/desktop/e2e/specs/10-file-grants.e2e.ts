@@ -107,6 +107,19 @@ describe("file grants", () => {
     expectRefused("file_choose attachment", other, "only a linked file is chosen for a request or dataset");
   });
 
+  it("refuses a relocation dialog without its request or dataset and the reference it repoints before showing anything", async () => {
+    const referrer = { kind: "request", id: randomUUID() };
+    const oldPath = "/elsewhere/upload.bin";
+    const none = await invoke("file_choose", { purpose: "linked_file_relocate", options: {}, oldPath });
+    expectRefused("file_choose linked_file_relocate", none, "choose the request or dataset the linked file is for");
+    const noOld = await invoke("file_choose", { purpose: "linked_file_relocate", options: {}, referrer });
+    expectRefused("file_choose linked_file_relocate", noOld, "choose the linked file to relocate");
+    const bind = await invoke("file_choose", { purpose: "linked_file", options: {}, referrer, oldPath });
+    expectRefused("file_choose linked_file", bind, "only with purpose linked_file_relocate");
+    const other = await invoke("file_choose", { purpose: "attachment", options: {}, oldPath });
+    expectRefused("file_choose attachment", other, "only a linked file is relocated");
+  });
+
   /** Every command that takes a request spec from the webview. */
   function specCommands(spec: Record<string, unknown>): [string, Record<string, unknown>][] {
     const input = { workspace_id: workspaceId, request_id: null, spec, environment_id: null, send_anyway: false };

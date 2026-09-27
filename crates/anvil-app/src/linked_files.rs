@@ -15,6 +15,15 @@
 //! dialog), but it reads one the desktop bound when it sends that saved
 //! request or uses that dataset from the same profile.
 //!
+//! A reference whose file lives at another path on this device (often one
+//! imported from another machine) is repointed the same way: the user picks
+//! the file at its new location in the native dialog for that request or
+//! dataset and the reference it replaces (`file_choose` with purpose
+//! `linked_file_relocate`, [`App::relocate_linked_file`]). That rewrites the
+//! saved request or dataset to name the new path and binds it for that
+//! referrer only. It is the one way the desktop writes a linked path into a
+//! saved request or dataset: a spec from the webview still never names one.
+//!
 //! The desktop shows, beside each linked file, whether it is bound
 //! ([`App::linked_file_status`]). That query looks only at files already
 //! bound for that referrer, and only at their metadata: it never reads a
@@ -23,6 +32,8 @@
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
+use anvil_domain::workspace::{Dataset, RequestDefinition, RequestRevision};
+use anvil_storage::StoreTx;
 use anvil_storage::store::kind;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -112,6 +123,47 @@ impl App {
         Ok(b)
     }
 
+    /// Repoint the linked file `old_path` that the saved request or dataset
+    /// `referrer` names to the file the user picked in the native open
+    /// dialog at its new location, and bind that file for `referrer`. Only
+    /// the desktop's `file_choose` (purpose `linked_file_relocate`) calls
+    /// this, with the dialog's result.
+    ///
+    /// `old_path` only identifies the reference: it must be a linked file
+    /// `referrer` names, and it is never looked at on disk. The picked file
+    /// must be a regular file and is named by its canonical path. One write
+    /// transaction checks that `referrer` still names `old_path`, rewrites
+    /// every reference to it in that request (filing a new revision) or
+    /// dataset, drops that referrer's binding of the old path and binds the
+    /// new one. Another request or dataset that names the old path is left
+    /// as it is, and stays unbound until the file is chosen for it.
+    pub fn relocate_linked_file(&self, referrer: LinkedFileReferrer, old_path: &str, picked: &Path) -> Result<LinkedFileBinding> {
+        if !self.named_linked_files(referrer)?.iter().any(|p| p == old_path) {
+            return Err(not_named(old_path, referrer));
+        }
+        let path = crate::token_files::chosen_path(picked, "linked file")?;
+        let fresh = LinkedFileBinding { id: Id::new(), referrer, path: path.clone(), bound_at: Utc::now() };
+        self.store.atomically(|s| {
+            // The request or dataset may have changed since the check above.
+            if let Err(e) = repoint_in(s, referrer, old_path, &path)? {
+                return Ok(Err(e));
+            }
+            let mut kept = None;
+            for b in s.list::<LinkedFileBinding>(kind::LINKED_FILE, None)?.into_iter().filter(|b| b.referrer == referrer) {
+                if b.path == path {
+                    kept = kept.or(Some(b));
+                } else if b.path == old_path {
+                    s.delete(kind::LINKED_FILE, &b.id)?;
+                }
+            }
+            if let Some(b) = kept {
+                return Ok(Ok(b));
+            }
+            s.put(kind::LINKED_FILE, &fresh.id, None, None, 0.0, &fresh)?;
+            Ok(Ok(fresh))
+        })?
+    }
+
     pub fn linked_file_bindings(&self) -> Result<Vec<LinkedFileBinding>> {
         Ok(self.store.list(kind::LINKED_FILE, None)?)
     }
@@ -176,6 +228,86 @@ impl App {
         refuse_unbound(&self.linked_file_bindings()?, LinkedFileReferrer::Dataset { id }, path)?;
         read_bound_file(path, max, "dataset")
     }
+}
+
+/// Rewrite every linked file `referrer` names at `old` to name `new`, in
+/// the transaction `s`: a request's spec (with a new revision, as a save
+/// files one) or a dataset's file. Refused if `referrer` is gone or no longer
+/// names `old`.
+fn repoint_in(s: &StoreTx<'_>, referrer: LinkedFileReferrer, old: &str, new: &str) -> anvil_storage::store::Result<Result<()>> {
+    let now = Utc::now();
+    match referrer {
+        LinkedFileReferrer::Request { id } => {
+            let Some(mut r) = s.get::<RequestDefinition>(kind::REQUEST, &id)? else {
+                return Ok(Err(AppError::NotFound("request".into())));
+            };
+            let mut spec = serde_json::to_value(&r.spec)?;
+            if !repoint(&mut spec, old, new) {
+                return Ok(Err(not_named(old, referrer)));
+            }
+            r.spec = serde_json::from_value(spec)?;
+            let hash = crate::workspace::spec_hash(&r.spec);
+            let prev: Option<RequestRevision> = match r.revision_id {
+                Some(rid) => s.get(kind::REVISION, &rid)?,
+                None => None,
+            };
+            if prev.map(|p| p.spec_sha256 != hash).unwrap_or(true) {
+                let rev = RequestRevision {
+                    id: Id::new(),
+                    request_id: r.meta.id,
+                    created_at: now,
+                    spec_sha256: hash,
+                    spec: r.spec.clone(),
+                };
+                s.put(kind::REVISION, &rev.id, Some(&r.workspace_id), Some(&r.meta.id), 0.0, &rev)?;
+                r.revision_id = Some(rev.id);
+            }
+            r.meta.updated_at = now;
+            s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
+        }
+        LinkedFileReferrer::Dataset { id } => {
+            let Some(mut d) = s.get::<Dataset>(kind::DATASET, &id)? else {
+                return Ok(Err(AppError::NotFound("dataset".into())));
+            };
+            match &mut d.attachment {
+                AttachmentRef::LinkedFile { path } if path.as_str() == old => *path = new.to_string(),
+                _ => return Ok(Err(not_named(old, referrer))),
+            }
+            d.meta.updated_at = now;
+            s.put(kind::DATASET, &d.meta.id, Some(&d.workspace_id), None, 0.0, &d)?;
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// Point every linked file at `old` in a serialized spec to `new`; whether
+/// there was one.
+fn repoint(v: &mut serde_json::Value, old: &str, new: &str) -> bool {
+    match v {
+        serde_json::Value::Object(o) => {
+            let mut found = false;
+            if o.get("kind").and_then(|k| k.as_str()) == Some("linked_file") && o.get("path").and_then(|p| p.as_str()) == Some(old) {
+                o.insert("path".into(), new.into());
+                found = true;
+            }
+            for x in o.values_mut() {
+                found |= repoint(x, old, new);
+            }
+            found
+        }
+        serde_json::Value::Array(a) => {
+            let mut found = false;
+            for x in a {
+                found |= repoint(x, old, new);
+            }
+            found
+        }
+        _ => false,
+    }
+}
+
+fn not_named(path: &str, referrer: LinkedFileReferrer) -> AppError {
+    AppError::Invalid(format!("the {} does not name the linked file '{path}', so it cannot be relocated", referrer.noun()))
 }
 
 fn refuse_unbound(bound: &[LinkedFileBinding], referrer: LinkedFileReferrer, path: &str) -> Result<()> {

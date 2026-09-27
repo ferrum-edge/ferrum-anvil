@@ -62,6 +62,8 @@ export function RequestEditor(props: {
   workspaceId: string;
   environmentId: string | null;
   profiles: Profiles;
+  /** Replace the draft with the saved request, which the backend changed (a linked file was relocated). */
+  onReload?: () => Promise<void>;
 }) {
   const { req } = props;
   const spec = req.spec;
@@ -155,8 +157,8 @@ export function RequestEditor(props: {
             <p className="hint">Content-Type, Content-Length and auth headers are added at send time; the Effective request tab shows exactly what will be sent and why.</p>
           </div>
         )}
-        {activeSub === "body" && <BodyEditor spec={spec} set={set} requestId={req.id} />}
-        {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} workspaceId={props.workspaceId} requestId={req.id} />}
+        {activeSub === "body" && <BodyEditor spec={spec} set={set} requestId={req.id} onRelocated={props.onReload} />}
+        {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} workspaceId={props.workspaceId} requestId={req.id} onRelocated={props.onReload} />}
         {activeSub === "auth" && (
           <AuthEditor
             value={(spec.auth as AuthConfig) ?? { type: "inherit" }}
@@ -269,7 +271,18 @@ function bodyDefault(t: Body["type"], prev?: Body): Body | undefined {
   }
 }
 
-export function BodyEditor({ spec, set, requestId }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; requestId?: string | null }) {
+export function BodyEditor({
+  spec,
+  set,
+  requestId,
+  onRelocated,
+}: {
+  spec: RequestSpec;
+  set: (p: Partial<RequestSpec>) => void;
+  requestId?: string | null;
+  /** Reload the saved request after a linked file it names was relocated. */
+  onRelocated?: () => Promise<void>;
+}) {
   const b = (spec.body ?? { type: "none" }) as Body;
   const setBody = (body: Body) => set({ body });
   const pickBinary = async () => {
@@ -320,7 +333,7 @@ export function BodyEditor({ spec, set, requestId }: { spec: RequestSpec; set: (
         </>
       )}
       {b.type === "form_url_encoded" && <KeyValueEditor rows={b.fields} onChange={(fields) => setBody({ ...b, fields })} nameLabel="Field" />}
-      {b.type === "multipart" && <MultipartEditor parts={b.parts} onChange={(parts) => setBody({ ...b, parts })} requestId={requestId} />}
+      {b.type === "multipart" && <MultipartEditor parts={b.parts} onChange={(parts) => setBody({ ...b, parts })} requestId={requestId} onRelocated={onRelocated} />}
       {b.type === "binary" && (
         <div className="fields">
           {b.attachment.kind === "stored" ? (
@@ -329,7 +342,7 @@ export function BodyEditor({ spec, set, requestId }: { spec: RequestSpec; set: (
               {`${b.attachment.file_name} · ${fmtBytes(b.attachment.size)}`}
             </span>
           ) : (
-            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={b.attachment.path} className="grow" />
+            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={b.attachment.path} className="grow" onRelocated={onRelocated} />
           )}
           <button className="btn" onClick={pickBinary}>
             Choose another file…
@@ -437,7 +450,17 @@ function LintedText(props: { kind: "json" | "xml"; text: string; onChange: (t: s
   );
 }
 
-function MultipartEditor({ parts, onChange, requestId }: { parts: MultipartPart[]; onChange: (p: MultipartPart[]) => void; requestId?: string | null }) {
+function MultipartEditor({
+  parts,
+  onChange,
+  requestId,
+  onRelocated,
+}: {
+  parts: MultipartPart[];
+  onChange: (p: MultipartPart[]) => void;
+  requestId?: string | null;
+  onRelocated?: () => Promise<void>;
+}) {
   const set = (i: number, p: MultipartPart) => onChange(parts.map((x, j) => (j === i ? p : x)));
   return (
     <div className="col">
@@ -453,7 +476,7 @@ function MultipartEditor({ parts, onChange, requestId }: { parts: MultipartPart[
               {`${p.attachment.file_name} · ${fmtBytes(p.attachment.size)}`}
             </span>
           ) : (
-            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={p.attachment.path} className="grow" />
+            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={p.attachment.path} className="grow" onRelocated={onRelocated} />
           )}
           <input className="field mono w-170" placeholder="content-type (auto)" aria-label="Part content type" value={p.content_type ?? ""} onChange={(e) => set(i, { ...p, content_type: e.target.value || null })} />
           <button className="btn ghost icon-btn" aria-label="Remove" title="Remove" onClick={() => onChange(parts.filter((_, j) => j !== i))}>
@@ -503,11 +526,14 @@ export function ProtocolEditor({
   set,
   workspaceId,
   requestId,
+  onRelocated,
 }: {
   spec: RequestSpec;
   set: (p: Partial<RequestSpec>) => void;
   workspaceId: string;
   requestId?: string | null;
+  /** Reload the saved request after a linked schema file it names was relocated. */
+  onRelocated?: () => Promise<void>;
 }) {
   const p = spec.protocol ?? "http";
   if (p === "web_socket") {
@@ -635,7 +661,7 @@ export function ProtocolEditor({
           <div className="col" data-testid="grpc-linked-schema">
             <span className="lbl">Linked schema files (read from this device)</span>
             {linkedSchemaFiles(g.schema).map((path, i) => (
-              <LinkedFileBinding key={`${i}:${path}`} referrer={linkedReferrer(requestId)} path={path} />
+              <LinkedFileBinding key={`${i}:${path}`} referrer={linkedReferrer(requestId)} path={path} onRelocated={onRelocated} />
             ))}
           </div>
         )}

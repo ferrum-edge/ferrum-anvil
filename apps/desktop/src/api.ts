@@ -243,12 +243,13 @@ export type FilePurpose =
   | "load_report_export"
   | "run_report_export"
   | "jwt_svid_file"
-  | "linked_file";
+  | "linked_file"
+  | "linked_file_relocate";
 export interface FileGrant {
   token: string;
   /** The chosen file's name without its folder, for display. */
   file_name: string;
-  /** Only for `jwt_svid_file` and `linked_file`: the path the backend bound in the vault. */
+  /** Only for `jwt_svid_file`, `linked_file` and `linked_file_relocate`: the path the backend bound in the vault. */
   path?: string;
 }
 /** A JWT-SVID token file bound on this device through the native dialog. */
@@ -577,6 +578,14 @@ export const api = {
   /** Bind, in the native open dialog, the linked local file a saved request or dataset names; null when the user cancels. */
   chooseLinkedFile: async (referrer: LinkedFileReferrer): Promise<FileGrant | null> =>
     (await call<FileGrant[]>("file_choose", { purpose: "linked_file", options: { multiple: false }, referrer }))[0] ?? null,
+  /**
+   * Repoint the linked local file at `oldPath` that a saved request or dataset names to a file chosen
+   * at a new location in the native open dialog, and bind it for that request or dataset. The backend
+   * writes only the path picked in the dialog, and never looks at `oldPath` on disk; null when the user
+   * cancels.
+   */
+  relocateLinkedFile: async (referrer: LinkedFileReferrer, oldPath: string): Promise<FileGrant | null> =>
+    (await call<FileGrant[]>("file_choose", { purpose: "linked_file_relocate", options: { multiple: false }, referrer, oldPath }))[0] ?? null,
   /** Whether each linked local file a saved request or dataset names is chosen on this device; reads no file. */
   linkedFileStatus: (referrer: LinkedFileReferrer) => call<LinkedFileStatus[]>("linked_file_status", { referrer }),
   /** JWT-SVID token files bound on this device, oldest first. */

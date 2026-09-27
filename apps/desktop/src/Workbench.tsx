@@ -295,6 +295,14 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     }
   };
 
+  // A linked file the saved request names was relocated: the backend rewrote
+  // the saved request, so its tab shows it as saved now. Draft edits are
+  // dropped: a draft naming a linked file cannot be saved from here anyway.
+  const reloadSaved = async (id: string) => {
+    const req = await api.getRequest(id);
+    setTabs((ts) => ts.map((x) => (x.req.id !== id ? x : { ...x, req, saved: snap(req) })));
+  };
+
   // The tab's own workspace, as it is now: a send can outlive a workspace switch
   // or an environment change (a resend runs after a prompt).
   const envOf = (wsId: string) => {
@@ -811,6 +819,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     workspaceId={ws.id}
                     environmentId={ws.active_environment_id ?? null}
                     profiles={profiles}
+                    onReload={() => reloadSaved(tab.req.id)}
                   />
                 </div>
                 <div
