@@ -170,6 +170,9 @@ fn grpc_call(
 ) -> Result<(SessionRequest, Option<String>), TransportFailure> {
     let call = sessions::grpc_call(ctx, r, prep, inferred, sessions::grpc_spec(ctx)?, false)?;
     let single = matches!(call.spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
+    if single && call.spec.messages.is_empty() {
+        inferred.push("no request message is set: the call sends the empty message ({}), framed, and auth signs that frame".into());
+    }
     let mut message = None;
     match &call.schema {
         grpc::Schema::Pool(_) if single => {
@@ -197,6 +200,11 @@ fn grpc_call(
         grpc::Schema::Reflection => {
             inferred.push("server reflection: the request messages are streamed once the call is open; the body shown is empty".into())
         }
+    }
+    if matches!(call.schema, grpc::Schema::Reflection) && !matches!(prep.auth, ResolvedAuth::None) {
+        inferred.push(
+            "each server reflection request is signed for its own path and message when it is sent, not with the signature shown".into(),
+        );
     }
     Ok((call.request, message))
 }

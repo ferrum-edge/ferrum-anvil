@@ -385,6 +385,7 @@ async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruth
                     return;
                 }
             }
+            log.push(GroundTruth::GrpcBodyReceived { path: path.clone(), body: reader.received.to_vec() });
             let _ = tx.send(Ok(Frame::trailers(trailers(0, "")))).await;
         }
         _ => {
