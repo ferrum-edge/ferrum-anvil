@@ -239,6 +239,12 @@
 
 ### Fixed
 
+- Saving a request (`save_request`) keeps the workspace, folder and position
+  it has in storage, read in the save's write transaction, whatever the
+  saved copy names; the name, description, tags and spec are saved as
+  before. An editor's copy loaded before the request was moved used to write
+  back its old folder and position, so the save silently undid the move.
+  Only a new request is placed by a save; moving one takes `move_request`.
 - Moving a request (`move_request`) reads and writes it in one write
   transaction and changes only its folder and position. It used to read the
   request first and save that copy afterwards, so a save or a linked-file

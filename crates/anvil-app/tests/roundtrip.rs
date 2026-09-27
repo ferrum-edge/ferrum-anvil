@@ -7,11 +7,13 @@ use anvil_app::{App, AppError};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::Variable;
+use anvil_domain::workspace::{RequestDefinition, Variable};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio_util::sync::CancellationToken;
 
 fn new_app(root: &std::path::Path, name: &str) -> App {
@@ -175,4 +177,122 @@ fn revisions_are_immutable_history() {
     assert_eq!(a.revision(&rev1).unwrap().spec.url, "http://a/", "old revision unchanged");
     let same = a.save_request(r2.clone()).unwrap();
     assert_eq!(same.revision_id, r2.revision_id, "no new revision when unchanged");
+}
+
+#[test]
+fn a_save_changes_a_request_but_never_its_placement() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "t");
+    let ws = a.create_workspace("W").unwrap();
+    let f = a.create_folder(&ws.meta.id, None, "F").unwrap();
+    let r = a.create_request(&ws.meta.id, Some(f.meta.id), "R", RequestSpec::http("GET", "http://a/")).unwrap();
+    assert_eq!((r.workspace_id, r.folder_id, r.sort_key), (ws.meta.id, Some(f.meta.id), 1.0));
+
+    let saved = a.save_request(RequestDefinition { name: "S".into(), spec: RequestSpec::http("POST", "http://b/"), ..r.clone() }).unwrap();
+    assert_eq!((saved.name.as_str(), saved.spec.url.as_str()), ("S", "http://b/"));
+    assert_ne!(saved.revision_id, r.revision_id, "the changed spec files a revision");
+    assert_eq!(a.revision(&saved.revision_id.unwrap()).unwrap().spec, saved.spec);
+    assert_eq!(a.request(&r.meta.id).unwrap(), saved);
+
+    // The placement a save names is not written: only a move places a
+    // request, and never into another workspace.
+    let other = a.create_workspace("X").unwrap();
+    let theirs = a.create_folder(&other.meta.id, None, "theirs").unwrap();
+    let placed = RequestDefinition { workspace_id: other.meta.id, folder_id: Some(theirs.meta.id), sort_key: 9.0, ..saved.clone() };
+    let kept = a.save_request(placed).unwrap();
+    assert_eq!((kept.workspace_id, kept.folder_id, kept.sort_key), (ws.meta.id, Some(f.meta.id), 1.0));
+    assert_eq!(kept.revision_id, saved.revision_id, "an unchanged spec files no revision");
+    assert_eq!(a.request(&r.meta.id).unwrap(), kept);
+    assert!(a.requests(&other.meta.id).unwrap().is_empty());
+}
+
+#[test]
+fn a_save_keeps_a_move_that_landed_after_the_editor_loaded_the_request() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "t");
+    let ws = a.create_workspace("W").unwrap();
+    let f = a.create_folder(&ws.meta.id, None, "F").unwrap();
+    let r = a.create_request(&ws.meta.id, None, "R", RequestSpec::http("GET", "http://a/")).unwrap();
+
+    // The editor loads the request; the request is then moved; the editor
+    // then saves its copy, which still names the old folder and position.
+    let mut editing = a.request(&r.meta.id).unwrap();
+    let moved = a.move_request(&r.meta.id, Some(f.meta.id), 7.5).unwrap();
+    editing.name = "renamed".into();
+    editing.spec.url = "http://b/".into();
+    let saved = a.save_request(editing).unwrap();
+
+    // The save's edits are stored where the move put the request.
+    assert_eq!((saved.folder_id, saved.sort_key), (Some(f.meta.id), 7.5));
+    assert_eq!((saved.name.as_str(), saved.spec.url.as_str()), ("renamed", "http://b/"));
+    assert_ne!(saved.revision_id, moved.revision_id);
+    assert_eq!(a.revision(&saved.revision_id.unwrap()).unwrap().spec, saved.spec);
+    assert_eq!(a.request(&r.meta.id).unwrap(), saved);
+    let in_folder: Vec<_> = a.requests(&ws.meta.id).unwrap().into_iter().filter(|q| q.folder_id == Some(f.meta.id)).collect();
+    assert_eq!(in_folder, vec![saved]);
+}
+
+#[test]
+fn moves_that_land_during_saves_are_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let a = Arc::new(new_app(root.path(), "t"));
+    let ws = a.create_workspace("W").unwrap();
+    let one = a.create_folder(&ws.meta.id, None, "one").unwrap();
+    let two = a.create_folder(&ws.meta.id, None, "two").unwrap();
+    let folders = [Some(one.meta.id), Some(two.meta.id), None];
+    let r = a.create_request(&ws.meta.id, None, "R", RequestSpec::http("GET", "http://a/")).unwrap();
+    // The copy an editor loaded before any move.
+    let stale = r.clone();
+
+    // Move `i` puts the request in `folders[i % 3]` at position 100 + i, so
+    // a placement tells which move made it.
+    let placed_by = |q: &RequestDefinition| -> usize {
+        assert!(q.sort_key >= 100.0, "a save put back the placement the request was created with");
+        let i = q.sort_key as usize - 100;
+        assert_eq!(q.folder_id, folders[i % folders.len()]);
+        i
+    };
+
+    // One thread keeps moving the request while this one keeps saving the
+    // stale copy. A save that wrote back the copy's placement would undo
+    // the moves made before it.
+    const SAVES: usize = 60;
+    let moved = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let mover = {
+        let (a, moved, done, id) = (a.clone(), moved.clone(), done.clone(), r.meta.id);
+        std::thread::spawn(move || {
+            let mut moves = 0;
+            loop {
+                a.move_request(&id, folders[moves % folders.len()], (100 + moves) as f64).unwrap();
+                moves += 1;
+                moved.store(moves, Ordering::SeqCst);
+                if done.load(Ordering::SeqCst) {
+                    return moves;
+                }
+            }
+        })
+    };
+    while moved.load(Ordering::SeqCst) == 0 {
+        std::thread::yield_now();
+    }
+    let mut saved = None;
+    for i in 0..SAVES {
+        // Every move finished before this save started is kept by it.
+        let before = moved.load(Ordering::SeqCst);
+        let spec = RequestSpec::http("GET", &format!("http://a/{i}"));
+        let q = a.save_request(RequestDefinition { spec, ..stale.clone() }).unwrap();
+        assert!(placed_by(&q) + 1 >= before, "save {i} undid move {}", before - 1);
+        saved = Some(q);
+    }
+    done.store(true, Ordering::SeqCst);
+    let moves = mover.join().unwrap();
+
+    // The request sits where the last move put it, with the last save's
+    // spec as its latest revision.
+    let stored = a.request(&r.meta.id).unwrap();
+    assert_eq!(placed_by(&stored), moves - 1);
+    assert_eq!(stored.spec, RequestSpec::http("GET", &format!("http://a/{}", SAVES - 1)));
+    assert_eq!(stored.revision_id, saved.unwrap().revision_id);
+    assert_eq!(a.revision(&stored.revision_id.unwrap()).unwrap().spec, stored.spec);
 }

@@ -320,6 +320,12 @@ impl App {
     /// hold yet must still be stored: a file released between being attached
     /// and this save is refused, so the request never names content that is
     /// gone. The check and the save run in one write transaction.
+    ///
+    /// A save never places a request that is already stored: it keeps the
+    /// workspace, folder and position the store holds, read in the same
+    /// transaction, whatever `r` names. The editor's copy may predate a move
+    /// ([`App::move_request`]), which writing back its placement would undo.
+    /// Only a new request is placed where `r` puts it.
     pub fn save_request(&self, r: RequestDefinition) -> Result<RequestDefinition> {
         self.save_request_holding(r, None)
     }
@@ -333,6 +339,9 @@ impl App {
         let also = also.map(serde_json::to_value).transpose()?;
         self.store.atomically(|s| {
             let held: Option<RequestDefinition> = s.get(kind::REQUEST, &r.meta.id)?;
+            if let Some(h) = &held {
+                (r.workspace_id, r.folder_id, r.sort_key) = (h.workspace_id, h.folder_id, h.sort_key);
+            }
             let mut held: Vec<serde_json::Value> = held.map(|h| serde_json::to_value(&h.spec)).transpose()?.into_iter().collect();
             held.extend(also);
             if let Some(gone) = first_unstored_attachment_in(s, &spec, &held)? {
