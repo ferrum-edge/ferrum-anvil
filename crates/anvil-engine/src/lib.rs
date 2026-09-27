@@ -27,6 +27,7 @@ pub mod workload;
 
 use anvil_domain::execution::{ExecutionRecord, ResponseRecord, TransportFailure};
 use anvil_domain::request::Protocol;
+use anvil_transport::grpc::ChannelUse;
 use anvil_transport::http::{CacheFence, HttpTransport};
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::tls::{PreparedTls, TlsSettings};
@@ -68,7 +69,9 @@ pub struct Engine {
     pub grpc_channels: Option<Arc<anvil_transport::grpc::Channels>>,
     /// SPIFFE Workload API SVIDs and JWT bundles (memory only).
     pub workload: Arc<workload::WorkloadCache>,
-    tls: Mutex<HashMap<String, Arc<PreparedTls>>>,
+    /// Prepared TLS configurations by isolation (workspace) and profile key
+    /// (see [`Engine::prepared_tls`]).
+    tls: Mutex<HashMap<(String, String), Arc<PreparedTls>>>,
     cookies: CookieJars,
     /// Advanced by [`Engine::clear_sensitive_state`] before it clears
     /// anything (see [`SensitiveEpoch`]).
@@ -89,7 +92,8 @@ pub(crate) struct CookieJars {
 struct Jars {
     by_isolation: HashMap<String, cookie_store::CookieStore>,
     /// Advanced for an isolation by [`Engine::clear_isolation`] (a workspace
-    /// delete) when it removes that isolation's jar; 0 when never cleared.
+    /// delete) when it removes that isolation's jar, before that isolation's
+    /// prepared TLS configurations are dropped; 0 when never cleared.
     generations: HashMap<String, u64>,
 }
 
@@ -150,16 +154,23 @@ impl CookieJars {
 /// ([`Engine::clear_sensitive_state`]) starts a new epoch, and what an
 /// execution of an earlier epoch prepares or receives afterwards is not
 /// kept: its cookies, its prepared TLS material (client identity keys and
-/// session-ticket stores), its connections and its session tickets. An
-/// execution's epoch ([`Engine::execution_epoch`]) also holds its workspace
-/// cookie jar's generation: after a workspace delete
-/// ([`Engine::clear_isolation`]) its cookies are not kept either.
+/// session-ticket stores), its connections, its gRPC channels and its
+/// session tickets. A workspace delete ([`Engine::clear_isolation`]) does
+/// not start a new epoch: it starts a new generation of that workspace's
+/// cookie jar and prepared TLS configurations (held by an execution's epoch,
+/// see [`Engine::execution_epoch`]) and of the transports' caches for that
+/// workspace, and an execution in it that started before the delete keeps
+/// none of its cookies, prepared TLS material, connections, gRPC channels or
+/// session tickets. Other workspaces' executions are not affected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SensitiveEpoch {
     epoch: u64,
     transport: CacheFence,
-    /// The generation of the execution's workspace cookie jar; `None` for an
-    /// epoch taken for no workspace, which keeps no cookies.
+    /// The generation of the engine's gRPC channels (0 when it keeps none).
+    channels: u64,
+    /// The generation of the execution's workspace (its cookie jar and its
+    /// prepared TLS configurations); `None` for an epoch taken for no
+    /// workspace, which keeps no cookies and caches no TLS material.
     jar: Option<u64>,
 }
 
@@ -199,10 +210,11 @@ impl Engine {
         loop {
             let epoch = self.epoch.load(Ordering::SeqCst);
             let transport = CacheFence { tcp: self.http.cache_generations(), quic: self.h3.cache_generations() };
+            let channels = self.grpc_channels.as_ref().map_or(0, |c| c.generation());
             // A lock advances the epoch before it clears the transports: an
             // unchanged epoch means the generations are not newer than it.
             if self.epoch.load(Ordering::SeqCst) == epoch {
-                return SensitiveEpoch { epoch, transport, jar: None };
+                return SensitiveEpoch { epoch, transport, channels, jar: None };
             }
         }
     }
@@ -213,6 +225,13 @@ impl Engine {
     pub fn execution_epoch(&self, isolation: &str) -> SensitiveEpoch {
         let jar = self.cookies.generation(isolation);
         SensitiveEpoch { jar: Some(jar), ..self.sensitive_epoch() }
+    }
+
+    /// The engine's gRPC channels for a call of an execution of `epoch` in
+    /// `isolation`; `None` when the engine keeps none.
+    pub(crate) fn grpc_channels_for(&self, epoch: SensitiveEpoch, isolation: &str) -> Option<ChannelUse> {
+        let channels = self.grpc_channels.clone()?;
+        Some(ChannelUse { channels, isolation: isolation.to_string(), generation: epoch.channels })
     }
 
     fn is_current(&self, epoch: SensitiveEpoch) -> bool {
@@ -229,33 +248,53 @@ impl Engine {
         }
     }
 
-    /// Validated TLS material, cached by profile key. A key
-    /// `<profile variant>|<material hash>` replaces an entry of the same
-    /// variant with other material, so a rotated Workload API SVID does not
-    /// leave the superseded key material behind. For an execution of an
-    /// earlier `epoch` (a lock since it started) the material is prepared
-    /// but not cached: it holds a client identity's private key and a
-    /// session-ticket store.
-    pub fn prepared_tls(&self, epoch: SensitiveEpoch, key: &str, s: &TlsSettings) -> Result<Arc<PreparedTls>, TransportFailure> {
-        if let Some(p) = self.tls.lock().get(key) {
-            return Ok(p.clone());
+    /// Validated TLS material, cached per isolation (workspace) by profile
+    /// key: the material holds a client identity's private key and the
+    /// session store its connections resume from, so one workspace never
+    /// resumes another's TLS session, and a workspace delete drops its
+    /// entries. A key `<profile variant>|<material hash>` replaces an entry
+    /// of the same variant with other material in the same isolation, so a
+    /// rotated Workload API SVID does not leave the superseded key material
+    /// behind. For an execution of an earlier `epoch` (a lock, or a delete of
+    /// its workspace, since it started) or of no workspace, the material is
+    /// prepared but neither taken from the cache nor cached.
+    pub fn prepared_tls(
+        &self,
+        epoch: SensitiveEpoch,
+        isolation: &str,
+        key: &str,
+        s: &TlsSettings,
+    ) -> Result<Arc<PreparedTls>, TransportFailure> {
+        let entry = (isolation.to_string(), key.to_string());
+        {
+            let cache = self.tls.lock();
+            if let Some(p) = cache.get(&entry).filter(|_| self.tls_cacheable(epoch, isolation)) {
+                return Ok(p.clone());
+            }
         }
         let mut p = anvil_transport::tls::prepare(s)?;
         p.profile_key = key.to_string();
         let p = Arc::new(p);
         let mut cache = self.tls.lock();
         // Checked under the cache's lock, before the variant's entries are
-        // dropped: a clear either advanced the epoch before this point or
-        // empties the cache after it.
-        if !self.is_current(epoch) {
+        // dropped: a lock or a delete of the workspace either advanced its
+        // counter before this point or empties the cache after it.
+        if !self.tls_cacheable(epoch, isolation) {
             return Ok(p);
         }
         if let Some((variant, _)) = key.rsplit_once('|') {
             let prefix = format!("{variant}|");
-            cache.retain(|k, _| !k.starts_with(&prefix));
+            cache.retain(|(i, k), _| i != isolation || !k.starts_with(&prefix));
         }
-        cache.insert(key.to_string(), p.clone());
+        cache.insert(entry, p.clone());
         Ok(p)
+    }
+
+    /// Whether an execution of `epoch` in `isolation` may use and fill the
+    /// prepared TLS cache: no lock and no delete of its workspace since it
+    /// started. Called under the cache's lock.
+    fn tls_cacheable(&self, epoch: SensitiveEpoch, isolation: &str) -> bool {
+        self.is_current(epoch) && epoch.jar == Some(self.cookies.generation(isolation))
     }
 
     /// Prepared TLS configurations held (for tests and the lock check).
@@ -308,18 +347,36 @@ impl Engine {
         self.cookies.jars.lock().by_isolation.clear();
     }
 
-    /// Clear one workspace's caches (on workspace delete). A cookie store of
-    /// an execution in that workspace that started before this is refused.
+    /// Clear one workspace's caches (on workspace delete). An execution in
+    /// that workspace that started before this keeps nothing it prepares or
+    /// receives afterwards in them: no cookie, prepared TLS configuration,
+    /// pooled connection, gRPC channel or session ticket. The sensitive-state
+    /// epoch is not advanced, so other workspaces' executions are not
+    /// affected.
     pub fn clear_isolation(&self, isolation: &str) {
+        // First: from here on, a cookie store or a prepared TLS configuration
+        // of an execution in this workspace that started earlier is refused.
+        self.cookies.clear_isolation(isolation);
+        self.tls.lock().retain(|(i, _), _| i != isolation);
         self.http.pool.clear_isolation(isolation);
         self.http.tickets.clear_isolation(isolation);
         self.h3.clear_isolation(isolation);
-        self.cookies.clear_isolation(isolation);
+        if let Some(c) = &self.grpc_channels {
+            c.clear_isolation(isolation);
+        }
     }
 
-    /// Session tickets held for 0-RTT, over TCP and QUIC (for tests and the
-    /// lock check).
+    /// Session tickets and sessions held for resumption (for tests and the
+    /// lock check): the 0-RTT ticket caches over TCP and QUIC, and the
+    /// session stores of the prepared TLS configurations.
     pub fn session_tickets_held(&self) -> usize {
+        let prepared: usize = self.tls.lock().values().map(|p| p.sessions_held()).sum();
+        self.early_data_tickets_held() + prepared
+    }
+
+    /// Session tickets held for 0-RTT (the early-data ticket caches over TCP
+    /// and QUIC only; for tests).
+    pub fn early_data_tickets_held(&self) -> usize {
         self.http.tickets.tickets_held() + self.h3.tickets.tickets_held()
     }
 }

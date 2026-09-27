@@ -26,12 +26,13 @@ use anvil_domain::execution::{
 use anvil_domain::tls::{ServerSpiffeIdentity, TlsMinVersion};
 use parking_lot::Mutex;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{ClientSessionMemoryCache, Resumption, WebPkiServerVerifier};
+use rustls::client::{ClientSessionStore, Resumption, Tls12ClientSessionValue, Tls13ClientSessionValue, WebPkiServerVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::sign::CertifiedKey;
-use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{ClientConfig, DigitallySignedStruct, NamedGroup, RootCertStore, SignatureScheme};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -125,7 +126,9 @@ pub struct PreparedTls {
     pub server_name_override: Option<String>,
     /// SPIFFE server identity check (replaces host-name verification).
     pub spiffe: Option<SpiffeExpectation>,
-    sessions: Arc<ClientSessionMemoryCache>,
+    /// The session store of this profile's connections outside the
+    /// early-data opt-in (see [`crate::tickets`] for those under it).
+    sessions: Arc<SessionStore>,
     /// Which TLS profile (and revision) this material was prepared from, set
     /// by the caller; part of the session-ticket isolation key, so tickets are
     /// never shared between two profiles even with identical settings.
@@ -302,7 +305,7 @@ pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> 
         min_version: settings.min_version,
         server_name_override: settings.server_name_override.clone(),
         spiffe,
-        sessions: Arc::new(ClientSessionMemoryCache::new(64)),
+        sessions: Arc::default(),
         profile_key: String::new(),
     })
 }
@@ -333,6 +336,111 @@ pub(crate) struct PeerCheck<'a> {
 impl PreparedTls {
     pub(crate) fn peer_check(&self) -> PeerCheck<'_> {
         PeerCheck { verifier: self.verifier.as_ref(), roots: self.roots.as_ref(), spiffe: self.spiffe.as_ref() }
+    }
+
+    /// TLS 1.3 tickets and TLS 1.2 sessions that this profile's connections
+    /// outside the early-data opt-in keep for resumption (the lock check
+    /// counts them with the ticket caches).
+    pub fn sessions_held(&self) -> usize {
+        self.sessions.len()
+    }
+}
+
+/// Server names a prepared profile's session store keeps, as rustls'
+/// in-memory cache of 64 sessions does (8 server names of 8 tickets).
+const MAX_SESSION_SERVERS: usize = 8;
+/// TLS 1.3 tickets kept per server name.
+const MAX_SESSION_TICKETS: usize = 8;
+
+/// The session store of a prepared profile. It keeps what rustls' in-memory
+/// cache keeps, within the same bounds (the oldest server name is dropped
+/// first), and it can say how much it holds.
+#[derive(Default)]
+pub(crate) struct SessionStore {
+    servers: Mutex<SessionServers>,
+}
+
+#[derive(Default)]
+struct SessionServers {
+    by_name: HashMap<ServerName<'static>, ServerSessions>,
+    /// The keys of `by_name`, oldest first.
+    order: VecDeque<ServerName<'static>>,
+}
+
+#[derive(Default)]
+struct ServerSessions {
+    kx_hint: Option<NamedGroup>,
+    tls12: Option<Tls12ClientSessionValue>,
+    /// Oldest first.
+    tls13: VecDeque<Tls13ClientSessionValue>,
+}
+
+impl SessionServers {
+    fn edit(&mut self, name: ServerName<'static>, f: impl FnOnce(&mut ServerSessions)) {
+        if !self.by_name.contains_key(&name) {
+            if self.order.len() >= MAX_SESSION_SERVERS
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.by_name.remove(&oldest);
+            }
+            self.order.push_back(name.clone());
+        }
+        f(self.by_name.entry(name).or_default());
+    }
+
+    fn get_mut(&mut self, name: &ServerName<'_>) -> Option<&mut ServerSessions> {
+        self.by_name.get_mut(&name.to_owned())
+    }
+}
+
+impl SessionStore {
+    /// TLS 1.3 tickets and TLS 1.2 sessions held.
+    pub(crate) fn len(&self) -> usize {
+        self.servers.lock().by_name.values().map(|s| s.tls13.len() + usize::from(s.tls12.is_some())).sum()
+    }
+}
+
+impl std::fmt::Debug for SessionStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The sessions carry secrets: none of them is shown.
+        f.debug_struct("SessionStore").finish_non_exhaustive()
+    }
+}
+
+impl ClientSessionStore for SessionStore {
+    fn set_kx_hint(&self, server_name: ServerName<'static>, group: NamedGroup) {
+        self.servers.lock().edit(server_name, |s| s.kx_hint = Some(group));
+    }
+
+    fn kx_hint(&self, server_name: &ServerName<'_>) -> Option<NamedGroup> {
+        self.servers.lock().get_mut(server_name).and_then(|s| s.kx_hint)
+    }
+
+    fn set_tls12_session(&self, server_name: ServerName<'static>, value: Tls12ClientSessionValue) {
+        self.servers.lock().edit(server_name, |s| s.tls12 = Some(value));
+    }
+
+    fn tls12_session(&self, server_name: &ServerName<'_>) -> Option<Tls12ClientSessionValue> {
+        self.servers.lock().get_mut(server_name).and_then(|s| s.tls12.clone())
+    }
+
+    fn remove_tls12_session(&self, server_name: &ServerName<'static>) {
+        if let Some(s) = self.servers.lock().get_mut(server_name) {
+            s.tls12 = None;
+        }
+    }
+
+    fn insert_tls13_ticket(&self, server_name: ServerName<'static>, value: Tls13ClientSessionValue) {
+        self.servers.lock().edit(server_name, |s| {
+            if s.tls13.len() >= MAX_SESSION_TICKETS {
+                s.tls13.pop_front();
+            }
+            s.tls13.push_back(value);
+        });
+    }
+
+    fn take_tls13_ticket(&self, server_name: &ServerName<'static>) -> Option<Tls13ClientSessionValue> {
+        self.servers.lock().get_mut(server_name).and_then(|s| s.tls13.pop_back())
     }
 }
 

@@ -207,9 +207,25 @@
   its responses are not stored, the TLS configuration it prepares (which
   holds a client identity's private key) is not cached, its connections
   (HTTP/1.1, HTTP/2 and HTTP/3) are closed instead of pooled, and its TLS or
-  QUIC connections keep none of the session tickets they receive. Not yet
-  fenced: the gRPC channels of a load run's virtual users, and a workspace
-  delete while work is in flight.
+  QUIC connections keep none of the session tickets they receive.
+- Work still in flight when its workspace is deleted no longer refills that
+  workspace's caches: a request, session or gRPC call of the deleted
+  workspace closes its connections instead of pooling them, caches none of
+  the TLS configurations it prepares and keeps none of the session tickets
+  it receives, even on a later redirect or retry. Other workspaces' work in
+  flight at the same time is not affected.
+- Prepared TLS configurations, and the session tickets their connections
+  receive, are now kept per workspace (every workspace without a TLS profile
+  shared one configuration), and a workspace delete drops that workspace's
+  tickets. Connections without the early-data opt-in still never resume a
+  session; under it, a connection resumes only its own workspace's tickets.
+- Pooled gRPC channels, which only a load run's virtual users keep, are no
+  longer shared between workspaces, and a call that began before its
+  engine's channels were cleared no longer returns its connection to them.
+  The app's lock and a workspace delete do not clear a load run's engines:
+  runs are expected to be stopped on lock (see #162).
+- The lock check now also counts the session tickets kept by prepared TLS
+  configurations (connections without the early-data opt-in).
 - A spec reimport now compares the import's scoped configuration too, not
   only its requests: the source's own variables, auth, settings and
   description (on the new workspace, or on the import root in an existing

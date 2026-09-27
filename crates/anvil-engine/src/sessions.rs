@@ -721,7 +721,7 @@ async fn prepare_grpc(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
         // Channel reuse only where the engine enables it (load runs) and
         // keep-alive is on; interactive calls always own their connection.
-        channels: if !interactive && b.prep.settings.keepalive { engine.grpc_channels.clone() } else { None },
+        channels: if !interactive && b.prep.settings.keepalive { engine.grpc_channels_for(b.prep.epoch, &ctx.isolation) } else { None },
     };
     let mut p = finish_prep(b, Plan::Grpc(plan), "POST".into(), display, headers, unary_body, facts);
     p.content_type = Some(

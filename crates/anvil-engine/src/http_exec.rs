@@ -161,7 +161,8 @@ pub(crate) fn resolve_auth(
 pub(crate) type TlsChoice = (Arc<PreparedTls>, Option<String>, Vec<anvil_domain::tls::HostBinding>);
 
 /// Build the TLS settings for a target (profile scoping + host binding),
-/// for an execution of `epoch` (see [`Engine::prepared_tls`]).
+/// for an execution of `epoch` in `ctx`'s workspace (see
+/// [`Engine::prepared_tls`]).
 pub(crate) fn tls_for(
     engine: &Engine,
     epoch: SensitiveEpoch,
@@ -176,7 +177,8 @@ pub(crate) fn tls_for(
             return Err(TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "the selected TLS profile no longer exists")
                 .with_field("settings.tls_profile"));
         }
-        return Ok((engine.prepared_tls(epoch, "default-strict", &TlsSettings::strict_system())?, None, vec![]));
+        let strict = engine.prepared_tls(epoch, &ctx.isolation, "default-strict", &TlsSettings::strict_system())?;
+        return Ok((strict, None, vec![]));
     };
     let prepared = prepared_from_profile(engine, epoch, ctx, p, &target.host, target.port, inferred)?;
     Ok((prepared, Some(p.name.clone()), p.bindings.clone()))
@@ -246,7 +248,7 @@ pub(crate) fn prepared_from_profile(
         s.client_identity.is_some(),
         anvil_transport::certs::sha256_hex(material.as_bytes())
     );
-    engine.prepared_tls(epoch, &key, &s)
+    engine.prepared_tls(epoch, &ctx.isolation, &key, &s)
 }
 
 fn proxy_invalid(msg: impl Into<String>, field: &str) -> TransportFailure {

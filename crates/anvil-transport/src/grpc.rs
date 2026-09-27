@@ -38,6 +38,7 @@
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
+use crate::fence::{Generations, in_isolation};
 use crate::grpc_web::{self, FrameError, WireFrame};
 use crate::http::{AttemptOutput, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
@@ -335,7 +336,7 @@ pub struct GrpcPlan {
     /// Reuse pooled connections from (and return them to) these channels.
     /// `None` (manual calls, interactive sessions, fresh-connection load):
     /// every call opens and closes its own connection.
-    pub channels: Option<Arc<Channels>>,
+    pub channels: Option<ChannelUse>,
 }
 
 impl GrpcPlan {
@@ -555,6 +556,11 @@ impl SharedChannel {
             SharedConn::H3 { quic, .. } => quic.close_reason().is_none(),
         }
     }
+
+    /// Whether this is the HTTP/3 channel over `quic`.
+    fn is_quic(&self, quic: &quinn::Connection) -> bool {
+        matches!(&self.conn, SharedConn::H3 { quic: q, .. } if q.stable_id() == quic.stable_id())
+    }
 }
 
 /// A pooled HTTP/1.1 connection (gRPC-Web): used by one call at a time.
@@ -573,10 +579,30 @@ struct ExclusiveChannel {
 /// gRPC-Web) across its calls. A manual call opens its own connection so its
 /// evidence covers the whole setup. HBONE tunnels are never pooled (a tunnel
 /// carries one execution's identity and headers).
+///
+/// Every key starts with the workspace isolation. [`Channels::clear`] (a
+/// lock) and [`Channels::clear_isolation`] (a workspace delete) start a new
+/// generation: a call of an execution that began before either (see
+/// [`ChannelUse::generation`]) does not return its connection to the
+/// channels it covers, and the connection closes when the call ends.
 #[derive(Default)]
 pub struct Channels {
+    /// Advanced by the clears; taken first, before `shared` or `exclusive`.
+    generations: parking_lot::Mutex<Generations>,
     shared: parking_lot::Mutex<HashMap<String, SharedChannel>>,
     exclusive: parking_lot::Mutex<HashMap<String, Vec<ExclusiveChannel>>>,
+}
+
+/// A plan's use of an engine's [`Channels`].
+#[derive(Clone)]
+pub struct ChannelUse {
+    pub channels: Arc<Channels>,
+    /// Workspace isolation component of the channel key.
+    pub isolation: String,
+    /// [`Channels::generation`] when the execution began: after a clear
+    /// since then that covers `isolation`, no connection is returned to
+    /// the channels.
+    pub generation: u64,
 }
 
 const MAX_EXCLUSIVE_PER_KEY: usize = 8;
@@ -586,10 +612,28 @@ impl Channels {
         Channels::default()
     }
 
-    /// Drop every pooled connection (e.g. on lock or at the end of a run).
+    /// Drop every pooled connection (e.g. on lock or at the end of a run)
+    /// and start a new generation.
     pub fn clear(&self) {
+        let mut generations = self.generations.lock();
+        generations.clear();
         self.shared.lock().clear();
         self.exclusive.lock().clear();
+    }
+
+    /// Drop the pooled connections of one workspace isolation (a workspace
+    /// delete) and start a new generation.
+    pub fn clear_isolation(&self, isolation: &str) {
+        let mut generations = self.generations.lock();
+        generations.clear_isolation(isolation);
+        self.shared.lock().retain(|k, _| !in_isolation(k, isolation));
+        self.exclusive.lock().retain(|k, _| !in_isolation(k, isolation));
+    }
+
+    /// The current generation, taken when an execution begins (see
+    /// [`ChannelUse::generation`]).
+    pub fn generation(&self) -> u64 {
+        self.generations.lock().current()
     }
 
     /// Pooled connections currently held (tests and diagnostics).
@@ -638,9 +682,11 @@ impl Channels {
 
     /// Return a connection after a call. HTTP/2 stays pooled while it is
     /// open; HTTP/3 and HTTP/1.1 only after a clean call (a canceled HTTP/3
-    /// stream is not reused: the connection is closed instead).
-    async fn checkin(&self, key: &str, c: Connected, clean: bool) {
+    /// stream is not reused: the connection is closed instead). After a
+    /// clear since `generation` that covers `key`, it is not pooled.
+    async fn checkin(&self, key: &str, generation: u64, c: Connected, clean: bool) {
         let Connected { conn, stats, mut observation, quic } = c;
+        let was_reused = observation.reused;
         observation.reused = false;
         match conn {
             Conn::H2(s) => {
@@ -648,8 +694,9 @@ impl Channels {
                     self.shared.lock().remove(key);
                     return;
                 }
+                let generations = self.generations.lock();
                 let mut shared = self.shared.lock();
-                if !shared.contains_key(key) {
+                if generations.admits(generation, key) && !shared.contains_key(key) {
                     let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
                     observation.prior_requests = 0;
                     shared.insert(key.to_string(), SharedChannel { conn: SharedConn::H2(s), stats, template: observation, served });
@@ -662,15 +709,27 @@ impl Channels {
                     quic.close(crate::h3::H3_NO_ERROR.into(), b"");
                     return;
                 }
+                let generations = self.generations.lock();
                 let mut shared = self.shared.lock();
-                if !shared.contains_key(key) {
-                    let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
-                    observation.prior_requests = 0;
-                    shared.insert(
-                        key.to_string(),
-                        SharedChannel { conn: SharedConn::H3 { send, quic }, stats, template: observation, served },
-                    );
+                // A reused channel is still pooled: it stays open for the
+                // calls that share it.
+                let pooled = shared.get(key).map(|ch| ch.is_quic(&quic));
+                if pooled == Some(true) {
+                    return;
                 }
+                if pooled.is_some() || !generations.admits(generation, key) {
+                    // Not kept (another channel is pooled under the key, or a
+                    // lock or a delete of its workspace fenced it). A channel
+                    // this call opened is closed now; a reused one is only
+                    // dropped, since other calls may still be streaming on it.
+                    if !was_reused {
+                        quic.close(crate::h3::H3_NO_ERROR.into(), b"");
+                    }
+                    return;
+                }
+                let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
+                observation.prior_requests = 0;
+                shared.insert(key.to_string(), SharedChannel { conn: SharedConn::H3 { send, quic }, stats, template: observation, served });
             }
             Conn::H1(mut s) => {
                 if !clean {
@@ -680,6 +739,10 @@ impl Channels {
                 // processed the end of the response; wait briefly for it.
                 let ready = tokio::time::timeout(Duration::from_millis(50), s.ready()).await;
                 if !matches!(ready, Ok(Ok(()))) {
+                    return;
+                }
+                let generations = self.generations.lock();
+                if !generations.admits(generation, key) {
                     return;
                 }
                 let mut exclusive = self.exclusive.lock();
@@ -693,8 +756,8 @@ impl Channels {
     }
 }
 
-/// Pool key for a plan's connection on one leg.
-fn channel_key(plan: &GrpcPlan, leg: Leg) -> String {
+/// Pool key for a plan's connection on one leg, in one workspace isolation.
+fn channel_key(isolation: &str, plan: &GrpcPlan, leg: Leg) -> String {
     let proxy = plan
         .proxy
         .as_ref()
@@ -705,7 +768,8 @@ fn channel_key(plan: &GrpcPlan, leg: Leg) -> String {
     // different header plans (or none) are never shared.
     let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
     format!(
-        "{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}",
+        "{}|{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}",
+        isolation,
         leg,
         plan.host.to_ascii_lowercase(),
         plan.port,
@@ -1407,8 +1471,8 @@ async fn attempt(
         .channels
         .as_ref()
         .filter(|_| !interactive && !crate::hbone::is_hbone(plan.proxy.as_ref()))
-        .map(|p| (p, channel_key(plan, leg)));
-    let pooled = pool.as_ref().and_then(|(p, key)| p.checkout(key));
+        .map(|u| (u, channel_key(&u.isolation, plan, leg)));
+    let pooled = pool.as_ref().and_then(|(u, key)| u.channels.checkout(key));
     let connected = match pooled {
         Some(c) => {
             let detail = Some("pooled gRPC channel");
@@ -1442,12 +1506,12 @@ async fn attempt(
     let cx = CallCx { plan, events, cancel, total_deadline, index };
     let out = exchange(cx, local, &mut conn, stats.clone(), rec, obs, commands).await;
     match pool {
-        Some((p, key)) => {
+        Some((u, key)) => {
             let last = out.attempts.last();
             let clean = last.is_some_and(|a| {
                 a.observation.failure.is_none() && a.response.as_ref().is_some_and(|r| r.body.completeness == BodyCompleteness::Complete)
             });
-            p.checkin(&key, Connected { conn, stats, observation, quic }, clean).await;
+            u.channels.checkin(&key, u.generation, Connected { conn, stats, observation, quic }, clean).await;
         }
         None => {
             if let Some(q) = quic {

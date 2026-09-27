@@ -302,7 +302,7 @@ fn ctrl(env: &Env) -> Fut<'_> {
         c.add(
             CheckKind::Diagnosis,
             "early data off by default: no early-data evidence, no ticket cache",
-            o.record.attempts.iter().all(|a| a.early_data.is_none()) && env.engine.session_tickets_held() == 0,
+            o.record.attempts.iter().all(|a| a.early_data.is_none()) && env.engine.early_data_tickets_held() == 0,
             line(&o),
         );
         let seen = backend_requests(env, from);

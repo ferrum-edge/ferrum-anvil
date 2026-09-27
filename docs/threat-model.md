@@ -258,15 +258,31 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   following is kept after it: its responses' cookies, the TLS
   configurations it prepares (which hold a client identity's private key
   and a session store), its connections (HTTP/1.1, HTTP/2 or HTTP/3) and
-  the session tickets they receive. A workspace delete
-  (`Engine::clear_isolation`) fences that workspace's cookie jar the same
-  way: the cookies of a request or session that started before the delete
-  are not kept, so they cannot reappear in a workspace restored with the
-  same id. The exceptions, both tracked for follow-up: the gRPC channels of
-  a load run's virtual users are not fenced (their engines are stopped on
-  lock and dropped with the run), and a workspace delete clears that
-  workspace's connections and session tickets without starting a new
-  generation.
+  the session tickets they receive. The lock check counts the tickets of
+  every session store: the 0-RTT ticket caches and those of the prepared
+  TLS configurations. Prepared TLS configurations, and the session stores
+  they hold, are kept per workspace (a connection outside the early-data
+  opt-in never resumes from them: rustls resumes a ticket only with the
+  verifier instance that obtained it, and each such connection has its
+  own), and a connection under the opt-in resumes only its own workspace's
+  tickets. A workspace delete
+  (`Engine::clear_isolation`) fences that workspace's caches the same way,
+  with a generation of its own, so other workspaces' work is not affected:
+  it drops the workspace's cookies, prepared TLS configurations (with their
+  sessions), connections and session tickets, and for a request, session or
+  gRPC call of that workspace that started before the delete, none of
+  those it prepares or receives afterwards is kept, even on a later
+  redirect or retry, so they cannot reappear in a workspace restored with
+  the same id. Pooled gRPC channels exist only on a load run's own engines
+  (one per virtual-user slot); a call that began before a clear of its
+  engine's channels does not return its connection to them. Neither the
+  lock nor a workspace delete clears those engines: the lock stops the run,
+  and its engines are dropped when it ends. Residual gap: deleting a
+  workspace while one of its load runs is still running leaves that run's
+  engines holding the workspace's pooled connections, session tickets,
+  cookies, prepared TLS configurations and gRPC channels until the run
+  ends (see
+  [ferrum-anvil#162](https://github.com/ferrum-edge/ferrum-anvil/issues/162)).
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).
