@@ -112,7 +112,7 @@ impl Engine {
                         url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
                     }
                     for (k, v) in &applied.facts {
-                        inferred.push(format!("auth {k}: {}", redactor.text(v)));
+                        inferred.push(redactor.inferred(&format!("auth {k}: {v}")));
                     }
                 }
             }
