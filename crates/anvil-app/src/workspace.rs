@@ -428,7 +428,18 @@ impl App {
     }
 
     pub fn delete_environment(&self, id: &Id) -> Result<()> {
-        self.store.delete(kind::ENVIRONMENT, id)?;
+        self.store.atomically(|s| {
+            let Some(env) = s.get::<Environment>(kind::ENVIRONMENT, id)? else { return Ok(()) };
+            s.delete(kind::ENVIRONMENT, id)?;
+            if let Some(mut ws) = s.get::<Workspace>(kind::WORKSPACE, &env.workspace_id)?
+                && ws.active_environment_id == Some(*id)
+            {
+                ws.active_environment_id = None;
+                ws.meta.updated_at = chrono::Utc::now();
+                s.put(kind::WORKSPACE, &ws.meta.id, None, None, 0.0, &ws)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 

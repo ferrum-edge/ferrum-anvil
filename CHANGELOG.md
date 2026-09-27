@@ -110,6 +110,11 @@
   session (not written to disk): they are hidden while another workspace is
   shown, marked **unsaved** again on return, and dropped once the scenario is
   no longer in its workspace.
+- Deleting an environment clears its active workspace selection in the same
+  transaction. Older profiles with a missing workspace-default environment
+  now prepare requests without an environment, and collection run reports say
+  when that fallback was used; an explicitly selected missing environment
+  still fails clearly.
 - Server-sent events: an event whose data (its `data:` lines joined with
   newlines) passes the parser's event bound, four times the line bound
   (`min(max_response_bytes, 1 MiB)`, at least 1 KiB), now stops the attempt
@@ -187,3 +192,28 @@
   identity bound to no host, whatever the proxy's kind or `no_proxy`, as it
   already was for the request's own TLS profile. This applies to a send, a
   session, a collection run and a load run.
+- Multi auth now applies each profile to the request as it will be sent
+  after the earlier profiles' changes. Cookie API keys from several profiles
+  all reach the one `Cookie` header, after the request's own cookies (from
+  every `Cookie` header it has); earlier builds sent only the last profile's
+  cookie. A profile's cookie replaces a cookie of the same name already in
+  the request, as a header API key replaces a header of the same name. An
+  HMAC profile signs the query, body and `Host` the earlier profiles
+  produced (a query API key, a WS-Security header), where it signed the
+  request before them and the gateway refused the signature. Before anything
+  is sent, a multi-auth set is now refused when two profiles would set the
+  same header, cookie or query parameter (including inside a nested set),
+  or when a profile would change what an earlier signature covers: after
+  HMAC, the query, the body or the `Host`, `Date`, `Digest` or
+  `Content-Digest` header; after DPoP, the `Host` header. Put such a profile
+  before the signing one. A multi-auth set can hold one HMAC profile and one
+  DPoP profile.
+- A cookie API key whose name is not an RFC 6265 cookie name (a token) or
+  whose value is not made of cookie octets (optionally in double quotes) is
+  refused before anything is sent, so its value cannot add or change another
+  cookie (for example a value `a; x=y`). The message names the cookie, never
+  its value.
+- HMAC evidence no longer records `hmac.signing_string_sha256`. With multi
+  auth the signing string can include an earlier profile's query API key,
+  and its hash could be checked against guesses of that key offline. The
+  nonce is still recorded.
