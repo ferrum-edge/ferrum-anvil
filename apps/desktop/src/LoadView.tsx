@@ -170,6 +170,9 @@ export function LoadView(props: {
   // written to disk). Only the shown workspace's drafts are read, so a switch
   // hides them and switching back restores them.
   const [drafts, setDrafts] = useState<Drafts>({});
+  // A new plan that was not edited yet: it gets a draft on its first edit and
+  // is dropped when something else is selected or the workspace switches.
+  const [fresh, setFresh] = useState<LoadPlan | null>(null);
   const [live, setLive] = useState<{ runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] } | null>(null);
   // Selection and lists belong to one workspace: reset them in the render that
   // switches, so no editor, confirmation or action of the previous workspace
@@ -179,6 +182,7 @@ export function LoadView(props: {
   if (shownWs !== props.workspaceId) {
     setShownWs(props.workspaceId);
     setSel(null);
+    setFresh(null);
     setPlans([]);
     setReports([]);
     setDatasets([]);
@@ -238,9 +242,13 @@ export function LoadView(props: {
   const wsDrafts = drafts[props.workspaceId] ?? {};
   // Only a plan of the shown workspace is ever offered for editing: its
   // unsaved edit, else the saved copy from the workspace's list.
-  const selFound = sel?.kind === "plan" ? (wsDrafts[sel.id]?.plan ?? plans.find((p) => p.id === sel.id)) : undefined;
+  const shownFresh = fresh && fresh.workspace_id === props.workspaceId && sel?.kind === "plan" && sel.id === fresh.id ? fresh : undefined;
+  const selFound = sel?.kind === "plan" ? (wsDrafts[sel.id]?.plan ?? plans.find((p) => p.id === sel.id) ?? shownFresh) : undefined;
   const selPlan = selFound?.workspace_id === props.workspaceId ? selFound : undefined;
   const newDrafts = Object.values(wsDrafts).filter((d) => d.created && !plans.some((p) => p.id === d.plan.id));
+  const newPlans = [...newDrafts.map((d) => d.plan), ...(shownFresh && !wsDrafts[shownFresh.id] && !plans.some((p) => p.id === shownFresh.id) ? [shownFresh] : [])];
+  // A plan that was never saved: it is discarded locally, there is nothing to delete.
+  const selNew = !!selPlan && newPlans.some((p) => p.id === selPlan.id);
   /** Records an edit of a plan in workspace `ws`; `created` defaults to the draft's current flag. */
   const editDraft = (ws: string, plan: LoadPlan, created?: boolean) =>
     setDrafts((d) => ({ ...d, [ws]: { ...d[ws], [plan.id]: { plan, created: created ?? d[ws]?.[plan.id]?.created ?? false } } }));
@@ -251,9 +259,14 @@ export function LoadView(props: {
       if (!own?.[id] || (only && own[id].plan !== only)) return d;
       return { ...d, [ws]: Object.fromEntries(Object.entries(own).filter(([k]) => k !== id)) };
     });
+  /** Selects `s`; an untouched new plan is dropped unless it is the one selected. */
+  const select = (s: Sel) => {
+    setSel(s);
+    setFresh((f) => (f && s?.kind === "plan" && s.id === f.id ? f : null));
+  };
   const createPlan = () => {
     const p = newPlan(props.workspaceId);
-    editDraft(props.workspaceId, p, true);
+    setFresh(p);
     setSel({ kind: "plan", id: p.id });
   };
 
@@ -272,20 +285,20 @@ export function LoadView(props: {
               New
             </button>
           </div>
-          {plans.length === 0 && newDrafts.length === 0 && <div className="side-empty">No plans yet.</div>}
-          {[...plans, ...newDrafts.map((d) => d.plan)].map((p) => (
+          {plans.length === 0 && newPlans.length === 0 && <div className="side-empty">No plans yet.</div>}
+          {[...plans, ...newPlans].map((p) => (
             <div
               key={p.id}
               className={`tree-row${sel?.kind === "plan" && sel.id === p.id ? " selected" : ""}`}
               role="button"
               tabIndex={0}
-              onClick={() => setSel({ kind: "plan", id: p.id })}
-              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "plan", id: p.id })}
+              onClick={() => select({ kind: "plan", id: p.id })}
+              onKeyDown={(e) => e.key === "Enter" && select({ kind: "plan", id: p.id })}
             >
               <Icon name="zap" size={14} className="row-icon" />
-              <span className="name">{p.name}</span>
+              <span className="name">{wsDrafts[p.id]?.plan.name ?? p.name}</span>
               {!p.trusted && <span className="badge warn">imported</span>}
-              {wsDrafts[p.id] && <span className="badge neutral">unsaved</span>}
+              {(wsDrafts[p.id] || p === shownFresh) && <span className="badge neutral">unsaved</span>}
             </div>
           ))}
           <div className="side-section-head">
@@ -299,8 +312,8 @@ export function LoadView(props: {
               role="button"
               tabIndex={0}
               title={`${r.plan_name} — ${new Date(r.started_at).toLocaleString()}`}
-              onClick={() => setSel({ kind: "report", id: r.run_id })}
-              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "report", id: r.run_id })}
+              onClick={() => select({ kind: "report", id: r.run_id })}
+              onKeyDown={(e) => e.key === "Enter" && select({ kind: "report", id: r.run_id })}
             >
               <div className="hist-line">
                 <span className="hist-title">{r.plan_name}</span>
@@ -325,8 +338,13 @@ export function LoadView(props: {
               key={`${props.workspaceId}/${selPlan.id}`}
               workspaceId={props.workspaceId}
               plan={selPlan}
-              unsaved={!!wsDrafts[selPlan.id]}
-              onChange={(p) => editDraft(props.workspaceId, p)}
+              unsaved={!!wsDrafts[selPlan.id] || selPlan === shownFresh}
+              onChange={(p) => {
+                // The first edit of a new plan keeps it as a draft.
+                const first = selPlan === shownFresh;
+                editDraft(props.workspaceId, p, first || undefined);
+                if (first) setFresh(null);
+              }}
               requests={requests}
               environments={props.environments}
               datasets={datasets}
@@ -336,10 +354,11 @@ export function LoadView(props: {
                 // Saved, even if another workspace is shown now: once the list
                 // is fresh, drop this render's workspace draft unless it was
                 // edited again while the save was pending.
-                const fresh = await reload();
+                const listed = await reload();
                 dropDraft(p.workspace_id, p.id, sent);
+                setFresh((f) => (f?.id === p.id ? null : f));
                 // Switched workspace meanwhile: do not select it in another workspace's view.
-                if (fresh === null) return;
+                if (listed === null) return;
                 setSel({ kind: "plan", id: p.id });
               }}
               onDeleted={async () => {
@@ -347,10 +366,18 @@ export function LoadView(props: {
                 if ((await reload()) === null) return;
                 setSel(null);
               }}
+              onDiscard={
+                selNew
+                  ? () => {
+                      dropDraft(props.workspaceId, selPlan.id);
+                      select(null);
+                    }
+                  : undefined
+              }
               onStarted={(runKey, name) => setLive({ runKey, planName: name, progress: null, timeline: [] })}
             />
           )}
-          {!live && sel?.kind === "report" && <ReportView key={sel.id} runId={sel.id} reports={reports} notify={props.notify} onDeleted={async () => { await reload(); setSel(null); }} />}
+          {!live && sel?.kind === "report" && <ReportView key={sel.id} runId={sel.id} reports={reports} notify={props.notify} onDeleted={async () => { if ((await reload()) === null) return; setSel(null); }} />}
           {!live && (!sel || (sel.kind === "plan" && !selPlan)) && (
             <div className="empty">
               <div>
@@ -389,6 +416,8 @@ export function PlanEditor(props: {
   /** `sent` is the edit that was saved. */
   onSaved: (p: LoadPlan, sent: EditPlan) => void;
   onDeleted: () => void;
+  /** Set for a plan that was never saved: it is discarded here instead of deleted. */
+  onDiscard?: () => void;
   onStarted: (runKey: string, name: string) => void;
 }) {
   const [p, setEdit] = useState<EditPlan>(() => editable(props.plan));
@@ -475,19 +504,25 @@ export function PlanEditor(props: {
             <Icon name="play" size={12} />
             Run…
           </button>
-          <button
-            className="btn ghost danger icon-btn"
-            aria-label="Delete plan"
-            title="Delete plan"
-            disabled={otherWorkspace}
-            onClick={async () => {
-              if (otherWorkspace) return;
-              await api.deleteLoadPlan(p.id).catch(() => undefined);
-              props.onDeleted();
-            }}
-          >
-            <Icon name="trash" />
-          </button>
+          {props.onDiscard ? (
+            <button className="btn ghost danger" title="Discard this unsaved plan" onClick={props.onDiscard}>
+              Discard
+            </button>
+          ) : (
+            <button
+              className="btn ghost danger icon-btn"
+              aria-label="Delete plan"
+              title="Delete plan"
+              disabled={otherWorkspace}
+              onClick={async () => {
+                if (otherWorkspace) return;
+                await api.deleteLoadPlan(p.id).catch(() => undefined);
+                props.onDeleted();
+              }}
+            >
+              <Icon name="trash" />
+            </button>
+          )}
         </div>
       </div>
       {!p.trusted && <div className="warn-box">This plan was imported. Review it and save it before it can run.</div>}

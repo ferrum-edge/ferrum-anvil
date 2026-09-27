@@ -285,6 +285,37 @@ describe("PlanEditor", () => {
 
 // ------------------------------------------------------------ workspace scoping
 
+function sampleReport(): LoadReport {
+  return {
+    run_id: "run-1",
+    schema_version: 1,
+    engine: "anvil-native",
+    engine_version: "x",
+    plan: plan(),
+    request_revisions: [],
+    started_at: "2026-09-26T00:00:00Z",
+    finished_at: "2026-09-26T00:00:05Z",
+    completion: "completed",
+    partial: false,
+    warmup_included_in_metrics: false,
+    destination_summary: ["udp://127.0.0.1:9"],
+    counts: { scheduled: 6, started: 6, dropped: 0, completed: 6, transport_failures: 0, application_failures: 0, assertion_failures: 0, timeouts: 0, canceled: 0, in_flight_at_end: 0 },
+    achieved_rate_per_sec: 1.2,
+    latency_success: none,
+    latency_failure: none,
+    histogram_success_b64: "",
+    status_distribution: [],
+    failure_categories: [],
+    timeline: [],
+    bytes_sent: 10,
+    bytes_received: 0,
+    generator: { peak_cpu_percent: null, peak_rss_bytes: null, max_schedule_lag_us: 0, p99_schedule_lag_us: 0, target_not_achieved: false, notes: [] },
+    notes: [],
+    requests: units(),
+    protocol_metrics: udp(true),
+  } as unknown as LoadReport;
+}
+
 function deferred<T>() {
   let resolve!: (v: T) => void;
   const promise = new Promise<T>((res) => {
@@ -337,6 +368,7 @@ const saveInto = (a: Record<string, unknown>) => {
 const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1] as Record<string, unknown>);
 const button = (name: string) => screen.getByRole("button", { name }) as HTMLButtonElement;
 const planName = () => screen.getByLabelText("Plan name") as HTMLInputElement;
+const sidebar = () => screen.getByRole("complementary", { name: "Load plans and reports" });
 const view = (ws: string) => <LoadView workspaceId={ws} tree={[]} environments={[]} notify={notify} />;
 
 /** Waits until workspace `ws`'s lists were requested and answered. */
@@ -373,6 +405,9 @@ describe("LoadView workspace switch", () => {
     fireEvent.click(await screen.findByText("Plan A"));
     fireEvent.change(planName(), { target: { value: "Edited A" } });
     expect(screen.getAllByText("unsaved")).toHaveLength(2);
+    // The row names the edit, as the editor does.
+    expect(screen.getByText("Edited A")).toBeTruthy();
+    expect(screen.queryByText("Plan A")).toBeNull();
 
     r.rerender(view("B"));
     await screen.findByText("Plan B");
@@ -383,10 +418,10 @@ describe("LoadView workspace switch", () => {
     expect(screen.queryByText("unsaved")).toBeNull();
 
     r.rerender(view("A"));
-    await screen.findByText("Plan A");
+    await screen.findByText("Edited A");
     expect(screen.queryByLabelText("Plan name")).toBeNull();
     expect(screen.getAllByText("unsaved")).toHaveLength(1);
-    fireEvent.click(screen.getByText("Plan A"));
+    fireEvent.click(screen.getByText("Edited A"));
     expect(planName().value).toBe("Edited A");
     expect(screen.getAllByText("unsaved")).toHaveLength(2);
     expect(calls("load_plan_save")).toHaveLength(0);
@@ -415,6 +450,86 @@ describe("LoadView workspace switch", () => {
     fireEvent.click(await screen.findByText("Draft A"));
     expect(planName().value).toBe("Draft A");
     expect(screen.getAllByText("unsaved")).toHaveLength(2);
+  });
+
+  it("drops an untouched new plan when something else is selected or the workspace switches", async () => {
+    backend();
+    const r = render(view("A"));
+    await screen.findByText("Plan A");
+    fireEvent.click(button("New"));
+    expect(planName().value).toBe("New load plan");
+    expect(within(sidebar()).getAllByText("New load plan")).toHaveLength(1);
+
+    fireEvent.click(screen.getByText("Plan A"));
+    expect(planName().value).toBe("Plan A");
+    expect(within(sidebar()).queryByText("New load plan")).toBeNull();
+    expect(screen.queryByText("unsaved")).toBeNull();
+
+    fireEvent.click(button("New"));
+    r.rerender(view("B"));
+    await listed("B");
+    r.rerender(view("A"));
+    await screen.findByText("Plan A");
+    await act(async () => {});
+    expect(within(sidebar()).queryByText("New load plan")).toBeNull();
+    expect(screen.queryByText("unsaved")).toBeNull();
+    expect(calls("load_plan_delete")).toHaveLength(0);
+  });
+
+  it("discards an unsaved new plan locally, and deletes a saved one", async () => {
+    backend({ load_plan_delete: () => undefined });
+    render(view("A"));
+    await screen.findByText("Plan A");
+
+    // Untouched.
+    fireEvent.click(button("New"));
+    expect(screen.queryByRole("button", { name: "Delete plan" })).toBeNull();
+    fireEvent.click(button("Discard"));
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    expect(within(sidebar()).queryByText("New load plan")).toBeNull();
+
+    // Edited: kept as a draft until discarded.
+    fireEvent.click(button("New"));
+    fireEvent.change(planName(), { target: { value: "Draft A" } });
+    fireEvent.click(screen.getByText("Plan A"));
+    fireEvent.click(screen.getByText("Draft A"));
+    expect(planName().value).toBe("Draft A");
+    fireEvent.click(button("Discard"));
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    expect(within(sidebar()).queryByText("Draft A")).toBeNull();
+    expect(screen.queryByText("unsaved")).toBeNull();
+    await act(async () => {});
+    expect(calls("load_plan_delete")).toHaveLength(0);
+
+    // A saved plan has Delete, not Discard.
+    fireEvent.click(screen.getByText("Plan A"));
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+    plans.A = [];
+    fireEvent.click(button("Delete plan"));
+    await waitFor(() => expect(calls("load_plan_delete")).toEqual([{ planId: "pa" }]));
+  });
+
+  it("keeps B's selection when a report delete from A completes after the switch", async () => {
+    const del = deferred<void>();
+    backend({
+      load_reports: (a) =>
+        a.workspaceId === "A"
+          ? [{ run_id: "run-1", plan_id: "pa", plan_name: "Run of A", started_at: "2026-09-26T00:00:00Z", completion: "completed", partial: false, achieved_rate_per_sec: 1, started: 6, failures: 0, p95_us: null, unit: "http_request" }]
+          : [],
+      load_report: () => sampleReport(),
+      load_report_delete: () => del.promise,
+    });
+    plans.B = [loadPlan("pb", "B", "Plan B")];
+    const r = render(view("A"));
+    fireEvent.click(await screen.findByText("Run of A"));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(calls("load_report_delete")).toEqual([{ runId: "run-1" }]));
+
+    r.rerender(view("B"));
+    fireEvent.click(await screen.findByText("Plan B"));
+    await act(async () => del.resolve());
+    await act(async () => {});
+    expect(planName().value).toBe("Plan B");
   });
 
   it("closes a pending run confirmation and never starts A's plan from B", async () => {
@@ -563,34 +678,7 @@ describe("PlanEditor dataset linked file", () => {
 
 describe("ReportView", () => {
   it("counts exchanges, not requests, and shows the protocol panel", async () => {
-    const report = {
-      run_id: "run-1",
-      schema_version: 1,
-      engine: "anvil-native",
-      engine_version: "x",
-      plan: plan(),
-      request_revisions: [],
-      started_at: "2026-09-26T00:00:00Z",
-      finished_at: "2026-09-26T00:00:05Z",
-      completion: "completed",
-      partial: false,
-      warmup_included_in_metrics: false,
-      destination_summary: ["udp://127.0.0.1:9"],
-      counts: { scheduled: 6, started: 6, dropped: 0, completed: 6, transport_failures: 0, application_failures: 0, assertion_failures: 0, timeouts: 0, canceled: 0, in_flight_at_end: 0 },
-      achieved_rate_per_sec: 1.2,
-      latency_success: none,
-      latency_failure: none,
-      histogram_success_b64: "",
-      status_distribution: [],
-      failure_categories: [],
-      timeline: [],
-      bytes_sent: 10,
-      bytes_received: 0,
-      generator: { peak_cpu_percent: null, peak_rss_bytes: null, max_schedule_lag_us: 0, p99_schedule_lag_us: 0, target_not_achieved: false, notes: [] },
-      notes: [],
-      requests: units(),
-      protocol_metrics: udp(true),
-    } as unknown as LoadReport;
+    const report = sampleReport();
     invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "load_report") return report;
       throw new Error(`unexpected ${cmd}`);
