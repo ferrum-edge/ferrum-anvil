@@ -57,6 +57,8 @@ async fn deleting_the_last_dataset_owner_removes_the_content() {
     let b = app.create_dataset(&ws.meta.id, "b", DatasetFormat::Csv, b"user\nshared\n", vec![]).unwrap();
     let key = sha(&a.attachment);
     assert_eq!(key, sha(&b.attachment), "content-addressed: one stored copy");
+    // Past the grace period: no draft holds it any more.
+    attached_days_ago(&app, &a.attachment, 31);
     app.delete_dataset(&a.meta.id).unwrap();
     assert!(app.get_attachment(&key).unwrap().is_some(), "still used by dataset b");
     app.delete_dataset(&b.meta.id).unwrap();
@@ -175,10 +177,39 @@ fn replacing_a_datasets_file_removes_the_old_content() {
     let ws = app.create_workspace("W").unwrap().meta.id;
     let d = app.create_dataset(&ws, "rows", DatasetFormat::Csv, b"user\nalice\n", vec![]).unwrap();
     let old = sha(&d.attachment);
+    attached_days_ago(&app, &d.attachment, 31);
     let next = app.put_attachment("rows.csv", b"user\nbob\n", None).unwrap();
     app.save_dataset(Dataset { attachment: next.clone(), ..d }).unwrap();
     assert!(app.get_attachment(&old).unwrap().is_none(), "the replaced file had no other owner");
     assert!(app.get_attachment(&sha(&next)).unwrap().is_some());
+}
+
+#[test]
+fn deleting_a_dataset_keeps_a_file_attached_within_the_grace_period() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let d = app.create_dataset(&ws, "rows", DatasetFormat::Csv, b"user\nalice\n", vec![]).unwrap();
+    // A request's draft holds the same content, attached just now.
+    let draft = app.create_request(&ws, None, "draft", RequestSpec::http("POST", "http://127.0.0.1:9/")).unwrap();
+    app.delete_dataset(&d.meta.id).unwrap();
+    assert!(app.get_attachment(&sha(&d.attachment)).unwrap().is_some(), "attached within the grace period: kept");
+    // So the draft saves, instead of being refused with "attach it again".
+    app.save_request(RequestDefinition { spec: upload(&d.attachment), ..draft }).unwrap();
+}
+
+#[test]
+fn replacing_a_datasets_file_keeps_one_attached_within_the_grace_period() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let d = app.create_dataset(&ws, "rows", DatasetFormat::Csv, b"user\nalice\n", vec![]).unwrap();
+    let draft = app.create_request(&ws, None, "draft", RequestSpec::http("POST", "http://127.0.0.1:9/")).unwrap();
+    let next = app.put_attachment("rows.csv", b"user\nbob\n", None).unwrap();
+    app.save_dataset(Dataset { attachment: next.clone(), ..d.clone() }).unwrap();
+    assert!(app.get_attachment(&sha(&d.attachment)).unwrap().is_some(), "attached within the grace period: kept");
+    assert!(app.get_attachment(&sha(&next)).unwrap().is_some());
+    app.save_request(RequestDefinition { spec: upload(&d.attachment), ..draft }).unwrap();
 }
 
 #[test]

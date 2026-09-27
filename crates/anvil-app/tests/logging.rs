@@ -60,6 +60,13 @@ fn a_log_file_is_rotated_once_it_reaches_its_limit() {
     assert_eq!(rotated, dir.path().join("bounded.log.1"));
     assert!(std::fs::metadata(&path).unwrap().len() <= 64, "the current file stays within its limit");
     assert!(std::fs::metadata(&rotated).unwrap().len() <= 64, "and so does the one before it");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for f in [&path, &rotated] {
+            assert_eq!(std::fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600, "{}: owner only", f.display());
+        }
+    }
     // Reopened, it goes on from where it was.
     let len = std::fs::metadata(&path).unwrap().len();
     let mut again = LogFile::open(path.clone(), 64).unwrap();

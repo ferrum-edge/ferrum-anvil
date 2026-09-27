@@ -565,7 +565,8 @@ Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so
 retention never removes them. Deleting a request (with its revisions, also
 when its folder is deleted) or a dataset, or replacing a dataset's file,
-deletes the content it held once no request, revision, dataset, spec source,
+deletes the content it held (unless a user attached it within the grace
+period, below) once no request, revision, dataset, spec source,
 scenario or load plan still refers to the same (content-addressed)
 attachment. The check and the delete run in one write transaction, so
 nothing can refer to it in between.
@@ -587,15 +588,15 @@ of a request may name the files that request holds even when one is no
 longer stored.
 
 The mark does not record which draft holds a file. Deleting a request (also
-when its folder is deleted) therefore keeps a file a user attached within
-the grace period (below; a mark without a time counts as recent until the
-cleanup at open records one), even when nothing saved references it any
-more: a request or dataset not saved yet may hold it, and the cleanup of
-files attached and never saved decides it once the period is over. Deleting
-a dataset, or replacing its file, releases the file it held once nothing
-saved references it, even when a draft has the same file attached. That
-draft's save is then refused with "attach it again", and attaching the file
-again stores it again.
+when its folder is deleted) or a dataset, or replacing a dataset's file,
+therefore keeps a file a user attached within the grace period (below; a
+mark without a time counts as recent until the cleanup at open records
+one), even when nothing saved references it any more: a request or dataset
+not saved yet may hold it, and the cleanup of files attached and never
+saved decides it once the period is over. A file attached longer ago is
+released once nothing saved references it; a draft that still has it
+attached is then refused on save with "attach it again", and attaching the
+file again stores it again.
 
 Deleting a request decrypts only its own revisions, found by the request
 they are filed under, and the reference check reads every object of those

@@ -64,7 +64,7 @@ pub struct LogFile {
 impl LogFile {
     /// Open `path` to append to, creating it if missing.
     pub fn open(path: PathBuf, limit: u64) -> io::Result<LogFile> {
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = options().append(true).open(&path)?;
         let len = file.metadata()?.len();
         Ok(LogFile { path, file: Some(file), len, limit })
     }
@@ -83,12 +83,25 @@ impl LogFile {
         self.file = None;
         self.len = 0;
         let file = match fs::rename(&self.path, self.rotated_path()) {
-            Ok(()) => OpenOptions::new().create(true).append(true).open(&self.path)?,
-            Err(_) => OpenOptions::new().create(true).write(true).truncate(true).open(&self.path)?,
+            Ok(()) => options().append(true).open(&self.path)?,
+            Err(_) => options().write(true).truncate(true).open(&self.path)?,
         };
         self.file = Some(file);
         Ok(())
     }
+}
+
+/// Options that create a log file readable by its owner only: a warning
+/// names stored objects by kind and id.
+fn options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
 }
 
 impl Write for LogFile {
@@ -146,7 +159,7 @@ impl Subscriber for Logger {
         let time = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
         let line = format!("{time} {} {}: {}{}", metadata.level().as_str(), metadata.target(), fields.message, fields.rest);
         // One event, one line.
-        let line = line.replace('\n', "\\n") + "\n";
+        let line = line.replace('\r', "\\r").replace('\n', "\\n") + "\n";
         let mut out = self.out.lock();
         let _ = out.write_all(line.as_bytes());
         let _ = out.flush();

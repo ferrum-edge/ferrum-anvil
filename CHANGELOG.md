@@ -312,11 +312,12 @@
   rotated to `anvil.log.1` at 5 MiB; the CLI writes warnings and errors to
   stderr. `ANVIL_LOG` (`off`, `error`, `warn`, `info`, `debug`, `trace`)
   sets another level for Anvil's own crates.
-- Deleting a request, or a folder with its requests, no longer releases a
-  file you attached within the last 30 days, as a workspace delete already
-  did not: a draft of another request may have attached the same file
-  moments before, and its save was then refused with "attach it again". The
-  30-day cleanup decides it instead.
+- Deleting a request, a folder with its requests or a dataset, or replacing
+  a dataset's file, no longer releases a file you attached within the last
+  30 days, as a workspace delete already did not: a draft of another request
+  or dataset may have attached the same file moments before, and its save
+  was then refused with "attach it again". The 30-day cleanup decides it
+  instead.
 - A file attached by a build that did not record when (a mark with no
   `attached_at`) now ages from the first storage cleanup that sees it, which
   records the time. Before, it counted as recently attached for good, so an
