@@ -71,6 +71,17 @@ pub fn run() {
     builder
         .manage(DesktopState::new(data_dir))
         .setup(|app| {
+            // Warnings and notices (a stored object that does not decode, a
+            // cleanup that did not finish) go to a bounded log file in the
+            // app's log directory; ANVIL_LOG sets another level.
+            match app.path().app_log_dir() {
+                Ok(dir) => {
+                    if let Err(err) = anvil_app::logging::log_to_file(&dir, anvil_app::logging::LevelFilter::INFO) {
+                        eprintln!("could not open the log file in {}: {err}", dir.display());
+                    }
+                }
+                Err(err) => eprintln!("no log directory: {err}"),
+            }
             #[cfg(feature = "e2e")]
             e2e_unlock(&app.state::<DesktopState>());
             let handle = app.handle().clone();

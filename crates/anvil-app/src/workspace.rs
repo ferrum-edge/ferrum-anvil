@@ -227,7 +227,8 @@ impl App {
         Ok(chain)
     }
 
-    /// Delete a folder, its subfolders and their requests.
+    /// Delete a folder, its subfolders and their requests, and release the
+    /// stored files those requests held as [`App::delete_request`] does.
     pub fn delete_folder(&self, id: &Id) -> Result<()> {
         // Read the folder and its tree inside the transaction, so a folder or
         // request created under a doomed folder meanwhile is deleted with it,
@@ -375,7 +376,10 @@ impl App {
 
     /// Delete a request with its revisions, and release the stored
     /// attachments it held that nothing else references any more, in one
-    /// write transaction.
+    /// write transaction. A file a user attached within [`ATTACHMENT_GRACE`]
+    /// is kept: a request or dataset not saved yet may hold it, and the
+    /// cleanup of files attached and never saved decides it once the period
+    /// is over.
     pub fn delete_request(&self, id: &Id) -> Result<()> {
         self.store.atomically(|s| match s.get::<RequestDefinition>(kind::REQUEST, id)? {
             Some(r) => delete_requests_in(s, &[r]),
@@ -690,7 +694,8 @@ pub(crate) fn grace_cutoff() -> i64 {
 /// a request or dataset not saved yet may hold it, so no release other than
 /// deleting or replacing a saved item that held it takes it before the
 /// period is over. A mark without a time (entries written before the time
-/// was recorded) counts as recent: its age is unknown.
+/// was recorded) counts as recent: its age is unknown. The cleanup at
+/// profile open records the time it first sees one, so it ages from then.
 pub(crate) fn attached_recently(entry: &AttachmentIndex, cutoff: i64) -> bool {
     entry.user && entry.attached_at.is_none_or(|t| t >= cutoff)
 }
@@ -708,6 +713,15 @@ pub(crate) fn attachment_entries_in(s: &StoreRead<'_>) -> anvil_storage::store::
         }
     }
     Ok(entries)
+}
+
+/// The index entry of attachment `sha`, if it has one that decodes.
+fn attachment_entry_in(s: &StoreRead<'_>, sha: &str) -> anvil_storage::store::Result<Option<AttachmentIndex>> {
+    match s.get::<AttachmentIndex>(kind::IMPORT_SOURCE, &attachment_index_id(sha)) {
+        Ok(entry) => Ok(entry),
+        Err(StoreError::Integrity | StoreError::Serde(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Write the index entry of attachment `sha` stored in `blob`. `user` marks
@@ -904,7 +918,10 @@ fn unstored(sha256: &str) -> AppError {
 
 /// Delete `requests` with their revisions, then release the stored
 /// attachments they held that nothing else references any more, including
-/// ones a user added.
+/// ones a user added, unless a user attached it within [`ATTACHMENT_GRACE`]
+/// ([`attached_recently`]): a request or dataset not saved yet may hold it,
+/// and the cleanup of files attached and never saved decides it once the
+/// period is over.
 fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_storage::store::Result<()> {
     let mut specs = Vec::new();
     for r in requests {
@@ -934,7 +951,14 @@ fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_
             held.insert(sha.to_string());
         });
     }
-    for sha in unreferenced_in(s, held)? {
+    let cutoff = grace_cutoff();
+    let mut candidates = HashSet::new();
+    for sha in held {
+        if !attachment_entry_in(&s.as_read(), &sha)?.is_some_and(|e| attached_recently(&e, cutoff)) {
+            candidates.insert(sha);
+        }
+    }
+    for sha in unreferenced_in(s, candidates)? {
         drop_attachment_in(s, &sha)?;
     }
     Ok(())

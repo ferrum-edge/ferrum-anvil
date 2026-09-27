@@ -270,3 +270,69 @@ fn an_object_that_does_not_decode_keeps_every_file_and_is_named() {
     assert!(!stored(&app, &abandoned));
     assert!(app.last_storage_cleanup().unwrap().unwrap().result.undecodable.is_empty());
 }
+
+#[test]
+fn a_mark_with_no_time_ages_from_the_first_pass_that_sees_it() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let legacy = app.put_attachment("legacy.bin", b"attached before the time was recorded", None).unwrap();
+    // As a build before the time was recorded wrote it: marked, with no time.
+    let (id, mut entry) = index_entry(&app, &legacy);
+    entry.as_object_mut().unwrap().remove("attached_at");
+    app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
+
+    let before = chrono::Utc::now().timestamp_millis();
+    assert_eq!(app.clean_up_storage().unwrap(), StorageCleanup::default(), "its age is unknown: kept");
+    assert!(stored(&app, &legacy));
+    let (_, entry) = index_entry(&app, &legacy);
+    assert_eq!(entry["user"], true, "{entry}");
+    assert!(entry["attached_at"].as_i64().is_some_and(|t| t >= before), "the pass recorded when it first saw it: {entry}");
+
+    // From then on it ages like any other: past the grace period and never
+    // saved, it is released.
+    attached_days_ago(&app, &legacy, 31);
+    assert_eq!(app.clean_up_storage().unwrap().released_attachments, 1);
+    assert!(!stored(&app, &legacy));
+}
+
+#[test]
+fn a_write_between_the_read_and_the_removals_makes_the_cleanup_read_again() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let abandoned = app.put_attachment("abandoned.bin", b"attached to a draft saved while the pass runs", None).unwrap();
+    attached_days_ago(&app, &abandoned, 31);
+
+    // After the first read found the file unreferenced, and before its write
+    // transaction, a save references it.
+    let mut reads = 0;
+    let save_once = || {
+        reads += 1;
+        if reads == 1 {
+            app.create_request(&ws, None, "saved", upload(&abandoned)).unwrap();
+        }
+    };
+    let done = app.clean_up_storage_between_phases(save_once).unwrap();
+    assert_eq!(reads, 2, "the write sent the pass back to read again");
+    assert_eq!(done, StorageCleanup::default(), "the second read saw the reference");
+    assert!(stored(&app, &abandoned), "a saved request references it: kept");
+    // Held by a saved item now: its mark is dropped.
+    let (_, entry) = index_entry(&app, &abandoned);
+    assert!(entry.get("user").is_none(), "{entry}");
+
+    // A profile that changes before every write transaction is left as it is
+    // until a later pass.
+    let other = app.put_attachment("other.bin", b"attached to a draft never saved", None).unwrap();
+    attached_days_ago(&app, &other, 31);
+    let mut writes = 0;
+    let keep_writing = || {
+        writes += 1;
+        app.create_workspace(&format!("W{writes}")).unwrap();
+    };
+    let e = app.clean_up_storage_between_phases(keep_writing).unwrap_err();
+    assert!(e.to_string().contains("kept changing"), "{e}");
+    assert!(writes > 1, "it read again before giving up");
+    assert!(stored(&app, &other), "nothing was released");
+    assert_eq!(app.clean_up_storage().unwrap().released_attachments, 1, "the next pass releases it");
+    assert!(!stored(&app, &other));
+}

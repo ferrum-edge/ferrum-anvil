@@ -5,6 +5,7 @@
 use anvil_app::App;
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
+use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
 use anvil_domain::workspace::{Dataset, DatasetFormat, RequestDefinition};
 use anvil_storage::store::DB_FILE;
@@ -69,6 +70,21 @@ fn upload(attachment: &AttachmentRef) -> RequestSpec {
     }
 }
 
+/// Mark attachment `a` as attached `days` ago.
+fn attached_days_ago(app: &App, a: &AttachmentRef, days: i64) {
+    let (id, mut entry) = app
+        .store
+        .object_meta(kind::IMPORT_SOURCE)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id.parse::<Id>().unwrap())
+        .filter_map(|id| app.store.get::<serde_json::Value>(kind::IMPORT_SOURCE, &id).unwrap().map(|v| (id, v)))
+        .find(|(_, v)| v["attachment"] == sha(a).as_str())
+        .expect("its index entry");
+    entry["attached_at"] = (chrono::Utc::now() - chrono::Duration::days(days)).timestamp_millis().into();
+    app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
+}
+
 #[test]
 fn deleting_the_request_that_holds_an_attached_file_removes_the_content() {
     let root = tempfile::tempdir().unwrap();
@@ -82,11 +98,31 @@ fn deleting_the_request_that_holds_an_attached_file_removes_the_content() {
     app.save_request(RequestDefinition { spec: RequestSpec::http("GET", "http://127.0.0.1:9/"), ..a.clone() }).unwrap();
     let folder = app.create_folder(&ws, None, "F").unwrap().meta.id;
     let b = app.create_request(&ws, Some(folder), "b", upload(&att)).unwrap();
+    // Past the grace period: no draft holds it any more.
+    attached_days_ago(&app, &att, 31);
     app.delete_request(&a.meta.id).unwrap();
     assert!(app.get_attachment(&sha(&att)).unwrap().is_some(), "still held by request b");
     app.delete_folder(&folder).unwrap();
     assert!(app.get_attachment(&sha(&att)).unwrap().is_none(), "no owner left: content deleted");
     assert!(app.request(&b.meta.id).is_err());
+}
+
+#[test]
+fn deleting_a_request_or_folder_keeps_a_file_attached_within_the_grace_period() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let att = app.put_attachment("payload.bin", b"payload a draft attached moments ago", None).unwrap();
+    let folder = app.create_folder(&ws, None, "F").unwrap().meta.id;
+    let a = app.create_request(&ws, None, "a", upload(&att)).unwrap();
+    app.create_request(&ws, Some(folder), "b", upload(&att)).unwrap();
+    // Another request's draft holds the same content, attached just now.
+    let draft = app.create_request(&ws, None, "draft", RequestSpec::http("POST", "http://127.0.0.1:9/")).unwrap();
+    app.delete_request(&a.meta.id).unwrap();
+    app.delete_folder(&folder).unwrap();
+    assert!(app.get_attachment(&sha(&att)).unwrap().is_some(), "attached within the grace period: kept");
+    // So the draft saves, instead of being refused with "attach it again".
+    app.save_request(RequestDefinition { spec: upload(&att), ..draft }).unwrap();
 }
 
 #[test]
@@ -98,7 +134,9 @@ fn a_save_naming_a_file_released_since_it_was_attached_is_refused() {
     // One request holds the file; another is being edited to attach it too.
     let first = app.create_request(&ws, None, "first", upload(&att)).unwrap();
     let draft = app.create_request(&ws, None, "draft", RequestSpec::http("POST", "http://127.0.0.1:9/")).unwrap();
-    // Deleting the request that held it releases it before the draft is saved.
+    // Deleting the request that held it releases it before the draft is
+    // saved, once the file was attached longer than the grace period ago.
+    attached_days_ago(&app, &att, 31);
     app.delete_request(&first.meta.id).unwrap();
     assert!(app.get_attachment(&sha(&att)).unwrap().is_none());
     let e = app.save_request(RequestDefinition { spec: upload(&att), ..draft.clone() }).unwrap_err();
@@ -163,6 +201,7 @@ fn a_file_shared_across_two_workspaces_survives_a_delete_in_one() {
     let att = app.put_attachment("payload.bin", b"payload both workspaces send", None).unwrap();
     let a = app.create_request(&one, None, "a", upload(&att)).unwrap();
     let b = app.create_request(&two, None, "b", upload(&att)).unwrap();
+    attached_days_ago(&app, &att, 31);
     app.delete_request(&a.meta.id).unwrap();
     let kept = app.get_attachment(&sha(&att)).unwrap();
     assert_eq!(kept.as_deref(), Some(&b"payload both workspaces send"[..]), "workspace Two still holds it");
@@ -197,6 +236,7 @@ fn a_revision_elsewhere_that_does_not_decode_keeps_files_without_failing_a_delet
     let other = app.create_request(&ws, None, "other", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
     let att = app.put_attachment("payload.bin", b"payload of a deleted request", None).unwrap();
     let q = app.create_request(&ws, None, "q", upload(&att)).unwrap();
+    attached_days_ago(&app, &att, 31);
     // Another request's revision whose stored payload no longer decrypts.
     let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
     let revision = other.revision_id.expect("a revision").to_string();
