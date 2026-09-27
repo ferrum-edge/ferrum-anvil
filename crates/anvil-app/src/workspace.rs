@@ -775,8 +775,7 @@ pub(crate) fn drop_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage
 }
 
 /// The kinds of object that can reference a stored attachment.
-pub(crate) const REFERRERS: [&str; 6] =
-    [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN];
+pub(crate) const REFERRERS: [&str; 6] = [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN];
 
 /// Of `candidates`, the attachments that no object of a [`REFERRERS`] kind
 /// references, in one pass over those objects. The match is on each
