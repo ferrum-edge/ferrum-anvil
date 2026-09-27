@@ -99,6 +99,14 @@ describe("file grants", () => {
     expectRefused("file_choose jwt_svid_file", t, "choose one file");
   });
 
+  it("refuses a linked-file dialog that is not for a request or dataset before showing anything", async () => {
+    const referrer = { kind: "request", id: randomUUID() };
+    const none = await invoke("file_choose", { purpose: "linked_file", options: {} });
+    expectRefused("file_choose linked_file", none, "choose the request or dataset the linked file is for");
+    const other = await invoke("file_choose", { purpose: "attachment", options: {}, referrer });
+    expectRefused("file_choose attachment", other, "only a linked file is chosen for a request or dataset");
+  });
+
   /** Every command that takes a request spec from the webview. */
   function specCommands(spec: Record<string, unknown>): [string, Record<string, unknown>][] {
     const input = { workspace_id: workspaceId, request_id: null, spec, environment_id: null, send_anyway: false };
@@ -127,6 +135,9 @@ describe("file grants", () => {
     const stored = await invoke<Saved>("request_get", { requestId: request.id });
     expect(stored.err).toBeUndefined();
     expect(JSON.stringify(stored.ok!.spec)).not.toContain("linked_file");
+    // The saved request names no linked file, so there is nothing to choose for it.
+    const status = await invoke<unknown[]>("linked_file_status", { referrer: { kind: "request", id: request.id } });
+    expect(status).toEqual({ ok: [] });
     expect((await invoke("request_delete", { requestId: request.id })).err).toBeUndefined();
   });
 

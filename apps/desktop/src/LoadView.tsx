@@ -37,6 +37,7 @@ import type {
 type EditPlan = LoadPlan & { chain: string[]; mix: WeightedStep[] };
 import { Modal, SidebarResizer, fmtAgo, fmtBytes, fmtUs, humanize, uid } from "./ui";
 import { Icon } from "./icons";
+import { LinkedFileBinding } from "./LinkedFile";
 
 const UNIT_WORDS: Record<LoadUnitKind, [string, string]> = {
   http_request: ["request", "requests"],
@@ -340,6 +341,7 @@ export function PlanEditor(props: {
   const [datasetDlg, setDatasetDlg] = useState(false);
   const [check, setCheck] = useState<LoadPlanCheck | null>(null);
   const useMix = p.mix.length > 0;
+  const dataset = props.datasets.find((d) => d.id === p.dataset_id);
   const requestKey = JSON.stringify([p.chain, p.mix.map((m) => m.request_id), p.connection_mode]);
   // What the plan measures (or why it is refused), re-checked as requests change. Nothing is sent.
   useEffect(() => {
@@ -575,6 +577,7 @@ export function PlanEditor(props: {
             Add dataset…
           </button>
         </div>
+        {dataset?.attachment.kind === "linked_file" && <LinkedFileBinding referrer={{ kind: "dataset", id: dataset.id }} path={dataset.attachment.path} />}
         <label className="check">
           <input
             type="checkbox"

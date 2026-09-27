@@ -37,6 +37,7 @@ describe("lock", () => {
       // No file dialog opens and no file is read while locked.
       ["file_choose", { purpose: "pem_file", options: null }],
       ["read_text_file", { grant: `fg-${"0".repeat(32)}`, workspaceId: null, storeAsSecret: null, base64: false }],
+      ["linked_file_status", { referrer: { kind: "request", id: "00000000-0000-0000-0000-000000000000" } }],
     ] as const) {
       const r = await invoke(cmd, args);
       expect({ cmd, ok: r.ok, err: r.err }).toEqual({ cmd, ok: undefined, err: "LOCKED" });
