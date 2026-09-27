@@ -2,6 +2,7 @@
 //! runner or load worker) from storage. The engine itself never reads the
 //! database or the UI; it receives a frozen snapshot.
 
+use crate::ContextEpoch;
 use crate::vars::VarLayer;
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -96,6 +97,12 @@ pub struct ExecutionContext {
     /// run-local values of the same scope: values extracted by steps of that
     /// scope and, for the workspace scope only, the dataset row.
     pub scope: Option<Id>,
+    /// The engine's execution epoch for `isolation`, taken when the context
+    /// was built ([`crate::Engine::context_epoch`]): a lock or a delete of
+    /// the workspace after that point fences an execution of this context,
+    /// even one that starts later. `None` (a standalone context): the
+    /// epoch is taken when the execution starts.
+    pub epoch: Option<ContextEpoch>,
 }
 
 impl ExecutionContext {
@@ -122,6 +129,7 @@ impl ExecutionContext {
             seed: None,
             redaction_names: vec![],
             scope: None,
+            epoch: None,
         }
     }
 
