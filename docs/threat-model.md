@@ -111,7 +111,9 @@ against it).
   transport, host and port, TLS profile and client identity, never persisted
   or exported, and dropped with pooled connections and OAuth tokens when the
   vault locks. A connection of an execution that began before the lock keeps
-  none of the tickets it receives afterwards.
+  none of the tickets it receives afterwards. Outside the early-data opt-in
+  no ticket and no TLS 1.2 session is kept at all (such a connection could
+  never resume one): only the key-exchange group each server chose.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -256,24 +258,41 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   an OAuth token that arrives after the lock to a call made before it is
   never cached. For an execution that began before the lock, nothing of the
   following is kept after it: its responses' cookies, the TLS
-  configurations it prepares (which hold a client identity's private key
-  and a session store), its connections (HTTP/1.1, HTTP/2 or HTTP/3) and
-  the session tickets they receive. The lock check counts the tickets of
-  every session store: the 0-RTT ticket caches and those of the prepared
-  TLS configurations. Prepared TLS configurations, and the session stores
-  they hold, are kept per workspace (a connection outside the early-data
-  opt-in never resumes from them: rustls resumes a ticket only with the
-  verifier instance that obtained it, and each such connection has its
-  own), and a connection under the opt-in resumes only its own workspace's
-  tickets. A workspace delete
+  configurations it prepares (which hold a client identity's private key),
+  its connections (HTTP/1.1, HTTP/2 or HTTP/3) and the session tickets they
+  receive. Session tickets are kept only by the 0-RTT ticket caches, which
+  the lock check counts: a connection outside the early-data opt-in never
+  resumes (rustls resumes a ticket only with the verifier instance that
+  obtained it, and each such connection has its own), so its prepared TLS
+  configuration's session store keeps neither TLS 1.3 tickets nor TLS 1.2
+  sessions, only each server's key-exchange group. Prepared TLS
+  configurations are kept per workspace, and a connection under the opt-in
+  resumes only its own workspace's tickets. A workspace delete
   (`Engine::clear_isolation`) fences that workspace's caches the same way,
   with a generation of its own, so other workspaces' work is not affected:
-  it drops the workspace's cookies, prepared TLS configurations (with their
-  sessions), connections and session tickets, and for a request, session or
-  gRPC call of that workspace that started before the delete, none of
-  those it prepares or receives afterwards is kept, even on a later
-  redirect or retry, so they cannot reappear in a workspace restored with
-  the same id. Pooled gRPC channels exist only on a load run's own engines
+  it drops the workspace's cookies, prepared TLS configurations,
+  connections and session tickets, and for a request, session or gRPC call
+  of that workspace that started before the delete, none of those it
+  prepares or receives afterwards is kept, even on a later redirect or
+  retry, so they cannot reappear in a workspace restored with the same id,
+  except for an execution whose context was built before the delete (see
+  the residual gap below). An execution takes the lock epoch and all of
+  these generations between the same two points, with no lock or delete of
+  its workspace started in between, so a snapshot never takes a transport
+  or channel generation newer than its jar generation; a snapshot taken
+  during a delete is post-delete for cookies and TLS material and keeps no
+  connection, ticket or channel. The generations are taken when the
+  execution starts, not when the app builds its context from storage.
+  Residual gap: an execution whose context was built before a workspace
+  delete but that starts executing after it (for example `App::send`
+  builds the context off the runtime before it executes,
+  `crates/anvil-app/src/exec.rs`) takes a post-delete snapshot, so it can
+  keep cookies in the deleted workspace's jar, a cached prepared TLS
+  configuration (including a client identity's private key), pooled
+  connections and 0-RTT session tickets under that workspace until the
+  next lock, visible to a workspace restored with the same id (see
+  [ferrum-anvil#163](https://github.com/ferrum-edge/ferrum-anvil/issues/163)).
+  Pooled gRPC channels exist only on a load run's own engines
   (one per virtual-user slot); a call that began before a clear of its
   engine's channels does not return its connection to them. Neither the
   lock nor a workspace delete reaches into those engines; each stops the
