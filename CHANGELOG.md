@@ -177,13 +177,22 @@
   QUIC connections keep none of the session tickets they receive.
 - Work still in flight when its workspace is deleted no longer refills that
   workspace's caches: a request, session or gRPC call of the deleted
-  workspace closes its connections instead of pooling them and keeps none
-  of the session tickets it receives, even on a later redirect or retry.
-  Other workspaces' work in flight at the same time is not affected. A gRPC
-  call in flight at a lock no longer returns its connection to a load run's
-  pooled channels, and pooled gRPC channels are no longer shared between
-  workspaces. The lock check now also counts the session tickets kept by
-  prepared TLS configurations (connections without the early-data opt-in).
+  workspace closes its connections instead of pooling them, caches none of
+  the TLS configurations it prepares and keeps none of the session tickets
+  it receives, even on a later redirect or retry. Other workspaces' work in
+  flight at the same time is not affected.
+- Prepared TLS configurations, and the TLS sessions they keep for
+  resumption, are now kept per workspace: a connection in one workspace no
+  longer resumes a TLS session another workspace established (every
+  workspace without a TLS profile shared one configuration), and a
+  workspace delete drops that workspace's sessions.
+- Pooled gRPC channels, which only a load run's virtual users keep, are no
+  longer shared between workspaces, and a call that began before its
+  engine's channels were cleared no longer returns its connection to them.
+  The app's lock and a workspace delete do not clear a load run's engines:
+  the lock stops the run instead.
+- The lock check now also counts the session tickets kept by prepared TLS
+  configurations (connections without the early-data opt-in).
 - A spec reimport now compares the import's scoped configuration too, not
   only its requests: the source's own variables, auth, settings and
   description (on the new workspace, or on the import root in an existing

@@ -556,6 +556,11 @@ impl SharedChannel {
             SharedConn::H3 { quic, .. } => quic.close_reason().is_none(),
         }
     }
+
+    /// Whether this is the HTTP/3 channel over `quic`.
+    fn is_quic(&self, quic: &quinn::Connection) -> bool {
+        matches!(&self.conn, SharedConn::H3 { quic: q, .. } if q.stable_id() == quic.stable_id())
+    }
 }
 
 /// A pooled HTTP/1.1 connection (gRPC-Web): used by one call at a time.
@@ -705,14 +710,22 @@ impl Channels {
                 }
                 let generations = self.generations.lock();
                 let mut shared = self.shared.lock();
-                if generations.admits(generation, key) && !shared.contains_key(key) {
-                    let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
-                    observation.prior_requests = 0;
-                    shared.insert(
-                        key.to_string(),
-                        SharedChannel { conn: SharedConn::H3 { send, quic }, stats, template: observation, served },
-                    );
+                // A reused channel is still pooled: it stays open for the
+                // calls that share it.
+                let pooled = shared.get(key).map(|ch| ch.is_quic(&quic));
+                if pooled == Some(true) {
+                    return;
                 }
+                if pooled.is_some() || !generations.admits(generation, key) {
+                    // Not kept (another channel is pooled under the key, or a
+                    // lock or a delete of its workspace fenced it): close it
+                    // now, as above, rather than when its last handle drops.
+                    quic.close(crate::h3::H3_NO_ERROR.into(), b"");
+                    return;
+                }
+                let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
+                observation.prior_requests = 0;
+                shared.insert(key.to_string(), SharedChannel { conn: SharedConn::H3 { send, quic }, stats, template: observation, served });
             }
             Conn::H1(mut s) => {
                 if !clean {

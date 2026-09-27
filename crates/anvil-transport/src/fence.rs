@@ -16,7 +16,10 @@ pub(crate) struct Generations {
     /// The generation the last clear of everything started.
     all: u64,
     /// The generation the last clear of each isolation started, since the
-    /// last clear of everything (which covers them all).
+    /// last clear of everything (which covers them all). It grows by one
+    /// entry per deleted workspace until the next lock, and
+    /// [`Generations::admits`] scans every entry: acceptable at the rate
+    /// people delete workspaces.
     isolations: HashMap<String, u64>,
 }
 

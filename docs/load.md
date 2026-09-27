@@ -118,10 +118,11 @@ pooled **channel** per workspace and destination
 HTTP/2 or HTTP/3 connection, or an HTTP/1.1 connection used by one gRPC-Web
 call at a time. A channel is returned only while it is open (HTTP/2) or after
 a clean call (HTTP/3, HTTP/1.1); a canceled HTTP/3 stream closes its
-connection instead, and so does a call whose execution began before a lock
-or a delete of its workspace. *Fresh* opens a connection per
-unit. Manual Send never uses channels (each call opens its own connection so
-its evidence covers the whole setup). SSE streams, WebSocket sessions, TCP
+connection instead. The channels are dropped with the run's engines when the
+run ends; neither the lock (which stops the run) nor a workspace delete
+clears them while it runs. *Fresh* opens a connection per unit. Manual Send
+never uses channels (each call opens its own connection so its evidence
+covers the whole setup). SSE streams, WebSocket sessions, TCP
 exchanges and UDP/DTLS exchanges always open their own connection or socket;
 the connection mode does not apply to them, and the preflight, report and
 comparison say so.

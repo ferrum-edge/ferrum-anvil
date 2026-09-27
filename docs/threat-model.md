@@ -257,18 +257,28 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   never cached. For an execution that began before the lock, nothing of the
   following is kept after it: its responses' cookies, the TLS
   configurations it prepares (which hold a client identity's private key
-  and a session store), its connections (HTTP/1.1, HTTP/2 or HTTP/3), its
-  gRPC channels (a load run's virtual users keep them) and the session
-  tickets its connections receive. The lock check counts the tickets of
+  and a session store), its connections (HTTP/1.1, HTTP/2 or HTTP/3) and
+  the session tickets they receive. The lock check counts the tickets of
   every session store: the 0-RTT ticket caches and those of the prepared
-  TLS configurations. A workspace delete (`Engine::clear_isolation`) fences
-  that workspace's caches the same way, with a generation of its own, so
-  other workspaces' work is not affected: for a request, session or gRPC
-  call of that workspace that started before the delete, its cookies,
-  connections, gRPC channels and session tickets are not kept, even on a
-  later redirect or retry, so they cannot reappear in a workspace restored
-  with the same id. A load run's gRPC channels belong to its own engines,
-  which are stopped on lock and dropped when the run ends.
+  TLS configurations. Prepared TLS configurations, and the session stores
+  they hold, are kept per workspace, so a connection in one workspace never
+  resumes a TLS session of another. A workspace delete
+  (`Engine::clear_isolation`) fences that workspace's caches the same way,
+  with a generation of its own, so other workspaces' work is not affected:
+  it drops the workspace's cookies, prepared TLS configurations (with their
+  sessions), connections and session tickets, and for a request, session or
+  gRPC call of that workspace that started before the delete, none of
+  those it prepares or receives afterwards is kept, even on a later
+  redirect or retry, so they cannot reappear in a workspace restored with
+  the same id. Pooled gRPC channels exist only on a load run's own engines
+  (one per virtual-user slot); a call that began before a clear of its
+  engine's channels does not return its connection to them. Neither the
+  lock nor a workspace delete clears those engines: the lock stops the run,
+  and its engines are dropped when it ends. Residual gap: deleting a
+  workspace while one of its load runs is still running leaves that run's
+  engines holding the workspace's pooled connections, session tickets,
+  cookies, prepared TLS configurations and gRPC channels until the run
+  ends (see the linked issue).
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).
