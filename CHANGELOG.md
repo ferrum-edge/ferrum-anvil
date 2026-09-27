@@ -97,6 +97,25 @@
 
 ### Fixed
 
+- A spec reimport now compares the import's scoped configuration too, not
+  only its requests: the source's own variables, auth, settings and
+  description (on the new workspace, or on the import root in an existing
+  workspace) and its environments. An OpenAPI server change, which leaves
+  every `{{baseUrl}}/…` request as it was, is now listed as a change to its
+  environment's `baseUrl` and applied, so requests are sent to the new
+  server. The same rules as for requests apply: a value you edited is a
+  conflict kept until you approve overwriting it (`overwrite_scope`), a
+  variable or environment gone from the source is kept until you approve
+  deleting it (`delete_scope`), your own variables stay, and a new server
+  arrives as a new environment. Imports made by earlier builds work this out
+  from their stored original file, unless they were reimported since; then
+  every difference is a conflict until the next reimport. A reimport of an
+  import root that was deleted is refused.
+- A reimport that changes a saved request now records a new revision for
+  it, in the same transaction, and points the request at it, so a send, run
+  or history record names the spec that was actually sent. The revision of
+  its old spec stays as it was; a request the reimport leaves unchanged
+  keeps its revision and gains none.
 - A load run now hands its worker every vault secret the plan's requests
   resolve: the datagram PROXY-protocol authentication secret of a UDP
   request, and the client identity of the selected proxy's own TLS profile

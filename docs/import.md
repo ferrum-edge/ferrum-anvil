@@ -7,8 +7,10 @@ Anvil workspace objects (`Workspace`, `Folder`, `RequestDefinition`,
 ```rust
 let detected = anvil_import::detect(&bytes);             // kind + dialect, no import
 let result = anvil_import::import(&bytes, &ImportOptions::default())?;
-let plan = anvil_import::reimport_diff(&existing_requests, &fresh_result);
+let scope = ScopeDiff { current: &stored_scope, generated: Some(&generated_hashes), fresh: &fresh_scope };
+let plan = anvil_import::reimport_diff(&existing_requests, &fresh_result, scope);
 let merged = plan.apply(&existing_requests, &ReimportApproval::default());
+let merged_scope = plan.apply_scope(&stored_scope, &fresh_scope, &ReimportApproval::default());
 ```
 
 Nothing is persisted or sent by the crate. The caller shows a preview (objects
@@ -167,7 +169,7 @@ opening or closing the import root does not drop a token already acquired.
 
 ## Reimport
 
-`reimport_diff(previous, fresh)` links requests by operation key and
+`reimport_diff(previous, fresh, scope)` links requests by operation key and
 classifies each previously imported request:
 
 | Upstream changed | User edited (spec hash ≠ `generated_hash`) | Result |
@@ -181,9 +183,59 @@ classifies each previously imported request:
 New operations are `added` (with the fresh folders they need in
 `added_folders`); requests without an import link are `unlinked` and untouched.
 `apply` keeps ids, folders, ordering and favorites of existing requests and
-moves added requests into the existing workspace. Changing the sample mode or
-seed between imports changes generated hashes; every operation then shows up
-as changed upstream.
+moves added requests into the existing workspace. An updated request loses
+its `revision_id`, since that revision holds the old spec. Changing the sample
+mode or seed between imports changes generated hashes; every operation then
+shows up as changed upstream.
+
+### Scoped configuration
+
+An import also writes configuration outside its requests (`ImportedScope`):
+the source's own description, settings, variables and auth, and its
+environments. An OpenAPI server is an environment whose `baseUrl` the
+requests reference as `{{baseUrl}}`, so a changed server changes no request
+and is found here instead. `reimport_diff` compares it in units, each with a
+stable key: `description`, `settings`, `auth`, `variables/<name>`,
+`environments/<id>` (the environment's name; an environment added or removed
+is one unit, with its variables) and `environments/<id>/variables/<name>`. A
+repeated variable name gets a `#n` suffix.
+
+Nothing on those objects records what was generated, so the caller keeps
+`ImportedScope::unit_hashes()` of what the import generated and passes it back
+as `ScopeDiff::generated`. Each unit is then classified as a request is, into
+`scope_updated`, `scope_conflicts` (applied only when the key is in
+`ReimportApproval::overwrite_scope`), `scope_preserved_edits` and
+`scope_removed` (deleted only when the key is in
+`ReimportApproval::delete_scope`). A variable or environment the user added
+is a preserved edit. Without a record of what was generated, every difference
+is a conflict or a removal awaiting approval. `apply_scope` returns the merged
+scope: variables are replaced in place, and a new environment arrives whole.
+`next_generated_scope` gives the hashes to keep after applying: the fresh
+import's, except that a declined conflict or removal keeps its earlier hash,
+so it is offered again next time, as a declined request conflict is.
+
+### Reimport in the app
+
+`App::spec_reimport_plan` and `App::spec_reimport_apply` run the importer in
+the import's own id namespace, so unchanged operations and environments keep
+their ids. The scope compared is the new workspace's, or the import root's in
+an existing workspace (an explicit "no auth" there stands for a source without
+auth, as at import), plus the environments the import brought. The generated
+hashes are kept in the source record (`SpecSourceRecord::generated_scope`); a
+record written by an earlier build without them gets them by importing its
+stored original again, unless it was reimported since. A reimport of an
+import root that was deleted is refused.
+
+The apply is one transaction after a restore checkpoint. It writes updated
+and added requests, the merged scope onto the workspace or import root, and
+changed or added environments, which are added to the import root's
+`import_environment_ids`. An environment deleted with approval is removed
+from there too; when it was the workspace's active environment, a workspace
+of the import's own falls back to the environment the source makes active,
+and any other workspace to none. Every request whose spec changes gets a new
+immutable revision, and the request points at it, so a send, run or history
+record names the spec actually sent; the old revision is left as it was, and
+a request the reimport leaves unchanged keeps its revision.
 
 ## OpenAPI and Swagger
 
