@@ -41,15 +41,15 @@ happened on the wire. No account, works offline.
 
 ## Getting started
 
-You need [Rust](https://rustup.rs) (stable), Node.js 22.23.3 and npm. On
-Linux, also install [Tauri's WebKitGTK dependencies](https://tauri.app/start/prerequisites/).
+You need [Rust](https://rustup.rs) (stable), Node.js 22 or later (CI uses
+22.23.3) and npm. On Linux, also install
+[Tauri's WebKitGTK dependencies](https://tauri.app/start/prerequisites/).
 
 ```bash
-# Build the desktop frontend (required before compiling the app)
-cd apps/desktop && npm ci && npm run build && cd ../..
-
-# Run the desktop app
-cd apps/desktop && npx tauri dev
+cd apps/desktop
+npm ci
+npm run build    # the desktop crate embeds dist/ at compile time
+npx tauri dev    # run the desktop app
 ```
 
 Prefer the terminal? Install the `anvil` CLI:
@@ -59,9 +59,9 @@ cargo install --path crates/anvil-cli
 
 anvil profile create me          # passphrase via --passphrase-stdin or ANVIL_PASSPHRASE
 anvil workspace create Demo
-anvil add Demo "Health" --url https://example.com/health
+anvil add Demo "Health" --url https://example.com/health --folder Smoke
 anvil send Health --workspace Demo
-anvil import-spec Demo openapi.yaml
+anvil import-spec Demo --file openapi.yaml
 anvil run Demo --folder Smoke --junit report.xml
 ```
 
@@ -69,9 +69,12 @@ anvil run Demo --folder Smoke --junit report.xml
 <summary><b>For contributors: tests and the failure lab</b></summary>
 
 ```bash
+(cd apps/desktop && npm ci && npm run build)   # the desktop crate embeds dist/
 cargo build --workspace
 cargo test --workspace --exclude anvil-desktop
 ```
+
+The full CI command list is in [docs/ci.md](docs/ci.md#reproducing-locally).
 
 The failure lab runs real, pinned Ferrum Edge releases on loopback
 (default v0.9.7, see `lab/gateway/RELEASE.lock`):
@@ -93,6 +96,7 @@ cargo run -p anvil-lab -- up core                 # keep a lab up for manual tes
 | Load testing | [docs/load.md](docs/load.md) |
 | Collection runner | [docs/runner.md](docs/runner.md) |
 | Imports | [docs/import.md](docs/import.md) |
+| Identities and sign-in | [docs/identity.md](docs/identity.md) |
 | Storage and recovery | [docs/storage-and-recovery.md](docs/storage-and-recovery.md) |
 | Architecture | [docs/architecture.md](docs/architecture.md) |
 | Security model | [docs/threat-model.md](docs/threat-model.md) |

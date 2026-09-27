@@ -1,17 +1,16 @@
 # G01 — Proposed gateway diagnostic contract (v1)
 
-**Status:** proposal (new work in Ferrum Edge). It is not implemented in any
-released gateway. Anvil keeps "authorized diagnostic detail" explicitly
-unavailable until a gateway ships it.
-**Owner:** Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer.
-**Tracking:** ferrum-edge/ferrum-edge#5767 (this proposal) and ferrum-edge/ferrum-edge#5759 (backend-spoofable markers).
-**Compatibility:** additive. The seven public `X-Gateway-Error` tokens, their
-statuses and bodies stay unchanged.
+| | |
+|---|---|
+| **Status** | Proposal (new work in Ferrum Edge). No released gateway implements it, so Anvil keeps "authorized diagnostic detail" explicitly unavailable. |
+| **Owner** | Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer. |
+| **Tracking** | ferrum-edge/ferrum-edge#5767 (this proposal), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
+| **Compatibility** | Additive. The seven public `X-Gateway-Error` tokens, their statuses and bodies stay unchanged. |
 
 ## Problem
 
 Today a client sees a coarse token (`connection_failure`, `backend_timeout`,
-…) and a status. On v0.9.5 and v0.9.7 (the marker code is unchanged between them):
+…) and a status. On v0.9.5 and v0.9.7:
 
 - a token merges several causes. For example, `connection_failure` covers
   DNS, TCP, TLS, pool and egress policy;
@@ -21,7 +20,8 @@ Today a client sees a coarse token (`connection_failure`, `backend_timeout`,
 - the operator has the precise `error_class`, but only in logs the caller
   cannot see.
 
-Anvil therefore caps gateway findings at *likely* and lists the alternatives.
+Anvil therefore caps gateway findings at *likely* and lists the alternatives
+(see [diagnostics.md](diagnostics.md#confidence-ceilings-why-most-gateway-findings-say-likely)).
 Precise, confirmed attribution needs evidence that is **authored by the
 gateway, authenticated, and scoped**.
 
@@ -124,11 +124,20 @@ Field rules:
 - **Coverage:** every `error_class` and every public token path produces a
   ref when enabled (live tests, mirroring the Anvil lab profiles).
 
-## Anvil integration (already modelled)
+## Anvil integration
 
-- `IntegrationProfile.detail` (`DiagnosticDetailAccess { base_url,
-  credential, namespace }`) already exists in the contracts. The credential
-  is a vault reference.
+Already modelled in Anvil:
+
+- A Ferrum gateway integration profile has an optional `detail` field
+  (`DiagnosticDetailAccess { base_url, credential, namespace? }`,
+  `crates/anvil-domain/src/integration.rs`). The credential is a sensitive
+  value (a vault reference or a template), meant to be a dedicated
+  least-privilege diagnostic credential, never an admin token.
+- Evidence source `gateway_detail` exists for authenticated gateway detail.
+
+Planned once a gateway ships the contract (not implemented; no fetch exists
+today):
+
 - When a response carries a ref **and** the destination matches a gateway
   profile with detail access, the user can ask Anvil to fetch the detail.
   Fetching is explicit and never automatic for untrusted destinations. It
@@ -138,7 +147,7 @@ Field rules:
     evidence is gateway-authored and authenticated;
   - keep public-marker findings visible, with their original confidence,
     for comparison;
-  - use evidence source `gateway_diagnostic_api` and cite the ref.
+  - use evidence source `gateway_detail` and cite the ref.
 - A `dispatch: not_sent` on the gateway → backend leg lets Anvil say "safe to
   retry" for a non-idempotent request. Anything else keeps the
   never-auto-replay rule.

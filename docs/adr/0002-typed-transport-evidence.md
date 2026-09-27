@@ -26,4 +26,5 @@ sufficient proof of dispatch safety").
 - The safe-retry and "never replay a possibly processed non-idempotent
   request" rules become decidable.
 - Evidence for the client-to-peer leg is exact. Evidence about the
-  gateway-to-upstream leg can only come from the gateway (see ADR 0003 and G01).
+  gateway-to-upstream leg can only come from the gateway (see ADR 0003 and
+  [G01](../g01-gateway-diagnostic-contract.md)).

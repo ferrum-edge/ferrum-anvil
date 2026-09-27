@@ -1,27 +1,27 @@
 # Native load engine (`anvil-load`)
 
-Implements build plan §14 (load testing), the per-protocol load actions of §7
-(ADR 0011) and the worker boundary of §4.3. Matrix cases LOAD-001…LOAD-014 are
-mapped to tests at the end of this page.
+The load engine runs open, closed and iteration workloads in a separate worker
+process, through the same engine as a manual Send. It counts one **load unit**
+per send, keeps balanced ledgers, merges HDR histograms, and writes JSON, CSV
+and HTML reports. Test coverage per failure-matrix case (LOAD-001…LOAD-014) is
+listed at the [end of this page](#matrix-coverage).
 
 ## Parity with manual Send
 
 Every send in a load run is one call to
-`Engine::execute(&ctx, EventCtx::none(), cancel)` — the same preparation,
+`Engine::execute(&ctx, EventCtx::none(), cancel)`: the same preparation,
 variable resolution, body serialization, auth application, TLS policy,
-transport, diagnostics and outcome classifier as the request editor. So
-HMAC nonces, DPoP proofs and JWT time claims are regenerated for every actual
-send, and trust settings cannot drift (LOAD-005, LOAD-008).
+transport, diagnostics and outcome classifier as the request editor. HMAC
+nonces, DPoP proofs and JWT time claims are regenerated for every send, and
+trust settings cannot drift.
 
-The load engine adds exactly one settings layer, `run:load`, on top of the
-request's own layers:
-
-The 1 MiB response capture limit cannot be raised from the app or CLI.
+The load engine adds one settings layer, `run:load`, on top of the request's
+own layers:
 
 | Field | Value | Why |
 |---|---|---|
 | `keepalive` | `true` for `persistent`, `false` for `fresh` | the plan's connection mode (HTTP pools and gRPC channels) |
-| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send; the full body is still read and counted, but body assertions and extractions are not evaluated when it exceeds the capture, nor is the application outcome of a SOAP or GraphQL request (see below) |
+| `limits.capture_bytes` | `min(request setting, 1 MiB)` | bounded memory per in-flight send. The full body is still read and counted, but when it exceeds the capture, body assertions and extractions are not evaluated, and neither is the application outcome of a SOAP or GraphQL request (see below). The app and CLI cannot raise the 1 MiB limit. |
 
 It also appends iteration-scoped variable layers (lowest to highest
 precedence): `load` (`{{anvil.iteration}}`, `{{anvil.vu}}`), the dataset row,
@@ -29,28 +29,27 @@ and values extracted by earlier chain steps. A request under an unopened
 import root (see [import.md](import.md#persisting-an-import-anvil-app)) gets no
 dataset row and only values extracted by chain steps under the same root;
 values it extracts reach only those steps (`ExecutionContext::scope`, carried
-to the worker). Each send gets a seed derived
-from the plan seed, the iteration and the step, so `{{$randomInt}}` /
-`{{$randomFrom}}` are reproducible per iteration.
+to the worker). Each send gets a seed derived from the plan seed, the
+iteration and the step, so `{{$randomInt}}` / `{{$randomFrom}}` are
+reproducible per iteration.
 
 ### Slots, connections and tokens
 
 A *slot* is a virtual user (closed), a concurrency lane (iterations) or an
 in-flight slot (open). Each slot lazily gets its own `Engine`, so connection
 pools, gRPC channels and cookie jars are per slot (like per-VU state in other
-tools), while all slots share **one** OAuth `TokenCache`. Token refresh is
-therefore single-flight across the whole run (LOAD-006). Open-workload slots
-are reused LIFO, so only as many engines exist as the peak concurrency
-actually needed. A slot's pools keep as many idle connections as the plan has
-distinct requests (at least 4, at most 64), so a persistent chain reuses each
-step's connection across iterations (see `docs/architecture.md`).
+tools), while all slots share **one** OAuth `TokenCache`, so token refresh
+is single-flight across the whole run. Open-workload slots are reused LIFO,
+so only as many engines exist as the peak concurrency needed. A slot's pools
+keep as many idle connections as the plan has distinct requests (at least 4,
+at most 64), so a persistent chain reuses each step's connection across
+iterations (see [architecture.md](architecture.md#connection-pools)).
 
 ## Load units per protocol (LOAD-013)
 
-Every step of a plan is one `Engine::execute` call — the same preparation,
-variables, auth, TLS profile and trust, proxy, DNS and timeout settings as a
-manual Send, through the same session adapter — and produces one **unit**.
-What a unit is depends on the request's protocol (`anvil_load::protocol`):
+Every step of a plan is one `Engine::execute` call through the same session
+adapter as a manual Send, and produces one **unit**. What a unit is depends
+on the request's protocol (`anvil_load::protocol`):
 
 | Unit (`LoadUnitKind`) | Requests | One unit is | Completed means | Success means | Latency (`latency_success`/`_failure`) | Protocol denominators |
 |---|---|---|---|---|---|---|
@@ -139,16 +138,16 @@ stage). A zero-duration stage is an instantaneous step, so a constant load is
 
 * **Closed (`closed_virtual_users`)** — each VU runs iterations back to back
   plus `think_time_ms`. A VU waits for its response before its next
-  iteration, so **slowing responses reduce the offered rate**; every report
+  iteration, so **slowing responses reduce the offered rate**. Every report
   carries that label, has no offered rate, and never claims a sustained
-  arrival rate (LOAD-002). Inactive VUs sleep until the ramp reaches them
-  (activation time is computed, not polled).
+  arrival rate. Inactive VUs sleep until the ramp reaches them (activation
+  time is computed, not polled).
 * **Open (`open_arrival_rate`)** — arrival *k* is scheduled when the
   integral of the rate reaches *k*, independently of response time. At its
   scheduled time an arrival is started if fewer than `max_in_flight`
   iterations are running; otherwise it is **dropped and counted** — never
   queued. Late timers catch up (they are not skipped), and the start lag
-  (scheduled → actually running) is measured per arrival (LOAD-001).
+  (scheduled → actually running) is measured per arrival.
 * **Iterations** — a fixed count over `min(concurrency, iterations)` lanes.
   Slowing responses lengthen the run instead of dropping work.
 
@@ -172,9 +171,10 @@ only with ≥ 10 sends in the window; warmup sends count, because the rule
 protects the target). Aborting stops scheduling and chains, drains, and marks
 the report `aborted_by_rule` and partial.
 
-Every run requires `RunOptions.acknowledged = true` — the UI's explicit start
-after showing destination, planned rate/concurrency/duration and the
-ownership reminder. Imported plans are never auto-started.
+Every run requires `RunOptions.acknowledged = true`: the UI's explicit start
+after showing the destination, the planned rate, concurrency and duration,
+and the ownership reminder (`--i-am-authorized` in the CLI). Imported plans
+are never auto-started.
 
 ## Accounting
 
@@ -241,14 +241,14 @@ live progress and in a crash report rebuilt from the last snapshot.
   `timeouts`, excluded from both distributions, and summarised in
   `timeouts_censored` (count, deadlines that elapsed, elapsed-at-abandonment)
   with the label *"a lower bound on the latency the target would have
-  produced"* (LOAD-004). Canceled sends have no latency.
+  produced"*. Canceled sends have no latency.
 * **Histograms are merged, never averaged.** Each shard (≤ 8, slots mapped
   round-robin) owns HDR histograms (1 µs – 1 h; 3 significant figures for
   success/failure, 2 for setup/lag/censored). Aggregation adds histograms and
   only then computes percentiles; the success and failure histograms are
-  exported as base64 V2+DEFLATE so saved reports can be merged again.
-  LOAD-003 checks merged percentiles against a brute-force sorted array
-  (within 0.1 %) and shows averaging per-worker p99s would be off by > 100×.
+  exported as base64 V2+DEFLATE so saved reports can be merged again. A test
+  checks merged percentiles against a brute-force sorted array (within
+  0.1 %) and shows that averaging per-worker p99s would be off by > 100×.
   Min/max/mean are exact; percentiles are clamped to the exact min/max.
 * **Timeline**: one bucket per second (wider if the plan exceeds 3,600 s),
   capped at 3,600 buckets. Sends are bucketed by start (`started`) and by
@@ -264,7 +264,7 @@ live progress and in a crash report rebuilt from the last snapshot.
   counted under "other"), ≤ 5 examples of ≤ 400 characters each, built only
   from the engine's redacted record (method, redacted URL, outcome summary,
   failure message, failed-assertion message). Response bodies are never
-  retained (LOAD-010).
+  retained.
 
 ## Generator health and "target not achieved"
 
@@ -283,14 +283,17 @@ of these hold:
 3. p99 start lag over the measured window > 50 ms — every arrival may have
    started, but late, so the offered arrival process was not honoured.
 
-The note states that the run does not establish the target's capacity
-(LOAD-007). Local port/address exhaustion (`client.connect.address_unavailable`)
+The note states that the run does not establish the target's capacity.
+Local port/address exhaustion (`client.connect.address_unavailable`)
 gets its own generator note because it is a generator-side limit. Closed and
 iteration workloads have no target rate, and say so.
 
 ## Worker process and IPC
 
-`anvil-load-worker` takes **no arguments** (it exits with 64 if given any).
+The desktop app and the CLI run the worker by re-launching their own
+executable with the fixed flag `--anvil-load-worker`. The standalone
+`anvil-load-worker` binary speaks the same protocol and takes **no
+arguments** (it exits with 64 if given any).
 
 * **stdin, line 1**: one JSON `WorkerJob` (≤ 256 MiB): plan, run options,
   per-request specs and settings/auth/variable layers, the selected TLS and
@@ -299,9 +302,10 @@ iteration workloads have no target rate, and say so.
   values**, stored attachment bytes (base64, digest-verified: request bodies
   and the `.proto` files or descriptor set a gRPC request's schema needs) and
   the dataset bytes.
-* **stdin, afterwards**: a `{"cancel":true}` line **or EOF** cancels the run.
-  EOF means the parent went away, so a worker never keeps generating traffic
-  for a dead app.
+* **stdin, afterwards**: a `{"cancel":true}` line **or EOF** cancels the run
+  (completion `canceled_by_user`). EOF means the parent went away, so a worker
+  never keeps generating traffic for a dead app. `{"cancel":true,"reason":"lock"}`
+  stops the run because the profile locked (completion `stopped_by_lock`).
 * **stdout**: NDJSON `WorkerMessage`s — `started` (run metadata), `progress`
   (≤ 4/s; lossy under backpressure; carries a balanced snapshot plus only the
   timeline buckets finalized since the last delivered progress) and exactly one
@@ -318,9 +322,9 @@ leftover UDP section. A unit test fails when the published schemas gain a
 sensitive field that this scoping does not know about. Values travel only
 over the stdin pipe (never argv or the environment, which other local users
 can read), are held in zeroizing buffers, redact in `Debug`, and are rebuilt
-in the worker as `MemorySecrets` / `MemoryAttachments`. The LOAD-009 test
-checks the process table shows no job content and that a scoped secret was
-used by every send but never appears in the report.
+in the worker as `MemorySecrets` / `MemoryAttachments`. A test checks that the
+process table shows no job content, and that a scoped secret was used by
+every send but never appears in the report.
 
 **Cancel, drain and crash.** Cancel stops scheduling and further chain steps,
 gives in-flight sends `cancel_drain_ms` (default 2 s), then cancels them and
@@ -331,28 +335,26 @@ notes how many were canceled. `LoadController` forwards cancel, kills the
 worker if it has not finished within its drain window plus 5 s, and — if the
 worker dies without a report — rebuilds a **partial `worker_crashed` report**
 from the last progress snapshot and the accumulated timeline, stating that
-later sends and the outcome of the in-flight ones are unknown (LOAD-009).
-Dropping the controller closes stdin (graceful cancel) and kills the worker
-after the same bound. The worker path always comes from the host app, never
-from an imported plan. A worker exits the process right after writing its
-report, without dropping its runtime: the runtime's blocking stdin reader
-would otherwise keep a finished worker alive (the `anvil` CLI's worker mode
-had exactly that bug until the protocol-load CLI test exposed it). A crash
-report carries the plan's unit kind, taken from the job's first request when
-the worker never announced its run.
+later sends and the outcome of the in-flight ones are unknown. A crash report
+carries the plan's unit kind, taken from the job's first request when the
+worker never announced its run. Dropping the controller closes stdin
+(graceful cancel) and kills the worker after the same bound. The worker path
+always comes from the host app, never from an imported plan. A worker exits
+the process right after writing its report, so the runtime's blocking stdin
+reader cannot keep a finished worker alive.
 
 ## Reports
 
 * **JSON** (`report::to_json` / `open_json`): the domain `LoadReport`, sealed
   with `integrity_sha256` (SHA-256 of the canonical JSON with that field
   unset). Reopening verifies the hash, so metrics, configuration, engine
-  version and dataset hash are proven unchanged (LOAD-011). The typed
+  version and dataset hash are proven unchanged. The typed
   `protocol_metrics` block (`ProtocolLoadMetrics`: `version` =
   `PROTOCOL_METRICS_VERSION` 1, `unit`, `semantics`, and one family block —
   `http`, `grpc` (+ `stream` for server streaming), `stream` (SSE),
   `websocket`, `tcp` or `datagram`) is part of the sealed content: changing a
-  denominator breaks the seal. Reports written before protocol load reopen
-  unchanged (`protocol_metrics` absent means HTTP requests).
+  denominator breaks the seal. A report without `protocol_metrics` counts HTTP
+  requests.
 * **CSV**: `summary_csv` (`section,metric,value`) and `timeline_csv`. Cells
   starting with `= + - @` or control characters are prefixed with `'` to
   neutralise spreadsheet formula injection. The summary adds `unit,*` rows
@@ -364,7 +366,7 @@ the worker never announced its run.
   SVG only, no JavaScript, no external fonts/images/stylesheets, and an
   embedded CSP (`default-src 'none'`). Every dynamic string is escaped;
   response-derived text (e.g. a header value quoted by a failed assertion) is
-  rendered inert (LOAD-011). Charts: sends completed/failed and arrivals
+  rendered inert. Charts: sends completed/failed and arrivals
   dropped per second, success p50/p99 per second, status distribution; native
   SVG `<title>` hover and a timeline table as the accessible data view; light
   and dark themes. Partial runs and unmet targets carry banners. A
@@ -381,14 +383,14 @@ protocol panel; the CLI prints one line per family after a run.
 
 `compare(a, b)` first compares the **load unit**: runs of different units
 (e.g. HTTP requests vs WebSocket sessions vs UDP exchanges) are **refused**
-outright — `compatible = false`, one blocking difference (`load unit`), no
-deltas, summary "Refused: …" (LOAD-013). Otherwise it lists semantic
+outright: `compatible = false`, one blocking difference (`load unit`), no
+deltas, summary "Refused: …". Otherwise it lists semantic
 differences. **Blocking** (latency deltas are withheld and the reasons
 returned instead): engine, engine version, workload model, warmup handling,
 observed protocol set, connection mode (only a *caution* for units that open
 their own connection in either mode), dataset hash, request set. **Caution**
 (deltas shown): request revisions, load level, completeness/partial,
-generator saturation, report schema (LOAD-014). Comparable runs get
+generator saturation, report schema. Comparable runs get
 success-latency deltas only when both have successful units, the achieved
 rate, the **failed-unit ratio**, censored timeouts and dropped arrivals, plus
 per-protocol ratios (non-OK and missing-status ratios, messages per opened
@@ -405,6 +407,25 @@ as `SendObservation::is_failure` decides per unit. Because
 maximum nor their sum is that count; the ratio uses the failure-latency
 distribution (one entry per failed non-timeout unit) plus the ledger's
 timeouts, kept within the bounds the two counters imply.
+
+## CLI
+
+```
+anvil load create <workspace> <name> --request <request>... (--vus N | --rate R | --iterations N)
+          [--duration SECS] [--concurrency N] [--max-in-flight N] [--warmup SECS]
+          [--abort-failure-pct PCT] [--fresh]
+anvil load check <workspace> <plan>       # the plan's load unit, or why it is refused
+anvil load preflight <workspace> <plan>   # destinations and planned load; nothing is sent
+anvil load run <workspace> <plan> --i-am-authorized [--json FILE] [--html FILE] [--csv FILE]
+anvil load list <workspace>
+anvil load reports <workspace>
+```
+
+`--vus` and `--rate` build one stage that ramps linearly from 0 to the target
+over `--duration` (default 30 s). `--iterations` runs a fixed count over
+`--concurrency` lanes (default 10). `--abort-failure-pct` sets the abort rule
+over a 10 s window. `--fresh` selects the fresh connection mode; the default is
+persistent. `--csv` writes the summary CSV.
 
 ## Measured on this hardware (not product claims)
 
@@ -426,15 +447,15 @@ Reproduce with `cargo build --release -p anvil-load --bins --examples` and
 Observations that shaped the implementation:
 
 * The contended runs kept the achieved/offered ratio at 100 % while arrivals
-  started up to ~270 ms late. That is why a p99 start lag above 50 ms now marks
+  started up to ~270 ms late. That is why a p99 start lag above 50 ms marks
   the target as not achieved.
 * An unbounded fresh-connection run (8 VUs for several seconds) exhausted the
   machine's ephemeral ports: 16,359 sockets in `TIME_WAIT` against a range of
   16,384 (49152–65535). Every later connection failed with
   `address_unavailable` until they drained. With `net.inet.tcp.msl` = 15 s
   (TIME_WAIT 30 s), one source address sustains at most ~16,384 / 30 s ≈ 546
-  new connections/s on this OS. Reports now call this out as a
-  generator-side limit.
+  new connections/s on this OS. Reports call this out as a generator-side
+  limit.
 * One worker process used ~5–7 cores at 91–107k iterations/s for a trivial
   response. Each send runs the full engine path (preparation, diagnostics,
   record assembly) that buys parity with manual Send; the per-send cost has
@@ -493,11 +514,6 @@ Observations that shaped the implementation:
   percentiles.
 * Peak CPU is sampled at the progress cadence (≥ 250 ms), so short bursts are
   averaged. Generator health is unavailable on non-Unix platforms.
-* `cargo clippy -p anvil-load --tests -- -D warnings` also lints workspace
-  path dependencies; with clippy 1.98 it currently fails on 42 pre-existing
-  findings in `anvil-transport`, `anvil-engine`, `anvil-auth`,
-  `anvil-diagnostics` and `anvil-fixtures` (mostly `result_large_err`).
-  `anvil-load` itself is clean (`--no-deps`).
 
 ## Matrix coverage
 

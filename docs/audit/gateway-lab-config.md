@@ -10,7 +10,9 @@ Configs: `lab/gateway/` (8 profiles, listed in section 4). Structural lint:
 Later status: the same configs validate and run unchanged against v0.9.7, the lab's default pin
 since then (the lint's field sets are identical in both releases; `anvil-lab --release v0.9.5`
 still runs v0.9.5). The citations below remain v0.9.5 citations; see
-[`gateway-0.9.7-delta.md`](gateway-0.9.7-delta.md) for what changed.
+[`gateway-0.9.7-delta.md`](gateway-0.9.7-delta.md) for what changed. The binary is now fetched and
+verified by `lab/scripts/fetch-gateway.sh`, and the lab runs as described in
+[`../lab/README.md`](../lab/README.md).
 
 ## 0. Provenance and citation convention
 
@@ -24,7 +26,7 @@ still runs v0.9.5). The citations below remain v0.9.5 citations; see
 All `path:line` citations are relative to the gateway repo at tag v0.9.5. Reproduce any of them with:
 
 ```sh
-git -C /Volumes/JustusStorage/GitHub/ferrum-edge/ferrum-edge show v0.9.5:<path>
+git -C <ferrum-edge checkout> show v0.9.5:<path>
 ```
 
 ## 1. Running the binary in file mode

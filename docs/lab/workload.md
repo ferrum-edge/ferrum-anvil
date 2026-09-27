@@ -17,25 +17,22 @@ lifetime), and its warning `workload attestation failed` — and the lookalike f
 ## 1. Running
 
 ```sh
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH    # macOS/Homebrew rustup
-export ANVIL_LAB_FERRUM_BIN=/path/to/ferrum-edge-macos-aarch64   # checked against the lock
-ulimit -n 4096
 cargo run -p anvil-lab -- run workload --untrusted-pass
 cargo run -p anvil-lab -- --release v0.9.5 run workload --untrusted-pass
 cargo run -p anvil-lab -- up workload        # keep everything up; prints the socket and listeners
-anvil workload probe --endpoint unix:///private/tmp/anvil-lab-wl-$(id -u)/mesh.sock --audience spiffe://anvil.lab/api/orders
+anvil workload probe --endpoint unix://<socket dir>/mesh.sock --audience spiffe://anvil.lab/api/orders
 ```
 
-Results go to `results/lab/<stamp>-workload/` (`summary.json`, `<ID>.json`, `<ID>.record.json`,
-`gateway-operator*.log`, `sockets.txt`). Every gateway configuration is validated by the real binary
-(`ferrum-edge validate`) before it starts. The profile needs Unix domain sockets (macOS, Linux).
+Setup, binary lookup, results layout and the two passes: [README.md](README.md). The run directory
+also holds `sockets.txt` (where the sockets went and why). Every gateway configuration is validated
+with `ferrum-edge validate` before it starts. The profile needs Unix domain sockets (macOS, Linux).
 
 ### Identity and attestation
 
 Ferrum Edge's Workload API is off by default (`FERRUM_MESH_WORKLOAD_API_ENABLED`, `src/config/env_config.rs:4647-4658`)
 and can only be served with `FERRUM_MESH_CA_BACKEND=internal` and the dev-only self-signed root
-(`FERRUM_MESH_CA_BOOTSTRAP_DEV=true`); it is refused under `FERRUM_MESH_PRODUCTION_MODE=true` (docs/mesh.md
-"Workload API JWT-SVID", ~line 4906). It attests a caller only by the kernel peer credentials of the socket:
+(`FERRUM_MESH_CA_BOOTSTRAP_DEV=true`); it is refused under `FERRUM_MESH_PRODUCTION_MODE=true` (Ferrum Edge
+`docs/mesh.md`, "Workload API JWT-SVID"). It attests a caller only by the kernel peer credentials of the socket:
 `FERRUM_MESH_WORKLOAD_API_UNIX_IDENTITY_RULES=uid:<uid>=<spiffe-id>` (`src/identity/attestation/unix.rs`; the
 server reads `SO_PEERCRED` / `getpeereid` through tonic's `UdsConnectInfo`, `server.rs:397-415`). The lab writes a
 rule for **the uid Anvil runs as** (read from a directory it just created), so the gateway attests the lab
@@ -55,9 +52,8 @@ The socket must meet Ferrum's contract (`src/identity/workload_api/listener.rs`,
 in a staging directory inside `sun_path`) and whose **every** ancestor is a real directory owned by this user or
 root and not group/world-writable without the sticky bit. The lab uses `lab/.run/workload/wapi` when it
 qualifies, else a private `0700` directory `anvil-lab-wl-<uid>` under `/private/tmp` (macOS, where `/tmp` is a
-symlink the contract refuses) or `/tmp` (Linux), and records the choice and the reason in `sockets.txt`. On the
-development machine the worktree path is 119 bytes and `/Volumes/JustusStorage` is group-writable, so the
-sockets live in `/private/tmp/anvil-lab-wl-501/`: `mesh.sock`, `foreign.sock`, and `disabled.sock` (never bound).
+symlink the contract refuses) or `/tmp` (Linux), and records the choice and the reason in `sockets.txt`. The
+directory holds `mesh.sock`, `foreign.sock` and `disabled.sock` (never bound).
 
 ### Instances and ports
 
@@ -77,9 +73,6 @@ carry no `iss`, so the provider names none (`jwks_auth.rs` then tries every prov
 
 ## 2. Scenarios
 
-Every scenario also runs untrusted (the gateway listeners not declared as Ferrum) and must then make no
-gateway attribution.
-
 | ID | Stimulus | Anvil's conclusion (public evidence) | Ground truth |
 |---|---|---|---|
 | WL-001 | HTTPS to the STRICT mesh inbound with a TLS profile whose identity is the **Workload API X.509-SVID** and whose trust is the SVID's bundle; server verified by SPIFFE ID `…/sa/workload-svc` | success; `FetchX509SVID` OK at the socket (or reused from the cache until half-life); client SVID `…/sa/anvil-client` presented; server verified by exact SPIFFE ID; no key material in the record | echo got `/echo`; operator 200 inbound transaction; `workload attested spiffe_id=…/anvil-client attestor=unix` |
@@ -96,11 +89,11 @@ gateway attribution.
 
 - **v0.9.5 serves the same Workload API.** `src/identity/workload_api/` and `src/identity/jwt_svid/` are
   unchanged between v0.9.5 and v0.9.7 (only `ca/internal.rs`, `spiffe/id.rs` and `spiffe/trust_domain.rs` differ,
-  in PEM parsing and error-message quoting), and all nine scenarios pass on both releases. No release-aware skip
-  is needed.
-- **The socket contract rules out most repository paths.** A worktree path longer than 74 bytes or any
-  group-writable ancestor (a shared volume) makes `ferrum-edge validate` refuse the configuration; the lab
-  therefore checks the contract itself before starting and falls back to a private temporary directory.
+  in PEM parsing and error-message quoting), and all nine scenarios pass on both releases without release-aware
+  skips.
+- **The socket contract rules out many checkout paths.** A socket parent longer than 74 bytes or any
+  group-writable ancestor (a shared volume) makes `ferrum-edge validate` refuse the configuration, so the lab
+  checks the contract itself before starting and falls back to a private temporary directory.
 - **Attestation is by uid only, and it works on macOS.** The `workload attested … attestor=unix` debug line
   shows the rule matched Anvil's uid through the socket's peer credentials on macOS too (the attestor module's
   comment expects non-Linux platforms to decline; the uid from tokio's `getpeereid` path is enough for a
@@ -120,8 +113,8 @@ gateway attribution.
 
 ## 4. Stability
 
-Three consecutive `anvil-lab run workload --untrusted-pass` runs on v0.9.7 and one on v0.9.5, on 2026-09-26 on
-the final code (macOS arm64; binaries `ferrum-edge-macos-aarch64`, sha256 from the lock files):
+Three consecutive `anvil-lab run workload --untrusted-pass` runs on v0.9.7 and one on v0.9.5, on 2026-09-26
+(macOS arm64; binaries `ferrum-edge-macos-aarch64`, sha256 from the lock files):
 
 | Run | Release | Result |
 |---|---|---|
@@ -130,8 +123,7 @@ the final code (macOS arm64; binaries `ferrum-edge-macos-aarch64`, sha256 from t
 | 3 (`results/lab/20260926T045336Z-workload`) | v0.9.7 | 18 passed, 0 failed, 0 skipped |
 | 4 (`results/lab/20260926T045345Z-workload`) | v0.9.5 | 18 passed, 0 failed, 0 skipped |
 
-18 = 9 scenarios × (trusted + untrusted pass). No untrusted run produced a `ferrum.token.*` or `ferrum.outcome*`
-finding. In every run the untrusted WL-001 reused the X.509-SVID the trusted pass had fetched (Anvil's cache
+18 = 9 scenarios × (trusted + untrusted pass). In every run the untrusted WL-001 reused the X.509-SVID the trusted pass had fetched (Anvil's cache
 holds it until half its 1-hour lifetime), which the evidence records as a cached call; its attestation line is
 the earlier fetch's.
 
@@ -142,5 +134,5 @@ the earlier fetch's.
 - Ferrum Edge's Workload API is dev/test-only (internal CA bootstrap), so the lab cannot show a production-mode
   posture; production deployments use a SPIRE agent's socket.
 - Federated trust domains, `ValidateJWTSVID` (Ferrum returns its claims as JSON bytes, not the SPIFFE
-  `Struct`: ferrum-edge/ferrum-edge#5764) and Windows named pipes are not driven live (see
-  protocols.md §5, item 9).
+  `Struct`: ferrum-edge/ferrum-edge#5764) and Windows named pipes are not driven live (see the SPIFFE item
+  in [protocols.md §5](../protocols.md)).

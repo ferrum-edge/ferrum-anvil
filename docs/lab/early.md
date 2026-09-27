@@ -9,7 +9,7 @@ The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3
 `20e7603` is identical apart from log formatting):
 
 - `FERRUM_TLS_EARLY_DATA_METHODS` (comma-separated, uppercased; `src/config/env_config.rs`
-  5076–5120) enables early data on the **HTTP/3 listener** of a listener without frontend mTLS
+  5076–5120) enables early data on the **HTTP/3 listener** when frontend mTLS is off
   (`src/http3/peer_identity.rs` `zero_rtt_admitted`, `quic_max_early_data_size`). The QUIC TLS
   config then advertises `max_early_data_size = u32::MAX` and uses a stateful session cache
   (`FERRUM_TLS_SESSION_CACHE_SIZE`, default 4096) instead of the stateless ticketer
@@ -19,8 +19,7 @@ The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3
   1731–1790, accept loop biased ahead of the completion signal at 1973–1979). Because every
   connection starts flagged as early, a 1-RTT request that becomes ready in the same turn as handshake
   completion can also be classified as early (source analysis, not observed here;
-  ferrum-edge/ferrum-edge#5761). A method outside the
-  list gets `425 {"error":"Method not allowed in 0-RTT early data"}` before routing (2805–2825);
+  ferrum-edge/ferrum-edge#5761). A method outside the list gets `425 {"error":"Method not allowed in 0-RTT early data"}` before routing (2805–2825);
   an admitted one is forwarded with `Early-Data: 1` (`src/http3/cross_protocol.rs` 1171–1178,
   5439–5440).
 - The **HTTPS (TCP) listener never accepts early data** (`src/tls/mod.rs` `enable_early_data`,
@@ -32,7 +31,7 @@ never passed to the engine:
 
 - the HTTP/1.1 echo **backend's request log**: which requests arrived, and whether the gateway
   marked them `Early-Data: 1`;
-- the **gateway's own log**: its warnings `Rejected HTTP/3 0-RTT request: method PUT not in allowed
+- the **gateway's own log**: the warnings `Rejected HTTP/3 0-RTT request: method PUT not in allowed
   early data methods` (HTTP/3) and `Rejected 0-RTT request: …` (HTTPS header path).
 
 Profile code: `crates/anvil-lab/src/early.rs`. Gateway configuration:
@@ -41,17 +40,13 @@ Profile code: `crates/anvil-lab/src/early.rs`. Gateway configuration:
 ## 1. Running
 
 ```sh
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH
-export ANVIL_LAB_FERRUM_BIN=/path/to/lab-bin/v0.9.7/ferrum-edge-macos-aarch64   # verified against the lock
-ulimit -n 4096
-
 cargo run -p anvil-lab -- list early
 cargo run -p anvil-lab -- run early --untrusted-pass                     # ~3 s
-cargo run -p anvil-lab -- --release v0.9.5 run early --untrusted-pass    # with the v0.9.5 binary
+cargo run -p anvil-lab -- --release v0.9.5 run early --untrusted-pass
 cargo run -p anvil-lab -- up early                                       # manual/desktop use
 ```
 
-Concurrent runs of this profile collide on its ports: take `.lab-lock-early` first.
+Setup, binary lookup, results layout and the two passes: [README.md](README.md).
 
 ## 2. Instances and ports
 
@@ -101,14 +96,13 @@ Observed on both releases: 2 session tickets per handshake on every listener; `m
 listener; the admitted 0-RTT GET reaches the backend with `Early-Data: 1`; the 425 body is the
 same on the HTTP/3 and HTTPS paths and carries no `X-Gateway-Error`.
 
-Found while building the profile:
+Behaviour these runs pin in Anvil:
 
-- Ferrum answers 425 as soon as it has the HEADERS and returns without reading the rest of the
-  request (`src/http3/server.rs` 2808–2825), so Anvil's write of the body can fail after the answer
-  exists (seen once in six early runs). Anvil now reads the response after a stopped HTTP/3 write
-  instead of reporting a write failure.
-- Before the handshake watch moved inline (it ran in its own task), HTTP/3 setup took 0.1–0.8 ms and
-  one early run in three lost the race against the ~0.4 ms loopback handshake: the request went out
-  after the handshake while the evidence still reported early data offered and accepted (with 0 early
-  bytes). Anvil now records such a request
-  as `handshake_completed_first` and never claims it as early data.
+- Ferrum answers 425 as soon as it has the HEADERS and does not read the rest of the request
+  (`src/http3/server.rs` 2808–2825), so Anvil's write of the body can fail after the answer exists
+  (seen once in six early runs). Anvil reads the response after a stopped HTTP/3 write instead of
+  reporting a write failure.
+- A request written after the handshake completed is recorded as `handshake_completed_first`, never
+  as early data, even when the ticket allowed it. When the handshake watch ran in its own task, one
+  run in three lost this race on loopback and was wrongly reported as accepted early data with 0
+  early bytes.

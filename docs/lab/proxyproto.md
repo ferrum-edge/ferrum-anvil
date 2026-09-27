@@ -1,15 +1,16 @@
 # Failure lab: `proxyproto` profile
 
 This profile runs Anvil's shared engine as a **load balancer that speaks the PROXY protocol**
-against the **real, pinned Ferrum Edge v0.9.7 release binary** (`lab/gateway/RELEASE.lock`).
+against the **real, pinned Ferrum Edge release binary** (v0.9.7 by default, v0.9.5 with
+`--release v0.9.5`).
 Every stream proxy sets `stream_proxy_protocol: true`: `tcp` and `tcp_tls` listeners require a
 PROXY v1/v2 header at the head of each connection, and `udp` / `dtls` listeners require the
 PROXY v2 `DGRAM` envelope on every datagram. There are no gateway mocks.
 
 Two more scenarios (PP-HTTP-001/002) send an **HTTP-family request with a PROXY header** to
 the gateway's ordinary HTTP and HTTPS listeners. Ferrum Edge HTTP listeners never read a PROXY
-header (`stream_proxy_protocol` is rejected for HTTP-family proxies, `src/config/types.rs`
-v0.9.7; `src/proxy/gateway_listener.rs` has no PROXY parsing), so they show what a listener that
+header (`stream_proxy_protocol` is rejected for HTTP-family proxies in `src/config/types.rs`, and
+`src/proxy/gateway_listener.rs` has no PROXY parsing). These scenarios show what a listener that
 does not expect the header does, and that Anvil reports only the public outcome.
 
 What Anvil sends is described in [protocols.md §3.10](../protocols.md). The gateway behaviour
@@ -36,28 +37,24 @@ Profile code: `crates/anvil-lab/src/{proxyproto,fixtures_proxyproto}.rs`. Receiv
 ## 1. Running
 
 ```sh
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH
-export ANVIL_LAB_FERRUM_BIN=/path/to/lab-bin/ferrum-edge-macos-aarch64   # verified against RELEASE.lock
-ulimit -n 4096
-
 cargo run -p anvil-lab -- list proxyproto
 cargo run -p anvil-lab -- run proxyproto --untrusted-pass          # ~60 s
 cargo run -p anvil-lab -- run proxyproto --scenario PP-013
 cargo run -p anvil-lab -- up proxyproto                            # manual/desktop use (authenticated scenarios need `run`)
 ```
 
-Every start runs the binary's `validate` first (the three configurations pass: `Validation
-passed.`). Results go to `results/lab/<UTC stamp>-proxyproto/` with the three operator logs
-(`gateway-operator.log` main, `-1` authenticated, `-2` untrusted-peer instance).
+Setup, binary lookup, results layout and the two passes: [README.md](README.md). Every start runs
+the binary's `validate` on the three configurations first. The run directory holds three operator
+logs: `gateway-operator.log` (main), `-1` (authenticated) and `-2` (untrusted-peer instance).
 
 ## 2. Instances and ports
 
-Profile 9 of the port plan: gateway 189xx, fixtures 199xx, **everything on loopback**.
+Port block: gateway 189xx, fixtures 199xx, **everything on loopback**.
 
 | Instance | Settings | Listeners | Fixtures |
 |---|---|---|---|
-| `proxyproto` | `FERRUM_TRUSTED_PROXIES=127.0.0.1/32`; no datagram secret (address-trust posture); streams on `127.0.0.1` | HTTP 18980, HTTPS 18981 (unused), admin 18990; `pp-tcp` 18901, `pp-tcp-tls` 18902 (TLS terminated), `pp-udp` 18903, `pp-dtls` 18904 (DTLS terminated) | 19901, 19902 (PROXY v2 echo), 19903, 19904 (UDP echo) |
-| `proxyproto-auth` | as above plus `FERRUM_DATAGRAM_PROXY_PROTOCOL_SECRET` (random 64 characters per run, passed only in the process environment and Anvil's in-memory vault) | HTTP 18982, HTTPS 18983 (unused), admin 18991; `pp-udp-auth` 18911, `pp-dtls-auth` 18912 | 19913, 19914 |
+| `proxyproto` | `FERRUM_TRUSTED_PROXIES=127.0.0.1/32`; no datagram secret (address-trust posture); streams on `127.0.0.1` | HTTP 18980, HTTPS 18981 (unused), admin 18990; `pp-tcp` 18901, `pp-tcp-tls` 18902 (TLS terminated), `pp-udp` 18903, `pp-dtls` 18904 (DTLS terminated) | 19901, 19902 (PROXY v2 echo), 19903, 19904 (UDP echo); 19930 (HTTP echo for `pp-http`) |
+| `proxyproto-auth` | as above plus `FERRUM_DATAGRAM_PROXY_PROTOCOL_SECRET` (64 random hex characters per run, passed only in the process environment and Anvil's in-memory vault) | HTTP 18982, HTTPS 18983 (unused), admin 18991; `pp-udp-auth` 18911, `pp-dtls-auth` 18912 | 19913, 19914 |
 | `proxyproto-v6` | the same trust list; streams on `::1` | HTTP 18984, admin 18992; `pp-v6-tcp` [::1]:18921, `pp-v6-udp` [::1]:18923 | 19921, 19923 (must stay silent) |
 
 Why three instances: the datagram secret is process-global (it switches every udp/dtls PROXY
@@ -105,18 +102,15 @@ second per listener, so each drop scenario waits 1.1 s before sending.
 
 ## 4. Results
 
-`anvil-lab run proxyproto --untrusted-pass`, three consecutive runs on macOS 26 (aarch64),
-Ferrum Edge v0.9.7: **42 passed, 0 failed, 0 skipped** each time (21 scenarios × trusted and
-untrusted destination passes). The untrusted pass (destination not declared as a Ferrum
-gateway) produces no `ferrum.token.*` / `ferrum.outcome` finding.
+| Date | Release | Runs | Result per run |
+|---|---|---|---|
+| before PP-HTTP (21 scenarios) | v0.9.7 | 3 consecutive, macOS 26 aarch64 | 42 passed, 0 failed, 0 skipped |
+| 2026-09-26, `run all` (21 scenarios) | v0.9.7 and v0.9.5 | 1 each | 42/0/0 |
+| 2026-09-26, with PP-HTTP-001/002 (23 scenarios) | v0.9.7 | 3 consecutive | 46/0/0 |
+| 2026-09-26, 23 scenarios | v0.9.5 | 1 | 46/0/0 |
 
-After merging into the main branch (2026-09-26), `anvil-lab run all --untrusted-pass` and
-`anvil-lab --release v0.9.5 run all --untrusted-pass` gave proxyproto **42/0/0 on both v0.9.7 and
-v0.9.5**.
-
-With PP-HTTP-001/002 (2026-09-26): three consecutive runs on v0.9.7 gave **46 passed, 0 failed,
-0 skipped** each time (23 scenarios × both passes), and one run on v0.9.5 **46/0/0**. In every run
-PP-HTTP-001 was observed as a close before any response and PP-HTTP-002 as a `decode_error` alert.
+Each result counts both the trusted and the untrusted pass. In every run PP-HTTP-001 was observed
+as a close before any response and PP-HTTP-002 as a `decode_error` alert.
 
 ## 5. Observations
 

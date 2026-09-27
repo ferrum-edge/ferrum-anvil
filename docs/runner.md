@@ -1,26 +1,22 @@
 # Collection runner (`anvil-runner`)
 
-Implements the collection-test part of build plan §6 (assertions, extraction,
-chained requests, CSV/JSON rows), the variable chain of §5.3 and the
-shared-prepared-request rule of §14.1 for collection runs. Relevant matrix
-cases: LOAD-008 (same request via Send/collection/load), DATA-020 (redaction
-across artifacts, datasets included) and the universal assertions
-(transport/application/assertion separation, no unsafe replay, bounded
-resources).
+The collection runner executes saved requests in order, as a scenario or a
+folder, with datasets, chained extraction and assertions, and writes
+JSON, JUnit and HTML reports.
 
 ## Parity with manual Send
 
-Every step is one call to `Engine::execute(&ctx, EventCtx::none(), cancel)` —
+Every step is one call to `Engine::execute(&ctx, EventCtx::none(), cancel)`:
 the same preparation, variable resolution, body serialization, per-send auth
 (fresh HMAC nonces, DPoP proofs, JWT time claims), TLS policy, connection
 pool, cookie jar, redaction, diagnostics and assertion evaluation as the
-request editor. The runner does not read storage: a `StepProvider`
+request editor. The runner does not read storage. A `StepProvider`
 (implemented by `anvil-app`) yields the frozen `ExecutionContext` of each
 saved request, built by the same `App::build_context` a manual Send uses.
 
-The app snapshots every request of the run once, at run start, so a run
-uses a frozen environment and request state (§5.3) even if either is edited
-while it runs. The exact request revision executed is recorded per step.
+The app snapshots every request of the run once, at run start, so edits to
+the environment or a request during the run do not affect it. Each step
+records the exact request revision it executed.
 
 The runner never retries a step. Retries remain the engine's decision under
 the request's retry policy, and the engine never replays a request that may
@@ -28,36 +24,38 @@ have been processed unless the method is idempotent.
 
 ## What can be run
 
-* **Scenario** — a saved `Scenario`: ordered `steps` (request, enabled,
-  `delay_ms` think time before the step), optional `dataset_id`,
-  `iterations`, `stop_on_failure`.
-* **Folder** — every request of a folder subtree (or the whole workspace) in
+* **Scenario**: a saved `Scenario` with ordered `steps` (request, enabled,
+  `delay_ms` think time before the step), an optional `dataset_id`,
+  `iterations` and `stop_on_failure`.
+* **Folder**: every request of a folder subtree (or the whole workspace) in
   sidebar order: at each level subfolders first, then requests, each by
   `sort_key`. Folder runs default to `stop_on_failure = false`.
 
 ### Trust
 
-Imported scenarios arrive with `trusted = false` (the portability layer
-clears the flag; nothing runs on import). The runner refuses an untrusted
-scenario with `RunError::Untrusted` before any traffic unless the caller sets
-`allow_untrusted`, which UIs set only after the user confirmed that specific
-run. The override is recorded in the report (`source.untrusted_override`,
-a note, and a banner in the HTML summary) and does not trust the scenario
-for later runs. `App::trust_scenario` / `anvil scenario trust` marks a
-reviewed scenario trusted. Scenarios created locally (`App::create_scenario`,
-`anvil scenario create`) are trusted. Folder runs are an explicit user
-action over the user's own saved requests.
+Imported scenarios arrive with `trusted = false`, and nothing runs on
+import. The runner refuses an untrusted scenario with `RunError::Untrusted`
+before any traffic unless the caller sets `allow_untrusted`, which UIs set
+only after the user confirmed that specific run. The override is recorded in
+the report (`source.untrusted_override`, a note, and a banner in the HTML
+summary) and does not trust the scenario for later runs.
+
+- `App::trust_scenario` / `anvil scenario trust` marks a reviewed scenario
+  trusted.
+- Scenarios created locally (`App::create_scenario`, `anvil scenario create`)
+  are trusted.
+- Folder runs are an explicit user action over the user's own saved requests.
 
 ## Variables and precedence
 
-The provider's context carries the normal chain (low → high): app defaults →
-workspace → selected environment → ancestor folders. The runner appends the
-run-local layers, which therefore always win:
+The provider's context carries the normal chain (low → high): workspace →
+selected environment → ancestor folders. The runner appends run-local layers,
+which therefore always win:
 
-1. `run` — `{{anvil.iteration}}` (0-based) and `{{anvil.step}}` (0-based
+1. `run`: `{{anvil.iteration}}` (0-based) and `{{anvil.step}}` (0-based
    position in the scenario). Treat the `anvil.` prefix as reserved.
-2. `dataset '<name>' row N` — the iteration's dataset row.
-3. `extracted (this iteration)` — values extracted by earlier steps of the
+2. `dataset '<name>' row N`: the iteration's dataset row.
+3. `extracted (this iteration)`: values extracted by earlier steps of the
    same iteration (a later extraction of the same name replaces the earlier
    one). Extracted values never cross iterations and are never persisted.
 
@@ -65,13 +63,13 @@ A step under an imported collection's import root that the user has not
 opened to the workspace (see [import.md](import.md#persisting-an-import-anvil-app))
 gets neither the dataset row nor values extracted by steps outside that
 root, and values it extracts are handed only to later steps under the same
-root (`ExecutionContext::scope`). Runs without import roots are unchanged.
+root (`ExecutionContext::scope`).
 
-Unresolved variables still fail preparation (`unresolved_variable`, nothing
-sent) — for example when an earlier extraction matched nothing. The step
-then fails on the transport dimension and its record says which variable
-and which scopes were searched; extraction misses are also surfaced in the
-step's `message`.
+An unresolved variable fails preparation (`unresolved_variable`, nothing
+sent), for example when an earlier extraction matched nothing. The step then
+fails on the transport dimension, and its record says which variable and
+which scopes were searched. Extraction misses also appear in the step's
+`message`.
 
 When the context has a seed, each step gets a seed derived from it, the
 iteration and the step, so `{{$randomInt}}` / `{{$randomFrom}}` are
@@ -79,28 +77,28 @@ reproducible per step and still differ between iterations.
 
 ## Datasets
 
-CSV (header row, then records) or a JSON array of flat objects — parsed by
+CSV (header row, then records) or a JSON array of flat objects, parsed by
 the same code as the load engine. JSON strings are used as-is, other scalars
 use their JSON text, `null` becomes an empty string, and a key missing from
 a row leaves that variable *undefined* for that row (not empty).
 
-Bounds (errors are clear and never quote cell values): 16 MiB, 100 000
-rows, 256 columns; empty, duplicate or brace-containing column names are
-rejected; a dataset must have at least one row.
+Bounds: 16 MiB, 100,000 rows and 256 columns. Empty, duplicate or
+brace-containing column names are rejected, and a dataset must have at least
+one row.
 
 Iterations: the explicit run override, else the scenario's `iterations`
-when non-zero, else one per dataset row, else 1 (at most 10 000). Iteration
-*i* uses row *i mod rows* — rows are reused in order when there are more
-iterations than rows, and later rows are unused when there are fewer; both
-cases are noted in the report.
+when non-zero, else one per dataset row, else 1 (at most 10,000). Iteration
+*i* uses row *i mod rows*: rows are reused in order when there are more
+iterations than rows, and later rows are unused when there are fewer. The
+report notes both cases.
 
-`sensitive_columns` values are secrets: they enter the engine as secret
-variables (redacted by the engine wherever it substitutes them), are added
-to the run's exact-value redactor, and the column names are added to the
-redaction name list for that run. Only the dataset's name, format, SHA-256,
-row count and column names appear in the report. A sensitive column that is
-not in the dataset is reported (and rejected by `App::create_dataset` and the
-CLI) rather than silently ignored.
+Values in `sensitive_columns` are secrets. They enter the engine as secret
+variables (redacted wherever the engine substitutes them) and are added to
+the run's exact-value redactor, and the column names are added to the
+redaction name list for that run. The report shows only the dataset's name,
+format, SHA-256, row count and column names. A sensitive column that is not
+in the dataset is reported (and rejected by `App::create_dataset` and the
+CLI), never silently ignored.
 
 ## Step outcome and "failed"
 
@@ -310,47 +308,42 @@ anvil scenario show <workspace> <scenario>
 anvil scenario trust <workspace> <scenario>
 ```
 
-Exit codes follow the CLI convention (0 success · 1 transport/application
-failure · 2 assertion failure · 3 local/usage error): `anvil run` exits 2
-when any step failed an assertion (and assertions are counted), otherwise 1
-when any step failed or was not sent or the run was canceled/aborted, 0 when
-everything passed, and 3 when the run could not start (untrusted scenario,
-invalid scenario, dataset or folder, locked profile, usage error). Usage
-errors now exit 3 as documented, rather than clap's default 2. Ctrl-C
-cancels and still writes the partial report files. Live progress goes to
-stderr (`-q` silences it); the summary and failing steps go to stdout.
+`anvil run` exit codes follow the CLI convention:
+
+| Code | When |
+|---|---|
+| 0 | every step passed |
+| 1 | a step failed or was not sent, or the run was canceled or aborted |
+| 2 | a step failed an assertion (and assertions are counted) |
+| 3 | the run could not start: untrusted scenario, invalid scenario, dataset or folder, locked profile, usage error |
+
+Ctrl-C cancels and still writes the partial report files. Live progress goes
+to stderr (`-q` silences it); the summary and failing steps go to stdout.
 
 ## Tests
 
-`cargo test -p anvil-runner -p anvil-app -p anvil-cli -p anvil-domain` —
-real fixture sockets and the real engine throughout:
+Real fixture sockets and the real engine throughout:
 
-* `crates/anvil-runner/tests/runner.rs` — chaining (a JSON-extracted token is
-  seen by the fixture in the next step's header; `anvil.*` builtins), CSV and
-  JSON dataset iterations with a sensitive column absent from JSON, JUnit,
-  HTML and history, sensitive extraction redacted everywhere (the engine
-  could not know the value), `stop_on_failure` stopping only the iteration
-  (the fixture never sees the skipped step) and a configurable `FailOn`,
-  assertion vs transport failure (distinct dimensions, JUnit `<failure>` vs
-  `<error>`), untrusted refusal with no traffic, cancellation mid-run with a
-  partial report, well-formed JUnit with hostile names, HTML escaping of an
-  injected `<script>` from a response, report/event bounds, provider errors
-  and fatal aborts, and plan validation.
-* `crates/anvil-app/tests/runner.rs` — scenario run through the store
-  (history records linked from the report, report saved and encrypted at
-  rest), export → import → refused until trusted or explicitly allowed,
-  folder tree order, stored datasets, and a lock mid-run aborting with a
-  partial report and nothing sent afterwards.
-* `crates/anvil-cli/tests/cli_run.rs` — the real `anvil` binary: scenario
-  create/list/show/trust, all exports, exit codes 0/1/2/3, `--fail-on`,
-  `--allow-untrusted`, stored and file datasets.
+* `crates/anvil-runner/tests/runner.rs`: chaining and `anvil.*` builtins,
+  CSV and JSON dataset iterations, sensitive values redacted in JUnit, HTML
+  and history, `stop_on_failure` and `FailOn`, assertion vs transport
+  failures, untrusted refusal with no traffic, cancellation with a partial
+  report, hostile names in JUnit, HTML escaping of response content,
+  report and event bounds, provider errors and fatal aborts.
+* `crates/anvil-app/tests/runner.rs`: runs through the store (history
+  records linked from the report, report encrypted at rest), export → import
+  → refused until trusted or allowed, folder order, stored datasets, and a
+  lock mid-run aborting with nothing sent afterwards.
+* `crates/anvil-cli/tests/cli_run.rs`: the `anvil` binary: scenario commands,
+  every export, exit codes 0/1/2/3, `--fail-on`, `--allow-untrusted`, stored
+  and file datasets.
 
 ## Limitations
 
 * Steps run sequentially; there is no concurrency within a run (use the load
   engine for concurrent traffic).
-* No scripting: extraction and assertions are the declarative ones of §6.
-  There are no conditional steps, loops or step-level retries.
+* No scripting: extraction and assertions are declarative. There are no
+  conditional steps, loops or step-level retries.
 * Session protocols (WebSocket, gRPC streams, SSE, TCP, UDP) run exactly as
   a Send of the saved request runs them (its saved messages and stop
   conditions); there is no interactive session step.
@@ -363,6 +356,3 @@ real fixture sockets and the real engine throughout:
   never marked as secret.
 * Response bodies are not part of any report; they live only in history,
   subject to the history policy.
-* The TypeScript bindings in `apps/desktop/src/generated/contracts.ts` must
-  be regenerated from the new schemas by the desktop owner
-  (`npm run contracts`).

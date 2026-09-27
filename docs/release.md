@@ -1,9 +1,9 @@
 # Releasing Ferrum Anvil
 
 Releases are built by `.github/workflows/release.yml` and always end as a
-**draft** GitHub release. Publishing a draft, announcing it and updating the
-website are manual owner steps taken only after the release gate below is met
-(plan §16 "Release gates", §18, §19).
+**draft** GitHub release. Publishing the draft, announcing it and updating the
+website are manual owner steps, taken only after the
+[owner checklist](#owner-checklist-before-publishing-a-draft) is met.
 
 ## Cutting a release
 
@@ -12,9 +12,9 @@ website are manual owner steps taken only after the release gate below is met
    `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json` — and
    commit.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
-   (Or run the workflow manually with the tag as input. Without a tag, a manual
-   run is a **dry run**: everything is built and checked and the evidence is
-   uploaded to the run, but no release is created.)
+   Or run the workflow manually with the tag as input. A manual run without a
+   tag is a **dry run**: everything is built and checked and the evidence is
+   uploaded to the run, but no release is created.
 4. Review the draft (checklist below), then publish it by hand.
 
 ## What the workflow does
@@ -37,11 +37,11 @@ Each build job:
 1. `tauri build --ci --target <t> --bundles <b>` — release profile, **default
    features only**. The `e2e` feature (embedded WebDriver + environment-driven
    unlock) is never passed.
-2. `cargo build --release -p anvil-cli --target <t>` and packages
-   `anvil-cli-<version>-<t>.tar.gz|.zip` with `LICENSE`, `LICENSE-COMMERCIAL.md`
-   and `THIRD_PARTY_LICENSES.md`. (At the time of writing no shipped application
-   launches the `anvil-load-worker` binary, so it is not packaged; add it here
-   when a host does.)
+2. `cargo build --release -p anvil-cli --target <t>`, packaged as
+   `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
+   `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
+   `anvil-load-worker` binary is not packaged: the desktop app and the CLI run
+   load workers by re-launching themselves.
 3. `scripts/release-check.sh` over every installer, the CLI archive and the raw
    app binary, with the runtime probe on native targets (Linux under Xvfb). Any
    failure stops the release.
@@ -51,10 +51,11 @@ Each build job:
 5. CycloneDX 1.5 SBOMs for `anvil-desktop` and `anvil-cli` for that target
    (`cargo cyclonedx`); the job fails if the desktop SBOM lists the WebDriver plugin.
 
-**Publish** (Ubuntu): npm SBOM of the UI's production dependencies
+**Publish** (Ubuntu): an npm SBOM of the UI's production dependencies
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
-runs for the release commit, `SHA256SUMS`, `release-evidence.json`, an uploaded
-evidence bundle, and — for tags only — `gh release create --draft --verify-tag`.
+runs for the release commit, `SHA256SUMS`, `release-evidence.json` and an
+uploaded evidence bundle. For a tag only, it then runs
+`gh release create --draft --verify-tag`.
 
 ### Release evidence
 
@@ -75,8 +76,9 @@ evidence bundle, and — for tags only — `gh release create --draft --verify-t
 - tests: the CI / Desktop E2E / Lab runs for the commit with their
   conclusions. A missing or skipped run is not a pass — check them.
 
-The script refuses to finish (non-zero exit) if a target has no passing release
-check, no installer, no CLI archive or no SBOM, or if two artifacts share a name.
+The script lists every problem in `problems` and exits non-zero if a target
+has no passing release check, no installer, no CLI archive or no SBOM, or if
+two artifacts share a name.
 
 ## Release artifact safety check
 
@@ -128,15 +130,14 @@ signature, plus `stapler`/`spctl` for notarization on macOS;
 the evidence says `"signed": false` and
 `"signing": "unsigned — owner credentials not configured"`.
 
-Unsigned means: the files are exactly what CI built from the recorded commit
+Unsigned means the files are exactly what CI built from the recorded commit
 (check `SHA256SUMS` and `release-evidence.json`), but the operating system
 cannot attribute them to Ferrum Edge. macOS Gatekeeper blocks an unsigned app
 downloaded from the internet unless the user explicitly allows it (on Apple
-silicon the bundle only carries an ad-hoc signature); Windows SmartScreen warns.
-Do not publish unsigned installers as a production download, and never describe
-them as signed. Signing is a blocked deliverable until the owner supplies
-credentials. No step in this repository creates, simulates or claims a
-signature it did not verify.
+silicon the bundle carries only an ad-hoc signature); Windows SmartScreen
+warns. Do not publish unsigned installers as a production download, and never
+describe them as signed. No step in this repository creates, simulates or
+claims a signature it did not verify.
 
 The Tauri updater is not used, so there is no updater signing key.
 
@@ -151,8 +152,8 @@ The Tauri updater is not used, so there is no updater signing key.
   exceptions — `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`
   (Tauri's HTML/CSS tooling) and `option-ext` (`dirs`) — all used unmodified.
   Sources: crates.io only. Duplicate crate versions are reported as warnings.
-- **Advisories**: RustSec, with three reviewed ignores that each carry an exit
-  condition in `deny.toml` and are open items for the owner:
+- **Advisories**: RustSec, with two reviewed ignores. Each carries an exit
+  condition in `deny.toml` and is an open item for the owner:
   - `RUSTSEC-2023-0071` — `rsa` (Marvin timing side channel) via
     `jsonwebtoken`'s `rust_crypto` backend for RS256 signing in `anvil-auth`.
     Anvil only signs caller-built JWTs locally; no patched `rsa` exists. Consider
@@ -160,11 +161,8 @@ The Tauri updater is not used, so there is no updater signing key.
   - `RUSTSEC-2024-0429` — `glib` 0.18 `VariantStrIter` unsoundness via Tauri's
     Linux GTK stack; not called by Anvil or Tauri. Resolves when Tauri moves to
     gtk-rs ≥ 0.20.
-  - `RUSTSEC-2025-0134` — `rustls-pemfile` is archived (unmaintained, no
-    vulnerability); used by `anvil-transport` and `anvil-fixtures`. Migrate to
-    `rustls_pki_types::pem::PemObject`.
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
-  ship in the UI bundle (currently 0 findings). The development-only E2E
+  ship in the UI bundle. The development-only E2E
   tooling (WebdriverIO 9.30.1, pinned exactly by `@wdio/tauri-service` 1.4.0)
   carries high-severity advisories in `deepmerge-ts`, `extract-zip` and
   `serialize-javascript`; it runs only on developer machines and CI against
@@ -203,7 +201,8 @@ npm run e2e         # wdio run ./wdio.conf.ts
   `target/`), or `ANVIL_E2E_APP`.
 - Set `ANVIL_E2E_GATEWAY=http://127.0.0.1:18080` with `cargo run -p anvil-lab -- up core`
   running to send the success spec through the real Ferrum Edge lab gateway
-  (`/ok/echo`) instead of the local fixture.
+  (`/ok/echo`) instead of the local fixture and to run the gateway spec (`06`),
+  which is skipped otherwise. `e2e.yml` does this on macOS and Linux.
 - Linux needs a display: `xvfb-run -a npm run e2e`.
 - Screenshots of each key screen are written to `apps/desktop/e2e/screenshots/`
   (git-ignored; uploaded as CI artifacts).
@@ -244,7 +243,7 @@ E2E build and requires it to fail.
       profile, send a request, lock/unlock, uninstall); screenshots attached.
 - [ ] Advisory ignores in `deny.toml` re-reviewed.
 - [ ] Website changes follow only after publishing and link the exact artifact
-      URLs and checksums (plan §18).
+      URLs and checksums.
 
 ## Open items
 
@@ -256,15 +255,15 @@ E2E build and requires it to fail.
   ferrum-edge/ferrum-anvil#3.
 - **Packaged-app smoke tests** (install, first run, dialogs, uninstall) are not
   automated; the native E2E suite runs against the instrumented debug build.
-- The three advisory ignores in `deny.toml` (see above).
+- The two advisory ignores in `deny.toml` (see above).
 - After merging dependency changes, regenerate `THIRD_PARTY_LICENSES.md`
   (`node scripts/licenses.mjs`); CI fails while it is stale.
 
 ## Local verification record
 
 Recorded 2026-09-26 on macOS 26 (Darwin 25.6), Apple M4, Rust 1.98.1,
-Node 23.11, branch `claude/anvil-desktop-client-3f372d` (draft PR
-ferrum-edge/ferrum-anvil#1), after the last functional merge (UDP and DTLS
+Node 23.11, on draft PR ferrum-edge/ferrum-anvil#1, after the last functional
+merge at that time (UDP and DTLS
 through HBONE, DTLS through CONNECT-UDP, PROXY headers on HTTP-family
 requests, per-protocol load units, the SPIFFE Workload API and JWT-SVIDs,
 0-RTT early data, WebSocket permessage-deflate).
@@ -286,7 +285,7 @@ requests, per-protocol load units, the SPIFFE Workload API and JWT-SVIDs,
 | Plaintext at rest | `cargo test -p anvil-app --test at_rest` | no planted marker in profile files, WAL/SHM side files or new temp files |
 | Failure matrix | `python3 scripts/matrix-coverage.py` (lab evidence from the v0.9.7 runs) | 172 of 182 with executed evidence (97 live, 74 automated, 1 release check; LOAD-013 is now live: gRPC, WebSocket and UDP load through the gateway checked against its transaction log); 6 blocked, 2 not applicable, 2 partial (website, gated on release) |
 
-Earlier on this branch (still valid; the scripts and workflows they exercise are unchanged in substance):
+Earlier runs on the same PR:
 
 | Check | Command | Result |
 | --- | --- | --- |

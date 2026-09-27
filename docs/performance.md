@@ -20,7 +20,7 @@ The host was also running builds. Each figure is from the release profile.
 | Desktop app bundle | `npx tauri build --ci --bundles app,dmg`; `du -sk` | `.app` 34.1 MiB; `.dmg` 13.8 MiB; raw `anvil-desktop` 34.1 MiB |
 | CLI binary | `cargo build --release -p anvil-cli` | `anvil` 28.3 MiB |
 | Desktop idle memory, lock screen | production binary, fresh `ANVIL_DATA_DIR`, `ps -o rss` at 2, 5 and 10 s, three launches | 87–97 MiB RSS in the app process; 18–24 threads |
-| Desktop memory through the full native E2E suite | release build with the test-only `e2e` feature (`npx tauri build --no-bundle --features e2e`), `ps` sampled every 200 ms during all nine spec files (requests, diagnosis, TLS failure, a 300-request load run, history, reports, lock) | app peak 236 MiB RSS; load worker peak 21 MiB RSS |
+| Desktop memory through the full native E2E suite | release build with the test-only `e2e` feature (`npx tauri build --no-bundle --features e2e`), `ps` sampled every 200 ms during the nine spec files the suite had at that commit (requests, diagnosis, TLS failure, a 300-request load run, history, reports, lock) | app peak 236 MiB RSS; load worker peak 21 MiB RSS |
 | CLI start | `anvil --version`, 20 runs | median 10 ms, p90 12 ms |
 | Profile creation | `anvil profile create --passphrase-stdin` | 191 ms (dominated by the passphrase KDF) |
 | One CLI request, end to end | `anvil send --url http://127.0.0.1:<port>/ --passphrase-stdin --no-history` to a local server, 10 runs: unlock, send, diagnose, print | median 115 ms, max 150 ms; peak RSS 87 MiB |
@@ -39,28 +39,22 @@ not included and are not yet measured.
 | Load worker peak RSS (small run) | 64 MiB | 21 MiB (up to 37 MiB in the heavier runs in load.md) |
 | CLI start | 50 ms | 10 ms |
 | CLI unlock + one local request | 400 ms | 115 ms |
-| Response bytes captured per send | Load runs cap captures at 1 MiB by default | — |
 
-The load capture ceiling is an internal executor limit, not a user setting or
-a universal bound on memory per send. Three byte counts are separate:
+## Response size limits
 
-- **Captured bytes** (`limits.capture_bytes`): the prefix of the response body
-  kept for display, history, assertions and extractions. The default for a
-  normal send is 8 MiB. A request or settings layer can set it higher or
-  lower. A load run adds a `run:load` layer that lowers it to
-  `min(request setting, 1 MiB)` by default (the load executor's internal
-  `response_capture_bytes` limit; see [load.md](load.md)). A body larger
-  than the capture is still read to the end and counted, but it is marked
-  display-truncated, and body assertions and extractions are not evaluated
-  against the prefix. Nor is the application outcome of a SOAP or GraphQL
-  request, whose faults and errors arrive in a 2xx body: it is
-  `not_evaluated` (see [load.md](load.md) for how a load run counts it).
-- **Wire-read bytes** (`limits.max_response_bytes`, 256 MiB by default): how
-  much of the body is read from the network before reading stops with a local
-  `response_too_large` outcome. Bytes past the capture are counted, not kept.
-- **Decoded bytes** (`limits.max_decoded_bytes`, 64 MiB by default): the
-  ceiling on a content-decoded (gzip, deflate, br, zstd) body, which is
-  decoded from the captured bytes and held in memory alongside them.
+Three settings (`limits.*`, on any settings layer) bound how much of a
+response body is read and held:
+
+| Limit | Default | What it bounds |
+|---|---|---|
+| `limits.capture_bytes` | 8 MiB | The prefix of the body kept for display, history, assertions and extractions. A longer body is still read and counted, but marked display-truncated. |
+| `limits.max_response_bytes` | 256 MiB | How much of the body is read from the network before reading stops with a local `response_too_large_local` failure. |
+| `limits.max_decoded_bytes` | 64 MiB | The decoded size of a gzip, deflate, br or zstd body, held in memory beside the captured bytes. |
+
+A load run lowers the capture to at most 1 MiB per send; see
+[load.md](load.md#parity-with-manual-send). When only a prefix of the body is
+captured, body assertions and extractions are not evaluated, and neither is the
+application outcome of a SOAP or GraphQL request.
 
 ## Not measured yet
 
