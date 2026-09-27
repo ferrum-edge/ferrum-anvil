@@ -54,9 +54,13 @@ async function fillPassphrase() {
 
 describe("unlock passphrase", () => {
   it("offers nothing until the profile's mode is known, then converts a keychain profile", async () => {
+    // The reply exists before the component asks: the section mounts after the
+    // settings load, and its mount effect may run after the pending button is
+    // already on screen, so the test must not depend on when app_status is invoked.
     let resolveStatus: (s: unknown) => void = () => {};
+    const statusReply = new Promise((resolve) => (resolveStatus = resolve));
     backend({
-      app_status: () => new Promise((resolve) => (resolveStatus = resolve)),
+      app_status: () => statusReply,
       profile_convert_to_passphrase: () => ({ recovery_key: "AAAA-BBBB", keychain_entry_removed: true }),
     });
     render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
