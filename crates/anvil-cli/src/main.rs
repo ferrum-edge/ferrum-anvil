@@ -86,6 +86,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ScenarioCmd,
     },
+    /// Print the last storage cleanup of the profile: when it ran, what it
+    /// removed, and the stored objects that do not decode, which keep every
+    /// stored file until they are repaired or deleted. Opening a profile runs
+    /// the cleanup at most once a day.
+    StorageCleanup {
+        /// Run a cleanup pass now, then print it.
+        #[arg(long)]
+        now: bool,
+        /// Print it as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List recent history.
     History {
         #[arg(long)]
@@ -927,6 +939,31 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
         Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),
         Cmd::Load { cmd } => specs_load::load_cmd(&app, cmd).await,
         Cmd::Scenario { cmd } => collection::scenario_cmd(&app, cmd),
+        Cmd::StorageCleanup { now, json } => {
+            if *now {
+                app.clean_up_storage()?;
+            }
+            let last = app.last_storage_cleanup()?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&last)?);
+                return Ok(0);
+            }
+            let Some(last) = last else {
+                println!("no storage cleanup has run on this profile yet");
+                return Ok(0);
+            };
+            let r = &last.result;
+            println!("last storage cleanup: {}", last.ran_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!("  orphaned revisions removed: {}", r.orphaned_revisions);
+            println!("  stored files released: {}", r.released_attachments);
+            if !r.undecodable.is_empty() {
+                println!("  objects that do not decode: {} (they keep every stored file until repaired or deleted)", r.undecodable.len());
+                for o in &r.undecodable {
+                    println!("    {}  {}", o.kind, o.id);
+                }
+            }
+            Ok(0)
+        }
         Cmd::History { workspace, limit } => {
             let ws = match workspace {
                 Some(w) => Some(app.find_workspace(w)?.meta.id),

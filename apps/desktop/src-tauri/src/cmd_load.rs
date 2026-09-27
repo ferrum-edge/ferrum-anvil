@@ -5,7 +5,7 @@
 use crate::commands::{R, blocking, blocking_unchecked, e, id};
 use crate::state::{DesktopState, LoadRunEntry, VaultId};
 use anvil_app::file_grants::{FilePurpose, ReadFile};
-use anvil_app::load::{LoadPlanCheck, LoadPreflight, LoadReportSummary};
+use anvil_app::load::{LoadPlanCheck, LoadPreflight, LoadReportSummary, LoadRunGuard};
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport};
@@ -15,6 +15,12 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub const LOAD_WORKER_FLAG: &str = "--anvil-load-worker";
+
+/// Why a run stopped when its workspace was deleted.
+const WORKSPACE_DELETED: &str = "the load run's workspace was deleted; the run was stopped and its report was not kept";
+
+/// What the window of another profile hears of a finished run.
+const PROFILE_CLOSED: &str = "the profile the load run was started in was closed";
 
 #[tauri::command]
 pub fn load_plans(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec<LoadPlan>> {
@@ -72,13 +78,24 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     let app = st.app()?;
     let vault = VaultId::of(&app);
     let plan_id = id(&plan_id)?;
-    // Prepared from the store, secrets and all, on a blocking thread.
+    // Prepared from the store, secrets and all, on a blocking thread. The run
+    // is registered with the profile before its job is prepared, so a delete
+    // of its workspace (or a lock) from then on stops it.
     let preparing = app.clone();
-    let job = anvil_app::off_runtime(move || preparing.worker_job(&preparing.load_plan(&plan_id)?, acknowledged)).await.map_err(e)?;
-    // A lock that landed while the job was prepared stopped this run: its
-    // job, secrets and all, is not handed to a worker.
-    if entry.lock_token().is_cancelled() {
+    let (run, job) = anvil_app::off_runtime(move || {
+        let plan = preparing.load_plan(&plan_id)?;
+        let run = preparing.register_load_run(&plan.workspace_id)?;
+        Ok((run, preparing.worker_job(&plan, acknowledged)?))
+    })
+    .await
+    .map_err(e)?;
+    // A lock or a workspace delete that landed while the job was prepared
+    // stopped this run: its job, secrets and all, is not handed to a worker.
+    if entry.lock_token().is_cancelled() || run.locked().is_cancelled() {
         return Err("LOCKED".into());
+    }
+    if run.workspace_deleted().is_cancelled() {
+        return Err(WORKSPACE_DELETED.into());
     }
     let exe = std::env::current_exe().map_err(|x| x.to_string())?;
     let mut controller = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await.map_err(|x| x.to_string())?;
@@ -87,6 +104,7 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     // Canceled already if a lock landed while the worker started: the loop
     // below then stops it at once.
     let lock = entry.lock_token().clone();
+    let (profile_locked, deleted) = (run.locked().clone(), run.workspace_deleted().clone());
     let key = run_key.clone();
     tauri::async_runtime::spawn(async move {
         let mut canceled = false;
@@ -108,28 +126,53 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
                     canceled = true;
                     controller.cancel_for_lock().await;
                 }
+                _ = profile_locked.cancelled(), if !canceled => {
+                    canceled = true;
+                    controller.cancel_for_lock().await;
+                }
+                // The worker process, and with it every engine, pool and
+                // session it holds for the workspace, ends at once: nothing
+                // of its report is kept, so it has nothing to drain.
+                _ = deleted.cancelled(), if !canceled => {
+                    canceled = true;
+                    controller.kill();
+                }
             }
         }
         let result = controller.wait().await;
         drop(entry);
+        // Nothing of a deleted workspace is saved.
+        if let Some(ev) = discarded(&run, &key, handle.state::<DesktopState>().is_current(&app)) {
+            let _ = handle.emit("load-finished", ev);
+            return;
+        }
+        drop(run);
         // The report is saved on a blocking thread.
         let (owner, run_key) = (app.clone(), key.clone());
         // Unchecked: `finished` holds the report itself if a lock landed.
         let ev = blocking_unchecked(&handle, move |st| Ok(finished(st, &owner, vault, run_key, result))).await;
         let ev = ev.unwrap_or_else(|err| LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(err) });
-        // Another profile is open: its window shows nothing of this one.
-        let ev = if handle.state::<DesktopState>().is_current(&app) {
-            ev
-        } else {
-            LoadFinishedEvent {
-                run_key: key.clone(),
-                run_id: None,
-                error: Some("the profile the load run was started in was closed".into()),
-            }
-        };
-        let _ = handle.emit("load-finished", ev);
+        let _ = handle.emit("load-finished", for_window(ev, handle.state::<DesktopState>().is_current(&app)));
     });
     Ok(run_key)
+}
+
+/// The event a run ends with when its workspace was deleted, which keeps no
+/// report; `None` while the workspace exists. `current`: whether the run's
+/// profile is still the open one (see [`for_window`]).
+fn discarded(run: &LoadRunGuard, run_key: &str, current: bool) -> Option<LoadFinishedEvent> {
+    let ev = LoadFinishedEvent { run_key: run_key.into(), run_id: None, error: Some(WORKSPACE_DELETED.into()) };
+    run.workspace_deleted().is_cancelled().then(|| for_window(ev, current))
+}
+
+/// `ev` while the run's profile is the open one (`current`). Another
+/// profile is open otherwise: its window hears only that the run's profile
+/// was closed, nothing of the run.
+fn for_window(ev: LoadFinishedEvent, current: bool) -> LoadFinishedEvent {
+    if current {
+        return ev;
+    }
+    LoadFinishedEvent { run_key: ev.run_key, run_id: None, error: Some(PROFILE_CLOSED.into()) }
 }
 
 /// Save the report of a finished run into the profile it started under,
@@ -256,4 +299,36 @@ pub async fn dataset_add(
         app.save_dataset(d).map_err(e)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::tests::{TempRoot, create};
+
+    #[tokio::test]
+    async fn a_run_of_a_deleted_workspace_keeps_no_report_and_only_its_profile_hears_why() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, _) = create(&st, "A");
+        st.set_app_since(a, st.epoch()).unwrap();
+        let app = st.app().unwrap();
+        let ws = app.create_workspace("W").unwrap().meta.id;
+        let kept = app.create_workspace("Kept").unwrap().meta.id;
+        let run = app.register_load_run(&ws).unwrap();
+        let other = app.register_load_run(&kept).unwrap();
+        assert!(discarded(&run, "run-1", true).is_none(), "its workspace exists: its report is saved");
+
+        app.delete_workspace(&ws).unwrap();
+        let ev = discarded(&run, "run-1", st.is_current(&app)).expect("a run of a deleted workspace is discarded");
+        assert_eq!((ev.run_key.as_str(), ev.run_id, ev.error.as_deref()), ("run-1", None, Some(WORKSPACE_DELETED)));
+        assert!(discarded(&other, "run-2", true).is_none(), "a run of another workspace keeps its report");
+
+        // Another profile is open: its window hears nothing of the run.
+        let (b, _) = create(&st, "B");
+        st.set_app_since(b, st.epoch()).unwrap();
+        assert!(!st.is_current(&app));
+        let ev = discarded(&run, "run-1", st.is_current(&app)).unwrap();
+        assert_eq!((ev.run_id, ev.error.as_deref()), (None, Some(PROFILE_CLOSED)));
+    }
 }

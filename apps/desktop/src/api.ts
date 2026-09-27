@@ -326,6 +326,18 @@ export interface LoadPlanCheck {
   /** [request id, protocol] in plan order. */
   protocols: [string, Protocol][];
 }
+/** The last storage cleanup of the open profile (`anvil_app::cleanup::StorageCleanupRecord`). */
+export interface StorageCleanupRecord {
+  ran_at: string;
+  result: {
+    /** Revisions removed because their request no longer exists. */
+    orphaned_revisions: number;
+    /** Stored files released. */
+    released_attachments: number;
+    /** Stored objects that do not decode: while one is left, no stored file is released. */
+    undecodable: { kind: string; id: string }[];
+  };
+}
 export interface LoadReportSummary {
   run_id: string;
   plan_id: string;
@@ -529,6 +541,8 @@ export const api = {
   saveIntegration: (profile: IntegrationProfile) => call<IntegrationProfile>("integration_save", { profile }),
   settings: () => call<AppSettings>("settings_get"),
   saveSettings: (settings: AppSettings) => call<void>("settings_save", { settings }),
+  /** The last storage cleanup (at most once a day when the profile opens); null before the first. */
+  storageCleanupLast: () => call<StorageCleanupRecord | null>("storage_cleanup_last"),
 
   effective: (input: SendInput) => call<EffectiveRequest>("effective_request", { input }),
   send: (input: SendInput, executionId: string) => call<ExecutionView>("send_request", { input, executionId }),

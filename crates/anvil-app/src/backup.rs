@@ -122,7 +122,7 @@ pub const TABLES: &[(&str, &str)] = &[
     ("blobs", "attachment contents and stored response bodies, with the attachments and history records that use them"),
     ("history", "every execution record with its stored response body"),
     ("load_reports", "every load report"),
-    ("meta", "not carried: the schema version, key check and blob pins belong to this database and are recreated"),
+    ("meta", "not carried: the schema version, key check, blob pins and notes (the last storage cleanup) belong to this database"),
 ];
 
 const KEYCHAIN_NOTE: &str =

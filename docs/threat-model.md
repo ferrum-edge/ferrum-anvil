@@ -295,13 +295,15 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   Pooled gRPC channels exist only on a load run's own engines
   (one per virtual-user slot); a call that began before a clear of its
   engine's channels does not return its connection to them. Neither the
-  lock nor a workspace delete clears those engines: the lock stops the run,
-  and its engines are dropped when it ends. Residual gap: deleting a
-  workspace while one of its load runs is still running leaves that run's
-  engines holding the workspace's pooled connections, session tickets,
-  cookies, prepared TLS configurations and gRPC channels until the run
-  ends (see
-  [ferrum-anvil#162](https://github.com/ferrum-edge/ferrum-anvil/issues/162)).
+  lock nor a workspace delete reaches into those engines; each stops the
+  run instead, and the run's engines, with everything they hold, end with
+  its worker process. Every load run is registered with its profile, by
+  workspace, before its job is prepared (`App::register_load_run`):
+  `App::lock` stops every registered run and a workspace delete stops that
+  workspace's, and a lock or delete that landed before the registration is
+  seen by it, so the job is never handed to a worker. A run stopped by its
+  workspace's delete keeps no report, and a report of a deleted workspace is
+  refused.
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).

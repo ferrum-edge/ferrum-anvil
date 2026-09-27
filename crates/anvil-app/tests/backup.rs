@@ -480,9 +480,12 @@ fn a_restore_keeps_a_file_attached_here_marked_as_attached() {
     b.put_attachment("mine.bin", content, None).unwrap();
     b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
 
-    // With the restored workspace gone, an automatic release still keeps it.
+    // Deleting the restored workspace, the only saved item that names it,
+    // keeps it: it was attached here within the grace period, so the draft
+    // may hold it. An automatic release keeps it too.
     b.delete_workspace(&ws.meta.id).unwrap();
     let AttachmentRef::Stored { sha256, .. } = &file else { panic!("a stored attachment") };
+    assert_eq!(b.get_attachment(sha256).unwrap().as_deref(), Some(&content[..]), "released by the workspace delete");
     assert!(!b.release_attachment(sha256).unwrap(), "still marked as attached here");
     assert_eq!(b.get_attachment(sha256).unwrap().as_deref(), Some(&content[..]));
 }

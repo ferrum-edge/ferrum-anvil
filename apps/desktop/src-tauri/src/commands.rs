@@ -3,6 +3,7 @@
 //! the user explicitly typed them (they are stored and only references return).
 
 use crate::state::{DesktopState, ImportGate, PendingEntry, cancel_pending};
+use anvil_app::cleanup::StorageCleanupRecord;
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::profiles::Unlock;
@@ -456,6 +457,14 @@ pub fn settings_get(st: State<'_, DesktopState>) -> R<AppSettings> {
 #[tauri::command]
 pub fn settings_save(st: State<'_, DesktopState>, settings: AppSettings) -> R<()> {
     st.app()?.save_settings(&settings).map_err(e)
+}
+
+/// The last storage cleanup of the open profile (`None` before the first):
+/// when it ran, what it removed, and the stored objects that do not decode,
+/// which keep every stored file until they are repaired or deleted.
+#[tauri::command]
+pub fn storage_cleanup_last(st: State<'_, DesktopState>) -> R<Option<StorageCleanupRecord>> {
+    st.app()?.last_storage_cleanup().map_err(e)
 }
 
 // ------------------------------------------------------------------ execution
