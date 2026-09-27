@@ -165,8 +165,9 @@
   previewed (before, it was refused, and a URL without a scheme was
   previewed as `https://`). A WebSocket over HTTP/2 or HTTP/3 shows its
   `CONNECT`, a gRPC or gRPC-Web call shows `POST` to the method's path with
-  its framed request message, and each shows the headers the session
-  transport adds or leaves out. An HMAC or DPoP signature in the preview
+  its request message as redacted JSON (and the size of the framed message
+  sent), and each shows the headers the session transport adds or leaves
+  out. The preview and the session build the request with the same code. An HMAC or DPoP signature in the preview
   covers the same method, path, authority and body as the one sent, with a
   `ws`/`grpc` URL signed as its `http` counterpart. An auth profile the
   session refuses (one that rewrites the body, or adds query parameters to

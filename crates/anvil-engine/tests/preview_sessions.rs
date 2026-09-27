@@ -7,16 +7,20 @@
 //! not change per send, and the HMAC signature, which must verify over the
 //! preview's method, target and authority. A DPoP proof in the preview is
 //! bound to the same method and URL as the one sent. `ws`, `wss`, `grpc` and
-//! `grpcs` URLs are previewed, and raw TCP and UDP say they are not.
+//! `grpcs` URLs are previewed, and raw TCP and UDP say they are not. A gRPC
+//! call's message is shown as redacted JSON, never as the framed or base64
+//! bytes sent, and auth the session refuses is shown as a request that would
+//! not be sent, for the reason the session gives.
 
 use anvil_auth::hmac_sig;
-use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile};
-use anvil_domain::execution::FailureKind;
+use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile, KeyLocation, WsseConfig, WssePasswordType};
+use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
 use anvil_domain::request::*;
-use anvil_domain::secret::SensitiveValue;
+use anvil_domain::secret::{REDACTED, SensitiveValue};
 use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides};
 use anvil_engine::context::MemoryAttachments;
 use anvil_engine::preview::EffectiveRequest;
+use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::grpc::ECHO_PROTO;
 use anvil_fixtures::http as fx;
@@ -378,4 +382,184 @@ async fn raw_tcp_and_udp_say_the_preview_is_not_supported() {
         assert_eq!(f.kind, FailureKind::UnsupportedCombination);
         assert!(f.message.starts_with(&format!("preview not supported for {name}")), "{}", f.message);
     }
+}
+
+/// A schema whose request message has a `password` field.
+const ACCOUNTS_PROTO: &str = r#"syntax = "proto3";
+package preview.v1;
+message Login { string user = 1; string password = 2; string note = 3; }
+service Accounts { rpc Login(Login) returns (Login); }
+"#;
+/// The value of a secret variable the message uses.
+const PLANTED: &str = "planted-grpc-secret-7q2w9e";
+/// A password written into the message itself.
+const LITERAL_PASSWORD: &str = "literal-grpc-password-4k8d";
+
+/// A unary `Login` call whose message holds a password and a secret variable.
+fn grpc_login(url: &str, wire: GrpcWire, version: HttpVersionPolicy) -> ExecutionContext {
+    let sha = anvil_transport::certs::sha256_hex(ACCOUNTS_PROTO.as_bytes());
+    let file = AttachmentRef::Stored {
+        sha256: sha.clone(),
+        size: ACCOUNTS_PROTO.len() as u64,
+        file_name: "accounts.proto".into(),
+        media_type: None,
+    };
+    let mut s = RequestSpec::http("POST", url);
+    s.protocol = Protocol::Grpc;
+    s.grpc = Some(GrpcSpec {
+        service: "preview.v1.Accounts".into(),
+        method: "Login".into(),
+        mode: GrpcMode::Unary,
+        schema: GrpcSchemaSource::ProtoFiles { files: vec![file] },
+        messages: vec![format!(r#"{{"user":"preview-user","password":"{LITERAL_PASSWORD}","note":"{{{{planted}}}}"}}"#)],
+        metadata: vec![],
+        deadline_ms: None,
+        plaintext: false,
+        wire,
+    });
+    let mut c = ExecutionContext::standalone(s);
+    c.settings_layers.push(("run".into(), SettingsOverrides { http_version: Some(version), ..Default::default() }));
+    let planted = VarEntry { name: "planted".into(), value: PLANTED.into(), secret: true };
+    c.var_layers = vec![VarLayer { label: "environment:lab".into(), vars: vec![planted] }];
+    c.attachments = Arc::new(MemoryAttachments(HashMap::from([(sha, Bytes::from_static(ACCOUNTS_PROTO.as_bytes()))])));
+    c
+}
+
+/// The base64 runs that encode `s` wherever it falls in a longer base64
+/// text: the groups wholly within it, for each of the three alignments.
+fn base64_runs(s: &str) -> Vec<String> {
+    (0..3)
+        .map(|k| {
+            let mut bytes = vec![0u8; k];
+            bytes.extend_from_slice(s.as_bytes());
+            let enc = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let skip = if k == 0 { 0 } else { 4 };
+            enc[skip..enc.len() - 4].to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn grpc_preview_shows_the_message_as_redacted_json_never_the_framed_or_base64_bytes() {
+    init();
+    let e = Engine::new();
+    let cases = [
+        ("gRPC", "grpc://grpc.example.test:50051", GrpcWire::Grpc, HttpVersionPolicy::Auto),
+        ("gRPC-Web", "http://grpc.example.test:8080", GrpcWire::GrpcWeb, HttpVersionPolicy::Http1Only),
+        ("gRPC-Web text", "http://grpc.example.test:8080", GrpcWire::GrpcWebText, HttpVersionPolicy::Http1Only),
+    ];
+    for (label, url, wire, version) in cases {
+        let p = e.preview(&grpc_login(url, wire, version)).unwrap_or_else(|f| panic!("{label}: the preview failed: {f:?}"));
+        let json = serde_json::to_string(&p).unwrap();
+        for secret in [PLANTED, LITERAL_PASSWORD] {
+            assert!(!json.contains(secret), "{label}: the preview holds {secret}: {json}");
+            for run in base64_runs(secret) {
+                assert!(!json.contains(&run), "{label}: the preview holds {secret} in base64 ({run}): {json}");
+            }
+        }
+        let message: serde_json::Value = serde_json::from_str(&p.body_preview).unwrap_or_else(|err| panic!("{label}: {err}"));
+        assert_eq!(message["user"], "preview-user", "{label}: {}", p.body_preview);
+        assert_eq!(message["password"], REDACTED, "{label}: the password field is not redacted: {}", p.body_preview);
+        assert_eq!(message["note"], REDACTED, "{label}: the secret variable is not redacted: {}", p.body_preview);
+        // The size is still that of the framed message sent.
+        assert!(p.body_bytes > 5, "{label}: {}", p.body_bytes);
+        let note = format!("it is sent as {} framed bytes", p.body_bytes);
+        assert!(p.inferred.iter().any(|i| i.contains(&note)), "{label}: no '{note}': {:?}", p.inferred);
+    }
+}
+
+/// The failure the session gives, before anything is sent, for `c`.
+async fn session_refusal(e: &Engine, c: &ExecutionContext) -> TransportFailure {
+    let o = run(e, c).await;
+    let f = o.record.attempts.last().and_then(|a| a.failure.clone()).expect("the session was not refused");
+    assert_eq!(f.phase, Phase::Prepare, "{f:?}");
+    f
+}
+
+/// The reason the preview gives for a request that would not be sent.
+fn not_sent(p: &EffectiveRequest) -> &str {
+    p.inferred
+        .iter()
+        .find_map(|i| i.strip_prefix("the request would not be sent: "))
+        .unwrap_or_else(|| panic!("the preview does not say the request would not be sent: {:?}", p.inferred))
+}
+
+fn wsse() -> AuthConfig {
+    AuthConfig::Wsse {
+        config: WsseConfig {
+            username: "preview-client".into(),
+            password: SensitiveValue::template("audit-only-wsse-password-2v6n"),
+            password_type: WssePasswordType::PasswordText,
+            timestamp_ttl_secs: None,
+            saml_assertion: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn ws_security_on_a_session_is_shown_as_not_sent_for_the_session_s_reason() {
+    init();
+    let e = Engine::new();
+    // An event stream carries the request's SOAP body, which WS-Security rewrites.
+    let mut s = RequestSpec::http("POST", "http://127.0.0.1:9/events");
+    s.protocol = Protocol::Sse;
+    s.body = Body::Soap {
+        version: SoapVersion::Soap11,
+        envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+        action: None,
+    };
+    s.auth = wsse();
+    let c = ExecutionContext::standalone(s);
+    let p = e.preview(&c).unwrap();
+    let why = not_sent(&p);
+    assert!(why.contains("rewrites the message body"), "{why}");
+    let f = session_refusal(&e, &c).await;
+    assert_eq!((f.kind, f.message.as_str()), (FailureKind::UnsupportedCombination, why));
+
+    // A WebSocket handshake has no body for WS-Security to rewrite: the
+    // session refuses the auth, and the preview says why.
+    let mut s = ws_spec("ws://127.0.0.1:9/ws", WsBootstrap::Http1Upgrade);
+    s.auth = wsse();
+    let c = ExecutionContext::standalone(s);
+    let p = e.preview(&c).unwrap();
+    let why = not_sent(&p);
+    let f = session_refusal(&e, &c).await;
+    assert_eq!(f.message, why, "the preview's reason differs from the session's");
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(!json.contains("audit-only-wsse-password-2v6n"), "the preview holds the password: {json}");
+}
+
+#[tokio::test]
+async fn an_api_key_in_the_query_of_a_grpc_call_is_shown_as_not_sent() {
+    init();
+    let e = Engine::new();
+    let key = AuthConfig::ApiKey {
+        name: "api_key".into(),
+        value: SensitiveValue::template("audit-only-query-key-6h3j"),
+        location: KeyLocation::Query,
+    };
+    let c = grpc("grpc://127.0.0.1:9", GrpcWire::Grpc, HttpVersionPolicy::Auto, key);
+    let p = e.preview(&c).unwrap();
+    let why = not_sent(&p);
+    assert!(why.contains("adds query parameters"), "{why}");
+    assert_eq!(p.url, format!("grpc://127.0.0.1:9{GRPC_PATH}"), "no query is added to the call's path");
+    let f = session_refusal(&e, &c).await;
+    assert_eq!((f.kind, f.message.as_str()), (FailureKind::UnsupportedCombination, why));
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(!json.contains("audit-only-query-key-6h3j"), "the preview holds the key: {json}");
+}
+
+#[tokio::test]
+async fn sse_over_tls_says_the_authority_follows_the_negotiated_version() {
+    init();
+    let e = Engine::new();
+    let mut s = RequestSpec::http("GET", "https://sse.example.test/events");
+    s.protocol = Protocol::Sse;
+    let p = e.preview(&ExecutionContext::standalone(s)).unwrap();
+    assert!(
+        p.inferred.iter().any(|i| i.starts_with("the stream is opened over HTTP/2 or HTTP/1.1, as ALPN negotiates")),
+        "{:?}",
+        p.inferred
+    );
+    assert!(!p.headers.iter().any(|h| h.name.eq_ignore_ascii_case("host")), "{:?}", p.headers);
 }

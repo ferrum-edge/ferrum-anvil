@@ -79,19 +79,27 @@ impl Engine {
         let schemes = session_preview::schemes(ctx.spec.protocol)?;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let prep = http_exec::prepare_all(self, ctx, &resolver, schemes)?;
-        let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
         let mut inferred = prep.inferred.clone();
         let shape = match ctx.spec.protocol {
             Protocol::Http => Shape::http(&prep),
-            _ => Shape::session(ctx, &resolver, &prep, &mut inferred)?,
+            // A message that does not fit the schema is refused with an error
+            // that may quote it: redacted as the session's failure is.
+            _ => Shape::session(ctx, &resolver, &prep, &mut inferred).map_err(|mut f| {
+                f.message = Redactor::for_execution(&resolver, &ctx.redaction_names).text(&f.message);
+                f
+            })?,
         };
+        // After the session's messages and metadata are resolved, so the
+        // secrets they use are known.
+        let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
+        let req = &shape.req;
         // The same authority and signing input as the send path. A session
         // signs for its URL's HTTP counterpart (`wss` as `https`).
-        let signable = http_exec::signable_request(&shape.method, &sessions::http_target(&shape.target), &shape.headers, &shape.body);
-        let mut headers = shape.headers.clone();
-        let mut target = shape.target.clone();
+        let signable = http_exec::signable_request(&req.method, &sessions::http_target(&req.target), &req.headers, &req.body);
+        let mut headers = req.headers.clone();
+        let mut target = req.target.clone();
         // The body sent: auth may rewrite it (a WS-Security header block).
-        let mut body = shape.body.clone();
+        let mut body = req.body.clone();
         let varies = matches!(
             prep.auth,
             ResolvedAuth::Hmac(_)
@@ -143,22 +151,28 @@ impl Engine {
         }
         let authority = http_exec::request_authority(&headers, &target);
         shape.transport_headers(&mut headers, &authority);
-        let body_preview: String = String::from_utf8_lossy(&body[..body.len().min(64 * 1024)]).into_owned();
-        let body_preview = if shape.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false) {
-            redactor.json_text(&body_preview)
+        let body_preview = if let Some(m) = &shape.message {
+            // A gRPC call's message as the JSON it is encoded from; its body
+            // size is still that of the framed bytes sent.
+            redactor.json_text(m)
         } else {
-            redactor.text(&body_preview)
+            let text: String = String::from_utf8_lossy(&body[..body.len().min(64 * 1024)]).into_owned();
+            if req.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false) {
+                redactor.json_text(&text)
+            } else {
+                redactor.text(&text)
+            }
         };
         let omitted = resolver.used_secrets.lock().len();
         Ok(EffectiveRequest {
-            method: shape.method.clone(),
+            method: req.method.clone(),
             url: redactor.url(&shape.url(&target)),
             destination: format!("{}:{}", target.host, target.port),
             authority: redactor.text(&authority),
             headers: headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect(),
             body_bytes: body.len() as u64,
             body_preview,
-            content_type: shape.content_type.clone(),
+            content_type: req.content_type.clone(),
             auth: prep.auth_label.clone(),
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),

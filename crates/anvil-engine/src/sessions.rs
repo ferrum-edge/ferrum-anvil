@@ -166,19 +166,75 @@ pub(crate) fn has_explicit_header(spec: &RequestSpec, name: &str) -> bool {
     spec.headers.iter().any(|h| h.enabled && h.name.trim().eq_ignore_ascii_case(name))
 }
 
+/// Noted for a session when the early-data setting is on.
+pub(crate) const EARLY_DATA_NOTE: &str =
+    "0-RTT early data is not used for sessions (WebSocket, gRPC, SSE, TCP, UDP): the early-data setting applies to HTTP requests only";
+
+/// Stands in for the `Sec-WebSocket-Key` generated for each handshake.
+const WS_KEY_PER_HANDSHAKE: &str = "<generated per handshake>";
+
+/// Connection-specific fields an HTTP/2 or HTTP/3 request does not carry
+/// (the `Host` is sent as `:authority`), and the WebSocket key, which only
+/// the HTTP/1.1 upgrade has (RFC 8441 §4).
+const WS_NOT_ON_EXTENDED_CONNECT: &[&str] = &["host", "connection", "upgrade", "transfer-encoding", "keep-alive", "sec-websocket-key"];
+
+/// The fields a gRPC call does not take from the request's headers (the
+/// transport frames the body and sets the authority itself).
+const GRPC_NOT_SENT: &[&str] = &["host", "connection", "transfer-encoding", "upgrade", "content-length", "keep-alive"];
+
+/// The connection-specific fields an event stream over HTTP/2 or HTTP/3
+/// does not send (the `Host` is sent as `:authority`).
+const SSE_NOT_SENT_OVER_H2_H3: &[&str] = &["host", "connection", "transfer-encoding", "upgrade", "keep-alive"];
+
+/// The HTTP request a session opens with (a WebSocket or SSE handshake, a
+/// gRPC call, a MASQUE `CONNECT`), before auth and cookies. The session and
+/// the effective-request preview build it with the same code; only the
+/// session applies auth and plans the transport.
+pub(crate) struct SessionRequest {
+    pub(crate) method: String,
+    /// Where the request is sent. Auth signs for its HTTP counterpart
+    /// ([`http_target`]).
+    pub(crate) target: Target,
+    /// The request's headers, before auth.
+    pub(crate) headers: Vec<(String, String)>,
+    /// The exact bytes sent (and signed).
+    pub(crate) body: Bytes,
+    pub(crate) content_type: Option<String>,
+    /// Headers the transport sets after auth: `(name, value, replace)`. One
+    /// that does not replace is added only when the request has none.
+    pub(crate) transport: Vec<(String, String, bool)>,
+    /// Lowercase names of the headers the transport leaves out.
+    pub(crate) not_sent: &'static [&'static str],
+    /// Whether the transport sends the authority as `Host` (gRPC-Web over
+    /// HTTP/1.1).
+    pub(crate) host_from_authority: bool,
+    /// Whether the request-target is the path alone (a gRPC call's method
+    /// path): no query is sent and an auth profile may add none.
+    pub(crate) path_only: bool,
+}
+
+/// Why a session refuses what an auth profile applied, before anything is
+/// sent: a handshake or call cannot carry a rewritten body, and a gRPC
+/// call's path takes no query.
+pub(crate) fn auth_refusal(applied: &anvil_auth::Applied, path_only: bool) -> Option<String> {
+    if applied.body.is_some() {
+        return Some(format!("the auth profile '{}' rewrites the message body, which this protocol cannot carry", applied.label));
+    }
+    if path_only && !applied.append_query.is_empty() {
+        return Some("an auth profile that adds query parameters cannot be used with gRPC (the path is fixed)".into());
+    }
+    None
+}
+
 /// OAuth acquisition (same transport and trust as HTTP) and per-send auth.
 /// Returns the final headers and query, auth facts, and scrubs every secret
 /// used through the redactor.
-#[allow(clippy::too_many_arguments)]
 async fn apply_auth(
     engine: &Engine,
     ctx: &ExecutionContext,
     prep: &mut Prepared,
     redactor: &mut Redactor,
-    method: &str,
-    target: &Target,
-    headers: Vec<(String, String)>,
-    body: &[u8],
+    req: &SessionRequest,
     cancel: &CancellationToken,
 ) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
@@ -188,27 +244,24 @@ async fn apply_auth(
         }
     }
     if matches!(prep.auth, ResolvedAuth::None) {
-        return Ok((headers, target.query.clone(), vec![]));
+        return Ok((req.headers.clone(), req.target.query.clone(), vec![]));
     }
-    let signable = http_exec::signable_request(method, &http_target(target), &headers, body);
+    let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
     let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
         .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
     http_exec::check_auth_headers(&applied)?;
-    if applied.body.is_some() {
-        return Err(unsupported(
-            format!("the auth profile '{}' rewrites the message body, which this protocol cannot carry", applied.label),
-            "auth",
-        ));
+    if let Some(why) = auth_refusal(&applied, req.path_only) {
+        return Err(unsupported(why, "auth"));
     }
     for s in &applied.secrets {
         redactor.add_secret(s);
     }
-    let mut out = headers;
+    let mut out = req.headers.clone();
     for (n, v) in applied.set_headers {
         out.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
         out.push((n, v));
     }
-    let mut query = target.query.clone();
+    let mut query = req.target.query.clone();
     for (k, v) in applied.append_query {
         let pair = format!("{}={}", prepare::encode_component(&k), prepare::encode_component(&v));
         query = if query.is_empty() { pair } else { format!("{query}&{pair}") };
@@ -278,7 +331,7 @@ fn base(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r: &Reso
     let mut inferred = prep.inferred.clone();
     if prep.settings.early_data.enabled {
         // The opt-in covers HTTP requests only; say so instead of ignoring it.
-        inferred.push("0-RTT early data is not used for sessions (WebSocket, gRPC, SSE, TCP, UDP): the early-data setting applies to HTTP requests only".into());
+        inferred.push(EARLY_DATA_NOTE.into());
     }
     Ok(Base { prep, redactor, inferred })
 }
@@ -371,13 +424,15 @@ pub(crate) fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result
     }))
 }
 
-async fn prepare_ws(
-    engine: &Engine,
-    epoch: SensitiveEpoch,
-    ctx: &ExecutionContext,
-    r: &Resolver,
-    cancel: &CancellationToken,
-) -> Result<SessionPrep, TransportFailure> {
+/// A WebSocket request's settings (the defaults when it has none) and its
+/// `permessage-deflate` offer, refused before the request is prepared when
+/// it cannot be sent as configured.
+pub(crate) struct WsOffer {
+    spec: WsSpec,
+    deflate: Option<ws_deflate::DeflateOffer>,
+}
+
+pub(crate) fn ws_offer(ctx: &ExecutionContext) -> Result<WsOffer, TransportFailure> {
     let spec = ctx.spec.websocket.clone().unwrap_or(WsSpec {
         bootstrap: WsBootstrap::Http1Upgrade,
         subprotocols: vec![],
@@ -388,50 +443,116 @@ async fn prepare_ws(
         permessage_deflate: Default::default(),
     });
     let deflate = ws_deflate_offer(&ctx.spec, &spec.permessage_deflate)?;
+    Ok(WsOffer { spec, deflate })
+}
+
+/// A WebSocket handshake and the messages the session sends once it is open.
+pub(crate) struct WsHandshake {
+    pub(crate) request: SessionRequest,
+    pub(crate) spec: WsSpec,
+    pub(crate) deflate: Option<ws_deflate::DeflateOffer>,
+    script: Vec<WsMessage>,
+    subprotocols: Vec<String>,
+}
+
+/// The note for a `permessage-deflate` offer.
+pub(crate) fn deflate_note(d: &ws_deflate::DeflateOffer) -> String {
+    format!("Sec-WebSocket-Extensions: {} (permessage-deflate offered, RFC 7692)", d.header_value())
+}
+
+impl WsOffer {
+    /// The handshake: `GET` with an HTTP/1.1 upgrade, `CONNECT` with
+    /// `:protocol = websocket` over HTTP/2 and HTTP/3 (RFC 8441, RFC 9220).
+    pub(crate) fn handshake(
+        self,
+        ctx: &ExecutionContext,
+        r: &Resolver,
+        prep: &Prepared,
+        inferred: &mut Vec<String>,
+    ) -> Result<WsHandshake, TransportFailure> {
+        let WsOffer { spec, deflate } = self;
+        let mut headers = prep.http.headers.clone();
+        if !has_explicit_header(&ctx.spec, "accept-encoding") {
+            headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept-encoding"));
+            inferred.retain(|i| !i.starts_with("Accept-Encoding"));
+        }
+        let mut script = Vec::with_capacity(spec.messages.len());
+        for (i, m) in spec.messages.iter().enumerate() {
+            let field = format!("websocket.messages[{i}]");
+            script.push(match m {
+                WsMessage::Text { text } => WsMessage::Text { text: r.resolve(text, &field)? },
+                WsMessage::Binary { hex } => {
+                    let hex = r.resolve(hex, &field)?;
+                    anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
+                    WsMessage::Binary { hex }
+                }
+                WsMessage::Ping { hex } => {
+                    let hex = r.resolve(hex, &field)?;
+                    anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
+                    WsMessage::Ping { hex }
+                }
+                WsMessage::Close { code, reason } => WsMessage::Close { code: *code, reason: r.resolve(reason, &field)? },
+            });
+        }
+        let subprotocols = spec
+            .subprotocols
+            .iter()
+            .enumerate()
+            .map(|(i, s)| r.resolve(s, &format!("websocket.subprotocols[{i}]")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut transport = vec![("Sec-WebSocket-Version".to_string(), "13".to_string(), false)];
+        if !subprotocols.is_empty() {
+            transport.push(("Sec-WebSocket-Protocol".into(), subprotocols.join(", "), false));
+        }
+        if let Some(d) = &deflate {
+            transport.push(("Sec-WebSocket-Extensions".into(), d.header_value(), false));
+        }
+        // Extended CONNECT (RFC 8441, RFC 9220) is sent, and so signed, as CONNECT.
+        let (method, not_sent): (&str, &'static [&'static str]) = match spec.bootstrap {
+            WsBootstrap::Http1Upgrade => {
+                transport.push(("Connection".into(), "Upgrade".into(), false));
+                transport.push(("Upgrade".into(), "websocket".into(), false));
+                transport.push(("Sec-WebSocket-Key".into(), WS_KEY_PER_HANDSHAKE.into(), false));
+                ("GET", &[])
+            }
+            WsBootstrap::Http2ExtendedConnect | WsBootstrap::Http3ExtendedConnect => {
+                transport.push(("User-Agent".into(), concat!("Ferrum-Anvil/", env!("CARGO_PKG_VERSION")).into(), false));
+                ("CONNECT", WS_NOT_ON_EXTENDED_CONNECT)
+            }
+        };
+        let request = SessionRequest {
+            method: method.into(),
+            target: prep.http.target.clone(),
+            headers,
+            body: Bytes::new(),
+            content_type: None,
+            transport,
+            not_sent,
+            host_from_authority: false,
+            path_only: false,
+        };
+        Ok(WsHandshake { request, spec, deflate, script, subprotocols })
+    }
+}
+
+async fn prepare_ws(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
+    let offer = ws_offer(ctx)?;
     let mut b = base(engine, epoch, ctx, r, &["wss", "ws"])?;
-    let target = b.prep.http.target.clone();
-    let mut headers = b.prep.http.headers.clone();
-    if !has_explicit_header(&ctx.spec, "accept-encoding") {
-        headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept-encoding"));
-        b.inferred.retain(|i| !i.starts_with("Accept-Encoding"));
-    }
-    let mut script = Vec::with_capacity(spec.messages.len());
-    for (i, m) in spec.messages.iter().enumerate() {
-        let field = format!("websocket.messages[{i}]");
-        script.push(match m {
-            WsMessage::Text { text } => WsMessage::Text { text: r.resolve(text, &field)? },
-            WsMessage::Binary { hex } => {
-                let hex = r.resolve(hex, &field)?;
-                anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                WsMessage::Binary { hex }
-            }
-            WsMessage::Ping { hex } => {
-                let hex = r.resolve(hex, &field)?;
-                anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                WsMessage::Ping { hex }
-            }
-            WsMessage::Close { code, reason } => WsMessage::Close { code: *code, reason: r.resolve(reason, &field)? },
-        });
-    }
-    let subprotocols = spec
-        .subprotocols
-        .iter()
-        .enumerate()
-        .map(|(i, s)| r.resolve(s, &format!("websocket.subprotocols[{i}]")))
-        .collect::<Result<Vec<_>, _>>()?;
-    // Extended CONNECT (RFC 8441, RFC 9220) is sent, and so signed, as CONNECT.
-    let method = match spec.bootstrap {
-        WsBootstrap::Http1Upgrade => "GET",
-        WsBootstrap::Http2ExtendedConnect | WsBootstrap::Http3ExtendedConnect => "CONNECT",
-    };
-    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, method, &target, headers, &[], cancel).await?;
+    let WsHandshake { request, spec, deflate, script, subprotocols } = offer.handshake(ctx, r, &b.prep, &mut b.inferred)?;
+    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
     if let Some(d) = &deflate {
-        b.inferred.push(format!("Sec-WebSocket-Extensions: {} (permessage-deflate offered, RFC 7692)", d.header_value()));
+        b.inferred.push(deflate_note(d));
     }
-    let t = Target { query, ..target.clone() };
+    let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = ws::WsPlan {
         bootstrap: spec.bootstrap,
@@ -463,25 +584,31 @@ async fn prepare_ws(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
-    let mut p = finish_prep(b, Plan::Ws(plan), method.into(), url, headers, Bytes::new(), vec![]);
+    let mut p = finish_prep(b, Plan::Ws(plan), request.method, url, headers, Bytes::new(), vec![]);
     p.cookies = cookies;
     Ok(p)
 }
 
-async fn prepare_sse(
-    engine: &Engine,
-    epoch: SensitiveEpoch,
+/// An event stream's request and the stream settings the session keeps.
+pub(crate) struct SseRequest {
+    pub(crate) request: SessionRequest,
+    spec: SseSpec,
+    last_event_id: Option<String>,
+}
+
+/// The request that opens an event stream: the request's method and body,
+/// asking for `text/event-stream` without content coding.
+pub(crate) fn sse_request(
     ctx: &ExecutionContext,
     r: &Resolver,
-    cancel: &CancellationToken,
-) -> Result<SessionPrep, TransportFailure> {
+    prep: &Prepared,
+    inferred: &mut Vec<String>,
+) -> Result<SseRequest, TransportFailure> {
     let spec = ctx.spec.sse.clone().unwrap_or(SseSpec { max_events: 0, idle_timeout_ms: 30_000, last_event_id: None, reconnect: false });
-    let mut b = base(engine, epoch, ctx, r, &["https", "http"])?;
-    if let Some(f) = sse::version_unsupported(b.prep.settings.http_version, b.prep.http.target.scheme == "https", b.prep.proxy.is_some()) {
+    if let Some(f) = sse::version_unsupported(prep.settings.http_version, prep.http.target.scheme == "https", prep.proxy.is_some()) {
         return Err(f);
     }
-    let target = b.prep.http.target.clone();
-    let mut headers = b.prep.http.headers.clone();
+    let mut headers = prep.http.headers.clone();
     if !has_explicit_header(&ctx.spec, "accept") {
         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept"));
     }
@@ -489,8 +616,8 @@ async fn prepare_sse(
         // Events are parsed incrementally; ask for an unencoded stream.
         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept-encoding"));
         headers.push(("Accept-Encoding".into(), "identity".into()));
-        b.inferred.retain(|i| !i.starts_with("Accept-Encoding"));
-        b.inferred.push("Accept-Encoding: identity (events are parsed as they arrive)".into());
+        inferred.retain(|i| !i.starts_with("Accept-Encoding"));
+        inferred.push("Accept-Encoding: identity (events are parsed as they arrive)".into());
     }
     let last_event_id = spec.last_event_id.as_ref().map(|v| r.resolve(v, "sse.last_event_id")).transpose()?;
     // Refused rather than left out of the handshake (the message never holds
@@ -502,14 +629,42 @@ async fn prepare_sse(
             "sse.last_event_id",
         ));
     }
-    let body = b.prep.http.body.clone();
-    let method = b.prep.http.method.clone();
-    let (mut headers, query, facts) =
-        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &method, &target, headers, &body, cancel).await?;
-    let t = Target { query, ..target.clone() };
+    let mut transport =
+        vec![("Accept".to_string(), "text/event-stream".to_string(), true), ("Cache-Control".to_string(), "no-cache".to_string(), false)];
+    if let Some(id) = &last_event_id {
+        transport.push(("Last-Event-ID".into(), id.clone(), true));
+    }
+    // Where the version policy leaves no choice of HTTP/2 or HTTP/3.
+    let h2_or_h3 =
+        matches!(prep.settings.http_version, HttpVersionPolicy::H2c | HttpVersionPolicy::Http2Only | HttpVersionPolicy::Http3Only);
+    let request = SessionRequest {
+        method: prep.http.method.clone(),
+        target: prep.http.target.clone(),
+        headers,
+        body: prep.http.body.clone(),
+        content_type: prep.http.content_type.clone(),
+        transport,
+        not_sent: if h2_or_h3 { SSE_NOT_SENT_OVER_H2_H3 } else { &[] },
+        host_from_authority: false,
+        path_only: false,
+    };
+    Ok(SseRequest { request, spec, last_event_id })
+}
+
+async fn prepare_sse(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
+    let mut b = base(engine, epoch, ctx, r, &["https", "http"])?;
+    let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
+    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = sse::SsePlan {
-        method: http::Method::from_bytes(method.as_bytes()).unwrap_or(http::Method::GET),
+        method: http::Method::from_bytes(request.method.as_bytes()).unwrap_or(http::Method::GET),
         https: t.scheme == "https",
         host: t.host.clone(),
         port: t.port,
@@ -517,7 +672,7 @@ async fn prepare_sse(
         authority: http_exec::request_authority(&headers, &t),
         request_target: t.request_target(),
         headers: header_pairs(&headers)?,
-        body: body.clone(),
+        body: request.body.clone(),
         version: b.prep.settings.http_version,
         timeouts: b.prep.settings.timeouts,
         limits: b.prep.settings.limits,
@@ -539,12 +694,12 @@ async fn prepare_sse(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
-    let mut p = finish_prep(b, Plan::Sse(plan), method, url, headers, body, facts);
+    let mut p = finish_prep(b, Plan::Sse(plan), request.method, url, headers, request.body, facts);
     p.cookies = cookies;
     Ok(p)
 }
 
-pub(crate) async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Schema, TransportFailure> {
+fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Schema, TransportFailure> {
     match &spec.schema {
         GrpcSchemaSource::Reflection => Ok(grpc::Schema::Reflection),
         GrpcSchemaSource::DescriptorSet { attachment } => {
@@ -575,23 +730,44 @@ pub(crate) async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Resu
     }
 }
 
-async fn prepare_grpc(
-    engine: &Engine,
-    epoch: SensitiveEpoch,
+/// A gRPC request's settings, refused before the request is prepared when it
+/// has none.
+pub(crate) fn grpc_spec(ctx: &ExecutionContext) -> Result<GrpcSpec, TransportFailure> {
+    ctx.spec.grpc.clone().ok_or_else(|| local(FailureKind::BodySerialization, "a gRPC request needs a service, method and schema", "grpc"))
+}
+
+/// A gRPC call and what the session needs to make it.
+pub(crate) struct GrpcCall {
+    pub(crate) request: SessionRequest,
+    pub(crate) spec: GrpcSpec,
+    pub(crate) schema: grpc::Schema,
+    /// The request messages (JSON), before they are encoded.
+    pub(crate) messages: Vec<String>,
+    service: String,
+    method: String,
+    /// The URL's path, under which the method's path is sent.
+    prefix: String,
+    tls_url: bool,
+}
+
+/// A gRPC or gRPC-Web call: `POST` to the method's path under the URL's
+/// path, with the framed request message of a unary or server-streaming
+/// call as its body. A local schema validates the method, call mode and
+/// every message before traffic. An `interactive` session refuses a call
+/// that does not stream requests.
+pub(crate) fn grpc_call(
     ctx: &ExecutionContext,
     r: &Resolver,
+    prep: &Prepared,
+    inferred: &mut Vec<String>,
+    spec: GrpcSpec,
     interactive: bool,
-    cancel: &CancellationToken,
-) -> Result<SessionPrep, TransportFailure> {
-    let Some(spec) = ctx.spec.grpc.clone() else {
-        return Err(local(FailureKind::BodySerialization, "a gRPC request needs a service, method and schema", "grpc"));
-    };
-    let mut b = base(engine, epoch, ctx, r, &["grpcs", "grpc", "https", "http"])?;
-    let version = b.prep.settings.http_version;
-    let target = b.prep.http.target.clone();
+) -> Result<GrpcCall, TransportFailure> {
+    let version = prep.settings.http_version;
+    let target = &prep.http.target;
     let tls_url = matches!(target.scheme.as_str(), "grpcs" | "https");
     let reflection = matches!(spec.schema, GrpcSchemaSource::Reflection);
-    if let Some((msg, field)) = grpc::unsupported_combination(spec.wire, spec.mode, reflection, version, tls_url, b.prep.proxy.is_some()) {
+    if let Some((msg, field)) = grpc::unsupported_combination(spec.wire, spec.mode, reflection, version, tls_url, prep.proxy.is_some()) {
         return Err(unsupported(msg, field));
     }
     if interactive && !matches!(spec.mode, GrpcMode::ClientStreaming | GrpcMode::Bidirectional) {
@@ -603,12 +779,17 @@ async fn prepare_grpc(
     if spec.plaintext && tls_url {
         return Err(unsupported("plaintext (h2c) was selected for a TLS URL; use grpc:// or http:// for h2c", "grpc.plaintext"));
     }
+    // Whether the call is known to go over HTTP/1.1 (gRPC-Web only), which
+    // sends the authority as `Host`.
+    let mut http1 = false;
     if spec.wire.is_web() {
-        b.inferred.push(format!(
+        inferred.push(format!(
             "gRPC-Web ({}): unary and server streaming only; the status is read from the trailer frame at the end of the response body",
             if spec.wire == GrpcWire::GrpcWebText { "text, base64 in both directions" } else { "binary" }
         ));
-        b.inferred.push(
+        let h2_or_h3 = matches!(version, HttpVersionPolicy::H2c | HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback);
+        http1 = version == HttpVersionPolicy::Http1Only || (!tls_url && !h2_or_h3);
+        inferred.push(
             match (version, tls_url) {
                 (HttpVersionPolicy::Http1Only, _) => "gRPC-Web over HTTP/1.1",
                 (HttpVersionPolicy::Http2Only, _) => "gRPC-Web over HTTP/2 (ALPN h2 only)",
@@ -620,24 +801,24 @@ async fn prepare_grpc(
             .into(),
         );
     } else if !tls_url {
-        b.inferred.push("cleartext gRPC uses HTTP/2 with prior knowledge (h2c)".into());
+        inferred.push("cleartext gRPC uses HTTP/2 with prior knowledge (h2c)".into());
     }
-    match version {
-        HttpVersionPolicy::Http3Only => b.inferred.push("HTTP/3 (QUIC) only: the call never falls back to TCP".into()),
-        HttpVersionPolicy::Http3WithFallback => b
-            .inferred
-            .push("HTTP/3 first; if it fails before the call is sent, the call is made over TCP as a separate, recorded attempt".into()),
-        _ => {}
+    if version == HttpVersionPolicy::Http3Only {
+        inferred.push("HTTP/3 (QUIC) only: the call never falls back to TCP".into());
+    } else if version == HttpVersionPolicy::Http3WithFallback {
+        inferred.push(
+            "HTTP/3 first; if it fails before the call is sent, the call is made over TCP as a separate, recorded attempt".into(),
+        );
     }
     let service = r.resolve(&spec.service, "grpc.service")?;
-    let method_name = r.resolve(&spec.method, "grpc.method")?;
+    let method = r.resolve(&spec.method, "grpc.method")?;
     let messages =
         spec.messages.iter().enumerate().map(|(i, m)| r.resolve(m, &format!("grpc.messages[{i}]"))).collect::<Result<Vec<_>, _>>()?;
-    let schema = load_schema(ctx, &spec).await?;
+    let schema = load_schema(ctx, &spec)?;
     // Local schema: the method, call mode and every message are validated before traffic.
     let mut unary_body = Bytes::new();
     if let grpc::Schema::Pool(pool) = &schema {
-        let m = grpc::resolve_method(pool, &service, &method_name, spec.mode)?;
+        let m = grpc::resolve_method(pool, &service, &method, spec.mode)?;
         for (i, j) in messages.iter().enumerate() {
             let enc =
                 grpc::encode_json(&m.input(), j).map_err(|e| local(FailureKind::BodySerialization, e, &format!("grpc.messages[{i}]")))?;
@@ -658,8 +839,7 @@ async fn prepare_grpc(
         }
     }
     // Metadata: request headers + gRPC metadata entries; HTTP content negotiation headers do not apply.
-    let mut headers: Vec<(String, String)> = b
-        .prep
+    let mut headers: Vec<(String, String)> = prep
         .http
         .headers
         .iter()
@@ -667,11 +847,11 @@ async fn prepare_grpc(
         .cloned()
         .collect();
     if has_explicit_header(&ctx.spec, "user-agent")
-        && let Some(ua) = b.prep.http.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("user-agent"))
+        && let Some(ua) = prep.http.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("user-agent"))
     {
         headers.push(ua.clone());
     }
-    b.inferred.retain(|i| !i.starts_with("Accept-Encoding") && !i.starts_with("User-Agent") && !i.starts_with("Content-Type"));
+    inferred.retain(|i| !i.starts_with("Accept-Encoding") && !i.starts_with("User-Agent") && !i.starts_with("Content-Type"));
     for (i, kv) in spec.metadata.iter().enumerate().filter(|(_, kv)| kv.enabled) {
         let n = r.resolve(kv.name.trim(), &format!("grpc.metadata[{i}].name"))?.to_ascii_lowercase();
         let v = r.resolve(&kv.value, &format!("grpc.metadata[{i}].value"))?;
@@ -691,26 +871,65 @@ async fn prepare_grpc(
         }
         headers.push((n, v));
     }
-    let prefix = target.path.trim_end_matches('/').to_string();
-    let path = format!("{prefix}/{service}/{method_name}");
-    let call_target = Target { path: path.clone(), ..target.clone() };
-    let (mut headers, query, facts) =
-        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "POST", &call_target, headers, &unary_body, cancel).await?;
-    if !query.is_empty() && query != target.query {
-        return Err(unsupported("an auth profile that adds query parameters cannot be used with gRPC (the path is fixed)", "auth"));
+    let content_type = match spec.wire {
+        GrpcWire::Grpc => "application/grpc",
+        GrpcWire::GrpcWeb => anvil_transport::grpc_web::CT_BINARY,
+        GrpcWire::GrpcWebText => anvil_transport::grpc_web::CT_TEXT,
+    };
+    let mut transport = vec![("content-type".to_string(), content_type.to_string(), true)];
+    if spec.wire.is_web() {
+        // PROTOCOL-WEB: the response mode follows Accept; ask for the request's own.
+        transport.push(("accept".into(), content_type.into(), true));
+        transport.push(("x-grpc-web".into(), "1".into(), true));
+    } else {
+        transport.push(("te".into(), "trailers".into(), true));
     }
-    let cookies = jar_cookies(engine, ctx, &mut b, &call_target, &mut headers);
-    let display = format!("{}://{}{}", target.scheme, target.authority, path);
+    transport.push(("user-agent".into(), concat!("grpc-anvil/", env!("CARGO_PKG_VERSION")).into(), false));
+    if let Some(ms) = spec.deadline_ms {
+        transport.push(("grpc-timeout".into(), grpc::grpc_timeout(ms), true));
+    }
+    let prefix = target.path.trim_end_matches('/').to_string();
+    let request = SessionRequest {
+        method: "POST".into(),
+        target: Target { path: format!("{prefix}/{service}/{method}"), ..target.clone() },
+        headers,
+        body: unary_body,
+        content_type: Some(content_type.into()),
+        transport,
+        not_sent: GRPC_NOT_SENT,
+        host_from_authority: http1,
+        path_only: true,
+    };
+    Ok(GrpcCall { request, spec, schema, messages, service, method, prefix, tls_url })
+}
+
+async fn prepare_grpc(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    interactive: bool,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
+    let spec = grpc_spec(ctx)?;
+    let mut b = base(engine, epoch, ctx, r, &["grpcs", "grpc", "https", "http"])?;
+    let GrpcCall { request, spec, schema, messages, service, method, prefix, tls_url } =
+        grpc_call(ctx, r, &b.prep, &mut b.inferred, spec, interactive)?;
+    // An auth profile that adds query parameters is refused (the path is fixed).
+    let (mut headers, _, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let call_target = &request.target;
+    let cookies = jar_cookies(engine, ctx, &mut b, call_target, &mut headers);
+    let display = format!("{}://{}{}", call_target.scheme, call_target.authority, call_target.path);
     let plan = grpc::GrpcPlan {
         tls: if tls_url { b.prep.tls.clone() } else { None },
-        host: target.host.clone(),
-        port: target.port,
+        host: call_target.host.clone(),
+        port: call_target.port,
         // `:authority` (HTTP/2, HTTP/3) or the gRPC-Web `Host` over HTTP/1.1:
         // what auth signed.
-        authority: http_exec::request_authority(&headers, &call_target),
+        authority: http_exec::request_authority(&headers, call_target),
         path_prefix: prefix,
         service,
-        method: method_name,
+        method,
         mode: spec.mode,
         schema,
         messages,
@@ -725,7 +944,7 @@ async fn prepare_grpc(
         transcript: TranscriptLimits::default(),
         redact: Some(redact_fn(&b.redactor)),
         wire: spec.wire,
-        version,
+        version: b.prep.settings.http_version,
         proxy_header: b
             .prep
             .proxy_header
@@ -735,16 +954,9 @@ async fn prepare_grpc(
         // keep-alive is on; interactive calls always own their connection.
         channels: if !interactive && b.prep.settings.keepalive { engine.grpc_channels_for(b.prep.epoch, &ctx.isolation) } else { None },
     };
-    let mut p = finish_prep(b, Plan::Grpc(plan), "POST".into(), display, headers, unary_body, facts);
+    let mut p = finish_prep(b, Plan::Grpc(plan), request.method, display, headers, request.body, facts);
     p.cookies = cookies;
-    p.content_type = Some(
-        match spec.wire {
-            GrpcWire::Grpc => "application/grpc",
-            GrpcWire::GrpcWeb => anvil_transport::grpc_web::CT_BINARY,
-            GrpcWire::GrpcWebText => anvil_transport::grpc_web::CT_TEXT,
-        }
-        .into(),
-    );
+    p.content_type = request.content_type;
     Ok(p)
 }
 
@@ -1171,9 +1383,19 @@ async fn prepare_masque(
         .filter(|(n, _)| has_explicit_header(&ctx.spec, n) || n.eq_ignore_ascii_case("user-agent"))
         .cloned()
         .collect();
-    let (headers, query, facts) =
-        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "CONNECT", &proxy_target, headers, &[], cancel).await?;
-    let t = Target { query, ..proxy_target };
+    let connect = SessionRequest {
+        method: "CONNECT".into(),
+        target: proxy_target,
+        headers,
+        body: Bytes::new(),
+        content_type: None,
+        transport: vec![],
+        not_sent: &[],
+        host_from_authority: false,
+        path_only: false,
+    };
+    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
+    let t = Target { query, ..connect.target };
     let connect_url = t.url();
     let display_url = b.redactor.url(&connect_url);
     b.inferred.push(format!(
