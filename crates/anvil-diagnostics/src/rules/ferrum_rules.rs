@@ -748,10 +748,7 @@ mod tests {
         assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.5")), format!("findings:{v} ferrum:ferrum-edge-0.9.5"));
         assert_eq!(crate::catalog_version_for(&t("ferrum-edge-2.0")), format!("findings:{v} ferrum:ferrum-edge-2.0(no-catalog)"));
         assert_eq!(crate::catalog_version_for(&FerrumTrust::NotConfigured), format!("findings:{v} ferrum:none"));
-        assert_eq!(
-            crate::catalog_version(),
-            format!("findings:{v} ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,ferrum-edge-0.9.8")
-        );
+        assert_eq!(crate::catalog_version(), format!("findings:{v} ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,ferrum-edge-0.9.8"));
     }
 
     fn codes(f: &[DiagnosticFinding]) -> Vec<&str> {

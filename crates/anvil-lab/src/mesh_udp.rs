@@ -533,11 +533,7 @@ pub(crate) fn defs() -> Vec<Def> {
         Def { id: "MESH-020", title: "UDP through HBONE without a client SVID: refused at mTLS (sidecar STRICT)", run: mesh020 },
         Def { id: "MESH-021", title: "UDP through HBONE with an untrusted-trust-domain SVID: refused at mTLS", run: mesh021 },
         Def { id: "MESH-022", title: "PERMISSIVE sidecar: unauthenticated UDP CONNECT refused 403 (UDP body)", run: mesh022 },
-        Def {
-            id: "MESH-023",
-            title: "UDP CONNECT to an undeclared port refused at relay synthesis (404; 403 from 0.9.8)",
-            run: mesh023,
-        },
+        Def { id: "MESH-023", title: "UDP CONNECT to an undeclared port refused at relay synthesis (404; 403 from 0.9.8)", run: mesh023 },
         Def {
             id: "MESH-024",
             title: "Ambient: declared name resolving to loopback refused 403 (UDP destination not allowed)",
