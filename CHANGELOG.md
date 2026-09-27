@@ -553,3 +553,13 @@
   The secrets a gRPC call signs with once server reflection resolves its
   schema (such as a freshly minted token) are now redacted in live events
   too, not only in the stored record.
+- Follow-up to the session redaction above: a secret in a hex- or
+  base64-encoded field that decodes to only 2 or 3 bytes is now redacted in
+  hex previews, since the 4-character minimum applies to each redacted form
+  rather than to the decoded byte count. A secret split across the
+  encoding's alignment no longer makes the whole decoded field (up to
+  8 MiB) a redaction pattern: only the bytes it covers, widened to whole
+  bytes or base64 groups, are, so it is also recognised in the truncated
+  preview of a field longer than the preview limit. The run history's
+  scrub of a stored transcript now redacts event ids and event types as
+  well as previews.
