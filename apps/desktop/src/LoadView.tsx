@@ -140,6 +140,15 @@ function newPlan(workspaceId: string): LoadPlan {
 }
 
 type Sel = { kind: "plan"; id: string } | { kind: "report"; id: string } | null;
+/** An unsaved plan edit; `created` marks a new plan that was never saved. */
+type PlanDraft = { plan: LoadPlan; created: boolean };
+/** Unsaved plan edits by workspace id, then plan id. */
+type Drafts = Record<string, Record<string, PlanDraft>>;
+
+/** The plan with its list fields normalized; an already normalized plan is returned as is. */
+function editable(plan: LoadPlan): EditPlan {
+  return plan.chain && plan.mix ? (plan as EditPlan) : { ...plan, chain: plan.chain ?? [], mix: plan.mix ?? [] };
+}
 
 /**
  * Stays mounted (only hidden) while another view is shown: the worker keeps
@@ -157,8 +166,27 @@ export function LoadView(props: {
   const [reports, setReports] = useState<LoadReportSummary[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [sel, setSel] = useState<Sel>(null);
-  const [draft, setDraft] = useState<LoadPlan | null>(null);
+  // Unsaved plan edits and new plans, kept in memory for the session (never
+  // written to disk). Only the shown workspace's drafts are read, so a switch
+  // hides them and switching back restores them.
+  const [drafts, setDrafts] = useState<Drafts>({});
+  // A new plan that was not edited yet: it gets a draft on its first edit and
+  // is dropped when something else is selected or the workspace switches.
+  const [fresh, setFresh] = useState<LoadPlan | null>(null);
   const [live, setLive] = useState<{ runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] } | null>(null);
+  // Selection and lists belong to one workspace: reset them in the render that
+  // switches, so no editor, confirmation or action of the previous workspace
+  // stays on screen. A live run (and its Stop control) is kept, and so are the
+  // previous workspace's drafts.
+  const [shownWs, setShownWs] = useState(props.workspaceId);
+  if (shownWs !== props.workspaceId) {
+    setShownWs(props.workspaceId);
+    setSel(null);
+    setFresh(null);
+    setPlans([]);
+    setReports([]);
+    setDatasets([]);
+  }
   const requests = useMemo(() => flatten(props.tree), [props.tree]);
 
   const wsRef = useRef(props.workspaceId);
@@ -171,6 +199,13 @@ export function LoadView(props: {
     setPlans(p);
     setReports(r);
     setDatasets(d);
+    // An edit of a saved plan the workspace no longer has is dropped; a new plan's is kept.
+    setDrafts((all) => {
+      const own = all[w];
+      const keep = ([id, x]: [string, PlanDraft]) => x.created || p.some((y) => y.id === id);
+      if (!own || Object.entries(own).every(keep)) return all;
+      return { ...all, [w]: Object.fromEntries(Object.entries(own).filter(keep)) };
+    });
     return r;
   };
   // The run listeners outlive renders: read the current workspace and callbacks.
@@ -204,10 +239,36 @@ export function LoadView(props: {
     };
   }, []);
 
-  useEffect(() => {
-    // Keep an unsaved new plan; otherwise edit the saved copy.
-    if (sel?.kind === "plan") setDraft((d) => plans.find((p) => p.id === sel.id) ?? (d?.id === sel.id ? d : null));
-  }, [sel, plans]);
+  const wsDrafts = drafts[props.workspaceId] ?? {};
+  // Only a plan of the shown workspace is ever offered for editing: its
+  // unsaved edit, else the saved copy from the workspace's list.
+  const shownFresh = fresh && fresh.workspace_id === props.workspaceId && sel?.kind === "plan" && sel.id === fresh.id ? fresh : undefined;
+  const selFound = sel?.kind === "plan" ? (wsDrafts[sel.id]?.plan ?? plans.find((p) => p.id === sel.id) ?? shownFresh) : undefined;
+  const selPlan = selFound?.workspace_id === props.workspaceId ? selFound : undefined;
+  const newDrafts = Object.values(wsDrafts).filter((d) => d.created && !plans.some((p) => p.id === d.plan.id));
+  const newPlans = [...newDrafts.map((d) => d.plan), ...(shownFresh && !wsDrafts[shownFresh.id] && !plans.some((p) => p.id === shownFresh.id) ? [shownFresh] : [])];
+  // A plan that was never saved: it is discarded locally, there is nothing to delete.
+  const selNew = !!selPlan && newPlans.some((p) => p.id === selPlan.id);
+  /** Records an edit of a plan in workspace `ws`; `created` defaults to the draft's current flag. */
+  const editDraft = (ws: string, plan: LoadPlan, created?: boolean) =>
+    setDrafts((d) => ({ ...d, [ws]: { ...d[ws], [plan.id]: { plan, created: created ?? d[ws]?.[plan.id]?.created ?? false } } }));
+  /** Drops a draft of workspace `ws`; `only` drops it only while it is still that edit. */
+  const dropDraft = (ws: string, id: string, only?: LoadPlan) =>
+    setDrafts((d) => {
+      const own = d[ws];
+      if (!own?.[id] || (only && own[id].plan !== only)) return d;
+      return { ...d, [ws]: Object.fromEntries(Object.entries(own).filter(([k]) => k !== id)) };
+    });
+  /** Selects `s`; an untouched new plan is dropped unless it is the one selected. */
+  const select = (s: Sel) => {
+    setSel(s);
+    setFresh((f) => (f && s?.kind === "plan" && s.id === f.id ? f : null));
+  };
+  const createPlan = () => {
+    const p = newPlan(props.workspaceId);
+    setFresh(p);
+    setSel({ kind: "plan", id: p.id });
+  };
 
   return (
     <div className="main" style={props.hidden ? { display: "none" } : undefined}>
@@ -218,29 +279,26 @@ export function LoadView(props: {
             <button
               className="btn ghost small"
               title="New load plan"
-              onClick={() => {
-                const p = newPlan(props.workspaceId);
-                setDraft(p);
-                setSel({ kind: "plan", id: p.id });
-              }}
+              onClick={createPlan}
             >
               <Icon name="plus" size={14} />
               New
             </button>
           </div>
-          {plans.length === 0 && <div className="side-empty">No plans yet.</div>}
-          {plans.map((p) => (
+          {plans.length === 0 && newPlans.length === 0 && <div className="side-empty">No plans yet.</div>}
+          {[...plans, ...newPlans].map((p) => (
             <div
               key={p.id}
               className={`tree-row${sel?.kind === "plan" && sel.id === p.id ? " selected" : ""}`}
               role="button"
               tabIndex={0}
-              onClick={() => setSel({ kind: "plan", id: p.id })}
-              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "plan", id: p.id })}
+              onClick={() => select({ kind: "plan", id: p.id })}
+              onKeyDown={(e) => e.key === "Enter" && select({ kind: "plan", id: p.id })}
             >
               <Icon name="zap" size={14} className="row-icon" />
-              <span className="name">{p.name}</span>
+              <span className="name">{wsDrafts[p.id]?.plan.name ?? p.name}</span>
               {!p.trusted && <span className="badge warn">imported</span>}
+              {(wsDrafts[p.id] || p === shownFresh) && <span className="badge neutral">unsaved</span>}
             </div>
           ))}
           <div className="side-section-head">
@@ -254,8 +312,8 @@ export function LoadView(props: {
               role="button"
               tabIndex={0}
               title={`${r.plan_name} — ${new Date(r.started_at).toLocaleString()}`}
-              onClick={() => setSel({ kind: "report", id: r.run_id })}
-              onKeyDown={(e) => e.key === "Enter" && setSel({ kind: "report", id: r.run_id })}
+              onClick={() => select({ kind: "report", id: r.run_id })}
+              onKeyDown={(e) => e.key === "Enter" && select({ kind: "report", id: r.run_id })}
             >
               <div className="hist-line">
                 <span className="hist-title">{r.plan_name}</span>
@@ -275,28 +333,52 @@ export function LoadView(props: {
       <section className="work single">
         <div className="pane">
           {live && <LivePanel live={live} onCancel={() => void api.loadRunCancel(live.runKey)} />}
-          {!live && sel?.kind === "plan" && draft && (
+          {!live && selPlan && (
             <PlanEditor
-              key={draft.id}
-              plan={draft}
+              key={`${props.workspaceId}/${selPlan.id}`}
+              workspaceId={props.workspaceId}
+              plan={selPlan}
+              unsaved={!!wsDrafts[selPlan.id] || selPlan === shownFresh}
+              onChange={(p) => {
+                // The first edit of a new plan keeps it as a draft.
+                const first = selPlan === shownFresh;
+                editDraft(props.workspaceId, p, first || undefined);
+                if (first) setFresh(null);
+              }}
               requests={requests}
               environments={props.environments}
               datasets={datasets}
               onDatasetsChanged={reload}
-              onSaved={async (p) => {
-                await reload();
-                setSel({ kind: "plan", id: p.id });
+              onSaved={async (p, sent) => {
                 props.notify("Plan saved.");
+                // Saved, even if another workspace is shown now: once the list
+                // is fresh, drop this render's workspace draft unless it was
+                // edited again while the save was pending.
+                const listed = await reload();
+                dropDraft(p.workspace_id, p.id, sent);
+                setFresh((f) => (f?.id === p.id ? null : f));
+                // Switched workspace meanwhile: do not select it in another workspace's view.
+                if (listed === null) return;
+                setSel({ kind: "plan", id: p.id });
               }}
               onDeleted={async () => {
-                await reload();
+                dropDraft(props.workspaceId, selPlan.id);
+                if ((await reload()) === null) return;
                 setSel(null);
               }}
+              onDiscard={
+                selNew
+                  ? () => {
+                      dropDraft(props.workspaceId, selPlan.id);
+                      select(null);
+                    }
+                  : undefined
+              }
               onStarted={(runKey, name) => setLive({ runKey, planName: name, progress: null, timeline: [] })}
             />
           )}
-          {!live && sel?.kind === "report" && <ReportView key={sel.id} runId={sel.id} reports={reports} notify={props.notify} onDeleted={async () => { await reload(); setSel(null); }} />}
-          {!live && !sel && (
+          {!live && sel?.kind === "report" && <ReportView key={sel.id} runId={sel.id} reports={reports} notify={props.notify} onDeleted={async () => { if ((await reload()) === null) return; setSel(null); }} />}
+          {!live && (!sel || (sel.kind === "plan" && !selPlan)) && (
             <div className="empty">
               <div>
                 <span className="empty-icon">
@@ -304,14 +386,7 @@ export function LoadView(props: {
                 </span>
                 <div className="big">Test under load with the same requests you send by hand.</div>
                 <div className="sub">Every iteration uses the same preparation, auth signing and TLS rules as Send. Runs execute in a separate worker process.</div>
-                <button
-                  className="btn primary"
-                  onClick={() => {
-                    const p = newPlan(props.workspaceId);
-                    setDraft(p);
-                    setSel({ kind: "plan", id: p.id });
-                  }}
-                >
+                <button className="btn primary" onClick={createPlan}>
                   <Icon name="plus" size={15} />
                   New load plan
                 </button>
@@ -327,16 +402,29 @@ export function LoadView(props: {
 // ------------------------------------------------------------ plan editor
 
 export function PlanEditor(props: {
+  /** The shown workspace: a plan of another one is never saved or started from here. */
+  workspaceId: string;
   plan: LoadPlan;
+  /** The plan carries edits that are not saved yet. */
+  unsaved?: boolean;
+  /** Every edit, so the view can keep it across a workspace switch. */
+  onChange?: (p: EditPlan) => void;
   requests: { id: string; label: string; method: string }[];
   environments: Environment[];
   datasets: Dataset[];
   onDatasetsChanged: () => void | Promise<unknown>;
-  onSaved: (p: LoadPlan) => void;
+  /** `sent` is the edit that was saved. */
+  onSaved: (p: LoadPlan, sent: EditPlan) => void;
   onDeleted: () => void;
+  /** Set for a plan that was never saved: it is discarded here instead of deleted. */
+  onDiscard?: () => void;
   onStarted: (runKey: string, name: string) => void;
 }) {
-  const [p, setP] = useState<EditPlan>({ ...props.plan, chain: props.plan.chain ?? [], mix: props.plan.mix ?? [] });
+  const [p, setEdit] = useState<EditPlan>(() => editable(props.plan));
+  const setP = (next: EditPlan) => {
+    setEdit(next);
+    props.onChange?.(next);
+  };
   const [err, setErr] = useState<string | null>(null);
   const [pick, setPick] = useState("");
   const [preflight, setPreflight] = useState<LoadPreflight | null>(null);
@@ -370,12 +458,18 @@ export function PlanEditor(props: {
   const setW = (workload: Workload) => setP({ ...p, workload });
   const label = (id: string) => props.requests.find((r) => r.id === id)?.label ?? "(missing request)";
 
+  const otherWorkspace = p.workspace_id !== props.workspaceId;
   const saveIt = async (): Promise<LoadPlan | null> => {
     setErr(null);
+    if (otherWorkspace) {
+      setErr("This plan belongs to another workspace; switch back to it to save or run the plan.");
+      return null;
+    }
     try {
-      const saved = await api.saveLoadPlan(p);
-      setP({ ...saved, chain: saved.chain ?? [], mix: saved.mix ?? [] });
-      props.onSaved(saved);
+      const sent = p;
+      const saved = await api.saveLoadPlan(sent);
+      setEdit(editable(saved));
+      props.onSaved(saved, sent);
       return saved;
     } catch (e) {
       setErr(String((e as Error).message));
@@ -388,12 +482,13 @@ export function PlanEditor(props: {
       <div className="page-head">
         <input className="field title-input grow" aria-label="Plan name" value={p.name} onChange={(e) => setP({ ...p, name: e.target.value })} />
         <div className="page-actions">
-          <button className="btn" onClick={() => void saveIt()}>
+          {props.unsaved && <span className="badge neutral">unsaved</span>}
+          <button className="btn" disabled={otherWorkspace} title={otherWorkspace ? "This plan belongs to another workspace." : undefined} onClick={() => void saveIt()}>
             Save
           </button>
           <button
             className="btn primary"
-            disabled={refused}
+            disabled={refused || otherWorkspace}
             title={refused ? "This plan cannot be load tested; see the refusal below." : undefined}
             onClick={async () => {
               const saved = await saveIt();
@@ -409,17 +504,25 @@ export function PlanEditor(props: {
             <Icon name="play" size={12} />
             Run…
           </button>
-          <button
-            className="btn ghost danger icon-btn"
-            aria-label="Delete plan"
-            title="Delete plan"
-            onClick={async () => {
-              await api.deleteLoadPlan(p.id).catch(() => undefined);
-              props.onDeleted();
-            }}
-          >
-            <Icon name="trash" />
-          </button>
+          {props.onDiscard ? (
+            <button className="btn ghost danger" title="Discard this unsaved plan" onClick={props.onDiscard}>
+              Discard
+            </button>
+          ) : (
+            <button
+              className="btn ghost danger icon-btn"
+              aria-label="Delete plan"
+              title="Delete plan"
+              disabled={otherWorkspace}
+              onClick={async () => {
+                if (otherWorkspace) return;
+                await api.deleteLoadPlan(p.id).catch(() => undefined);
+                props.onDeleted();
+              }}
+            >
+              <Icon name="trash" />
+            </button>
+          )}
         </div>
       </div>
       {!p.trusted && <div className="warn-box">This plan was imported. Review it and save it before it can run.</div>}
@@ -629,8 +732,9 @@ export function PlanEditor(props: {
               </button>
               <button
                 className="btn primary"
-                disabled={!ack}
+                disabled={!ack || otherWorkspace}
                 onClick={async () => {
+                  if (otherWorkspace) return;
                   try {
                     const key = await api.loadRunStart(p.id, true);
                     setPreflight(null);
