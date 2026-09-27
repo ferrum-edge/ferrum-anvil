@@ -813,12 +813,7 @@ fn a_relocation_is_refused_unless_the_referrer_names_the_old_path_and_a_regular_
 
     // An old path the request or dataset does not name, even one another names.
     let plain = app.create_request(&ws.meta.id, None, "plain", RequestSpec::http("GET", URL)).unwrap();
-    let unnamed = [
-        (request(&r), path_str(&new)),
-        (request(&r), String::new()),
-        (dataset, path_str(&new)),
-        (request(&plain), old.clone()),
-    ];
+    let unnamed = [(request(&r), path_str(&new)), (request(&r), String::new()), (dataset, path_str(&new)), (request(&plain), old.clone())];
     for (referrer, old_path) in unnamed {
         let err = refused(app.relocate_linked_file(referrer, &old_path, &new), &old_path);
         assert!(err.contains("does not name the linked file"), "{old_path}: {err}");

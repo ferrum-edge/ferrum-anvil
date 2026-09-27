@@ -252,13 +252,8 @@ fn repoint_in(s: &StoreTx<'_>, referrer: LinkedFileReferrer, old: &str, new: &st
                 None => None,
             };
             if prev.map(|p| p.spec_sha256 != hash).unwrap_or(true) {
-                let rev = RequestRevision {
-                    id: Id::new(),
-                    request_id: r.meta.id,
-                    created_at: now,
-                    spec_sha256: hash,
-                    spec: r.spec.clone(),
-                };
+                let rev =
+                    RequestRevision { id: Id::new(), request_id: r.meta.id, created_at: now, spec_sha256: hash, spec: r.spec.clone() };
                 s.put(kind::REVISION, &rev.id, Some(&r.workspace_id), Some(&r.meta.id), 0.0, &rev)?;
                 r.revision_id = Some(rev.id);
             }
