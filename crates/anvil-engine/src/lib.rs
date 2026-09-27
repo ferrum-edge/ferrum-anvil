@@ -437,14 +437,19 @@ impl Engine {
 
     /// Clear one workspace's caches (on workspace delete). An execution in
     /// that workspace that started before this keeps nothing it prepares or
-    /// receives afterwards in them: no cookie, prepared TLS configuration,
-    /// pooled connection, gRPC channel or session ticket. The sensitive-state
-    /// epoch is not advanced, so other workspaces' executions are not
-    /// affected.
+    /// receives afterwards in them: no cookie, OAuth token, prepared TLS
+    /// configuration, pooled connection, gRPC channel or session ticket. The
+    /// sensitive-state epoch is not advanced, so other workspaces' executions
+    /// are not affected. The Workload API cache is left alone: it is keyed by
+    /// endpoint, not by workspace, and holds this device's workload identity.
     pub fn clear_isolation(&self, isolation: &str) {
         // First: from here on, a cookie store or a prepared TLS configuration
         // of an execution in this workspace that started earlier is refused.
+        // The tokens are cleared after it: an OAuth acquisition that misses
+        // the new jar generation took its token-cache generation before this
+        // clear, which then refuses it (see `oauth_http::acquire`).
         self.cookies.clear_isolation(isolation);
+        self.tokens.clear_partition(isolation);
         self.tls.lock().retain(|(i, _), _| i != isolation);
         self.http.pool.clear_isolation(isolation);
         self.http.tickets.clear_isolation(isolation);

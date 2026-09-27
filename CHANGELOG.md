@@ -589,3 +589,13 @@
   preview of a field longer than the preview limit. The run history's
   scrub of a stored transcript now redacts event ids and event types as
   well as previews.
+- Deleting a workspace now also forgets the OAuth tokens (access and
+  refresh tokens, including interactive sign-ins) cached for it. Before, they
+  stayed in memory until the lock, and a workspace restored with the same id
+  sent them without a new sign-in. A token request or refresh of that
+  workspace in flight across the delete, and a sign-in completed after it,
+  no longer caches its token, and a send or sign-in whose context was built
+  before the delete caches nothing for the workspace: a client-credentials
+  token is acquired for that send only, and an interactive grant needs a new
+  sign-in. Workload API SVIDs are not kept per workspace and are still
+  cleared on lock.

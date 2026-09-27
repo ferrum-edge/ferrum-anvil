@@ -83,8 +83,8 @@ impl App {
     /// [`ATTACHMENT_GRACE`] is kept: a request or dataset of another
     /// workspace not saved yet may hold it, and the cleanup of files attached
     /// and never saved decides it once the period is over. Its load runs are
-    /// then stopped, and the engine drops its connections, sessions and other
-    /// cached state.
+    /// then stopped, and the engine drops its connections, sessions, OAuth
+    /// tokens and other cached state.
     pub fn delete_workspace(&self, id: &Id) -> Result<()> {
         let cutoff = grace_cutoff();
         self.store.atomically(|s| {
@@ -97,6 +97,15 @@ impl App {
             }
             Ok(())
         })?;
+        // Only after the storage delete is committed. A context built for the
+        // workspace takes its epoch before it reads the workspace from
+        // storage (`App::build_context`), and the engine keeps nothing for
+        // an epoch taken before `clear_isolation`: a build that still read
+        // the workspace then keeps nothing either. Cleared first, a build
+        // between the clear and the commit would take a post-delete epoch
+        // and keep cookies, tokens and connections for the deleted workspace
+        // that a workspace restored with the same id would pick up. A delete
+        // that fails leaves the engine as it was.
         self.stop_load_runs_of(id);
         self.engine.clear_isolation(&id.to_string());
         Ok(())

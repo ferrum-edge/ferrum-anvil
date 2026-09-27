@@ -192,9 +192,9 @@ impl App {
     ///
     /// The context carries the engine's execution epoch for the workspace,
     /// taken when the build starts (`ExecutionContext::epoch`): an execution
-    /// of it keeps nothing for the workspace (cookies, prepared TLS
-    /// configurations, pooled connections, session tickets) once the
-    /// workspace is deleted, even when it starts after the delete.
+    /// of it keeps nothing for the workspace (cookies, OAuth tokens,
+    /// prepared TLS configurations, pooled connections, session tickets)
+    /// once the workspace is deleted, even when it starts after the delete.
     pub fn build_context(
         &self,
         request_id: Option<Id>,

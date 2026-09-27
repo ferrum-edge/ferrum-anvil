@@ -273,11 +273,12 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   resumes only its own workspace's tickets. A workspace delete
   (`Engine::clear_isolation`) fences that workspace's caches the same way,
   with a generation of its own, so other workspaces' work is not affected:
-  it drops the workspace's cookies, prepared TLS configurations,
-  connections and session tickets, and for a request, session or gRPC call
-  of that workspace that started before the delete, none of those it
-  prepares or receives afterwards is kept, even on a later redirect or
-  retry, so they cannot reappear in a workspace restored with the same id.
+  it drops the workspace's cookies, OAuth tokens, prepared TLS
+  configurations, connections and session tickets, and for a request,
+  session, gRPC call or token request of that workspace that started
+  before the delete, none of those it prepares or receives afterwards is
+  kept, even on a later redirect or retry, so they cannot reappear in a
+  workspace restored with the same id.
   An execution takes the lock epoch and all of these generations between
   the same two points, with no lock or delete of its workspace started in
   between, so a snapshot never takes a transport or channel generation

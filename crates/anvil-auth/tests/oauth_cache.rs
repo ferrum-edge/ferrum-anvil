@@ -4,7 +4,8 @@
 //! (sign-out) or a new sign-in wins over every acquisition still in flight,
 //! and a send overtaken only by a sign-in is served with its token; a refresh
 //! finishes even when its caller stops waiting, unless a lock or a sign-out
-//! aborts it.
+//! aborts it. Clearing a partition (a workspace delete) does all of that for
+//! the partition's keys only.
 
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, OAuthResolved, TokenCache, TokenHttp, TokenKey};
@@ -546,4 +547,108 @@ async fn a_lock_aborts_a_refresh_its_caller_is_waiting_for() {
     let e = task.await.unwrap().expect_err("a lock aborts the refresh");
     assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
     assert_eq!(issuer.completed.load(Ordering::SeqCst), 0);
+}
+
+// -------------------------------------------------------------- partitions ---
+
+fn in_partition(partition: &str, cfg: &OAuthResolved) -> TokenKey {
+    TokenKey::new(partition, cfg)
+}
+
+#[tokio::test]
+async fn clearing_a_partition_forgets_its_tokens_only() {
+    let cache = TokenCache::new();
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("deleted", "rt-deleted", false));
+    let other = in_partition("other-workspace", &cfg);
+    assert!(cache.store_sign_in(&other, cache.generation(&other), signed_in("kept", "rt-kept", false)));
+
+    let before = cache.generation(&key(&cfg));
+    let other_before = cache.generation(&other);
+    cache.clear_partition("workspace");
+    assert!(cache.get(&key(&cfg)).is_none(), "the partition's token survived its clear");
+    assert_eq!(cache.get(&other).unwrap().access_token.as_str(), "kept");
+    assert_eq!(cache.generation(&other), other_before, "another partition's generation moved");
+
+    // Nothing from before the clear lands in the partition afterwards.
+    assert!(!cache.insert_if_current(&key(&cfg), before, signed_in("late", "rt", false)));
+    assert!(!cache.store_sign_in(&key(&cfg), before, signed_in("late", "rt", false)));
+    assert!(cache.get(&key(&cfg)).is_none());
+
+    // A partition restored under the same name starts empty: an interactive
+    // grant needs a new sign-in, and one made now is kept.
+    let issuer = Issuer::default();
+    let e = acquire(&cache, &cfg, &issuer).await.expect_err("the cleared sign-in was used");
+    assert!(matches!(e, AuthError::InteractionRequired(_)), "{e:?}");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
+    sign_in(&cache, &cfg, signed_in("restored", "rt-restored", false));
+    assert_eq!(acquire(&cache, &cfg, &issuer).await.unwrap(), "restored");
+}
+
+#[tokio::test]
+async fn clearing_a_partition_during_acquisition_discards_the_late_token_and_spares_other_partitions() {
+    let issuer = Arc::new(Issuer::gated());
+    let cache = Arc::new(TokenCache::new());
+    let cfg = client_credentials("api-a");
+    let other = in_partition("other-workspace", &cfg);
+    let task = {
+        let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
+        tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
+    };
+    issuer.received.notified().await;
+    let other_task = {
+        let (cache, issuer, cfg, other) = (cache.clone(), issuer.clone(), cfg.clone(), other.clone());
+        tokio::spawn(async move { cache.get_or_acquire(&other, &cfg, &*issuer, Utc::now()).await })
+    };
+    issuer.received.notified().await;
+    cache.clear_partition("workspace");
+    issuer.release.notify_one();
+    issuer.release.notify_one();
+    let e = task.await.unwrap().expect_err("an acquisition that straddles its partition's clear must not succeed");
+    assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
+    assert!(other_task.await.unwrap().is_ok(), "another partition's acquisition was canceled");
+    assert!(cache.get(&key(&cfg)).is_none(), "the late token repopulated the cleared partition");
+    assert!(cache.get(&other).is_some());
+}
+
+#[tokio::test]
+async fn clearing_a_partition_aborts_its_refresh() {
+    let issuer = Arc::new(Issuer::gated());
+    let cache = Arc::new(TokenCache::new());
+    let cfg = pkce("api-a");
+    sign_in(&cache, &cfg, signed_in("old", "rt-0", true));
+    let task = {
+        let (cache, issuer, cfg) = (cache.clone(), issuer.clone(), cfg.clone());
+        tokio::spawn(async move { acquire(&cache, &cfg, &issuer).await })
+    };
+    issuer.received.notified().await;
+    cache.clear_partition("workspace");
+    // Ends without the issuer ever answering.
+    let e = task.await.unwrap().expect_err("the partition's clear aborts the refresh");
+    assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
+    assert_eq!(issuer.completed.load(Ordering::SeqCst), 0);
+    assert!(cache.get(&key(&cfg)).is_none());
+}
+
+/// A call that belongs to a generation from before its partition's clear is
+/// refused without reading the cache or asking the issuer, even when the
+/// restored partition holds a usable token.
+#[tokio::test]
+async fn an_acquisition_since_a_generation_before_the_clear_is_refused() {
+    let cache = TokenCache::new();
+    let issuer = Issuer::default();
+    let cfg = pkce("api-a");
+    let k = key(&cfg);
+    let before = cache.generation(&k);
+    cache.clear_partition("workspace");
+    sign_in(&cache, &cfg, signed_in("restored", "rt", false));
+    let Err(e) = cache.get_or_acquire_since(&k, before, &cfg, &issuer, Utc::now()).await else { panic!("served across the clear") };
+    assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
+    assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
+
+    // A sign-in alone since then still serves it (as for `get_or_acquire`).
+    let since = cache.generation(&k);
+    sign_in(&cache, &cfg, signed_in("newer", "rt", false));
+    let t = cache.get_or_acquire_since(&k, since, &cfg, &issuer, Utc::now()).await.unwrap();
+    assert_eq!(t.access_token.as_str(), "newer");
 }
