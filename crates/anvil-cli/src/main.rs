@@ -639,6 +639,9 @@ fn real_main() {
 
 async fn cli_main() -> i32 {
     anvil_transport::init();
+    // Warnings (a stored object that does not decode, a cleanup that did
+    // not finish) go to stderr; ANVIL_LOG sets another level.
+    anvil_app::logging::log_to_stderr(anvil_app::logging::LevelFilter::WARN);
     let cli = match Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {

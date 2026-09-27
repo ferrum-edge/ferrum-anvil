@@ -1025,6 +1025,21 @@ fn a_reimport_keeps_the_version_it_replaces_while_something_else_references_it()
     assert_eq!(app.get_attachment(&v2).unwrap(), Some(newer));
 }
 
+/// Mark stored attachment `sha256` as attached `days` ago.
+fn attached_days_ago(app: &App, sha256: &str, days: i64) {
+    let (id, mut entry) = app
+        .store
+        .object_meta(kind::IMPORT_SOURCE)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id.parse::<Id>().unwrap())
+        .filter_map(|id| app.store.get::<serde_json::Value>(kind::IMPORT_SOURCE, &id).unwrap().map(|v| (id, v)))
+        .find(|(_, v)| v["attachment"] == sha256)
+        .expect("its index entry");
+    entry["attached_at"] = (chrono::Utc::now() - chrono::Duration::days(days)).timestamp_millis().into();
+    app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
+}
+
 #[test]
 fn a_file_attached_before_a_reimport_is_still_stored_when_the_request_is_saved() {
     let root = tempfile::tempdir().unwrap();
@@ -1047,7 +1062,9 @@ fn a_file_attached_before_a_reimport_is_still_stored_when_the_request_is_saved()
     let q = app.create_request(&done.workspace_id, None, "Upload", upload).unwrap();
     assert_eq!(app.request(&q.meta.id).unwrap().spec.body, Body::Binary { attachment: file, content_type: None });
     assert_eq!(app.get_attachment(&v1).unwrap().as_deref(), Some(SERVER_V1.as_bytes()));
-    // Deleting the request that holds it releases it: nothing else does.
+    // Deleting the request that holds it releases it once the grace period
+    // is over: nothing else does.
+    attached_days_ago(&app, &v1, 31);
     app.delete_request(&q.meta.id).unwrap();
     assert_eq!(app.get_attachment(&v1).unwrap(), None, "released with its request");
     let v2 = record(&app, &done.workspace_id, None).original_sha256;
@@ -1066,6 +1083,7 @@ fn deleting_a_request_that_sends_the_current_original_keeps_it() {
         ..RequestSpec::http("POST", "https://upload.example.invalid/")
     };
     let q = app.create_request(&done.workspace_id, None, "Upload", upload).unwrap();
+    attached_days_ago(&app, &v1, 31);
     app.delete_request(&q.meta.id).unwrap();
     // The import's record still names it as its original.
     assert_eq!(app.get_attachment(&v1).unwrap().as_deref(), Some(SERVER_V1.as_bytes()), "the import still holds v1");

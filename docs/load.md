@@ -426,8 +426,9 @@ anvil load list <workspace>
 anvil load reports <workspace>
 ```
 
-`--vus` and `--rate` build one stage that ramps linearly from 0 to the target
-over `--duration` (default 30 s). `--iterations` runs a fixed count over
+`--vus` and `--rate` hold the target for `--duration` (default 30 s) from the
+start, with no ramp: the plan is a zero-duration step to the target followed by
+a hold stage (`[{0 s → N}, {D s → N}]`). `--iterations` runs a fixed count over
 `--concurrency` lanes (default 10). `--abort-failure-pct` sets the abort rule
 over a 10 s window. `--fresh` selects the fresh connection mode; the default is
 persistent. `--csv` writes the summary CSV.

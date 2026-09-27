@@ -501,7 +501,9 @@ impl App {
     }
 
     /// Delete a dataset and release its stored file unless something else
-    /// references it, in one write transaction.
+    /// references it, in one write transaction. A file a user attached within
+    /// [`crate::cleanup::ATTACHMENT_GRACE`] is kept, as a request delete
+    /// keeps it: a request or dataset not saved yet may hold it.
     pub fn delete_dataset(&self, id: &Id) -> Result<()> {
         self.store.atomically(|s| {
             let d: Option<Dataset> = s.get(kind::DATASET, id)?;

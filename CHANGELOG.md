@@ -165,7 +165,8 @@
   removed and which stored objects did not decode;
   `App::clean_up_storage_if_due` runs one only when opening a profile would
   (`cleanup::CLEANUP_INTERVAL`), and `App::last_storage_cleanup` returns the
-  last pass.
+  last pass. `anvil_app::logging` installs the log the desktop and the CLI
+  write to (`log_to_file`, `log_to_stderr`).
 - **Breaking (API):** `App::release_attachment` keeps a file a user attached
   (`App::put_attachment`) and returns `false` for it, even when nothing
   references it. `App::save_request`, `App::create_request` and
@@ -188,6 +189,11 @@
   session refuses (one that rewrites the body, or adds query parameters to
   a gRPC call) is shown as a request that would not be sent. Raw TCP and UDP
   say the preview is not supported for them.
+- CLI: `anvil load create --rate N` and `--vus N` now hold `N` for
+  `--duration` from the start, as their help says. Before, they built a
+  single stage that ramped linearly from 0 to `N`, so `--rate 100
+  --duration 20` planned 1,000 arrivals instead of 2,000. The plan is now a
+  zero-duration step to `N` followed by a hold of `N` for `--duration`.
 - The failure lab's `h3x`, `proxyproto` and `mesh` profiles declared the
   Ferrum Edge 0.9.5 catalog whatever release ran, so on the default pin their
   diagnoses used another release's catalog. Every lab profile now declares
@@ -355,7 +361,22 @@
   being released, is now logged as a warning naming its kind and id (never
   its content), and the cleanup keeps it in its last pass, which
   `anvil storage-cleanup` prints, so the damaged row can be found and
-  repaired or deleted.
+  repaired or deleted. Warnings now reach a log: before, none was installed,
+  so they were dropped. The desktop writes `anvil.log` in its log directory
+  (on macOS `~/Library/Logs/com.ferrumedge.anvil/`) at level `info`,
+  rotated to `anvil.log.1` at 5 MiB; the CLI writes warnings and errors to
+  stderr. `ANVIL_LOG` (`off`, `error`, `warn`, `info`, `debug`, `trace`)
+  sets another level for Anvil's own crates.
+- Deleting a request, a folder with its requests or a dataset, or replacing
+  a dataset's file, no longer releases a file you attached within the last
+  30 days, as a workspace delete already did not: a draft of another request
+  or dataset may have attached the same file moments before, and its save
+  was then refused with "attach it again". The 30-day cleanup decides it
+  instead.
+- A file attached by a build that did not record when (a mark with no
+  `attached_at`) now ages from the first storage cleanup that sees it, which
+  records the time. Before, it counted as recently attached for good, so an
+  unsaved one was never released.
 - A spec reimport now compares the import's scoped configuration too, not
   only its requests: the source's own variables, auth, settings and
   description (on the new workspace, or on the import root in an existing
