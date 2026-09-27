@@ -86,6 +86,9 @@ struct Plan {
     /// Files attached past the grace period that a saved item references:
     /// their mark is dropped.
     held: Vec<AttachmentIndex>,
+    /// Files marked as attached with no time (marked before the time was
+    /// recorded): the pass records its own time, so they age from it.
+    unstamped: Vec<AttachmentIndex>,
     undecodable: Vec<UndecodableObject>,
     rows: String,
 }
@@ -106,9 +109,18 @@ impl App {
     /// attachment index and any orphaned revisions. The pass is kept
     /// ([`App::last_storage_cleanup`]).
     pub fn clean_up_storage(&self) -> Result<StorageCleanup> {
+        self.clean_up_storage_between_phases(|| {})
+    }
+
+    /// [`App::clean_up_storage`], calling `between` after each read and
+    /// before its write transaction, so a test can write where another
+    /// connection could. Not for other callers.
+    #[doc(hidden)]
+    pub fn clean_up_storage_between_phases(&self, mut between: impl FnMut()) -> Result<StorageCleanup> {
         let cutoff = grace_cutoff();
         for _ in 0..ATTEMPTS {
             let (marker, plan) = self.store.read_consistently(|s| Ok((s.change_marker()?, plan_in(s, cutoff)?)))?;
+            between();
             let done = self.store.atomically(|s| {
                 // A write since the read could reference a file the plan
                 // releases: read again.
@@ -173,6 +185,10 @@ fn plan_in(s: &StoreRead<'_>, cutoff: i64) -> anvil_storage::store::Result<Plan>
     // Attached recently, so a draft not saved yet may hold it: the pass
     // after its grace period decides it.
     let recent: HashSet<String> = entries.iter().filter(|e| attached_recently(e, cutoff)).map(|e| e.attachment.clone()).collect();
+    // A mark with no time counts as recent, so it would never age: the pass
+    // stamps it, and the grace period runs from then.
+    let (unstamped, entries): (Vec<AttachmentIndex>, Vec<AttachmentIndex>) =
+        entries.into_iter().partition(|e| e.user && e.attached_at.is_none());
     let mut candidates = HashSet::new();
     let requests: HashSet<String> = s.object_meta(kind::REQUEST)?.into_iter().map(|m| m.id).collect();
     // By id, and their row ids for the reference scan to skip.
@@ -204,19 +220,28 @@ fn plan_in(s: &StoreRead<'_>, cutoff: i64) -> anvil_storage::store::Result<Plan>
     candidates.extend(aged.iter().map(|e| e.attachment.clone()));
     let (unreferenced, undecodable) = reference_scan_in(s, candidates, &orphan_rows)?;
     let held = aged.into_iter().filter(|e| !unreferenced.contains(&e.attachment)).collect();
-    Ok(Plan { orphans, unreferenced, held, undecodable, rows })
+    Ok(Plan { orphans, unreferenced, held, unstamped, undecodable, rows })
 }
 
 /// Carry out `plan` in the write transaction that checked nothing changed
 /// since it was read, and keep the pass.
 fn apply_in(s: &StoreTx<'_>, plan: Plan) -> anvil_storage::store::Result<StorageCleanup> {
     let mut done = StorageCleanup::default();
+    // Stamping releases nothing, so it happens even when nothing else does.
+    let now = Utc::now().timestamp_millis();
+    let stamped = !plan.unstamped.is_empty();
+    for e in plan.unstamped {
+        let aging = AttachmentIndex { attached_at: Some(now), ..e };
+        s.put(kind::IMPORT_SOURCE, &attachment_index_id(&aging.attachment), None, None, 0.0, &aging)?;
+    }
     // An object that does not decode could name any file: nothing is
     // removed, so the files the orphaned revisions name are not lost track
     // of. The next pass tries again.
     if !plan.undecodable.is_empty() {
         done.undecodable = plan.undecodable;
-        keep_in(s, &done, Some(plan.rows))?;
+        // What was stamped changed the rows the digest covers.
+        let rows = if stamped { rows_digest_in(&s.as_read())? } else { plan.rows };
+        keep_in(s, &done, Some(rows))?;
         return Ok(done);
     }
     for id in &plan.orphans {
