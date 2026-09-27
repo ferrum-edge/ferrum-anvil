@@ -148,7 +148,7 @@ impl Transcript {
             preview_is_hex,
             preview_truncated,
             event_id: event_id.map(redact),
-            event_type,
+            event_type: event_type.map(redact),
         }
     }
 
@@ -637,14 +637,16 @@ mod tests {
     }
 
     #[test]
-    fn hex_previews_are_redacted() {
-        let redact: RedactFn = Arc::new(|s: &str| s.replace("c0ffee00", "‹redacted›"));
+    fn hex_previews_and_event_types_are_redacted() {
+        let redact: RedactFn = Arc::new(|s: &str| s.replace("c0ffee00", "‹redacted›").replace("sekret-type", "‹redacted›"));
         let mut t = Transcript::new(Instant::now(), TranscriptLimits::default(), EventCtx::none(), Some(redact));
         t.data(Direction::Sent, "binary", &[0x01, 0xc0, 0xff, 0xee, 0x00]);
         t.control(Direction::Sent, "ping", &[0xc0, 0xff, 0xee, 0x00]);
+        t.event(Direction::Received, "event", b"data", Some("id-1".into()), Some("sekret-type".into()));
         let s = t.finish();
         assert!(s.messages[0].preview_is_hex && s.messages[0].preview == "01‹redacted›", "{:?}", s.messages[0]);
         assert!(s.messages[1].preview_is_hex && s.messages[1].preview == "‹redacted›", "{:?}", s.messages[1]);
+        assert_eq!(s.messages[2].event_type.as_deref(), Some("‹redacted›"));
     }
 
     #[test]
