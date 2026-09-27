@@ -184,9 +184,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   - **Privacy:** a relocated path is a path on this device, and it is saved
     in the request or dataset, so a later export carries it (as it carries
     any linked path, in every export mode). The export preview warns that
-    requests or datasets name linked local files; the receiving device's
-    import preview lists each one with its path. Attach a copy instead to
-    keep a local path out of a bundle.
+    requests or datasets name linked local files and lists each one with
+    its path and the request or dataset that names it, as the receiving
+    device's import preview does. Attach a copy instead to keep a local
+    path out of a bundle.
 - **Altering an encrypted bundle:** the vault is sealed with associated data
   covering the format version and the SHA-256 of every other entry
   (manifest, `workspace/objects.json`, each attachment, the history). Any

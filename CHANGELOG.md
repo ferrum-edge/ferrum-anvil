@@ -228,6 +228,14 @@
   `grpc_client_streaming`, `grpc_bidirectional`, `udp_masque` and
   `udp_hbone` (those plans are now load tested), and adds `mixed_tunnels`,
   `grpc_unsupported_combination` and `masque_through_proxy`.
+- The export preview now lists each linked local file path the bundle will
+  carry, with the request or dataset that names it (`linked_files`, as
+  `request 'Upload': /path/to/file`), beside the existing warning that
+  linked local files are named. A path repointed with **Choose new
+  location…** is a path on this device, so the preview shows which ones
+  leave with the export. The bundle's manifest does not repeat them. The
+  desktop export dialog does not show the list yet; `anvil export --preview`
+  prints it.
 
 ### Fixed
 
@@ -240,6 +248,11 @@
   tab's unsaved edits, which the relocation replaces with the saved request.
   Windows paths are shown without the `\\?\` verbatim prefix (`\\?\UNC\`
   as `\\`); the stored path is unchanged.
+- Moving a request (`move_request`) reads and writes it in one write
+  transaction and changes only its folder and position. It used to read the
+  request first and save that copy afterwards, so a save or a linked-file
+  relocation that landed in between could be undone, leaving the request
+  naming its old, unbound path. A move never files a revision.
 - Desktop Load: switching workspaces now clears the selected plan or report
   and closes a pending run confirmation, so the Load view never shows, saves,
   runs or deletes the previous workspace's plan; the plan editor also refuses
@@ -260,6 +273,13 @@
   each destination's whole host: a host that only contains `localhost` or
   `127.0.0.1` (such as `localhost.example.com`) no longer counts as this
   machine, and a tunnel's proxy is judged apart from its target.
+- The load preflight now judges the proxy profile a request is actually sent
+  through, whatever its kind: a loopback target behind a remote HTTP, HTTPS
+  or SOCKS5 proxy (as well as MASQUE or HBONE) warns that traffic leaves
+  this machine, and each destination names that proxy. The profile's
+  `NO_PROXY` list is applied as the engine applies it, so a bypassed target
+  (including a UDP target under an HBONE profile, which was labelled "via
+  HBONE proxy") is shown as direct and the proxy's host is not judged.
 - The effective-request preview now shows what a WebSocket, SSE or gRPC
   request sends. A `ws://`, `wss://`, `grpc://` or `grpcs://` URL is
   previewed (before, it was refused, and a URL without a scheme was

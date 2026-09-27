@@ -221,6 +221,13 @@ profiles, spec-import records or load reports, and its bundle kind is
   missing (a blob lost to retention, or a request created without its file)
   travels without it, and the export lists that request or dataset among its
   excluded items.
+- The path of every linked local file its requests and datasets name, in
+  every mode: a path on the exporting device, which can show its user name
+  and folder layout. Only the binding stays on the device. The export
+  preview warns that linked local files are named and lists each one with
+  the request or dataset that names it (`linked_files` in the preview, as
+  `request 'Upload': /path/to/file`); the manifest does not repeat them.
+  Attach a copy instead to keep a local path out of a bundle.
 
 In either bundle mode **only the vault is encrypted**. The objects (names,
 URLs, header and body text), attachments and history are ordinary zip

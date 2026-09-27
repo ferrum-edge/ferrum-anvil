@@ -365,3 +365,80 @@ fn load_preflight_warns_when_either_the_target_or_the_tunnel_proxy_is_remote() {
     let pre = preflight(hbone("127.0.0.1:15008"));
     assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
 }
+
+/// The local-traffic warning judges the proxy profile the engine actually
+/// routes through, whatever its kind: a loopback target behind a remote
+/// HTTP or SOCKS5 proxy leaves this machine. A target the profile's
+/// NO_PROXY list bypasses is sent directly: it is labelled without the
+/// proxy, and the proxy's host is not judged.
+#[test]
+fn load_preflight_judges_every_proxy_profile_after_no_proxy() {
+    use anvil_domain::request::{PayloadEncoding, Protocol, StreamPayload, UdpSpec};
+    use anvil_domain::settings::ProxySelection;
+    use anvil_domain::tls::{ProxyKind, ProxyProfile};
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let profile = |kind: ProxyKind, address: &str, no_proxy: &str| {
+        app.save_proxy_profile(ProxyProfile {
+            id: Id::new(),
+            workspace_id: ws.meta.id,
+            name: "proxy".into(),
+            kind,
+            address: address.into(),
+            username: None,
+            password: None,
+            no_proxy: no_proxy.into(),
+            tls_profile_id: None,
+            hbone: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .unwrap()
+    };
+    let preflight = |mut spec: RequestSpec, proxy: &ProxyProfile| {
+        spec.settings.proxy_profile_id = Some(ProxySelection::Profile { id: proxy.id });
+        let req = app.create_request(&ws.meta.id, None, "req", spec).unwrap();
+        let p = app.save_load_plan(plan(ws.meta.id, req.meta.id)).unwrap();
+        app.load_preflight(&p).unwrap()
+    };
+    let leaves = |w: &[String]| w.iter().any(|w| w.contains("Traffic leaves this machine"));
+    let http = || RequestSpec::http("GET", "http://127.0.0.1:8080/x");
+
+    // A loopback target behind a remote HTTP proxy.
+    let pre = preflight(http(), &profile(ProxyKind::Http, "proxy.example.test:3128", ""));
+    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080 via HTTP proxy proxy.example.test:3128".to_string()]);
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    // A loopback target behind a remote SOCKS5 proxy.
+    let pre = preflight(http(), &profile(ProxyKind::Socks5, "192.0.2.10:1080", ""));
+    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080 via SOCKS5 proxy 192.0.2.10:1080".to_string()]);
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    // A remote proxy whose NO_PROXY list bypasses the loopback target.
+    let pre = preflight(http(), &profile(ProxyKind::Http, "proxy.example.test:3128", "localhost,127.0.0.1"));
+    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080".to_string()]);
+    assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
+    // Both local: no warning.
+    let pre = preflight(http(), &profile(ProxyKind::Socks5, "localhost:1080", ""));
+    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080 via SOCKS5 proxy localhost:1080".to_string()]);
+    assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
+
+    // A datagram target a remote HBONE profile's NO_PROXY bypasses is sent
+    // directly: no "via HBONE proxy" label and no warning.
+    let mut udp = RequestSpec::http("GET", "udp://127.0.0.1:9");
+    udp.protocol = Protocol::Udp;
+    udp.udp = Some(UdpSpec {
+        dtls: false,
+        datagrams: vec![StreamPayload { data: "x".into(), encoding: PayloadEncoding::Text }],
+        response_window_ms: 100,
+        max_datagrams: 1,
+        masque: None,
+        proxy_protocol: None,
+    });
+    let pre = preflight(udp.clone(), &profile(ProxyKind::Hbone, "mesh.example.test:15008", "127.0.0.0/8"));
+    assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9".to_string()]);
+    assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
+    // Without the bypass the same profile carries it, and it is remote.
+    let pre = preflight(udp, &profile(ProxyKind::Hbone, "mesh.example.test:15008", ""));
+    assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via HBONE proxy mesh.example.test:15008".to_string()]);
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+}
