@@ -2,15 +2,20 @@
 //! source of each value — without sending anything. Secrets are redacted;
 //! per-send values (HMAC nonces, DPoP proofs, JWT iat/exp) are shown as they
 //! would be generated for one send and labelled as varying per send.
+//! WebSocket, SSE and gRPC requests show the handshake or call their session
+//! transport sends; raw TCP and UDP are not previewed.
 
 use crate::Engine;
 use crate::context::ExecutionContext;
 use crate::http_exec;
 use crate::redact::Redactor;
+use crate::session_preview::{self, Shape};
+use crate::sessions;
 use crate::vars::Resolver;
 use anvil_auth::ResolvedAuth;
 use anvil_diagnostics::FerrumTrust;
 use anvil_domain::execution::{HeaderEntry, TransportFailure};
+use anvil_domain::request::Protocol;
 use anvil_domain::settings::EffectiveSettings;
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -66,16 +71,27 @@ fn with_jwt_svid_placeholder(a: &ResolvedAuth) -> ResolvedAuth {
 }
 
 impl Engine {
+    /// The request a send would make, without sending it. A WebSocket, SSE
+    /// or gRPC request shows its handshake or call as the session transport
+    /// sends it (method, target, `Host` / `:authority`, headers, body and the
+    /// signature over them); raw TCP and UDP have no request to preview.
     pub fn preview(&self, ctx: &ExecutionContext) -> Result<EffectiveRequest, TransportFailure> {
+        let schemes = session_preview::schemes(ctx.spec.protocol)?;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
-        let prep = http_exec::prepare_all(self, ctx, &resolver, &["https", "http"])?;
+        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes)?;
         let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
-        // The same authority and signing input as the send path.
-        let signable = http_exec::signable_request(&prep.http.method, &prep.http.target, &prep.http.headers, &prep.http.body);
-        let mut headers = prep.http.headers.clone();
-        let mut url = prep.http.target.url();
+        let mut inferred = prep.inferred.clone();
+        let shape = match ctx.spec.protocol {
+            Protocol::Http => Shape::http(&prep),
+            _ => Shape::session(ctx, &resolver, &prep, &mut inferred)?,
+        };
+        // The same authority and signing input as the send path. A session
+        // signs for its URL's HTTP counterpart (`wss` as `https`).
+        let signable = http_exec::signable_request(&shape.method, &sessions::http_target(&shape.target), &shape.headers, &shape.body);
+        let mut headers = shape.headers.clone();
+        let mut target = shape.target.clone();
         // The body sent: auth may rewrite it (a WS-Security header block).
-        let mut body = prep.http.body.clone();
+        let mut body = shape.body.clone();
         let varies = matches!(
             prep.auth,
             ResolvedAuth::Hmac(_)
@@ -84,7 +100,6 @@ impl Engine {
                 | ResolvedAuth::Wsse { .. }
                 | ResolvedAuth::JwtSvid { .. }
         );
-        let mut inferred = prep.inferred.clone();
         let auth = if has_unfetched_jwt_svid(&prep.auth) {
             // The preview makes no Workload API call and reads no token file.
             inferred.push(
@@ -101,8 +116,9 @@ impl Engine {
                     redactor.add_secret(s);
                 }
                 // The engine refuses an auth header that is not valid on the
-                // wire: say so rather than show a request that would not be sent.
-                if let Some(why) = http_exec::auth_header_problem(&applied) {
+                // wire, and a session one it cannot carry: say so rather than
+                // show a request that would not be sent.
+                if let Some(why) = http_exec::auth_header_problem(&applied).or_else(|| shape.auth_refusal(&applied)) {
                     inferred.push(format!("the request would not be sent: {why}"));
                 } else {
                     for (n, v) in applied.set_headers {
@@ -110,8 +126,8 @@ impl Engine {
                         headers.push((n, v));
                     }
                     for (k, v) in applied.append_query {
-                        let sep = if url.contains('?') { '&' } else { '?' };
-                        url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
+                        let pair = format!("{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
+                        target.query = if target.query.is_empty() { pair } else { format!("{}&{pair}", target.query) };
                     }
                     if let Some(b) = applied.body {
                         body = b.into();
@@ -125,22 +141,24 @@ impl Engine {
             // say so rather than show the request without its credentials.
             Err(e) => inferred.push(format!("the request would not be sent: {}", redactor.text(&e.to_string()))),
         }
+        let authority = http_exec::request_authority(&headers, &target);
+        shape.transport_headers(&mut headers, &authority);
         let body_preview: String = String::from_utf8_lossy(&body[..body.len().min(64 * 1024)]).into_owned();
-        let body_preview = if prep.http.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false) {
+        let body_preview = if shape.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false) {
             redactor.json_text(&body_preview)
         } else {
             redactor.text(&body_preview)
         };
         let omitted = resolver.used_secrets.lock().len();
         Ok(EffectiveRequest {
-            method: prep.http.method.clone(),
-            url: redactor.url(&url),
-            destination: format!("{}:{}", prep.http.target.host, prep.http.target.port),
-            authority: redactor.text(&http_exec::request_authority(&headers, &prep.http.target)),
+            method: shape.method.clone(),
+            url: redactor.url(&shape.url(&target)),
+            destination: format!("{}:{}", target.host, target.port),
+            authority: redactor.text(&authority),
             headers: headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect(),
             body_bytes: body.len() as u64,
             body_preview,
-            content_type: prep.http.content_type.clone(),
+            content_type: shape.content_type.clone(),
             auth: prep.auth_label.clone(),
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),

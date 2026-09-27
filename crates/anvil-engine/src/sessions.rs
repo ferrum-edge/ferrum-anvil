@@ -114,7 +114,7 @@ fn header_pairs(headers: &[(String, String)]) -> Result<Vec<(HeaderName, HeaderV
 /// `https`; RFC 6455 §4.1, and gRPC is carried over HTTP). In the cookie jar,
 /// `Secure` and `HttpOnly` cookies then apply as for HTTP requests to the
 /// origin, and a DPoP proof's `htu` is the HTTP URL the request is sent to.
-fn http_target(t: &Target) -> Target {
+pub(crate) fn http_target(t: &Target) -> Target {
     let scheme = match t.scheme.as_str() {
         "wss" | "grpcs" => "https",
         "ws" | "grpc" => "http",
@@ -162,7 +162,7 @@ fn replace_oauth(a: &mut ResolvedAuth, t: &anvil_auth::oauth::CachedToken) {
     }
 }
 
-fn has_explicit_header(spec: &RequestSpec, name: &str) -> bool {
+pub(crate) fn has_explicit_header(spec: &RequestSpec, name: &str) -> bool {
     spec.headers.iter().any(|h| h.enabled && h.name.trim().eq_ignore_ascii_case(name))
 }
 
@@ -343,7 +343,7 @@ async fn prepare_session(
 
 /// The validated `permessage-deflate` offer, refused before any traffic when
 /// it cannot be sent as configured.
-fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_deflate::DeflateOffer>, TransportFailure> {
+pub(crate) fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_deflate::DeflateOffer>, TransportFailure> {
     if !o.enabled {
         return Ok(None);
     }
@@ -544,7 +544,7 @@ async fn prepare_sse(
     Ok(p)
 }
 
-async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Schema, TransportFailure> {
+pub(crate) async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Schema, TransportFailure> {
     match &spec.schema {
         GrpcSchemaSource::Reflection => Ok(grpc::Schema::Reflection),
         GrpcSchemaSource::DescriptorSet { attachment } => {

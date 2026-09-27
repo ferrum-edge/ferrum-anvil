@@ -20,6 +20,7 @@ pub mod preview;
 mod proxy_protocol;
 pub mod record;
 pub mod redact;
+mod session_preview;
 pub mod sessions;
 pub mod settings;
 pub mod vars;
