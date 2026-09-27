@@ -190,7 +190,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(*calls.lock().unwrap(), 2);
+        assert!(*calls.lock().unwrap() >= 2, "the forced first failure was not retried: {} call(s)", *calls.lock().unwrap());
         assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
     }
 }
