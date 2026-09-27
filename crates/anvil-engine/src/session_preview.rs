@@ -171,7 +171,14 @@ fn grpc_call(
     let call = sessions::grpc_call(ctx, r, prep, inferred, sessions::grpc_spec(ctx)?, false)?;
     let single = matches!(call.spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
     if single && call.spec.messages.is_empty() {
-        inferred.push("no request message is set: the call sends the empty message ({}), framed, and auth signs that frame".into());
+        // With server reflection the frame is signed only when the call is
+        // sent: what the preview shows is signed over an empty body.
+        let signed = match (&prep.auth, &call.schema) {
+            (ResolvedAuth::None, _) => "",
+            (_, grpc::Schema::Reflection) => ", and auth signs that frame when the call is sent",
+            _ => ", and auth signs that frame",
+        };
+        inferred.push(format!("no request message is set: the call sends the empty message ({{}}), framed{signed}"));
     }
     let mut message = None;
     match &call.schema {

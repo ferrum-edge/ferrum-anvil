@@ -1057,6 +1057,8 @@ struct OneShot {
     grpc_status: Option<i32>,
     grpc_message: Option<String>,
     failure: Option<TransportFailure>,
+    /// `failure` is auth's: the request could not be signed and was not sent.
+    sign_failed: bool,
 }
 
 impl OneShot {
@@ -1070,6 +1072,7 @@ impl OneShot {
             grpc_status,
             grpc_message: None,
             failure: None,
+            sign_failed: false,
         }
     }
 }
@@ -1084,6 +1087,7 @@ async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stat
             Ok(h) => Some(h),
             Err(f) => {
                 out.failure = Some(f);
+                out.sign_failed = true;
                 return out;
             }
         },
@@ -1213,7 +1217,12 @@ async fn reflect(
                 grpc_message: r.grpc_message.clone(),
                 succeeded: false,
                 problem: Some(problem),
+                auth_failed: r.sign_failed,
             };
+            if let Some(f) = r.failure.as_ref().filter(|_| r.sign_failed) {
+                let o = outcome(format!("auth could not be prepared for the reflection request, so it was not sent: {}", f.message), &r);
+                return Err(ReflectError::Refused(Box::new(r), o));
+            }
             if r.failure.is_some() {
                 let o = outcome("the reflection exchange failed at the transport level".into(), &r);
                 return Err(ReflectError::Refused(Box::new(r), o));
@@ -1284,6 +1293,7 @@ async fn reflect(
             grpc_message: None,
             succeeded: true,
             problem: None,
+            auth_failed: false,
         };
         return match pool.add_file_descriptor_protos(files.into_values()) {
             Ok(()) => Ok((pool, outcome)),
@@ -1307,6 +1317,7 @@ async fn reflect(
                 grpc_message: None,
                 succeeded: false,
                 problem: Some("server reflection was not attempted".into()),
+                auth_failed: false,
             },
         )),
     }

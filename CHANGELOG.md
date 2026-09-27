@@ -188,19 +188,6 @@
 
 ### Fixed
 
-- gRPC: a unary or server-streaming call with a local schema and no request
-  message is now signed over the empty message it sends (a 5-byte frame,
-  base64-encoded for gRPC-Web text). Before, an HMAC `Content-Digest` and
-  signature covered an empty body, so a gateway that verifies the digest
-  refused the call. The prepared request and the effective-request preview
-  show the empty message `{}` and the size of that frame.
-- gRPC: each server reflection request is now signed for its own path and
-  message when auth is set: an HMAC signature, `Content-Digest` and nonce of
-  its own, and a fresh DPoP proof bound to the reflection URL. Before,
-  reflection requests reused the headers signed for the call's method path,
-  so a gateway that verifies HMAC or DPoP refused them and reflection
-  failed. docs/protocols.md explains why reflection is signed rather than
-  sent without those headers.
 - The effective-request preview now shows what a WebSocket, SSE or gRPC
   request sends. A `ws://`, `wss://`, `grpc://` or `grpcs://` URL is
   previewed (before, it was refused, and a URL without a scheme was
@@ -572,6 +559,25 @@
   the one signed and sent. The effective-request preview shows the request
   message as redacted JSON and says that a digest or signature it shows
   covers an empty body, since the call is signed when it is sent.
+- gRPC: a unary or server-streaming call with a local schema and no request
+  message is now signed over the empty message it sends (a 5-byte frame,
+  base64-encoded for gRPC-Web text). Before, an HMAC `Content-Digest` and
+  signature covered an empty body, so a gateway that verifies the digest
+  refused the call. The prepared request and the effective-request preview
+  show the empty message `{}` and the size of that frame.
+- gRPC: each server reflection request is now signed for its own path and
+  message when auth is set: an HMAC signature and `Content-Digest` of its
+  own (and a fresh nonce with Ferrum HMAC v2), or a fresh DPoP proof bound
+  to the reflection URL. Before, reflection requests reused the headers
+  signed for the call's method path, so a gateway that verifies HMAC or
+  DPoP refused them and reflection failed. docs/protocols.md explains why
+  reflection is signed rather than sent without those headers. A token
+  minted for a reflection request (a JWT) is redacted in the record and
+  history, including where the server echoes it in its refusal. A
+  reflection request that auth cannot sign is not sent, and
+  `grpc.reflection_unavailable` says that auth preparation failed for it
+  instead of reporting a transport failure and advising the operator to
+  allow reflection.
 
 ### Security
 

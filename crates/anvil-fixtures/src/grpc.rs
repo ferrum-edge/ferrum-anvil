@@ -4,6 +4,8 @@
 //! ([`handle_h3`], full duplex on one request stream). gRPC-Web is served by
 //! [`crate::grpc_web`]. A native call with `x-fixture-set-cookie` metadata is
 //! answered with that value, verbatim, as a `Set-Cookie` response header.
+//! With `x-fixture-deny-reflection` metadata, reflection is refused (see
+//! `reflection_denial`).
 
 use crate::http::FxBody;
 use crate::log::{GroundTruth, GroundTruthLog};
@@ -129,6 +131,38 @@ fn trailers(status: i32, message: &str) -> HeaderMap {
     t
 }
 
+/// How a reflection request is refused: the trailers it ends with, sent
+/// after `after`.
+struct Denial {
+    trailers: HeaderMap,
+    after: std::time::Duration,
+}
+
+/// How a reflection request to `path` is refused when the caller asks with
+/// `x-fixture-deny-reflection`: `PERMISSION_DENIED`. With the value
+/// `echo-authorization`, the server serves only v1alpha: v1 answers
+/// `UNIMPLEMENTED` after 1.1 s, so the v1alpha request that follows is sent
+/// (and a JWT for it minted) at a later second than the call was prepared,
+/// and v1alpha's refusal echoes the request's `Authorization` (in
+/// `grpc-message` and an `x-fixture-echo` trailer), as a server that reports
+/// the credential it refused would.
+fn reflection_denial(path: &str, h: &HeaderMap) -> Option<Denial> {
+    let deny = h.get("x-fixture-deny-reflection")?;
+    let now = std::time::Duration::ZERO;
+    if deny.as_bytes() != b"echo-authorization" {
+        return Some(Denial { trailers: trailers(7, "reflection is disabled for this caller"), after: now });
+    }
+    if path.starts_with("/grpc.reflection.v1.") {
+        return Some(Denial { trailers: trailers(12, "unknown service"), after: std::time::Duration::from_millis(1_100) });
+    }
+    let auth = h.get("authorization").map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
+    let mut t = trailers(7, &format!("reflection is disabled for this caller: {auth}"));
+    if let Some(v) = h.get("authorization") {
+        t.insert("x-fixture-echo", v.clone());
+    }
+    Some(Denial { trailers: t, after: now })
+}
+
 type Tx = futures::channel::mpsc::Sender<Result<Frame<Bytes>, std::io::Error>>;
 
 /// Where request bytes come from: a hyper body (HTTP/1.1, HTTP/2) or an
@@ -192,7 +226,7 @@ impl FrameReader {
 
 pub async fn handle(req: Request<Incoming>, log: GroundTruthLog) -> Response<FxBody> {
     let path = req.uri().path().to_string();
-    let deny_reflection = req.headers().contains_key("x-fixture-deny-reflection");
+    let deny_reflection = reflection_denial(&path, req.headers());
     let set_cookie = req.headers().get("x-fixture-set-cookie").cloned();
     let (tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
     let body: FxBody = BodyExt::boxed(StreamBody::new(rx));
@@ -216,7 +250,7 @@ pub type H3Stream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes
 /// any status.
 pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTruthLog) {
     let path = req.uri().path().to_string();
-    let deny_reflection = req.headers().contains_key("x-fixture-deny-reflection");
+    let deny_reflection = reflection_denial(&path, req.headers());
     let set_cookie = req.headers().get("x-fixture-set-cookie").cloned();
     let (mut send, mut recv) = stream.split();
     let (dtx, drx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(16);
@@ -289,7 +323,7 @@ pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTrut
     let _ = send.finish().await;
 }
 
-async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruthLog, deny_reflection: bool) {
+async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruthLog, deny_reflection: Option<Denial>) {
     let send = |m: Bytes| Ok(Frame::data(m));
     match path.as_str() {
         "/anvil.lab.v1.Echo/Unary" => {
@@ -359,8 +393,9 @@ async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruth
             let _ = tx.send(Ok(Frame::trailers(trailers(0, "")))).await;
         }
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" | "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo" => {
-            if deny_reflection {
-                let _ = tx.send(Ok(Frame::trailers(trailers(7, "reflection is disabled for this caller")))).await;
+            if let Some(d) = deny_reflection {
+                tokio::time::sleep(d.after).await;
+                let _ = tx.send(Ok(Frame::trailers(d.trailers))).await;
                 return;
             }
             while let Some(Ok(m)) = reader.next().await {

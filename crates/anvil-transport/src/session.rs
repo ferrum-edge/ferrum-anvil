@@ -243,6 +243,9 @@ pub struct ReflectionOutcome {
     pub succeeded: bool,
     /// Why no usable schema was obtained, when it was not.
     pub problem: Option<String>,
+    /// A reflection request could not be signed (auth preparation failed), so
+    /// it was not sent: the server did not refuse reflection.
+    pub auth_failed: bool,
 }
 
 /// How a gRPC-Web response body was framed (set once response headers arrived).

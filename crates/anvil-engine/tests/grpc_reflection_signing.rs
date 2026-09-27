@@ -7,12 +7,14 @@
 //! came with it), the HMAC `Content-Digest` is checked against the bytes
 //! that arrived and the signature against what was received, over h2c and
 //! HTTP/3, for the call and for every reflection request. The record's
-//! prepared request is the one signed and sent.
+//! prepared request is the one signed and sent, and a token minted for a
+//! reflection request is redacted in the record wherever the server echoes
+//! it.
 
 use anvil_auth::digest::{self, DigestAlg};
 use anvil_auth::hmac_sig;
 use anvil_domain::Id;
-use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile};
+use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile, JwtAlgorithm, JwtClaims};
 use anvil_domain::request::*;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides};
@@ -29,6 +31,7 @@ const USERNAME: &str = "reflection-client";
 const SECRET: &str = "audit-only-reflection-hmac-6t1p";
 const PATH: &str = "/anvil.lab.v1.Echo/Unary";
 const REFLECTION_PATH: &str = "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
+const REFLECTION_V1ALPHA_PATH: &str = "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo";
 
 fn init() {
     anvil_transport::init();
@@ -94,6 +97,18 @@ fn dpop() -> AuthConfig {
             dpop_scheme: true,
             handle_nonce_challenge: true,
         },
+    }
+}
+
+/// A JWT minted for each request it signs (`iat` is the second it is signed).
+fn jwt() -> AuthConfig {
+    AuthConfig::Jwt {
+        algorithm: JwtAlgorithm::HS256,
+        signing_key: SensitiveValue::template("audit-only-reflection-jwt-key-8q2w"),
+        claims: JwtClaims { sub: Some(USERNAME.into()), ..Default::default() },
+        kid: None,
+        header_name: "Authorization".into(),
+        prefix: "Bearer".into(),
     }
 }
 
@@ -170,6 +185,17 @@ fn requests(log: &GroundTruthLog, path: &str) -> Vec<Received> {
         out.push(Received { method: method.clone(), target: target.clone(), headers: headers.clone(), authority, body });
     }
     out
+}
+
+/// The `Authorization` each request to `path` arrived with, in order.
+fn authorizations(log: &GroundTruthLog, path: &str) -> Vec<String> {
+    log.entries()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            GroundTruth::RequestReceived { path: p, headers, .. } if p == path => header(&headers, "authorization").map(str::to_string),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What the fixture received for the call.
@@ -291,4 +317,32 @@ async fn each_reflection_request_carries_a_dpop_proof_of_its_own_bound_to_its_pa
         assert!(!jtis.contains(&claims["jti"]), "reflection request {i}: the proof {} was sent before", claims["jti"]);
         jtis.push(claims["jti"].clone());
     }
+}
+
+#[tokio::test]
+async fn a_token_minted_for_a_reflection_request_and_echoed_in_its_refusal_is_redacted_in_the_record() {
+    init();
+    let e = Engine::new();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut c = reflected_with(&format!("grpc://{}", f.addr), HttpVersionPolicy::Auto, jwt());
+    // v1 answers UNIMPLEMENTED after 1.1 s, so the v1alpha request is signed
+    // at a later second than the call, with a token of its own; v1alpha
+    // refuses reflection and echoes the Authorization it received.
+    c.spec.grpc.as_mut().unwrap().metadata = vec![KeyValue::new("x-fixture-deny-reflection", "echo-authorization")];
+    let o = e.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+
+    let (v1, v1alpha) = (authorizations(&f.log, REFLECTION_PATH), authorizations(&f.log, REFLECTION_V1ALPHA_PATH));
+    assert_eq!((v1.len(), v1alpha.len()), (1, 1), "one request per reflection version: {v1:?} {v1alpha:?}");
+    assert_ne!(v1[0], v1alpha[0], "the v1alpha request was not signed with a token of its own");
+    let token = v1alpha[0].strip_prefix("Bearer ").expect("the reflection request carried no bearer token");
+    let signature = token.rsplit('.').next().expect("the token is not a JWT");
+
+    // The record (what history stores) keeps the refusal, echo included:
+    // grpc-message, the trailer, the note and the finding.
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(record.contains("grpc.reflection_unavailable"), "{record}");
+    assert!(record.contains("reflection is disabled for this caller: Bearer "), "the echoed refusal is not in the record: {record}");
+    assert!(record.contains("x-fixture-echo"), "the echo trailer is not in the record: {record}");
+    assert!(!record.contains(token) && !record.contains(signature), "the record holds the token minted for the reflection request");
+    assert!(!record.contains("audit-only-reflection-jwt-key-8q2w"), "the record holds the JWT signing key");
 }
