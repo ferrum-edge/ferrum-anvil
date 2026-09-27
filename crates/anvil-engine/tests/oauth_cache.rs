@@ -33,6 +33,9 @@ use zeroize::Zeroizing;
 #[derive(Default)]
 struct Fixture {
     token_requests: AtomicU64,
+    /// Token answers written, each counted once its client closed the
+    /// connection: the client is then done with it.
+    token_answers: AtomicU64,
     token_forms: Mutex<Vec<String>>,
     api_authorization: Mutex<Vec<String>>,
     /// Hold every token answer until `release` is notified.
@@ -113,6 +116,10 @@ async fn serve(mut sock: TcpStream, fx: Arc<Fixture>) {
     let response = format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
     let _ = sock.write_all(response.as_bytes()).await;
     let _ = sock.shutdown().await;
+    if path == "/token" {
+        while matches!(sock.read(&mut chunk).await, Ok(n) if n > 0) {}
+        fx.token_answers.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn oauth(addr: SocketAddr, grant: OAuthGrant, audience: &str) -> OAuth2Config {
@@ -447,7 +454,13 @@ async fn a_workspace_delete_aborts_a_detached_refresh() {
     engine.clear_isolation("workspace-under-test");
     fx.hold.store(false, Ordering::SeqCst);
     fx.release.notify_one();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fx.token_answers.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the issuer answered the refresh and its client closed the connection");
 
     let key = interactive_oauth(&c).unwrap().cache_key().clone();
     assert!(engine.tokens.get(&key).is_none(), "the refresh stored its token after the workspace delete");

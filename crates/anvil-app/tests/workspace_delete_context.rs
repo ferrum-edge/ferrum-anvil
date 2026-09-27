@@ -108,11 +108,31 @@ fn allow_workspace_deletes(app: &App) {
     db.execute_batch("DROP TRIGGER IF EXISTS injected_failure;").unwrap();
 }
 
+/// Make the commit of a transaction that deleted workspace `ws`'s row fail:
+/// a deferred foreign key holds the row, and is checked only at COMMIT, so
+/// the failure comes after everything `App::delete_workspace` runs inside
+/// its transaction, the row delete included.
+fn fail_workspace_delete_commits(app: &App, ws: &Id) {
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    let hold = "CREATE TABLE injected_hold (kind TEXT NOT NULL, id TEXT NOT NULL, \
+                FOREIGN KEY (kind, id) REFERENCES objects (kind, id) DEFERRABLE INITIALLY DEFERRED);";
+    db.execute_batch(hold).unwrap();
+    db.execute("INSERT INTO injected_hold (kind, id) VALUES ('workspace', ?1)", [ws.to_string()]).unwrap();
+}
+
+fn allow_workspace_delete_commits(app: &App) {
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    db.execute_batch("DROP TABLE IF EXISTS injected_hold;").unwrap();
+}
+
 /// `App::delete_workspace` clears the engine after the storage delete is
 /// committed, never before: the epoch fence of a context built during the
 /// delete depends on it. A delete whose storage write fails keeps the
 /// workspace's engine state (here its cookie jar); clearing the engine first
-/// would already have dropped it.
+/// would already have dropped it. It fails once before the workspace row is
+/// deleted and once at the commit, after everything the transaction does:
+/// a clear moved into the transaction, even after the row delete, would
+/// also have dropped it.
 #[tokio::test]
 async fn the_engine_is_cleared_only_after_the_storage_delete_is_committed() {
     anvil_fixtures::init();
@@ -133,8 +153,14 @@ async fn the_engine_is_cleared_only_after_the_storage_delete_is_committed() {
     assert!(app.delete_workspace(&ws).is_err(), "the injected failure fails the storage delete");
     assert!(app.workspace(&ws).is_ok(), "the failed delete removed nothing");
     assert!(app.engine.has_cookie_jar(&isolation), "the engine was cleared before the storage delete was committed");
-
     allow_workspace_deletes(&app);
+
+    fail_workspace_delete_commits(&app, &ws);
+    assert!(app.delete_workspace(&ws).is_err(), "the held row fails the commit");
+    assert!(app.workspace(&ws).is_ok(), "the failed commit removed nothing");
+    assert!(app.engine.has_cookie_jar(&isolation), "the engine was cleared inside the storage delete's transaction");
+    allow_workspace_delete_commits(&app);
+
     app.delete_workspace(&ws).unwrap();
     assert!(app.workspace(&ws).is_err());
     assert!(!app.engine.has_cookie_jar(&isolation), "the committed delete cleared the engine");
