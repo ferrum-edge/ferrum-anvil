@@ -15,9 +15,10 @@
   in the same transaction, and never looks at the old path. Other requests
   naming the old path stay unbound. The editor then reloads the saved
   request. The new path is saved in the request, so a later export carries
-  it; the export preview warns that linked local files are named. Datasets
-  can be relocated through the same backend call, but the load plan editor
-  does not offer it yet.
+  it; the export preview warns that linked local files are named. A load
+  plan's linked-file dataset offers the same **Choose new location…**: the
+  backend rewrites that dataset only, and the load view then reloads its
+  datasets.
 - Desktop: an imported collection's root folder has a **Workspace scope** tab
   in its folder settings. It shows whether the collection is isolated from
   its workspace (the default) or opened to it on this device, and which
