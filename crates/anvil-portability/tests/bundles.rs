@@ -409,6 +409,58 @@ fn imports_never_open_an_import_root_and_list_every_linked_file() {
 }
 
 #[test]
+fn export_previews_list_the_linked_file_paths_they_carry() {
+    let mut g = sample();
+    // Nothing linked: no paths, no warning.
+    let preview = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    assert!(preview.linked_files.is_empty());
+    assert!(!preview.manifest.device_bindings.iter().any(|d| d.contains("linked local files")), "{:?}", preview.manifest.device_bindings);
+
+    let ws = g.workspaces[0].meta.id;
+    let linked = |path: &str| AttachmentRef::LinkedFile { path: path.into() };
+    let part = |path: &str| MultipartPart {
+        name: "file".into(),
+        enabled: true,
+        content: MultipartContent::File { attachment: linked(path), file_name: None },
+        content_type: None,
+    };
+    // The same path twice in one request is listed once for it.
+    let parts = vec![part("/Users/alice/Desktop/a.bin"), part("/Users/alice/Desktop/b.bin"), part("/Users/alice/Desktop/a.bin")];
+    g.requests[0].spec.body = Body::Multipart { parts };
+    g.requests[1].spec.body = Body::Binary { attachment: linked("/Users/alice/Desktop/a.bin"), content_type: None };
+    g.datasets.push(Dataset {
+        meta: Meta::new(),
+        workspace_id: ws,
+        name: "rows".into(),
+        format: DatasetFormat::Csv,
+        attachment: linked("/Users/alice/data/rows.csv"),
+        sensitive_columns: vec![],
+    });
+    let expected = vec![
+        format!("request '{}': /Users/alice/Desktop/a.bin", g.requests[0].name),
+        format!("request '{}': /Users/alice/Desktop/b.bin", g.requests[0].name),
+        format!("request '{}': /Users/alice/Desktop/a.bin", g.requests[1].name),
+        "dataset 'rows': /Users/alice/data/rows.csv".to_string(),
+    ];
+    // Every mode carries the paths, so every preview lists them, beside the
+    // warning that they need choosing again on the target machine.
+    for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
+        let preview = bundle::preview(&g, &opts(mode, pass)).unwrap();
+        assert_eq!(preview.linked_files, expected, "{mode:?}");
+        let warned = &preview.manifest.device_bindings;
+        assert!(warned.iter().any(|d| d.contains("linked local files")), "{warned:?}");
+        let (bytes, written) = bundle::write(&g, &opts(mode, pass)).unwrap();
+        assert_eq!(written.linked_files, expected, "{mode:?}");
+        // The listing is for the user exporting; the bundle's manifest does
+        // not repeat the paths.
+        let opened = bundle::open(&bytes, pass).unwrap();
+        let manifest = serde_json::to_string(&opened.manifest).unwrap();
+        assert!(!manifest.contains("/Users/alice"), "{manifest}");
+        assert_eq!(opened.graph.linked_files(), expected);
+    }
+}
+
+#[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();
     let existing = Existing { objects: g.requests.iter().map(|r| r.meta.id).collect(), ..Default::default() };

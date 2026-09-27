@@ -364,16 +364,27 @@ impl App {
         self.store.get(kind::REVISION, id)?.ok_or_else(|| AppError::NotFound("revision".into()))
     }
 
+    /// Move a request to `folder` of its own workspace at `sort_key`. Only
+    /// the placement changes: the request is read and written back in one
+    /// write transaction, so a save or a linked-file relocation of it that
+    /// lands meanwhile is kept, never replaced by an older copy.
     pub fn move_request(&self, id: &Id, folder: Option<Id>, sort_key: f64) -> Result<RequestDefinition> {
-        let mut r = self.request(id)?;
-        if let Some(f) = folder
-            && self.folder(&f)?.workspace_id != r.workspace_id
-        {
-            return Err(AppError::Invalid("cannot move a request to another workspace".into()));
-        }
-        r.folder_id = folder;
-        r.sort_key = sort_key;
-        self.save_request(r)
+        self.store.atomically(|s| {
+            let Some(mut r) = s.get::<RequestDefinition>(kind::REQUEST, id)? else {
+                return Ok(Err(AppError::NotFound("request".into())));
+            };
+            if let Some(f) = folder {
+                let Some(f) = s.get::<Folder>(kind::FOLDER, &f)? else { return Ok(Err(AppError::NotFound("folder".into()))) };
+                if f.workspace_id != r.workspace_id {
+                    return Ok(Err(AppError::Invalid("cannot move a request to another workspace".into())));
+                }
+            }
+            r.folder_id = folder;
+            r.sort_key = sort_key;
+            r.meta.updated_at = chrono::Utc::now();
+            s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
+            Ok(Ok(r))
+        })?
     }
 
     /// Save a copy of a request. The copy names the stored files the request

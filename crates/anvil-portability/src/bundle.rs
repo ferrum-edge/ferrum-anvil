@@ -154,6 +154,12 @@ pub struct ExportPreview {
     pub manifest: Manifest,
     pub secrets_included: usize,
     pub literals_moved: usize,
+    /// Every linked local file the exported requests and datasets name, as
+    /// `request 'Upload': /path/to/file` ([`PortableGraph::linked_files`]).
+    /// The bundle carries these paths of this machine (user names, folder
+    /// layout), so the preview lists them rather than only warning that
+    /// there are some. Not written into the bundle's manifest.
+    pub linked_files: Vec<String>,
 }
 
 fn sha256(b: &[u8]) -> String {
@@ -270,7 +276,12 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
 
 pub fn preview(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<ExportPreview, BundleError> {
     let (manifest, _, vault) = prepare(graph, opts)?;
-    Ok(ExportPreview { manifest, secrets_included: vault.secrets.len(), literals_moved: vault.literals.len() })
+    Ok(ExportPreview {
+        manifest,
+        secrets_included: vault.secrets.len(),
+        literals_moved: vault.literals.len(),
+        linked_files: graph.linked_files(),
+    })
 }
 
 /// Write a bundle to bytes.
@@ -329,7 +340,12 @@ pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>
     zw.start_file(CHECKSUMS_ENTRY, opt)?;
     zw.write_all(&serde_json::to_vec_pretty(&checksums)?)?;
     let bytes = zw.finish()?.into_inner();
-    let preview = ExportPreview { manifest, secrets_included: vault.secrets.len(), literals_moved: vault.literals.len() };
+    let preview = ExportPreview {
+        manifest,
+        secrets_included: vault.secrets.len(),
+        literals_moved: vault.literals.len(),
+        linked_files: graph.linked_files(),
+    };
     Ok((bytes, preview))
 }
 
