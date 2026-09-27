@@ -190,7 +190,12 @@ pub(crate) fn host_problem(v: &str) -> Option<String> {
                 None => return Some("only a port may follow the IPv6 address".into()),
             }
         }
-        None if v.matches(':').count() > 1 => return Some("an IPv6 address must be in brackets ([...])".into()),
+        None if v.matches(':').count() > 1 => {
+            return Some(match v.parse::<std::net::Ipv6Addr>() {
+                Ok(_) => "an IPv6 address must be in brackets ([...])".into(),
+                Err(_) => "it has more than one ':' (a single ':' separates the host from the port)".into(),
+            });
+        }
         None => match v.split_once(':') {
             Some((host, port)) => (Some(host), Some(port)),
             None => (Some(v), None),
@@ -607,6 +612,8 @@ mod tests {
             ("a.test extra", "whitespace"),
             ("a.test\t", "whitespace"),
             ("2001:db8::1", "brackets"),
+            ("a.test:80:90", "more than one ':'"),
+            ("a.test::80", "more than one ':'"),
             ("[2001:db8::1", "closing"),
             ("[a.test]", "not an IPv6 address"),
             ("[::1]x", "only a port"),

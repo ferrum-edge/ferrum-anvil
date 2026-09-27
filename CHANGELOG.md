@@ -501,8 +501,10 @@
   brackets). A value with userinfo, a path, a query, a fragment or
   whitespace, or an IPv6 address without brackets, is refused before
   anything is sent, for HTTP/1.1, HTTP/2 and HTTP/3 requests, WebSocket,
-  SSE and gRPC, and so is such a `Host` set by an auth profile. The message
-  names the reason, never the value. Before, a `Host` such as
+  SSE and gRPC, and so is such a `Host` set by an auth profile. An empty
+  `Host` is refused too; before, it was sent empty (leave the header out to
+  send the URL's host and port). The message names the reason, never the
+  value. Before, a `Host` such as
   `a.test/admin` changed the path an HTTP/2 or HTTP/3 request was sent
   with, while the signature covered the original path.
 - A gRPC URL with a query, or a gRPC request with query parameters, is now
