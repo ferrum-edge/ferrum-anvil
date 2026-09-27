@@ -97,6 +97,15 @@
 
 ### Fixed
 
+- Work still in flight when a profile locks no longer refills what the lock
+  cleared. A SPIFFE Workload API call in progress now ends with the send or
+  session it belongs to, and an answer that arrives after the lock anyway
+  (an X.509-SVID, a JWT-SVID or JWT bundles) is never cached; before, a
+  JWT-SVID fetched across a lock could stay in memory after it. Likewise,
+  cookies of a response that arrives after the lock are not stored, a
+  connection in use at the lock is closed instead of being pooled again
+  (HTTP/1.1, HTTP/2 and HTTP/3), and a TLS or QUIC connection whose attempt
+  began before the lock keeps none of the session tickets it receives.
 - A load run now hands its worker every vault secret the plan's requests
   resolve: the datagram PROXY-protocol authentication secret of a UDP
   request, and the client identity of the selected proxy's own TLS profile

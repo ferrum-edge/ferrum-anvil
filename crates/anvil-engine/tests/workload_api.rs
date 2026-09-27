@@ -16,11 +16,13 @@ use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::{ClientIdentity, ServerSpiffeIdentity, TlsProfile};
 use anvil_domain::workload::*;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
+use anvil_fixtures::gate::{self, Gate};
 use anvil_fixtures::http as fx;
 use anvil_fixtures::workload_api::{self as wl, Mode};
 use anvil_fixtures::{ClientAuth, GroundTruth, TlsServerOptions};
 use anvil_transport::recorder::EventCtx;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -478,4 +480,98 @@ async fn the_effective_request_preview_makes_no_workload_api_call() {
     assert!(p.auth.starts_with("jwt_svid"));
     assert!(p.inferred.iter().any(|n| n.contains("fetched from the SPIFFE Workload API")), "{:?}", p.inferred);
     assert!(w.log.entries().is_empty(), "the preview never dials the Workload API");
+}
+
+// ------------------------------------------------------------ lock fence ---
+
+/// Wait until the gate holds its connection: the Workload API call is in flight.
+async fn in_flight(gate: &Gate) {
+    tokio::time::timeout(Duration::from_secs(10), gate.held()).await.expect("the Workload API call never started");
+}
+
+/// Run `c` on a task of its own with `cancel`.
+fn spawn(e: &Arc<Engine>, c: &ExecutionContext, cancel: &CancellationToken) -> tokio::task::JoinHandle<ExecutionOutput> {
+    let (e, c, cancel) = (e.clone(), c.clone(), cancel.clone());
+    tokio::spawn(async move { e.execute(&c, EventCtx::none(), cancel).await })
+}
+
+fn as_sse(mut c: ExecutionContext) -> ExecutionContext {
+    c.spec.protocol = Protocol::Sse;
+    c.spec.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 3_000, last_event_id: None, reconnect: false });
+    c
+}
+
+/// The desktop lock: the engine's caches are cleared, then registered work
+/// is canceled. The Workload API answer to the call that was in flight then
+/// arrives; it must not be cached, and the canceled request is not sent.
+#[tokio::test]
+async fn a_workload_api_answer_that_arrives_after_a_lock_is_not_cached() {
+    init();
+    let w = wl::serve(&sock("lock")).await.unwrap();
+    let upstream = w.path.clone().unwrap();
+    let api = fx::serve("127.0.0.1:0", None).await.unwrap();
+    for protocol in [Protocol::Http, Protocol::Sse] {
+        let gate = gate::unix(&sock("lock-gate"), &upstream, 0).await.unwrap();
+        let e = Arc::new(Engine::new());
+        let c = match protocol {
+            Protocol::Sse => as_sse(with_jwt(&api.url("/sse?count=1"), jwt_auth(JwtSvidSource::WorkloadApi, &gate.uri(), &[GW_AUD]))),
+            _ => with_jwt(&api.url("/echo"), jwt_auth(JwtSvidSource::WorkloadApi, &gate.uri(), &[GW_AUD])),
+        };
+        let sent = api.log.count_requests();
+        let cancel = CancellationToken::new();
+        let task = spawn(&e, &c, &cancel);
+        in_flight(&gate).await;
+        e.clear_sensitive_state();
+        cancel.cancel();
+        assert!(e.workload.is_empty());
+        gate.release();
+        let o = task.await.unwrap();
+        assert_eq!(failure(&o), Some(FailureKind::Canceled), "{protocol:?}: {:?}", codes(&o));
+        assert_eq!(e.workload.len(), (0, 0, 0), "{protocol:?}: the answer that arrived after the lock was cached");
+        assert_eq!(api.log.count_requests(), sent, "{protocol:?}: the canceled request was sent");
+
+        // After unlock, a fresh execution fetches and caches again.
+        let o = run(&e, &c).await;
+        assert!(o.record.response.is_some(), "{protocol:?}: {:?} {:?}", failure(&o), codes(&o));
+        assert!(!evidence(&o).calls[0].cached);
+        assert_eq!(e.workload.len(), (0, 1, 0), "{protocol:?}");
+        assert!(authorization_seen(&api).is_some_and(|a| a.starts_with("Bearer ")));
+    }
+}
+
+/// Without a cancellation (an engine user that only clears), each of the
+/// three caches is still fenced: whichever Workload API answer lands after
+/// the clear, nothing the execution fetched is cached, and the execution
+/// itself completes with what it fetched.
+#[tokio::test]
+async fn every_workload_api_cache_is_fenced_against_answers_that_land_after_a_clear() {
+    init();
+    let w = wl::serve(&sock("fence")).await.unwrap();
+    let upstream = w.path.clone().unwrap();
+    let api = mtls_server(&w).await;
+    // The request fetches, one connection each and in this order: its
+    // X.509-SVID, its JWT-SVID and the JWT bundles that verify it.
+    for (held, rpc) in [(0, "FetchX509SVID"), (1, "FetchJWTSVID"), (2, "FetchJWTBundles")] {
+        let gate = gate::unix(&sock("fence-gate"), &upstream, held).await.unwrap();
+        let e = Arc::new(Engine::new());
+        let mut cfg = jwt_auth(JwtSvidSource::WorkloadApi, &gate.uri(), &[GW_AUD]);
+        cfg.verify_with_bundles = true;
+        let mut c = with_tls(&api.url("/echo"), workload_tls(&gate.uri(), true, vec![]));
+        c.auth_layers = vec![("request".into(), AuthConfig::JwtSvid { config: cfg })];
+        let calls = workload_calls(&w, rpc);
+        let task = spawn(&e, &c, &CancellationToken::new());
+        in_flight(&gate).await;
+        e.clear_sensitive_state();
+        gate.release();
+        let o = task.await.unwrap();
+        assert_eq!(o.record.response.as_ref().map(|r| r.status), Some(200), "{rpc}: {:?} {:?}", failure(&o), codes(&o));
+        assert_eq!(workload_calls(&w, rpc), calls + 1, "{rpc} was answered after the clear");
+        assert_eq!(e.workload.len(), (0, 0, 0), "{rpc}: an answer of the step that spanned the clear was cached");
+
+        // After unlock, a fresh execution caches all three.
+        let o = run(&e, &c).await;
+        assert_eq!(o.record.response.as_ref().map(|r| r.status), Some(200), "{rpc}: {:?} {:?}", failure(&o), codes(&o));
+        assert!(evidence(&o).calls.iter().all(|c| !c.cached), "{rpc}");
+        assert_eq!(e.workload.len(), (1, 1, 1), "{rpc}");
+    }
 }

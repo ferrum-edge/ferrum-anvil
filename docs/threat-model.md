@@ -103,7 +103,8 @@ against it).
   holder resume a session. They are kept in memory only, per workspace,
   transport, host and port, TLS profile and client identity, never persisted
   or exported, and dropped with pooled connections and OAuth tokens when the
-  vault locks.
+  vault locks. A connection whose attempt began before the lock keeps none
+  of the tickets it receives afterwards.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -240,7 +241,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   scope is the workspace boundary: it does not separate items inside one
   workspace, so anything imported into a workspace can use its secrets.
 - **Lock bypass:** the backend refuses privileged commands while locked; the
-  key is dropped; sessions, executions and load runs are stopped.
+  key is dropped; sessions, executions and load runs are stopped. Work still
+  in flight at the lock cannot refill what it cleared: a Workload API answer,
+  an OAuth token, a response's cookies or a connection in use when the lock
+  happened is not cached, stored or pooled again.
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).

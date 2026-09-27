@@ -34,6 +34,7 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 
 pub use context::ExecutionContext;
@@ -69,7 +70,16 @@ pub struct Engine {
     pub workload: Arc<workload::WorkloadCache>,
     tls: Mutex<HashMap<String, Arc<PreparedTls>>>,
     cookies: Mutex<HashMap<String, cookie_store::CookieStore>>,
+    /// Advanced by [`Engine::clear_sensitive_state`] before it clears
+    /// anything (see [`SensitiveEpoch`]).
+    epoch: AtomicU64,
 }
+
+/// The engine's sensitive-state epoch when an execution started. A lock
+/// ([`Engine::clear_sensitive_state`]) starts a new epoch, and what an
+/// execution of an earlier epoch receives afterwards (cookies) is not kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SensitiveEpoch(u64);
 
 impl Default for Engine {
     fn default() -> Self {
@@ -88,7 +98,13 @@ impl Engine {
             workload: Arc::new(workload::WorkloadCache::default()),
             tls: Mutex::new(HashMap::new()),
             cookies: Mutex::new(HashMap::new()),
+            epoch: AtomicU64::new(0),
         }
+    }
+
+    /// The current sensitive-state epoch, taken when an execution starts.
+    pub fn sensitive_epoch(&self) -> SensitiveEpoch {
+        SensitiveEpoch(self.epoch.load(Ordering::SeqCst))
     }
 
     /// Execute a request of any supported protocol.
@@ -129,9 +145,16 @@ impl Engine {
         if pairs.is_empty() { None } else { Some(pairs.join("; ")) }
     }
 
-    pub fn store_cookies(&self, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
+    /// Keep the response's cookies in the workspace jar, unless the jar was
+    /// cleared since `epoch` (a lock while the request was in flight).
+    pub fn store_cookies(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
         let Ok(url) = url::Url::parse(&t.url()) else { return };
         let mut jars = self.cookies.lock();
+        // Checked under the jar's lock: a clear either advanced the epoch
+        // before this point or empties the jar after it.
+        if self.epoch.load(Ordering::SeqCst) != epoch.0 {
+            return;
+        }
         let jar = jars.entry(isolation.to_string()).or_default();
         for v in r.header_values("set-cookie") {
             let _ = jar.parse(v, &url);
@@ -143,6 +166,11 @@ impl Engine {
     /// session tickets, tokens, Workload API SVIDs, cookies and prepared
     /// client identities.
     pub fn clear_sensitive_state(&self) {
+        // First: from here on, a cookie store checked against an earlier
+        // epoch is refused. The Workload API cache, the HTTP and HTTP/3
+        // connection pools and the ticket caches fence what is in flight the
+        // same way when they are cleared below.
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         self.http.pool.clear();
         self.http.tickets.clear();
         self.h3.clear();

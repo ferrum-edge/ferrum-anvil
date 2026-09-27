@@ -1391,7 +1391,8 @@ async fn run_prepared(
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
     let started_at = Utc::now();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
-    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver).await;
+    // Canceling the execution abandons a Workload API call in flight.
+    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
     let materialized = match materialized {
         Ok(m) => m,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, Some(workload)),
@@ -1507,7 +1508,7 @@ impl Engine {
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let cancel = CancellationToken::new();
         let fallback = Box::new(ctx.clone());
-        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver).await;
+        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver, &cancel).await;
         let (ctx, prepared, workload) = match materialized {
             Ok(m) => {
                 let ctx = m.unwrap_or(ctx);

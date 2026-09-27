@@ -542,9 +542,12 @@ impl AttemptTarget {
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
     let started_at = Utc::now();
+    // Cookies that arrive after a lock (a new epoch) are not kept.
+    let epoch = engine.sensitive_epoch();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
-    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver).await;
+    // Canceling the execution abandons a Workload API call in flight.
+    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
     let materialized = match materialized {
         Ok(m) => m,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, Some(workload)),
@@ -735,7 +738,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         if prep.settings.cookies
             && let Some(r) = &out.response
         {
-            engine.store_cookies(&ctx.isolation, &current.target, r);
+            engine.store_cookies(epoch, &ctx.isolation, &current.target, r);
         }
 
         // ---- redirects ----

@@ -16,7 +16,9 @@
 //! identity, SNI override, minimum version and the client certificate chain)
 //! and ALPN list. Tickets live in memory only: they are never persisted,
 //! exported or shared, and [`TicketCache::clear`] drops them with the vault
-//! lock, as pooled connections and OAuth tokens are dropped.
+//! lock, as pooled connections and OAuth tokens are dropped. A connection
+//! whose attempt began before that clear resumes nothing and keeps none of
+//! the tickets it receives.
 
 use crate::tls::{self, ObservationHandle, ObservingClientCert, ObservingVerifier, PreparedTls, SlotCell, SlotHandle};
 use anvil_domain::execution::TransportFailure;
@@ -26,7 +28,7 @@ use rustls::{ClientConfig, NamedGroup};
 use rustls_pki_types::ServerName;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Tickets kept per context (rustls' own in-memory cache keeps 8 per server).
 const MAX_TICKETS: usize = 8;
@@ -44,6 +46,9 @@ pub enum TicketTransport {
 #[derive(Default)]
 pub struct TicketCache {
     contexts: Mutex<HashMap<String, Arc<ResumptionContext>>>,
+    /// Advanced by [`TicketCache::clear`] while it holds the `contexts`
+    /// lock, and compared under that lock.
+    generation: AtomicU64,
 }
 
 impl TicketCache {
@@ -51,9 +56,19 @@ impl TicketCache {
         Self::default()
     }
 
-    /// Forget every ticket (vault lock, reset).
+    /// Forget every ticket (vault lock, reset). A connection already under
+    /// way keeps its context, which is no longer reachable: the tickets it
+    /// receives are dropped with it.
     pub fn clear(&self) {
-        self.contexts.lock().clear();
+        let mut map = self.contexts.lock();
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        map.clear();
+    }
+
+    /// The current generation, taken when an attempt begins and handed to
+    /// [`context`](Self::context).
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// Forget the tickets of one workspace isolation.
@@ -72,9 +87,14 @@ impl TicketCache {
         self.contexts.lock().len()
     }
 
-    /// The context for one isolation key, created on first use.
+    /// The context for one isolation key, created on first use. For an
+    /// attempt that began before a [`clear`](Self::clear) (its `generation`
+    /// is no longer current) a fresh context that the cache does not hold:
+    /// nothing is resumed, and the tickets it receives are not kept.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn context(
         &self,
+        generation: u64,
         isolation: &str,
         transport: TicketTransport,
         host: &str,
@@ -94,6 +114,9 @@ impl TicketCache {
             alpn.join(",")
         );
         let mut map = self.contexts.lock();
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Arc::new(ResumptionContext::new(prepared));
+        }
         if let Some(c) = map.get(&key) {
             return c.clone();
         }
@@ -260,15 +283,15 @@ mod tests {
             ..Default::default()
         })
         .expect("profile");
-        let a = cache.context("ws-a", TicketTransport::Quic, "Example.test", 443, &p, &["h3"]);
-        assert!(Arc::ptr_eq(&a, &cache.context("ws-a", TicketTransport::Quic, "example.test", 443, &p, &["h3"])));
+        let a = cache.context(0, "ws-a", TicketTransport::Quic, "Example.test", 443, &p, &["h3"]);
+        assert!(Arc::ptr_eq(&a, &cache.context(0, "ws-a", TicketTransport::Quic, "example.test", 443, &p, &["h3"])));
         for b in [
-            cache.context("ws-b", TicketTransport::Quic, "example.test", 443, &p, &["h3"]),
-            cache.context("ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h3"]),
-            cache.context("ws-a", TicketTransport::Quic, "example.test", 8443, &p, &["h3"]),
-            cache.context("ws-a", TicketTransport::Quic, "other.test", 443, &p, &["h3"]),
-            cache.context("ws-a", TicketTransport::Quic, "example.test", 443, &other_profile, &["h3"]),
-            cache.context("ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]),
+            cache.context(0, "ws-b", TicketTransport::Quic, "example.test", 443, &p, &["h3"]),
+            cache.context(0, "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h3"]),
+            cache.context(0, "ws-a", TicketTransport::Quic, "example.test", 8443, &p, &["h3"]),
+            cache.context(0, "ws-a", TicketTransport::Quic, "other.test", 443, &p, &["h3"]),
+            cache.context(0, "ws-a", TicketTransport::Quic, "example.test", 443, &other_profile, &["h3"]),
+            cache.context(0, "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]),
         ] {
             assert!(!Arc::ptr_eq(&a, &b), "a context must not be shared across isolation keys");
             assert!(!Arc::ptr_eq(&a.store, &b.store));
@@ -280,5 +303,25 @@ mod tests {
         cache.clear();
         assert_eq!(cache.contexts(), 0);
         assert_eq!(cache.tickets_held(), 0);
+    }
+
+    #[test]
+    fn an_attempt_that_began_before_a_clear_gets_a_context_the_cache_does_not_keep() {
+        let cache = TicketCache::new();
+        let p = prepared(false);
+        let before = cache.generation();
+        let held = cache.context(before, "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
+        cache.clear();
+        assert_eq!(cache.contexts(), 0);
+        // A handshake that reaches the cache after the clear (it was resolving
+        // or connecting meanwhile) neither resumes nor stores anything there.
+        let late = cache.context(before, "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
+        assert!(!Arc::ptr_eq(&held, &late));
+        assert_eq!(late.store.len(), 0);
+        assert_eq!(cache.contexts(), 0, "nothing an earlier attempt opens is held after the clear");
+        // An attempt that begins after the clear uses the cache again.
+        let now = cache.context(cache.generation(), "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
+        assert!(!Arc::ptr_eq(&late, &now));
+        assert_eq!(cache.contexts(), 1);
     }
 }
