@@ -10,6 +10,7 @@ use crate::http_exec::Prepared;
 use crate::prepare::Target;
 use crate::sessions::{self, SessionRequest};
 use crate::vars::Resolver;
+use anvil_auth::ResolvedAuth;
 use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
 use anvil_domain::request::*;
 use anvil_domain::settings::HttpVersionPolicy;
@@ -23,6 +24,8 @@ pub(crate) struct Shape {
     /// The request message (JSON) of a unary or server-streaming gRPC call,
     /// shown in place of the framed bytes sent: a secret in those bytes
     /// (or in their base64 text) would not be recognised to be redacted.
+    /// With server reflection the message is encoded, and the call signed
+    /// over it, only when the call is sent.
     pub message: Option<String>,
 }
 
@@ -178,8 +181,21 @@ fn grpc_call(
             }
         }
         grpc::Schema::Pool(_) => inferred.push("the request messages are streamed once the call is open; the body shown is empty".into()),
+        // The session signs the framed message once reflection has resolved
+        // the schema, which the preview (sending nothing) cannot do.
+        grpc::Schema::Reflection if single => {
+            message = call.messages.first().cloned();
+            let signed = if matches!(prep.auth, ResolvedAuth::None) {
+                ""
+            } else {
+                ", and auth signs the call then, over the framed message sent: a Content-Digest or signature shown here is computed over an empty body, not over the message"
+            };
+            inferred.push(format!(
+                "server reflection: the request message is shown as JSON; it is encoded, and its size known, once the schema is resolved when the call is sent{signed}"
+            ));
+        }
         grpc::Schema::Reflection => {
-            inferred.push("server reflection: the request message is encoded when the call is sent; the body shown is empty".into())
+            inferred.push("server reflection: the request messages are streamed once the call is open; the body shown is empty".into())
         }
     }
     Ok((call.request, message))

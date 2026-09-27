@@ -80,7 +80,22 @@ struct SessionPrep {
     /// Where the handshake responses' cookies are kept (WebSocket, SSE and
     /// gRPC with the cookies setting on).
     cookies: Option<SessionCookies>,
+    /// What a gRPC call whose schema comes from server reflection was signed
+    /// for and sent with, once the transport encoded its message.
+    resigned: Option<ResignedSlot>,
 }
+
+/// A gRPC call signed over the framed message it sent, once server
+/// reflection resolved its schema: the record's prepared request, in place
+/// of the one prepared (and signed over an empty body) before it was known.
+struct Resigned {
+    headers: Vec<(String, String)>,
+    body: Bytes,
+    secrets: Vec<String>,
+    facts: Vec<(String, String)>,
+}
+
+type ResignedSlot = Arc<parking_lot::Mutex<Option<Resigned>>>;
 
 /// The workspace jar a session handshake keeps its `Set-Cookie` in: the
 /// execution's isolation, the URL the handshake stands for in the jar, and
@@ -190,6 +205,7 @@ const SSE_NOT_SENT_OVER_H2_H3: &[&str] = &["host", "connection", "transfer-encod
 /// gRPC call, a MASQUE `CONNECT`), before auth and cookies. The session and
 /// the effective-request preview build it with the same code; only the
 /// session applies auth and plans the transport.
+#[derive(Clone)]
 pub(crate) struct SessionRequest {
     pub(crate) method: String,
     /// Where the request is sent. Auth signs for its HTTP counterpart
@@ -226,9 +242,39 @@ pub(crate) fn auth_refusal(applied: &anvil_auth::Applied, path_only: bool) -> Op
     None
 }
 
+/// A session request's headers and query once auth is applied.
+struct Authorized {
+    headers: Vec<(String, String)>,
+    query: String,
+    facts: Vec<(String, String)>,
+    /// The fields auth set, as it set them.
+    set: Vec<(String, String)>,
+}
+
+/// Per-send auth for `req`, refused before anything is sent when a header
+/// it produced is not valid on the wire or the session cannot carry it.
+fn sign_request(auth: &ResolvedAuth, req: &SessionRequest) -> Result<anvil_auth::Applied, TransportFailure> {
+    let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
+    let applied =
+        anvil_auth::apply(auth, &signable, Utc::now()).map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
+    http_exec::check_auth_headers(&applied)?;
+    if let Some(why) = auth_refusal(&applied, req.path_only) {
+        return Err(unsupported(why, "auth"));
+    }
+    Ok(applied)
+}
+
+/// Set each field in `set` on `headers`, replacing any of the same name.
+fn set_headers(headers: &mut Vec<(String, String)>, set: Vec<(String, String)>) {
+    for (n, v) in set {
+        headers.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
+        headers.push((n, v));
+    }
+}
+
 /// OAuth acquisition (same transport and trust as HTTP) and per-send auth.
-/// Returns the final headers and query, auth facts, and scrubs every secret
-/// used through the redactor.
+/// Returns the final headers and query and the auth facts, and scrubs every
+/// secret used through the redactor.
 async fn apply_auth(
     engine: &Engine,
     ctx: &ExecutionContext,
@@ -236,7 +282,7 @@ async fn apply_auth(
     redactor: &mut Redactor,
     req: &SessionRequest,
     cancel: &CancellationToken,
-) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), TransportFailure> {
+) -> Result<Authorized, TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
         match crate::oauth_http::acquire(engine, prep.epoch, ctx, &prep.settings, key, cfg, cancel).await {
             Ok(t) => replace_oauth(&mut prep.auth, &t),
@@ -244,29 +290,45 @@ async fn apply_auth(
         }
     }
     if matches!(prep.auth, ResolvedAuth::None) {
-        return Ok((req.headers.clone(), req.target.query.clone(), vec![]));
+        return Ok(Authorized { headers: req.headers.clone(), query: req.target.query.clone(), facts: vec![], set: vec![] });
     }
-    let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
-    let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
-        .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
-    http_exec::check_auth_headers(&applied)?;
-    if let Some(why) = auth_refusal(&applied, req.path_only) {
-        return Err(unsupported(why, "auth"));
-    }
+    let applied = sign_request(&prep.auth, req)?;
     for s in &applied.secrets {
         redactor.add_secret(s);
     }
-    let mut out = req.headers.clone();
-    for (n, v) in applied.set_headers {
-        out.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
-        out.push((n, v));
-    }
+    let mut headers = req.headers.clone();
+    set_headers(&mut headers, applied.set_headers.clone());
     let mut query = req.target.query.clone();
     for (k, v) in applied.append_query {
         let pair = format!("{}={}", prepare::encode_component(&k), prepare::encode_component(&v));
         query = if query.is_empty() { pair } else { format!("{query}&{pair}") };
     }
-    Ok((out, query, applied.facts))
+    Ok(Authorized { headers, query, facts: applied.facts, set: applied.set_headers })
+}
+
+/// Signs a unary or server-streaming gRPC call whose schema comes from
+/// server reflection once its message is encoded, over the framed message
+/// it sends (a call with a local schema is signed so when it is prepared).
+/// The fields auth sets otherwise than it set them when the call was
+/// prepared (`first`, over an empty body) replace those in `sent`, the
+/// call's prepared headers; what the call is sent with is kept in `slot`
+/// for the record.
+fn sign_after_reflection(
+    auth: ResolvedAuth,
+    request: &SessionRequest,
+    first: &[(String, String)],
+    sent: &[(String, String)],
+    slot: ResignedSlot,
+) -> grpc::SignFn {
+    let (request, first, sent) = (request.clone(), first.to_vec(), sent.to_vec());
+    Arc::new(move |body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
+        let applied = sign_request(&auth, &SessionRequest { body: body.clone(), ..request.clone() })?;
+        let mut headers = sent.clone();
+        set_headers(&mut headers, applied.set_headers.into_iter().filter(|h| !first.contains(h)).collect());
+        let wire = header_pairs(&headers)?;
+        *slot.lock() = Some(Resigned { headers, body: body.clone(), secrets: applied.secrets, facts: applied.facts });
+        Ok(wire)
+    })
 }
 
 /// Client identity material (PEM) for DTLS, following the TLS profile's
@@ -366,6 +428,7 @@ fn finish_prep(
         redactor,
         extra_findings: vec![],
         cookies: None,
+        resigned: None,
     }
 }
 
@@ -549,7 +612,7 @@ async fn prepare_ws(
     // built: every redaction below (transcript, URL, PROXY header) covers
     // their secrets.
     b.redactor.refresh(r);
-    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
@@ -666,7 +729,7 @@ async fn prepare_sse(
     let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
     // Covers a secret in the Last-Event-ID, resolved after the redactor was built.
     b.redactor.refresh(r);
-    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = sse::SsePlan {
@@ -932,9 +995,14 @@ async fn prepare_grpc(
     // resolved after the redactor was built.
     b.redactor.refresh(r);
     // An auth profile that adds query parameters is refused (the path is fixed).
-    let (mut headers, _, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let Authorized { mut headers, facts, set, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let call_target = &request.target;
     let cookies = jar_cookies(engine, ctx, &mut b, call_target, &mut headers);
+    // With server reflection the message is encoded once the schema is
+    // resolved: the call is signed then, over the framed message it sends.
+    let reflected = matches!(schema, grpc::Schema::Reflection) && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
+    let resigned: Option<ResignedSlot> = (reflected && !matches!(b.prep.auth, ResolvedAuth::None)).then(Default::default);
+    let sign = resigned.clone().map(|slot| sign_after_reflection(b.prep.auth.clone(), &request, &set, &headers, slot));
     let display = format!("{}://{}{}", call_target.scheme, call_target.authority, call_target.path);
     let plan = grpc::GrpcPlan {
         tls: if tls_url { b.prep.tls.clone() } else { None },
@@ -950,6 +1018,7 @@ async fn prepare_grpc(
         schema,
         messages,
         headers: header_pairs(&headers)?,
+        sign,
         deadline_ms: spec.deadline_ms,
         timeouts: b.prep.settings.timeouts,
         limits: b.prep.settings.limits,
@@ -973,6 +1042,7 @@ async fn prepare_grpc(
     let mut p = finish_prep(b, Plan::Grpc(plan), request.method, display, headers, request.body, facts);
     p.cookies = cookies;
     p.content_type = request.content_type;
+    p.resigned = resigned;
     Ok(p)
 }
 
@@ -1416,7 +1486,7 @@ async fn prepare_masque(
         host_from_authority: false,
         path_only: false,
     };
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
+    let Authorized { headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
     let t = Target { query, ..connect.target };
     let connect_url = t.url();
     let display_url = b.redactor.url(&connect_url);
@@ -1657,6 +1727,17 @@ async fn run_prepared(
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
     redactor.refresh(resolver);
+    // A call signed once server reflection resolved its schema: the request
+    // as it was signed and sent.
+    let (headers, body, auth_facts) = match prep.resigned.as_ref().and_then(|s| s.lock().take()) {
+        Some(r) => {
+            for s in &r.secrets {
+                redactor.add_secret(s);
+            }
+            (r.headers, r.body, r.facts)
+        }
+        None => (headers, body, auth_facts),
+    };
     let mut attempts = out.attempts;
     let Some(last) = attempts.pop() else {
         let f = TransportFailure::new(Phase::Session, FailureKind::Internal, "the session adapter returned no attempt");

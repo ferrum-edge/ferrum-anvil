@@ -468,6 +468,27 @@ async fn grpc_preview_shows_the_message_as_redacted_json_never_the_framed_or_bas
     }
 }
 
+/// With server reflection the session encodes the message, and signs the
+/// call over it, once the schema is resolved: the preview shows the message
+/// as JSON and says that a digest or signature it shows covers an empty body.
+#[tokio::test]
+async fn grpc_preview_with_server_reflection_shows_the_message_signed_when_the_call_is_sent() {
+    init();
+    let e = Engine::new();
+    for (label, auth) in [("HMAC", hmac()), ("no auth", AuthConfig::None)] {
+        let mut c = grpc("grpc://grpc.example.test:50051", GrpcWire::Grpc, HttpVersionPolicy::Auto, auth);
+        c.spec.grpc.as_mut().unwrap().schema = GrpcSchemaSource::Reflection;
+        let p = e.preview(&c).unwrap_or_else(|f| panic!("{label}: the preview failed: {f:?}"));
+        let message: serde_json::Value = serde_json::from_str(&p.body_preview).unwrap_or_else(|err| panic!("{label}: {err}"));
+        assert_eq!(message, serde_json::json!({"message": "hi"}), "{label}: the message is not shown");
+        assert_eq!(p.body_bytes, 0, "{label}: nothing is encoded before the schema is resolved");
+        let note = p.inferred.iter().find(|i| i.starts_with("server reflection:")).unwrap_or_else(|| panic!("{label}: {:?}", p.inferred));
+        assert!(note.contains("encoded, and its size known, once the schema is resolved"), "{label}: {note}");
+        let signs = note.contains("auth signs the call then, over the framed message sent");
+        assert_eq!(signs && note.contains("computed over an empty body"), label == "HMAC", "{label}: {note}");
+    }
+}
+
 /// The failure the session gives, before anything is sent, for `c`.
 async fn session_refusal(e: &Engine, c: &ExecutionContext) -> TransportFailure {
     let o = run(e, c).await;
