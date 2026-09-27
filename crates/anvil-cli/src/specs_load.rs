@@ -124,6 +124,7 @@ pub enum LoadCmd {
         /// Fixed iteration count (with --concurrency).
         #[arg(long, conflicts_with_all = ["vus", "rate"])]
         iterations: Option<u64>,
+        /// Seconds --vus or --rate is held at its target, from the start.
         #[arg(long, default_value_t = 30)]
         duration: u64,
         #[arg(long, default_value_t = 10)]
@@ -192,7 +193,10 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             for r in requests {
                 chain.push(app.find_request(&ws, r)?.meta.id);
             }
-            let stage = |target: u64| vec![Stage { duration_secs: *duration, target }];
+            // A held target: an instantaneous step to it, then a hold. The
+            // schedule ramps from 0 before the first timed stage, so a single
+            // `{duration, target}` stage would ramp instead of hold.
+            let stage = |target: u64| vec![Stage { duration_secs: 0, target }, Stage { duration_secs: *duration, target }];
             let workload = match (vus, rate, iterations) {
                 (Some(v), _, _) => Workload::ClosedVirtualUsers { stages: stage(*v), think_time_ms: 0 },
                 (_, Some(r), _) => Workload::OpenArrivalRate { stages: stage(*r), max_in_flight: *max_in_flight },

@@ -160,6 +160,11 @@
 
 ### Fixed
 
+- CLI: `anvil load create --rate N` and `--vus N` now hold `N` for
+  `--duration` from the start, as their help says. Before, they built a
+  single stage that ramped linearly from 0 to `N`, so `--rate 100
+  --duration 20` planned 1,000 arrivals instead of 2,000. The plan is now a
+  zero-duration step to `N` followed by a hold of `N` for `--duration`.
 - WebSocket over HTTP/2 and HTTP/3, SSE over HTTP/2 and gRPC (native and
   gRPC-Web, every HTTP version) now send an explicit `Host` header as the
   request's authority (`:authority`, or `Host` over HTTP/1.1), as HTTP
