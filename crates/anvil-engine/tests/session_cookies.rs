@@ -152,11 +152,8 @@ fn in_workspace(mut c: ExecutionContext, isolation: &str) -> ExecutionContext {
     c
 }
 
-/// The engine's future is boxed: a test that awaits several gRPC calls inline
-/// otherwise holds them all in its own future, which overflows the test
-/// thread's stack in a debug build.
 async fn run(e: &Engine, c: &ExecutionContext) -> ExecutionOutput {
-    Box::pin(e.execute(c, EventCtx::none(), CancellationToken::new())).await
+    e.execute(c, EventCtx::none(), CancellationToken::new()).await
 }
 
 /// Run `c` and check that it reached the server and was answered.
