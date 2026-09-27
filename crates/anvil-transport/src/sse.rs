@@ -18,7 +18,10 @@
 //!   (reset / truncated stream), bounded in count, honoring the server's
 //!   `retry:` delay and sending `Last-Event-ID`. Each reconnection is its own
 //!   recorded attempt. A clean end of stream is recorded as the server
-//!   closing the stream and is not reconnected.
+//!   closing the stream and is not reconnected. Neither is a stream whose
+//!   last event id (sent by the server) is not a valid header value: without
+//!   `Last-Event-ID` the server would start the stream over, so the session
+//!   ends with a note instead ([`INVALID_ID_NOTE`], which never holds the id).
 //! * Transports: HTTP/1.1 and HTTP/2 over the instrumented TCP connector, or
 //!   HTTP/3 over QUIC (`Http3Only` / `Http3WithFallback`): DNS and the QUIC
 //!   handshake are measured (no TCP phase) and the event stream is parsed
@@ -44,6 +47,11 @@ use http_body_util::{BodyExt, Full};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+
+/// Why a stream was not reconnected after the server sent an event id that
+/// cannot be sent back as `Last-Event-ID`. The id itself is left out: the
+/// server chose it and it may hold anything.
+pub const INVALID_ID_NOTE: &str = "not reconnected: the server sent an event id that is not a valid Last-Event-ID header value (it holds a control or non-ASCII character), and reconnecting without Last-Event-ID would ask the server to start the stream over";
 
 /// One dispatched event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +215,8 @@ pub struct SsePlan {
     pub https: bool,
     pub host: String,
     pub port: u16,
+    /// The HTTP/1.1 `Host` default, or the `:authority` over HTTP/2 and
+    /// HTTP/3: the request's explicit `Host` when it has one (what auth signed).
     pub authority: String,
     pub request_target: String,
     pub headers: Vec<(HeaderName, HeaderValue)>,
@@ -821,6 +831,12 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
         let response = response_record(status, version, resp_headers, body_capture(completeness, wire, &captured, content_type));
         attempts.push(AttemptOutput { observation: obs, response: Some(response), body: captured });
         if !reconnectable || reconnects >= plan.max_reconnects {
+            break;
+        }
+        // A configured Last-Event-ID is checked before anything is sent, so
+        // an id that cannot be sent here came from the server.
+        if parser.last_event_id.as_deref().is_some_and(|id| HeaderValue::from_str(id).is_err()) {
+            facts.notes.push(INVALID_ID_NOTE.into());
             break;
         }
         // Explicit, bounded reconnection with Last-Event-ID; each one is a new

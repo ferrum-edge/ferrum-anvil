@@ -303,6 +303,8 @@ pub struct GrpcPlan {
     pub tls: Option<Arc<PreparedTls>>,
     pub host: String,
     pub port: u16,
+    /// The `:authority` (HTTP/2, HTTP/3) or HTTP/1.1 `Host` (gRPC-Web): the
+    /// request's explicit `Host` when it has one (what auth signed).
     pub authority: String,
     /// Optional path prefix in front of `/<service>/<method>` (gateway routing).
     pub path_prefix: String,

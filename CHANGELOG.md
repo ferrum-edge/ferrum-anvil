@@ -142,6 +142,26 @@
 
 ### Fixed
 
+- WebSocket over HTTP/2 and HTTP/3, SSE over HTTP/2 and gRPC (native and
+  gRPC-Web, every HTTP version) now send an explicit `Host` header as the
+  request's authority (`:authority`, or `Host` over HTTP/1.1), as HTTP
+  requests do. Before, they sent the URL's authority while an HMAC or DPoP
+  signature covered the explicit `Host`, so the server's signature check
+  failed. A WebSocket over extended CONNECT is now signed, and recorded,
+  with the method it is sent with (`CONNECT`) instead of `GET`.
+- gRPC calls now use the workspace cookie jar as HTTP requests and SSE and
+  WebSocket handshakes do: with the Cookies setting on, they send the
+  stored cookies that match their URL (a `grpc://` or `grpcs://` URL counts
+  as its `http://` or `https://` counterpart, so `Secure` cookies stay on
+  TLS), within the workspace only, and the `Set-Cookie` of their response
+  headers is stored when the call ends, unless the profile was locked or
+  the workspace deleted since the call started. Before, gRPC ignored the jar
+  as if Cookies were off.
+- An SSE stream set to reconnect is no longer reconnected without
+  `Last-Event-ID` when the id the server sent is not a valid header value
+  (a control or non-ASCII character), which would have asked the server to
+  start the stream over. The session ends with a note that says why and
+  never holds the id. Before, the reconnection silently left the header out.
 - The effective-request preview now resolves the `Host` / `:authority` the
   way Send does: an explicit `Host` header wins over the URL's authority, and
   an HMAC or DPoP signature shown in the preview covers that value. Before,

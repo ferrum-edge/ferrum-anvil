@@ -32,6 +32,14 @@ pub enum GroundTruth {
         body_bytes: u64,
         headers: Vec<(String, String)>,
     },
+    /// The authority of a request's target as received: the HTTP/2 or HTTP/3
+    /// `:authority` (an HTTP/1.1 origin-form request carries it in `Host`
+    /// instead and records none). Pushed before the request's
+    /// `RequestReceived`.
+    AuthorityReceived {
+        path: String,
+        authority: String,
+    },
     ResponseStarted {
         status: u16,
     },

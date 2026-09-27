@@ -77,8 +77,8 @@ struct SessionPrep {
     require_verified_tls: bool,
     redactor: Redactor,
     extra_findings: Vec<Draft>,
-    /// Where the handshake responses' cookies are kept (WebSocket and SSE
-    /// with the cookies setting on).
+    /// Where the handshake responses' cookies are kept (WebSocket, SSE and
+    /// gRPC with the cookies setting on).
     cookies: Option<SessionCookies>,
 }
 
@@ -109,22 +109,24 @@ fn header_pairs(headers: &[(String, String)]) -> Result<Vec<(HeaderName, HeaderV
     http_exec::wire_headers(headers)
 }
 
-/// The URL a handshake stands for in the cookie jar: a WebSocket URL as its
-/// HTTP counterpart (`ws` as `http`, `wss` as `https`, RFC 6455 §4.1), so
-/// `Secure` and `HttpOnly` cookies apply as for HTTP requests to the origin.
+/// The URL a handshake stands for in the cookie jar: a WebSocket or gRPC URL
+/// as its HTTP counterpart (`ws` and `grpc` as `http`, `wss` and `grpcs` as
+/// `https`; RFC 6455 §4.1, and gRPC is carried over HTTP), so `Secure` and
+/// `HttpOnly` cookies apply as for HTTP requests to the origin.
 fn cookie_target(t: &Target) -> Target {
     let scheme = match t.scheme.as_str() {
-        "wss" => "https",
-        "ws" => "http",
+        "wss" | "grpcs" => "https",
+        "ws" | "grpc" => "http",
         other => other,
     };
     Target { scheme: scheme.to_string(), ..t.clone() }
 }
 
-/// Cookies for an HTTP-based handshake (WebSocket, SSE), as for an HTTP
-/// request when the cookies setting is on: the workspace jar's cookies for
-/// the target join `headers` (the request's own cookies win), and the
-/// handshake's `Set-Cookie` is kept when the session ends.
+/// Cookies for an HTTP-based handshake (WebSocket, SSE) or gRPC call, as for
+/// an HTTP request when the cookies setting is on: the workspace jar's
+/// cookies for the target join `headers` (the request's own cookies win),
+/// and the `Set-Cookie` of the handshake (or of the call's response headers)
+/// is kept when the session ends.
 fn jar_cookies(
     engine: &Engine,
     ctx: &ExecutionContext,
@@ -416,8 +418,13 @@ async fn prepare_ws(
         .enumerate()
         .map(|(i, s)| r.resolve(s, &format!("websocket.subprotocols[{i}]")))
         .collect::<Result<Vec<_>, _>>()?;
-    let method = if spec.bootstrap == WsBootstrap::Http2ExtendedConnect { "CONNECT" } else { "GET" };
-    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "GET", &target, headers, &[], cancel).await?;
+    // Extended CONNECT (RFC 8441, RFC 9220) is sent, and so signed, as CONNECT.
+    let method = match spec.bootstrap {
+        WsBootstrap::Http1Upgrade => "GET",
+        WsBootstrap::Http2ExtendedConnect | WsBootstrap::Http3ExtendedConnect => "CONNECT",
+    };
+    let (mut headers, query, facts) =
+        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, method, &target, headers, &[], cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
@@ -431,7 +438,8 @@ async fn prepare_ws(
         secure: t.scheme == "wss",
         host: t.host.clone(),
         port: t.port,
-        authority: t.authority.clone(),
+        // HTTP/1.1 `Host`, or `:authority` over HTTP/2 and HTTP/3: what auth signed.
+        authority: http_exec::request_authority(&headers, &t),
         request_target: t.request_target(),
         headers: header_pairs(&headers)?,
         subprotocols,
@@ -505,7 +513,8 @@ async fn prepare_sse(
         https: t.scheme == "https",
         host: t.host.clone(),
         port: t.port,
-        authority: t.authority.clone(),
+        // HTTP/1.1 `Host`, or `:authority` over HTTP/2 and HTTP/3: what auth signed.
+        authority: http_exec::request_authority(&headers, &t),
         request_target: t.request_target(),
         headers: header_pairs(&headers)?,
         body: body.clone(),
@@ -685,17 +694,20 @@ async fn prepare_grpc(
     let prefix = target.path.trim_end_matches('/').to_string();
     let path = format!("{prefix}/{service}/{method_name}");
     let call_target = Target { path: path.clone(), ..target.clone() };
-    let (headers, query, facts) =
+    let (mut headers, query, facts) =
         apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "POST", &call_target, headers, &unary_body, cancel).await?;
     if !query.is_empty() && query != target.query {
         return Err(unsupported("an auth profile that adds query parameters cannot be used with gRPC (the path is fixed)", "auth"));
     }
+    let cookies = jar_cookies(engine, ctx, &mut b, &call_target, &mut headers);
     let display = format!("{}://{}{}", target.scheme, target.authority, path);
     let plan = grpc::GrpcPlan {
         tls: if tls_url { b.prep.tls.clone() } else { None },
         host: target.host.clone(),
         port: target.port,
-        authority: target.authority.clone(),
+        // `:authority` (HTTP/2, HTTP/3) or the gRPC-Web `Host` over HTTP/1.1:
+        // what auth signed.
+        authority: http_exec::request_authority(&headers, &call_target),
         path_prefix: prefix,
         service,
         method: method_name,
@@ -724,6 +736,7 @@ async fn prepare_grpc(
         channels: if !interactive && b.prep.settings.keepalive { engine.grpc_channels_for(b.prep.epoch, &ctx.isolation) } else { None },
     };
     let mut p = finish_prep(b, Plan::Grpc(plan), "POST".into(), display, headers, unary_body, facts);
+    p.cookies = cookies;
     p.content_type = Some(
         match spec.wire {
             GrpcWire::Grpc => "application/grpc",

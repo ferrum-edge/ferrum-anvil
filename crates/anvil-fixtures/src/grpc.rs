@@ -2,7 +2,8 @@
 //! `grpc.reflection.v1.ServerReflection`, implemented with raw gRPC framing
 //! over the fixture's HTTP/2 server ([`handle`]) and over the HTTP/3 fixture
 //! ([`handle_h3`], full duplex on one request stream). gRPC-Web is served by
-//! [`crate::grpc_web`].
+//! [`crate::grpc_web`]. A native call with `x-fixture-set-cookie` metadata is
+//! answered with that value, verbatim, as a `Set-Cookie` response header.
 
 use crate::http::FxBody;
 use crate::log::{GroundTruth, GroundTruthLog};
@@ -187,11 +188,16 @@ impl FrameReader {
 pub async fn handle(req: Request<Incoming>, log: GroundTruthLog) -> Response<FxBody> {
     let path = req.uri().path().to_string();
     let deny_reflection = req.headers().contains_key("x-fixture-deny-reflection");
+    let set_cookie = req.headers().get("x-fixture-set-cookie").cloned();
     let (tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
     let body: FxBody = BodyExt::boxed(StreamBody::new(rx));
     let reader = FrameReader { src: Src::Hyper(req.into_body()), buf: BytesMut::new() };
     tokio::spawn(run(path, reader, tx, log, deny_reflection));
-    Response::builder().status(200).header("content-type", "application/grpc").body(body).unwrap()
+    let mut resp = Response::builder().status(200).header("content-type", "application/grpc");
+    if let Some(c) = set_cookie {
+        resp = resp.header("set-cookie", c);
+    }
+    resp.body(body).unwrap()
 }
 
 /// A server-side HTTP/3 request stream.
@@ -206,6 +212,7 @@ pub type H3Stream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes
 pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTruthLog) {
     let path = req.uri().path().to_string();
     let deny_reflection = req.headers().contains_key("x-fixture-deny-reflection");
+    let set_cookie = req.headers().get("x-fixture-set-cookie").cloned();
     let (mut send, mut recv) = stream.split();
     let (dtx, drx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(16);
     tokio::spawn(async move {
@@ -232,6 +239,9 @@ pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTrut
     // servers send it.
     let mut first = rx.next().await;
     let mut resp = http::Response::builder().status(200).header("content-type", "application/grpc");
+    if let Some(c) = set_cookie {
+        resp = resp.header("set-cookie", c);
+    }
     let immediate_status = matches!(&first, Some(Ok(f)) if f.is_trailers());
     if immediate_status && let Some(Ok(f)) = first.take() {
         for (n, v) in f.into_trailers().ok().iter().flatten() {

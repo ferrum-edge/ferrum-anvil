@@ -64,6 +64,8 @@ pub struct WsPlan {
     pub secure: bool,
     pub host: String,
     pub port: u16,
+    /// The HTTP/1.1 `Host` default, or the `:authority` over HTTP/2 and
+    /// HTTP/3: the request's explicit `Host` when it has one (what auth signed).
     pub authority: String,
     /// Origin-form target (`/path?query`).
     pub request_target: String,

@@ -1326,6 +1326,53 @@ async fn sse_max_events_is_a_planned_client_stop() {
     assert_eq!(o.record.outcome.application, ApplicationState::Success);
 }
 
+/// An SSE stream that reconnects after an abnormal end.
+fn sse_reconnecting(url: &str) -> ExecutionContext {
+    let mut s = spec(Protocol::Sse, url);
+    s.sse = Some(SseSpec { max_events: 0, idle_timeout_ms: 5_000, last_event_id: None, reconnect: true });
+    ctx(s)
+}
+
+/// The `Last-Event-ID` of every request to `/sse` the fixture received, in order.
+fn last_event_ids(log: &anvil_fixtures::GroundTruthLog) -> Vec<Option<String>> {
+    let mut ids = vec![];
+    for e in log.entries() {
+        if let GroundTruth::RequestReceived { path, headers, .. } = e.event
+            && path.starts_with("/sse")
+        {
+            ids.push(headers.into_iter().find(|(n, _)| n == "last-event-id").map(|(_, v)| v));
+        }
+    }
+    ids
+}
+
+#[tokio::test]
+async fn sse_server_id_that_is_not_a_header_value_is_not_reconnected_and_the_note_leaves_it_out() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    // A valid id from the server is sent back on every reconnection (the
+    // fixture sends `retry: 50`, one event, then aborts the stream).
+    let o = run(&e, &sse_reconnecting(&f.url("/sse?count=1&interval=20&abort=1&id=ok-7"))).await;
+    let sent = last_event_ids(&f.log);
+    assert_eq!(sent.len(), 6, "the first request and five reconnections: {sent:?}");
+    assert_eq!(sent[0], None);
+    assert!(sent[1..].iter().all(|id| id.as_deref() == Some("ok-7")), "{sent:?}");
+    assert_eq!(o.record.attempts.len(), 6);
+
+    // A non-ASCII id cannot be sent as Last-Event-ID: the stream is not
+    // reconnected (without the header the server would start it over), and
+    // the note says why without the id.
+    f.log.clear();
+    let o = run(&e, &sse_reconnecting(&f.url("/sse?count=1&interval=20&abort=1&id=%C3%A9v%C3%A9nement-7"))).await;
+    assert_eq!(last_event_ids(&f.log), vec![None], "the server received one request");
+    assert_eq!(o.record.attempts.len(), 1);
+    assert!(matches!(o.record.outcome.protocol_status, ProtocolStatus::Sse { events: 1, closed_by: ClosedBy::Abnormal, .. }));
+    let inferred = &o.record.prepared.inferred;
+    assert!(inferred.iter().any(|i| i == anvil_transport::sse::INVALID_ID_NOTE), "{inferred:?}");
+    assert!(!inferred.iter().any(|i| i.contains("nement-7") || i.contains("reconnecting")), "{inferred:?}");
+}
+
 // -------------------------------------------------------------------- TCP
 
 #[tokio::test]
