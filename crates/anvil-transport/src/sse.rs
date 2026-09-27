@@ -19,9 +19,12 @@
 //!   `retry:` delay and sending `Last-Event-ID`. Each reconnection is its own
 //!   recorded attempt. A clean end of stream is recorded as the server
 //!   closing the stream and is not reconnected. Neither is a stream whose
-//!   last event id (sent by the server) is not a valid header value: without
-//!   `Last-Event-ID` the server would start the stream over, so the session
-//!   ends with a note instead ([`INVALID_ID_NOTE`], which never holds the id).
+//!   last event id (sent by the server) is not a valid header value because
+//!   it holds a control character (other than a tab, which a header value
+//!   may hold; ids with NUL are ignored and line breaks end the line):
+//!   without `Last-Event-ID` the server would start the stream over, so the
+//!   session ends with a note instead ([`INVALID_ID_NOTE`], which never holds
+//!   the id).
 //! * Transports: HTTP/1.1 and HTTP/2 over the instrumented TCP connector, or
 //!   HTTP/3 over QUIC (`Http3Only` / `Http3WithFallback`): DNS and the QUIC
 //!   handshake are measured (no TCP phase) and the event stream is parsed
@@ -51,7 +54,7 @@ use tokio_util::sync::CancellationToken;
 /// Why a stream was not reconnected after the server sent an event id that
 /// cannot be sent back as `Last-Event-ID`. The id itself is left out: the
 /// server chose it and it may hold anything.
-pub const INVALID_ID_NOTE: &str = "not reconnected: the server sent an event id that is not a valid Last-Event-ID header value (it holds a control or non-ASCII character), and reconnecting without Last-Event-ID would ask the server to start the stream over";
+pub const INVALID_ID_NOTE: &str = "not reconnected: the server sent an event id that is not a valid Last-Event-ID header value (it holds a control character), and reconnecting without Last-Event-ID would ask the server to start the stream over";
 
 /// One dispatched event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,13 +576,8 @@ async fn open_h3(
     };
 
     let headers = request_headers(plan, true, last_event_id);
-    let authority = plan
-        .headers
-        .iter()
-        .find(|(n, _)| n == http::header::HOST)
-        .and_then(|(_, v)| v.to_str().ok().map(|s| s.to_string()))
-        .unwrap_or_else(|| plan.authority.clone());
-    let mut req = match Request::builder().method(plan.method.clone()).uri(format!("https://{authority}{}", plan.request_target)).body(()) {
+    let uri = format!("https://{}{}", plan.authority, plan.request_target);
+    let mut req = match Request::builder().method(plan.method.clone()).uri(uri).body(()) {
         Ok(r) => r,
         Err(e) => {
             let f = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("the request could not be built: {e}"));

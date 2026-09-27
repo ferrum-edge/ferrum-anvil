@@ -1360,17 +1360,19 @@ async fn sse_server_id_that_is_not_a_header_value_is_not_reconnected_and_the_not
     assert!(sent[1..].iter().all(|id| id.as_deref() == Some("ok-7")), "{sent:?}");
     assert_eq!(o.record.attempts.len(), 6);
 
-    // A non-ASCII id cannot be sent as Last-Event-ID: the stream is not
-    // reconnected (without the header the server would start it over), and
-    // the note says why without the id.
+    // An id holding a control character (the fixture decodes `%01`) cannot
+    // be sent as Last-Event-ID: the stream is not reconnected (without the
+    // header the server would start it over), and the note says why without
+    // the id.
     f.log.clear();
-    let o = run(&e, &sse_reconnecting(&f.url("/sse?count=1&interval=20&abort=1&id=%C3%A9v%C3%A9nement-7"))).await;
+    let o = run(&e, &sse_reconnecting(&f.url("/sse?count=1&interval=20&abort=1&id=bad%01id-7"))).await;
     assert_eq!(last_event_ids(&f.log), vec![None], "the server received one request");
     assert_eq!(o.record.attempts.len(), 1);
     assert!(matches!(o.record.outcome.protocol_status, ProtocolStatus::Sse { events: 1, closed_by: ClosedBy::Abnormal, .. }));
     let inferred = &o.record.prepared.inferred;
-    assert!(inferred.iter().any(|i| i == anvil_transport::sse::INVALID_ID_NOTE), "{inferred:?}");
-    assert!(!inferred.iter().any(|i| i.contains("nement-7") || i.contains("reconnecting")), "{inferred:?}");
+    let notes: Vec<_> = inferred.iter().filter(|i| i.as_str() == anvil_transport::sse::INVALID_ID_NOTE).collect();
+    assert_eq!(notes.len(), 1, "{inferred:?}");
+    assert!(!inferred.iter().any(|i| i.contains("id-7")), "{inferred:?}");
 }
 
 // -------------------------------------------------------------------- TCP

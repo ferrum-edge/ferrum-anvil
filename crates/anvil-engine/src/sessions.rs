@@ -109,11 +109,12 @@ fn header_pairs(headers: &[(String, String)]) -> Result<Vec<(HeaderName, HeaderV
     http_exec::wire_headers(headers)
 }
 
-/// The URL a handshake stands for in the cookie jar: a WebSocket or gRPC URL
-/// as its HTTP counterpart (`ws` and `grpc` as `http`, `wss` and `grpcs` as
-/// `https`; RFC 6455 §4.1, and gRPC is carried over HTTP), so `Secure` and
-/// `HttpOnly` cookies apply as for HTTP requests to the origin.
-fn cookie_target(t: &Target) -> Target {
+/// The HTTP URL a handshake or call stands for: a WebSocket or gRPC URL as
+/// its HTTP counterpart (`ws` and `grpc` as `http`, `wss` and `grpcs` as
+/// `https`; RFC 6455 §4.1, and gRPC is carried over HTTP). In the cookie jar,
+/// `Secure` and `HttpOnly` cookies then apply as for HTTP requests to the
+/// origin, and a DPoP proof's `htu` is the HTTP URL the request is sent to.
+fn http_target(t: &Target) -> Target {
     let scheme = match t.scheme.as_str() {
         "wss" | "grpcs" => "https",
         "ws" | "grpc" => "http",
@@ -137,7 +138,7 @@ fn jar_cookies(
     if !b.prep.settings.cookies {
         return None;
     }
-    let target = cookie_target(target);
+    let target = http_target(target);
     for n in http_exec::add_jar_cookies(engine, &ctx.isolation, &target, headers) {
         if !b.inferred.contains(&n) {
             b.inferred.push(n);
@@ -189,7 +190,7 @@ async fn apply_auth(
     if matches!(prep.auth, ResolvedAuth::None) {
         return Ok((headers, target.query.clone(), vec![]));
     }
-    let signable = http_exec::signable_request(method, target, &headers, body);
+    let signable = http_exec::signable_request(method, &http_target(target), &headers, body);
     let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
         .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
     http_exec::check_auth_headers(&applied)?;
@@ -423,8 +424,7 @@ async fn prepare_ws(
         WsBootstrap::Http1Upgrade => "GET",
         WsBootstrap::Http2ExtendedConnect | WsBootstrap::Http3ExtendedConnect => "CONNECT",
     };
-    let (mut headers, query, facts) =
-        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, method, &target, headers, &[], cancel).await?;
+    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, method, &target, headers, &[], cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
@@ -498,7 +498,7 @@ async fn prepare_sse(
     if last_event_id.as_deref().is_some_and(|id| HeaderValue::from_str(id).is_err()) {
         return Err(local(
             FailureKind::InvalidHeader,
-            "sse.last_event_id resolves to a value that is not a valid Last-Event-ID header value (it holds a line break, control or non-ASCII character); the request was not sent",
+            "sse.last_event_id resolves to a value that is not a valid Last-Event-ID header value (it holds a line break or control character); the request was not sent",
             "sse.last_event_id",
         ));
     }

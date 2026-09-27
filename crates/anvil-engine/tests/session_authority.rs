@@ -7,11 +7,12 @@
 //! case checks, from the fixture's ground truth, that the server received
 //! the explicit `Host` (as `Host` over HTTP/1.1, as `:authority` over HTTP/2
 //! and HTTP/3) and that the signature it received verifies over what it
-//! received.
+//! received. A DPoP proof for a WebSocket over HTTP/2 is bound to the same
+//! method and authority, with the `http` counterpart of the `ws` URL.
 
 use anvil_auth::hmac_sig;
 use anvil_domain::Id;
-use anvil_domain::auth::{AuthConfig, HmacAlgorithm, HmacConfig, HmacProfile};
+use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile};
 use anvil_domain::request::*;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides};
@@ -62,12 +63,29 @@ fn hmac() -> AuthConfig {
     }
 }
 
+fn dpop() -> AuthConfig {
+    AuthConfig::Dpop {
+        config: DpopConfig {
+            access_token: SensitiveValue::template("audit-only-dpop-token-7m2q"),
+            private_key_pem: SensitiveValue::template(anvil_auth::dpop::generate_key_pem().unwrap()),
+            dpop_scheme: true,
+            handle_nonce_challenge: true,
+        },
+    }
+}
+
 /// `s` with the explicit `Host`, HMAC auth and the HTTP version policy, if
-/// any. The context takes its auth layer from the spec when it is built, so
-/// the auth is set before.
-fn signed(mut s: RequestSpec, version: Option<HttpVersionPolicy>) -> ExecutionContext {
+/// any.
+fn signed(s: RequestSpec, version: Option<HttpVersionPolicy>) -> ExecutionContext {
+    with_auth(s, version, hmac())
+}
+
+/// `s` with the explicit `Host`, `auth` and the HTTP version policy, if any.
+/// The context takes its auth layer from the spec when it is built, so the
+/// auth is set before.
+fn with_auth(mut s: RequestSpec, version: Option<HttpVersionPolicy>, auth: AuthConfig) -> ExecutionContext {
     s.headers.push(KeyValue::new("Host", HOST));
-    s.auth = hmac();
+    s.auth = auth;
     let mut c = ExecutionContext::standalone(s);
     c.settings_layers.push(("run".into(), SettingsOverrides { http_version: version, ..Default::default() }));
     c
@@ -96,6 +114,11 @@ fn lab_trust(mut c: ExecutionContext) -> ExecutionContext {
 }
 
 fn ws(url: &str, bootstrap: WsBootstrap) -> ExecutionContext {
+    // The bootstrap chooses the HTTP version.
+    signed(ws_spec(url, bootstrap), None)
+}
+
+fn ws_spec(url: &str, bootstrap: WsBootstrap) -> RequestSpec {
     let mut s = RequestSpec::http("GET", url);
     s.protocol = Protocol::WebSocket;
     s.websocket = Some(WsSpec {
@@ -107,8 +130,7 @@ fn ws(url: &str, bootstrap: WsBootstrap) -> ExecutionContext {
         idle_close_ms: 1_000,
         permessage_deflate: Default::default(),
     });
-    // The bootstrap chooses the HTTP version.
-    signed(s, None)
+    s
 }
 
 fn sse(url: &str, version: HttpVersionPolicy) -> ExecutionContext {
@@ -121,12 +143,8 @@ fn sse(url: &str, version: HttpVersionPolicy) -> ExecutionContext {
 /// A unary `Echo` call with the echo service's `.proto` as its schema.
 fn grpc(url: &str, wire: GrpcWire, version: HttpVersionPolicy) -> ExecutionContext {
     let sha = anvil_transport::certs::sha256_hex(ECHO_PROTO.as_bytes());
-    let file = AttachmentRef::Stored {
-        sha256: sha.clone(),
-        size: ECHO_PROTO.len() as u64,
-        file_name: "echo.proto".into(),
-        media_type: None,
-    };
+    let file =
+        AttachmentRef::Stored { sha256: sha.clone(), size: ECHO_PROTO.len() as u64, file_name: "echo.proto".into(), media_type: None };
     let mut s = RequestSpec::http("POST", url);
     s.protocol = Protocol::Grpc;
     s.grpc = Some(GrpcSpec {
@@ -179,14 +197,10 @@ fn received(log: &GroundTruthLog, path: &str) -> Received {
     let GroundTruth::RequestReceived { method, path: target, headers, .. } = entries[i].clone() else { unreachable!() };
     // The fixtures record a request's `:authority` just before the request
     // itself; an HTTP/1.1 request records none.
-    let authority = entries[..i]
-        .iter()
-        .rev()
-        .take_while(|e| !matches!(e, GroundTruth::RequestReceived { .. }))
-        .find_map(|e| match e {
-            GroundTruth::AuthorityReceived { path: p, authority } if p.starts_with(path) => Some(authority.clone()),
-            _ => None,
-        });
+    let authority = entries[..i].iter().rev().take_while(|e| !matches!(e, GroundTruth::RequestReceived { .. })).find_map(|e| match e {
+        GroundTruth::AuthorityReceived { path: p, authority } if p.starts_with(path) => Some(authority.clone()),
+        _ => None,
+    });
     let authority = match authority {
         Some(a) => a,
         None => header(&headers, "host").expect("neither :authority nor Host received").to_string(),
@@ -253,6 +267,26 @@ async fn websocket_over_http1_http2_and_http3_sends_and_signs_the_explicit_host(
     assert_signed_for_host("ws over HTTP/3", &o, &h3.log, "/ws");
     assert_eq!(received(&h3.log, "/ws").method, "CONNECT", "RFC 9220: the wire method, which the signature covers");
     assert_eq!(o.record.prepared.method, "CONNECT");
+}
+
+#[tokio::test]
+async fn websocket_over_http2_binds_the_dpop_proof_to_connect_and_the_explicit_host() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let url = format!("ws://{}/ws?close_after=1", f.addr);
+    let o = run(&e, &with_auth(ws_spec(&url, WsBootstrap::Http2ExtendedConnect), None, dpop())).await;
+    let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
+    assert!(o.record.response.is_some(), "no response: {failure:?}");
+    let r = received(&f.log, "/ws");
+    assert_eq!(r.method, "CONNECT");
+    assert_eq!(r.authority, HOST, "the server did not receive the explicit Host as the authority");
+    let proof = header(&r.headers, "dpop").unwrap_or_else(|| panic!("no DPoP proof received: {:?}", r.headers));
+    let payload = proof.split('.').nth(1).expect("the DPoP proof is not a JWT");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).expect("the DPoP payload is not base64url");
+    let claims: serde_json::Value = serde_json::from_slice(&payload).expect("the DPoP payload is not JSON");
+    assert_eq!(claims["htm"], "CONNECT", "RFC 8441: the proof is bound to the wire method");
+    assert_eq!(claims["htu"], format!("http://{HOST}/ws"), "the proof is not bound to the Host sent");
 }
 
 #[tokio::test]

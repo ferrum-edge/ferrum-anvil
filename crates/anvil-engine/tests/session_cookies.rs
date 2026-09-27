@@ -122,12 +122,8 @@ const GRPC_PATH: &str = "/anvil.lab.v1.Echo/Unary";
 /// its `Set-Cookie` response header.
 fn grpc(url: &str, set_cookie: Option<&str>) -> ExecutionContext {
     let sha = anvil_transport::certs::sha256_hex(ECHO_PROTO.as_bytes());
-    let file = AttachmentRef::Stored {
-        sha256: sha.clone(),
-        size: ECHO_PROTO.len() as u64,
-        file_name: "echo.proto".into(),
-        media_type: None,
-    };
+    let file =
+        AttachmentRef::Stored { sha256: sha.clone(), size: ECHO_PROTO.len() as u64, file_name: "echo.proto".into(), media_type: None };
     let mut s = RequestSpec::http("POST", url);
     s.protocol = Protocol::Grpc;
     s.grpc = Some(GrpcSpec {
