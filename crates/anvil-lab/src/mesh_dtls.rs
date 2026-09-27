@@ -1,15 +1,15 @@
 //! `mesh` profile, DTLS through HBONE: the datagram tunnel of mesh_udp.rs
 //! (`CONNECT` with `x-ferrum-mesh-protocol: udp`, `[u16 length][payload]`
 //! records) with a DTLS session inside it. Ferrum Edge's datagram relay
-//! (`src/proxy/hbone_proxy.rs` `relay_hbone_udp`, identical in v0.9.5 and
-//! v0.9.7) forwards each record as one UDP datagram and never looks inside,
+//! (`src/proxy/hbone_proxy.rs` `relay_hbone_udp`, the same forwarding in
+//! v0.9.5, v0.9.7 and v0.9.8) forwards each record as one UDP datagram and never looks inside,
 //! so the DTLS handshake is end to end between Anvil and the workload.
 //!
 //! * The STRICT sidecar relays to the workload's declared `udp` ports
 //!   17806/17807 (mesh-sidecar.json): a DTLS echo presenting the workload's
 //!   SVID and requiring a mesh client certificate (MESH-031), and one
 //!   presenting an SVID from a root the mesh does not trust (MESH-032).
-//! * A tunnel that never opens attempts no DTLS: the relay-synthesis 404
+//! * A tunnel that never opens attempts no DTLS: the relay-synthesis refusal
 //!   for an undeclared port (MESH-033) and Ambient's UDP destination 403
 //!   (MESH-034) have exactly the UDP-through-HBONE shape.
 //!
@@ -20,7 +20,9 @@
 //! lines, debug relay lines). Neither is given to the engine.
 
 use crate::fixtures_policy::{codes, send};
-use crate::mesh::{AMBIENT_HBONE_PORT, DTLS_ECHO_PORT, DTLS_UNTRUSTED_PORT, Def, Env, Fut, SIDECAR_PORT, SYNTHESIS_REFUSAL, Svid};
+use crate::mesh::{
+    AMBIENT_HBONE_PORT, DTLS_ECHO_PORT, DTLS_UNTRUSTED_PORT, Def, Env, Fut, SIDECAR_PORT, Svid, synthesis_refusal, synthesis_refusal_log,
+};
 use crate::mesh::{attempt, outcome, tunnel_of, wait_op_lines};
 use crate::mesh_udp::{
     LOOPBACK_NAME, UNDECLARED_UDP_PORT, channel, check_counts, no_policy_claim, received, tunnel_opened, udp_tunnel_refused,
@@ -215,7 +217,8 @@ fn mesh032(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-033: DTLS to an undeclared port at the sidecar: the relay-synthesis
-/// 404 before any tunnel, exactly as for UDP; no DTLS attempted.
+/// refusal (404 on 0.9.5 / 0.9.7, 403 on 0.9.8) before any tunnel, exactly as
+/// for UDP; no DTLS attempted.
 fn mesh033(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -224,10 +227,11 @@ fn mesh033(env: &Env) -> Fut<'_> {
         let dtls_tls = env.tls("client SVID → svc (DTLS workload)", Svid::Client, ids::SVC_SPIFFE_ID, None);
         let authority = format!("127.0.0.1:{UNDECLARED_UDP_PORT}");
         let o = send(&env.engine, &env.via_hbone_dtls(SIDECAR_PORT, &authority, &["x"], 800, hbone_tls, dtls_tls)).await;
-        udp_tunnel_refused(&mut c, &o, 404, "Not Found");
+        let refusal = synthesis_refusal();
+        udp_tunnel_refused(&mut c, &o, refusal.status, refusal.udp_body);
         no_dtls_attempted(&mut c, &o);
         no_policy_claim(&mut c, &o);
-        let log = wait_op_lines(&env.sidecar, from, &[SYNTHESIS_REFUSAL, "port_not_declared"]).await;
+        let log = synthesis_refusal_log(&env.sidecar, from, "port_not_declared").await;
         c.add(CheckKind::GroundTruth, "operator log: relay synthesis refused the authority (port_not_declared)", !log.is_empty(), "");
         outcome(o, c, log)
     })
@@ -265,7 +269,7 @@ pub(crate) fn defs() -> Vec<Def> {
             run: mesh031,
         },
         Def { id: "MESH-032", title: "DTLS through HBONE to a workload with an untrusted SVID: Anvil rejects the DTLS peer", run: mesh032 },
-        Def { id: "MESH-033", title: "DTLS through HBONE to an undeclared port: relay-synthesis 404, no DTLS attempted", run: mesh033 },
+        Def { id: "MESH-033", title: "DTLS through HBONE to an undeclared port: relay-synthesis refusal, no DTLS attempted", run: mesh033 },
         Def { id: "MESH-034", title: "Ambient DTLS to a name resolving to loopback: UDP destination 403, no DTLS attempted", run: mesh034 },
     ]
 }

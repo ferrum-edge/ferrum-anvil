@@ -76,14 +76,16 @@ type Fut<'a> = Pin<Box<dyn Future<Output = Outcome> + 'a>>;
 
 // ------------------------------------------------------------ contexts ---
 
-fn ferrum_profile() -> IntegrationProfile {
+/// The trusted profile of the h3x listeners; it declares the running
+/// release's compatibility id, so diagnoses use that release's catalog.
+pub(crate) fn ferrum_profile() -> IntegrationProfile {
     IntegrationProfile {
         id: Id::new(),
         workspace_id: Id::new(),
         name: "lab h3x gateway".into(),
         kind: IntegrationKind::FerrumGateway {
             hosts: GATEWAY_PORTS.iter().map(|p| HostBinding { host: "127.0.0.1".into(), port: Some(*p) }).collect(),
-            compatibility_id: "ferrum-edge-0.9.5".into(),
+            compatibility_id: crate::gateway::compatibility_id(),
             require_verified_tls: false,
             detail: None,
             console_url: None,
