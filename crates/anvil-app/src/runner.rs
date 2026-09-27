@@ -199,12 +199,7 @@ impl App {
 
     /// Name the plan's environment (`environment`, else the workspace's
     /// active one) and snapshot every request it runs.
-    fn run_steps(
-        &self,
-        mut plan: RunPlan,
-        environment: Option<Id>,
-        seed: Option<u64>,
-    ) -> Result<(RunPlan, Steps, Vec<String>)> {
+    fn run_steps(&self, mut plan: RunPlan, environment: Option<Id>, seed: Option<u64>) -> Result<(RunPlan, Steps, Vec<String>)> {
         let ws = self.workspace(&plan.workspace_id)?;
         let selected_env = environment.or(ws.active_environment_id);
         let environments = self.environments(&ws.meta.id)?;

@@ -275,14 +275,9 @@ impl App {
             Some(_) => None,
             None => None,
         };
-        let env_id = env_id.filter(|eid| {
-            sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid))
-        });
+        let env_id = env_id.filter(|eid| sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid)));
         if let Some(eid) = env_id {
-            let env = environments
-                .into_iter()
-                .find(|e| e.meta.id == eid)
-                .ok_or_else(|| AppError::NotFound("environment".into()))?;
+            let env = environments.into_iter().find(|e| e.meta.id == eid).ok_or_else(|| AppError::NotFound("environment".into()))?;
             var_layers.push(layer(format!("environment:{}", env.name), &env.variables, &secrets)?);
         }
         for f in nested {
