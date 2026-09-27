@@ -385,7 +385,7 @@ export function PlanEditor(props: {
   requests: { id: string; label: string; method: string }[];
   environments: Environment[];
   datasets: Dataset[];
-  onDatasetsChanged: () => void;
+  onDatasetsChanged: () => void | Promise<unknown>;
   /** `sent` is the edit that was saved. */
   onSaved: (p: LoadPlan, sent: EditPlan) => void;
   onDeleted: () => void;
@@ -648,7 +648,16 @@ export function PlanEditor(props: {
             Add dataset…
           </button>
         </div>
-        {dataset?.attachment.kind === "linked_file" && <LinkedFileBinding referrer={{ kind: "dataset", id: dataset.id }} path={dataset.attachment.path} />}
+        {dataset?.attachment.kind === "linked_file" && (
+          <LinkedFileBinding
+            referrer={{ kind: "dataset", id: dataset.id }}
+            path={dataset.attachment.path}
+            onRelocated={async () => {
+              // The saved dataset now names the new path: reload it so this shows that path.
+              await props.onDatasetsChanged();
+            }}
+          />
+        )}
         <label className="check">
           <input
             type="checkbox"

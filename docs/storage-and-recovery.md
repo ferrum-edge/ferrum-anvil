@@ -379,7 +379,11 @@ are reported as needing rebinding, and the preview lists each linked local
 file with the request or dataset that names it. A bundle import drops this
 device's linked-file bindings for every request and dataset it overwrites.
 In the desktop, choose each linked file again with **Choose file…** beside
-the request's body or gRPC schema, or beside the dataset in a load plan.
+the request's body or gRPC schema, or beside the dataset in a load plan. A
+request's file that is somewhere else on this device is repointed with
+**Choose new location…**: the saved request then names the path picked in
+the dialog, and only that request is bound to it. A later export carries the
+new path, like any linked path.
 An OAuth 2 profile imported from a bundle never keeps the token-cache id the
 bundle gives it, so it caches its token under the workspace, folder or
 request that defines it, never alongside a profile stored here that names

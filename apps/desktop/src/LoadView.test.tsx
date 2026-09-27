@@ -8,6 +8,7 @@
 // run keeps its Stop control, and switching back restores the unsaved draft.
 // jsdom only.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { vi } from "vitest";
 
 const invoke = vi.fn();
@@ -16,7 +17,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 import type { LoadPlanCheck, LoadPreflight } from "./api";
-import type { LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
+import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
 import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
 
 const notify = vi.fn();
@@ -474,6 +475,89 @@ describe("LoadView workspace switch", () => {
     await listed("B");
     fireEvent.click(button("Stop run"));
     await waitFor(() => expect(calls("load_run_cancel")).toEqual([{ runKey: "key-1" }]));
+  });
+});
+
+describe("PlanEditor dataset linked file", () => {
+  const OLD = "/data/rows.csv";
+  const NEW = "/home/me/moved/rows.csv";
+  const DATASET = { kind: "dataset", id: "ds-1" };
+
+  function dataset(path: string): Dataset {
+    return {
+      id: "ds-1",
+      schema_version: 1,
+      created_at: "2026-09-26T00:00:00Z",
+      updated_at: "2026-09-26T00:00:00Z",
+      workspace_id: "ws-1",
+      name: "rows",
+      format: "csv",
+      attachment: { kind: "linked_file", path },
+    };
+  }
+
+  /** The load view's datasets: `onDatasetsChanged` reloads them, which then name what `saved` holds. */
+  function Editor({ saved, reloaded }: { saved: { path: string }; reloaded: () => void }) {
+    const [datasets, setDatasets] = useState([dataset(OLD)]);
+    return (
+      <PlanEditor
+        plan={{ ...plan(), chain: ["req-http"], dataset_id: "ds-1" }}
+        {...editorProps}
+        datasets={datasets}
+        onDatasetsChanged={async () => {
+          reloaded();
+          setDatasets([dataset(saved.path)]);
+        }}
+      />
+    );
+  }
+
+  function backend(choose: (s: { status: unknown[]; saved: { path: string } }) => unknown) {
+    const state = { status: [{ path: OLD, state: "invalid", problem: "the file is no longer at this path" }] as unknown[], saved: { path: OLD } };
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "linked_file_status") return state.status;
+      if (cmd === "file_choose") return choose(state);
+      // The plan's unit check is not under test.
+      if (cmd === "load_plan_check") return new Promise(() => {});
+      throw new Error(`unexpected ${cmd}`);
+    });
+    return state;
+  }
+
+  const calls = (cmd: string) => invoke.mock.calls.filter(([c]) => c === cmd).map(([, args]) => args);
+  const relocateButton = () => screen.queryByRole("button", { name: /Choose new location…/ });
+
+  it("relocates the dataset's file in the dialog, then reloads the datasets", async () => {
+    const reloaded = vi.fn();
+    const state = backend((s) => {
+      s.saved.path = NEW;
+      s.status = [{ path: NEW, state: "bound" }];
+      return [{ token: "t", file_name: "rows.csv", path: NEW }];
+    });
+    render(<Editor saved={state.saved} reloaded={reloaded} />);
+    expect((await screen.findByTestId("linked-file-state")).textContent).toBe("Missing or changed");
+    fireEvent.click(relocateButton()!);
+    await waitFor(() => expect(screen.getByTestId("linked-file").textContent).toContain(NEW));
+    await waitFor(() => expect(screen.getByTestId("linked-file-state").textContent).toBe("Chosen on this device"));
+    expect(calls("file_choose")).toEqual([{ purpose: "linked_file_relocate", options: { multiple: false }, referrer: DATASET, oldPath: OLD }]);
+    expect(reloaded).toHaveBeenCalledTimes(1);
+    expect(relocateButton()).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("reloads nothing when the dialog is cancelled", async () => {
+    const reloaded = vi.fn();
+    const state = backend(() => []);
+    render(<Editor saved={state.saved} reloaded={reloaded} />);
+    expect((await screen.findByTestId("linked-file-state")).textContent).toBe("Missing or changed");
+    fireEvent.click(relocateButton()!);
+    await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
+    await waitFor(() => expect((relocateButton() as HTMLButtonElement).disabled).toBe(false));
+    expect(calls("file_choose")[0]).toEqual({ purpose: "linked_file_relocate", options: { multiple: false }, referrer: DATASET, oldPath: OLD });
+    expect(reloaded).not.toHaveBeenCalled();
+    expect(calls("linked_file_status")).toHaveLength(1);
+    expect(screen.getByTestId("linked-file").textContent).toContain(OLD);
+    expect(screen.getByTestId("linked-file-state").textContent).toBe("Missing or changed");
   });
 });
 
