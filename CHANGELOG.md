@@ -106,6 +106,10 @@
   Switching workspaces now clears the Runner's selected scenario, report,
   folder choice and pending confirmation, so the Runner never offers to run
   the previous workspace's scenario; a live run's Stop control is kept.
+  Unsaved edits to a scenario's run options are kept per workspace for the
+  session (not written to disk): they are hidden while another workspace is
+  shown, marked **unsaved** again on return, and dropped once the scenario is
+  no longer in its workspace.
 - A load run now hands its worker every vault secret the plan's requests
   resolve: the datagram PROXY-protocol authentication secret of a UDP
   request, and the client identity of the selected proxy's own TLS profile

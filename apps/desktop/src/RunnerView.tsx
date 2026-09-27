@@ -7,6 +7,10 @@ import { Modal, SidebarResizer, fmtAgo, fmtUs, humanize } from "./ui";
 import { Icon } from "./icons";
 
 type Sel = { kind: "scenario"; id: string } | { kind: "report"; id: string } | { kind: "new" } | null;
+/** The run options a scenario page edits; the rest always comes from the saved scenario. */
+type ScenarioEdit = Pick<Scenario, "iterations" | "stop_on_failure">;
+/** Unsaved scenario edits by workspace id, then scenario id. */
+type Drafts = Record<string, Record<string, ScenarioEdit>>;
 /** The live run; `runId` is null while `run_start` has not answered yet. */
 type Live = { runId: string | null; name: string; events: RunEvent[]; stopping?: boolean };
 /**
@@ -47,10 +51,15 @@ export function RunnerView(props: {
   const [live, setLive] = useState<Live | null>(null);
   const [folderPick, setFolderPick] = useState("");
   const [confirmUntrusted, setConfirmUntrusted] = useState<Scenario | null>(null);
+  // Unsaved scenario edits, kept in memory for the session (never written to
+  // disk). Only the shown workspace's drafts are read, so a switch hides them
+  // and switching back restores them.
+  const [drafts, setDrafts] = useState<Drafts>({});
   const slot = useRef<Slot>({ state: "idle" });
   // Selection, folder choice, confirmation and lists belong to one workspace:
   // reset them in the render that switches, so no action of the previous
-  // workspace stays on screen. A live run (and its Stop control) is kept.
+  // workspace stays on screen. A live run (and its Stop control) is kept, and
+  // so are the previous workspace's drafts.
   const [shownWs, setShownWs] = useState(props.workspaceId);
   if (shownWs !== props.workspaceId) {
     setShownWs(props.workspaceId);
@@ -72,6 +81,12 @@ export function RunnerView(props: {
     if (w !== wsRef.current) return null;
     setScenarios(s);
     setReports(r);
+    // A draft of a scenario the workspace no longer has is dropped.
+    setDrafts((d) => {
+      const own = d[w];
+      if (!own || Object.keys(own).every((id) => s.some((x) => x.id === id))) return d;
+      return { ...d, [w]: Object.fromEntries(Object.entries(own).filter(([id]) => s.some((x) => x.id === id))) };
+    });
     return r;
   };
   // The run listeners outlive renders: read the current workspace and callbacks.
@@ -161,6 +176,16 @@ export function RunnerView(props: {
 
   // Only a scenario of the shown workspace's list is ever offered for a run.
   const selScenario = sel?.kind === "scenario" ? scenarios.find((s) => s.id === sel.id) : undefined;
+  const wsDrafts = drafts[props.workspaceId] ?? {};
+  /** Sets (or, with null, drops) a draft of workspace `ws`; `only` drops it only while it is still that edit. */
+  const setDraft = (ws: string, id: string, draft: ScenarioEdit | null, only?: ScenarioEdit) =>
+    setDrafts((d) => {
+      const own = { ...d[ws] };
+      if (only && own[id] !== only) return d;
+      if (draft) own[id] = draft;
+      else delete own[id];
+      return { ...d, [ws]: own };
+    });
   const runScenario = (s: Scenario) => (s.trusted === false ? setConfirmUntrusted(s) : void start({ kind: "scenario", scenario_id: s.id }, s.name));
 
   return (
@@ -187,6 +212,7 @@ export function RunnerView(props: {
               <Icon name="listChecks" size={14} className="row-icon" />
               <span className="name">{s.name}</span>
               {s.trusted === false && <span className="badge warn">imported</span>}
+              {wsDrafts[s.id] && <span className="badge neutral">unsaved</span>}
             </div>
           ))}
           <div className="side-section-head">
@@ -257,9 +283,16 @@ export function RunnerView(props: {
             <ScenarioDetail
               key={`${props.workspaceId}/${selScenario.id}`}
               scenario={selScenario}
+              draft={wsDrafts[selScenario.id]}
+              onDraft={(d) => setDraft(props.workspaceId, selScenario.id, d)}
               requests={requests}
               onRun={runScenario}
-              onSaved={reload}
+              onSaved={(id, sent) => {
+                // Saved, even if another workspace is shown now: once the list
+                // is fresh, drop this render's workspace draft unless it was
+                // edited again while the save was pending.
+                void reload().then(() => sent && setDraft(props.workspaceId, id, null, sent));
+              }}
               onDeleted={async () => {
                 await reload();
                 setSel(null);
@@ -385,9 +418,18 @@ function ScenarioEditor(props: { requests: { id: string; label: string; method: 
   );
 }
 
-function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; label: string }[]; onRun: (s: Scenario) => void; onSaved: () => void; onDeleted: () => void }) {
-  const [s, setS] = useState(props.scenario);
-  if (!s) return null;
+function ScenarioDetail(props: {
+  scenario: Scenario;
+  /** The unsaved edit of this scenario, held by the Runner so a workspace switch keeps it. */
+  draft?: ScenarioEdit;
+  onDraft: (edit: ScenarioEdit) => void;
+  requests: { id: string; label: string }[];
+  onRun: (s: Scenario) => void;
+  onSaved: (id: string, sent: ScenarioEdit | undefined) => void;
+  onDeleted: () => void;
+}) {
+  const s = props.draft ? { ...props.scenario, ...props.draft } : props.scenario;
+  const setS = (next: Scenario) => props.onDraft({ iterations: next.iterations, stop_on_failure: next.stop_on_failure });
   return (
     <div className="page narrow">
       <div className="page-head">
@@ -395,6 +437,7 @@ function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; lab
           <div className="page-title">
             <h2>{s.name}</h2>
             {s.trusted === false && <span className="badge warn">imported</span>}
+            {props.draft && <span className="badge neutral">unsaved</span>}
           </div>
           <div className="page-meta">
             {s.steps.length} step{s.steps.length === 1 ? "" : "s"} · {s.iterations ?? 1} iteration{(s.iterations ?? 1) === 1 ? "" : "s"}
@@ -446,8 +489,9 @@ function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; lab
           <button
             className="btn"
             onClick={async () => {
-              setS(await api.saveScenario(s));
-              props.onSaved();
+              const sent = props.draft;
+              await api.saveScenario(s);
+              props.onSaved(s.id, sent);
             }}
           >
             Save

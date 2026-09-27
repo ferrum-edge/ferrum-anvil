@@ -4,7 +4,9 @@
 // never comes back as running, and a Stop pressed during startup cancels the
 // run once its id is known. Switching workspaces drops the previous
 // workspace's selection, folder choice and pending confirmation, but keeps a
-// live run's Stop control.
+// live run's Stop control. An unsaved scenario edit is kept per workspace:
+// hidden while another workspace is shown, restored on return, and dropped
+// once its scenario is gone from the workspace.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -302,5 +304,89 @@ describe("switching workspaces", () => {
     await waitFor(() => expect(calls("scenarios_list").some((c) => c.workspaceId === "B")).toBe(true));
     fireEvent.click(button("Stop run"));
     await waitFor(() => expect(calls("run_cancel")).toEqual([{ runId: "run-1" }]));
+  });
+});
+
+describe("unsaved scenario edits", () => {
+  const iterations = () => screen.getByLabelText("Iterations") as HTMLInputElement;
+
+  it("hides A's edit while B is shown and restores it, still unsaved, on return to A", async () => {
+    backend({
+      scenario_save: (a) => {
+        lists.A = [a.scenario as Scenario];
+        return a.scenario;
+      },
+    });
+    lists.B = [scenario("sb", "B", "Scenario B")];
+    const r = await mount("A");
+    fireEvent.click(screen.getByText("Scenario A"));
+    fireEvent.change(iterations(), { target: { value: "7" } });
+    expect(screen.getByText("1 step · 7 iterations")).toBeTruthy();
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+
+    r.rerender(view("B"));
+    await screen.findByText("Scenario B");
+    expect(screen.queryByText("unsaved")).toBeNull();
+    expect(screen.queryByLabelText("Iterations")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Run" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    fireEvent.click(screen.getByText("Scenario B"));
+    expect(iterations().value).toBe("1");
+    expect(screen.queryByText("unsaved")).toBeNull();
+
+    r.rerender(view("A"));
+    await screen.findByText("Scenario A");
+    expect(screen.getAllByText("unsaved")).toHaveLength(1);
+    fireEvent.click(screen.getByText("Scenario A"));
+    expect(iterations().value).toBe("7");
+    expect(screen.getByText("1 step · 7 iterations")).toBeTruthy();
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+    expect(calls("scenario_save")).toHaveLength(0);
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    expect(iterations().value).toBe("7");
+    expect((calls("scenario_save")[0].scenario as Scenario).iterations).toBe(7);
+  });
+
+  it("drops the edit of a scenario gone from A's refreshed list", async () => {
+    backend();
+    const r = await mount("A");
+    fireEvent.click(screen.getByText("Scenario A"));
+    fireEvent.change(iterations(), { target: { value: "7" } });
+
+    r.rerender(view("B"));
+    await screen.findByText("No scenarios yet.");
+    lists.A = [scenario("sa2", "A", "Other A")];
+    r.rerender(view("A"));
+    await screen.findByText("Other A");
+    expect(screen.queryByText("unsaved")).toBeNull();
+    fireEvent.click(screen.getByText("Other A"));
+    expect(iterations().value).toBe("1");
+
+    // Back again: the scenario returns, but its dropped edit does not.
+    r.rerender(view("B"));
+    await screen.findByText("No scenarios yet.");
+    lists.A = [scenario("sa", "A", "Scenario A")];
+    r.rerender(view("A"));
+    fireEvent.click(await screen.findByText("Scenario A"));
+    expect(iterations().value).toBe("1");
+    expect(screen.queryByText("unsaved")).toBeNull();
+  });
+
+  it("drops the edit of a deleted scenario while it is shown", async () => {
+    backend({
+      scenario_delete: () => {
+        lists.A = [];
+      },
+    });
+    await mount("A");
+    fireEvent.click(screen.getByText("Scenario A"));
+    fireEvent.change(iterations(), { target: { value: "7" } });
+
+    fireEvent.click(button("Delete scenario"));
+    await screen.findByText("No scenarios yet.");
+    expect(screen.queryByText("unsaved")).toBeNull();
+    expect(screen.queryByLabelText("Iterations")).toBeNull();
   });
 });
