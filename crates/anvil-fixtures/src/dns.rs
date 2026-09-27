@@ -2,10 +2,40 @@
 //! (default NXDOMAIN), or never answers (`Silent`) to produce resolver timeouts.
 
 use crate::log::{GroundTruth, GroundTruthLog};
+use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio_util::sync::CancellationToken;
+
+const PORT_ZERO_BIND_ATTEMPTS: usize = 32;
+
+type TcpBindFuture = Pin<Box<dyn Future<Output = io::Result<TcpListener>> + Send>>;
+
+async fn bind_ephemeral_pair_with<F>(bind: &str, mut bind_tcp: F) -> io::Result<(UdpSocket, TcpListener)>
+where
+    F: FnMut(SocketAddr) -> TcpBindFuture,
+{
+    for attempt in 0..PORT_ZERO_BIND_ATTEMPTS {
+        let udp = UdpSocket::bind(bind).await?;
+        let addr = udp.local_addr()?;
+        match bind_tcp(addr).await {
+            Ok(tcp) => return Ok((udp, tcp)),
+            Err(error)
+                if matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse)
+                    && attempt + 1 < PORT_ZERO_BIND_ATTEMPTS => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("the final bind attempt returns its error")
+}
+
+fn requests_ephemeral_port(bind: &str) -> bool {
+    bind.rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()) == Some(0)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum DnsMode {
@@ -52,9 +82,15 @@ fn answer(query: &[u8], mode: DnsMode) -> Option<Vec<u8>> {
 }
 
 pub async fn serve(bind: &str, mode: DnsMode) -> anyhow::Result<DnsFixture> {
-    let udp = UdpSocket::bind(bind).await?;
+    let (udp, tcp) = if requests_ephemeral_port(bind) {
+        bind_ephemeral_pair_with(bind, |addr| Box::pin(TcpListener::bind(addr))).await?
+    } else {
+        let udp = UdpSocket::bind(bind).await?;
+        let addr = udp.local_addr()?;
+        let tcp = TcpListener::bind(addr).await?;
+        (udp, tcp)
+    };
     let addr = udp.local_addr()?;
-    let tcp = TcpListener::bind(addr).await?;
     let log = GroundTruthLog::default();
     let cancel = CancellationToken::new();
     let (l1, c1) = (log.clone(), cancel.clone());
@@ -125,4 +161,36 @@ pub fn stalled_listener(bind: &str) -> anyhow::Result<StalledListener> {
         }
     }
     Ok(StalledListener { addr: local, _listener: listener, _fillers: fillers })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn ephemeral_pair_retries_when_tcp_port_is_occupied() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied_addr = occupied.local_addr().unwrap();
+        let calls = Arc::new(Mutex::new(0));
+        let bind_calls = calls.clone();
+
+        let (udp, tcp) = bind_ephemeral_pair_with("127.0.0.1:0", move |addr| {
+            let attempt = {
+                let mut calls = bind_calls.lock().unwrap();
+                *calls += 1;
+                *calls
+            };
+            if attempt == 1 {
+                Box::pin(TcpListener::bind(occupied_addr)) as TcpBindFuture
+            } else {
+                Box::pin(TcpListener::bind(addr)) as TcpBindFuture
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), 2);
+        assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
+    }
 }
