@@ -87,6 +87,6 @@ async fn a_grpc_url_with_a_query_is_refused_and_nothing_reaches_the_server() {
 async fn the_preview_refuses_a_grpc_url_with_a_query() {
     init();
     let e = Engine::new();
-    let err = e.preview(&grpc("grpc://127.0.0.1:50051/prefix?tenant=a", "Unary", GrpcMode::Unary)).err().expect("the preview is refused");
+    let err = e.preview(&grpc("grpc://127.0.0.1:50051/prefix?tenant=a", "Unary", GrpcMode::Unary)).expect_err("the preview is refused");
     assert_query_refused("preview", &err);
 }
