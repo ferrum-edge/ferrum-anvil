@@ -18,8 +18,8 @@ The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3
 - A request stream accepted before the handshake completed is early data (`src/http3/server.rs`
   1731–1790, accept loop biased ahead of the completion signal at 1973–1979). Because every
   connection starts flagged as early, a 1-RTT request that becomes ready in the same turn as handshake
-  completion can also be classified as early (source analysis, not observed here;
-  ferrum-edge/ferrum-edge#5761). A method outside the list gets `425 {"error":"Method not allowed in 0-RTT early data"}` before routing (2805–2825);
+  completion can also be classified as early (ferrum-edge/ferrum-edge#5761, fixed in v0.9.8 by
+  #5775; observed on v0.9.7 in lab run 36345042003 on macOS, see §3). A method outside the list gets `425 {"error":"Method not allowed in 0-RTT early data"}` before routing (2805–2825);
   an admitted one is forwarded with `Early-Data: 1` (`src/http3/cross_protocol.rs` 1171–1178,
   5439–5440).
 - The **HTTPS (TCP) listener never accepts early data** (`src/tls/mod.rs` `enable_early_data`,
