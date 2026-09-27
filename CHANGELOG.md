@@ -164,3 +164,18 @@
   identity bound to no host, whatever the proxy's kind or `no_proxy`, as it
   already was for the request's own TLS profile. This applies to a send, a
   session, a collection run and a load run.
+- Multi auth now applies each profile to the request as it will be sent
+  after the earlier profiles' changes. Cookie API keys from several profiles
+  all reach the one `Cookie` header, after the request's own cookies (from
+  every `Cookie` header it has); earlier builds sent only the last profile's
+  cookie. A profile's cookie replaces a cookie of the same name already in
+  the request, as a header API key replaces a header of the same name. An
+  HMAC profile signs the query, body and `Host` the earlier profiles
+  produced (a query API key, a WS-Security header), where it signed the
+  request before them and the gateway refused the signature. Before anything
+  is sent, a multi-auth set is now refused when two profiles would set the
+  same header, cookie or query parameter (including inside a nested set),
+  or when a profile would change what an earlier signature covers: after
+  HMAC, the query, the body or the `Host`, `Date`, `Digest` or
+  `Content-Digest` header; after DPoP, the `Host` header. Put such a profile
+  before the signing one.
