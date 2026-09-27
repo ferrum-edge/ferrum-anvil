@@ -1,16 +1,14 @@
 //! What a workspace delete ([`Engine::clear_isolation`]) clears stays cleared
 //! when an execution of that workspace that was in flight goes on afterwards:
 //! it pools no connection (HTTP/1.1, HTTP/2, HTTP/3), keeps no session ticket
-//! (TLS over TCP, QUIC, whether in the 0-RTT ticket caches or in a prepared
-//! TLS configuration's session store) and returns no gRPC channel, while
-//! another workspace's execution in flight across the same delete keeps all
-//! of them. Prepared TLS configurations, and the session tickets they keep,
-//! are never shared between workspaces, and a connection resumes only its
-//! own workspace's sessions.
-//! A gRPC channel in use at a lock is not kept either, and the lock check
-//! ([`Engine::session_tickets_held`]) counts the tickets held by prepared TLS
-//! configurations. A gate (`anvil_fixtures::gate`) holds the request until
-//! the test has deleted the workspace.
+//! (TLS over TCP, QUIC) and returns no gRPC channel, while another
+//! workspace's execution in flight across the same delete keeps all of them.
+//! Prepared TLS configurations are never shared between workspaces, and a
+//! connection resumes only its own workspace's sessions. Outside the
+//! early-data opt-in no session ticket is kept at all
+//! ([`Engine::session_tickets_held`] stays 0). A gRPC channel in use at a
+//! lock is not kept either. A gate (`anvil_fixtures::gate`) holds the request
+//! until the test has deleted the workspace.
 
 use anvil_domain::Id;
 use anvil_domain::outcome::ProtocolStatus;
@@ -157,8 +155,7 @@ fn resumed(o: &ExecutionOutput) -> Option<bool> {
 }
 
 /// Without the early-data opt-in and with connection reuse off: every
-/// request opens a new TLS connection, a full handshake whose tickets the
-/// prepared TLS configuration's session store keeps.
+/// request opens a new TLS connection, a full handshake.
 fn fresh_connection(c: ExecutionContext) -> ExecutionContext {
     with(c, SettingsOverrides { keepalive: Some(false), ..Default::default() })
 }
@@ -237,7 +234,7 @@ async fn session_tickets_received_after_the_workspace_delete_are_not_kept() {
             assert_eq!(status(&o), Some(200), "{version:?} {workspace}: {failures:?}");
             let ed = o.record.attempts.last().and_then(|a| a.early_data.clone()).expect("early-data evidence");
             assert!(ed.tickets_received >= 1, "{version:?} {workspace}: the fixture issues tickets: {ed:?}");
-            assert_eq!(e.early_data_tickets_held() >= 1, kept, "{version:?} {workspace}: tickets kept after workspace-a's delete");
+            assert_eq!(e.session_tickets_held() >= 1, kept, "{version:?} {workspace}: tickets kept after workspace-a's delete");
         }
     }
 }
@@ -290,59 +287,56 @@ async fn a_grpc_channel_in_use_at_its_workspace_delete_or_at_a_lock_is_not_kept(
     assert_eq!(channels.len(), 1);
 }
 
+/// Without the early-data opt-in, over TLS over TCP and over QUIC, against
+/// servers that issue session tickets: a connection never resumes (rustls
+/// resumes a ticket only with the verifier instance that obtained it, and
+/// each of these connections has its own), so none of the tickets it
+/// receives is kept, not even by the prepared TLS configuration.
 #[tokio::test]
-async fn the_lock_check_counts_the_session_tickets_of_prepared_tls_configurations() {
+async fn https_requests_outside_the_early_data_opt_in_keep_no_session_ticket() {
     init();
-    let fx = early_data::serve_tls("127.0.0.1:0", server_tls(), EarlyMode::Accept).await.unwrap();
-    let e = Engine::new();
-    // Without the early-data opt-in: no 0-RTT ticket cache, but the prepared
-    // TLS configuration's session store keeps the tickets the server sends.
-    let o = run(&e, &lab_trust(get(&fx.url("/echo")))).await;
-    assert_eq!(status(&o), Some(200));
-    assert!(o.record.attempts[0].early_data.is_none());
-    assert_eq!(e.early_data_tickets_held(), 0);
-    assert_eq!(e.prepared_tls_len(), 1);
-    assert!(e.session_tickets_held() >= 1, "the prepared TLS configuration's tickets are not counted");
-    e.clear_sensitive_state();
-    assert_eq!(e.session_tickets_held(), 0, "the lock left tickets behind");
+    let tcp = early_data::serve_tls("127.0.0.1:0", server_tls(), EarlyMode::Accept).await.unwrap();
+    let quic = early_data::serve_h3("127.0.0.1:0", server_tls(), EarlyMode::Accept).await.unwrap();
+    for (to, version) in [(tcp.url("/echo"), HttpVersionPolicy::Http1Only), (quic.url("/echo"), HttpVersionPolicy::Http3Only)] {
+        let e = Engine::new();
+        let c = fresh_connection(lab_trust(with_version(get(&to), version)));
+        for _ in 0..2 {
+            let o = run(&e, &c).await;
+            assert_eq!(status(&o), Some(200), "{version:?}");
+            assert!(o.record.attempts[0].early_data.is_none(), "{version:?}");
+            assert_ne!(resumed(&o), Some(true), "{version:?}: a connection outside the early-data opt-in resumed a session");
+        }
+        assert_eq!(e.prepared_tls_len(), 1, "{version:?}");
+        assert_eq!(e.session_tickets_held(), 0, "{version:?}: session tickets kept outside the early-data opt-in");
+    }
 }
 
 /// The same TLS settings in two workspaces (as every workspace without a TLS
 /// profile shares the default ones). Outside the early-data opt-in, each
-/// workspace's connections keep the tickets they receive in its own prepared
-/// TLS configuration, which its delete drops; they never resume them (rustls
-/// resumes a ticket only with the verifier instance that obtained it, and
-/// each of these connections has its own). Under the opt-in, a connection
-/// resumes its own workspace's sessions only.
+/// workspace has its own prepared TLS configuration, which its delete drops,
+/// and keeps no session ticket. Under the opt-in, a connection resumes its
+/// own workspace's sessions only.
 #[tokio::test]
-async fn prepared_tls_sessions_are_not_shared_between_workspaces_and_are_dropped_by_the_delete() {
+async fn prepared_tls_configurations_are_per_workspace_and_dropped_by_the_delete() {
     init();
     let fx = early_data::serve_tls("127.0.0.1:0", server_tls(), EarlyMode::Disabled).await.unwrap();
     let e = Engine::new();
     let shared = fresh_connection(lab_trust(get(&fx.url("/echo"))));
     let (in_a, in_b) = (in_workspace(shared.clone(), "workspace-a"), in_workspace(shared, "workspace-b"));
 
-    for _ in 0..2 {
-        let o = run(&e, &in_a).await;
+    for c in [&in_a, &in_a, &in_b] {
+        let o = run(&e, c).await;
         assert_eq!(status(&o), Some(200));
         assert_eq!(resumed(&o), Some(false), "a connection outside the early-data opt-in resumed a session");
     }
-    let held_by_a = e.session_tickets_held();
-    assert!(held_by_a >= 1, "the fixture issues tickets");
-    let o = run(&e, &in_b).await;
-    assert_eq!(status(&o), Some(200));
-    assert_eq!(resumed(&o), Some(false), "workspace-b resumed a TLS session");
     assert_eq!(e.prepared_tls_len(), 2, "one prepared TLS configuration per workspace");
-    let held_by_b = e.session_tickets_held() - held_by_a;
-    assert!(held_by_b >= 1, "workspace-b's tickets are kept in its own prepared TLS configuration");
+    assert_eq!(e.session_tickets_held(), 0, "session tickets kept outside the early-data opt-in");
 
-    // Workspace-a's delete drops its prepared TLS configuration and exactly
-    // the tickets it held; workspace-b keeps its own.
+    // Workspace-a's delete drops its prepared TLS configuration; workspace-b
+    // keeps its own.
     e.clear_isolation("workspace-a");
     assert_eq!(e.prepared_tls_len(), 1, "workspace-a's prepared TLS configuration survived its delete");
-    assert_eq!(e.session_tickets_held(), held_by_b, "workspace-a's delete did not drop exactly its own tickets");
     e.clear_isolation("workspace-b");
-    assert_eq!(e.session_tickets_held(), 0, "a workspace delete left session tickets behind");
     assert_eq!(e.prepared_tls_len(), 0);
 
     // Under the early-data opt-in (the fixture's tickets allow resumption
@@ -372,10 +366,10 @@ async fn prepared_tls_sessions_are_not_shared_between_workspaces_and_are_dropped
 
 /// Held on a plain-HTTP first hop and redirected to the TLS fixture after the
 /// delete, without the early-data opt-in: the TLS configuration the execution
-/// prepares after the delete, and the tickets its connection receives, are
-/// its own only, unless its workspace is another.
+/// prepares after the delete is its own only, unless its workspace is
+/// another. Neither keeps a session ticket (none is kept outside the opt-in).
 #[tokio::test]
-async fn a_tls_configuration_prepared_by_an_execution_that_spans_its_workspace_delete_keeps_no_ticket() {
+async fn a_tls_configuration_prepared_by_an_execution_that_spans_its_workspace_delete_is_not_cached() {
     init();
     let tls = early_data::serve_tls("127.0.0.1:0", server_tls(), EarlyMode::Disabled).await.unwrap();
     let api = fx::serve("127.0.0.1:0", None).await.unwrap();
@@ -387,8 +381,7 @@ async fn a_tls_configuration_prepared_by_an_execution_that_spans_its_workspace_d
         let failures: Vec<_> = o.record.attempts.iter().map(|a| a.failure.as_ref().map(|f| f.kind)).collect();
         assert_eq!(status(&o), Some(200), "{workspace}: {failures:?}");
         assert!(o.record.attempts.last().and_then(|a| a.early_data.as_ref()).is_none(), "{workspace}");
-        assert_eq!(e.early_data_tickets_held(), 0, "{workspace}");
         assert_eq!(e.prepared_tls_len(), usize::from(kept), "{workspace}: TLS configurations cached after workspace-a's delete");
-        assert_eq!(e.session_tickets_held() >= 1, kept, "{workspace}: tickets kept after workspace-a's delete");
+        assert_eq!(e.session_tickets_held(), 0, "{workspace}: session tickets kept outside the early-data opt-in");
     }
 }

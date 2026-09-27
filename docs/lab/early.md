@@ -66,7 +66,7 @@ cache (the vault-lock path), so the trusted and untrusted passes behave alike.
 
 | ID | Stimulus | Anvil must conclude | Ground truth |
 |---|---|---|---|
-| CTRL-EARLY | GET over HTTP/3, no opt-in | success; no early-data evidence; no ticket cache | backend saw the GET without `Early-Data` |
+| CTRL-EARLY | GET over HTTP/3, no opt-in | success; no early-data evidence; no ticket kept | backend saw the GET without `Early-Data` |
 | EARLY-001 | GET (fetches tickets), then GET with the opt-in | first: `no_ticket`, 2 tickets, `max_early_data_size` 4294967295; second: resumed, 0-RTT offered and **accepted** (154 bytes), `early_data.accepted` (confirmed, `client_to_peer`, replay note) | backend saw the 0-RTT GET with **`Early-Data: 1`**, the ticket GET without |
 | EARLY-002 | GET, then PUT in 0-RTT (Anvil's policy lists PUT; the gateway's only GET) | attempt 0: 0-RTT accepted by QUIC, answered **425**; attempt 1 `too_early_retry` on the **same connection**, not early, **200**; `request.too_early` (confirmed, scope unknown, names "HTTP 200") | backend saw exactly one PUT (the retry) without `Early-Data`; gateway log `Rejected HTTP/3 0-RTT request: method PUT …` |
 | EARLY-003 | the same GET pair against `early-off` | tickets with `max_early_data_size` 0; second GET resumed, not offered (`ticket_without_early_data`), delivered after the handshake; `early_data.ticket_without_early_data` | backend saw both GETs, neither marked |
