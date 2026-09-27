@@ -5,12 +5,13 @@
 //! file or a linked local file is bound in the vault instead
 //! (`anvil_app::token_files`, `anvil_app::linked_files`), and only a bound
 //! path is read at send time. The user lists the bound token files and
-//! removes one that should no longer be read.
+//! removes one that should no longer be read, and sees beside each linked
+//! file whether it is bound.
 
 use crate::commands::{R, e, id};
 use crate::state::DesktopState;
 use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
-use anvil_app::linked_files::LinkedFileReferrer;
+use anvil_app::linked_files::{LinkedFileReferrer, LinkedFileStatus};
 use anvil_app::token_files::TokenFileBinding;
 use serde::Deserialize;
 use std::sync::{Arc, Weak};
@@ -158,6 +159,15 @@ pub fn token_files_list(st: State<'_, DesktopState>) -> R<Vec<TokenFileBinding>>
 pub fn token_file_remove(st: State<'_, DesktopState>, binding_id: String) -> R<()> {
     let binding = id(&binding_id)?;
     st.app()?.remove_token_file_binding(&binding).map_err(e)
+}
+
+/// The binding state of each linked file the saved request or dataset
+/// `referrer` names (see `App::linked_file_status`). Read-only: it binds
+/// nothing, and looks only at the metadata of files already bound for that
+/// referrer. Refused while locked.
+#[tauri::command]
+pub fn linked_file_status(st: State<'_, DesktopState>, referrer: LinkedFileReferrer) -> R<Vec<LinkedFileStatus>> {
+    st.app()?.linked_file_status(referrer).map_err(e)
 }
 
 fn title(purpose: FilePurpose) -> &'static str {

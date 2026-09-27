@@ -260,6 +260,19 @@ export interface TokenFileBinding {
 }
 /** The saved request or dataset a linked local file is chosen for. */
 export type LinkedFileReferrer = { kind: "request"; id: string } | { kind: "dataset"; id: string };
+/**
+ * Whether a linked local file a saved request or dataset names can be used on this device:
+ * chosen here for it and still a regular file at that path (`bound`), not chosen here
+ * (`unbound`, refused), or chosen but moved, deleted or replaced since (`invalid`).
+ */
+export type LinkedFileState = "bound" | "unbound" | "invalid";
+export interface LinkedFileStatus {
+  /** The path the request or dataset names. */
+  path: string;
+  state: LinkedFileState;
+  /** Why a bound file cannot be used (only for `invalid`). */
+  problem?: string;
+}
 export interface FileDialogOptions {
   /** Suggested name for a save dialog. */
   file_name?: string;
@@ -563,6 +576,8 @@ export const api = {
   /** Bind, in the native open dialog, the linked local file a saved request or dataset names; null when the user cancels. */
   chooseLinkedFile: async (referrer: LinkedFileReferrer): Promise<FileGrant | null> =>
     (await call<FileGrant[]>("file_choose", { purpose: "linked_file", options: { multiple: false }, referrer }))[0] ?? null,
+  /** Whether each linked local file a saved request or dataset names is chosen on this device; reads no file. */
+  linkedFileStatus: (referrer: LinkedFileReferrer) => call<LinkedFileStatus[]>("linked_file_status", { referrer }),
   /** JWT-SVID token files bound on this device, oldest first. */
   tokenFiles: () => call<TokenFileBinding[]>("token_files_list"),
   /** Stop reading a bound token file until it is chosen again. */

@@ -183,3 +183,17 @@ describe("import dialog cancellation", () => {
     await waitFor(() => expect(calls("import_cancel")).toEqual([{ attempt }]));
   });
 });
+
+describe("import dialog: linked local files", () => {
+  it("points to where each linked file is chosen on this device", async () => {
+    backend({ import_preview: () => ({ ...report, linked_files: ["request 'Upload': /home/me/upload.bin"] }) });
+    await previewed();
+    expect(screen.getByTestId("import-linked-files").textContent).toContain("Choose file…");
+  });
+
+  it("says nothing when the bundle names no linked file", async () => {
+    backend({ import_preview: () => report });
+    await previewed();
+    expect(screen.queryByTestId("import-linked-files")).toBeNull();
+  });
+});

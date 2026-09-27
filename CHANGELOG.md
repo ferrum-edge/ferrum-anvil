@@ -18,6 +18,18 @@
   `--json` prints it as JSON; `--now` runs a pass first. The desktop exposes
   the same record through the `storage_cleanup_last` command
   (`api.storageCleanupLast()`); it has no screen for it yet.
+- Desktop: a linked local file that a saved request or dataset names (for
+  example one from an imported bundle) can now be chosen on this device. The
+  request's binary body or multipart part, its gRPC schema, and a load
+  plan's dataset show the file with its binding state: chosen on this
+  device, not chosen, or chosen but missing or changed since. **Choose
+  file…** or **Rebind…** opens the native dialog for that request or
+  dataset. The backend still binds only the exact file the reference names
+  (canonical path, regular file, and that request or dataset), and the new
+  read-only `linked_file_status` command reads no file and never looks at a
+  path that was not chosen. The import preview points to where linked files
+  are chosen, and the refusal of an unchosen linked file names Choose file…
+  instead of saying the chooser is not available.
 
 ### Changed
 

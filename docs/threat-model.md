@@ -156,8 +156,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   any other device, and on this one until that exact file is bound in the
   native dialog (`file_choose`, purpose `linked_file`) for the request or
   dataset that names it, that request, gRPC schema or dataset is refused
-  before anything is read or sent. The desktop does not offer a control that
-  opens this dialog yet, so a linked file cannot be bound today.
+  before anything is read or sent. The desktop offers **Choose file…** (or
+  **Rebind…**) beside each linked file and shows whether it is bound; the
+  backend binds only the exact file the request or dataset names, and its
+  status query (`linked_file_status`) reads no file and never looks at a
+  path that was not chosen.
   - A binding (`anvil_app::linked_files`) covers one request or dataset and
     one path, so a later import naming the same path cannot use it, and a
     bundle import drops the bindings of every request and dataset it

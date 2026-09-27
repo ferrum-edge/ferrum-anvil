@@ -378,6 +378,8 @@ Device-bound items (keychain entries, provider sessions, linked local files)
 are reported as needing rebinding, and the preview lists each linked local
 file with the request or dataset that names it. A bundle import drops this
 device's linked-file bindings for every request and dataset it overwrites.
+In the desktop, choose each linked file again with **Choose file…** beside
+the request's body or gRPC schema, or beside the dataset in a load plan.
 An OAuth 2 profile imported from a bundle never keeps the token-cache id the
 bundle gives it, so it caches its token under the workspace, folder or
 request that defines it, never alongside a profile stored here that names
