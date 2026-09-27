@@ -130,6 +130,8 @@ export interface EffectiveRequest {
   method: string;
   url: string;
   destination: string;
+  /** The Host (HTTP/1.1) or :authority (HTTP/2, HTTP/3) sent, which request signatures cover. */
+  authority: string;
   headers: HeaderEntry[];
   body_bytes: number;
   body_preview: string;
