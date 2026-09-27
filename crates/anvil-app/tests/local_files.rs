@@ -27,7 +27,8 @@ use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
@@ -867,6 +868,77 @@ fn a_locked_app_relocates_nothing() {
 
     app.relocate_linked_file(request(&r), &old, &new).unwrap();
     assert_eq!(named(&app, request(&r)), vec![(path_str(&new), LinkedFileState::Bound)]);
+}
+
+#[test]
+fn moving_a_request_never_undoes_a_relocation_that_lands_meanwhile() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let paths = [canonical(&canary_file(files.path(), "a.bin")), canonical(&canary_file(files.path(), "b.bin"))];
+    let app = Arc::new(new_app(root.path(), "move"));
+    let ws = app.create_workspace("W").unwrap();
+    let one = app.create_folder(&ws.meta.id, None, "one").unwrap();
+    let two = app.create_folder(&ws.meta.id, None, "two").unwrap();
+    let folders = [Some(one.meta.id), Some(two.meta.id), None];
+    let spec = with_body(Body::Binary { attachment: linked(&paths[0]), content_type: None });
+    let r = app.create_request(&ws.meta.id, None, "upload", spec).unwrap();
+    app.bind_linked_file(request(&r), &paths[0]).unwrap();
+
+    // One thread keeps moving the request while this one repoints its linked
+    // file back and forth. A move that wrote back the request as it read it
+    // before a relocation would undo that relocation: the request would name
+    // the old path again, unbound, and the next relocation would be refused
+    // because the request no longer names the path it repoints.
+    const RELOCATIONS: usize = 60;
+    let start = Arc::new(Barrier::new(2));
+    let done = Arc::new(AtomicBool::new(false));
+    let mover = {
+        let (app, start, done, id) = (app.clone(), start.clone(), done.clone(), r.meta.id);
+        std::thread::spawn(move || {
+            start.wait();
+            let mut moves = 0;
+            loop {
+                app.move_request(&id, folders[moves % folders.len()], moves as f64).unwrap();
+                moves += 1;
+                if done.load(Ordering::SeqCst) {
+                    return moves;
+                }
+            }
+        })
+    };
+    start.wait();
+    let mut relocated = Ok(());
+    for i in 0..RELOCATIONS {
+        let (from, to) = (&paths[i % 2], &paths[(i + 1) % 2]);
+        if let Err(e) = app.relocate_linked_file(request(&r), &path_str(from), to) {
+            relocated = Err(format!("relocation {i}: {e}"));
+            break;
+        }
+    }
+    done.store(true, Ordering::SeqCst);
+    let moves = mover.join().unwrap();
+    relocated.unwrap();
+
+    // The request names the file the last relocation picked, bound for it,
+    // its latest revision is that relocation's, and it sits where the last
+    // move put it.
+    let last = &paths[RELOCATIONS % 2];
+    let saved = app.request(&r.meta.id).unwrap();
+    assert_eq!(saved.spec, with_body(Body::Binary { attachment: linked(last), content_type: None }));
+    assert_eq!(named(&app, request(&r)), vec![(path_str(last), LinkedFileState::Bound)]);
+    assert_eq!(bindings_of(&app, request(&r)), vec![path_str(last)]);
+    assert_eq!(app.revision(&saved.revision_id.unwrap()).unwrap().spec, saved.spec);
+    assert_eq!((saved.folder_id, saved.sort_key), (folders[(moves - 1) % folders.len()], (moves - 1) as f64));
+
+    // A move to a folder of another workspace, or one that does not exist,
+    // or of a request that does not exist, changes nothing.
+    let other = app.create_workspace("X").unwrap();
+    let elsewhere = app.create_folder(&other.meta.id, None, "elsewhere").unwrap();
+    let err = refused(app.move_request(&r.meta.id, Some(elsewhere.meta.id), 0.5), "another workspace");
+    assert!(err.contains("another workspace"), "{err}");
+    assert!(matches!(app.move_request(&r.meta.id, Some(Id::new()), 0.5), Err(AppError::NotFound(_))));
+    assert!(matches!(app.move_request(&Id::new(), None, 0.5), Err(AppError::NotFound(_))));
+    assert_eq!(app.request(&r.meta.id).unwrap(), saved);
 }
 
 #[test]
