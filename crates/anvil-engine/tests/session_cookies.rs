@@ -1,24 +1,29 @@
 //! The workspace cookie jar applies to the HTTP-based session handshakes
-//! (SSE, WebSocket) as to HTTP requests: stored cookies are sent under the
-//! same matching rules and workspace isolation, the handshake's `Set-Cookie`
-//! is kept, the cookies setting turns both off, a cookie the request sends
-//! itself wins over a stored one of the same name, a `wss` handshake stands
-//! for `https` (so `Secure` applies), and the cookies of a session that spans
-//! a lock or the deletion of its workspace are not kept. Fixture ground truth
-//! shows what the server received.
+//! (SSE, WebSocket) and to gRPC calls as to HTTP requests: stored cookies are
+//! sent under the same matching rules and workspace isolation, the
+//! handshake's (or the call's response headers') `Set-Cookie` is kept, the
+//! cookies setting turns both off, a cookie the request sends itself wins
+//! over a stored one of the same name, a `wss` handshake or `grpcs` call
+//! stands for `https` (so `Secure` applies), and the cookies of a session
+//! that spans a lock or the deletion of its workspace are not kept. Fixture
+//! ground truth shows what the server received.
 
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::events::ExecutionEvent;
 use anvil_domain::execution::Direction;
-use anvil_domain::request::{KeyValue, Protocol, RequestSpec, SseSpec, WsBootstrap, WsMessage, WsSpec};
+use anvil_domain::request::*;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{DnsOverride, SettingsOverrides};
 use anvil_domain::tls::{TlsMinVersion, TlsProfile};
+use anvil_engine::context::MemoryAttachments;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
+use anvil_fixtures::grpc::ECHO_PROTO;
 use anvil_fixtures::http as fx;
 use anvil_fixtures::{GroundTruth, LabPki, TlsServerOptions, gate};
 use anvil_transport::recorder::{EventCtx, EventFn};
+use bytes::Bytes;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -109,6 +114,34 @@ fn ws(url: &str) -> ExecutionContext {
     ExecutionContext::standalone(s)
 }
 
+/// The gRPC echo call's path on the fixture.
+const GRPC_PATH: &str = "/anvil.lab.v1.Echo/Unary";
+
+/// A unary gRPC `Echo` call (the `.proto` as its schema, so nothing but the
+/// call is sent). With `set_cookie`, the fixture answers with that value as
+/// its `Set-Cookie` response header.
+fn grpc(url: &str, set_cookie: Option<&str>) -> ExecutionContext {
+    let sha = anvil_transport::certs::sha256_hex(ECHO_PROTO.as_bytes());
+    let file =
+        AttachmentRef::Stored { sha256: sha.clone(), size: ECHO_PROTO.len() as u64, file_name: "echo.proto".into(), media_type: None };
+    let mut s = RequestSpec::http("POST", url);
+    s.protocol = Protocol::Grpc;
+    s.grpc = Some(GrpcSpec {
+        service: "anvil.lab.v1.Echo".into(),
+        method: "Unary".into(),
+        mode: GrpcMode::Unary,
+        schema: GrpcSchemaSource::ProtoFiles { files: vec![file] },
+        messages: vec![r#"{"message":"hi"}"#.into()],
+        metadata: set_cookie.map(|c| KeyValue::new("x-fixture-set-cookie", c)).into_iter().collect(),
+        deadline_ms: None,
+        plaintext: false,
+        wire: GrpcWire::Grpc,
+    });
+    let mut c = ExecutionContext::standalone(s);
+    c.attachments = Arc::new(MemoryAttachments(HashMap::from([(sha, Bytes::from_static(ECHO_PROTO.as_bytes()))])));
+    c
+}
+
 fn cookies_off(mut c: ExecutionContext) -> ExecutionContext {
     c.settings_layers.push(("run".into(), SettingsOverrides { cookies: Some(false), ..Default::default() }));
     c
@@ -119,8 +152,11 @@ fn in_workspace(mut c: ExecutionContext, isolation: &str) -> ExecutionContext {
     c
 }
 
+/// The engine's future is boxed: a test that awaits several gRPC calls inline
+/// otherwise holds them all in its own future, which overflows the test
+/// thread's stack in a debug build.
 async fn run(e: &Engine, c: &ExecutionContext) -> ExecutionOutput {
-    e.execute(c, EventCtx::none(), CancellationToken::new()).await
+    Box::pin(e.execute(c, EventCtx::none(), CancellationToken::new())).await
 }
 
 /// Run `c` and check that it reached the server and was answered.
@@ -379,4 +415,134 @@ async fn a_secure_cookie_from_a_wss_handshake_is_kept_for_https_and_not_sent_ove
     assert_eq!(cookie_on(&plain, "/ws"), None, "a Secure cookie was sent over ws://");
     ok(&e, &on_test_host(get(&format!("http://{TEST_HOST}:{plain_port}/echo")))).await;
     assert_eq!(cookie_on(&plain, "/echo"), None, "a Secure cookie was sent over http://");
+}
+
+#[tokio::test]
+async fn an_http_login_cookie_is_sent_on_a_grpc_call() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    // An HttpOnly cookie, set over http: a grpc:// call is its HTTP
+    // counterpart in the jar and carries it in its metadata.
+    login(&e, &f).await;
+    ok(&e, &grpc(&format!("grpc://{}", f.addr), None)).await;
+    assert_eq!(cookie_on(&f, GRPC_PATH).as_deref(), Some("sid=audit-only-session"));
+    ok(&e, &grpc(&format!("http://{}", f.addr), None)).await;
+    assert_eq!(cookie_on(&f, GRPC_PATH).as_deref(), Some("sid=audit-only-session"));
+}
+
+#[tokio::test]
+async fn set_cookie_on_a_grpc_response_is_kept_in_the_jar() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let o = ok(&e, &grpc(&format!("grpc://{}", f.addr), Some("grpc_sid=from-grpc; Path=/"))).await;
+    assert!(o.record.response.as_ref().unwrap().header_values("set-cookie")[0].starts_with("grpc_sid="));
+    ok(&e, &get(&f.url("/echo"))).await;
+    assert_eq!(cookie_on(&f, "/echo").as_deref(), Some("grpc_sid=from-grpc"));
+    // And sent on the next call.
+    ok(&e, &grpc(&format!("grpc://{}", f.addr), None)).await;
+    assert_eq!(cookie_on(&f, GRPC_PATH).as_deref(), Some("grpc_sid=from-grpc"));
+}
+
+#[tokio::test]
+async fn with_cookies_off_a_grpc_call_neither_sends_nor_keeps_cookies() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    login(&e, &f).await;
+    ok(&e, &cookies_off(grpc(&format!("grpc://{}", f.addr), None))).await;
+    assert_eq!(cookie_on(&f, GRPC_PATH), None);
+
+    let e = Engine::new();
+    ok(&e, &cookies_off(grpc(&format!("grpc://{}", f.addr), Some("grpc_sid=from-grpc; Path=/")))).await;
+    ok(&e, &get(&f.url("/echo"))).await;
+    assert_eq!(cookie_on(&f, "/echo"), None, "a gRPC call with cookies off stored its Set-Cookie");
+}
+
+#[tokio::test]
+async fn grpc_cookies_stay_in_their_workspace_and_a_request_cookie_wins() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    ok(&e, &in_workspace(get(&f.url("/set-cookie?name=sid&value=audit-only-session")), "workspace-a")).await;
+    ok(&e, &in_workspace(get(&f.url("/set-cookie?name=theme&value=dark")), "workspace-a")).await;
+    ok(&e, &in_workspace(grpc(&format!("grpc://{}", f.addr), None), "workspace-b")).await;
+    assert_eq!(cookie_on(&f, GRPC_PATH), None, "a cookie of workspace a was sent for workspace b");
+    ok(&e, &in_workspace(grpc(&format!("grpc://{}", f.addr), Some("grpc_sid=from-b; Path=/")), "workspace-b")).await;
+    ok(&e, &in_workspace(get(&f.url("/echo")), "workspace-a")).await;
+    let mut sent: Vec<String> = cookie_on(&f, "/echo").unwrap_or_default().split("; ").map(str::to_string).collect();
+    sent.sort();
+    assert_eq!(sent, ["sid=audit-only-session", "theme=dark"]);
+    ok(&e, &in_workspace(get(&f.url("/echo")), "workspace-b")).await;
+    assert_eq!(cookie_on(&f, "/echo").as_deref(), Some("grpc_sid=from-b"));
+
+    // A configured Cookie header: sid once (its own value), theme from the jar.
+    let mut c = in_workspace(grpc(&format!("grpc://{}", f.addr), None), "workspace-a");
+    c.spec.headers.push(KeyValue::new("Cookie", "sid=configured"));
+    ok(&e, &c).await;
+    assert_eq!(cookie_on(&f, GRPC_PATH).as_deref(), Some("sid=configured; theme=dark"));
+}
+
+#[tokio::test]
+async fn a_lock_or_workspace_delete_during_a_grpc_call_leaves_no_cookie() {
+    init();
+    let api = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Arc::new(Engine::new());
+    ok(&e, &in_workspace(get(&api.url("/set-cookie?name=other&value=kept")), "workspace-b")).await;
+    // The workspace delete first: the lock after it clears every jar.
+    for lock in [false, true] {
+        let g = gate::tcp(api.addr, 0).await.unwrap();
+        let c = in_workspace(grpc(&format!("grpc://{}", g.addr.unwrap()), Some("grpc_sid=in-flight; Path=/")), "workspace-a");
+        let task = {
+            let (e, c) = (e.clone(), c.clone());
+            tokio::spawn(async move { run(&e, &c).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), g.held()).await.expect("the call never connected");
+        if lock {
+            e.clear_sensitive_state();
+        } else {
+            e.clear_isolation("workspace-a");
+        }
+        g.release();
+        let o = task.await.unwrap();
+        // Not canceled: the call was answered, with its Set-Cookie.
+        let response = o.record.response.as_ref().expect("the gRPC call was answered");
+        assert!(response.header_values("set-cookie")[0].starts_with("grpc_sid="), "lock: {lock}");
+        assert!(!e.has_cookie_jar("workspace-a"), "lock: {lock}: a call answered after the clear recreated the jar");
+        ok(&e, &in_workspace(get(&api.url("/echo")), "workspace-a")).await;
+        assert_eq!(cookie_on(&api, "/echo"), None, "lock: {lock}: the Set-Cookie of a call that spanned the clear was kept");
+        if !lock {
+            // The delete left the other workspace's jar alone.
+            ok(&e, &in_workspace(get(&api.url("/echo")), "workspace-b")).await;
+            assert_eq!(cookie_on(&api, "/echo").as_deref(), Some("other=kept"));
+        }
+    }
+
+    // A call that starts after the delete keeps its cookie again.
+    ok(&e, &in_workspace(grpc(&format!("grpc://{}", api.addr), Some("grpc_sid=after-delete; Path=/")), "workspace-a")).await;
+    ok(&e, &in_workspace(get(&api.url("/echo")), "workspace-a")).await;
+    assert_eq!(cookie_on(&api, "/echo").as_deref(), Some("grpc_sid=after-delete"));
+}
+
+#[tokio::test]
+async fn a_secure_cookie_from_a_grpcs_call_is_kept_for_https_and_not_sent_over_grpc() {
+    init();
+    let tls = fx::serve("127.0.0.1:0", Some(server_tls())).await.unwrap();
+    let plain = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let (tls_port, plain_port) = (tls.addr.port(), plain.addr.port());
+
+    // A grpcs:// call stands for https:// in the jar: its Secure cookie is
+    // kept, and sent over https:// and on the next grpcs:// call.
+    let o = ok(&e, &on_test_host(grpc(&format!("grpcs://{TEST_HOST}:{tls_port}"), Some("sec=from-grpcs; Path=/; Secure")))).await;
+    assert!(o.record.response.as_ref().unwrap().header_values("set-cookie")[0].contains("Secure"));
+    ok(&e, &on_test_host(get(&format!("https://{TEST_HOST}:{tls_port}/echo")))).await;
+    assert_eq!(cookie_on(&tls, "/echo").as_deref(), Some("sec=from-grpcs"));
+    ok(&e, &on_test_host(grpc(&format!("grpcs://{TEST_HOST}:{tls_port}"), None))).await;
+    assert_eq!(cookie_on(&tls, GRPC_PATH).as_deref(), Some("sec=from-grpcs"));
+
+    // Not over grpc:// to the same host.
+    ok(&e, &on_test_host(grpc(&format!("grpc://{TEST_HOST}:{plain_port}"), None))).await;
+    assert_eq!(cookie_on(&plain, GRPC_PATH), None, "a Secure cookie was sent over grpc://");
 }

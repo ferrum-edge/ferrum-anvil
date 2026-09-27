@@ -496,7 +496,7 @@ pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<Strin
         }
         if http::HeaderValue::from_str(v).is_err() {
             return Some(format!(
-                "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break, control or non-ASCII character, for example pasted with the credential)"
+                "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break or control character, for example pasted with the credential)"
             ));
         }
     }
@@ -505,10 +505,10 @@ pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<Strin
 
 /// The `Host` (HTTP/1.1) or `:authority` (HTTP/2, HTTP/3) a request is sent
 /// with: the first explicit `Host` header wins over the target URL's
-/// authority, as the HTTP send path (h1/h2/h3) and HTTP/1.1 sessions build
-/// the request. Request signatures cover this value, so the send path,
-/// sessions and the preview all use it. WebSocket over h2/h3, SSE over h2
-/// and gRPC still send the URL's authority (issue #158).
+/// authority, as the HTTP send path and the HTTP-based sessions (WebSocket,
+/// SSE and gRPC, over every HTTP version) build the request. Request
+/// signatures cover this value, so the send path, sessions and the preview
+/// all use it.
 pub(crate) fn request_authority(headers: &[(String, String)], target: &Target) -> String {
     headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")).map(|(_, v)| v.clone()).unwrap_or_else(|| target.authority.clone())
 }

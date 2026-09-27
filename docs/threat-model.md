@@ -83,12 +83,12 @@ against it).
   hop's target, and a hop whose route or TLS settings cannot be prepared is
   not followed.
 
-  SSE and WebSocket handshakes use the same jar, with the same rules and
-  workspace isolation (a `ws://` URL counts as `http://`, `wss://` as
-  `https://`). A handshake's `Set-Cookie` is stored when the session ends,
-  and not at all when the profile was locked or the session's workspace
-  deleted since the session started (the same fences as for HTTP
-  responses, below).
+  SSE and WebSocket handshakes and gRPC calls use the same jar, with the
+  same rules and workspace isolation (a `ws://` or `grpc://` URL counts as
+  `http://`, `wss://` or `grpcs://` as `https://`). A handshake's (or a gRPC
+  call's) `Set-Cookie` is stored when the session ends, and not at all when
+  the profile was locked or the session's workspace deleted since the
+  session started (the same fences as for HTTP responses, below).
 - **Redirects and NO_PROXY:** the proxy route is decided for each hop's host
   and port. A redirect from a NO_PROXY host to any other host goes through
   the proxy, and a redirect to a NO_PROXY host goes direct, so a server can
