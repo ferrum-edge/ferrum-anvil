@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- The effective-request preview now resolves the `Host` / `:authority` the
+  way Send does: an explicit `Host` header wins over the URL's authority, and
+  an HMAC or DPoP signature shown in the preview covers that value. Before,
+  the preview signed for the URL's authority, so for a request with an
+  explicit `Host` it did not match what was sent. The preview also shows the
+  `Host` / `:authority` that will be sent (including a `Host` an auth
+  profile sets) and the non-secret facts of the generated credential (for
+  example the DPoP proof's `htu`), and when the auth profile cannot be
+  applied (for example an HMAC request with a manual `Content-Digest`
+  header, also beside a JWT-SVID the preview does not fetch) it says the
+  request would not be sent, instead of showing it without its credentials.
 - A file you attach (a request body or multipart file, a gRPC schema file, a
   dataset) can no longer be deleted before the request or dataset that uses
   it is saved. Before, a release in between, such as a reimport releasing

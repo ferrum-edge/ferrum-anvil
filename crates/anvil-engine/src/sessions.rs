@@ -17,7 +17,7 @@ use crate::record::{self, Assembly};
 use crate::redact::Redactor;
 use crate::vars::Resolver;
 use crate::{Engine, ExecutionOutput, SensitiveEpoch};
-use anvil_auth::{ResolvedAuth, SignableRequest};
+use anvil_auth::ResolvedAuth;
 use anvil_diagnostics::{Draft, FerrumTrust};
 use anvil_domain::Id;
 use anvil_domain::diagnostics::{Confidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
@@ -187,19 +187,7 @@ async fn apply_auth(
     if matches!(prep.auth, ResolvedAuth::None) {
         return Ok((headers, target.query.clone(), vec![]));
     }
-    let signable = SignableRequest {
-        method: method.to_string(),
-        scheme: target.scheme.clone(),
-        authority: headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case("host"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| target.authority.clone()),
-        raw_path: target.path.clone(),
-        raw_query: target.query.clone(),
-        headers: headers.clone(),
-        body: body.to_vec(),
-    };
+    let signable = http_exec::signable_request(method, target, &headers, body);
     let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
         .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
     http_exec::check_auth_headers(&applied)?;
