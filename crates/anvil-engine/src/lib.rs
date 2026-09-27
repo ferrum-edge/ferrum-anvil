@@ -34,6 +34,7 @@ use anvil_transport::tls::{PreparedTls, TlsSettings};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
@@ -76,7 +77,12 @@ pub struct Engine {
     /// Advanced by [`Engine::clear_sensitive_state`] before it clears
     /// anything (see [`SensitiveEpoch`]).
     epoch: Arc<AtomicU64>,
+    /// Tells this engine's [`ContextEpoch`]s from other engines' ones.
+    id: u64,
 }
+
+/// Source of `Engine::id`.
+static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// The workspace cookie jars (one per isolation), with the engine's epoch
 /// that fences what is stored in them. Cloned into an interactive session's
@@ -149,8 +155,9 @@ impl CookieJars {
     }
 }
 
-/// The engine's sensitive-state epoch when an execution started, with the
-/// transports' cache generations taken at the same point. A lock
+/// The engine's sensitive-state epoch when an execution started (or when its
+/// context was built, see [`ContextEpoch`]), with the transports' cache
+/// generations taken at the same point. A lock
 /// ([`Engine::clear_sensitive_state`]) starts a new epoch, and what an
 /// execution of an earlier epoch prepares or receives afterwards is not
 /// kept: its cookies, its prepared TLS material (client identity keys), its
@@ -159,9 +166,10 @@ impl CookieJars {
 /// starts a new generation of that workspace's cookie jar and prepared TLS
 /// configurations (held by an execution's epoch, see
 /// [`Engine::execution_epoch`]) and of the transports' caches for that
-/// workspace, and an execution in it that started before the delete keeps
-/// none of its cookies, prepared TLS material, connections, gRPC channels or
-/// session tickets. Other workspaces' executions are not affected.
+/// workspace, and an execution in it that started (or whose context was
+/// built) before the delete keeps none of its cookies, prepared TLS
+/// material, connections, gRPC channels or session tickets. Other
+/// workspaces' executions are not affected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SensitiveEpoch {
     epoch: u64,
@@ -172,6 +180,21 @@ pub struct SensitiveEpoch {
     /// prepared TLS configurations); `None` for an epoch taken for no
     /// workspace, which keeps no cookies and caches no TLS material.
     jar: Option<u64>,
+}
+
+/// An execution epoch taken when an execution context was built
+/// ([`Engine::context_epoch`]), carried by [`ExecutionContext::epoch`]. An
+/// execution of that context on the engine that took it, in the workspace it
+/// was taken for, starts with it: a lock or a delete of the workspace that
+/// lands after the context was built, even before the execution starts,
+/// fences that execution as one in flight. It holds nothing else: an
+/// execution on another engine (a load run's), or of a context whose
+/// isolation was changed since, takes its epoch when it starts.
+#[derive(Clone, Debug)]
+pub struct ContextEpoch {
+    engine: u64,
+    isolation: String,
+    epoch: SensitiveEpoch,
 }
 
 impl SensitiveEpoch {
@@ -201,6 +224,7 @@ impl Engine {
             tls: Mutex::new(HashMap::new()),
             cookies: CookieJars { jars: Arc::default(), epoch: epoch.clone() },
             epoch,
+            id: NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -215,6 +239,26 @@ impl Engine {
     /// starts.
     pub fn execution_epoch(&self, isolation: &str) -> SensitiveEpoch {
         self.snapshot(Some(isolation), || {})
+    }
+
+    /// The execution epoch of `isolation`, taken when an execution context
+    /// for that workspace is built, before anything is read for it (see
+    /// [`ExecutionContext::epoch`]). A context built before a workspace
+    /// delete but executed after it keeps nothing for the deleted workspace;
+    /// one built after the delete (a workspace restored with the same id)
+    /// is not affected.
+    pub fn context_epoch(&self, isolation: &str) -> ContextEpoch {
+        ContextEpoch { engine: self.id, isolation: isolation.to_string(), epoch: self.execution_epoch(isolation) }
+    }
+
+    /// The epoch an execution of `ctx` starts with: the one taken when the
+    /// context was built, when this engine took it for the context's
+    /// workspace; otherwise the current one.
+    pub(crate) fn epoch_for(&self, ctx: &ExecutionContext) -> SensitiveEpoch {
+        match &ctx.epoch {
+            Some(c) if c.engine == self.id && c.isolation == ctx.isolation => c.epoch,
+            _ => self.execution_epoch(&ctx.isolation),
+        }
     }
 
     /// The epoch, `isolation`'s jar generation and the transports' and gRPC
@@ -255,14 +299,39 @@ impl Engine {
         self.epoch.load(Ordering::SeqCst) == epoch.epoch
     }
 
-    /// Execute a request of any supported protocol.
+    /// Execute a request of any supported protocol. Each protocol's execution
+    /// runs boxed, so the future a caller awaits stays small: a caller that
+    /// awaits several executions inline (a gRPC call's is large) does not
+    /// hold their state on its own stack.
     pub async fn execute(&self, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
         match ctx.spec.protocol {
-            Protocol::Http => http_exec::execute(self, ctx, events, cancel).await,
+            Protocol::Http => self.boxed_http(ctx, events, cancel).await,
             Protocol::WebSocket | Protocol::Grpc | Protocol::Sse | Protocol::Tcp | Protocol::Udp => {
-                sessions::execute(self, ctx, events, cancel).await
+                self.boxed_session(ctx, events, cancel).await
             }
         }
+    }
+
+    /// An HTTP execution, boxed in a frame of its own: [`Engine::execute`]'s
+    /// frame never holds it, nor a session's beside it.
+    fn boxed_http<'a>(
+        &'a self,
+        ctx: &'a ExecutionContext,
+        events: EventCtx,
+        cancel: CancellationToken,
+    ) -> Pin<Box<impl Future<Output = ExecutionOutput> + 'a>> {
+        Box::pin(http_exec::execute(self, ctx, events, cancel))
+    }
+
+    /// A session execution (WebSocket, gRPC, SSE, TCP, UDP), boxed as
+    /// [`Engine::boxed_http`] is.
+    fn boxed_session<'a>(
+        &'a self,
+        ctx: &'a ExecutionContext,
+        events: EventCtx,
+        cancel: CancellationToken,
+    ) -> Pin<Box<impl Future<Output = ExecutionOutput> + 'a>> {
+        Box::pin(sessions::execute(self, ctx, events, cancel))
     }
 
     /// Validated TLS material, cached per isolation (workspace) by profile
@@ -415,5 +484,28 @@ mod tests {
         assert!(deleted);
         assert_eq!(epoch, e.execution_epoch("workspace-a"), "the epoch mixes generations from both sides of the delete");
         assert_eq!(epoch.jar, Some(1));
+    }
+
+    /// A context's epoch holds for the engine that took it and the workspace
+    /// it was taken for: after that workspace's delete, an execution of the
+    /// context still starts with the epoch from before it. Another engine, or
+    /// a context moved to another workspace, takes a current epoch, and a
+    /// context built after the delete starts after it.
+    #[tokio::test]
+    async fn a_context_epoch_holds_on_its_engine_for_its_workspace_only() {
+        let (e, other) = (Engine::new(), Engine::new());
+        let mut ctx = ExecutionContext::standalone(anvil_domain::request::RequestSpec::http("GET", "http://127.0.0.1:1/"));
+        ctx.isolation = "workspace-a".into();
+        ctx.epoch = Some(e.context_epoch("workspace-a"));
+        e.clear_isolation("workspace-a");
+        other.clear_isolation("workspace-a");
+        assert_eq!(e.epoch_for(&ctx).jar, Some(0), "the context's epoch is not the one taken before the delete");
+        assert_eq!(other.epoch_for(&ctx), other.execution_epoch("workspace-a"));
+        let mut moved = ctx.clone();
+        moved.isolation = "workspace-b".into();
+        assert_eq!(e.epoch_for(&moved), e.execution_epoch("workspace-b"));
+        ctx.epoch = Some(e.context_epoch("workspace-a"));
+        assert_eq!(e.epoch_for(&ctx), e.execution_epoch("workspace-a"), "a context built after the delete starts before it");
+        assert_eq!(e.epoch_for(&ctx).jar, Some(1));
     }
 }

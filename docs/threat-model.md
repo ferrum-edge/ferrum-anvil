@@ -274,24 +274,24 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   connections and session tickets, and for a request, session or gRPC call
   of that workspace that started before the delete, none of those it
   prepares or receives afterwards is kept, even on a later redirect or
-  retry, so they cannot reappear in a workspace restored with the same id,
-  except for an execution whose context was built before the delete (see
-  the residual gap below). An execution takes the lock epoch and all of
-  these generations between the same two points, with no lock or delete of
-  its workspace started in between, so a snapshot never takes a transport
-  or channel generation newer than its jar generation; a snapshot taken
-  during a delete is post-delete for cookies and TLS material and keeps no
-  connection, ticket or channel. The generations are taken when the
-  execution starts, not when the app builds its context from storage.
-  Residual gap: an execution whose context was built before a workspace
-  delete but that starts executing after it (for example `App::send`
-  builds the context off the runtime before it executes,
-  `crates/anvil-app/src/exec.rs`) takes a post-delete snapshot, so it can
-  keep cookies in the deleted workspace's jar, a cached prepared TLS
-  configuration (including a client identity's private key), pooled
-  connections and 0-RTT session tickets under that workspace until the
-  next lock, visible to a workspace restored with the same id (see
-  [ferrum-anvil#163](https://github.com/ferrum-edge/ferrum-anvil/issues/163)).
+  retry, so they cannot reappear in a workspace restored with the same id.
+  An execution takes the lock epoch and all of these generations between
+  the same two points, with no lock or delete of its workspace started in
+  between, so a snapshot never takes a transport or channel generation
+  newer than its jar generation; a snapshot taken during a delete is
+  post-delete for cookies and TLS material and keeps no connection, ticket
+  or channel. For a context the app builds from storage
+  (`App::build_context`), the snapshot is taken when the build starts,
+  before anything is read for the workspace, and carried by the context
+  (`ExecutionContext::epoch`, bound to the engine that took it and to the
+  context's workspace): an execution whose context was built before a
+  delete is fenced even when it starts executing after it (`App::send`, for
+  example, builds the context off the runtime first), and a delete that
+  lands before the snapshot leaves the build nothing to read. A workspace
+  restored with the same id is not refused: its contexts are built after
+  the delete. An execution of a context without a snapshot (a standalone
+  request) or on another engine than the one that took it (a load run's
+  engines) takes its snapshot when it starts.
   Pooled gRPC channels exist only on a load run's own engines
   (one per virtual-user slot); a call that began before a clear of its
   engine's channels does not return its connection to them. Neither the

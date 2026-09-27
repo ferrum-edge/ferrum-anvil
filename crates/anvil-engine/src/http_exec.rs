@@ -683,11 +683,11 @@ impl AttemptTarget {
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
     let started_at = Utc::now();
-    // Taken first: what this execution prepares or receives after a lock (a
-    // new epoch) is not kept: its prepared TLS material, its cookies, its
-    // connections and its session tickets. A workspace delete since then
-    // keeps its cookies out of the deleted workspace's jar too.
-    let epoch = engine.execution_epoch(&ctx.isolation);
+    // Taken first, or when the context was built (`ExecutionContext::epoch`):
+    // what this execution prepares or receives after a lock (a new epoch) or
+    // a delete of its workspace is not kept: its prepared TLS material, its
+    // cookies, its connections and its session tickets.
+    let epoch = engine.epoch_for(ctx);
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
     // Canceling the execution abandons a Workload API call in flight.

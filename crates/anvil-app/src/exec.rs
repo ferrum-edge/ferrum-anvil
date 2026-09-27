@@ -189,6 +189,12 @@ impl App {
     /// profile or its proxy's is refused. The context is tagged with the
     /// sealed root (`ExecutionContext::scope`) so a run or load chain keeps
     /// values extracted outside it, and its dataset, away from it.
+    ///
+    /// The context carries the engine's execution epoch for the workspace,
+    /// taken when the build starts (`ExecutionContext::epoch`): an execution
+    /// of it keeps nothing for the workspace (cookies, prepared TLS
+    /// configurations, pooled connections, session tickets) once the
+    /// workspace is deleted, even when it starts after the delete.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -196,6 +202,12 @@ impl App {
         draft: Option<RequestSpec>,
         opts: &SendOptions,
     ) -> Result<ExecutionContext> {
+        // Taken before anything is read for the workspace: a delete of it
+        // from here on (or a lock) fences an execution of this context, even
+        // one that starts after it, while a delete before this point leaves
+        // nothing to read. A workspace restored with the same id afterwards
+        // is not affected: its contexts are built after the delete.
+        let epoch = self.engine.context_epoch(&ws_id.to_string());
         if let Some(d) = &draft {
             refuse_linked_files(d)?;
         }
@@ -312,6 +324,7 @@ impl App {
             seed: opts.seed,
             redaction_names: settings_app.redaction_names.clone(),
             scope: sealed.map(|i| chain[i].meta.id),
+            epoch: Some(epoch),
         };
         if sealed.is_some() {
             refuse_device_identity(&ctx.effective_auth().1)?;

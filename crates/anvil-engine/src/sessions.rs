@@ -1469,10 +1469,10 @@ async fn run_prepared(
 /// Automation execution for WebSocket, gRPC, SSE, TCP/TLS and UDP/DTLS.
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
     let started_at = Utc::now();
-    // Taken first: TLS material prepared after a lock is not cached, and
-    // handshake cookies received after a lock or a workspace delete are not
-    // kept.
-    let epoch = engine.execution_epoch(&ctx.isolation);
+    // Taken first, or when the context was built (`ExecutionContext::epoch`):
+    // TLS material prepared after a lock or a workspace delete is not cached,
+    // and handshake cookies received after either are not kept.
+    let epoch = engine.epoch_for(ctx);
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // Canceling the execution abandons a Workload API call in flight.
     let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
@@ -1586,10 +1586,11 @@ impl Engine {
     /// idle auto-close do not apply to interactive sessions.
     pub async fn open_session(&self, ctx: ExecutionContext, events: EventCtx) -> SessionHandle {
         let started_at = Utc::now();
-        // Taken first: TLS material prepared after a lock is not cached, and
-        // handshake cookies received after a lock or a workspace delete are
-        // not kept.
-        let epoch = self.execution_epoch(&ctx.isolation);
+        // Taken first, or when the context was built
+        // (`ExecutionContext::epoch`): TLS material prepared after a lock or
+        // a workspace delete is not cached, and handshake cookies received
+        // after either are not kept.
+        let epoch = self.epoch_for(&ctx);
         let protocol = ctx.spec.protocol;
         let execution_id = events.execution_id;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
