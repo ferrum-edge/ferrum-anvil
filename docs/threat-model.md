@@ -261,8 +261,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   the session tickets they receive. The lock check counts the tickets of
   every session store: the 0-RTT ticket caches and those of the prepared
   TLS configurations. Prepared TLS configurations, and the session stores
-  they hold, are kept per workspace, so a connection in one workspace never
-  resumes a TLS session of another. A workspace delete
+  they hold, are kept per workspace (a connection outside the early-data
+  opt-in never resumes from them: rustls resumes a ticket only with the
+  verifier instance that obtained it, and each such connection has its
+  own), and a connection under the opt-in resumes only its own workspace's
+  tickets. A workspace delete
   (`Engine::clear_isolation`) fences that workspace's caches the same way,
   with a generation of its own, so other workspaces' work is not affected:
   it drops the workspace's cookies, prepared TLS configurations (with their

@@ -4,8 +4,9 @@
 //! (TLS over TCP, QUIC, whether in the 0-RTT ticket caches or in a prepared
 //! TLS configuration's session store) and returns no gRPC channel, while
 //! another workspace's execution in flight across the same delete keeps all
-//! of them. Prepared TLS configurations, and so the sessions a new
-//! connection resumes, are never shared between workspaces.
+//! of them. Prepared TLS configurations, and the session tickets they keep,
+//! are never shared between workspaces, and a connection resumes only its
+//! own workspace's sessions.
 //! A gRPC channel in use at a lock is not kept either, and the lock check
 //! ([`Engine::session_tickets_held`]) counts the tickets held by prepared TLS
 //! configurations. A gate (`anvil_fixtures::gate`) holds the request until
@@ -156,8 +157,8 @@ fn resumed(o: &ExecutionOutput) -> Option<bool> {
 }
 
 /// Without the early-data opt-in and with connection reuse off: every
-/// request opens a new TLS connection, which resumes a session from the
-/// prepared TLS configuration's session store when it holds one.
+/// request opens a new TLS connection, a full handshake whose tickets the
+/// prepared TLS configuration's session store keeps.
 fn fresh_connection(c: ExecutionContext) -> ExecutionContext {
     with(c, SettingsOverrides { keepalive: Some(false), ..Default::default() })
 }
@@ -307,8 +308,12 @@ async fn the_lock_check_counts_the_session_tickets_of_prepared_tls_configuration
 }
 
 /// The same TLS settings in two workspaces (as every workspace without a TLS
-/// profile shares the default ones): each workspace's connections resume
-/// only its own sessions, and its delete drops the tickets it held.
+/// profile shares the default ones). Outside the early-data opt-in, each
+/// workspace's connections keep the tickets they receive in its own prepared
+/// TLS configuration, which its delete drops; they never resume them (rustls
+/// resumes a ticket only with the verifier instance that obtained it, and
+/// each of these connections has its own). Under the opt-in, a connection
+/// resumes its own workspace's sessions only.
 #[tokio::test]
 async fn prepared_tls_sessions_are_not_shared_between_workspaces_and_are_dropped_by_the_delete() {
     init();
@@ -317,40 +322,52 @@ async fn prepared_tls_sessions_are_not_shared_between_workspaces_and_are_dropped
     let shared = fresh_connection(lab_trust(get(&fx.url("/echo"))));
     let (in_a, in_b) = (in_workspace(shared.clone(), "workspace-a"), in_workspace(shared, "workspace-b"));
 
-    let o = run(&e, &in_a).await;
-    assert_eq!(status(&o), Some(200));
-    assert_eq!(resumed(&o), Some(false));
-    assert!(e.session_tickets_held() >= 1, "the fixture issues tickets");
-    // Workspace-a's next connection resumes its session: resumption works here.
-    let o = run(&e, &in_a).await;
-    assert_eq!(status(&o), Some(200));
-    assert_eq!(resumed(&o), Some(true), "workspace-a did not resume its own session");
-
-    // Workspace-b's first connection to the same server does not resume
-    // workspace-a's session.
+    for _ in 0..2 {
+        let o = run(&e, &in_a).await;
+        assert_eq!(status(&o), Some(200));
+        assert_eq!(resumed(&o), Some(false), "a connection outside the early-data opt-in resumed a session");
+    }
+    let held_by_a = e.session_tickets_held();
+    assert!(held_by_a >= 1, "the fixture issues tickets");
     let o = run(&e, &in_b).await;
     assert_eq!(status(&o), Some(200));
-    assert_eq!(resumed(&o), Some(false), "workspace-b resumed workspace-a's TLS session");
+    assert_eq!(resumed(&o), Some(false), "workspace-b resumed a TLS session");
     assert_eq!(e.prepared_tls_len(), 2, "one prepared TLS configuration per workspace");
+    let held_by_b = e.session_tickets_held() - held_by_a;
+    assert!(held_by_b >= 1, "workspace-b's tickets are kept in its own prepared TLS configuration");
 
-    // Workspace-a's delete drops its prepared TLS configuration and the
-    // tickets it held; workspace-b keeps its own and resumes from them.
+    // Workspace-a's delete drops its prepared TLS configuration and exactly
+    // the tickets it held; workspace-b keeps its own.
     e.clear_isolation("workspace-a");
     assert_eq!(e.prepared_tls_len(), 1, "workspace-a's prepared TLS configuration survived its delete");
-    let o = run(&e, &in_b).await;
-    assert_eq!(resumed(&o), Some(true), "workspace-b's session was dropped by workspace-a's delete");
+    assert_eq!(e.session_tickets_held(), held_by_b, "workspace-a's delete did not drop exactly its own tickets");
     e.clear_isolation("workspace-b");
     assert_eq!(e.session_tickets_held(), 0, "a workspace delete left session tickets behind");
     assert_eq!(e.prepared_tls_len(), 0);
 
-    // After its delete, workspace-a starts over with a full handshake, and
-    // deleting it again leaves no ticket behind.
+    // Under the early-data opt-in (the fixture's tickets allow resumption
+    // only): workspace-a resumes its own session, workspace-b never resumes
+    // workspace-a's, and a delete drops the deleted workspace's sessions only.
+    let (in_a, in_b) = (early(in_a), early(in_b));
+    let o = run(&e, &in_a).await;
+    assert_eq!(status(&o), Some(200));
+    assert_eq!(resumed(&o), Some(false));
+    let o = run(&e, &in_a).await;
+    assert_eq!(status(&o), Some(200));
+    assert_eq!(resumed(&o), Some(true), "workspace-a did not resume its own session: resumption works here");
+    let o = run(&e, &in_b).await;
+    assert_eq!(status(&o), Some(200));
+    assert_eq!(resumed(&o), Some(false), "workspace-b resumed workspace-a's TLS session");
+    e.clear_isolation("workspace-a");
+    let o = run(&e, &in_b).await;
+    assert_eq!(status(&o), Some(200));
+    assert_eq!(resumed(&o), Some(true), "workspace-b's session was dropped by workspace-a's delete");
     let o = run(&e, &in_a).await;
     assert_eq!(status(&o), Some(200));
     assert_eq!(resumed(&o), Some(false), "workspace-a resumed a session from before its delete");
-    assert!(e.session_tickets_held() >= 1);
     e.clear_isolation("workspace-a");
-    assert_eq!(e.session_tickets_held(), 0, "workspace-a's delete left its session tickets behind");
+    e.clear_isolation("workspace-b");
+    assert_eq!(e.session_tickets_held(), 0, "a workspace delete left session tickets behind");
 }
 
 /// Held on a plain-HTTP first hop and redirected to the TLS fixture after the

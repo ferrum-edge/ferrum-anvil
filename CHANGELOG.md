@@ -181,11 +181,11 @@
   the TLS configurations it prepares and keeps none of the session tickets
   it receives, even on a later redirect or retry. Other workspaces' work in
   flight at the same time is not affected.
-- Prepared TLS configurations, and the TLS sessions they keep for
-  resumption, are now kept per workspace: a connection in one workspace no
-  longer resumes a TLS session another workspace established (every
-  workspace without a TLS profile shared one configuration), and a
-  workspace delete drops that workspace's sessions.
+- Prepared TLS configurations, and the session tickets their connections
+  receive, are now kept per workspace (every workspace without a TLS profile
+  shared one configuration), and a workspace delete drops that workspace's
+  tickets. Connections without the early-data opt-in still never resume a
+  session; under it, a connection resumes only its own workspace's tickets.
 - Pooled gRPC channels, which only a load run's virtual users keep, are no
   longer shared between workspaces, and a call that began before its
   engine's channels were cleared no longer returns its connection to them.
