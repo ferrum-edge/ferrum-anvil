@@ -74,6 +74,8 @@ impl Engine {
         let signable = http_exec::signable_request(&prep.http.method, &prep.http.target, &prep.http.headers, &prep.http.body);
         let mut headers = prep.http.headers.clone();
         let mut url = prep.http.target.url();
+        // The body sent: auth may rewrite it (a WS-Security header block).
+        let mut body = prep.http.body.clone();
         let varies = matches!(
             prep.auth,
             ResolvedAuth::Hmac(_)
@@ -111,6 +113,9 @@ impl Engine {
                         let sep = if url.contains('?') { '&' } else { '?' };
                         url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
                     }
+                    if let Some(b) = applied.body {
+                        body = b.into();
+                    }
                     for (k, v) in &applied.facts {
                         inferred.push(redactor.inferred(&format!("auth {k}: {v}")));
                     }
@@ -120,7 +125,7 @@ impl Engine {
             // say so rather than show the request without its credentials.
             Err(e) => inferred.push(format!("the request would not be sent: {}", redactor.text(&e.to_string()))),
         }
-        let body_preview: String = String::from_utf8_lossy(&prep.http.body[..prep.http.body.len().min(64 * 1024)]).into_owned();
+        let body_preview: String = String::from_utf8_lossy(&body[..body.len().min(64 * 1024)]).into_owned();
         let body_preview = if prep.http.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false) {
             redactor.json_text(&body_preview)
         } else {
@@ -133,7 +138,7 @@ impl Engine {
             destination: format!("{}:{}", prep.http.target.host, prep.http.target.port),
             authority: redactor.text(&http_exec::request_authority(&headers, &prep.http.target)),
             headers: headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect(),
-            body_bytes: prep.http.body.len() as u64,
+            body_bytes: body.len() as u64,
             body_preview,
             content_type: prep.http.content_type.clone(),
             auth: prep.auth_label.clone(),
