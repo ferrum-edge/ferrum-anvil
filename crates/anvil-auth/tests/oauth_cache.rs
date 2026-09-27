@@ -642,7 +642,7 @@ async fn an_acquisition_since_a_generation_before_the_clear_is_refused() {
     let before = cache.generation(&k);
     cache.clear_partition("workspace");
     sign_in(&cache, &cfg, signed_in("restored", "rt", false));
-    let e = cache.get_or_acquire_since(&k, before, &cfg, &issuer, Utc::now()).await.expect_err("served across the clear");
+    let Err(e) = cache.get_or_acquire_since(&k, before, &cfg, &issuer, Utc::now()).await else { panic!("served across the clear") };
     assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
     assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
 
