@@ -419,10 +419,13 @@ fn a_stored_attachment_without_its_content_is_restored_only_where_that_content_i
         ..RequestSpec::http("POST", "https://original.example.invalid/")
     };
     a.create_request(&ws.meta.id, None, "Upload", upload(&file)).unwrap();
-    // A request whose stored content this profile never held, as one created
-    // through the API can be: the backup is still written.
+    // A request whose stored content this profile does not hold, as after the
+    // loss of its blob: the backup is still written. (A save refuses a stored
+    // file that is not stored, so the row is written directly.)
     let never = AttachmentRef::Stored { sha256: "0".repeat(64), size: 1, file_name: "never.bin".into(), media_type: None };
-    a.create_request(&ws.meta.id, None, "Orphan", upload(&never)).unwrap();
+    let mut orphan = a.create_request(&ws.meta.id, None, "Orphan", RequestSpec::http("POST", "https://original.example.invalid/")).unwrap();
+    orphan.spec = upload(&never);
+    a.store.put(kind::REQUEST, &orphan.meta.id, Some(&ws.meta.id), None, orphan.sort_key, &orphan).unwrap();
     let bytes = export(&a);
     // The target stores the same content in a workspace of its own.
     let b = new_app(root.path(), "b");
@@ -457,6 +460,34 @@ fn a_stored_attachment_without_its_content_is_restored_only_where_that_content_i
     assert_eq!(named.len(), 1, "{named:?}");
     assert!(named[0].starts_with("request 'Orphan'"), "{named:?}");
     assert_eq!(b.run_dataset(&b.dataset(&rows.meta.id).unwrap()).unwrap().rows.len(), 1);
+}
+
+#[test]
+fn a_restore_keeps_a_file_attached_here_marked_as_attached() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Shared").unwrap();
+    let content = b"placeholder attached statement";
+    let file = a.put_attachment("statement.bin", content, None).unwrap();
+    let upload = RequestSpec {
+        body: Body::Binary { attachment: file.clone(), content_type: None },
+        ..RequestSpec::http("POST", "https://original.example.invalid/")
+    };
+    a.create_request(&ws.meta.id, None, "Upload", upload).unwrap();
+    let bytes = export(&a);
+    // On the target, the same file is attached to an item not saved yet.
+    let b = new_app(root.path(), "b");
+    b.put_attachment("mine.bin", content, None).unwrap();
+    b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+
+    // Deleting the restored workspace, the only saved item that names it,
+    // keeps it: it was attached here within the grace period, so the draft
+    // may hold it. An automatic release keeps it too.
+    b.delete_workspace(&ws.meta.id).unwrap();
+    let AttachmentRef::Stored { sha256, .. } = &file else { panic!("a stored attachment") };
+    assert_eq!(b.get_attachment(sha256).unwrap().as_deref(), Some(&content[..]), "released by the workspace delete");
+    assert!(!b.release_attachment(sha256).unwrap(), "still marked as attached here");
+    assert_eq!(b.get_attachment(sha256).unwrap().as_deref(), Some(&content[..]));
 }
 
 #[test]

@@ -68,6 +68,7 @@ fn plan(addr: SocketAddr, path: &str) -> HttpPlan {
         isolation: "pool-test".into(),
         display_url: format!("https://{addr}{path}"),
         early_data: EarlyDataIntent::Off,
+        fence: None,
     }
 }
 

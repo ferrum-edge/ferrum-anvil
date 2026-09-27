@@ -35,7 +35,8 @@
 //!   template expansion `400`.
 //!
 //! Ground truth records QUIC connections, the negotiated ALPN and every
-//! request, so tests can prove that a request really travelled over QUIC.
+//! request (with its `:authority`, [`GroundTruth::AuthorityReceived`]), so
+//! tests can prove that a request really travelled over QUIC.
 
 use crate::log::{GroundTruth, GroundTruthLog};
 use crate::tlsserver::{TlsServerOptions, server_config};
@@ -165,6 +166,10 @@ pub async fn serve_with(bind: &str, tls: TlsServerOptions, options: H3Options) -
                             let (quic, router) = (quic.clone(), router.clone());
                             tokio::spawn(async move {
                                 let Ok((req, mut stream)) = resolver.resolve_request().await else { return };
+                                if let Some(a) = req.uri().authority() {
+                                    let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+                                    log.push(GroundTruth::AuthorityReceived { path, authority: a.to_string() });
+                                }
                                 if req.method() == http::Method::CONNECT {
                                     if req.extensions().get::<h3::ext::Protocol>() == Some(&h3::ext::Protocol::CONNECT_UDP) {
                                         return connect_udp(req, stream, log, options, quic, router).await;

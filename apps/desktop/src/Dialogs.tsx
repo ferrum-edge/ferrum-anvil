@@ -27,6 +27,7 @@ const now = () => new Date().toISOString();
 /** Ferrum Edge releases with a source-audited catalog in anvil-diagnostics
  * (`catalog/ferrum/<id>/outcomes.json`), newest first; new profiles use the first. */
 export const FERRUM_COMPATIBILITY = [
+  { id: "ferrum-edge-0.9.8", label: "Ferrum Edge 0.9.8" },
   { id: "ferrum-edge-0.9.7", label: "Ferrum Edge 0.9.7" },
   { id: "ferrum-edge-0.9.5", label: "Ferrum Edge 0.9.5" },
 ] as const;
@@ -1104,6 +1105,12 @@ export function ImportDialog(props: {
               {w}
             </div>
           ))}
+          {preview.linked_files.length > 0 && (
+            <p className="hint" data-testid="import-linked-files">
+              After the {backup ? "restore" : "import"}, choose each linked file on this device with Choose file… beside the request&apos;s body or gRPC schema, or beside
+              the dataset in a load plan. Until then Anvil never reads it.
+            </p>
+          )}
         </div>
       )}
       {notice && (

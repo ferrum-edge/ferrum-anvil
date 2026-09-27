@@ -135,13 +135,18 @@ run early.
 **Connection modes per unit.** For HTTP requests and gRPC calls/streams,
 *persistent* keeps pooled connections per virtual user: HTTP keep-alive and
 one multiplexed HTTP/2 or HTTP/3 connection per origin, and for gRPC one
-pooled **channel** per destination (`anvil_transport::grpc::Channels`, set on
-each slot's engine): a multiplexed HTTP/2 or HTTP/3 connection, or an HTTP/1.1
-connection used by one gRPC-Web call at a time. A channel is returned only
-while it is open (HTTP/2) or after a clean call (HTTP/3, HTTP/1.1); a canceled
-HTTP/3 stream closes its connection instead. *Fresh* opens a connection per
-unit. Manual Send never uses channels (each call opens its own connection so
-its evidence covers the whole setup). SSE streams, WebSocket sessions, TCP
+pooled **channel** per workspace and destination
+(`anvil_transport::grpc::Channels`, set on each slot's engine): a multiplexed
+HTTP/2 or HTTP/3 connection, or an HTTP/1.1 connection used by one gRPC-Web
+call at a time. A channel is returned only while it is open (HTTP/2) or after
+a clean call (HTTP/3, HTTP/1.1); a canceled HTTP/3 stream closes its
+connection instead. The channels are dropped with the run's engines when the
+run ends. Neither the lock nor a workspace delete clears them while it runs;
+each stops the run instead: every run is registered with its profile by
+workspace (`App::register_load_run`), the lock stops every run and a
+workspace delete stops that workspace's (its report is not kept). *Fresh* opens a connection per unit. Manual Send
+never uses channels (each call opens its own connection so its evidence
+covers the whole setup). SSE streams, WebSocket sessions, TCP
 exchanges and UDP/DTLS exchanges always open their own connection or socket;
 the connection mode does not apply to them, and the preflight, report and
 comparison say so.
@@ -449,8 +454,9 @@ anvil load list <workspace>
 anvil load reports <workspace>
 ```
 
-`--vus` and `--rate` build one stage that ramps linearly from 0 to the target
-over `--duration` (default 30 s). `--iterations` runs a fixed count over
+`--vus` and `--rate` hold the target for `--duration` (default 30 s) from the
+start, with no ramp: the plan is a zero-duration step to the target followed by
+a hold stage (`[{0 s → N}, {D s → N}]`). `--iterations` runs a fixed count over
 `--concurrency` lanes (default 10). `--abort-failure-pct` sets the abort rule
 over a 10 s window. `--fresh` selects the fresh connection mode; the default is
 persistent. `--csv` writes the summary CSV.

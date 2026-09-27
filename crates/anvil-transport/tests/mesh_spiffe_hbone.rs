@@ -94,6 +94,7 @@ fn plan(url: &str, tls: Option<TlsSettings>, proxy: Option<ProxyPlan>) -> HttpPl
         isolation: "mesh-test".into(),
         display_url: url.into(),
         early_data: anvil_transport::http::EarlyDataIntent::Off,
+        fence: None,
     }
 }
 

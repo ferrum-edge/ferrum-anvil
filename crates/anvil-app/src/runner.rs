@@ -9,6 +9,7 @@
 //! the store off the async runtime (see [`crate::off_runtime`]).
 
 use crate::exec::SendOptions;
+use crate::workspace::release_held_attachment_in;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::runner::{FailOn, RunReport};
@@ -166,7 +167,7 @@ impl App {
     /// Run a prepared plan against this workspace's store.
     pub async fn run_plan(&self, plan: RunPlan, settings: RunSettings, cancel: CancellationToken) -> Result<RunReport> {
         let (app, environment, seed) = (self.shared(), settings.environment, settings.seed);
-        let (plan, steps) = prepare(&cancel, move || app.run_steps(plan, environment, seed)).await?;
+        let (plan, steps, notes) = prepare(&cancel, move || app.run_steps(plan, environment, seed)).await?;
         let provider = AppProvider { app: self, steps, record_history: settings.record_history };
         let run_opts = RunOptions {
             iterations: settings.iterations,
@@ -177,7 +178,8 @@ impl App {
             run_id: settings.run_id,
             max_report_steps: None,
         };
-        let report = anvil_runner::run(&self.engine, &provider, plan, run_opts, cancel).await.map_err(run_error)?;
+        let mut report = anvil_runner::run(&self.engine, &provider, plan, run_opts, cancel).await.map_err(run_error)?;
+        report.notes.extend(notes);
         if !settings.persist_report {
             return Ok(report);
         }
@@ -198,20 +200,29 @@ impl App {
 
     /// Name the plan's environment (`environment`, else the workspace's
     /// active one) and snapshot every request it runs.
-    fn run_steps(&self, mut plan: RunPlan, environment: Option<Id>, seed: Option<u64>) -> Result<(RunPlan, Steps)> {
+    fn run_steps(&self, mut plan: RunPlan, environment: Option<Id>, seed: Option<u64>) -> Result<(RunPlan, Steps, Vec<String>)> {
         let ws = self.workspace(&plan.workspace_id)?;
-        let env_id = environment.or(ws.active_environment_id);
-        if let Some(eid) = env_id {
-            let env = self
-                .environments(&ws.meta.id)?
-                .into_iter()
-                .find(|e| e.meta.id == eid)
-                .ok_or_else(|| AppError::NotFound("environment".into()))?;
-            plan.environment_id = Some(eid);
-            plan.environment_name = Some(env.name);
+        let selected_env = environment.or(ws.active_environment_id);
+        let environments = self.environments(&ws.meta.id)?;
+        let mut notes = Vec::new();
+        let env = match selected_env {
+            Some(eid) => match environments.iter().find(|e| e.meta.id == eid) {
+                Some(env) => Some(env),
+                None if environment == Some(eid) => return Err(AppError::NotFound("environment".into())),
+                None => {
+                    notes.push("The workspace's selected environment no longer exists; no environment was used.".into());
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(env) = env {
+            plan.environment_id = Some(env.meta.id);
+            plan.environment_name = Some(env.name.clone());
         }
         // Snapshot every request once: the run uses a frozen environment and
         // request state even if they are edited while it runs.
+        let env_id = env.map(|env| env.meta.id);
         let opts = SendOptions { environment: env_id, seed, ..Default::default() };
         let mut steps = HashMap::new();
         for st in plan.steps.iter().filter(|s| s.enabled) {
@@ -231,7 +242,7 @@ impl App {
             };
             steps.insert(st.request_id, built);
         }
-        Ok((plan, steps))
+        Ok((plan, steps, notes))
     }
 
     /// Requests of a folder subtree in tree order, as `(id, name)`.
@@ -489,12 +500,19 @@ impl App {
         RunDataset::parse(&d.name, d.format, &bytes, &d.sensitive_columns).map_err(|e| AppError::Invalid(e.to_string()))
     }
 
+    /// Delete a dataset and release its stored file unless something else
+    /// references it, in one write transaction. A file a user attached within
+    /// [`crate::cleanup::ATTACHMENT_GRACE`] is kept, as a request delete
+    /// keeps it: a request or dataset not saved yet may hold it.
     pub fn delete_dataset(&self, id: &Id) -> Result<()> {
-        let d = self.dataset(id).ok();
-        self.store.delete(kind::DATASET, id)?;
-        if let Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) = d.map(|d| d.attachment) {
-            self.release_attachment(&sha256)?;
-        }
+        self.store.atomically(|s| {
+            let d: Option<Dataset> = s.get(kind::DATASET, id)?;
+            s.delete(kind::DATASET, id)?;
+            if let Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) = d.map(|d| d.attachment) {
+                release_held_attachment_in(s, &sha256)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 }

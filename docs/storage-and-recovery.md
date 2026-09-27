@@ -13,6 +13,23 @@ CLI also takes `--data-dir`). Each local profile has its own directory with a
 header (`profile.json`: KDF parameters, wrapped keys and protection mode, no
 plaintext key) and an encrypted SQLite database.
 
+Warnings, such as a stored object that does not decode, go to a log. The
+desktop writes `anvil.log` in its log directory at level `info`:
+
+| Platform | Desktop log directory |
+|---|---|
+| macOS | `~/Library/Logs/com.ferrumedge.anvil/` |
+| Windows | `%LOCALAPPDATA%\com.ferrumedge.anvil\logs\` |
+| Linux | `$XDG_DATA_HOME/com.ferrumedge.anvil/logs/` (default `~/.local/share/com.ferrumedge.anvil/logs/`) |
+
+Once it would pass 5 MiB (`anvil_app::logging::LOG_FILE_LIMIT`), it is
+renamed `anvil.log.1`, replacing the one before, and a new one is started.
+The CLI writes warnings and errors to stderr. `ANVIL_LOG` (`off`, `error`,
+`warn`, `info`, `debug` or `trace`) sets another level for Anvil's own
+crates in both; other crates log warnings and errors at most. A log line
+names what its call site names (a kind and id, an error), never request
+content or secrets.
+
 ## What is encrypted
 
 Everything the user creates or observes: workspaces, folders, requests and
@@ -144,7 +161,8 @@ A linked provider identity is **not** an unlock method; see
 Locking (button, ⌘/Ctrl+L, idle timeout, system sleep) drops the data key,
 cached OAuth tokens and pooled connections, aborts executions and
 interactive sessions, and stops load workers (their partial reports are
-kept). Backend commands return `LOCKED` until unlock.
+kept). Deleting a workspace stops that workspace's load workers; their
+reports are not kept. Backend commands return `LOCKED` until unlock.
 
 ## Recovery
 
@@ -360,6 +378,8 @@ Device-bound items (keychain entries, provider sessions, linked local files)
 are reported as needing rebinding, and the preview lists each linked local
 file with the request or dataset that names it. A bundle import drops this
 device's linked-file bindings for every request and dataset it overwrites.
+In the desktop, choose each linked file again with **Choose file…** beside
+the request's body or gRPC schema, or beside the dataset in a load plan.
 An OAuth 2 profile imported from a bundle never keeps the token-cache id the
 bundle gives it, so it caches its token under the workspace, folder or
 request that defines it, never alongside a profile stored here that names
@@ -545,12 +565,109 @@ its pin by primary key.
 
 Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so
-retention never removes them. Deleting a dataset deletes its content once no
-request, revision, dataset, spec source, scenario or load plan still refers
-to the same (content-addressed) attachment. The check and the delete run in
-one write transaction, so nothing can refer to it in between. Pins are
-re-applied to existing attachments, in one write transaction, whenever a
-profile opens.
+retention never removes them. Deleting a request (with its revisions, also
+when its folder is deleted) or a dataset, or replacing a dataset's file,
+deletes the content it held (unless a user attached it within the grace
+period, below) once no request, revision, dataset, spec source,
+scenario or load plan still refers to the same (content-addressed)
+attachment. The check and the delete run in one write transaction, so
+nothing can refer to it in between.
+
+A file the user attaches (`App::put_attachment`: a body or multipart file, a
+gRPC schema file, a dataset) is stored before the request or dataset that
+uses it is saved, in a separate call. Its index entry is marked as added by
+a user (`"user": true`, with `"attached_at"`, the time in unix
+milliseconds it was last attached; entries written earlier have neither),
+and no automatic release, such as a reimport releasing the source file it
+replaces or `App::release_attachment`, deletes a marked attachment: only
+deleting or replacing an item that held it does. A bundle import or a
+restore stores the files its items reference without marking them (an entry
+already marked stays marked). A save checks, in its own write transaction,
+that every stored attachment the request or dataset names and did not hold
+when last saved is still stored, and is refused otherwise (attach the file
+again), so a saved item never names content deleted in between. A duplicate
+of a request may name the files that request holds even when one is no
+longer stored.
+
+The mark does not record which draft holds a file. Deleting a request (also
+when its folder is deleted) or a dataset, or replacing a dataset's file,
+therefore keeps a file a user attached within the grace period (below; a
+mark without a time counts as recent until the cleanup at open records
+one), even when nothing saved references it any more: a request or dataset
+not saved yet may hold it, and the cleanup of files attached and never
+saved decides it once the period is over. A file attached longer ago is
+released once nothing saved references it; a draft that still has it
+attached is then refused on save with "attach it again", and attaching the
+file again stores it again.
+
+Deleting a request decrypts only its own revisions, found by the request
+they are filed under, and the reference check reads every object of those
+kinds once for all the files the request held. An object there that does not
+decrypt could reference any of them, so the delete then keeps every file it
+held instead of failing. That object is logged as a warning naming its kind
+and id (never its content), so the damaged row can be found and repaired or
+deleted. Pins are re-applied to existing attachments, in one write
+transaction, whenever a profile opens.
+
+Deleting a workspace deletes its items and, in the same write transaction,
+releases every stored file they referenced that no item of another
+workspace still references, except a file a user attached within the grace
+period (below; a mark without a time counts as recent until the cleanup at
+open records one): a request or dataset of another workspace not saved yet
+may hold it, so the cleanup of files attached and never saved decides it
+once the period is over. A file referenced by any saved item in any
+workspace is never released.
+
+### Cleanup when a profile opens
+
+After the pins are re-applied, opening a profile runs a cleanup
+(`App::clean_up_storage_if_due`) once a day at most
+(`anvil_app::cleanup::CLEANUP_INTERVAL`, measured from the last pass;
+`App::clean_up_storage` runs one at once):
+
+- Revisions filed under a request that no longer exists are removed
+  (builds before deletes removed a request's revisions left them behind;
+  after the first pass, and unless a backup restores such a profile, there
+  are none). A revision filed under no request is kept. The stored files
+  only those revisions referenced are released, except one a user attached
+  within the grace period: attaching it again restarts its wait.
+- A file a user attached (`"user": true`) whose `"attached_at"` is older
+  than the grace period, **30 days** (`anvil_app::cleanup::ATTACHMENT_GRACE`),
+  is released if no saved item references it: it was attached to a request
+  or dataset that was never saved. Attaching the same content again restarts
+  the period, and a later save naming a released file is refused ("attach it
+  again"). One that a saved item references loses its mark: from then on it
+  is held like any other file, and later passes do not check it again.
+- A mark with no `"attached_at"` (written before the time was recorded)
+  counts as recent, so on its own it would never age. The first pass that
+  sees one records its own time there (even a pass blocked by an object that
+  does not decode), and the grace period runs from then.
+
+Both use the same reference check as a delete. The pass reads what
+references each file in a read transaction, which never takes the database
+write lock, then removes and releases in a short write transaction only if
+nothing was written to the database in between (by this connection, another
+process or a checkpoint restore; `anvil_storage::store::ChangeMarker`).
+Otherwise it reads again, up to three times, and then gives up until the
+next pass. When an object does not decode, it could name any file, so the
+pass removes and releases nothing (the orphaned revisions stay, and so keep
+track of their files, until it is repaired or deleted); each such object is
+logged as a warning by kind and id, and the pass reports them. A pass with
+nothing to release decrypts only the attachment index entries and any
+orphaned revisions; a pass blocked by an object that does not decode reads
+every object that can reference a file, so while none of those objects and
+no attachment index entry has changed since (by id, parent and time
+written), the pass at open is skipped: it would find the same. A cleanup
+that fails does not stop the profile opening; it is logged and runs again at
+a later open.
+
+The last pass is kept in the database's `meta` table (a plaintext note of
+this device, never carried by a backup or export): when it ran, how many
+revisions it removed and files it released, and the kind and id of each
+object that did not decode. `anvil storage-cleanup` prints it (`--json` as
+JSON, `--now` runs a pass first), and the desktop reads it with the
+`storage_cleanup_last` command (`api.storageCleanupLast()`); the desktop has
+no screen for it yet.
 
 ## Plaintext at rest
 

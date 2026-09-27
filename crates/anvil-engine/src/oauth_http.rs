@@ -11,10 +11,10 @@
 //! lost), and a token that arrives after a lock, a sign-out or a newer
 //! sign-in is discarded rather than cached or sent.
 
-use crate::Engine;
 use crate::context::{ExecutionContext, resolve_sensitive};
 use crate::prepare;
 use crate::vars::Resolver;
+use crate::{Engine, SensitiveEpoch};
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, Generation, OAuthResolved, TokenHttp, TokenKey};
 use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
@@ -38,6 +38,10 @@ pub struct EngineTokenHttp<'a> {
     pub engine: &'a Engine,
     pub ctx: &'a ExecutionContext,
     pub settings: &'a EffectiveSettings,
+    /// The engine's epoch when the execution (or sign-in) started: TLS
+    /// material and connections of a token request it plans after a lock
+    /// are not kept.
+    pub epoch: SensitiveEpoch,
 }
 
 impl EngineTokenHttp<'_> {
@@ -55,15 +59,16 @@ impl EngineTokenHttp<'_> {
             let value = http::HeaderValue::from_str(&format!("Basic {token}")).map_err(|e| e.to_string())?;
             headers.push((http::header::AUTHORIZATION, value));
         }
+        let epoch = self.epoch;
         let tls = if t.scheme == "https" {
             let mut inf = vec![];
-            Some(crate::http_exec::tls_for(self.engine, self.ctx, self.settings, &t, &mut inf).map_err(|e| e.message)?.0)
+            Some(crate::http_exec::tls_for(self.engine, epoch, self.ctx, self.settings, &t, &mut inf).map_err(|e| e.message)?.0)
         } else {
             None
         };
         // The token endpoint uses the request's proxy profile (and its
         // NO_PROXY list), exactly like the API request would.
-        let proxy = crate::http_exec::proxy_for(self.engine, self.ctx, self.settings, &t, &mut inferred).map_err(|e| e.message)?;
+        let proxy = crate::http_exec::proxy_for(self.engine, epoch, self.ctx, self.settings, &t, &mut inferred).map_err(|e| e.message)?;
         Ok(HttpPlan {
             method: http::Method::POST,
             https: t.scheme == "https",
@@ -90,6 +95,7 @@ impl EngineTokenHttp<'_> {
             proxy_header: None,
             proxy_header_withheld: None,
             early_data: anvil_transport::http::EarlyDataIntent::Off,
+            fence: Some(epoch.transport()),
         })
     }
 }
@@ -158,22 +164,49 @@ pub(crate) fn cache_key(ctx: &ExecutionContext, resolved: &OAuthResolved) -> Tok
 /// caller's wait at once. A client-credentials request is abandoned with it
 /// and caches nothing. A refresh keeps running on the token cache's own task
 /// (the issuer may already have rotated the refresh token) and its token is
-/// cached for the next send, unless a newer sign-in came first; a lock or a
-/// sign-out aborts it.
+/// cached for the next send, unless a newer sign-in came first; a lock, a
+/// delete of the workspace or a sign-out aborts it.
+///
+/// An execution whose workspace was deleted since its `epoch` was taken
+/// (its context built, or it started) neither uses nor fills the workspace's
+/// tokens: a client-credentials token is acquired for this send only, and an
+/// interactive grant needs a new sign-in. A token cached for a workspace
+/// restored with the same id is never sent for the deleted one, and nothing
+/// is cached for the deleted one afterwards.
 pub(crate) async fn acquire(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     settings: &EffectiveSettings,
     key: &TokenKey,
     cfg: &OAuthResolved,
     cancel: &CancellationToken,
 ) -> Result<CachedToken, AuthError> {
-    let http = EngineTokenHttp { engine, ctx, settings };
+    let http = EngineTokenHttp { engine, ctx, settings, epoch };
+    // Taken before the jar generation is read: a delete advances the jar
+    // generation before it clears the workspace's tokens, so either the
+    // delete is seen here or `since` predates its clear and the cache refuses
+    // the call.
+    let since = engine.tokens.generation(key);
+    let uncached = anvil_auth::oauth::TokenCache::new();
+    let r = async {
+        if workspace_deleted_since(engine, epoch, ctx) {
+            uncached.get_or_acquire(key, cfg, &http, Utc::now()).await
+        } else {
+            engine.tokens.get_or_acquire_since(key, since, cfg, &http, Utc::now()).await
+        }
+    };
     tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(AuthError::Canceled("the execution was canceled while its OAuth token was being acquired".into())),
-        r = engine.tokens.get_or_acquire(key, cfg, &http, Utc::now()) => r,
+        r = r => r,
     }
+}
+
+/// Whether the workspace of `ctx` was deleted ([`Engine::clear_isolation`])
+/// since `epoch` was taken; never for an epoch of no workspace.
+fn workspace_deleted_since(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext) -> bool {
+    epoch.jar.is_some_and(|jar| jar != engine.cookies.generation(&ctx.isolation))
 }
 
 /// Typed local failure for a token that could not be obtained before sending.
@@ -273,8 +306,9 @@ pub fn interactive_oauth(ctx: &ExecutionContext) -> Result<InteractiveOAuth, Tra
 }
 
 /// The token-cache generation a sign-in starts in. Take it before the
-/// browser step and pass it to [`redeem_authorization_code`]: a lock or a
-/// sign-out in between then discards the redeemed token.
+/// browser step and pass it to [`redeem_authorization_code`]: a lock, a
+/// delete of the workspace or a sign-out in between then discards the
+/// redeemed token.
 pub fn sign_in_generation(engine: &Engine, target: &InteractiveOAuth) -> Generation {
     engine.tokens.generation(&target.key)
 }
@@ -285,7 +319,9 @@ pub fn sign_in_generation(engine: &Engine, target: &InteractiveOAuth) -> Generat
 /// still in `generation`; otherwise the token is dropped and the call fails
 /// with [`AuthError::Canceled`]. Storing it starts a new generation for the
 /// profile, so a refresh that began before this sign-in cannot overwrite it.
-/// `cancel` abandons the redemption.
+/// When the workspace of `ctx` was deleted since the context was built
+/// ([`ExecutionContext::epoch`]), the code is not redeemed. `cancel` abandons
+/// the redemption.
 #[allow(clippy::too_many_arguments)]
 pub async fn redeem_authorization_code(
     engine: &Engine,
@@ -297,7 +333,12 @@ pub async fn redeem_authorization_code(
     redirect_uri: &str,
     cancel: &CancellationToken,
 ) -> Result<TokenSummary, AuthError> {
-    let http = EngineTokenHttp { engine, ctx, settings: &target.settings };
+    // `generation` was taken before this check: a delete that is not seen
+    // here clears the workspace's tokens after it, and the store is refused.
+    if workspace_deleted_since(engine, engine.epoch_for(ctx), ctx) {
+        return Err(AuthError::Canceled("the workspace was deleted during this sign-in; the authorization code was not redeemed".into()));
+    }
+    let http = EngineTokenHttp { engine, ctx, settings: &target.settings, epoch: engine.sensitive_epoch() };
     engine.tokens.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t = tokio::select! {
         biased;
@@ -309,7 +350,7 @@ pub async fn redeem_authorization_code(
     let summary = TokenSummary::of(&t);
     if !engine.tokens.store_sign_in(&target.key, generation, t) {
         return Err(AuthError::Canceled(
-            "a lock, a sign-out or another sign-in superseded this sign-in while it was in flight; the redeemed token was discarded".into(),
+            "a lock, a workspace delete, a sign-out or another sign-in superseded this sign-in; the redeemed token was discarded".into(),
         ));
     }
     Ok(summary)

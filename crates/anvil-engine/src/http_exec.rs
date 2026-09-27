@@ -2,13 +2,13 @@
 //! (redirects, safe retries, DPoP nonce challenge), each with freshly applied
 //! auth, followed by diagnosis and record assembly.
 
-use crate::Engine;
 use crate::assertions::{self, Observed};
 use crate::context::{ExecutionContext, resolve_sensitive};
 use crate::prepare::{self, PreparedHttp, Target};
 use crate::record::{self, Assembly};
 use crate::redact::Redactor;
 use crate::vars::Resolver;
+use crate::{Engine, SensitiveEpoch};
 use anvil_auth::{ResolvedAuth, SignableRequest};
 use anvil_diagnostics::FerrumTrust;
 use anvil_domain::auth::AuthConfig;
@@ -43,6 +43,9 @@ pub struct Prepared {
     /// The request's PROXY header (HTTP-family requests), for connections to
     /// the request's own `host:port`.
     pub proxy_header: Option<anvil_transport::proxy_protocol::HeaderPlan>,
+    /// The engine's epoch when the execution started: what it prepares or
+    /// receives after a lock is not kept.
+    pub epoch: SensitiveEpoch,
 }
 
 fn host_matches(pattern: &str, host: &str) -> bool {
@@ -157,9 +160,12 @@ pub(crate) fn resolve_auth(
 /// Prepared TLS material, the selected profile's name and its host bindings.
 pub(crate) type TlsChoice = (Arc<PreparedTls>, Option<String>, Vec<anvil_domain::tls::HostBinding>);
 
-/// Build the TLS settings for a target (profile scoping + host binding).
+/// Build the TLS settings for a target (profile scoping + host binding),
+/// for an execution of `epoch` in `ctx`'s workspace (see
+/// [`Engine::prepared_tls`]).
 pub(crate) fn tls_for(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     settings: &EffectiveSettings,
     target: &Target,
@@ -171,9 +177,10 @@ pub(crate) fn tls_for(
             return Err(TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "the selected TLS profile no longer exists")
                 .with_field("settings.tls_profile"));
         }
-        return Ok((engine.prepared_tls("default-strict", &TlsSettings::strict_system())?, None, vec![]));
+        let strict = engine.prepared_tls(epoch, &ctx.isolation, "default-strict", &TlsSettings::strict_system())?;
+        return Ok((strict, None, vec![]));
     };
-    let prepared = prepared_from_profile(engine, ctx, p, &target.host, target.port, inferred)?;
+    let prepared = prepared_from_profile(engine, epoch, ctx, p, &target.host, target.port, inferred)?;
     Ok((prepared, Some(p.name.clone()), p.bindings.clone()))
 }
 
@@ -181,6 +188,7 @@ pub(crate) fn tls_for(
 /// to `host:port` when the profile's bindings allow it.
 pub(crate) fn prepared_from_profile(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     p: &anvil_domain::tls::TlsProfile,
     host: &str,
@@ -240,7 +248,7 @@ pub(crate) fn prepared_from_profile(
         s.client_identity.is_some(),
         anvil_transport::certs::sha256_hex(material.as_bytes())
     );
-    engine.prepared_tls(&key, &s)
+    engine.prepared_tls(epoch, &ctx.isolation, &key, &s)
 }
 
 fn proxy_invalid(msg: impl Into<String>, field: &str) -> TransportFailure {
@@ -313,6 +321,7 @@ pub(crate) fn hbone_datagram_connect_headers(
 
 pub(crate) fn proxy_for(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     settings: &EffectiveSettings,
     target: &Target,
@@ -355,7 +364,7 @@ pub(crate) fn proxy_for(
             let tp = ctx.tls_profiles.iter().find(|t| t.id == id).ok_or_else(|| {
                 proxy_invalid(format!("the TLS profile selected for proxy '{}' no longer exists", p.name), "proxy.tls_profile")
             })?;
-            Some(prepared_from_profile(engine, ctx, tp, &host, port, inferred)?)
+            Some(prepared_from_profile(engine, epoch, ctx, tp, &host, port, inferred)?)
         }
         None => None,
     };
@@ -400,6 +409,17 @@ pub(crate) fn trust_for(ctx: &ExecutionContext, target: &Target) -> (FerrumTrust
 }
 
 pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, allowed: &[&str]) -> Result<Prepared, TransportFailure> {
+    prepare_all_at(engine, engine.sensitive_epoch(), ctx, r, allowed)
+}
+
+/// [`prepare_all`] for an execution of `epoch`.
+pub(crate) fn prepare_all_at(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    allowed: &[&str],
+) -> Result<Prepared, TransportFailure> {
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let http = prepare::prepare_http(&ctx.spec, r, ctx.attachments.as_ref(), &settings, ctx.send_anyway, allowed)?;
     let mut inferred = http.inferred.clone();
@@ -409,11 +429,11 @@ pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver,
     let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{} (from {auth_scope})", auth.label()) };
     let tls_scheme = matches!(http.target.scheme.as_str(), "https" | "wss" | "grpcs");
     let (tls, tls_name, bindings) = if tls_scheme {
-        tls_for(engine, ctx, &settings, &http.target, &mut inferred).map(|(a, b, c)| (Some(a), b, c))?
+        tls_for(engine, epoch, ctx, &settings, &http.target, &mut inferred).map(|(a, b, c)| (Some(a), b, c))?
     } else {
         (None, None, vec![])
     };
-    let proxy = proxy_for(engine, ctx, &settings, &http.target, &mut inferred)?;
+    let proxy = proxy_for(engine, epoch, ctx, &settings, &http.target, &mut inferred)?;
     let proxy_header = crate::proxy_protocol::request_header(&ctx.spec, r, &settings, proxy.as_ref())?;
     if let (Some(spec), Some(_)) = (&ctx.spec.proxy_protocol, &proxy_header) {
         inferred.push(crate::proxy_protocol::request_header_note(spec, &http.target.authority));
@@ -434,6 +454,7 @@ pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver,
         oauth_key,
         inferred,
         proxy_header,
+        epoch,
     })
 }
 
@@ -457,6 +478,131 @@ fn carries_credential(name: &str, value: &str, marked: &[String], extra_names: &
     crate::redact::is_credential_name(name, extra_names)
         || marked.iter().any(|m| m.eq_ignore_ascii_case(name))
         || secrets.iter().any(|s| !s.is_empty() && (value == s.as_str() || (s.len() >= 4 && value.contains(s.as_str()))))
+}
+
+fn invalid_header(msg: String, field: &str) -> TransportFailure {
+    TransportFailure::new(Phase::Prepare, FailureKind::InvalidHeader, msg).with_field(field)
+}
+
+/// Why a header an auth profile produced is not valid on the wire (a line
+/// break pasted with a token, a header name with a space), naming the header,
+/// never its value: the value is a credential. `None` when every header is
+/// valid.
+pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<String> {
+    let label = &applied.label;
+    for (n, v) in &applied.set_headers {
+        if http::HeaderName::from_bytes(n.as_bytes()).is_err() {
+            return Some(format!("the auth profile {label} would send a header named {n:?}, which is not a valid header name"));
+        }
+        if http::HeaderValue::from_str(v).is_err() {
+            return Some(format!(
+                "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break or control character, for example pasted with the credential)"
+            ));
+        }
+        if n.eq_ignore_ascii_case("host")
+            && let Some(why) = prepare::host_problem(v)
+        {
+            return Some(format!("the auth profile {label} would send a Host header that is not a host with an optional port: {why}"));
+        }
+    }
+    None
+}
+
+/// The `Host` (HTTP/1.1) or `:authority` (HTTP/2, HTTP/3) a request is sent
+/// with: the first explicit `Host` header wins over the target URL's
+/// authority, as the HTTP send path and the HTTP-based sessions (WebSocket,
+/// SSE and gRPC, over every HTTP version) build the request. Request
+/// signatures cover this value, so the send path, sessions and the preview
+/// all use it.
+pub(crate) fn request_authority(headers: &[(String, String)], target: &Target) -> String {
+    headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")).map(|(_, v)| v.clone()).unwrap_or_else(|| target.authority.clone())
+}
+
+/// What an auth profile signs for one send of `method` to `target` with
+/// `headers` and `body`.
+pub(crate) fn signable_request(method: &str, target: &Target, headers: &[(String, String)], body: &[u8]) -> SignableRequest {
+    SignableRequest {
+        method: method.to_string(),
+        scheme: target.scheme.clone(),
+        authority: request_authority(headers, target),
+        raw_path: target.path.clone(),
+        raw_query: target.query.clone(),
+        headers: headers.to_vec(),
+        body: body.to_vec(),
+    }
+}
+
+/// Refuse a header an auth profile produced that is not valid on the wire
+/// rather than send the request without it (see [`auth_header_problem`]).
+pub(crate) fn check_auth_headers(applied: &anvil_auth::Applied) -> Result<(), TransportFailure> {
+    match auth_header_problem(applied) {
+        Some(why) => Err(invalid_header(format!("{why}; the request was not sent"), "auth")),
+        None => Ok(()),
+    }
+}
+
+/// The request's final headers for the wire. A header that is not valid on
+/// the wire fails the request, naming the header (never its value), rather
+/// than being left out of what is sent.
+pub(crate) fn wire_headers(headers: &[(String, String)]) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, TransportFailure> {
+    let mut out = Vec::with_capacity(headers.len());
+    for (n, v) in headers {
+        let why = match (http::HeaderName::from_bytes(n.as_bytes()), http::HeaderValue::from_str(v)) {
+            (Ok(name), Ok(value)) => {
+                out.push((name, value));
+                continue;
+            }
+            (Err(_), _) => format!("{n:?} is not a valid header name"),
+            (_, Err(_)) => format!("the {n} header value is not a valid header value"),
+        };
+        return Err(invalid_header(format!("{why}; the request was not sent"), "headers"));
+    }
+    Ok(out)
+}
+
+/// The name of one `name=value` pair of a `Cookie` header.
+fn cookie_name(pair: &str) -> &str {
+    pair.split_once('=').map_or(pair, |(n, _)| n).trim()
+}
+
+/// Add the workspace jar's cookies for `target` (never across workspaces) to
+/// the request's `Cookie` header. A stored cookie whose name the request
+/// already sends (a configured `Cookie` header or a cookie API key) is left
+/// out: the request's own cookie wins, as a cookie API key replaces a
+/// configured cookie of the same name. Returns a note for each stored cookie
+/// that cannot be sent (its value is not a valid header value).
+pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target, headers: &mut Vec<(String, String)>) -> Vec<String> {
+    let Some(stored) = engine.cookie_header(isolation, target) else { return vec![] };
+    let sent: Vec<String> = headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, v)| v.split(';'))
+        .map(|p| cookie_name(p).to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    let mut notes = vec![];
+    let mut added = vec![];
+    for pair in stored.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let name = cookie_name(pair);
+        if sent.iter().any(|s| s == name) {
+            continue;
+        }
+        if http::HeaderValue::from_str(pair).is_err() {
+            notes.push(format!("stored cookie '{name}' not sent: its value is not a valid header value"));
+            continue;
+        }
+        added.push(pair);
+    }
+    if added.is_empty() {
+        return notes;
+    }
+    let added = added.join("; ");
+    match headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("cookie")) {
+        Some((_, v)) if v.trim().is_empty() => *v = added,
+        Some((_, v)) => *v = format!("{v}; {added}"),
+        None => headers.push(("Cookie".into(), added)),
+    }
+    notes
 }
 
 /// Whether a request body holds a resolved secret value byte for byte (at
@@ -542,16 +688,22 @@ impl AttemptTarget {
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
     let started_at = Utc::now();
+    // Taken first, or when the context was built (`ExecutionContext::epoch`):
+    // what this execution prepares or receives after a lock (a new epoch) or
+    // a delete of its workspace is not kept: its prepared TLS material, its
+    // cookies, its connections and its session tickets.
+    let epoch = engine.epoch_for(ctx);
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
-    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver).await;
+    // Canceling the execution abandons a Workload API call in flight.
+    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
     let materialized = match materialized {
         Ok(m) => m,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, Some(workload)),
     };
     let workload = (!workload.is_empty()).then_some(workload);
     let ctx = materialized.as_ref().unwrap_or(ctx);
-    let prepared = prepare_all(engine, ctx, &resolver, &["https", "http"]);
+    let prepared = prepare_all_at(engine, epoch, ctx, &resolver, &["https", "http"]);
     let mut prep = match prepared.and_then(|p| early_data_policy_check(&p.settings.early_data).map(|()| p)) {
         Ok(p) => p,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, workload),
@@ -564,7 +716,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     // API request exists on the wire. Canceling the execution stops waiting
     // for the token (see `oauth_http::acquire`).
     if let Some((key, cfg)) = &prep.oauth_key {
-        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, &cancel).await {
+        match crate::oauth_http::acquire(engine, epoch, ctx, &prep.settings, key, cfg, &cancel).await {
             Ok(t) => {
                 replace_oauth(&mut prep.auth, &t);
             }
@@ -602,25 +754,15 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
 
     loop {
         // ---- per-attempt auth (fresh nonces / proofs / time claims) ----
-        let signable = SignableRequest {
-            method: current.method.clone(),
-            scheme: current.target.scheme.clone(),
-            authority: current
-                .headers
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case("host"))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| current.target.authority.clone()),
-            raw_path: current.target.path.clone(),
-            raw_query: current.target.query.clone(),
-            headers: current.headers.clone(),
-            body: current.body.to_vec(),
-        };
+        let signable = signable_request(&current.method, &current.target, &current.headers, &current.body);
         let mut headers = current.headers.clone();
         let mut query = current.target.query.clone();
         let mut body = current.body.clone();
         if current.with_credentials {
-            match anvil_auth::apply(&prep.auth, &signable, Utc::now()) {
+            let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
+                .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, e.to_string()).with_field("auth"))
+                .and_then(|a| check_auth_headers(&a).map(|()| a));
+            match applied {
                 Ok(applied) => {
                     for s in &applied.secrets {
                         redactor.add_secret(s);
@@ -638,31 +780,34 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                     }
                     final_auth_facts = applied.facts;
                 }
-                Err(e) => {
-                    let f = TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, e.to_string()).with_field("auth");
+                Err(f) => {
                     if attempts.is_empty() {
                         return record::local_failure_with(ctx, &resolver, started_at, f, workload);
                     }
+                    prep.inferred.push(format!("the follow-up attempt to {} was not sent: {}", current.target.authority, f.message));
                     break;
                 }
             }
         }
-        // Cookies from the workspace jar (never across workspaces).
+        // Cookies from the workspace jar (never across workspaces), after
+        // the request's own cookies, which win over a stored one.
         if prep.settings.cookies {
-            let jar_cookie = engine.cookie_header(&ctx.isolation, &current.target);
-            if let Some(c) = jar_cookie {
-                match headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("cookie")) {
-                    Some((_, v)) => *v = format!("{v}; {c}"),
-                    None => headers.push(("Cookie".into(), c)),
+            for n in add_jar_cookies(engine, &ctx.isolation, &current.target, &mut headers) {
+                if !prep.inferred.contains(&n) {
+                    prep.inferred.push(n);
                 }
             }
         }
-        let mut header_pairs = Vec::with_capacity(headers.len());
-        for (n, v) in &headers {
-            if let (Ok(n), Ok(v)) = (http::HeaderName::from_bytes(n.as_bytes()), http::HeaderValue::from_str(v)) {
-                header_pairs.push((n, v));
+        let header_pairs = match wire_headers(&headers) {
+            Ok(h) => h,
+            Err(f) => {
+                if attempts.is_empty() {
+                    return record::local_failure_with(ctx, &resolver, started_at, f, workload);
+                }
+                prep.inferred.push(format!("the follow-up attempt to {} was not sent: {}", current.target.authority, f.message));
+                break;
             }
-        }
+        };
         let target_for_plan = Target { query: query.clone(), ..current.target.clone() };
         let display_url = redactor.url(&target_for_plan.url());
         // The PROXY header is configured for the request's own listener: a
@@ -710,6 +855,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             proxy_header,
             proxy_header_withheld,
             early_data: early_intent(&prep.settings.early_data, &current.method, current.target.scheme == "https", &reason),
+            fence: Some(epoch.transport()),
         };
         let index = attempts.len() as u32;
         let outs = match prep.settings.http_version {
@@ -735,7 +881,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         if prep.settings.cookies
             && let Some(r) = &out.response
         {
-            engine.store_cookies(&ctx.isolation, &current.target, r);
+            engine.store_cookies(epoch, &ctx.isolation, &current.target, r);
         }
 
         // ---- redirects ----
@@ -810,7 +956,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                             credentials_stripped = true;
                         }
                         let mut hop_notes = vec![];
-                        let proxy = match proxy_for(engine, ctx, &prep.settings, &t, &mut hop_notes) {
+                        let proxy = match proxy_for(engine, epoch, ctx, &prep.settings, &t, &mut hop_notes) {
                             Ok(p) => p,
                             Err(f) => {
                                 let why = format!("its proxy route could not be prepared: {}", f.message);
@@ -830,9 +976,9 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                                         p.client_identity = None;
                                     }
                                 });
-                                tls_for(engine, &strict_ctx, &prep.settings, &t, &mut hop_notes)
+                                tls_for(engine, epoch, &strict_ctx, &prep.settings, &t, &mut hop_notes)
                             } else {
-                                tls_for(engine, ctx, &prep.settings, &t, &mut hop_notes)
+                                tls_for(engine, epoch, ctx, &prep.settings, &t, &mut hop_notes)
                             };
                             match prepared {
                                 Ok((tls, name, _)) => (Some(tls), name),

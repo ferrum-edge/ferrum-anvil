@@ -77,7 +77,7 @@ cargo test --workspace --exclude anvil-desktop
 The full CI command list is in [docs/ci.md](docs/ci.md#reproducing-locally).
 
 The failure lab runs real, pinned Ferrum Edge releases on loopback
-(default v0.9.7, see `lab/gateway/RELEASE.lock`):
+(default v0.9.8, see `lab/gateway/RELEASE.lock`):
 
 ```bash
 lab/scripts/fetch-gateway.sh                      # download + verify the pinned gateway

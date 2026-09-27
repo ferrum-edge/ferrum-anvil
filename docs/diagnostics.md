@@ -124,9 +124,12 @@ describes it as failed**: there is no `http.*`, `client.connect.*`,
 **CONNECT refusals.** Anvil quotes the endpoint's public body (its JSON
 `error` string, bounded) and never claims a precise mesh-policy cause.
 Several admission reasons share one public response: Ferrum Edge uses one
-body for an unauthenticated peer, a withdrawn trust and a revoked SVID, and
-0.9.7 answers a destination it does not terminate with the same
-`404 {"error":"Not Found"}` as a route miss. The refusal is attributed to the
+body for an unauthenticated peer, a withdrawn trust and a revoked SVID.
+0.9.5 and 0.9.7 answer a destination the endpoint does not terminate with the
+same `404 {"error":"Not Found"}` as a route miss; 0.9.8 answers it with the
+documented `403 {"error":"HBONE relay destination not allowed"}`, and a
+terminator without its mesh configuration with
+`503 {"error":"HBONE relay not ready"}`. The refusal is attributed to the
 endpoint as `confirmed` only when the endpoint's identity was verified,
 because it arrives on that authenticated HTTP/2 connection before any tunnel
 exists. A verification bypass on the endpoint's TLS profile produces
@@ -219,11 +222,13 @@ Anvil embeds one source-audited catalog per supported gateway release:
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.7` (default for new profiles) | v0.9.7, `8fed134` | **538** | [audit/gateway-0.9.7-delta.md](audit/gateway-0.9.7-delta.md) (delta on top of the 0.9.5 audit) |
+| `ferrum-edge-0.9.8` (default for new profiles) | v0.9.8, `e27f210` | **540** | [audit/gateway-0.9.8-delta.md](audit/gateway-0.9.8-delta.md) (delta on top of the 0.9.7 audit) |
+| `ferrum-edge-0.9.7` | v0.9.7, `8fed134` | **538** | [audit/gateway-0.9.7-delta.md](audit/gateway-0.9.7-delta.md) (delta on top of the 0.9.5 audit) |
 | `ferrum-edge-0.9.5` | v0.9.5, `20e7603` | **528** | [audit/gateway-source-audit.md](audit/gateway-source-audit.md) |
 
-Each catalog inventories the release's client-observable outcomes, the **7**
-public `X-Gateway-Error` tokens (identical in both releases), the **19**
+Each catalog inventories the release's client-observable outcomes, the public
+`X-Gateway-Error` tokens (**7** in 0.9.5 and 0.9.7; 0.9.8 adds
+`request_timeout`, so **8**), the **19**
 internal error classes, the gateway-written headers, and each outcome's
 `shared_signal_with` siblings. Its `drift` section records the reconciliation
 with the previous release, and `marker_semantics` holds the release-specific
@@ -247,20 +252,23 @@ catalog whose id equals the profile's `compatibility_id`:
 
 - On v0.9.5 and v0.9.7 a backend can inject `X-Gateway-Error` and
   `X-Gateway-Upstream-Status` on some paths (native gRPC responses, plugin
-  reject maps). Marker-derived claims are therefore capped at **likely**,
-  even for trusted gateways over verified TLS. The same cap applies to a
-  release without a catalog.
+  reject maps). v0.9.8 strips a backend's copies at every backend response
+  boundary, but a plugin rejection can still carry any value and any
+  non-Ferrum endpoint can send the headers. Marker-derived claims are
+  therefore capped at **likely**, even for trusted gateways over verified
+  TLS. The same cap applies to a release without a catalog.
 - A trusted profile used over plain HTTP (lab use) is also capped at likely.
 - `confirmed` gateway attribution needs a gateway-owned, authenticated
   diagnostic contract that no release provides yet (see
   [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md)).
 
-### The seven tokens are coarse, and stay coarse
+### The tokens are coarse, and stay coarse
 
 | Token | What Anvil says | What Anvil never claims from the token alone |
 |---|---|---|
 | `connection_failure` | The gateway could not set up a connection to the configured backend (DNS, TCP, TLS, pool, …). | That TLS failed; that DNS failed; that your client certificate is wrong (the gateway uses its own identity). |
-| `backend_timeout` | The gateway's backend deadline elapsed (any 504 gets this token). | That the backend received the request (on v0.9.5 a pooled-connection bug can strand it; on v0.9.7 a Gateway API route's request timeout can fire before dispatch); that the backend is slow rather than unreachable. |
+| `backend_timeout` | The gateway's backend deadline elapsed (any 504 gets this token, except a 0.9.8 route timeout that no backend held). | That the backend received the request (on v0.9.5 a pooled-connection bug can strand it; on v0.9.7 a Gateway API route's request timeout can fire before dispatch); that the backend is slow rather than unreachable. |
+| `request_timeout` (0.9.8) | The route's total request timeout expired before any backend held the attempt (upload, gateway processing or admission, retry backoff). | That the backend is slow; which phase used the time; that no earlier attempt reached a backend. |
 | `backend_error` | The backend path failed or the gateway refused locally (buffer capacity, in-flight limit, egress policy, …). | That the backend returned this error. |
 | `circuit_breaker_open` | The gateway's breaker for this backend is open. | That the backend is down right now. |
 | `overload` | The gateway shed load, was draining, or hit the response-transform ceiling (502). | CPU pressure. |
@@ -297,13 +305,15 @@ only presentation; every card shows its own confidence.
   wording, every catalog on disk is embedded and internally consistent, and
   the desktop profile dialog offers exactly the embedded releases.
 - Per-release selection tests: a 0.9.7-only signal is not matched against
-  the 0.9.5 catalog, release notes follow the profile's release, and an
-  unknown release gets no catalog.
+  the 0.9.5 catalog, 0.9.8's `request_timeout` is unknown to the older
+  catalogs, release notes follow the profile's release, and an unknown
+  release gets no catalog.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release
   (`anvil-lab --release v0.9.5 …`; the default is the `RELEASE.lock` pin,
-  v0.9.7). The lab's trusted profile declares the running release's
-  compatibility id. Every scenario runs trusted and untrusted: no `ferrum.*`
+  v0.9.8). Every lab profile's trusted profile declares the running release's
+  compatibility id, and the lab refuses to run a release without its own
+  catalog. Every scenario runs trusted and untrusted: no `ferrum.*`
   gateway attribution may appear when the destination is untrusted, and
   lookalikes (backend 403/5xx/404) must not be attributed to the gateway.
   Operator log `error_class` values are used only as ground truth, never as

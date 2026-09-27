@@ -127,9 +127,11 @@ impl RunSecrets {
             }
         }
         if let Some(st) = &mut r.stream {
+            // Hex previews too: the redactor knows secrets' hex forms.
             for m in &mut st.messages {
-                if !m.preview_is_hex {
-                    m.preview = red.text(&m.preview);
+                m.preview = red.text(&m.preview);
+                for s in [&mut m.event_id, &mut m.event_type].into_iter().flatten() {
+                    *s = red.text(s);
                 }
             }
         }

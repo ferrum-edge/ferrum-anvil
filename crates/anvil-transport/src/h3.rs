@@ -15,7 +15,8 @@
 
 use crate::dns;
 use crate::errors::display_chain;
-use crate::http::{AttemptOutput, EarlyDataIntent, HttpPlan, sleep_until_opt};
+use crate::fence::Generations;
+use crate::http::{AttemptOutput, CacheGenerations, EarlyDataIntent, HttpPlan, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
 use crate::tickets::{HandshakeGuard, ResumptionContext, TicketCache, TicketTransport};
 use crate::tls;
@@ -167,7 +168,10 @@ pub struct PoolStats {
 /// those idle longer than the TTL even when their key is never used again.
 /// The sweep runs only while the pool holds connections. A connection the
 /// pool gives up is closed at once when idle, else when its last request
-/// ends; closing happens outside the pool lock.
+/// ends; closing happens outside the pool lock. A connection opened by an
+/// attempt whose execution began before a [`Pool::clear`] (a vault lock), or
+/// before a [`Pool::clear_isolation`] of its isolation (a workspace delete),
+/// is never pooled: it serves that attempt only (see [`HttpPlan::fence`]).
 struct Pool {
     shared: Arc<PoolShared>,
 }
@@ -179,6 +183,9 @@ struct PoolShared {
 
 #[derive(Default)]
 struct PoolState {
+    /// Advanced by [`Pool::clear`] and [`Pool::clear_isolation`]; an attempt
+    /// takes the generation before it acquires a connection.
+    generations: Generations,
     conns: HashMap<String, H3Conn>,
     /// The connection that answered `425 Too Early`, kept (even with
     /// connection reuse off) for the one retry the engine sends on it after
@@ -241,13 +248,22 @@ impl Pool {
         found
     }
 
+    fn generation(&self) -> u64 {
+        self.shared.state.lock().generations.current()
+    }
+
     /// Pool a new connection for `key`, leased for the request that opened
     /// it. It replaces the key's previous connection, if any; that one is
-    /// closed once no request is in flight on it.
-    fn checkin(&self, key: &str, c: H3Conn) -> StreamLease {
+    /// closed once no request is in flight on it. After a [`clear`](Self::clear)
+    /// since `generation`, or a [`clear_isolation`](Self::clear_isolation) of
+    /// its key's isolation, it is only leased (closed when the request ends).
+    fn checkin(&self, key: &str, c: H3Conn, generation: u64) -> StreamLease {
         let (lease, closing) = {
             let mut state = self.shared.state.lock();
             let lease = self.lease(key, &c);
+            if !state.generations.admits(generation, key) {
+                return lease;
+            }
             let mut removed = Vec::new();
             removed.extend(state.conns.insert(key.to_string(), c).map(|old| (key.to_string(), old)));
             evict_over_cap(&mut state.conns, self.shared.limits.max_idle_total, &mut removed);
@@ -290,9 +306,13 @@ impl Pool {
         found
     }
 
-    fn keep_too_early(&self, key: &str, c: H3Conn) {
+    fn keep_too_early(&self, key: &str, c: H3Conn, generation: u64) {
         let closing = {
             let mut state = self.shared.state.lock();
+            if !state.generations.admits(generation, key) {
+                // Cleared since the attempt began: not kept for the retry.
+                return;
+            }
             let mut removed = Vec::new();
             removed.extend(state.too_early.insert(key.to_string(), c).map(|old| (key.to_string(), old)));
             self.ensure_sweeper(&mut state);
@@ -324,6 +344,7 @@ impl Pool {
     fn clear(&self) {
         let closing = {
             let mut state = self.shared.state.lock();
+            state.generations.clear();
             let removed = std::mem::take(&mut state.conns).into_iter().chain(std::mem::take(&mut state.too_early)).collect();
             state.to_close(removed)
         };
@@ -334,6 +355,7 @@ impl Pool {
         let prefix = format!("{isolation}|");
         let closing = {
             let mut state = self.shared.state.lock();
+            state.generations.clear_isolation(isolation);
             let mut removed: Vec<_> = state.conns.extract_if(|k, _| k.starts_with(&prefix)).collect();
             removed.extend(state.too_early.extract_if(|k, _| k.starts_with(&prefix)));
             state.to_close(removed)
@@ -1023,13 +1045,20 @@ impl H3Transport {
         self.pool.shared.sweep_at(now, false);
     }
 
+    /// The current pool and ticket-cache generations (see [`HttpPlan::fence`]).
+    pub fn cache_generations(&self) -> CacheGenerations {
+        CacheGenerations { pool: self.pool.generation(), tickets: self.tickets.generation() }
+    }
+
     /// Drop pooled connections and every session ticket.
     pub fn clear(&self) {
         self.pool.clear();
         self.tickets.clear();
     }
 
-    /// Drop the pooled connections and session tickets of one isolation.
+    /// Drop the pooled connections and session tickets of one isolation. An
+    /// attempt of that isolation that began before this pools no connection
+    /// and keeps no ticket (see [`HttpPlan::fence`]).
     pub fn clear_isolation(&self, isolation: &str) {
         self.pool.clear_isolation(isolation);
         self.tickets.clear_isolation(isolation);
@@ -1053,6 +1082,7 @@ impl H3Transport {
         rec: &mut Recorder,
         plan: &HttpPlan,
         prepared: &Arc<tls::PreparedTls>,
+        ticket_generation: u64,
         cancel: &CancellationToken,
     ) -> Result<Fresh, (TransportFailure, Option<ConnectionObservation>, EarlyTrack)> {
         let intent = plan.early_data;
@@ -1062,7 +1092,7 @@ impl H3Transport {
             Ok(a) => a,
             Err(f) => return Err((f, Some(cobs), track)),
         };
-        let ctx = self.tickets.context(&plan.isolation, TicketTransport::Quic, &plan.host, plan.port, prepared, &["h3"]);
+        let ctx = self.tickets.context(ticket_generation, &plan.isolation, TicketTransport::Quic, &plan.host, plan.port, prepared, &["h3"]);
         track.tickets = Some((ctx.clone(), ctx.store.received()));
         let (sn, handle) = match tls::routed_handle(prepared, &plan.host, &["h3"]) {
             Ok(x) => x,
@@ -1258,6 +1288,11 @@ impl H3Transport {
         let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let key = format!("{}|h3://{}:{}|{}", plan.isolation, plan.host.to_ascii_lowercase(), plan.port, prepared.fingerprint);
 
+        // Those of the execution (else taken now, first): what this attempt
+        // opens is pooled, and the tickets it receives are kept, only if
+        // nothing was cleared since.
+        let CacheGenerations { pool: generation, tickets: ticket_generation } =
+            plan.fence.map_or_else(|| self.cache_generations(), |f| f.quic);
         // The retry after `425 Too Early` goes out on the connection that
         // answered it, whose handshake is complete.
         let handed = match plan.early_data {
@@ -1283,11 +1318,11 @@ impl H3Transport {
                 });
                 (Some(c), true, None)
             }
-            None if early_on => match self.connect_resumable(&mut rec, plan, &prepared, cancel).await {
+            None if early_on => match self.connect_resumable(&mut rec, plan, &prepared, ticket_generation, cancel).await {
                 Ok(Fresh::Established(b)) => {
                     let (c, t) = *b;
                     track = Some(t);
-                    lease = Some(if plan.keepalive { self.pool.checkin(&key, c.clone()) } else { self.pool.lease(&key, &c) });
+                    lease = Some(if plan.keepalive { self.pool.checkin(&key, c.clone(), generation) } else { self.pool.lease(&key, &c) });
                     (Some(c), false, None)
                 }
                 Ok(Fresh::ZeroRtt(z)) => (None, false, Some(z)),
@@ -1317,7 +1352,7 @@ impl H3Transport {
                 };
                 let QuicConnected { quic, send, observation: cobs, .. } = connected;
                 let c = H3Conn::new(send, quic, cobs);
-                lease = Some(if plan.keepalive { self.pool.checkin(&key, c.clone()) } else { self.pool.lease(&key, &c) });
+                lease = Some(if plan.keepalive { self.pool.checkin(&key, c.clone(), generation) } else { self.pool.lease(&key, &c) });
                 (Some(c), false, None)
             }
         };
@@ -1540,7 +1575,8 @@ impl H3Transport {
                 }
             };
             let c = H3Conn::new(send, quic, cobs);
-            lease = Some(if plan.keepalive && poolable { self.pool.checkin(&key, c.clone()) } else { self.pool.lease(&key, &c) });
+            lease =
+                Some(if plan.keepalive && poolable { self.pool.checkin(&key, c.clone(), generation) } else { self.pool.lease(&key, &c) });
             track = Some(track_z);
             (c, stream)
         } else {
@@ -1591,7 +1627,7 @@ impl H3Transport {
             && out.observation.failure.is_none()
             && out.response.as_ref().map(|r| r.status) == Some(425)
         {
-            self.pool.keep_too_early(&key, conn);
+            self.pool.keep_too_early(&key, conn, generation);
         }
         drop(lease);
         out

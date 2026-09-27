@@ -26,12 +26,13 @@ use anvil_domain::execution::{
 use anvil_domain::tls::{ServerSpiffeIdentity, TlsMinVersion};
 use parking_lot::Mutex;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{ClientSessionMemoryCache, Resumption, WebPkiServerVerifier};
+use rustls::client::{ClientSessionStore, Resumption, Tls12ClientSessionValue, Tls13ClientSessionValue, WebPkiServerVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::sign::CertifiedKey;
-use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{ClientConfig, DigitallySignedStruct, NamedGroup, RootCertStore, SignatureScheme};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -125,7 +126,10 @@ pub struct PreparedTls {
     pub server_name_override: Option<String>,
     /// SPIFFE server identity check (replaces host-name verification).
     pub spiffe: Option<SpiffeExpectation>,
-    sessions: Arc<ClientSessionMemoryCache>,
+    /// The session store of this profile's connections outside the
+    /// early-data opt-in (see [`crate::tickets`] for those under it): it
+    /// keeps key-exchange hints only.
+    sessions: Arc<SessionStore>,
     /// Which TLS profile (and revision) this material was prepared from, set
     /// by the caller; part of the session-ticket isolation key, so tickets are
     /// never shared between two profiles even with identical settings.
@@ -302,7 +306,7 @@ pub fn prepare(settings: &TlsSettings) -> Result<PreparedTls, TransportFailure> 
         min_version: settings.min_version,
         server_name_override: settings.server_name_override.clone(),
         spiffe,
-        sessions: Arc::new(ClientSessionMemoryCache::new(64)),
+        sessions: Arc::default(),
         profile_key: String::new(),
     })
 }
@@ -333,6 +337,70 @@ pub(crate) struct PeerCheck<'a> {
 impl PreparedTls {
     pub(crate) fn peer_check(&self) -> PeerCheck<'_> {
         PeerCheck { verifier: self.verifier.as_ref(), roots: self.roots.as_ref(), spiffe: self.spiffe.as_ref() }
+    }
+}
+
+/// Server names a prepared profile's session store keeps a key-exchange hint
+/// for (the oldest is dropped first).
+const MAX_SESSION_SERVERS: usize = 8;
+
+/// The session store of a prepared profile's connections, those outside the
+/// early-data opt-in. Such a connection never resumes a session: it has its
+/// own certificate verifier and client-certificate resolver, and rustls
+/// resumes a session only with the instances that obtained it. So the store
+/// keeps no TLS 1.2 session and no TLS 1.3 ticket (each is dropped as it
+/// arrives, with its secret). It keeps the key-exchange group each server
+/// chose: the next ClientHello to that server offers a key share for it
+/// first and needs no HelloRetryRequest. The ClientHello is the one a store
+/// that kept the sessions would produce, since rustls would find none of
+/// them usable.
+#[derive(Debug, Default)]
+pub(crate) struct SessionStore {
+    kx_hints: Mutex<KxHints>,
+}
+
+#[derive(Debug, Default)]
+struct KxHints {
+    by_name: HashMap<ServerName<'static>, NamedGroup>,
+    /// The keys of `by_name`, oldest first.
+    order: VecDeque<ServerName<'static>>,
+}
+
+impl KxHints {
+    fn set(&mut self, name: ServerName<'static>, group: NamedGroup) {
+        if !self.by_name.contains_key(&name) {
+            if self.order.len() >= MAX_SESSION_SERVERS
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.by_name.remove(&oldest);
+            }
+            self.order.push_back(name.clone());
+        }
+        self.by_name.insert(name, group);
+    }
+}
+
+impl ClientSessionStore for SessionStore {
+    fn set_kx_hint(&self, server_name: ServerName<'static>, group: NamedGroup) {
+        self.kx_hints.lock().set(server_name, group);
+    }
+
+    fn kx_hint(&self, server_name: &ServerName<'_>) -> Option<NamedGroup> {
+        self.kx_hints.lock().by_name.get(&server_name.to_owned()).copied()
+    }
+
+    fn set_tls12_session(&self, _server_name: ServerName<'static>, _value: Tls12ClientSessionValue) {}
+
+    fn tls12_session(&self, _server_name: &ServerName<'_>) -> Option<Tls12ClientSessionValue> {
+        None
+    }
+
+    fn remove_tls12_session(&self, _server_name: &ServerName<'static>) {}
+
+    fn insert_tls13_ticket(&self, _server_name: ServerName<'static>, _value: Tls13ClientSessionValue) {}
+
+    fn take_tls13_ticket(&self, _server_name: &ServerName<'static>) -> Option<Tls13ClientSessionValue> {
+        None
     }
 }
 
@@ -954,4 +1022,75 @@ pub fn client_config_observed(
 pub fn observe(h: &ObservationHandle, prepared: &PreparedTls, completed: bool) -> TlsObservation {
     let alpn: Vec<&str> = h.alpn.iter().map(|s| s.as_str()).collect();
     observation_from_slot(&h.slot, &h.sni, h.sent_sni, &alpn, prepared, completed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anvil_fixtures::{LabPki, tlsserver};
+    use rustls::HandshakeKind;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::TlsAcceptor;
+
+    /// A server that speaks only `version` and accepts only secp384r1 (the
+    /// client's first key share is X25519). After the handshake it has sent
+    /// its session tickets (rustls' default two in TLS 1.3; a TLS 1.2 session
+    /// is set up by the handshake itself), and then it sends one byte.
+    fn server(pki: &LabPki, version: &'static rustls::SupportedProtocolVersion) -> TlsAcceptor {
+        let mut provider = rustls::crypto::ring::default_provider();
+        provider.kx_groups = vec![rustls::crypto::ring::kx_group::SECP384R1];
+        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[version])
+            .expect("protocol version")
+            .with_no_client_auth()
+            .with_single_cert(tlsserver::certs(&pki.server.chain_with(&pki.ca)), tlsserver::key(&pki.server.key))
+            .expect("server certificate");
+        TlsAcceptor::from(Arc::new(cfg))
+    }
+
+    /// One connection of `prepared` to `acceptor`, once the client has read
+    /// the byte the server sends after its tickets: the handshake's kind and
+    /// whether the evidence says it resumed.
+    async fn connection(prepared: &PreparedTls, acceptor: &TlsAcceptor) -> (HandshakeKind, Option<bool>) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let acceptor = acceptor.clone();
+        let served = tokio::spawn(async move {
+            let mut s = acceptor.accept(server).await.expect("server handshake");
+            s.write_all(b"x").await.expect("server write");
+            s.flush().await.expect("server flush");
+            s
+        });
+        let (mut stream, obs) = match connect(prepared, client, "localhost", &[], None).await {
+            Ok(c) => c,
+            Err((f, _)) => panic!("client handshake: {f:?}"),
+        };
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).await.expect("the server's byte");
+        served.await.expect("server task");
+        (stream.get_ref().1.handshake_kind().expect("handshake kind"), obs.resumed)
+    }
+
+    #[tokio::test]
+    async fn outside_the_early_data_opt_in_only_the_key_exchange_hint_is_kept() {
+        crate::init();
+        let pki = LabPki::generate();
+        let roots = vec![pki.ca.cert.clone()];
+        let settings = TlsSettings { verify: true, use_system_roots: false, extra_roots_pem: roots, ..Default::default() };
+        let prepared = prepare(&settings).expect("profile");
+        let localhost = ServerName::try_from("localhost").expect("server name");
+
+        // TLS 1.3: the first ClientHello's key share is not one the server
+        // accepts; the next one offers the group the server chose.
+        let tls13 = server(&pki, &rustls::version::TLS13);
+        assert_eq!(connection(&prepared, &tls13).await, (HandshakeKind::FullWithHelloRetryRequest, Some(false)));
+        assert_eq!(prepared.sessions.kx_hint(&localhost), Some(NamedGroup::secp384r1));
+        assert_eq!(connection(&prepared, &tls13).await, (HandshakeKind::Full, Some(false)), "the key-exchange hint was not used");
+        assert!(prepared.sessions.take_tls13_ticket(&localhost).is_none(), "a TLS 1.3 ticket was kept");
+
+        // TLS 1.2: the session the handshake set up is not kept either.
+        let tls12 = server(&pki, &rustls::version::TLS12);
+        assert_eq!(connection(&prepared, &tls12).await, (HandshakeKind::Full, Some(false)));
+        assert!(prepared.sessions.tls12_session(&localhost).is_none(), "a TLS 1.2 session was kept");
+        assert_eq!(prepared.sessions.kx_hint(&localhost), Some(NamedGroup::secp384r1));
+    }
 }

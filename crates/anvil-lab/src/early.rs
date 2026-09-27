@@ -192,6 +192,30 @@ fn backend_requests(env: &Env, from: usize) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+/// Before v0.9.8 the gateway could classify an HTTP/3 stream accepted before
+/// its handshake-complete signal as early data (ferrum-edge#5761, fixed in
+/// v0.9.8 by #5775): a request the client sent as 1-RTT on the early-data
+/// listener then reaches the backend with `Early-Data: 1`, or draws 425 for a
+/// method outside the gateway's list. Timing-dependent; seen on macOS runners.
+fn misclassifies_1rtt() -> bool {
+    !crate::gateway::release_at_least("v0.9.8")
+}
+
+fn misclassified_note() -> String {
+    let release = crate::gateway::release_label();
+    format!("{release} marked a 1-RTT stream as early data (fixed in v0.9.8, ferrum-edge#5775)")
+}
+
+/// Whether the backend saw exactly `method`s sent as 1-RTT through the
+/// early-data listener: without `Early-Data`, or with `Early-Data: 1` on
+/// releases before v0.9.8. The detail names the gateway misclassification.
+fn one_rtt_seen(seen: &[(String, Option<String>)], methods: &[&str]) -> (bool, String) {
+    let mark_ok = |e: &Option<String>| e.is_none() || (misclassifies_1rtt() && e.as_deref() == Some("1"));
+    let ok = seen.len() == methods.len() && seen.iter().zip(methods).all(|((m, e), want)| m == want && mark_ok(e));
+    let marked = seen.iter().any(|(_, e)| e.is_some());
+    (ok, if ok && marked { format!("{seen:?}; {}", misclassified_note()) } else { format!("{seen:?}") })
+}
+
 fn backend_count(env: &Env) -> usize {
     backend_requests(env, 0).len()
 }
@@ -267,12 +291,13 @@ async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str]) -
         let reported =
             early(&out, 0).is_some_and(|e| e.not_used == Some(EarlyDataNotUsed::HandshakeCompletedFirst) && e.accepted.is_none());
         let seen = backend_requests(env, backend_from);
-        let consistent = reported && seen.iter().all(|(_, e)| e.is_none());
+        let methods: Vec<&str> = seen.iter().map(|(m, _)| m.as_str()).collect();
+        let (backend_ok, detail) = one_rtt_seen(&seen, &methods);
         c.add(
             CheckKind::Diagnosis,
             format!("round {round}: a request that missed the 0-RTT window is not claimed as early data"),
-            consistent,
-            format!("{} backend={seen:?}", line(&out)),
+            reported && backend_ok,
+            format!("{} backend={detail}", line(&out)),
         );
         missed.push(round);
     }
@@ -301,17 +326,12 @@ fn ctrl(env: &Env) -> Fut<'_> {
         c.success(CheckKind::Diagnosis, &o);
         c.add(
             CheckKind::Diagnosis,
-            "early data off by default: no early-data evidence, no ticket cache",
+            "early data off by default: no early-data evidence, no ticket kept",
             o.record.attempts.iter().all(|a| a.early_data.is_none()) && env.engine.session_tickets_held() == 0,
             line(&o),
         );
-        let seen = backend_requests(env, from);
-        c.add(
-            CheckKind::GroundTruth,
-            "the backend received the GET without Early-Data",
-            seen == vec![("GET".to_string(), None)],
-            format!("{seen:?}"),
-        );
+        let (ok, detail) = one_rtt_seen(&backend_requests(env, from), &["GET"]);
+        c.add(CheckKind::GroundTruth, "the backend received the GET without Early-Data", ok, detail);
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
     })
 }
@@ -357,12 +377,13 @@ fn early001(env: &Env) -> Fut<'_> {
         );
         no_gateway_attribution(&mut c, &o);
         let seen = backend_requests(env, from);
+        let before = backend_requests(env, from.saturating_sub(1));
+        let (ticket_ok, ticket) = one_rtt_seen(before.get(..1).unwrap_or_default(), &["GET"]);
         c.add(
             CheckKind::GroundTruth,
             "the backend saw the 0-RTT GET with `Early-Data: 1` (the ticket-fetching GET before it had none)",
-            seen == vec![("GET".to_string(), Some("1".to_string()))]
-                && backend_requests(env, from - 1).first().is_some_and(|r| r.1.is_none()),
-            format!("{seen:?}"),
+            seen == vec![("GET".to_string(), Some("1".to_string()))] && ticket_ok,
+            format!("{seen:?}; ticket GET {ticket}"),
         );
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
     })
@@ -508,27 +529,30 @@ fn early005(env: &Env) -> Fut<'_> {
         let from = backend_count(env);
         let o = send(env, &ctx(env, "POST", HTTPS, HttpVersionPolicy::Http3Only, Some(&[]))).await;
         c.success(CheckKind::Diagnosis, &o);
+        let a = &o.record.attempts;
+        // Before v0.9.8 the gateway may answer the 1-RTT POST 425; Anvil then
+        // retries it once, still not as early data.
+        let misclassified = misclassifies_1rtt()
+            && a.len() == 2
+            && a[0].response_status == Some(425)
+            && a[1].reason == AttemptReason::TooEarlyRetry
+            && early(&o, 1).is_some_and(|e| !e.offered);
         c.add(
             CheckKind::Diagnosis,
             "POST is never early data: resumed, sent after the handshake, reason recorded",
             early(&o, 0).is_some_and(|e| {
                 !e.method_eligible && !e.offered && e.resumption_attempted && e.not_used == Some(EarlyDataNotUsed::MethodNotEligible)
-            }) && o.record.attempts.len() == 1,
-            line(&o),
+            }) && (a.len() == 1 || misclassified),
+            if misclassified { format!("{}; {}", line(&o), misclassified_note()) } else { line(&o) },
         );
         c.add(
             CheckKind::Diagnosis,
             "no 425 and no early-data claim",
-            !codes(&o).iter().any(|x| x.starts_with("early_data.accepted") || x == "request.too_early"),
+            !codes(&o).iter().any(|x| x.starts_with("early_data.accepted") || (x == "request.too_early" && !misclassified)),
             format!("{:?}", codes(&o)),
         );
-        let seen = backend_requests(env, from);
-        c.add(
-            CheckKind::GroundTruth,
-            "the backend saw the POST without Early-Data",
-            seen == vec![("POST".to_string(), None)],
-            format!("{seen:?}"),
-        );
+        let (ok, detail) = one_rtt_seen(&backend_requests(env, from), &["POST"]);
+        c.add(CheckKind::GroundTruth, "the backend saw the POST without Early-Data", ok, detail);
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
     })
 }
@@ -618,13 +642,8 @@ fn early007(env: &Env) -> Fut<'_> {
             early(&o, 0).is_some_and(|e| e.not_used == Some(EarlyDataNotUsed::NoTicket) && !e.resumption_attempted && !e.offered),
             line(&o),
         );
-        let seen = backend_requests(env, from);
-        c.add(
-            CheckKind::GroundTruth,
-            "the backend saw the GET without Early-Data",
-            seen == vec![("GET".to_string(), None)],
-            format!("{seen:?}"),
-        );
+        let (ok, detail) = one_rtt_seen(&backend_requests(env, from), &["GET"]);
+        c.add(CheckKind::GroundTruth, "the backend saw the GET without Early-Data", ok, detail);
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
     })
 }

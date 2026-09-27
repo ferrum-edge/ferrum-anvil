@@ -16,8 +16,8 @@ use crate::prepare::{self, Target};
 use crate::record::{self, Assembly};
 use crate::redact::Redactor;
 use crate::vars::Resolver;
-use crate::{Engine, ExecutionOutput};
-use anvil_auth::{ResolvedAuth, SignableRequest};
+use crate::{Engine, ExecutionOutput, SensitiveEpoch};
+use anvil_auth::ResolvedAuth;
 use anvil_diagnostics::{Draft, FerrumTrust};
 use anvil_domain::Id;
 use anvil_domain::diagnostics::{Confidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
@@ -77,24 +77,112 @@ struct SessionPrep {
     require_verified_tls: bool,
     redactor: Redactor,
     extra_findings: Vec<Draft>,
+    /// Where the handshake responses' cookies are kept (WebSocket, SSE and
+    /// gRPC with the cookies setting on).
+    cookies: Option<SessionCookies>,
+    /// What a gRPC call whose schema comes from server reflection was signed
+    /// for and sent with, once the transport encoded its message.
+    resigned: Option<ResignedSlot>,
+    /// The secrets of every gRPC request signed in the transport (the call and
+    /// each server reflection request), for the record's redactor.
+    signed_secrets: Option<SignedSecrets>,
+}
+
+/// A gRPC call signed over the framed message it sent, once server
+/// reflection resolved its schema: the record's prepared request, in place
+/// of the one prepared (and signed over an empty body) before it was known.
+struct Resigned {
+    headers: Vec<(String, String)>,
+    body: Bytes,
+    facts: Vec<(String, String)>,
+}
+
+type ResignedSlot = Arc<parking_lot::Mutex<Option<Resigned>>>;
+
+/// The secrets requests signed in the transport were signed with (a token
+/// minted for each signature), whether or not the record keeps the request:
+/// a server can echo a reflection request's credential in its refusal.
+type SignedSecrets = Arc<parking_lot::Mutex<Vec<String>>>;
+
+/// The redactor of a live transcript that can learn secrets once the session
+/// is planned: those a gRPC call signed once server reflection resolved its
+/// schema (before the call's first message is recorded).
+type SharedRedactor = Arc<parking_lot::RwLock<Redactor>>;
+
+/// The workspace jar a session handshake keeps its `Set-Cookie` in: the
+/// execution's isolation, the URL the handshake stands for in the jar, and
+/// the engine's epoch (with the jar's generation) when the execution
+/// started, so the cookies of a session that spans a lock or the deletion of
+/// its workspace are not kept.
+struct SessionCookies {
+    jars: crate::CookieJars,
+    epoch: SensitiveEpoch,
+    isolation: String,
+    target: Target,
 }
 
 fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFailure {
     TransportFailure::new(Phase::Prepare, kind, msg).with_field(field)
 }
 
+/// A binary or ping message's hex, resolved and checked. The message is sent,
+/// and shown in the transcript, as the bytes it decodes to: its secrets are
+/// redacted in that form too.
+fn ws_hex(r: &Resolver, raw: &str, field: &str) -> Result<String, TransportFailure> {
+    let since = r.used_secrets.lock().len();
+    let hex = r.resolve(raw, field)?;
+    let bytes = anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, field))?;
+    crate::redact::note_decoded_secrets(r, since, PayloadEncoding::Hex, &bytes);
+    Ok(hex)
+}
+
 fn unsupported(msg: impl Into<String>, field: &str) -> TransportFailure {
     local(FailureKind::UnsupportedCombination, msg, field)
 }
 
-fn header_pairs(headers: &[(String, String)]) -> Vec<(HeaderName, HeaderValue)> {
-    headers
-        .iter()
-        .filter_map(|(n, v)| match (HeaderName::from_bytes(n.as_bytes()), HeaderValue::from_str(v)) {
-            (Ok(n), Ok(v)) => Some((n, v)),
-            _ => None,
-        })
-        .collect()
+/// The handshake's final headers for the wire; a header that is not valid
+/// there fails the session before anything is sent (see
+/// [`http_exec::wire_headers`]).
+fn header_pairs(headers: &[(String, String)]) -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
+    http_exec::wire_headers(headers)
+}
+
+/// The HTTP URL a handshake or call stands for: a WebSocket or gRPC URL as
+/// its HTTP counterpart (`ws` and `grpc` as `http`, `wss` and `grpcs` as
+/// `https`; RFC 6455 §4.1, and gRPC is carried over HTTP). In the cookie jar,
+/// `Secure` and `HttpOnly` cookies then apply as for HTTP requests to the
+/// origin, and a DPoP proof's `htu` is the HTTP URL the request is sent to.
+pub(crate) fn http_target(t: &Target) -> Target {
+    let scheme = match t.scheme.as_str() {
+        "wss" | "grpcs" => "https",
+        "ws" | "grpc" => "http",
+        other => other,
+    };
+    Target { scheme: scheme.to_string(), ..t.clone() }
+}
+
+/// Cookies for an HTTP-based handshake (WebSocket, SSE) or gRPC call, as for
+/// an HTTP request when the cookies setting is on: the workspace jar's
+/// cookies for the target join `headers` (the request's own cookies win),
+/// and the `Set-Cookie` of the handshake (or of the call's response headers)
+/// is kept when the session ends.
+fn jar_cookies(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    b: &mut Base,
+    target: &Target,
+    headers: &mut Vec<(String, String)>,
+) -> Option<SessionCookies> {
+    if !b.prep.settings.cookies {
+        return None;
+    }
+    let target = http_target(target);
+    for n in http_exec::add_jar_cookies(engine, &ctx.isolation, &target, headers) {
+        if !b.inferred.contains(&n) {
+            b.inferred.push(n);
+        }
+    }
+    Some(SessionCookies { jars: engine.cookie_jars(), epoch: b.prep.epoch, isolation: ctx.isolation.clone(), target })
 }
 
 fn dns_config(s: &EffectiveSettings) -> DnsConfig {
@@ -112,69 +200,174 @@ fn replace_oauth(a: &mut ResolvedAuth, t: &anvil_auth::oauth::CachedToken) {
     }
 }
 
-fn has_explicit_header(spec: &RequestSpec, name: &str) -> bool {
+pub(crate) fn has_explicit_header(spec: &RequestSpec, name: &str) -> bool {
     spec.headers.iter().any(|h| h.enabled && h.name.trim().eq_ignore_ascii_case(name))
 }
 
+/// Noted for a session when the early-data setting is on.
+pub(crate) const EARLY_DATA_NOTE: &str =
+    "0-RTT early data is not used for sessions (WebSocket, gRPC, SSE, TCP, UDP): the early-data setting applies to HTTP requests only";
+
+/// Stands in for the `Sec-WebSocket-Key` generated for each handshake.
+const WS_KEY_PER_HANDSHAKE: &str = "<generated per handshake>";
+
+/// Connection-specific fields an HTTP/2 or HTTP/3 request does not carry
+/// (the `Host` is sent as `:authority`), and the WebSocket key, which only
+/// the HTTP/1.1 upgrade has (RFC 8441 §4).
+const WS_NOT_ON_EXTENDED_CONNECT: &[&str] = &["host", "connection", "upgrade", "transfer-encoding", "keep-alive", "sec-websocket-key"];
+
+/// The fields a gRPC call does not take from the request's headers (the
+/// transport frames the body and sets the authority itself).
+const GRPC_NOT_SENT: &[&str] = &["host", "connection", "transfer-encoding", "upgrade", "content-length", "keep-alive"];
+
+/// The connection-specific fields an event stream over HTTP/2 or HTTP/3
+/// does not send (the `Host` is sent as `:authority`).
+const SSE_NOT_SENT_OVER_H2_H3: &[&str] = &["host", "connection", "transfer-encoding", "upgrade", "keep-alive"];
+
+/// The HTTP request a session opens with (a WebSocket or SSE handshake, a
+/// gRPC call, a MASQUE `CONNECT`), before auth and cookies. The session and
+/// the effective-request preview build it with the same code; only the
+/// session applies auth and plans the transport.
+#[derive(Clone)]
+pub(crate) struct SessionRequest {
+    pub(crate) method: String,
+    /// Where the request is sent. Auth signs for its HTTP counterpart
+    /// ([`http_target`]).
+    pub(crate) target: Target,
+    /// The request's headers, before auth.
+    pub(crate) headers: Vec<(String, String)>,
+    /// The exact bytes sent (and signed).
+    pub(crate) body: Bytes,
+    pub(crate) content_type: Option<String>,
+    /// Headers the transport sets after auth: `(name, value, replace)`. One
+    /// that does not replace is added only when the request has none.
+    pub(crate) transport: Vec<(String, String, bool)>,
+    /// Lowercase names of the headers the transport leaves out.
+    pub(crate) not_sent: &'static [&'static str],
+    /// Whether the transport sends the authority as `Host` (gRPC-Web over
+    /// HTTP/1.1).
+    pub(crate) host_from_authority: bool,
+    /// Whether the request-target is the path alone (a gRPC call's method
+    /// path): no query is sent and an auth profile may add none.
+    pub(crate) path_only: bool,
+}
+
+/// Why a session refuses what an auth profile applied, before anything is
+/// sent: a handshake or call cannot carry a rewritten body, and a gRPC
+/// call's path takes no query.
+pub(crate) fn auth_refusal(applied: &anvil_auth::Applied, path_only: bool) -> Option<String> {
+    if applied.body.is_some() {
+        return Some(format!("the auth profile '{}' rewrites the message body, which this protocol cannot carry", applied.label));
+    }
+    if path_only && !applied.append_query.is_empty() {
+        return Some("an auth profile that adds query parameters cannot be used with gRPC (the path is fixed)".into());
+    }
+    None
+}
+
+/// A session request's headers and query once auth is applied.
+struct Authorized {
+    headers: Vec<(String, String)>,
+    query: String,
+    facts: Vec<(String, String)>,
+    /// The fields auth set, as it set them.
+    set: Vec<(String, String)>,
+}
+
+/// Per-send auth for `req`, refused before anything is sent when a header
+/// it produced is not valid on the wire or the session cannot carry it.
+fn sign_request(auth: &ResolvedAuth, req: &SessionRequest) -> Result<anvil_auth::Applied, TransportFailure> {
+    let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
+    let applied =
+        anvil_auth::apply(auth, &signable, Utc::now()).map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
+    http_exec::check_auth_headers(&applied)?;
+    if let Some(why) = auth_refusal(&applied, req.path_only) {
+        return Err(unsupported(why, "auth"));
+    }
+    Ok(applied)
+}
+
+/// Set each field in `set` on `headers`, replacing any of the same name.
+fn set_headers(headers: &mut Vec<(String, String)>, set: Vec<(String, String)>) {
+    for (n, v) in set {
+        headers.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
+        headers.push((n, v));
+    }
+}
+
 /// OAuth acquisition (same transport and trust as HTTP) and per-send auth.
-/// Returns the final headers and query, auth facts, and scrubs every secret
-/// used through the redactor.
-#[allow(clippy::too_many_arguments)]
+/// Returns the final headers and query and the auth facts, and scrubs every
+/// secret used through the redactor.
 async fn apply_auth(
     engine: &Engine,
     ctx: &ExecutionContext,
     prep: &mut Prepared,
     redactor: &mut Redactor,
-    method: &str,
-    target: &Target,
-    headers: Vec<(String, String)>,
-    body: &[u8],
+    req: &SessionRequest,
     cancel: &CancellationToken,
-) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), TransportFailure> {
+) -> Result<Authorized, TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
-        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, cancel).await {
+        match crate::oauth_http::acquire(engine, prep.epoch, ctx, &prep.settings, key, cfg, cancel).await {
             Ok(t) => replace_oauth(&mut prep.auth, &t),
             Err(e) => return Err(crate::oauth_http::acquisition_failure(cfg, e, "Nothing was sent.")),
         }
     }
     if matches!(prep.auth, ResolvedAuth::None) {
-        return Ok((headers, target.query.clone(), vec![]));
+        return Ok(Authorized { headers: req.headers.clone(), query: req.target.query.clone(), facts: vec![], set: vec![] });
     }
-    let signable = SignableRequest {
-        method: method.to_string(),
-        scheme: target.scheme.clone(),
-        authority: headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case("host"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| target.authority.clone()),
-        raw_path: target.path.clone(),
-        raw_query: target.query.clone(),
-        headers: headers.clone(),
-        body: body.to_vec(),
-    };
-    let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
-        .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
-    if applied.body.is_some() {
-        return Err(unsupported(
-            format!("the auth profile '{}' rewrites the message body, which this protocol cannot carry", applied.label),
-            "auth",
-        ));
-    }
+    let applied = sign_request(&prep.auth, req)?;
     for s in &applied.secrets {
         redactor.add_secret(s);
     }
-    let mut out = headers;
-    for (n, v) in applied.set_headers {
-        out.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
-        out.push((n, v));
-    }
-    let mut query = target.query.clone();
+    let mut headers = req.headers.clone();
+    set_headers(&mut headers, applied.set_headers.clone());
+    let mut query = req.target.query.clone();
     for (k, v) in applied.append_query {
         let pair = format!("{}={}", prepare::encode_component(&k), prepare::encode_component(&v));
         query = if query.is_empty() { pair } else { format!("{query}&{pair}") };
     }
-    Ok((out, query, applied.facts))
+    Ok(Authorized { headers, query, facts: applied.facts, set: applied.set_headers })
+}
+
+/// Signs a gRPC request in the transport, once its path and body are known:
+/// a unary or server-streaming call whose schema comes from server
+/// reflection, over the framed message it sends (a call with a local schema
+/// is signed so when it is prepared), and each server reflection request,
+/// for its own path and framed message, so neither is sent with a signature
+/// or DPoP proof made for another request. The fields auth sets otherwise
+/// than it set them when the call was prepared (`first`, over an empty
+/// body) replace those in `sent`, the call's prepared headers. What a call
+/// is sent with is kept in `slot` for the record (a reflection request has
+/// none), and the secrets it is signed with (a freshly minted token) join
+/// the `live` transcript redactor and `signed`, for the record's redactor.
+fn sign_in_transport(
+    auth: ResolvedAuth,
+    request: &SessionRequest,
+    first: &[(String, String)],
+    sent: &[(String, String)],
+    slot: Option<ResignedSlot>,
+    live: SharedRedactor,
+    signed: SignedSecrets,
+) -> grpc::SignFn {
+    let (request, first, sent) = (request.clone(), first.to_vec(), sent.to_vec());
+    Arc::new(move |path: &str, body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
+        let target = Target { path: path.to_string(), ..request.target.clone() };
+        let applied = sign_request(&auth, &SessionRequest { target, body: body.clone(), ..request.clone() })?;
+        {
+            let mut live = live.write();
+            for s in &applied.secrets {
+                live.add_secret(s);
+            }
+        }
+        signed.lock().extend(applied.secrets);
+        let mut headers = sent.clone();
+        set_headers(&mut headers, applied.set_headers.into_iter().filter(|h| !first.contains(h)).collect());
+        let wire = header_pairs(&headers)?;
+        if let Some(slot) = &slot {
+            *slot.lock() = Some(Resigned { headers, body: body.clone(), facts: applied.facts });
+        }
+        Ok(wire)
+    })
 }
 
 /// Client identity material (PEM) for DTLS, following the TLS profile's
@@ -212,9 +405,13 @@ fn decode_payloads(r: &Resolver, payloads: &[StreamPayload], field: &str) -> Res
         .iter()
         .enumerate()
         .map(|(i, p)| {
+            let since = r.used_secrets.lock().len();
             let data = r.resolve(&p.data, &format!("{field}[{i}].data"))?;
-            anvil_transport::session::decode_payload(&StreamPayload { data, encoding: p.encoding })
-                .map_err(|e| local(FailureKind::BodySerialization, e, &format!("{field}[{i}]")))
+            let bytes = anvil_transport::session::decode_payload(&StreamPayload { data, encoding: p.encoding })
+                .map_err(|e| local(FailureKind::BodySerialization, e, &format!("{field}[{i}]")))?;
+            // Sent, and shown in the transcript, decoded.
+            crate::redact::note_decoded_secrets(r, since, p.encoding, &bytes);
+            Ok(bytes)
         })
         .collect()
 }
@@ -233,13 +430,13 @@ struct Base {
     inferred: Vec<String>,
 }
 
-fn base(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, schemes: &[&str]) -> Result<Base, TransportFailure> {
-    let prep = http_exec::prepare_all(engine, ctx, r, schemes)?;
+fn base(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r: &Resolver, schemes: &[&str]) -> Result<Base, TransportFailure> {
+    let prep = http_exec::prepare_all_at(engine, epoch, ctx, r, schemes)?;
     let redactor = Redactor::for_execution(r, &ctx.redaction_names);
     let mut inferred = prep.inferred.clone();
     if prep.settings.early_data.enabled {
         // The opt-in covers HTTP requests only; say so instead of ignoring it.
-        inferred.push("0-RTT early data is not used for sessions (WebSocket, gRPC, SSE, TCP, UDP): the early-data setting applies to HTTP requests only".into());
+        inferred.push(EARLY_DATA_NOTE.into());
     }
     Ok(Base { prep, redactor, inferred })
 }
@@ -273,6 +470,9 @@ fn finish_prep(
         inferred,
         redactor,
         extra_findings: vec![],
+        cookies: None,
+        resigned: None,
+        signed_secrets: None,
     }
 }
 
@@ -281,27 +481,34 @@ fn redact_fn(r: &Redactor) -> RedactFn {
     Arc::new(move |s: &str| r.text(s))
 }
 
-/// `cancel` ends a wait for an OAuth token (nothing is sent).
+fn shared_redact_fn(r: &SharedRedactor) -> RedactFn {
+    let r = r.clone();
+    Arc::new(move |s: &str| r.read().text(s))
+}
+
+/// `cancel` ends a wait for an OAuth token (nothing is sent). `epoch` is the
+/// engine's when the execution started.
 async fn prepare_session(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     r: &Resolver,
     interactive: bool,
     cancel: &CancellationToken,
 ) -> Result<SessionPrep, TransportFailure> {
     match ctx.spec.protocol {
-        Protocol::WebSocket => prepare_ws(engine, ctx, r, cancel).await,
-        Protocol::Grpc => prepare_grpc(engine, ctx, r, interactive, cancel).await,
-        Protocol::Sse => prepare_sse(engine, ctx, r, cancel).await,
-        Protocol::Tcp => prepare_tcp(engine, ctx, r),
-        Protocol::Udp => prepare_udp(engine, ctx, r, cancel).await,
+        Protocol::WebSocket => prepare_ws(engine, epoch, ctx, r, cancel).await,
+        Protocol::Grpc => prepare_grpc(engine, epoch, ctx, r, interactive, cancel).await,
+        Protocol::Sse => prepare_sse(engine, epoch, ctx, r, cancel).await,
+        Protocol::Tcp => prepare_tcp(engine, epoch, ctx, r),
+        Protocol::Udp => prepare_udp(engine, epoch, ctx, r, cancel).await,
         Protocol::Http => Err(unsupported("HTTP is request/response; use execute() rather than a session", "protocol")),
     }
 }
 
 /// The validated `permessage-deflate` offer, refused before any traffic when
 /// it cannot be sent as configured.
-fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_deflate::DeflateOffer>, TransportFailure> {
+pub(crate) fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_deflate::DeflateOffer>, TransportFailure> {
     if !o.enabled {
         return Ok(None);
     }
@@ -329,12 +536,15 @@ fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_
     }))
 }
 
-async fn prepare_ws(
-    engine: &Engine,
-    ctx: &ExecutionContext,
-    r: &Resolver,
-    cancel: &CancellationToken,
-) -> Result<SessionPrep, TransportFailure> {
+/// A WebSocket request's settings (the defaults when it has none) and its
+/// `permessage-deflate` offer, refused before the request is prepared when
+/// it cannot be sent as configured.
+pub(crate) struct WsOffer {
+    spec: WsSpec,
+    deflate: Option<ws_deflate::DeflateOffer>,
+}
+
+pub(crate) fn ws_offer(ctx: &ExecutionContext) -> Result<WsOffer, TransportFailure> {
     let spec = ctx.spec.websocket.clone().unwrap_or(WsSpec {
         bootstrap: WsBootstrap::Http1Upgrade,
         subprotocols: vec![],
@@ -345,54 +555,122 @@ async fn prepare_ws(
         permessage_deflate: Default::default(),
     });
     let deflate = ws_deflate_offer(&ctx.spec, &spec.permessage_deflate)?;
-    let mut b = base(engine, ctx, r, &["wss", "ws"])?;
-    let target = b.prep.http.target.clone();
-    let mut headers = b.prep.http.headers.clone();
-    if !has_explicit_header(&ctx.spec, "accept-encoding") {
-        headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept-encoding"));
-        b.inferred.retain(|i| !i.starts_with("Accept-Encoding"));
-    }
-    let mut script = Vec::with_capacity(spec.messages.len());
-    for (i, m) in spec.messages.iter().enumerate() {
-        let field = format!("websocket.messages[{i}]");
-        script.push(match m {
-            WsMessage::Text { text } => WsMessage::Text { text: r.resolve(text, &field)? },
-            WsMessage::Binary { hex } => {
-                let hex = r.resolve(hex, &field)?;
-                anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                WsMessage::Binary { hex }
+    Ok(WsOffer { spec, deflate })
+}
+
+/// A WebSocket handshake and the messages the session sends once it is open.
+pub(crate) struct WsHandshake {
+    pub(crate) request: SessionRequest,
+    pub(crate) spec: WsSpec,
+    pub(crate) deflate: Option<ws_deflate::DeflateOffer>,
+    script: Vec<WsMessage>,
+    subprotocols: Vec<String>,
+}
+
+/// The note for a `permessage-deflate` offer.
+pub(crate) fn deflate_note(d: &ws_deflate::DeflateOffer) -> String {
+    format!("Sec-WebSocket-Extensions: {} (permessage-deflate offered, RFC 7692)", d.header_value())
+}
+
+impl WsOffer {
+    /// The handshake: `GET` with an HTTP/1.1 upgrade, `CONNECT` with
+    /// `:protocol = websocket` over HTTP/2 and HTTP/3 (RFC 8441, RFC 9220).
+    pub(crate) fn handshake(
+        self,
+        ctx: &ExecutionContext,
+        r: &Resolver,
+        prep: &Prepared,
+        inferred: &mut Vec<String>,
+    ) -> Result<WsHandshake, TransportFailure> {
+        let WsOffer { spec, deflate } = self;
+        let mut headers = prep.http.headers.clone();
+        if !has_explicit_header(&ctx.spec, "accept-encoding") {
+            headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept-encoding"));
+            inferred.retain(|i| !i.starts_with("Accept-Encoding"));
+        }
+        let mut script = Vec::with_capacity(spec.messages.len());
+        for (i, m) in spec.messages.iter().enumerate() {
+            let field = format!("websocket.messages[{i}]");
+            script.push(match m {
+                WsMessage::Text { text } => WsMessage::Text { text: r.resolve(text, &field)? },
+                WsMessage::Binary { hex } => WsMessage::Binary { hex: ws_hex(r, hex, &field)? },
+                WsMessage::Ping { hex } => WsMessage::Ping { hex: ws_hex(r, hex, &field)? },
+                WsMessage::Close { code, reason } => WsMessage::Close { code: *code, reason: r.resolve(reason, &field)? },
+            });
+        }
+        let subprotocols = spec
+            .subprotocols
+            .iter()
+            .enumerate()
+            .map(|(i, s)| r.resolve(s, &format!("websocket.subprotocols[{i}]")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut transport = vec![("Sec-WebSocket-Version".to_string(), "13".to_string(), false)];
+        if !subprotocols.is_empty() {
+            transport.push(("Sec-WebSocket-Protocol".into(), subprotocols.join(", "), false));
+        }
+        if let Some(d) = &deflate {
+            transport.push(("Sec-WebSocket-Extensions".into(), d.header_value(), false));
+        }
+        // Extended CONNECT (RFC 8441, RFC 9220) is sent, and so signed, as CONNECT.
+        let (method, not_sent): (&str, &'static [&'static str]) = match spec.bootstrap {
+            WsBootstrap::Http1Upgrade => {
+                transport.push(("Connection".into(), "Upgrade".into(), false));
+                transport.push(("Upgrade".into(), "websocket".into(), false));
+                transport.push(("Sec-WebSocket-Key".into(), WS_KEY_PER_HANDSHAKE.into(), false));
+                ("GET", &[])
             }
-            WsMessage::Ping { hex } => {
-                let hex = r.resolve(hex, &field)?;
-                anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                WsMessage::Ping { hex }
+            WsBootstrap::Http2ExtendedConnect | WsBootstrap::Http3ExtendedConnect => {
+                transport.push(("User-Agent".into(), concat!("Ferrum-Anvil/", env!("CARGO_PKG_VERSION")).into(), false));
+                ("CONNECT", WS_NOT_ON_EXTENDED_CONNECT)
             }
-            WsMessage::Close { code, reason } => WsMessage::Close { code: *code, reason: r.resolve(reason, &field)? },
-        });
+        };
+        let request = SessionRequest {
+            method: method.into(),
+            target: prep.http.target.clone(),
+            headers,
+            body: Bytes::new(),
+            content_type: None,
+            transport,
+            not_sent,
+            host_from_authority: false,
+            path_only: false,
+        };
+        Ok(WsHandshake { request, spec, deflate, script, subprotocols })
     }
-    let subprotocols = spec
-        .subprotocols
-        .iter()
-        .enumerate()
-        .map(|(i, s)| r.resolve(s, &format!("websocket.subprotocols[{i}]")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let method = if spec.bootstrap == WsBootstrap::Http2ExtendedConnect { "CONNECT" } else { "GET" };
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "GET", &target, headers, &[], cancel).await?;
+}
+
+async fn prepare_ws(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
+    let offer = ws_offer(ctx)?;
+    let mut b = base(engine, epoch, ctx, r, &["wss", "ws"])?;
+    let WsHandshake { request, spec, deflate, script, subprotocols } = offer.handshake(ctx, r, &b.prep, &mut b.inferred)?;
+    // The messages and subprotocols were resolved after the redactor was
+    // built: every redaction below (transcript, URL, PROXY header) covers
+    // their secrets.
+    b.redactor.refresh_used_secrets(r);
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
     if let Some(d) = &deflate {
-        b.inferred.push(format!("Sec-WebSocket-Extensions: {} (permessage-deflate offered, RFC 7692)", d.header_value()));
+        b.inferred.push(deflate_note(d));
     }
-    let t = Target { query, ..target.clone() };
+    let t = Target { query, ..request.target.clone() };
+    let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = ws::WsPlan {
         bootstrap: spec.bootstrap,
         secure: t.scheme == "wss",
         host: t.host.clone(),
         port: t.port,
-        authority: t.authority.clone(),
+        // HTTP/1.1 `Host`, or `:authority` over HTTP/2 and HTTP/3: what auth signed.
+        authority: http_exec::request_authority(&headers, &t),
         request_target: t.request_target(),
-        headers: header_pairs(&headers),
+        headers: header_pairs(&headers)?,
         subprotocols,
         deflate,
         script,
@@ -414,22 +692,31 @@ async fn prepare_ws(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
-    Ok(finish_prep(b, Plan::Ws(plan), method.into(), url, headers, Bytes::new(), vec![]))
+    let mut p = finish_prep(b, Plan::Ws(plan), request.method, url, headers, Bytes::new(), vec![]);
+    p.cookies = cookies;
+    Ok(p)
 }
 
-async fn prepare_sse(
-    engine: &Engine,
+/// An event stream's request and the stream settings the session keeps.
+pub(crate) struct SseRequest {
+    pub(crate) request: SessionRequest,
+    spec: SseSpec,
+    last_event_id: Option<String>,
+}
+
+/// The request that opens an event stream: the request's method and body,
+/// asking for `text/event-stream` without content coding.
+pub(crate) fn sse_request(
     ctx: &ExecutionContext,
     r: &Resolver,
-    cancel: &CancellationToken,
-) -> Result<SessionPrep, TransportFailure> {
+    prep: &Prepared,
+    inferred: &mut Vec<String>,
+) -> Result<SseRequest, TransportFailure> {
     let spec = ctx.spec.sse.clone().unwrap_or(SseSpec { max_events: 0, idle_timeout_ms: 30_000, last_event_id: None, reconnect: false });
-    let mut b = base(engine, ctx, r, &["https", "http"])?;
-    if let Some(f) = sse::version_unsupported(b.prep.settings.http_version, b.prep.http.target.scheme == "https", b.prep.proxy.is_some()) {
+    if let Some(f) = sse::version_unsupported(prep.settings.http_version, prep.http.target.scheme == "https", prep.proxy.is_some()) {
         return Err(f);
     }
-    let target = b.prep.http.target.clone();
-    let mut headers = b.prep.http.headers.clone();
+    let mut headers = prep.http.headers.clone();
     if !has_explicit_header(&ctx.spec, "accept") {
         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept"));
     }
@@ -437,23 +724,65 @@ async fn prepare_sse(
         // Events are parsed incrementally; ask for an unencoded stream.
         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("accept-encoding"));
         headers.push(("Accept-Encoding".into(), "identity".into()));
-        b.inferred.retain(|i| !i.starts_with("Accept-Encoding"));
-        b.inferred.push("Accept-Encoding: identity (events are parsed as they arrive)".into());
+        inferred.retain(|i| !i.starts_with("Accept-Encoding"));
+        inferred.push("Accept-Encoding: identity (events are parsed as they arrive)".into());
     }
     let last_event_id = spec.last_event_id.as_ref().map(|v| r.resolve(v, "sse.last_event_id")).transpose()?;
-    let body = b.prep.http.body.clone();
-    let method = b.prep.http.method.clone();
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &method, &target, headers, &body, cancel).await?;
-    let t = Target { query, ..target.clone() };
+    // Refused rather than left out of the handshake (the message never holds
+    // the value, which may come from a secret).
+    if last_event_id.as_deref().is_some_and(|id| HeaderValue::from_str(id).is_err()) {
+        return Err(local(
+            FailureKind::InvalidHeader,
+            "sse.last_event_id resolves to a value that is not a valid Last-Event-ID header value (it holds a line break or control character); the request was not sent",
+            "sse.last_event_id",
+        ));
+    }
+    let mut transport =
+        vec![("Accept".to_string(), "text/event-stream".to_string(), true), ("Cache-Control".to_string(), "no-cache".to_string(), false)];
+    if let Some(id) = &last_event_id {
+        transport.push(("Last-Event-ID".into(), id.clone(), true));
+    }
+    // Where the version policy leaves no choice of HTTP/2 or HTTP/3.
+    let h2_or_h3 =
+        matches!(prep.settings.http_version, HttpVersionPolicy::H2c | HttpVersionPolicy::Http2Only | HttpVersionPolicy::Http3Only);
+    let request = SessionRequest {
+        method: prep.http.method.clone(),
+        target: prep.http.target.clone(),
+        headers,
+        body: prep.http.body.clone(),
+        content_type: prep.http.content_type.clone(),
+        transport,
+        not_sent: if h2_or_h3 { SSE_NOT_SENT_OVER_H2_H3 } else { &[] },
+        host_from_authority: false,
+        path_only: false,
+    };
+    Ok(SseRequest { request, spec, last_event_id })
+}
+
+async fn prepare_sse(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
+    let mut b = base(engine, epoch, ctx, r, &["https", "http"])?;
+    let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
+    // Covers a secret in the Last-Event-ID, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let t = Target { query, ..request.target.clone() };
+    let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = sse::SsePlan {
-        method: http::Method::from_bytes(method.as_bytes()).unwrap_or(http::Method::GET),
+        method: http::Method::from_bytes(request.method.as_bytes()).unwrap_or(http::Method::GET),
         https: t.scheme == "https",
         host: t.host.clone(),
         port: t.port,
-        authority: t.authority.clone(),
+        // HTTP/1.1 `Host`, or `:authority` over HTTP/2 and HTTP/3: what auth signed.
+        authority: http_exec::request_authority(&headers, &t),
         request_target: t.request_target(),
-        headers: header_pairs(&headers),
-        body: body.clone(),
+        headers: header_pairs(&headers)?,
+        body: request.body.clone(),
         version: b.prep.settings.http_version,
         timeouts: b.prep.settings.timeouts,
         limits: b.prep.settings.limits,
@@ -475,10 +804,12 @@ async fn prepare_sse(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
-    Ok(finish_prep(b, Plan::Sse(plan), method, url, headers, body, facts))
+    let mut p = finish_prep(b, Plan::Sse(plan), request.method, url, headers, request.body, facts);
+    p.cookies = cookies;
+    Ok(p)
 }
 
-async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Schema, TransportFailure> {
+fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Schema, TransportFailure> {
     match &spec.schema {
         GrpcSchemaSource::Reflection => Ok(grpc::Schema::Reflection),
         GrpcSchemaSource::DescriptorSet { attachment } => {
@@ -509,22 +840,52 @@ async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Sc
     }
 }
 
-async fn prepare_grpc(
-    engine: &Engine,
+/// A gRPC request's settings, refused before the request is prepared when it
+/// has none.
+pub(crate) fn grpc_spec(ctx: &ExecutionContext) -> Result<GrpcSpec, TransportFailure> {
+    ctx.spec.grpc.clone().ok_or_else(|| local(FailureKind::BodySerialization, "a gRPC request needs a service, method and schema", "grpc"))
+}
+
+/// A gRPC call and what the session needs to make it.
+pub(crate) struct GrpcCall {
+    pub(crate) request: SessionRequest,
+    pub(crate) spec: GrpcSpec,
+    pub(crate) schema: grpc::Schema,
+    /// The request messages (JSON), before they are encoded.
+    pub(crate) messages: Vec<String>,
+    service: String,
+    method: String,
+    /// The URL's path, under which the method's path is sent.
+    prefix: String,
+    tls_url: bool,
+}
+
+/// A gRPC or gRPC-Web call: `POST` to the method's path under the URL's
+/// path, with the framed request message of a unary or server-streaming
+/// call as its body. A local schema validates the method, call mode and
+/// every message before traffic. An `interactive` session refuses a call
+/// that does not stream requests, and every call a URL with a query.
+pub(crate) fn grpc_call(
     ctx: &ExecutionContext,
     r: &Resolver,
+    prep: &Prepared,
+    inferred: &mut Vec<String>,
+    spec: GrpcSpec,
     interactive: bool,
-    cancel: &CancellationToken,
-) -> Result<SessionPrep, TransportFailure> {
-    let Some(spec) = ctx.spec.grpc.clone() else {
-        return Err(local(FailureKind::BodySerialization, "a gRPC request needs a service, method and schema", "grpc"));
-    };
-    let mut b = base(engine, ctx, r, &["grpcs", "grpc", "https", "http"])?;
-    let version = b.prep.settings.http_version;
-    let target = b.prep.http.target.clone();
+) -> Result<GrpcCall, TransportFailure> {
+    let version = prep.settings.http_version;
+    let target = &prep.http.target;
+    // The call is sent to the method's path alone: a query would be signed
+    // and never sent.
+    if !target.query.is_empty() {
+        return Err(unsupported(
+            "a gRPC URL cannot have a query or query parameters: the call is sent to /<service>/<method> under the URL's path, with no query, so the query would be signed but never sent; remove it",
+            "url",
+        ));
+    }
     let tls_url = matches!(target.scheme.as_str(), "grpcs" | "https");
     let reflection = matches!(spec.schema, GrpcSchemaSource::Reflection);
-    if let Some((msg, field)) = grpc::unsupported_combination(spec.wire, spec.mode, reflection, version, tls_url, b.prep.proxy.is_some()) {
+    if let Some((msg, field)) = grpc::unsupported_combination(spec.wire, spec.mode, reflection, version, tls_url, prep.proxy.is_some()) {
         return Err(unsupported(msg, field));
     }
     if interactive && !matches!(spec.mode, GrpcMode::ClientStreaming | GrpcMode::Bidirectional) {
@@ -536,12 +897,17 @@ async fn prepare_grpc(
     if spec.plaintext && tls_url {
         return Err(unsupported("plaintext (h2c) was selected for a TLS URL; use grpc:// or http:// for h2c", "grpc.plaintext"));
     }
+    // Whether the call is known to go over HTTP/1.1 (gRPC-Web only), which
+    // sends the authority as `Host`.
+    let mut http1 = false;
     if spec.wire.is_web() {
-        b.inferred.push(format!(
+        inferred.push(format!(
             "gRPC-Web ({}): unary and server streaming only; the status is read from the trailer frame at the end of the response body",
             if spec.wire == GrpcWire::GrpcWebText { "text, base64 in both directions" } else { "binary" }
         ));
-        b.inferred.push(
+        let h2_or_h3 = matches!(version, HttpVersionPolicy::H2c | HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback);
+        http1 = version == HttpVersionPolicy::Http1Only || (!tls_url && !h2_or_h3);
+        inferred.push(
             match (version, tls_url) {
                 (HttpVersionPolicy::Http1Only, _) => "gRPC-Web over HTTP/1.1",
                 (HttpVersionPolicy::Http2Only, _) => "gRPC-Web over HTTP/2 (ALPN h2 only)",
@@ -553,24 +919,29 @@ async fn prepare_grpc(
             .into(),
         );
     } else if !tls_url {
-        b.inferred.push("cleartext gRPC uses HTTP/2 with prior knowledge (h2c)".into());
+        inferred.push("cleartext gRPC uses HTTP/2 with prior knowledge (h2c)".into());
     }
-    match version {
-        HttpVersionPolicy::Http3Only => b.inferred.push("HTTP/3 (QUIC) only: the call never falls back to TCP".into()),
-        HttpVersionPolicy::Http3WithFallback => b
-            .inferred
-            .push("HTTP/3 first; if it fails before the call is sent, the call is made over TCP as a separate, recorded attempt".into()),
-        _ => {}
+    if version == HttpVersionPolicy::Http3Only {
+        inferred.push("HTTP/3 (QUIC) only: the call never falls back to TCP".into());
+    } else if version == HttpVersionPolicy::Http3WithFallback {
+        inferred
+            .push("HTTP/3 first; if it fails before the call is sent, the call is made over TCP as a separate, recorded attempt".into());
     }
     let service = r.resolve(&spec.service, "grpc.service")?;
-    let method_name = r.resolve(&spec.method, "grpc.method")?;
-    let messages =
+    let method = r.resolve(&spec.method, "grpc.method")?;
+    let mut messages =
         spec.messages.iter().enumerate().map(|(i, m)| r.resolve(m, &format!("grpc.messages[{i}]"))).collect::<Result<Vec<_>, _>>()?;
-    let schema = load_schema(ctx, &spec).await?;
+    // A unary or server-streaming call with no message sends the empty
+    // message, as the transport encodes it: auth signs that frame, and the
+    // prepared body is it.
+    if messages.is_empty() && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming) {
+        messages.push("{}".into());
+    }
+    let schema = load_schema(ctx, &spec)?;
     // Local schema: the method, call mode and every message are validated before traffic.
     let mut unary_body = Bytes::new();
     if let grpc::Schema::Pool(pool) = &schema {
-        let m = grpc::resolve_method(pool, &service, &method_name, spec.mode)?;
+        let m = grpc::resolve_method(pool, &service, &method, spec.mode)?;
         for (i, j) in messages.iter().enumerate() {
             let enc =
                 grpc::encode_json(&m.input(), j).map_err(|e| local(FailureKind::BodySerialization, e, &format!("grpc.messages[{i}]")))?;
@@ -591,8 +962,7 @@ async fn prepare_grpc(
         }
     }
     // Metadata: request headers + gRPC metadata entries; HTTP content negotiation headers do not apply.
-    let mut headers: Vec<(String, String)> = b
-        .prep
+    let mut headers: Vec<(String, String)> = prep
         .http
         .headers
         .iter()
@@ -600,11 +970,11 @@ async fn prepare_grpc(
         .cloned()
         .collect();
     if has_explicit_header(&ctx.spec, "user-agent")
-        && let Some(ua) = b.prep.http.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("user-agent"))
+        && let Some(ua) = prep.http.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("user-agent"))
     {
         headers.push(ua.clone());
     }
-    b.inferred.retain(|i| !i.starts_with("Accept-Encoding") && !i.starts_with("User-Agent") && !i.starts_with("Content-Type"));
+    inferred.retain(|i| !i.starts_with("Accept-Encoding") && !i.starts_with("User-Agent") && !i.starts_with("Content-Type"));
     for (i, kv) in spec.metadata.iter().enumerate().filter(|(_, kv)| kv.enabled) {
         let n = r.resolve(kv.name.trim(), &format!("grpc.metadata[{i}].name"))?.to_ascii_lowercase();
         let v = r.resolve(&kv.value, &format!("grpc.metadata[{i}].value"))?;
@@ -624,27 +994,85 @@ async fn prepare_grpc(
         }
         headers.push((n, v));
     }
-    let prefix = target.path.trim_end_matches('/').to_string();
-    let path = format!("{prefix}/{service}/{method_name}");
-    let call_target = Target { path: path.clone(), ..target.clone() };
-    let (headers, query, facts) =
-        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "POST", &call_target, headers, &unary_body, cancel).await?;
-    if !query.is_empty() && query != target.query {
-        return Err(unsupported("an auth profile that adds query parameters cannot be used with gRPC (the path is fixed)", "auth"));
+    let content_type = match spec.wire {
+        GrpcWire::Grpc => "application/grpc",
+        GrpcWire::GrpcWeb => anvil_transport::grpc_web::CT_BINARY,
+        GrpcWire::GrpcWebText => anvil_transport::grpc_web::CT_TEXT,
+    };
+    let mut transport = vec![("content-type".to_string(), content_type.to_string(), true)];
+    if spec.wire.is_web() {
+        // PROTOCOL-WEB: the response mode follows Accept; ask for the request's own.
+        transport.push(("accept".into(), content_type.into(), true));
+        transport.push(("x-grpc-web".into(), "1".into(), true));
+    } else {
+        transport.push(("te".into(), "trailers".into(), true));
     }
-    let display = format!("{}://{}{}", target.scheme, target.authority, path);
+    transport.push(("user-agent".into(), concat!("grpc-anvil/", env!("CARGO_PKG_VERSION")).into(), false));
+    if let Some(ms) = spec.deadline_ms {
+        transport.push(("grpc-timeout".into(), grpc::grpc_timeout(ms), true));
+    }
+    let prefix = target.path.trim_end_matches('/').to_string();
+    let request = SessionRequest {
+        method: "POST".into(),
+        target: Target { path: format!("{prefix}/{service}/{method}"), ..target.clone() },
+        headers,
+        body: unary_body,
+        content_type: Some(content_type.into()),
+        transport,
+        not_sent: GRPC_NOT_SENT,
+        host_from_authority: http1,
+        path_only: true,
+    };
+    Ok(GrpcCall { request, spec, schema, messages, service, method, prefix, tls_url })
+}
+
+async fn prepare_grpc(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    interactive: bool,
+    cancel: &CancellationToken,
+) -> Result<SessionPrep, TransportFailure> {
+    let spec = grpc_spec(ctx)?;
+    let mut b = base(engine, epoch, ctx, r, &["grpcs", "grpc", "https", "http"])?;
+    let GrpcCall { request, spec, schema, messages, service, method, prefix, tls_url } =
+        grpc_call(ctx, r, &b.prep, &mut b.inferred, spec, interactive)?;
+    // Covers the secrets of the service, method, messages and metadata,
+    // resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
+    // An auth profile that adds query parameters is refused (the path is fixed).
+    let Authorized { mut headers, facts, set, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let call_target = &request.target;
+    let cookies = jar_cookies(engine, ctx, &mut b, call_target, &mut headers);
+    // With server reflection the message is encoded once the schema is
+    // resolved: the call is signed then, over the framed message it sends.
+    let reflection = matches!(schema, grpc::Schema::Reflection) && !matches!(b.prep.auth, ResolvedAuth::None);
+    let reflected = reflection && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
+    let resigned: Option<ResignedSlot> = reflected.then(Default::default);
+    let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
+    let signed = SignedSecrets::default();
+    let signer = |slot| sign_in_transport(b.prep.auth.clone(), &request, &set, &headers, slot, live.clone(), signed.clone());
+    let sign = resigned.clone().map(|slot| signer(Some(slot)));
+    // Each reflection request is signed for its own path and body.
+    let sign_reflection = reflection.then(|| signer(None));
+    let display = format!("{}://{}{}", call_target.scheme, call_target.authority, call_target.path);
     let plan = grpc::GrpcPlan {
         tls: if tls_url { b.prep.tls.clone() } else { None },
-        host: target.host.clone(),
-        port: target.port,
-        authority: target.authority.clone(),
+        host: call_target.host.clone(),
+        port: call_target.port,
+        // `:authority` (HTTP/2, HTTP/3) or the gRPC-Web `Host` over HTTP/1.1:
+        // what auth signed.
+        authority: http_exec::request_authority(&headers, call_target),
         path_prefix: prefix,
         service,
-        method: method_name,
+        method,
         mode: spec.mode,
         schema,
         messages,
-        headers: header_pairs(&headers),
+        headers: header_pairs(&headers)?,
+        sign,
+        sign_reflection,
         deadline_ms: spec.deadline_ms,
         timeouts: b.prep.settings.timeouts,
         limits: b.prep.settings.limits,
@@ -653,9 +1081,9 @@ async fn prepare_grpc(
         display_url: b.redactor.url(&display),
         max_message_bytes: b.prep.settings.limits.max_response_bytes.min(GRPC_MAX_MESSAGE) as usize,
         transcript: TranscriptLimits::default(),
-        redact: Some(redact_fn(&b.redactor)),
+        redact: Some(shared_redact_fn(&live)),
         wire: spec.wire,
-        version,
+        version: b.prep.settings.http_version,
         proxy_header: b
             .prep
             .proxy_header
@@ -663,17 +1091,13 @@ async fn prepare_grpc(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
         // Channel reuse only where the engine enables it (load runs) and
         // keep-alive is on; interactive calls always own their connection.
-        channels: if !interactive && b.prep.settings.keepalive { engine.grpc_channels.clone() } else { None },
+        channels: if !interactive && b.prep.settings.keepalive { engine.grpc_channels_for(b.prep.epoch, &ctx.isolation) } else { None },
     };
-    let mut p = finish_prep(b, Plan::Grpc(plan), "POST".into(), display, headers, unary_body, facts);
-    p.content_type = Some(
-        match spec.wire {
-            GrpcWire::Grpc => "application/grpc",
-            GrpcWire::GrpcWeb => anvil_transport::grpc_web::CT_BINARY,
-            GrpcWire::GrpcWebText => anvil_transport::grpc_web::CT_TEXT,
-        }
-        .into(),
-    );
+    let mut p = finish_prep(b, Plan::Grpc(plan), request.method, display, headers, request.body, facts);
+    p.cookies = cookies;
+    p.content_type = request.content_type;
+    p.resigned = resigned;
+    p.signed_secrets = reflection.then_some(signed);
     Ok(p)
 }
 
@@ -691,7 +1115,7 @@ fn no_auth(prep: &Prepared, protocol: &str) -> Result<(), TransportFailure> {
     }
 }
 
-fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
+fn prepare_tcp(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.tcp.clone().unwrap_or(TcpSpec {
         tls: false,
         framing: TcpFraming::None,
@@ -702,13 +1126,13 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
         expect_frames: 0,
         proxy_protocol: None,
     });
-    let mut b = base(engine, ctx, r, &["tcp", "tls"])?;
+    let mut b = base(engine, epoch, ctx, r, &["tcp", "tls"])?;
     no_auth(&b.prep, "TCP")?;
     let target = b.prep.http.target.clone();
     let use_tls = target.scheme == "tls" || spec.tls;
     let mut tls: Option<Arc<PreparedTls>> = None;
     if use_tls {
-        let (t, name, _) = http_exec::tls_for(engine, ctx, &b.prep.settings, &target, &mut b.inferred)?;
+        let (t, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &b.prep.settings, &target, &mut b.inferred)?;
         tls = Some(t);
         b.prep.tls_profile_name = name;
         b.prep.tls = tls.clone();
@@ -722,6 +1146,8 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
         .as_ref()
         .map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some(), "tcp.proxy_protocol"))
         .transpose()?;
+    // Covers the secrets of the payloads and PROXY header, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(p) = &spec.proxy_protocol {
         b.inferred.push(crate::proxy_protocol::header_note(p));
@@ -755,6 +1181,7 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
 
 async fn prepare_udp(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     r: &Resolver,
     cancel: &CancellationToken,
@@ -767,7 +1194,7 @@ async fn prepare_udp(
         masque: None,
         proxy_protocol: None,
     });
-    let mut b = base(engine, ctx, r, &["udp", "dtls"])?;
+    let mut b = base(engine, epoch, ctx, r, &["udp", "dtls"])?;
     if spec.masque.is_none() {
         no_auth(&b.prep, "UDP")?;
     }
@@ -788,6 +1215,8 @@ async fn prepare_udp(
     let datagrams = decode_payloads(r, &spec.datagrams, "udp.datagrams")?;
     let envelope =
         spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::envelope_plan(p, ctx, r, &mut b.redactor, use_dtls)).transpose()?;
+    // Covers the secrets of the datagrams and envelope, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(m) = &spec.masque {
         if envelope.is_some() {
@@ -932,7 +1361,7 @@ fn dtls_plan(
     path: DtlsPath,
 ) -> Result<dtls::DtlsPlan, TransportFailure> {
     let settings = b.prep.settings.clone();
-    let (t, name, _) = http_exec::tls_for(engine, ctx, &settings, target, &mut b.inferred)?;
+    let (t, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &settings, target, &mut b.inferred)?;
     b.prep.tls_profile_name = name;
     b.prep.tls = Some(t.clone());
     let identity = match identity_material(ctx, &settings, target)? {
@@ -1081,9 +1510,11 @@ async fn prepare_masque(
         None => (expanded.clone(), String::new()),
     };
     let proxy_target = Target { path, query, ..pt };
+    // Covers the secrets of the proxy URL and URI template, resolved after the redactor was built.
+    b.redactor.refresh_used_secrets(r);
     b.inferred.extend(notes);
     let settings = b.prep.settings.clone();
-    let (tls, name, _) = http_exec::tls_for(engine, ctx, &settings, &proxy_target, &mut b.inferred)?;
+    let (tls, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &settings, &proxy_target, &mut b.inferred)?;
     b.prep.tls_profile_name = name;
     b.prep.tls = Some(tls.clone());
     // The proxy is the only HTTP peer, so gateway trust follows the proxy.
@@ -1099,9 +1530,19 @@ async fn prepare_masque(
         .filter(|(n, _)| has_explicit_header(&ctx.spec, n) || n.eq_ignore_ascii_case("user-agent"))
         .cloned()
         .collect();
-    let (headers, query, facts) =
-        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "CONNECT", &proxy_target, headers, &[], cancel).await?;
-    let t = Target { query, ..proxy_target };
+    let connect = SessionRequest {
+        method: "CONNECT".into(),
+        target: proxy_target,
+        headers,
+        body: Bytes::new(),
+        content_type: None,
+        transport: vec![],
+        not_sent: &[],
+        host_from_authority: false,
+        path_only: false,
+    };
+    let Authorized { headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
+    let t = Target { query, ..connect.target };
     let connect_url = t.url();
     let display_url = b.redactor.url(&connect_url);
     b.inferred.push(format!(
@@ -1118,7 +1559,7 @@ async fn prepare_masque(
         proxy_authority: t.authority.clone(),
         request_target: t.request_target(),
         target: target.authority.clone(),
-        headers: header_pairs(&headers),
+        headers: header_pairs(&headers)?,
         mode: m.datagrams,
         tls,
         dns: dns_config(&settings),
@@ -1242,10 +1683,14 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
                 r.problem.clone().unwrap_or_else(|| "Server reflection failed.".into())
             ),
         ));
-        d.extra_remediation.push(Remediation {
-            text: "Import the service's .proto files or a descriptor set and call it without reflection, or ask the operator to allow reflection for this caller.".into(),
-            owner: Owner::Caller,
-        });
+        // A reflection request auth could not sign was never sent: the server
+        // did not refuse reflection, so allowing it would change nothing.
+        let text = if r.auth_failed {
+            "Fix the request's auth profile so it can sign the reflection request, or import the service's .proto files or a descriptor set and call it without reflection."
+        } else {
+            "Import the service's .proto files or a descriptor set and call it without reflection, or ask the operator to allow reflection for this caller."
+        };
+        d.extra_remediation.push(Remediation { text: text.into(), owner: Owner::Caller });
         out.push(d);
     }
     if facts.icmp_port_unreachable && protocol == Protocol::Udp {
@@ -1292,6 +1737,18 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
     out
 }
 
+/// The transcript as it is stored: every preview and event field redacted
+/// again with the record's redactor, which holds every secret the execution
+/// used (the transcript was redacted as it was emitted).
+fn redact_transcript(mut t: StreamTranscript, r: &Redactor) -> StreamTranscript {
+    for m in &mut t.messages {
+        m.preview = r.text(&m.preview);
+        m.event_id = m.event_id.as_deref().map(|v| r.text(v));
+        m.event_type = m.event_type.as_deref().map(|v| r.text(v));
+    }
+    t
+}
+
 async fn run_plan(plan: &Plan, events: &EventCtx, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
     match plan {
         Plan::Ws(p) => ws::run(p, events, cancel, commands).await,
@@ -1317,11 +1774,29 @@ async fn run_prepared(
     workload: Option<WorkloadApiEvidence>,
 ) -> ExecutionOutput {
     let out = run_plan(&prep.plan, &events, &cancel, commands).await;
+    // The handshake responses' cookies, kept in the workspace jar unless the
+    // engine was locked or the workspace deleted since the execution started.
+    if let Some(c) = &prep.cookies {
+        for r in out.attempts.iter().filter_map(|a| a.response.as_ref()) {
+            c.jars.store(c.epoch, &c.isolation, &c.target, r);
+        }
+    }
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
-    for s in resolver.used_secrets.lock().iter() {
-        redactor.add_secret(s);
+    redactor.refresh_used_secrets(resolver);
+    // The secrets of the call and of each reflection request signed in the
+    // transport: any of them can be echoed in the response, notes or findings.
+    if let Some(signed) = &prep.signed_secrets {
+        for s in signed.lock().iter() {
+            redactor.add_secret(s);
+        }
     }
+    // A call signed once server reflection resolved its schema: the request
+    // as it was signed and sent.
+    let (headers, body, auth_facts) = match prep.resigned.as_ref().and_then(|s| s.lock().take()) {
+        Some(r) => (r.headers, r.body, r.facts),
+        None => (headers, body, auth_facts),
+    };
     let mut attempts = out.attempts;
     let Some(last) = attempts.pop() else {
         let f = TransportFailure::new(Phase::Session, FailureKind::Internal, "the session adapter returned no attempt");
@@ -1378,7 +1853,7 @@ async fn run_prepared(
         protocol_fallback_from: fallback_from,
         redactor: &redactor,
         extra_findings: extra,
-        stream: out.transcript,
+        stream: out.transcript.map(|t| redact_transcript(t, &redactor)),
         protocol_status_override: Some(out.status),
         workload_api: workload,
     };
@@ -1390,8 +1865,13 @@ async fn run_prepared(
 /// Automation execution for WebSocket, gRPC, SSE, TCP/TLS and UDP/DTLS.
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
     let started_at = Utc::now();
+    // Taken first, or when the context was built (`ExecutionContext::epoch`):
+    // TLS material prepared after a lock or a workspace delete is not cached,
+    // and handshake cookies received after either are not kept.
+    let epoch = engine.epoch_for(ctx);
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
-    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver).await;
+    // Canceling the execution abandons a Workload API call in flight.
+    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
     let materialized = match materialized {
         Ok(m) => m,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, Some(workload)),
@@ -1402,7 +1882,7 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     // cancellation abandons it and nothing is sent.
     let prepared = tokio::select! {
         biased;
-        p = prepare_session(engine, ctx, &resolver, false, &cancel) => p,
+        p = prepare_session(engine, epoch, ctx, &resolver, false, &cancel) => p,
         _ = cancel.cancelled() => {
             Err(TransportFailure::new(Phase::Prepare, FailureKind::Canceled, "the execution was canceled before anything was sent"))
         }
@@ -1502,17 +1982,22 @@ impl Engine {
     /// idle auto-close do not apply to interactive sessions.
     pub async fn open_session(&self, ctx: ExecutionContext, events: EventCtx) -> SessionHandle {
         let started_at = Utc::now();
+        // Taken first, or when the context was built
+        // (`ExecutionContext::epoch`): TLS material prepared after a lock or
+        // a workspace delete is not cached, and handshake cookies received
+        // after either are not kept.
+        let epoch = self.epoch_for(&ctx);
         let protocol = ctx.spec.protocol;
         let execution_id = events.execution_id;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let cancel = CancellationToken::new();
         let fallback = Box::new(ctx.clone());
-        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver).await;
+        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver, &cancel).await;
         let (ctx, prepared, workload) = match materialized {
             Ok(m) => {
                 let ctx = m.unwrap_or(ctx);
                 let workload = (!workload.is_empty()).then_some(workload);
-                let prepared = prepare_session(self, &ctx, &resolver, true, &cancel).await;
+                let prepared = prepare_session(self, epoch, &ctx, &resolver, true, &cancel).await;
                 (ctx, prepared, workload)
             }
             Err(f) => (ctx, Err(f), Some(workload)),

@@ -81,13 +81,14 @@ pub async fn spec_reimport_plan(handle: AppHandle, import_id: String, input: Spe
     .await
 }
 
-/// Returns only a count (see `spec_import`).
+/// Returns only a count (see `spec_import`). The import's source record then
+/// holds this file.
 #[tauri::command]
 pub async fn spec_reimport_apply(handle: AppHandle, import_id: String, input: SpecInput, approval: ReimportApproval) -> R<usize> {
     blocking_unchecked(&handle, move |st| {
         let app = st.app()?;
-        let (bytes, _) = input.load(&st.file_grants)?;
-        app.spec_reimport_apply(&id(&import_id)?, &bytes, &approval).map_err(e)
+        let (bytes, name) = input.load(&st.file_grants)?;
+        app.spec_reimport_apply(&id(&import_id)?, &bytes, &name, &approval).map_err(e)
     })
     .await
 }

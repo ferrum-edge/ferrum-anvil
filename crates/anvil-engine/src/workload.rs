@@ -23,8 +23,10 @@
 //! Every Workload API call, the SVIDs used (public data) and the JWT-SVID
 //! checks become [`WorkloadApiEvidence`] in the record. Private keys and
 //! tokens live only in `Zeroizing` memory and in the cache, which the engine
-//! clears on lock ([`crate::Engine::clear_sensitive_state`]). Calls use the
-//! request's connect timeout (5 s when unset) as their deadline.
+//! clears on lock ([`crate::Engine::clear_sensitive_state`]). An answer that
+//! arrives after the cache was cleared is never cached (see
+//! [`WorkloadCache`]), and canceling the execution abandons the step. Calls
+//! use the request's connect timeout (5 s when unset) as their deadline.
 
 use crate::context::{ExecutionContext, SecretResolver, resolve_sensitive};
 use crate::prepare;
@@ -41,6 +43,7 @@ use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 /// How long fetched JWT bundles are reused.
@@ -67,23 +70,56 @@ struct CachedBundles {
 
 /// In-memory Workload API material (SVIDs with their private keys, JWT-SVIDs,
 /// JWT bundles). Never persisted; cleared on lock.
+///
+/// Every [`clear`](Self::clear) starts a new generation. A Workload API step
+/// takes the generation before its first call, and what it fetches is cached
+/// only while that generation is still current, checked under the same lock
+/// as the insert. An answer that arrives after a lock is therefore never
+/// cached, however long the call took.
 #[derive(Default)]
 pub struct WorkloadCache {
-    x509: Mutex<HashMap<String, CachedX509>>,
-    jwt: Mutex<HashMap<String, CachedJwt>>,
-    bundles: Mutex<HashMap<String, CachedBundles>>,
+    state: Mutex<CacheState>,
 }
 
+#[derive(Default)]
+struct CacheState {
+    generation: u64,
+    x509: HashMap<String, CachedX509>,
+    jwt: HashMap<String, CachedJwt>,
+    bundles: HashMap<String, CachedBundles>,
+}
+
+/// The cache generation a Workload API step started in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Generation(u64);
+
 impl WorkloadCache {
+    /// Drop every entry and start a new generation: a fetch that started
+    /// before this call can no longer cache its answer.
     pub fn clear(&self) {
-        self.x509.lock().clear();
-        self.jwt.lock().clear();
-        self.bundles.lock().clear();
+        let mut s = self.state.lock();
+        s.generation = s.generation.wrapping_add(1);
+        s.x509.clear();
+        s.jwt.clear();
+        s.bundles.clear();
+    }
+
+    fn generation(&self) -> Generation {
+        Generation(self.state.lock().generation)
+    }
+
+    /// Apply `insert` only while `generation` is current.
+    fn publish(&self, generation: Generation, insert: impl FnOnce(&mut CacheState)) {
+        let mut s = self.state.lock();
+        if s.generation == generation.0 {
+            insert(&mut s);
+        }
     }
 
     /// Number of cached entries (X.509, JWT, bundles), for tests and status.
     pub fn len(&self) -> (usize, usize, usize) {
-        (self.x509.lock().len(), self.jwt.lock().len(), self.bundles.lock().len())
+        let s = self.state.lock();
+        (s.x509.len(), s.jwt.len(), s.bundles.len())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -257,19 +293,21 @@ fn needed_profiles(ctx: &ExecutionContext) -> Vec<(anvil_domain::Id, String, u16
     out
 }
 
+/// The X.509-SVIDs at `endpoint` and when they are to be re-fetched.
 async fn x509_for(
     engine: &crate::Engine,
+    generation: Generation,
     endpoint: &Endpoint,
     timeout: Duration,
     purpose: &str,
     ev: &mut WorkloadApiEvidence,
-) -> Result<Arc<X509Fetch>, TransportFailure> {
+) -> Result<(Arc<X509Fetch>, DateTime<Utc>), TransportFailure> {
     let key = endpoint.uri.clone();
     let now = Utc::now();
-    if let Some(c) = engine.workload.x509.lock().get(&key)
+    if let Some(c) = engine.workload.state.lock().x509.get(&key)
         && now < c.refresh_after
     {
-        let fetch = c.fetch.clone();
+        let (fetch, refresh_after) = (c.fetch.clone(), c.refresh_after);
         ev.calls.push(WorkloadApiCall {
             rpc: WorkloadRpc::FetchX509Svid,
             endpoint: endpoint.uri.clone(),
@@ -280,7 +318,7 @@ async fn x509_for(
             caller_uid: None,
             result: WorkloadCallResult::Ok,
         });
-        return Ok(fetch);
+        return Ok((fetch, refresh_after));
     }
     let client = wapi::WorkloadClient::new(endpoint.clone(), timeout);
     let timed = client.fetch_x509_svids().await;
@@ -290,8 +328,10 @@ async fn x509_for(
             // Re-fetch at half the shortest SVID lifetime (SPIFFE rotation).
             let refresh_after = fetch.svids.iter().map(|s| s.not_before + (s.not_after - s.not_before) / 2).min().unwrap_or(now).max(now);
             let fetch = Arc::new(fetch);
-            engine.workload.x509.lock().insert(key, CachedX509 { fetch: fetch.clone(), refresh_after });
-            Ok(fetch)
+            engine.workload.publish(generation, |s| {
+                s.x509.insert(key, CachedX509 { fetch: fetch.clone(), refresh_after });
+            });
+            Ok((fetch, refresh_after))
         }
         Err(e) => {
             ev.calls.push(call_record(WorkloadRpc::FetchX509Svid, endpoint, purpose, false, Some(timed.duration), Some(&e)).await);
@@ -306,6 +346,7 @@ async fn x509_for(
 /// `None` when the request needs none.
 async fn materialize_tls(
     engine: &crate::Engine,
+    generation: Generation,
     ctx: &ExecutionContext,
     ev: &mut WorkloadApiEvidence,
     values: &mut Ephemeral,
@@ -322,7 +363,7 @@ async fn materialize_tls(
         let purpose = format!("TLS profile '{}' client identity", p.name);
         let endpoint = wapi::resolve_endpoint(&endpoint)
             .map_err(|e| endpoint_failure(e, "tls.client_identity.endpoint", FailureKind::TlsProfileInvalid))?;
-        let fetch = x509_for(engine, &endpoint, timeout, &purpose, ev).await?;
+        let (fetch, refresh_after) = x509_for(engine, generation, &endpoint, timeout, &purpose, ev).await?;
         let want = spiffe_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let svid = match want {
             Some(w) => fetch.svids.iter().find(|s| s.spiffe_id == w),
@@ -340,7 +381,6 @@ async fn materialize_tls(
             }
             return Err(call_failure(WorkloadRpc::FetchX509Svid, &endpoint, &e, "tls.client_identity.spiffe_id"));
         };
-        let refresh_after = engine.workload.x509.lock().get(&endpoint.uri).map(|c| c.refresh_after);
         ev.x509_svids.push(X509SvidSummary {
             tls_profile: p.name.clone(),
             spiffe_id: svid.spiffe_id.clone(),
@@ -351,7 +391,7 @@ async fn materialize_tls(
             bundle_trusted: trust_bundle && !svid.bundle_pem.is_empty(),
             bundle_certificates: svid.bundle_pem.len() as u32,
             federated_trust_domains: fetch.federated_trust_domains.clone(),
-            refresh_after,
+            refresh_after: Some(refresh_after),
         });
         if trust_bundle {
             p.extra_roots_pem.extend(svid.bundle_pem.iter().cloned());
@@ -620,13 +660,14 @@ pub fn check_jwt_svid(
 
 async fn bundles_for(
     engine: &crate::Engine,
+    generation: Generation,
     endpoint: &Endpoint,
     timeout: Duration,
     ev: &mut WorkloadApiEvidence,
 ) -> Result<Arc<BTreeMap<String, Vec<u8>>>, TransportFailure> {
     let now = Utc::now();
     let purpose = "JWT-SVID signature check";
-    if let Some(c) = engine.workload.bundles.lock().get(&endpoint.uri)
+    if let Some(c) = engine.workload.state.lock().bundles.get(&endpoint.uri)
         && now < c.refresh_after
     {
         let b = c.bundles.clone();
@@ -647,10 +688,10 @@ async fn bundles_for(
         Ok(b) => {
             ev.calls.push(call_record(WorkloadRpc::FetchJwtBundles, endpoint, purpose, false, Some(timed.duration), None).await);
             let b = Arc::new(b);
-            engine.workload.bundles.lock().insert(
-                endpoint.uri.clone(),
-                CachedBundles { bundles: b.clone(), refresh_after: now + ChronoDuration::seconds(JWT_BUNDLE_TTL_SECS) },
-            );
+            let refresh_after = now + ChronoDuration::seconds(JWT_BUNDLE_TTL_SECS);
+            engine.workload.publish(generation, |s| {
+                s.bundles.insert(endpoint.uri.clone(), CachedBundles { bundles: b.clone(), refresh_after });
+            });
             Ok(b)
         }
         Err(e) => {
@@ -665,6 +706,7 @@ async fn bundles_for(
 /// sends anyway.
 async fn acquire_jwt_svid(
     engine: &crate::Engine,
+    generation: Generation,
     ctx: &ExecutionContext,
     plan: &JwtSvidPlan,
     ev: &mut WorkloadApiEvidence,
@@ -686,7 +728,7 @@ async fn acquire_jwt_svid(
             let endpoint = endpoint.as_ref().expect("resolved above");
             let key = format!("{}|{}|{}", endpoint.uri, plan.spiffe_id.clone().unwrap_or_default(), plan.audiences.join("\u{1f}"));
             let now = Utc::now();
-            let cached = engine.workload.jwt.lock().get(&key).filter(|c| now < c.refresh_after).map(|c| c.token.clone());
+            let cached = engine.workload.state.lock().jwt.get(&key).filter(|c| now < c.refresh_after).map(|c| c.token.clone());
             match cached {
                 Some(t) => {
                     ev.calls.push(WorkloadApiCall {
@@ -717,7 +759,9 @@ async fn acquire_jwt_svid(
                                 // Reuse until half its lifetime, and never within the margin.
                                 let refresh = (iat + (exp - iat) / 2).min(exp - JWT_REFRESH_MARGIN_SECS);
                                 if let Some(r) = when(refresh).filter(|r| *r > now) {
-                                    engine.workload.jwt.lock().insert(key, CachedJwt { token: f.token.clone(), refresh_after: r });
+                                    engine.workload.publish(generation, |s| {
+                                        s.jwt.insert(key, CachedJwt { token: f.token.clone(), refresh_after: r });
+                                    });
                                 }
                             }
                             f.token
@@ -735,7 +779,7 @@ async fn acquire_jwt_svid(
         }
     };
     let bundles = match (&endpoint, plan.verify_with_bundles) {
-        (Some(e), true) => Some(bundles_for(engine, e, timeout, ev).await?),
+        (Some(e), true) => Some(bundles_for(engine, generation, e, timeout, ev).await?),
         _ => None,
     };
     // With the Workload API source the configured ID was requested; the
@@ -799,25 +843,37 @@ fn install_token(a: &mut AuthConfig, token: &SensitiveValue) {
 /// Everything the Workload API contributes before a request is prepared:
 /// X.509-SVID client identities and the checked JWT-SVID. Returns the
 /// context to prepare with (`None`: the original one) and the evidence,
-/// which is also returned when the step fails.
+/// which is also returned when the step fails. Canceling `cancel` abandons
+/// the step at once (a call in flight is dropped) and fails it as canceled.
 pub(crate) async fn prepare(
     engine: &crate::Engine,
     ctx: &ExecutionContext,
     r: &Resolver,
+    cancel: &CancellationToken,
 ) -> (Result<Option<ExecutionContext>, TransportFailure>, WorkloadApiEvidence) {
     let mut ev = WorkloadApiEvidence::default();
-    let result = prepare_inner(engine, ctx, r, &mut ev).await;
+    // Taken before any call: nothing fetched from here on is cached once a
+    // lock cleared the cache.
+    let generation = engine.workload.generation();
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            Err(TransportFailure::new(Phase::Prepare, FailureKind::Canceled, "the execution was canceled before anything was sent"))
+        }
+        result = prepare_inner(engine, generation, ctx, r, &mut ev) => result,
+    };
     (result, ev)
 }
 
 async fn prepare_inner(
     engine: &crate::Engine,
+    generation: Generation,
     ctx: &ExecutionContext,
     r: &Resolver,
     ev: &mut WorkloadApiEvidence,
 ) -> Result<Option<ExecutionContext>, TransportFailure> {
     let mut values = Ephemeral::new();
-    let mut out = materialize_tls(engine, ctx, ev, &mut values).await?;
+    let mut out = materialize_tls(engine, generation, ctx, ev, &mut values).await?;
     if auth_is_sent(ctx)
         // The layer `ExecutionContext::effective_auth` selects.
         && let Some(layer) = ctx.auth_layers.iter().rposition(|(_, a)| !matches!(a, AuthConfig::Inherit))
@@ -834,7 +890,7 @@ async fn prepare_inner(
         if let Some(config) = find_jwt_svid(auth) {
             let base = out.as_ref().unwrap_or(ctx);
             let plan = resolve_plan(config, base, r)?;
-            let token = acquire_jwt_svid(engine, base, &plan, ev).await?;
+            let token = acquire_jwt_svid(engine, generation, base, &plan, ev).await?;
             let token = ephemeral(&mut values, "SPIFFE JWT-SVID", token);
             let mut c = out.unwrap_or_else(|| ctx.clone());
             install_token(&mut c.auth_layers[layer].1, &token);

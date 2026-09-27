@@ -14,7 +14,13 @@
 //! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — gRPC echo and reflection
 //!   ([`crate::grpc`]); with an `application/grpc-web*` content type, the
 //!   gRPC-Web echo ([`crate::grpc_web`])
-//! * `/sse?count=&interval=` — server-sent events
+//! * `/sse?count=&interval=&set_cookie=&id=&no_id=&abort=` — server-sent events;
+//!   `set_cookie` (`name=value`) answers with that cookie (`Path=/; HttpOnly`),
+//!   `id` is sent as every event's id (instead of its index), `no_id=1` sends
+//!   events without an `id:` field (each keeps the last event ID the client
+//!   had, such as its `Last-Event-ID`), and `abort=1`
+//!   sends `retry: 50` first and aborts the stream after the events (H1
+//!   truncation / H2 RST_STREAM)
 //! * `/gzip`, `/binary`, `/html`, `/injection`, `/soap-fault`, `/graphql-errors`
 //! * `/redirect?to=&status=`, `/set-cookie?name=&value=`
 //! * `/auth/basic?user=&pass=`, `/auth/bearer?token=`, `/auth/apikey?name=&value=&in=header|query`
@@ -22,7 +28,10 @@
 //! * `/oauth/token`, `/oauth/authorize` — minimal fixture identity provider
 //! * `/ws` — WebSocket echo via H1 Upgrade or H2 extended CONNECT; with a
 //!   permessage-deflate offer or `pmd` query options, the independent
-//!   RFC 7692 peer in [`crate::ws_deflate`]
+//!   RFC 7692 peer in [`crate::ws_deflate`]; `set_cookie` as for `/sse`
+//!
+//! An HTTP/2 request's `:authority` is recorded as
+//! [`GroundTruth::AuthorityReceived`].
 
 use crate::log::{GroundTruth, GroundTruthLog};
 use crate::tlsserver::{TlsServerOptions, client_cn, server_config};
@@ -181,6 +190,12 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let raw_target = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| path.clone());
+    // The request-target's authority: HTTP/2 `:authority` (absent for an
+    // HTTP/1.1 origin-form target, which carries it in `Host`).
+    let authority = req.uri().authority().map(|a| a.to_string());
+    if let Some(a) = &authority {
+        log.push(GroundTruth::AuthorityReceived { path: raw_target.clone(), authority: a.clone() });
+    }
     let qs = query(&req);
     let headers: Vec<(String, String)> =
         req.headers().iter().map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
@@ -241,7 +256,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
             json(
                 200,
                 serde_json::json!({
-                    "method": method.as_str(), "target": raw_target, "version": version,
+                    "method": method.as_str(), "target": raw_target, "authority": authority, "version": version,
                     "headers": headers.iter().map(|(n, v)| serde_json::json!([n, v])).collect::<Vec<_>>(),
                     "body": body_text, "body_len": body.len(),
                 }),
@@ -331,17 +346,32 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
         (_, ["sse"]) => {
             let count: u32 = q(&qs, "count").and_then(|s| s.parse().ok()).unwrap_or(3).min(10_000);
             let interval: u64 = q(&qs, "interval").and_then(|s| s.parse().ok()).unwrap_or(50).min(60_000);
+            let id = q(&qs, "id").map(str::to_string);
+            let no_id = q(&qs, "no_id") == Some("1");
+            let abort = q(&qs, "abort") == Some("1");
             let (mut tx, b) = channel_body();
             tokio::spawn(async move {
+                if abort && tx.send(Ok(Frame::data(Bytes::from_static(b"retry: 50\n")))).await.is_err() {
+                    return;
+                }
                 for i in 0..count {
-                    let ev = format!("id: {i}\nevent: tick\ndata: {{\"n\":{i}}}\n\n");
+                    let id = id.clone().unwrap_or_else(|| i.to_string());
+                    let id_field = if no_id { String::new() } else { format!("id: {id}\n") };
+                    let ev = format!("{id_field}event: tick\ndata: {{\"n\":{i}}}\n\n");
                     if tx.send(Ok(Frame::data(Bytes::from(ev)))).await.is_err() {
                         return;
                     }
                     tokio::time::sleep(Duration::from_millis(interval)).await;
                 }
+                if abort {
+                    let _ = tx.send(Err(std::io::Error::other("fixture abort after the events"))).await;
+                }
             });
-            Response::builder().status(200).header("content-type", "text/event-stream").header("cache-control", "no-cache").body(b).unwrap()
+            let mut resp = Response::builder().status(200).header("content-type", "text/event-stream").header("cache-control", "no-cache");
+            if let Some(c) = q(&qs, "set_cookie") {
+                resp = resp.header("set-cookie", format!("{c}; Path=/; HttpOnly"));
+            }
+            resp.body(b).unwrap()
         }
         (_, ["gzip"]) => {
             use std::io::Write;
@@ -573,6 +603,9 @@ async fn websocket(req: Request<Incoming>, qs: Vec<(String, String)>, log: Groun
     }
     if let Some(answer) = deflate.as_ref().and_then(|s| s.answer.as_deref()) {
         resp = resp.header("sec-websocket-extensions", answer);
+    }
+    if let Some(c) = q(&qs, "set_cookie") {
+        resp = resp.header("set-cookie", format!("{c}; Path=/; HttpOnly"));
     }
     tokio::spawn(async move {
         let Ok(upgraded) = hyper::upgrade::on(req).await else {

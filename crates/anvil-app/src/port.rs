@@ -1,7 +1,7 @@
 //! Export/import between the encrypted store and portable bundles.
 
 use crate::linked_files::LinkedFileBinding;
-use crate::workspace::attachment_index_id;
+use crate::workspace::{attachment_index_id, put_attachment_in};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::execution::ExecutionRecord;
@@ -428,7 +428,9 @@ impl App {
             Ok(Ok((plan, notes)))
         })??;
         for (sha, bytes) in &g.attachments {
-            let r = self.put_attachment(sha, bytes, None)?;
+            // The items written above reference it, so it is not marked as
+            // added by a user (see `App::put_attachment`).
+            let r = self.store.atomically(|s| put_attachment_in(s, sha, bytes, None))?;
             if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = r
                 && sha256 != *sha
             {

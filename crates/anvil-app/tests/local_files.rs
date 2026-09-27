@@ -7,7 +7,7 @@
 //! the device, and a load worker never opens a linked file itself.
 
 use anvil_app::exec::{SendOptions, refuse_linked_files};
-use anvil_app::linked_files::LinkedFileReferrer;
+use anvil_app::linked_files::{LinkedFileReferrer, LinkedFileState};
 use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
@@ -23,6 +23,7 @@ use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +34,9 @@ use fifo::{mkfifo, within_seconds};
 
 const CANARY: &str = "anvil-local-file-canary";
 const URL: &str = "http://127.0.0.1:9/x";
+/// The stored file of a multipart spec in [`linked_specs`]: a save refuses a
+/// stored file that is not stored, so a test saving one stores it first.
+const STORED: &[u8] = b"a";
 
 /// The error of a refused call (an `ExecutionContext` is not `Debug`).
 fn refused<T>(r: Result<T, AppError>, label: &str) -> String {
@@ -76,7 +80,8 @@ fn linked_specs(path: &Path) -> Vec<(&'static str, RequestSpec)> {
         content: MultipartContent::File { attachment, file_name: None },
         content_type: None,
     };
-    let stored = AttachmentRef::Stored { sha256: "0".repeat(64), size: 1, file_name: "a".into(), media_type: None };
+    let sha256 = hex::encode(sha2::Sha256::digest(STORED));
+    let stored = AttachmentRef::Stored { sha256, size: 1, file_name: "a".into(), media_type: None };
     vec![
         ("binary body", with_body(Body::Binary { attachment: linked(path), content_type: None })),
         ("multipart part", with_body(Body::Multipart { parts: vec![part(stored), part(linked(path))] })),
@@ -110,6 +115,11 @@ fn saved_linked_specs(path: &Path) -> Vec<(&'static str, RequestSpec)> {
 
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap()
+}
+
+/// The state of each linked file `referrer` names, as the desktop shows it.
+fn states(app: &App, referrer: LinkedFileReferrer) -> Vec<LinkedFileState> {
+    app.linked_file_status(referrer).unwrap().into_iter().map(|s| s.state).collect()
 }
 
 fn linked_dataset(ws: Id, path: &Path) -> Dataset {
@@ -360,6 +370,7 @@ async fn a_saved_linked_file_is_inert_until_it_is_chosen_for_that_request_on_thi
     let path = canonical(&canary_file(files.path(), "secret.txt"));
     let app = new_app(root.path(), "saved");
     let ws = app.create_workspace("W").unwrap();
+    app.put_attachment("a", STORED, None).unwrap();
     let mut saved = Vec::new();
     for (label, spec) in saved_linked_specs(&path) {
         let r = app.create_request(&ws.meta.id, None, label, spec).unwrap();
@@ -410,6 +421,7 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
     let path = canonical(&canary_file(files.path(), "secret.txt"));
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("W").unwrap();
+    a.put_attachment("a", STORED, None).unwrap();
     for (label, spec) in saved_linked_specs(&path) {
         let r = a.create_request(&ws.meta.id, None, label, spec).unwrap();
         // A binding on the exporting device does not travel with the bundle.
@@ -441,14 +453,23 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
     let dataset = b.datasets(&ws_b.meta.id).unwrap().pop().unwrap();
     let err = refused(b.run_dataset(&dataset), "dataset");
     assert!(err.contains("not chosen on this device"), "{err}");
+    // The desktop shows each imported reference as not chosen here.
+    for r in &requests {
+        assert_eq!(states(&b, request(r)), vec![LinkedFileState::Unbound], "{}", r.name);
+    }
+    let dataset_referrer = LinkedFileReferrer::Dataset { id: dataset.meta.id };
+    assert_eq!(states(&b, dataset_referrer), vec![LinkedFileState::Unbound]);
 
     // Choosing the same files on the receiving device makes the references usable.
     for r in &requests {
         b.bind_linked_file(request(r), &path).unwrap();
         b.build_context(Some(r.meta.id), &ws_b.meta.id, None, &SendOptions::default()).expect(&r.name);
+        assert_eq!(states(&b, request(r)), vec![LinkedFileState::Bound], "{}", r.name);
     }
     assert!(b.run_dataset(&dataset).is_err(), "the dataset's own file is still not chosen");
-    b.bind_linked_file(LinkedFileReferrer::Dataset { id: dataset.meta.id }, &rows).unwrap();
+    assert_eq!(states(&b, dataset_referrer), vec![LinkedFileState::Unbound]);
+    b.bind_linked_file(dataset_referrer, &rows).unwrap();
+    assert_eq!(states(&b, dataset_referrer), vec![LinkedFileState::Bound]);
     assert_eq!(b.run_dataset(&dataset).unwrap().rows.len(), 1);
 }
 
@@ -518,6 +539,99 @@ fn only_a_regular_file_is_bound_as_a_linked_file() {
     let token = canary_file(files.path(), "jwt_svid.token");
     app.bind_token_file(&token).unwrap();
     assert!(app.linked_file_bindings().unwrap().is_empty());
+}
+
+#[test]
+fn the_status_of_a_linked_file_follows_the_choice_on_this_device_and_the_file() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let path = canonical(&canary_file(files.path(), "upload.bin"));
+    let app = new_app(root.path(), "status");
+    let ws = app.create_workspace("W").unwrap();
+    app.put_attachment("a", STORED, None).unwrap();
+
+    // Every place a request names a linked file has one status, not chosen yet.
+    for (label, spec) in saved_linked_specs(&path) {
+        let r = app.create_request(&ws.meta.id, None, label, spec).unwrap();
+        let status = app.linked_file_status(request(&r)).unwrap();
+        assert_eq!(status.len(), 1, "{label}: {status:?}");
+        assert_eq!(Path::new(&status[0].path), path, "{label}");
+        assert_eq!((status[0].state, status[0].problem.as_deref()), (LinkedFileState::Unbound, None), "{label}");
+        app.bind_linked_file(request(&r), &path).unwrap();
+        assert_eq!(states(&app, request(&r)), vec![LinkedFileState::Bound], "{label}");
+    }
+    // A request naming no linked file has none.
+    let plain = app.create_request(&ws.meta.id, None, "plain", RequestSpec::http("GET", URL)).unwrap();
+    assert!(app.linked_file_status(request(&plain)).unwrap().is_empty());
+    // An unknown request or dataset is refused.
+    assert!(app.linked_file_status(LinkedFileReferrer::Request { id: Id::new() }).is_err());
+    assert!(app.linked_file_status(LinkedFileReferrer::Dataset { id: Id::new() }).is_err());
+
+    let spec = with_body(Body::Binary { attachment: linked(&path), content_type: None });
+    let r = app.create_request(&ws.meta.id, None, "upload", spec).unwrap();
+    // A binding made for another request naming the same file does not count.
+    assert_eq!(states(&app, request(&r)), vec![LinkedFileState::Unbound]);
+    let binding = app.bind_linked_file(request(&r), &path).unwrap();
+    assert_eq!(states(&app, request(&r)), vec![LinkedFileState::Bound]);
+    let bindings = app.linked_file_bindings().unwrap().len();
+
+    // The file moves: the binding stays but no longer leads to it, and the
+    // request cannot read it.
+    let moved_dir = files.path().join("moved");
+    std::fs::create_dir(&moved_dir).unwrap();
+    let moved = moved_dir.join("upload.bin");
+    std::fs::rename(&path, &moved).unwrap();
+    let status = app.linked_file_status(request(&r)).unwrap();
+    assert_eq!(status[0].state, LinkedFileState::Invalid);
+    assert!(status[0].problem.as_deref().unwrap().contains("no longer at this path"), "{status:?}");
+    let ctx = app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
+    assert!(ctx.attachments.load(&linked(&path)).is_err());
+    // Choosing the file at its new place does not rebind the request: it
+    // still names the old path, and only that path is ever read.
+    let err = refused(app.bind_linked_file(request(&r), &moved), "moved");
+    assert!(err.contains("not the linked file"), "{err}");
+    assert_eq!(app.linked_file_bindings().unwrap().len(), bindings);
+    assert_eq!(states(&app, request(&r)), vec![LinkedFileState::Invalid]);
+
+    // Put back where it was chosen, it is usable again; choosing it again
+    // keeps the one binding.
+    std::fs::rename(&moved, &path).unwrap();
+    assert_eq!(states(&app, request(&r)), vec![LinkedFileState::Bound]);
+    assert_eq!(app.bind_linked_file(request(&r), &path).unwrap().id, binding.id);
+    let ctx = app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
+    assert_eq!(ctx.attachments.load(&linked(&path)).unwrap().as_ref(), CANARY.as_bytes());
+
+    // Replaced by a folder: not a regular file.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let status = app.linked_file_status(request(&r)).unwrap();
+    assert_eq!(status[0].state, LinkedFileState::Invalid);
+    assert!(status[0].problem.as_deref().unwrap().contains("no longer leads to a regular file"), "{status:?}");
+    std::fs::remove_dir(&path).unwrap();
+
+    // A folder on the path replaced by a link leads somewhere else.
+    #[cfg(unix)]
+    {
+        let dir = canonical(files.path()).join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        let inner = canary_file(&dir, "rows.csv");
+        let d = app.save_dataset(linked_dataset(ws.meta.id, &inner)).unwrap();
+        let referrer = LinkedFileReferrer::Dataset { id: d.meta.id };
+        assert_eq!(states(&app, referrer), vec![LinkedFileState::Unbound]);
+        app.bind_linked_file(referrer, &inner).unwrap();
+        assert_eq!(states(&app, referrer), vec![LinkedFileState::Bound]);
+        let elsewhere = canonical(files.path()).join("elsewhere");
+        std::fs::rename(&dir, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        let status = app.linked_file_status(referrer).unwrap();
+        assert_eq!(status[0].state, LinkedFileState::Invalid);
+        assert!(status[0].problem.as_deref().unwrap().contains("resolves to a different location than the one chosen"), "{status:?}");
+        assert!(app.run_dataset(&d).is_err());
+    }
+
+    // Locked: nothing is reported.
+    app.lock();
+    assert!(app.linked_file_status(request(&r)).is_err());
 }
 
 #[cfg(unix)]

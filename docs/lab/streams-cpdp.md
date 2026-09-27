@@ -1,7 +1,7 @@
 # Failure lab: `streams` and `cpdp` profiles
 
 These two profiles run Anvil's shared engine against a **real, pinned Ferrum Edge release
-binary** (v0.9.7 by default, v0.9.5 with `--release v0.9.5`), with no gateway mocks. Every
+binary** (v0.9.8 by default, v0.9.7 or v0.9.5 with `--release`), with no gateway mocks. Every
 scenario passes on both releases with the same expectations; observations recorded below as
 "0.9.5" were re-observed on 0.9.7.
 
@@ -243,7 +243,8 @@ What these runs showed:
   `grpcweb-passthrough` and `grpcweb-down` proxies and two proxy-scoped `grpc_web` plugin
   configs in `streams.yaml` (checked by `lint-profiles.rb` and the binary's `validate`).
   - **Pass-through gRPC-Web on v0.9.7 appends a trailer frame** over HTTP/1.1 and HTTP/2
-    (GRPCWEB-lookalike). Without the plugin the request reaches the backend untranslated, as
+    (GRPCWEB-lookalike; fixed in v0.9.8, where the backend's body reaches the client byte for
+    byte, and the scenario accepts both shapes). Without the plugin the request reaches the backend untranslated, as
     documented, but the gateway adds its own `grpc-status: 2` frame after the backend's
     complete gRPC-Web body; it also logs `grpc_status: 2` for these calls, including over
     HTTP/3 where the body is left alone. That looks like a gateway defect: a gRPC-Web client

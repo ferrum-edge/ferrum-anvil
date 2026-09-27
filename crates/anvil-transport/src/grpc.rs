@@ -38,6 +38,7 @@
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
+use crate::fence::{Generations, in_isolation};
 use crate::grpc_web::{self, FrameError, WireFrame};
 use crate::http::{AttemptOutput, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
@@ -296,12 +297,20 @@ pub enum Schema {
     Reflection,
 }
 
+/// Signs a request for the path and body it sends: given its path (the
+/// URL's path prefix included) and its framed request message, the
+/// request's headers (metadata and auth) with the signature over them. An
+/// error fails the request before it is sent.
+pub type SignFn = Arc<dyn Fn(&str, &Bytes) -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct GrpcPlan {
     /// TLS; `None` = cleartext (h2c for native gRPC; HTTP/1.1 or h2c for gRPC-Web).
     pub tls: Option<Arc<PreparedTls>>,
     pub host: String,
     pub port: u16,
+    /// The `:authority` (HTTP/2, HTTP/3) or HTTP/1.1 `Host` (gRPC-Web): the
+    /// request's explicit `Host` when it has one (what auth signed).
     pub authority: String,
     /// Optional path prefix in front of `/<service>/<method>` (gateway routing).
     pub path_prefix: String,
@@ -313,6 +322,19 @@ pub struct GrpcPlan {
     pub messages: Vec<String>,
     /// Metadata and auth headers.
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// With server reflection, the call's headers are signed here, once the
+    /// schema is resolved and the message encoded, over the framed message of
+    /// a unary or server-streaming call. They replace `headers` for the call.
+    /// `None`: the call is sent with `headers`. The engine sets it only for a
+    /// unary or server-streaming call; a call that streams requests is signed
+    /// when it is prepared.
+    pub sign: Option<SignFn>,
+    /// With server reflection, each reflection request is signed here for
+    /// its own path and framed message (a fresh signature, nonce or DPoP
+    /// proof), and sent with the headers returned in place of `headers`,
+    /// which were signed for the call. `None` (no auth): reflection
+    /// requests are sent with `headers`.
+    pub sign_reflection: Option<SignFn>,
     pub deadline_ms: Option<u64>,
     pub timeouts: Timeouts,
     pub limits: Limits,
@@ -335,7 +357,7 @@ pub struct GrpcPlan {
     /// Reuse pooled connections from (and return them to) these channels.
     /// `None` (manual calls, interactive sessions, fresh-connection load):
     /// every call opens and closes its own connection.
-    pub channels: Option<Arc<Channels>>,
+    pub channels: Option<ChannelUse>,
 }
 
 impl GrpcPlan {
@@ -433,10 +455,11 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
     }
 }
 
-/// Request headers for a call (metadata, auth, and the wire's own fields).
-fn call_headers(plan: &GrpcPlan, h1: bool) -> HeaderMap {
+/// Request headers for a call: `meta` (metadata and auth) and the wire's own
+/// fields.
+fn call_headers(plan: &GrpcPlan, meta: &[(HeaderName, HeaderValue)], h1: bool) -> HeaderMap {
     let mut h = HeaderMap::new();
-    for (n, v) in &plan.headers {
+    for (n, v) in meta {
         if n == http::header::HOST
             || n == http::header::CONNECTION
             || n == http::header::TRANSFER_ENCODING
@@ -555,6 +578,11 @@ impl SharedChannel {
             SharedConn::H3 { quic, .. } => quic.close_reason().is_none(),
         }
     }
+
+    /// Whether this is the HTTP/3 channel over `quic`.
+    fn is_quic(&self, quic: &quinn::Connection) -> bool {
+        matches!(&self.conn, SharedConn::H3 { quic: q, .. } if q.stable_id() == quic.stable_id())
+    }
 }
 
 /// A pooled HTTP/1.1 connection (gRPC-Web): used by one call at a time.
@@ -573,10 +601,30 @@ struct ExclusiveChannel {
 /// gRPC-Web) across its calls. A manual call opens its own connection so its
 /// evidence covers the whole setup. HBONE tunnels are never pooled (a tunnel
 /// carries one execution's identity and headers).
+///
+/// Every key starts with the workspace isolation. [`Channels::clear`] (a
+/// lock) and [`Channels::clear_isolation`] (a workspace delete) start a new
+/// generation: a call of an execution that began before either (see
+/// [`ChannelUse::generation`]) does not return its connection to the
+/// channels it covers, and the connection closes when the call ends.
 #[derive(Default)]
 pub struct Channels {
+    /// Advanced by the clears; taken first, before `shared` or `exclusive`.
+    generations: parking_lot::Mutex<Generations>,
     shared: parking_lot::Mutex<HashMap<String, SharedChannel>>,
     exclusive: parking_lot::Mutex<HashMap<String, Vec<ExclusiveChannel>>>,
+}
+
+/// A plan's use of an engine's [`Channels`].
+#[derive(Clone)]
+pub struct ChannelUse {
+    pub channels: Arc<Channels>,
+    /// Workspace isolation component of the channel key.
+    pub isolation: String,
+    /// [`Channels::generation`] when the execution began: after a clear
+    /// since then that covers `isolation`, no connection is returned to
+    /// the channels.
+    pub generation: u64,
 }
 
 const MAX_EXCLUSIVE_PER_KEY: usize = 8;
@@ -586,10 +634,28 @@ impl Channels {
         Channels::default()
     }
 
-    /// Drop every pooled connection (e.g. on lock or at the end of a run).
+    /// Drop every pooled connection (e.g. on lock or at the end of a run)
+    /// and start a new generation.
     pub fn clear(&self) {
+        let mut generations = self.generations.lock();
+        generations.clear();
         self.shared.lock().clear();
         self.exclusive.lock().clear();
+    }
+
+    /// Drop the pooled connections of one workspace isolation (a workspace
+    /// delete) and start a new generation.
+    pub fn clear_isolation(&self, isolation: &str) {
+        let mut generations = self.generations.lock();
+        generations.clear_isolation(isolation);
+        self.shared.lock().retain(|k, _| !in_isolation(k, isolation));
+        self.exclusive.lock().retain(|k, _| !in_isolation(k, isolation));
+    }
+
+    /// The current generation, taken when an execution begins (see
+    /// [`ChannelUse::generation`]).
+    pub fn generation(&self) -> u64 {
+        self.generations.lock().current()
     }
 
     /// Pooled connections currently held (tests and diagnostics).
@@ -638,9 +704,11 @@ impl Channels {
 
     /// Return a connection after a call. HTTP/2 stays pooled while it is
     /// open; HTTP/3 and HTTP/1.1 only after a clean call (a canceled HTTP/3
-    /// stream is not reused: the connection is closed instead).
-    async fn checkin(&self, key: &str, c: Connected, clean: bool) {
+    /// stream is not reused: the connection is closed instead). After a
+    /// clear since `generation` that covers `key`, it is not pooled.
+    async fn checkin(&self, key: &str, generation: u64, c: Connected, clean: bool) {
         let Connected { conn, stats, mut observation, quic } = c;
+        let was_reused = observation.reused;
         observation.reused = false;
         match conn {
             Conn::H2(s) => {
@@ -648,8 +716,9 @@ impl Channels {
                     self.shared.lock().remove(key);
                     return;
                 }
+                let generations = self.generations.lock();
                 let mut shared = self.shared.lock();
-                if !shared.contains_key(key) {
+                if generations.admits(generation, key) && !shared.contains_key(key) {
                     let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
                     observation.prior_requests = 0;
                     shared.insert(key.to_string(), SharedChannel { conn: SharedConn::H2(s), stats, template: observation, served });
@@ -662,15 +731,27 @@ impl Channels {
                     quic.close(crate::h3::H3_NO_ERROR.into(), b"");
                     return;
                 }
+                let generations = self.generations.lock();
                 let mut shared = self.shared.lock();
-                if !shared.contains_key(key) {
-                    let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
-                    observation.prior_requests = 0;
-                    shared.insert(
-                        key.to_string(),
-                        SharedChannel { conn: SharedConn::H3 { send, quic }, stats, template: observation, served },
-                    );
+                // A reused channel is still pooled: it stays open for the
+                // calls that share it.
+                let pooled = shared.get(key).map(|ch| ch.is_quic(&quic));
+                if pooled == Some(true) {
+                    return;
                 }
+                if pooled.is_some() || !generations.admits(generation, key) {
+                    // Not kept (another channel is pooled under the key, or a
+                    // lock or a delete of its workspace fenced it). A channel
+                    // this call opened is closed now; a reused one is only
+                    // dropped, since other calls may still be streaming on it.
+                    if !was_reused {
+                        quic.close(crate::h3::H3_NO_ERROR.into(), b"");
+                    }
+                    return;
+                }
+                let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
+                observation.prior_requests = 0;
+                shared.insert(key.to_string(), SharedChannel { conn: SharedConn::H3 { send, quic }, stats, template: observation, served });
             }
             Conn::H1(mut s) => {
                 if !clean {
@@ -680,6 +761,10 @@ impl Channels {
                 // processed the end of the response; wait briefly for it.
                 let ready = tokio::time::timeout(Duration::from_millis(50), s.ready()).await;
                 if !matches!(ready, Ok(Ok(()))) {
+                    return;
+                }
+                let generations = self.generations.lock();
+                if !generations.admits(generation, key) {
                     return;
                 }
                 let mut exclusive = self.exclusive.lock();
@@ -693,8 +778,8 @@ impl Channels {
     }
 }
 
-/// Pool key for a plan's connection on one leg.
-fn channel_key(plan: &GrpcPlan, leg: Leg) -> String {
+/// Pool key for a plan's connection on one leg, in one workspace isolation.
+fn channel_key(isolation: &str, plan: &GrpcPlan, leg: Leg) -> String {
     let proxy = plan
         .proxy
         .as_ref()
@@ -705,7 +790,8 @@ fn channel_key(plan: &GrpcPlan, leg: Leg) -> String {
     // different header plans (or none) are never shared.
     let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
     format!(
-        "{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}",
+        "{}|{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}",
+        isolation,
         leg,
         plan.host.to_ascii_lowercase(),
         plan.port,
@@ -971,6 +1057,8 @@ struct OneShot {
     grpc_status: Option<i32>,
     grpc_message: Option<String>,
     failure: Option<TransportFailure>,
+    /// `failure` is auth's: the request could not be signed and was not sent.
+    sign_failed: bool,
 }
 
 impl OneShot {
@@ -984,17 +1072,33 @@ impl OneShot {
             grpc_status,
             grpc_message: None,
             failure: None,
+            sign_failed: false,
         }
     }
 }
 
 async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stats: &Arc<ConnStats>, cancel: &CancellationToken) -> OneShot {
-    let (tx, rx) = mpsc::channel(1);
-    let _ = tx.try_send(frame(msg));
-    drop(tx);
+    let body = frame(msg);
     let mut out = OneShot::empty(None, None);
+    // Signed for the reflection request's own path and body, never sent
+    // with the signature made for the call.
+    let signed = match &plan.sign_reflection {
+        Some(sign) => match sign(&plan.origin(path), &body) {
+            Ok(h) => Some(h),
+            Err(f) => {
+                out.failure = Some(f);
+                out.sign_failed = true;
+                return out;
+            }
+        },
+        None => None,
+    };
+    let (tx, rx) = mpsc::channel(1);
+    let _ = tx.try_send(body);
+    drop(tx);
     let ctl = StreamCtl::new(stats.clone());
-    let fut = match start(conn, plan, path, call_headers(plan, conn.is_h1()), rx, None, &ctl) {
+    let headers = call_headers(plan, signed.as_deref().unwrap_or(&plan.headers), conn.is_h1());
+    let fut = match start(conn, plan, path, headers, rx, None, &ctl) {
         Ok(f) => f,
         Err(f) => {
             out.failure = Some(f);
@@ -1113,7 +1217,12 @@ async fn reflect(
                 grpc_message: r.grpc_message.clone(),
                 succeeded: false,
                 problem: Some(problem),
+                auth_failed: r.sign_failed,
             };
+            if let Some(f) = r.failure.as_ref().filter(|_| r.sign_failed) {
+                let o = outcome(format!("auth could not be prepared for the reflection request, so it was not sent: {}", f.message), &r);
+                return Err(ReflectError::Refused(Box::new(r), o));
+            }
             if r.failure.is_some() {
                 let o = outcome("the reflection exchange failed at the transport level".into(), &r);
                 return Err(ReflectError::Refused(Box::new(r), o));
@@ -1184,6 +1293,7 @@ async fn reflect(
             grpc_message: None,
             succeeded: true,
             problem: None,
+            auth_failed: false,
         };
         return match pool.add_file_descriptor_protos(files.into_values()) {
             Ok(()) => Ok((pool, outcome)),
@@ -1207,6 +1317,7 @@ async fn reflect(
                 grpc_message: None,
                 succeeded: false,
                 problem: Some("server reflection was not attempted".into()),
+                auth_failed: false,
             },
         )),
     }
@@ -1407,8 +1518,8 @@ async fn attempt(
         .channels
         .as_ref()
         .filter(|_| !interactive && !crate::hbone::is_hbone(plan.proxy.as_ref()))
-        .map(|p| (p, channel_key(plan, leg)));
-    let pooled = pool.as_ref().and_then(|(p, key)| p.checkout(key));
+        .map(|u| (u, channel_key(&u.isolation, plan, leg)));
+    let pooled = pool.as_ref().and_then(|(u, key)| u.channels.checkout(key));
     let connected = match pooled {
         Some(c) => {
             let detail = Some("pooled gRPC channel");
@@ -1442,12 +1553,12 @@ async fn attempt(
     let cx = CallCx { plan, events, cancel, total_deadline, index };
     let out = exchange(cx, local, &mut conn, stats.clone(), rec, obs, commands).await;
     match pool {
-        Some((p, key)) => {
+        Some((u, key)) => {
             let last = out.attempts.last();
             let clean = last.is_some_and(|a| {
                 a.observation.failure.is_none() && a.response.as_ref().is_some_and(|r| r.body.completeness == BodyCompleteness::Complete)
             });
-            p.checkin(&key, Connected { conn, stats, observation, quic }, clean).await;
+            u.channels.checkin(&key, u.generation, Connected { conn, stats, observation, quic }, clean).await;
         }
         None => {
             if let Some(q) = quic {
@@ -1616,12 +1727,26 @@ async fn exchange(
     // gRPC-Web sends one complete body, so its length is known up front.
     let exact = web.then(|| pending.iter().map(|(b, _)| wire_bytes(b).len() as u64).sum::<u64>());
     obs.bytes.request_body = exact.unwrap_or_else(|| pending.iter().map(|(b, _)| 5 + b.len() as u64).sum());
+    let path = format!("/{}/{}", plan.service, plan.method);
+    // Auth over the framed message now that it is encoded (server reflection).
+    let signed = match &plan.sign {
+        Some(sign) => {
+            let body = match plan.mode {
+                GrpcMode::Unary | GrpcMode::ServerStreaming => pending.iter().map(|(b, _)| wire_bytes(b)).collect::<Vec<_>>().concat(),
+                GrpcMode::ClientStreaming | GrpcMode::Bidirectional => vec![],
+            };
+            match sign(&plan.origin(&path), &Bytes::from(body)) {
+                Ok(h) => Some(h),
+                Err(f) => return early(rec, obs, f, facts, DispatchState::NotDispatched),
+            }
+        }
+        None => None,
+    };
 
     // ---- the call ----
     let (tx, rx) = mpsc::channel::<Bytes>(64);
     let mut tx = Some(tx);
-    let path = format!("/{}/{}", plan.service, plan.method);
-    let mut headers = call_headers(plan, conn.is_h1());
+    let mut headers = call_headers(plan, signed.as_deref().unwrap_or(&plan.headers), conn.is_h1());
     if let Some(ms) = plan.deadline_ms
         && let Ok(v) = HeaderValue::from_str(&grpc_timeout(ms))
     {

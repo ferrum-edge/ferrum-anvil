@@ -4,6 +4,13 @@
 //!   comments, CR / LF / CRLF line endings, a leading BOM) — the body is never
 //!   buffered unboundedly: raw bytes are captured only up to the capture
 //!   limit and the transcript keeps a bounded event history.
+//! * Parser bounds: one line may hold at most the line bound
+//!   (`min(max_response_bytes, 1 MiB)`, at least 1 KiB) and one event's data
+//!   (its `data:` lines joined with newlines) at most four times that. Past
+//!   either bound the attempt stops with `response_too_large_local`: an
+//!   event is never dispatched with some of its data lines dropped.
+//! * A leading UTF-8 BOM is stripped wherever the transport splits its three
+//!   bytes; only the start of each connection's stream is checked.
 //! * Stop conditions are explicit: `max_events`, an idle timeout (no bytes at
 //!   all, so keep-alive comments count as activity), the total deadline, an
 //!   explicit cancel/Close command, or the server ending the stream.
@@ -11,7 +18,13 @@
 //!   (reset / truncated stream), bounded in count, honoring the server's
 //!   `retry:` delay and sending `Last-Event-ID`. Each reconnection is its own
 //!   recorded attempt. A clean end of stream is recorded as the server
-//!   closing the stream and is not reconnected.
+//!   closing the stream and is not reconnected. Neither is a stream whose
+//!   last event id (sent by the server) is not a valid header value because
+//!   it holds a control character (other than a tab, which a header value
+//!   may hold; ids with NUL are ignored and line breaks end the line):
+//!   without `Last-Event-ID` the server would start the stream over, so the
+//!   session ends with a note instead ([`INVALID_ID_NOTE`], which never holds
+//!   the id).
 //! * Transports: HTTP/1.1 and HTTP/2 over the instrumented TCP connector, or
 //!   HTTP/3 over QUIC (`Http3Only` / `Http3WithFallback`): DNS and the QUIC
 //!   handshake are measured (no TCP phase) and the event stream is parsed
@@ -38,6 +51,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+/// Why a stream was not reconnected after the server sent an event id that
+/// cannot be sent back as `Last-Event-ID`. The id itself is left out: the
+/// server chose it and it may hold anything.
+pub const INVALID_ID_NOTE: &str = "not reconnected: the server sent an event id that is not a valid Last-Event-ID header value (it holds a control character), and reconnecting without Last-Event-ID would ask the server to start the stream over";
+
 /// One dispatched event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
@@ -59,13 +77,24 @@ pub struct SseParser {
     /// Reconnection time requested by the server (`retry:`).
     pub retry_ms: Option<u64>,
     bom_checked: bool,
+    /// Leading bytes of the stream that match a BOM prefix so far, held back
+    /// until a chunk decides whether the stream starts with a BOM.
+    bom_matched: usize,
     pending_cr: bool,
     max_line: usize,
 }
 
+const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
 impl SseParser {
     pub fn new(max_line: usize) -> Self {
         SseParser { max_line: max_line.max(1024), ..Default::default() }
+    }
+
+    /// The largest data one event may carry (its `data:` lines joined with
+    /// newlines), in bytes: four times the line bound.
+    pub fn max_event_data(&self) -> usize {
+        self.max_line.saturating_mul(4)
     }
 
     /// Discard partially received event state on a new connection; the last
@@ -76,18 +105,41 @@ impl SseParser {
         self.has_data = false;
         self.event_type.clear();
         self.bom_checked = false;
+        self.bom_matched = 0;
         self.pending_cr = false;
     }
 
     /// Feed bytes; dispatched events are appended to `out`. Returns an error
-    /// when a single line exceeds the configured bound.
+    /// when a single line exceeds the line bound or one event's data exceeds
+    /// [`SseParser::max_event_data`]; the oversized event is not dispatched
+    /// and the stream must not be fed further without [`SseParser::reset_stream`].
     pub fn feed(&mut self, mut chunk: &[u8], out: &mut Vec<SseEvent>) -> Result<(), String> {
-        if !self.bom_checked && !chunk.is_empty() {
-            self.bom_checked = true;
-            if chunk.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                chunk = &chunk[3..];
+        if !self.bom_checked {
+            // The BOM may be split across chunks: hold back a matching prefix
+            // until the stream's first bytes decide it.
+            let mut i = 0;
+            while self.bom_matched < BOM.len() && i < chunk.len() && chunk[i] == BOM[self.bom_matched] {
+                self.bom_matched += 1;
+                i += 1;
+            }
+            if self.bom_matched == BOM.len() {
+                self.bom_checked = true;
+                self.bom_matched = 0;
+                chunk = &chunk[i..];
+            } else if i == chunk.len() {
+                return Ok(()); // still undecided
+            } else {
+                // Not a BOM: the held-back bytes are ordinary stream bytes.
+                self.bom_checked = true;
+                let held = std::mem::take(&mut self.bom_matched);
+                self.feed_bytes(&BOM[..held], out)?;
+                chunk = &chunk[i..];
             }
         }
+        self.feed_bytes(chunk, out)
+    }
+
+    fn feed_bytes(&mut self, chunk: &[u8], out: &mut Vec<SseEvent>) -> Result<(), String> {
         for &b in chunk {
             if self.pending_cr {
                 self.pending_cr = false;
@@ -96,10 +148,10 @@ impl SseParser {
                 }
             }
             match b {
-                b'\n' => self.end_line(out),
+                b'\n' => self.end_line(out)?,
                 b'\r' => {
                     self.pending_cr = true;
-                    self.end_line(out);
+                    self.end_line(out)?;
                 }
                 _ => {
                     if self.line.len() >= self.max_line {
@@ -112,7 +164,7 @@ impl SseParser {
         Ok(())
     }
 
-    fn end_line(&mut self, out: &mut Vec<SseEvent>) {
+    fn end_line(&mut self, out: &mut Vec<SseEvent>) -> Result<(), String> {
         let line = String::from_utf8_lossy(&std::mem::take(&mut self.line)).into_owned();
         if line.is_empty() {
             if self.has_data {
@@ -126,10 +178,10 @@ impl SseParser {
             self.data.clear();
             self.has_data = false;
             self.event_type.clear();
-            return;
+            return Ok(());
         }
         if line.starts_with(':') {
-            return; // comment / keep-alive
+            return Ok(()); // comment / keep-alive
         }
         let (field, value) = match line.split_once(':') {
             Some((f, v)) => (f.to_string(), v.strip_prefix(' ').unwrap_or(v).to_string()),
@@ -138,10 +190,17 @@ impl SseParser {
         match field.as_str() {
             "event" => self.event_type = value,
             "data" => {
-                if self.data.len() + value.len() <= self.max_line.saturating_mul(4) {
-                    self.data.push_str(&value);
-                    self.data.push('\n');
+                // `self.data` already holds the newline joining this line to
+                // the previous ones, so this is the event's data length if the
+                // event ended here.
+                if self.data.len() + value.len() > self.max_event_data() {
+                    self.data.clear();
+                    self.has_data = false;
+                    self.event_type.clear();
+                    return Err(format!("an event-stream event's data exceeded {} bytes", self.max_event_data()));
                 }
+                self.data.push_str(&value);
+                self.data.push('\n');
                 self.has_data = true;
             }
             // An id containing NUL is ignored (spec); a non-numeric retry too.
@@ -149,6 +208,7 @@ impl SseParser {
             "retry" if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => self.retry_ms = value.parse().ok(),
             _ => {}
         }
+        Ok(())
     }
 }
 
@@ -158,6 +218,8 @@ pub struct SsePlan {
     pub https: bool,
     pub host: String,
     pub port: u16,
+    /// The HTTP/1.1 `Host` default, or the `:authority` over HTTP/2 and
+    /// HTTP/3: the request's explicit `Host` when it has one (what auth signed).
     pub authority: String,
     pub request_target: String,
     pub headers: Vec<(HeaderName, HeaderValue)>,
@@ -514,13 +576,8 @@ async fn open_h3(
     };
 
     let headers = request_headers(plan, true, last_event_id);
-    let authority = plan
-        .headers
-        .iter()
-        .find(|(n, _)| n == http::header::HOST)
-        .and_then(|(_, v)| v.to_str().ok().map(|s| s.to_string()))
-        .unwrap_or_else(|| plan.authority.clone());
-    let mut req = match Request::builder().method(plan.method.clone()).uri(format!("https://{authority}{}", plan.request_target)).body(()) {
+    let uri = format!("https://{}{}", plan.authority, plan.request_target);
+    let mut req = match Request::builder().method(plan.method.clone()).uri(uri).body(()) {
         Ok(r) => r,
         Err(e) => {
             let f = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("the request could not be built: {e}"));
@@ -686,9 +743,9 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
                             }
                             continue;
                         }
-                        if let Err(e) = parser.feed(&d, &mut batch) {
-                            break End::Failed(TransportFailure::new(Phase::Session, FailureKind::ResponseTooLargeLocal, format!("{e} (local limit)")));
-                        }
+                        // Events completed before a limit error in the same
+                        // chunk are still recorded.
+                        let fed = parser.feed(&d, &mut batch);
                         let mut stop = false;
                         for ev in batch.drain(..) {
                             total_events += 1;
@@ -700,6 +757,9 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
                         }
                         if stop {
                             break End::Client;
+                        }
+                        if let Err(e) = fed {
+                            break End::Failed(TransportFailure::new(Phase::Session, FailureKind::ResponseTooLargeLocal, format!("{e} (local limit)")));
                         }
                     }
                     Some(Err(f)) => break End::Failed(f),
@@ -771,6 +831,12 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
         if !reconnectable || reconnects >= plan.max_reconnects {
             break;
         }
+        // A configured Last-Event-ID is checked before anything is sent, so
+        // an id that cannot be sent here came from the server.
+        if parser.last_event_id.as_deref().is_some_and(|id| HeaderValue::from_str(id).is_err()) {
+            facts.notes.push(INVALID_ID_NOTE.into());
+            break;
+        }
         // Explicit, bounded reconnection with Last-Event-ID; each one is a new
         // attempt on a new connection (a new QUIC connection for HTTP/3).
         let delay = Duration::from_millis(parser.retry_ms.unwrap_or(1_000).min(30_000));
@@ -833,5 +899,122 @@ mod tests {
         let mut p = SseParser::new(1024);
         let mut out = vec![];
         assert!(p.feed(&vec![b'a'; 2000], &mut out).is_err());
+    }
+
+    fn data_line(len: usize) -> Vec<u8> {
+        let mut line = b"data: ".to_vec();
+        line.resize(line.len() + len, b'x');
+        line.push(b'\n');
+        line
+    }
+
+    #[test]
+    fn many_short_data_lines_past_the_event_limit_fail_instead_of_dropping_data() {
+        let mut p = SseParser::new(1024);
+        assert_eq!(p.max_event_data(), 4096);
+        let mut out = vec![];
+        p.feed(b"data: first\n\n", &mut out).unwrap();
+        for _ in 0..4 {
+            p.feed(&data_line(1000), &mut out).unwrap();
+        }
+        // Fifth line: 4 * 1001 + 1000 = 5004 bytes of event data.
+        let err = p.feed(&data_line(1000), &mut out).unwrap_err();
+        assert!(err.contains("4096"), "{err}");
+        p.feed(b"\n", &mut out).ok();
+        assert_eq!(out.len(), 1, "the oversized event is never dispatched");
+        assert_eq!(out[0].data, "first", "events before it are kept");
+    }
+
+    #[test]
+    fn one_line_past_the_event_limit_fails_and_earlier_events_in_the_chunk_are_kept() {
+        let mut p = SseParser::new(8192);
+        let mut chunk = b"data: a\n\n".to_vec();
+        for _ in 0..4 {
+            chunk.extend(data_line(8000));
+        }
+        // 4 * 8001 + 1000 = 33004 bytes of event data, over 4 * 8192.
+        chunk.extend(data_line(1000));
+        chunk.extend(b"\n");
+        let mut out = vec![];
+        assert!(p.feed(&chunk, &mut out).is_err());
+        assert_eq!(out.iter().map(|e| e.data.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        // A single line longer than the line bound is refused by that bound.
+        let mut p = SseParser::new(8192);
+        let mut out = vec![];
+        assert!(p.feed(&data_line(9000), &mut out).is_err());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn event_data_exactly_at_the_limit_is_dispatched_whole_and_later_events_follow() {
+        let mut p = SseParser::new(1024);
+        let mut out = vec![];
+        // Four lines of 1000 bytes plus three joining newlines: 4003 bytes.
+        for _ in 0..4 {
+            p.feed(&data_line(1000), &mut out).unwrap();
+        }
+        // Fill up to exactly 4096: 4003 + 1 newline + 92.
+        p.feed(&data_line(92), &mut out).unwrap();
+        p.feed(b"\n", &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data.len(), 4096);
+        p.feed(b"data: next\n\n", &mut out).unwrap();
+        assert_eq!(out[1].data, "next");
+        // One more byte fails.
+        for _ in 0..4 {
+            p.feed(&data_line(1000), &mut out).unwrap();
+        }
+        assert!(p.feed(&data_line(93), &mut out).is_err());
+        // A new connection parses normally again.
+        p.reset_stream();
+        p.feed(b"data: after reconnect\n\n", &mut out).unwrap();
+        assert_eq!(out.last().unwrap().data, "after reconnect");
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn a_bom_split_at_every_offset_is_stripped() {
+        let stream: &[u8] = b"\xEF\xBB\xBFdata: hello\n\n";
+        for a in 0..=4 {
+            for b in a..=4 {
+                let (ev, _) = parse(&[&stream[..a], &stream[a..b], &stream[b..]]);
+                assert_eq!(ev.len(), 1, "split at {a}/{b}");
+                assert_eq!(ev[0].data, "hello", "split at {a}/{b}");
+            }
+        }
+        // Byte by byte, with empty chunks in between.
+        let chunks: Vec<&[u8]> = stream.iter().flat_map(|b| [&[][..], std::slice::from_ref(b)]).collect();
+        let (ev, _) = parse(&chunks);
+        assert_eq!(ev.iter().map(|e| e.data.as_str()).collect::<Vec<_>>(), vec!["hello"]);
+    }
+
+    #[test]
+    fn no_bom_a_partial_bom_and_a_later_bom_are_not_stripped() {
+        let (ev, _) = parse(&[b"", b"data: plain\n\n"]);
+        assert_eq!(ev[0].data, "plain");
+        // A partial BOM prefix is replayed as stream bytes (here, part of a field name).
+        let (ev, _) = parse(&[b"\xEF", b"\xBB", b"data: x\n\n"]);
+        assert!(ev.is_empty());
+        let (ev, _) = parse(&[b"\xEF", b"\xBBx\n: c\n\ndata: y\n\n"]);
+        assert_eq!(ev.iter().map(|e| e.data.as_str()).collect::<Vec<_>>(), vec!["y"]);
+        // A BOM after the start is not the initial prefix.
+        let (ev, _) = parse(&[b"data: a\n\n", b"\xEF\xBB\xBFdata: b\n\n"]);
+        assert_eq!(ev.iter().map(|e| e.data.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        let (ev, _) = parse(&[b"data: \xEF", b"\xBB\xBF\n\n"]);
+        assert_eq!(ev[0].data, "\u{FEFF}");
+    }
+
+    #[test]
+    fn each_new_connection_strips_its_own_split_bom() {
+        let mut p = SseParser::new(4096);
+        let mut out = vec![];
+        p.feed(b"\xEF\xBB", &mut out).unwrap();
+        p.reset_stream();
+        p.feed(b"\xEF", &mut out).unwrap();
+        p.feed(b"\xBB\xBFdata: one\n\n", &mut out).unwrap();
+        p.reset_stream();
+        p.feed(b"\xEF\xBB", &mut out).unwrap();
+        p.feed(b"\xBFdata: two\n\n", &mut out).unwrap();
+        assert_eq!(out.iter().map(|e| e.data.as_str()).collect::<Vec<_>>(), vec!["one", "two"]);
     }
 }

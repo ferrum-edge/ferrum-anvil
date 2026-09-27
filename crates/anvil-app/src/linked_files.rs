@@ -14,6 +14,11 @@
 //! import cannot create one. The CLI cannot bind a linked file (it has no
 //! dialog), but it reads one the desktop bound when it sends that saved
 //! request or uses that dataset from the same profile.
+//!
+//! The desktop shows, beside each linked file, whether it is bound
+//! ([`App::linked_file_status`]). That query looks only at files already
+//! bound for that referrer, and only at their metadata: it never reads a
+//! file, and never touches a path that was not chosen.
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
@@ -59,24 +64,41 @@ pub struct LinkedFileBinding {
     pub bound_at: DateTime<Utc>,
 }
 
+/// Whether a linked file a request or dataset names can be used on this device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedFileState {
+    /// Chosen on this device for the referrer, and still a regular file at
+    /// the path it was chosen at. The size limit is not checked here: it
+    /// depends on what reads the file, and is enforced when it is read.
+    Bound,
+    /// Not chosen on this device for the referrer, so it is refused. The
+    /// path is not looked at.
+    Unbound,
+    /// Chosen for the referrer, but no longer usable as chosen: the file was
+    /// moved or deleted, it was replaced by something other than a regular
+    /// file, or its path now resolves to another location.
+    Invalid,
+}
+
+/// The binding state of one linked file a request or dataset names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedFileStatus {
+    /// The path the request or dataset names.
+    pub path: String,
+    pub state: LinkedFileState,
+    /// Why a bound file cannot be used (only for `invalid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
 impl App {
     /// Bind the linked file the user picked in the native open dialog for
     /// `referrer`, which must name that file. Only the desktop's
     /// `file_choose` calls this, with the dialog's result.
     pub fn bind_linked_file(&self, referrer: LinkedFileReferrer, picked: &Path) -> Result<LinkedFileBinding> {
         let path = crate::token_files::chosen_path(picked, "linked file")?;
-        let named = match referrer {
-            LinkedFileReferrer::Request { id } => {
-                let mut paths = Vec::new();
-                linked_paths(&serde_json::to_value(&self.request(&id)?.spec)?, &mut paths);
-                paths
-            }
-            LinkedFileReferrer::Dataset { id } => match self.dataset(&id)?.attachment {
-                AttachmentRef::LinkedFile { path } => vec![path],
-                AttachmentRef::Stored { .. } => vec![],
-            },
-        };
-        if !named.contains(&path) {
+        if !self.named_linked_files(referrer)?.contains(&path) {
             return Err(AppError::Invalid(format!(
                 "the chosen file '{path}' is not the linked file this {} names; attach the file instead",
                 referrer.noun()
@@ -92,6 +114,43 @@ impl App {
 
     pub fn linked_file_bindings(&self) -> Result<Vec<LinkedFileBinding>> {
         Ok(self.store.list(kind::LINKED_FILE, None)?)
+    }
+
+    /// The binding state of each linked file the saved request or dataset
+    /// `referrer` names, in the order it names them. Read-only: only a file
+    /// bound for `referrer` on this device is looked at, and only its
+    /// metadata; an unbound path is never touched. The size limit is checked
+    /// when the file is read, since it depends on what reads it.
+    pub fn linked_file_status(&self, referrer: LinkedFileReferrer) -> Result<Vec<LinkedFileStatus>> {
+        let bound = self.linked_file_bindings()?;
+        let mut status = Vec::new();
+        for path in self.named_linked_files(referrer)? {
+            let chosen = bound.iter().any(|b| b.referrer == referrer && b.path == path);
+            let problem = if chosen { bound_file_problem(&path) } else { None };
+            let state = match (chosen, &problem) {
+                (false, _) => LinkedFileState::Unbound,
+                (true, None) => LinkedFileState::Bound,
+                (true, Some(_)) => LinkedFileState::Invalid,
+            };
+            status.push(LinkedFileStatus { path, state, problem });
+        }
+        Ok(status)
+    }
+
+    /// The paths of the linked files the saved request (its body or gRPC
+    /// schema) or dataset `referrer` names.
+    fn named_linked_files(&self, referrer: LinkedFileReferrer) -> Result<Vec<String>> {
+        Ok(match referrer {
+            LinkedFileReferrer::Request { id } => {
+                let mut paths = Vec::new();
+                linked_paths(&serde_json::to_value(&self.request(&id)?.spec)?, &mut paths);
+                paths
+            }
+            LinkedFileReferrer::Dataset { id } => match self.dataset(&id)?.attachment {
+                AttachmentRef::LinkedFile { path } => vec![path],
+                AttachmentRef::Stored { .. } => vec![],
+            },
+        })
     }
 
     /// The linked files `spec` names, refusing any that was not chosen on
@@ -128,8 +187,34 @@ fn refuse_unbound(bound: &[LinkedFileBinding], referrer: LinkedFileReferrer, pat
 
 fn unbound(path: &str, noun: &str) -> AppError {
     AppError::Invalid(format!(
-        "the linked local file '{path}' was not chosen on this device for this {noun}; attach the file instead (Anvil stores a copy). Choosing a linked file in the desktop is not available yet"
+        "the linked local file '{path}' was not chosen on this device for this {noun}; choose it in the desktop with Choose file… beside the {noun}'s linked file, or attach the file instead (Anvil stores a copy)"
     ))
+}
+
+/// Why a bound linked file whose path no longer resolves to itself cannot be
+/// used. Which change caused it is not known.
+const RESOLVES_ELSEWHERE: &str = concat!(
+    "the path resolves to a different location than the one chosen (the file or a folder on its path may have been replaced by a link, ",
+    "or a folder on its path renamed or remapped)"
+);
+
+/// Why a bound linked file can no longer be read as chosen, if it cannot:
+/// the same path and regular-file checks as [`read_bound_file`], from
+/// metadata alone. No data is read and nothing is opened for reading, so a
+/// FIFO never blocks (on Windows, resolving the path opens a handle with no
+/// access rights). The size limit is not checked: it depends on what reads
+/// the file, and is enforced when it is read.
+fn bound_file_problem(path: &str) -> Option<String> {
+    match std::fs::canonicalize(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("the file is no longer at this path".into()),
+        Err(e) => Some(format!("the file cannot be reached ({e})")),
+        Ok(canonical) if canonical.to_str() != Some(path) => Some(RESOLVES_ELSEWHERE.into()),
+        Ok(_) => match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => None,
+            Ok(_) => Some("the path no longer leads to a regular file".into()),
+            Err(e) => Some(format!("the file cannot be reached ({e})")),
+        },
+    }
 }
 
 /// Read a bound linked file, bounded to `max` bytes. Only a regular file is

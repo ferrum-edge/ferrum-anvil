@@ -32,6 +32,14 @@ pub enum GroundTruth {
         body_bytes: u64,
         headers: Vec<(String, String)>,
     },
+    /// The authority of a request's target as received: the HTTP/2 or HTTP/3
+    /// `:authority` (an HTTP/1.1 origin-form request carries it in `Host`
+    /// instead and records none). Pushed before the request's
+    /// `RequestReceived`.
+    AuthorityReceived {
+        path: String,
+        authority: String,
+    },
     ResponseStarted {
         status: u16,
     },
@@ -43,6 +51,14 @@ pub enum GroundTruth {
     },
     MessageReceived {
         bytes: u64,
+    },
+    /// The request body a gRPC fixture received for a unary call or a
+    /// server reflection request, as it arrived (the length-prefixed
+    /// messages), so a test can check a body digest and signature against
+    /// it.
+    GrpcBodyReceived {
+        path: String,
+        body: Vec<u8>,
     },
     DatagramRelayed {
         bytes: u64,

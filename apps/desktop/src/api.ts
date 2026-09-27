@@ -130,6 +130,8 @@ export interface EffectiveRequest {
   method: string;
   url: string;
   destination: string;
+  /** The Host (HTTP/1.1) or :authority (HTTP/2, HTTP/3) sent, which request signatures cover. */
+  authority: string;
   headers: HeaderEntry[];
   body_bytes: number;
   body_preview: string;
@@ -258,6 +260,20 @@ export interface TokenFileBinding {
 }
 /** The saved request or dataset a linked local file is chosen for. */
 export type LinkedFileReferrer = { kind: "request"; id: string } | { kind: "dataset"; id: string };
+/**
+ * Whether a linked local file a saved request or dataset names can be used on this device:
+ * chosen here for it and still a regular file at that path (`bound`), not chosen here
+ * (`unbound`, refused), or chosen but moved, deleted or replaced since (`invalid`). `bound`
+ * does not check the size limit, which depends on what reads the file and is checked then.
+ */
+export type LinkedFileState = "bound" | "unbound" | "invalid";
+export interface LinkedFileStatus {
+  /** The path the request or dataset names. */
+  path: string;
+  state: LinkedFileState;
+  /** Why a bound file cannot be used (only for `invalid`). */
+  problem?: string;
+}
 export interface FileDialogOptions {
   /** Suggested name for a save dialog. */
   file_name?: string;
@@ -320,6 +336,18 @@ export interface LoadPlanCheck {
   refusal?: LoadRefusal | null;
   /** [request id, protocol] in plan order. */
   protocols: [string, Protocol][];
+}
+/** The last storage cleanup of the open profile (`anvil_app::cleanup::StorageCleanupRecord`). */
+export interface StorageCleanupRecord {
+  ran_at: string;
+  result: {
+    /** Revisions removed because their request no longer exists. */
+    orphaned_revisions: number;
+    /** Stored files released. */
+    released_attachments: number;
+    /** Stored objects that do not decode: while one is left, no stored file is released. */
+    undecodable: { kind: string; id: string }[];
+  };
 }
 export interface LoadReportSummary {
   run_id: string;
@@ -524,6 +552,8 @@ export const api = {
   saveIntegration: (profile: IntegrationProfile) => call<IntegrationProfile>("integration_save", { profile }),
   settings: () => call<AppSettings>("settings_get"),
   saveSettings: (settings: AppSettings) => call<void>("settings_save", { settings }),
+  /** The last storage cleanup (at most once a day when the profile opens); null before the first. */
+  storageCleanupLast: () => call<StorageCleanupRecord | null>("storage_cleanup_last"),
 
   effective: (input: SendInput) => call<EffectiveRequest>("effective_request", { input }),
   send: (input: SendInput, executionId: string) => call<ExecutionView>("send_request", { input, executionId }),
@@ -544,6 +574,8 @@ export const api = {
   /** Bind, in the native open dialog, the linked local file a saved request or dataset names; null when the user cancels. */
   chooseLinkedFile: async (referrer: LinkedFileReferrer): Promise<FileGrant | null> =>
     (await call<FileGrant[]>("file_choose", { purpose: "linked_file", options: { multiple: false }, referrer }))[0] ?? null,
+  /** Whether each linked local file a saved request or dataset names is chosen on this device; reads no file. */
+  linkedFileStatus: (referrer: LinkedFileReferrer) => call<LinkedFileStatus[]>("linked_file_status", { referrer }),
   /** JWT-SVID token files bound on this device, oldest first. */
   tokenFiles: () => call<TokenFileBinding[]>("token_files_list"),
   /** Stop reading a bound token file until it is chosen again. */

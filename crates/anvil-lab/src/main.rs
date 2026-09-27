@@ -84,6 +84,11 @@ async fn main() -> Result<()> {
     anvil_fixtures::init();
     let cli = Cli::parse();
     gateway::select_release(cli.release.clone());
+    if matches!(cli.cmd, Cmd::Run { .. } | Cmd::Up { .. }) {
+        // Trusted profiles declare the release's own diagnostics catalog:
+        // refuse to start a release Anvil has no catalog for.
+        gateway::read_lock()?.catalog_compatibility_id()?;
+    }
     match cli.cmd {
         Cmd::Verify => {
             let (bin, lock) = gateway::binary()?;

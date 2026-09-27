@@ -82,6 +82,13 @@ against it).
   to it, whatever the redirect policy. TLS settings are prepared for each
   hop's target, and a hop whose route or TLS settings cannot be prepared is
   not followed.
+
+  SSE and WebSocket handshakes and gRPC calls use the same jar, with the
+  same rules and workspace isolation (a `ws://` or `grpc://` URL counts as
+  `http://`, `wss://` or `grpcs://` as `https://`). A handshake's (or a gRPC
+  call's) `Set-Cookie` is stored when the session ends, and not at all when
+  the profile was locked or the session's workspace deleted since the
+  session started (the same fences as for HTTP responses, below).
 - **Redirects and NO_PROXY:** the proxy route is decided for each hop's host
   and port. A redirect from a NO_PROXY host to any other host goes through
   the proxy, and a redirect to a NO_PROXY host goes direct, so a server can
@@ -103,7 +110,10 @@ against it).
   holder resume a session. They are kept in memory only, per workspace,
   transport, host and port, TLS profile and client identity, never persisted
   or exported, and dropped with pooled connections and OAuth tokens when the
-  vault locks.
+  vault locks. A connection of an execution that began before the lock keeps
+  none of the tickets it receives afterwards. Outside the early-data opt-in
+  no ticket and no TLS 1.2 session is kept at all (such a connection could
+  never resume one): only the key-exchange group each server chose.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -126,8 +136,9 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   values they extract stay inside it); never present this device's JWT-SVID
   (Workload API or token file); and are refused a TLS profile whose client
   identity (certificate or X.509-SVID) is bound to no host, including the
-  proxy's. Opening a root (`App::set_import_root_workspace_scope`) is never
-  imported, and the desktop does not offer a control for it yet. TLS trust
+  proxy's. Opening a root (`App::set_import_root_workspace_scope`, the
+  desktop's **Workspace scope** tab after a confirmation) is never imported.
+  TLS trust
   settings and proxies selected by the destination still apply, and a client
   identity bound to hosts is presented only to those hosts. Cookies and
   cached OAuth tokens are per workspace, not per import root; cookies follow
@@ -145,8 +156,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   any other device, and on this one until that exact file is bound in the
   native dialog (`file_choose`, purpose `linked_file`) for the request or
   dataset that names it, that request, gRPC schema or dataset is refused
-  before anything is read or sent. The desktop does not offer a control that
-  opens this dialog yet, so a linked file cannot be bound today.
+  before anything is read or sent. The desktop offers **Choose file…** (or
+  **Rebind…**) beside each linked file and shows whether it is bound; the
+  backend binds only the exact file the request or dataset names, and its
+  status query (`linked_file_status`) reads no file and never looks at a
+  path that was not chosen.
   - A binding (`anvil_app::linked_files`) covers one request or dataset and
     one path, so a later import naming the same path cannot use it, and a
     bundle import drops the bindings of every request and dataset it
@@ -240,7 +254,60 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   scope is the workspace boundary: it does not separate items inside one
   workspace, so anything imported into a workspace can use its secrets.
 - **Lock bypass:** the backend refuses privileged commands while locked; the
-  key is dropped; sessions, executions and load runs are stopped.
+  key is dropped; sessions, executions and load runs are stopped. Work still
+  in flight at the lock cannot refill what it cleared, even if it is not
+  canceled: each cache the lock clears is fenced by the generation the work
+  started in, checked under the cache's own lock. A Workload API answer or
+  an OAuth token that arrives after the lock to a call made before it is
+  never cached. For an execution that began before the lock, nothing of the
+  following is kept after it: its responses' cookies, the TLS
+  configurations it prepares (which hold a client identity's private key),
+  its connections (HTTP/1.1, HTTP/2 or HTTP/3) and the session tickets they
+  receive. Session tickets are kept only by the 0-RTT ticket caches, which
+  the lock check counts: a connection outside the early-data opt-in never
+  resumes (rustls resumes a ticket only with the verifier instance that
+  obtained it, and each such connection has its own), so its prepared TLS
+  configuration's session store keeps neither TLS 1.3 tickets nor TLS 1.2
+  sessions, only each server's key-exchange group. Prepared TLS
+  configurations are kept per workspace, and a connection under the opt-in
+  resumes only its own workspace's tickets. A workspace delete
+  (`Engine::clear_isolation`) fences that workspace's caches the same way,
+  with a generation of its own, so other workspaces' work is not affected:
+  it drops the workspace's cookies, OAuth tokens, prepared TLS
+  configurations, connections and session tickets, and for a request,
+  session, gRPC call or token request of that workspace that started
+  before the delete, none of those it prepares or receives afterwards is
+  kept, even on a later redirect or retry, so they cannot reappear in a
+  workspace restored with the same id.
+  An execution takes the lock epoch and all of these generations between
+  the same two points, with no lock or delete of its workspace started in
+  between, so a snapshot never takes a transport or channel generation
+  newer than its jar generation; a snapshot taken during a delete is
+  post-delete for cookies and TLS material and keeps no connection, ticket
+  or channel. For a context the app builds from storage
+  (`App::build_context`), the snapshot is taken when the build starts,
+  before anything is read for the workspace, and carried by the context
+  (`ExecutionContext::epoch`, bound to the engine that took it and to the
+  context's workspace): an execution whose context was built before a
+  delete is fenced even when it starts executing after it (`App::send`, for
+  example, builds the context off the runtime first), and a delete that
+  lands before the snapshot leaves the build nothing to read. A workspace
+  restored with the same id is not refused: its contexts are built after
+  the delete. An execution of a context without a snapshot (a standalone
+  request) or on another engine than the one that took it (a load run's
+  engines) takes its snapshot when it starts.
+  Pooled gRPC channels exist only on a load run's own engines
+  (one per virtual-user slot); a call that began before a clear of its
+  engine's channels does not return its connection to them. Neither the
+  lock nor a workspace delete reaches into those engines; each stops the
+  run instead, and the run's engines, with everything they hold, end with
+  its worker process. Every load run is registered with its profile, by
+  workspace, before its job is prepared (`App::register_load_run`):
+  `App::lock` stops every registered run and a workspace delete stops that
+  workspace's, and a lock or delete that landed before the registration is
+  seen by it, so the job is never handed to a worker. A run stopped by its
+  workspace's delete keeps no report, and a report of a deleted workspace is
+  refused.
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).

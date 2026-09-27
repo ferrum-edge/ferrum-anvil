@@ -1,13 +1,15 @@
 // Request editor. Edits a draft RequestDefinition; nothing here performs I/O
 // except explicit lint/preview calls to the Rust backend.
 import { useEffect, useState } from "react";
-import { api, type EffectiveRequest, type LintResult } from "./api";
+import { api, type EffectiveRequest, type LinkedFileReferrer, type LintResult } from "./api";
 import type {
   Assertion,
+  AttachmentRef,
   AuthConfig,
   Body,
   Comparison,
   Extraction,
+  GrpcSpec,
   HttpVersionPolicy,
   IntegrationProfile,
   KeyValue,
@@ -23,6 +25,7 @@ import type {
 import { AuthEditor } from "./AuthEditor";
 import { DatagramEnvelopeEditor, ProxyHeaderEditor } from "./ProxyProtocolEditor";
 import { EarlyDataSettings } from "./EarlyData";
+import { LinkedFileBinding } from "./LinkedFile";
 import { KeyValueEditor, Tabs, fmtBytes, humanize, shortcut, useDebounced } from "./ui";
 import { Icon } from "./icons";
 import { WsDeflateEditor } from "./WsDeflateEditor";
@@ -152,8 +155,8 @@ export function RequestEditor(props: {
             <p className="hint">Content-Type, Content-Length and auth headers are added at send time; the Effective request tab shows exactly what will be sent and why.</p>
           </div>
         )}
-        {activeSub === "body" && <BodyEditor spec={spec} set={set} />}
-        {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} workspaceId={props.workspaceId} />}
+        {activeSub === "body" && <BodyEditor spec={spec} set={set} requestId={req.id} />}
+        {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} workspaceId={props.workspaceId} requestId={req.id} />}
         {activeSub === "auth" && (
           <AuthEditor
             value={(spec.auth as AuthConfig) ?? { type: "inherit" }}
@@ -266,7 +269,7 @@ function bodyDefault(t: Body["type"], prev?: Body): Body | undefined {
   }
 }
 
-function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void }) {
+export function BodyEditor({ spec, set, requestId }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; requestId?: string | null }) {
   const b = (spec.body ?? { type: "none" }) as Body;
   const setBody = (body: Body) => set({ body });
   const pickBinary = async () => {
@@ -317,13 +320,17 @@ function BodyEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Request
         </>
       )}
       {b.type === "form_url_encoded" && <KeyValueEditor rows={b.fields} onChange={(fields) => setBody({ ...b, fields })} nameLabel="Field" />}
-      {b.type === "multipart" && <MultipartEditor parts={b.parts} onChange={(parts) => setBody({ ...b, parts })} />}
+      {b.type === "multipart" && <MultipartEditor parts={b.parts} onChange={(parts) => setBody({ ...b, parts })} requestId={requestId} />}
       {b.type === "binary" && (
         <div className="fields">
-          <span className="file-chip">
-            <Icon name="file" size={14} />
-            {b.attachment.kind === "stored" ? `${b.attachment.file_name} · ${fmtBytes(b.attachment.size)}` : b.attachment.path}
-          </span>
+          {b.attachment.kind === "stored" ? (
+            <span className="file-chip">
+              <Icon name="file" size={14} />
+              {`${b.attachment.file_name} · ${fmtBytes(b.attachment.size)}`}
+            </span>
+          ) : (
+            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={b.attachment.path} className="grow" />
+          )}
           <button className="btn" onClick={pickBinary}>
             Choose another file…
           </button>
@@ -430,7 +437,7 @@ function LintedText(props: { kind: "json" | "xml"; text: string; onChange: (t: s
   );
 }
 
-function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange: (p: MultipartPart[]) => void }) {
+function MultipartEditor({ parts, onChange, requestId }: { parts: MultipartPart[]; onChange: (p: MultipartPart[]) => void; requestId?: string | null }) {
   const set = (i: number, p: MultipartPart) => onChange(parts.map((x, j) => (j === i ? p : x)));
   return (
     <div className="col">
@@ -440,11 +447,13 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
           <input className="field mono w-180" placeholder="name" aria-label="Part name" value={p.name} onChange={(e) => set(i, { ...p, name: e.target.value })} />
           {p.part_kind === "text" ? (
             <input className="field mono grow" placeholder="value" aria-label="Part value" value={p.value} onChange={(e) => set(i, { ...p, value: e.target.value })} />
-          ) : (
+          ) : p.attachment.kind === "stored" ? (
             <span className="file-chip grow">
               <Icon name="file" size={14} />
-              {p.attachment.kind === "stored" ? `${p.attachment.file_name} · ${fmtBytes(p.attachment.size)}` : p.attachment.path}
+              {`${p.attachment.file_name} · ${fmtBytes(p.attachment.size)}`}
             </span>
+          ) : (
+            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={p.attachment.path} className="grow" />
           )}
           <input className="field mono w-170" placeholder="content-type (auto)" aria-label="Part content type" value={p.content_type ?? ""} onChange={(e) => set(i, { ...p, content_type: e.target.value || null })} />
           <button className="btn ghost icon-btn" aria-label="Remove" title="Remove" onClick={() => onChange(parts.filter((_, j) => j !== i))}>
@@ -476,9 +485,30 @@ function MultipartEditor({ parts, onChange }: { parts: MultipartPart[]; onChange
   );
 }
 
+/** The saved request a linked file is chosen for; null for a request that is not saved. */
+function linkedReferrer(requestId: string | null | undefined): LinkedFileReferrer | null {
+  return requestId ? { kind: "request", id: requestId } : null;
+}
+
+/** Paths of the linked local files a gRPC schema names (stored files are not listed). */
+function linkedSchemaFiles(schema: GrpcSpec["schema"]): string[] {
+  const refs: AttachmentRef[] = schema.kind === "proto_files" ? schema.files : schema.kind === "descriptor_set" ? [schema.attachment] : [];
+  return refs.flatMap((a) => (a.kind === "linked_file" ? [a.path] : []));
+}
+
 // -------------------------------------------------------------- protocols
 
-export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; workspaceId: string }) {
+export function ProtocolEditor({
+  spec,
+  set,
+  workspaceId,
+  requestId,
+}: {
+  spec: RequestSpec;
+  set: (p: Partial<RequestSpec>) => void;
+  workspaceId: string;
+  requestId?: string | null;
+}) {
   const p = spec.protocol ?? "http";
   if (p === "web_socket") {
     const ws = spec.websocket ?? {};
@@ -601,6 +631,14 @@ export function ProtocolEditor({ spec, set, workspaceId }: { spec: RequestSpec; 
             <option value="descriptor_set">Descriptor set (.pb)…</option>
           </select>
         </label>
+        {linkedSchemaFiles(g.schema).length > 0 && (
+          <div className="col" data-testid="grpc-linked-schema">
+            <span className="lbl">Linked schema files (read from this device)</span>
+            {linkedSchemaFiles(g.schema).map((path, i) => (
+              <LinkedFileBinding key={`${i}:${path}`} referrer={linkedReferrer(requestId)} path={path} />
+            ))}
+          </div>
+        )}
         <label className="lbl">
           Messages (JSON, one per line; unary/server streaming send the first)
           <textarea className="field" rows={5} value={g.messages.join("\n")} onChange={(e) => set({ grpc: { ...g, messages: e.target.value.split("\n").filter((l) => l.trim()) } })} />
@@ -1210,6 +1248,7 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
       <table className="grid">
         <tbody>
           <tr><td className="k">Destination</td><td className="v">{eff.destination}</td></tr>
+          <tr><td className="k">Host / :authority</td><td className="v">{eff.authority}</td></tr>
           <tr><td className="k">Auth</td><td className="v">{eff.auth}{eff.auth_varies_per_send ? " (computed per send)" : ""}</td></tr>
           <tr>
             <td className="k">TLS</td>

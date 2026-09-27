@@ -189,6 +189,12 @@ impl App {
     /// profile or its proxy's is refused. The context is tagged with the
     /// sealed root (`ExecutionContext::scope`) so a run or load chain keeps
     /// values extracted outside it, and its dataset, away from it.
+    ///
+    /// The context carries the engine's execution epoch for the workspace,
+    /// taken when the build starts (`ExecutionContext::epoch`): an execution
+    /// of it keeps nothing for the workspace (cookies, OAuth tokens,
+    /// prepared TLS configurations, pooled connections, session tickets)
+    /// once the workspace is deleted, even when it starts after the delete.
     pub fn build_context(
         &self,
         request_id: Option<Id>,
@@ -196,6 +202,12 @@ impl App {
         draft: Option<RequestSpec>,
         opts: &SendOptions,
     ) -> Result<ExecutionContext> {
+        // Taken before anything is read for the workspace: a delete of it
+        // from here on (or a lock) fences an execution of this context, even
+        // one that starts after it, while a delete before this point leaves
+        // nothing to read. A workspace restored with the same id afterwards
+        // is not affected: its contexts are built after the delete.
+        let epoch = self.engine.context_epoch(&ws_id.to_string());
         if let Some(d) = &draft {
             refuse_linked_files(d)?;
         }
@@ -263,11 +275,21 @@ impl App {
         for f in base {
             var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
         }
-        let env_id = opts.environment.or(ws.active_environment_id);
+        let selected_env = opts.environment.or(ws.active_environment_id);
+        let environments = self.environments(ws_id)?;
+        let env_id = match selected_env {
+            Some(eid) if environments.iter().any(|env| env.meta.id == eid) => Some(eid),
+            Some(eid) if opts.environment == Some(eid) => {
+                return Err(AppError::NotFound("environment".into()));
+            }
+            // A deleted workspace default can remain in older profiles. Treat
+            // it as unset; an explicit selection above remains an error.
+            Some(_) => None,
+            None => None,
+        };
         let env_id = env_id.filter(|eid| sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid)));
         if let Some(eid) = env_id {
-            let env =
-                self.environments(ws_id)?.into_iter().find(|e| e.meta.id == eid).ok_or_else(|| AppError::NotFound("environment".into()))?;
+            let env = environments.into_iter().find(|e| e.meta.id == eid).ok_or_else(|| AppError::NotFound("environment".into()))?;
             var_layers.push(layer(format!("environment:{}", env.name), &env.variables, &secrets)?);
         }
         for f in nested {
@@ -302,6 +324,7 @@ impl App {
             seed: opts.seed,
             redaction_names: settings_app.redaction_names.clone(),
             scope: sealed.map(|i| chain[i].meta.id),
+            epoch: Some(epoch),
         };
         if sealed.is_some() {
             refuse_device_identity(&ctx.effective_auth().1)?;
@@ -446,7 +469,7 @@ fn has_linked_file(v: &serde_json::Value) -> bool {
     }
 }
 
-fn collect_attachments(v: &serde_json::Value, f: &mut dyn FnMut(&str)) {
+pub(crate) fn collect_attachments(v: &serde_json::Value, f: &mut dyn FnMut(&str)) {
     match v {
         serde_json::Value::Object(o) => {
             if o.get("kind").and_then(|k| k.as_str()) == Some("stored")

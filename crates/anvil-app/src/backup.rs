@@ -41,7 +41,7 @@
 use crate::linked_files::LinkedFileBinding;
 use crate::port::{self, ImportApproval, ImportReport};
 use crate::specs::SpecSourceRecord;
-use crate::workspace::attachment_index_id;
+use crate::workspace::index_attachment_in;
 use crate::{App, AppError, Result, settings_id};
 use anvil_domain::Id;
 use anvil_domain::execution::ExecutionRecord;
@@ -122,7 +122,7 @@ pub const TABLES: &[(&str, &str)] = &[
     ("blobs", "attachment contents and stored response bodies, with the attachments and history records that use them"),
     ("history", "every execution record with its stored response body"),
     ("load_reports", "every load report"),
-    ("meta", "not carried: the schema version, key check and blob pins belong to this database and are recreated"),
+    ("meta", "not carried: the schema version, key check, blob pins and notes (the last storage cleanup) belong to this database"),
 ];
 
 const KEYCHAIN_NOTE: &str =
@@ -1204,8 +1204,7 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     for (sha, bytes) in &g.attachments {
         let blob = w.tx.put_blob(bytes)?;
         w.tx.pin_blob(&blob)?;
-        let index = serde_json::json!({"attachment": sha, "blob": blob});
-        w.tx.put(kind::IMPORT_SOURCE, &attachment_index_id(sha), None, None, 0.0, &index)?;
+        index_attachment_in(w.tx, sha, &blob, false)?;
     }
     // A record is never dated after its restore, so age-based retention
     // always reaches it, as after a bundle import.
