@@ -278,7 +278,8 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   workspace while one of its load runs is still running leaves that run's
   engines holding the workspace's pooled connections, session tickets,
   cookies, prepared TLS configurations and gRPC channels until the run
-  ends (see the linked issue).
+  ends (see
+  [ferrum-anvil#162](https://github.com/ferrum-edge/ferrum-anvil/issues/162)).
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).

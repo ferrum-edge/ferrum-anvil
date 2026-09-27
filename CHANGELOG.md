@@ -190,7 +190,7 @@
   longer shared between workspaces, and a call that began before its
   engine's channels were cleared no longer returns its connection to them.
   The app's lock and a workspace delete do not clear a load run's engines:
-  the lock stops the run instead.
+  runs are expected to be stopped on lock (see #162).
 - The lock check now also counts the session tickets kept by prepared TLS
   configurations (connections without the early-data opt-in).
 - A spec reimport now compares the import's scoped configuration too, not

@@ -686,6 +686,7 @@ impl Channels {
     /// clear since `generation` that covers `key`, it is not pooled.
     async fn checkin(&self, key: &str, generation: u64, c: Connected, clean: bool) {
         let Connected { conn, stats, mut observation, quic } = c;
+        let was_reused = observation.reused;
         observation.reused = false;
         match conn {
             Conn::H2(s) => {
@@ -718,9 +719,12 @@ impl Channels {
                 }
                 if pooled.is_some() || !generations.admits(generation, key) {
                     // Not kept (another channel is pooled under the key, or a
-                    // lock or a delete of its workspace fenced it): close it
-                    // now, as above, rather than when its last handle drops.
-                    quic.close(crate::h3::H3_NO_ERROR.into(), b"");
+                    // lock or a delete of its workspace fenced it). A channel
+                    // this call opened is closed now; a reused one is only
+                    // dropped, since other calls may still be streaming on it.
+                    if !was_reused {
+                        quic.close(crate::h3::H3_NO_ERROR.into(), b"");
+                    }
                     return;
                 }
                 let served = Arc::new(std::sync::atomic::AtomicU32::new(observation.prior_requests + 1));
