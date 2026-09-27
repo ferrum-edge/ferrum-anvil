@@ -25,14 +25,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 
-const ACCEPTED: &[&str] = &[
-    "api.example.test",
-    "api.example.test:8443",
-    "192.0.2.10",
-    "192.0.2.10:8080",
-    "[2001:db8::1]",
-    "[2001:db8::1]:8443",
-];
+const ACCEPTED: &[&str] =
+    &["api.example.test", "api.example.test:8443", "192.0.2.10", "192.0.2.10:8080", "[2001:db8::1]", "[2001:db8::1]:8443"];
 
 /// Refused values, with a word the error gives as the reason.
 const REFUSED: &[(&str, &str)] = &[

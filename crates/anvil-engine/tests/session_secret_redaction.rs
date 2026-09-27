@@ -33,10 +33,8 @@ fn init() {
 /// `spec` with `name` as a secret variable holding `value` and short timeouts.
 fn with_secret(spec: RequestSpec, name: &str, value: &str) -> ExecutionContext {
     let mut c = ExecutionContext::standalone(spec);
-    c.var_layers = vec![VarLayer {
-        label: "environment:test".into(),
-        vars: vec![VarEntry { name: name.into(), value: value.into(), secret: true }],
-    }];
+    c.var_layers =
+        vec![VarLayer { label: "environment:test".into(), vars: vec![VarEntry { name: name.into(), value: value.into(), secret: true }] }];
     let timeouts = TimeoutOverrides {
         connect_ms: Some(Some(3_000)),
         response_headers_ms: Some(Some(5_000)),
