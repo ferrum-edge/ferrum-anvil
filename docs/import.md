@@ -2,8 +2,7 @@
 
 `crates/anvil-import` turns API descriptions and other clients' exports into
 Anvil workspace objects (`Workspace`, `Folder`, `RequestDefinition`,
-`Environment`) plus an `ImportReport`. It implements build plan §11 and the
-import side of §12, and the failure-matrix cases DATA-008 through DATA-013.
+`Environment`) plus an `ImportReport`.
 
 ```rust
 let detected = anvil_import::detect(&bytes);             // kind + dialect, no import
@@ -20,9 +19,9 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 
 | Rule | How it is enforced |
 |---|---|
-| No network or file I/O during import | The crate has no I/O code paths. External `$ref`s, `wsdl:import`, `xsd:import`/`include`/`redefine` with `schemaLocation`, `externalValue` examples, OpenID Connect discovery URLs, `oauth2MetadataUrl`, Postman/Insomnia/cURL file references are listed in `report.external_refs` with every location that uses them and `requires_approval: true` (DATA-009). Resolving one is a separate, explicit, per-reference user action outside this crate. |
-| Safe XML | WSDL is parsed with `roxmltree` with DTDs refused (`allow_dtd: false`): internal/external entity declarations fail the import with `ImportError::UnsafeXml`; undeclared entities are syntax errors. Node count is bounded (DATA-013). |
-| Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are copied verbatim into `report.scripts` with `enabled: false, trusted: false` and never attached to requests. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied (DATA-008). Imported requests are never sent. |
+| No network or file I/O during import | The crate has no I/O code paths. External `$ref`s, `wsdl:import`, `xsd:import`/`include`/`redefine` with `schemaLocation`, `externalValue` examples, OpenID Connect discovery URLs, `oauth2MetadataUrl`, Postman/Insomnia/cURL file references are listed in `report.external_refs` with every location that uses them and `requires_approval: true`. Resolving one is a separate, explicit, per-reference user action outside this crate. |
+| Safe XML | WSDL is parsed with `roxmltree` with DTDs refused (`allow_dtd: false`): internal/external entity declarations fail the import with `ImportError::UnsafeXml`; undeclared entities are syntax errors. Node count is bounded. |
+| Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are copied verbatim into `report.scripts` with `enabled: false, trusted: false` and never attached to requests. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
 | No invented credentials | Auth is imported as configs whose secrets are `{{variable}}` references, listed in `report.required_variables` and deliberately *not* defined, so a request fails validation (unresolved variable) until the user supplies a value. Credential-like body fields and parameters are never generated in samples. |
 | Credential redaction (migrations) | Literal credentials in HAR, cURL, Postman and Insomnia input (Authorization/Cookie/API-key-like headers, credential-like query parameters, form fields and JSON members, auth helper secrets, secret variables, cached OAuth tokens) are replaced by `{{placeholder}}` variables and listed in `report.redactions`, unless `ImportOptions::include_credentials` is set (kept values are then marked sensitive). A value that is only variable references plus an auth scheme word (`Bearer {{token}}`) is not a literal secret and is kept. Detection is name-based and best effort; bodies that cannot be scanned (XML, arbitrary text, unparsable JSON) produce a `body_not_scanned` warning. |
 | Bounded work | `max_bytes` (input size), `max_nodes` (parsed JSON/YAML nodes — charged *during* deserialization, so YAML alias bombs are refused — and XML nodes), a fixed nesting-depth limit, `max_ref_depth`, `max_ref_expansions` (whole import), `max_sample_nodes` (per payload), `max_operations`. Malformed input yields an `ImportError`, never a panic (property-tested). |
@@ -62,8 +61,8 @@ Codes are stable strings (for example `recursive_schema`,
   everything else is a pure function of the input and options.
 * `ImportSource::operation_key` is the operationId (else `METHOD path`) for
   OpenAPI, `service/port/operation` for WSDL, the item id for Postman and
-  Insomnia, `har:<index>:<METHOD url>` for HAR and `curl:<METHOD url>` for
-  cURL. Duplicates get a `#n` suffix and a warning.
+  Insomnia, `har:<index>:<METHOD url>` (query dropped) for HAR and
+  `curl:<METHOD url>` for cURL. Duplicates get a `#n` suffix and a warning.
 * `ImportSource::generated_hash` is SHA-256 of the canonical JSON (sorted
   keys, no whitespace) of the generated `RequestSpec` with `source` removed
   (`anvil_import::spec_hash`).
@@ -72,99 +71,101 @@ Codes are stable strings (for example `recursive_schema`,
 
 `App::spec_import` gives every import its own fresh `id_namespace` (any
 namespace in the caller's options is ignored) and keeps it in the stored
-source record; only a reimport of that import (`spec_reimport_plan`/`_apply`)
-reuses it. Importing the same source again, into the same or another
-workspace, therefore creates an independent copy and never moves or
-overwrites an earlier import's requests. An import that would still overwrite
-a stored object is refused.
+source record. Only a reimport of that import (`spec_reimport_plan` /
+`spec_reimport_apply`) reuses it. Importing the same source again, into the
+same or another workspace, therefore creates an independent copy and never
+moves or overwrites an earlier import's requests. An import that would still
+overwrite a stored object is refused.
 
-The import is atomic: a restore checkpoint is taken first, then the new
+The import is atomic. A restore checkpoint is taken first; then the new
 workspace or root folder, the original bytes (a stored attachment), folders,
 requests, environments and the source record are written in one
 transaction. If anything fails, including taking the checkpoint, nothing is
 written.
 
+### The import root
+
 Imported into an existing workspace, the objects go under a new top-level
-folder, the *import root* (`Folder::import_root`), that carries the source's
-workspace-level scope: description, settings, variables and auth. A source
-without auth of its own gets an explicit `none` there. Imported environments
-are added to the destination workspace and listed on the import root
+folder, the *import root* (`Folder::import_root`). It carries the source's
+workspace-level scope: description, settings, variables and auth (an
+explicit `none` when the source has no auth). Imported environments are added
+to the destination workspace and listed on the import root
 (`import_environment_ids`).
 
 The import root is a boundary. A request under it resolves only the imported
 collection's own scope (`App::build_context`):
 
 - variables of the import root and the folders under it, and of an
-  environment the import brought with it when that one is selected;
+  environment the import brought, when that one is selected;
 - auth of the import root, the folders under it and the request;
-- in a collection run or a load chain, values extracted in the same
-  iteration by requests under the same import root.
+- in a collection run or load chain, values extracted in the same iteration
+  by requests under the same import root.
 
-The destination workspace's variables and auth, folders above the import
-root, and every other environment (including the destination's active one,
-even when chosen for a send) are left out, whether or not their values are
-secret. So are the run-local values of the workspace: a value extracted in
-the same iteration by a request outside the import root, and the row of the
-run's or load plan's dataset. Each prepared request carries the import root
-it was sealed under (`ExecutionContext::scope`, `None` outside one), and
-the runner and the load executor hand a step only the extracted values of
-its own scope and, outside an import root only, the dataset row. It works
-the other way too: a value extracted under the import root is not visible
-to the workspace's own requests. Runs of requests that are not under an
-import root are unchanged. When a run or load test with a dataset includes
-a request under an import root that is not opened, the dataset rows are
-not applied to it and the run report says so in a note.
+Everything else is left out, secret or not:
 
-A JWT-SVID drawn from this device's SPIFFE Workload API or from a token file
-is refused, and so is a request whose effective settings select a TLS
-profile with a client identity (a certificate or this device's X.509-SVID)
-bound to no host, along with the selected proxy's own TLS profile, whatever
-the proxy's kind or `no_proxy`, so the check does not depend on the destination.
-A sealed import root sent through an HBONE mesh proxy whose SVID profile is
-unbound is refused until the root is opened. So an imported `Bearer {{token}}`
-can never pick up the destination's `token`, whether it is a variable of the
-destination or a value its own login request extracted earlier in the same
-run: it stays unresolved and the request is not sent.
+- the destination workspace's variables and auth, and folders above the
+  import root;
+- every other environment, including the destination's active one, even when
+  chosen for a send;
+- values extracted by requests outside the import root, and the dataset row
+  of the run or load plan. When a run or load test with a dataset includes a
+  request under an unopened import root, the rows are not applied to it and
+  the report says so in a note;
+- this device's identity: a JWT-SVID from the SPIFFE Workload API or a token
+  file is refused, and so is a TLS profile whose client identity (a
+  certificate or this device's X.509-SVID) is bound to no host. Both the
+  request's own TLS profile and the selected proxy's count, whatever the
+  proxy's kind (HBONE included) or `no_proxy`, so the check does not depend
+  on the destination.
 
-The user can open an import root to its workspace on this device
-(`use_workspace_scope`, set only by `App::set_import_root_workspace_scope`
-and the desktop command `folder_set_workspace_scope`; the desktop control
-that calls it is pending). Then the workspace's variables, active
-environment and auth, this device's workload identity and TLS client
-identities, and the run's extracted values and dataset rows apply under it
-as under any folder. An import never sets it: a spec import creates the root
-with it off, saving a folder keeps the stored value, and a bundle import
-turns it off with a warning (the import root itself is kept).
+It works the other way too: a value extracted under the import root is not
+visible to the workspace's own requests. Each prepared request carries the
+import root it was sealed under (`ExecutionContext::scope`, `None` outside
+one), and the runner and load executor hand a step only the extracted values
+of its own scope. Requests that are not under an import root are unaffected.
 
-Precedence. In a workspace of its own the source's collection variables are
-workspace variables, below the environment. Under an import root they rank
-the same way: workspace variables (only when opened), then folders above the
-import root (only when opened), then the import root's variables, then the
-environment, then the folders under the import root and the run's
-iteration values. An existing-workspace import therefore prepares
+So an imported `Bearer {{token}}` can never pick up the destination's
+`token`, whether it is a destination variable or a value the destination's
+own login request extracted earlier in the same run. It stays unresolved and
+the request is not sent.
+
+**Opening an import root.** The user can open an import root to its
+workspace on this device (`use_workspace_scope`, set only by
+`App::set_import_root_workspace_scope` and the desktop command
+`folder_set_workspace_scope`; the desktop does not offer a control for it
+yet). The workspace's variables, active environment and auth, this device's
+workload identity and TLS client identities, and the run's extracted values
+and dataset rows then apply under it as under any folder. An import never
+sets it: a spec import creates the root with it off, saving a folder keeps
+the stored value, and a bundle import turns it off with a warning (the
+import root itself is kept).
+
+**Variable precedence.** In a workspace of its own, the source's collection
+variables are workspace variables, below the environment. Under an import
+root they rank the same way: workspace variables (only when opened), then
+folders above the import root (only when opened), then the import root's
+variables, then the environment, then the folders under the import root and
+the run's iteration values. An existing-workspace import therefore prepares
 exactly like a new-workspace import of the same source.
 
-Other settings still apply under an import root: TLS trust (verification,
-roots, minimum version), proxy profiles, DNS overrides and gateway profiles
-selected by the destination workspace or an outer folder. A TLS profile with
-a client identity applies only when it is bound to hosts, and then the
-identity is presented only to those hosts. A proxy carries the connection
-and its own TLS profile is used only for the connection to the proxy; a
-client identity in it likewise applies only when that profile is bound to
-hosts.
+**Settings that still apply.** TLS trust (verification, roots, minimum
+version), proxy profiles, DNS overrides and gateway profiles selected by the
+destination workspace or an outer folder still apply under an import root. A
+TLS profile with a client identity applies only when it is bound to hosts,
+and then presents the identity only to those hosts. A proxy's own TLS profile
+is used only for the connection to the proxy, under the same host-binding
+rule.
 
-Cookies and cached OAuth tokens are kept per workspace, not per import root.
-Every request of the workspace, under an import root or not, shares the
-workspace's cookie jar: a cookie set in response to one request is sent with
-another to a host the cookie matches, following the usual domain, path and
-`Secure` rules, so a cookie never reaches a host it was not set for. An OAuth
-token is cached under the workspace, every setting that decides what it
-authorizes (issuer, client, grant, audience, scope) and the workspace, folder
-or request that defines the profile (`token_cache_id`). An imported profile
-is therefore cached apart from the workspace's own, and opening or closing
-the import root does not drop a token already acquired.
+**Cookies and OAuth tokens** are kept per workspace, not per import root.
+Every request in the workspace shares its cookie jar, and cookies follow the
+usual domain, path and `Secure` rules, so a cookie never reaches a host it
+was not set for. An OAuth token is cached under the workspace, every setting
+that decides what it authorizes (issuer, client, grant, audience, scope) and
+the workspace, folder or request that defines the profile (`token_cache_id`).
+An imported profile is therefore cached apart from the workspace's own, and
+opening or closing the import root does not drop a token already acquired.
 
-## Reimport (DATA-012)
+## Reimport
 
 `reimport_diff(previous, fresh)` links requests by operation key and
 classifies each previously imported request:

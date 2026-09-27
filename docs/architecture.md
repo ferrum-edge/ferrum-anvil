@@ -26,121 +26,139 @@ redacted results.
 CLI (`anvil`) = same anvil-app services without a webview.
 ```
 
-- **Lock is enforced in the backend.** Every data command goes through
-  `DesktopState::app()`, which refuses while locked. Locking drops the data
-  key, clears token caches, pooled connections and TLS/QUIC session tickets,
-  cancels executions and sessions, and stops load workers. The lock screen is
-  only a view of that state. Opening another profile (`DesktopState::set_app`)
-  locks the previous one and stops its work the same way. Work is bound to
-  the profile it started under: a collection run, send, session or load run
-  records only into that profile, and a load report that finished while it
-  was locked is held for it (`state::VaultId`) and saved when that profile is
-  next unlocked, never into another. `load_run_start` registers the run
-  before it reads the profile, as `session_open` does.
-- **A session open is cancelable from its first moment.** `session_open`
-  registers its cancellation token before it reads the profile or builds the
-  request. Locking locks the profile before it cancels the registered tokens,
-  so an open that registered earlier is stopped while it connects, and one
-  that registers later is refused when it reads the profile. A session is
-  published to the open sessions before its pending token is retired, so a
-  concurrent cancel always finds one of the two; a cancel that lands in
-  between aborts the new session. The pending token is removed on every path,
-  a panic included, and an id that is still registered is refused
-  (`state::PendingEntry`, also used by `send_request`, collection runs and
-  OAuth sign-in). An Abort that reaches the backend before the open has
-  registered finds nothing to stop; the renderer cancels again once the open
-  returns.
-- **Store work stays off the async runtime.** One SQLite connection serves a
-  profile, and a long transaction (an import, a spec import, a folder or
-  workspace delete) holds it until it ends. Commands that write in bulk, read
-  many records or derive a key run their work on a blocking thread
-  (`commands::blocking`): profile creation, unlock and passphrase changes,
-  spec imports, folder and workspace deletes, history lists, views and
-  clears, export previews, and attachment, PEM/PKCS#12 and dataset reads.
-  Bundle imports and previews run on their own worker (`import_work`).
-  Async paths do the same with `anvil_app::off_runtime`: a send, a session
-  open and an OAuth sign-in build their context there, a send and a session
-  record their history there, a collection run prepares its steps and saves
-  its report there (and records each step through `block_in_place`), and a
-  load run prepares its job and saves its report there. A context looks up
-  the vault secrets of its spec, its effective auth and the profiles its
-  settings select as it is built; any other secret is looked up if the
-  engine uses it. A cancel while a send, a session open or a collection run
-  waits for its preparation ends it at once, with nothing sent or recorded.
-  Shorter commands still run on the UI thread, in the order they were
-  called, and wait for a long transaction to end.
+### Lock
+
+- **The backend enforces the lock.** Every data command goes through
+  `DesktopState::app()`, which refuses while locked. The lock screen is only a
+  view of that state.
+- **Locking stops everything.** It drops the data key, clears token caches,
+  pooled connections and TLS/QUIC session tickets, revokes file grants,
+  cancels executions, imports, sign-ins and sessions, and stops load workers.
+  Opening another profile (`DesktopState::set_app_since`) locks the previous
+  one and stops its work the same way.
+- **Work stays with its profile.** A send, session, collection run or load run
+  records only into the profile it started under. A load report that finishes
+  while its profile is locked is held for that profile (`state::VaultId`) and
+  saved when it is next unlocked, never into another.
+- **Work is cancelable from its first moment.** Every attempt registers its
+  cancellation token before it reads the profile: `session_open`,
+  `send_request`, collection runs, bundle imports and OAuth sign-ins through
+  `state::PendingEntry`, and `load_run_start` through `LoadRunEntry`. A lock
+  first locks the profile, then cancels every registered token, so an attempt
+  that registered earlier is stopped, and one that registers later is refused
+  when it reads the profile. A `PendingEntry` is removed on every path, a
+  panic included, and an id that is still registered is refused. A session is
+  published to the open sessions before its pending
+  token is retired, so a concurrent cancel always finds one of the two. An
+  Abort that reaches the backend before the open has registered finds nothing
+  to stop, so the renderer cancels again once the open returns.
 - **A lock wins over work that ran off the lock.** `DesktopState` keeps a
-  lock epoch that every lock and profile switch bumps first. An unlock or a
-  profile creation takes it before its key derivation and opens the profile
-  only if it is unchanged (`set_app_since`, `unlock_since`); otherwise the
-  profile stays locked. An unlock of the open profile checks it under the
-  write lock of the store's key, before the key is set (`Store::unlock_if`),
-  so the profile is never usable in between. `commands::blocking` takes it
-  before the work and returns `LOCKED` instead of the work's result if it
-  changed meanwhile; writes that return no data use `blocking_unchecked`, so
-  a committed write is not reported as `LOCKED`.
-- **File commands never take a path from the webview.** The backend shows
-  the native open or save dialog itself (`file_choose`), keeps the chosen
-  path and returns an opaque grant bound to one purpose (bundle import or
-  export, attachment, PEM or PKCS#12 file, spec source, dataset, load or run
-  report export); file commands accept only such a grant
-  (`anvil_app::file_grants`). A read grant is refused if the file or a folder
-  on its path was replaced after the choice; a write goes to a new temporary
-  file that is renamed over the chosen name, and spends the grant (a bundle
-  or backup is created readable only by its owner on Unix). Grants expire
-  after 30 minutes, are capped at 32 and are revoked on lock and when another
-  profile is opened; a dialog that was open then grants nothing.
+  lock epoch that every lock and profile switch bumps first. Unlock and
+  profile creation read it before deriving the key and open the profile only
+  if it is unchanged (`set_app_since`, `unlock_since`). An unlock of the open
+  profile checks it under the write lock of the store's key, before the key is
+  set (`Store::unlock_if`), so the profile is never usable in between.
+  `commands::blocking` returns `LOCKED` instead of its result if the epoch
+  changed while it ran; writes that return no data use `blocking_unchecked`,
+  so a committed write is not reported as `LOCKED`.
+
+### Store work
+
+Each profile has one SQLite connection, and a long transaction (an import, a
+spec import, a folder or workspace delete) holds it until it ends. Work that
+writes in bulk, reads many records or derives a key therefore runs on a
+blocking thread, not on the async runtime:
+
+- `commands::blocking`: profile creation, unlock and passphrase changes, spec
+  imports, folder and workspace deletes, history lists, views and clears,
+  export previews, and attachment, PEM/PKCS#12 and dataset reads.
+- `import_work`: bundle imports and previews, one at a time.
+- `anvil_app::off_runtime`: building the context of a send, session open or
+  OAuth sign-in; recording a send or session in history; preparing and saving
+  a collection run (each step is recorded through `block_in_place`); preparing
+  and saving a load run.
+
+A cancel while a send, session open or collection run waits for its
+preparation ends it at once, with nothing sent or recorded. Shorter commands
+run on the UI thread in the order they were called, and wait for a long
+transaction to end.
+
+### Files
+
+- **File commands never take a path from the webview.** The backend shows the
+  native open or save dialog itself (`file_choose`), keeps the chosen path and
+  returns an opaque grant bound to one purpose: bundle import or export,
+  attachment, PEM or PKCS#12 file, spec source, dataset, or load or run report
+  export (`anvil_app::file_grants`).
+- A read grant is refused if the file, or a folder on its path, was replaced
+  after the choice. A write goes to a new temporary file that is renamed over
+  the chosen name, and spends the grant. A bundle or backup is created
+  readable only by its owner on Unix.
+- Grants expire after 30 minutes, are capped at 32, and are revoked on lock
+  and when another profile is opened. A dialog that was open at that moment
+  grants nothing.
 - **Request specs from the webview name no local file.** `build_context`
   refuses an unsaved draft that references a linked file
-  (`AttachmentRef::LinkedFile`), and the desktop refuses to create or save
-  a request that does. A JWT-SVID token file is re-read at every send, so
-  it is bound instead of granted: `file_choose` with purpose
-  `jwt_svid_file` records the path as chosen in the vault, links kept so a
-  rotating token keeps working (it is canonicalised only to check that it
-  leads to a regular file; `anvil_app::token_files`, never exported or
-  imported), and the desktop
-  confines the app so a token-file path that is not bound is refused before
-  anything is read. The JWT-SVID editor lists the bound token files and
-  removes one (`token_files_list`, `token_file_remove`); an auth setting that
-  names a removed file is refused until it is chosen again. A linked file
-  that a saved request, gRPC schema or dataset names is bound the same way,
-  for that request or dataset
-  (`file_choose` with purpose `linked_file` and the referrer,
-  `anvil_app::linked_files`; the desktop control that opens this dialog is
-  pending); until then it is refused before anything is read, in the
-  desktop and the CLI alike. The CLI cannot bind one itself.
-- **Pooled HTTP connections are bounded.** Each engine keeps at most 8 idle
-  HTTP/1.1 or HTTP/2 connections per pool key (isolation, destination and
-  security context) and 64 in total; one more closes the connection idle
-  longest, within the key when the key is full, else across all keys. A
-  background sweep closes connections idle for 90 s even when their
-  destination is never used again, and stops while the pool is empty; it ends
-  with the engine that started it. An HTTP/2 connection counts as idle only
-  with no request in flight, so neither expiry nor eviction cuts a request
-  short. A load run gives each slot (virtual user or concurrency lane) its own
-  engine with smaller caps sized from the plan: N is the number of distinct
-  requests in its chain or mix, within 4..=64, so a persistent chain finds
-  each step's connection still pooled on the next iteration. Per slot, the
-  HTTP/1.1 and HTTP/2 pool keeps at most 2 idle connections per key and N in
-  total (one cap for both versions), and the QUIC pool at most N idle
-  connections. These caps leave out connections carrying a request, the
-  connection kept for the one retry after `425 Too Early` (at most one per
-  key: HTTP and QUIC for up to 10 s, or the shorter idle TTL) and the slot's gRPC
-  channels (one per destination).
-- **The workbench shows the selected workspace's state only.** Its lists
-  (collection tree, history, TLS/proxy/gateway profiles, environments) are
-  cleared when the workspace changes and filled only from the latest read of
-  the workspace still selected; an earlier read that finishes late is
-  dropped. Saving a request keeps the editor usable: saves of one request are
-  written one at a time in the order asked, each moves the saved baseline to
-  what it wrote, and edits made while a save was pending are kept and stay
-  unsaved.
-- **Load traffic never runs in the UI process.** The desktop re-launches its
-  own executable with a fixed, non-secret flag and sends the job over stdin.
-  The job carries only the secrets its requests reference.
-- **Remote content is inert.** Bodies, headers and messages are shown as
-  text or hex. The CSP forbids remote scripts, frames and fetches. No
-  response text can change settings or reach the vault.
+  (`AttachmentRef::LinkedFile`), and the desktop refuses to create or save a
+  request that does.
+- **Files read at send time are bound, not granted.** A JWT-SVID token file is
+  re-read at every send. `file_choose` with purpose `jwt_svid_file` records the
+  chosen path in the vault (`anvil_app::token_files`; never exported or
+  imported). Links are kept, so a rotating token keeps working; the path is
+  canonicalised only to check that it leads to a regular file. The desktop
+  refuses a token-file path that is not bound before reading anything. The
+  JWT-SVID editor lists and removes bound files (`token_files_list`,
+  `token_file_remove`); an auth setting that names a removed file is refused
+  until it is chosen again.
+- A linked file that a saved request, gRPC schema or dataset names is bound
+  the same way, for that request or dataset (`file_choose` with purpose
+  `linked_file` and the referrer, `anvil_app::linked_files`). No desktop
+  control opens that dialog yet, and the CLI cannot bind one, so until it is
+  bound the file is refused before anything is read, in the desktop and the
+  CLI alike.
+
+### Connection pools
+
+- Each engine keeps at most 8 idle HTTP/1.1 or HTTP/2 connections per pool
+  key (isolation, destination and security context) and 64 in total. One
+  more closes the connection idle longest: within the key when the key is
+  full, else across all keys.
+- The HTTP/3 pool keeps at most 64 idle QUIC connections, on its own cap
+  (see [protocols.md](protocols.md) §3.7).
+- A background sweep closes connections idle for 90 s, even when their
+  destination is never used again. It stops while the pool is empty and ends
+  with its engine.
+- A connection counts as idle only with no request in flight, so neither
+  expiry nor eviction cuts a request short.
+- A load run gives each slot (virtual user or concurrency lane) its own
+  engine with smaller caps. N is the number of distinct requests in the
+  plan's chain or mix, clamped to 4..=64, so a persistent chain finds each
+  step's connection still pooled on the next iteration. Per slot, the HTTP/1.1
+  and HTTP/2 pool keeps at most 2 idle connections per key and N in total,
+  and the QUIC pool at most N. These caps leave out connections carrying a
+  request, the one connection per key kept for a retry after `425 Too Early`
+  (up to 10 s, or the shorter idle TTL), and the slot's gRPC channels (one
+  per destination).
+
+### Webview
+
+- **The workbench shows the selected workspace only.** Its lists (collection
+  tree, history, TLS/proxy/gateway profiles, environments) are cleared when
+  the workspace changes and filled only from the latest read of the workspace
+  still selected; a late earlier read is dropped.
+- **Saving keeps the editor usable.** Saves of one request are written one at
+  a time, in order. Each moves the saved baseline to what it wrote, and edits
+  made while a save was pending stay unsaved.
+- **Remote content is inert.** Bodies, headers and messages are shown as text
+  or hex. The CSP forbids remote scripts, frames and fetches. No response text
+  can change settings or reach the vault.
+
+### Load worker
+
+Load traffic never runs in the UI process. The desktop (and the CLI)
+re-launches its own executable with the fixed, non-secret flag
+`--anvil-load-worker` and sends the job over stdin. The job carries only the
+secrets its requests reference. See [load.md](load.md#worker-process-and-ipc).
 
 ## Crates
 
@@ -148,15 +166,16 @@ CLI (`anvil`) = same anvil-app services without a webview.
 |---|---|
 | `anvil-domain` | Versioned data contracts (serde + JSON Schema): requests, auth, settings, TLS/proxy/integration profiles, execution records and evidence, findings, load plans/reports, events. `contracts/schemas/*.schema.json` and the TypeScript bindings are generated from it. |
 | `anvil-transport` | Instrumented connections: DNS (system/custom), TCP happy-eyeballs, HTTP CONNECT / SOCKS5 proxies, rustls with an observing verifier and client-cert resolver, HTTP/1.1 and HTTP/2 (hyper), HTTP/3 (quinn + h3), and WS/gRPC/SSE/TCP/UDP/DTLS session adapters. Records typed phases, byte counts, connection reuse, TLS evidence and a dispatch state derived from bytes actually written. |
-| `anvil-auth` | Final-byte auth: API key, Basic, Bearer, JWT (HS/RS/ES), OAuth2 (client credentials, refresh, auth-code + PKCE helpers, single-flight token cache), Ferrum HMAC v2 (legacy v1 opt-in only), DPoP, WS-Security UsernameToken and user-supplied SAML, and multi-auth. |
+| `anvil-auth` | Auth applied to the final bytes: API key, Basic, Bearer, JWT (HS/RS/ES), OAuth2 (client credentials, refresh, auth-code + PKCE helpers, single-flight token cache), Ferrum HMAC v2 (legacy v1 opt-in only), DPoP, WS-Security UsernameToken and user-supplied SAML, and multi-auth. |
 | `anvil-engine` | Variable resolution (precedence, cycles, helpers), request preparation and lint, per-send auth, redirects with cross-origin credential stripping, safe-retry rules, assertions and extraction, redaction by name and by exact secret value, the effective-request preview, session execution, and record assembly. |
 | `anvil-diagnostics` | Deterministic rules over typed evidence that produce findings with confidence, scope, owner, evidence, alternatives, "does not prove" statements, remediation and confirm-with steps. Includes Ferrum catalog matching with trust and confidence ceilings. Wording lives in `catalog/diagnostics/findings.en.json`. |
 | `anvil-storage` | SQLite store in which every payload is sealed with XChaCha20-Poly1305 and a record-bound AAD. Data keys are wrapped by an Argon2id passphrase key and a recovery key, or held in the OS keychain. Covers migrations, checkpoints and the plaintext-leak audit. |
-| `anvil-portability` | Workspace bundles: share-safely (placeholders) and encrypted transfer; bundles describing a full backup are refused (full backups are ANVILBAK files, see `anvil-app`). Import is hardened (limits, traversal, symlinks, bombs, checksums), normalises trust, uses conflict policies, and writes objects and secrets in one transaction that a failure rolls back (see `storage-and-recovery.md`). |
+| `anvil-portability` | Workspace bundles: share-safely (placeholders) and encrypted transfer. Bundles that describe a full backup are refused (full backups are ANVILBAK files, see `anvil-app`). Import is hardened (limits, traversal, symlinks, bombs, checksums), normalises trust, applies conflict policies, and writes objects and secrets in one transaction that a failure rolls back (see [storage-and-recovery.md](storage-and-recovery.md)). |
 | `anvil-import` | OpenAPI 2.0/3.0/3.1/3.2, WSDL 1.1, Postman, Insomnia, cURL and HAR importers with reports and reimport diffs. |
+| `anvil-identity` | Interactive identity flows: the OAuth authorization-code + PKCE sign-in to a target API (loopback redirect) and optional provider accounts linked to a profile (see [identity.md](identity.md)). |
 | `anvil-load` | Open, closed and iteration workloads over the same engine; mergeable HDR histograms; balanced ledgers; generator health; the worker protocol; JSON, CSV and HTML reports; run comparison. |
 | `anvil-runner` | Collection runner: scenarios and folders, datasets, chained extraction, stop-on-failure, JUnit/HTML/JSON reports. |
-| `anvil-app` | Services shared by the desktop and CLI: profiles/unlock, the workspace tree, revisions, environments, secrets, profiles, the history policy, send/record, export/import, full backups (one encrypted, authenticated file; see `storage-and-recovery.md`), spec import, load plans/runs, and scenarios. |
+| `anvil-app` | Services shared by the desktop and CLI: profiles and unlock, the workspace tree, revisions, environments, secrets, profiles, the history policy, send and record, export and import, full backups (one encrypted, authenticated file; see [storage-and-recovery.md](storage-and-recovery.md)), spec import, load plans and runs, and scenarios. |
 | `anvil-cli` | The `anvil` command-line client. |
 | `anvil-lab` | Real-gateway failure laboratory: the pinned Ferrum Edge binary, profile configs, fixtures, operator-log ground truth, and trusted/untrusted passes. |
 | `anvil-fixtures` | Controllable test peers: HTTP(S) routes, raw fault modes, TLS servers, WS, gRPC with reflection, SSE, TCP/UDP, DTLS, DNS, and an OAuth IdP. |
@@ -165,72 +184,81 @@ CLI (`anvil`) = same anvil-app services without a webview.
 ## One execution, end to end
 
 1. **Freeze the context.** `anvil-app` freezes an `ExecutionContext`: the
-   request spec (draft or saved revision), variable layers (workspace → environment → folders → request →
-   iteration), settings layers (app → workspace → folders → request →
-   run), auth inheritance, TLS/proxy/integration profiles and a secret
-   resolver scoped to the workspace's own vault (`exec::ResolvedSecrets`).
-   The secrets of the spec, the effective auth and the profiles the
-   settings select are looked up as the context is frozen, any other when
-   it is used; all fail closed once the profile locks.
+   request spec (draft or saved revision), the variable layers (workspace →
+   environment → folders; runs add iteration layers on top), the settings
+   layers (app → workspace → folders → request → run), auth inheritance,
+   TLS/proxy/integration profiles, and a secret resolver scoped to the
+   workspace's own vault
+   (`exec::ResolvedSecrets`). The secrets of the spec, the effective auth and
+   the selected profiles are looked up now; any other secret when the engine
+   uses it. All fail closed once the profile locks.
 2. **Prepare.** `anvil-engine` interpolates, lints the body (block or warn),
    serialises it, infers the content type, and then applies auth over the
    final bytes. HMAC digests and DPoP proofs are regenerated on every send.
-3. **Send and observe.** `anvil-transport` resolves, connects, negotiates
-   TLS and ALPN, writes the request and reads the response. It records each
-   phase with a status (completed, failed, timed out, reused, not applicable)
-   and tracks written bytes so that dispatch is never guessed from error
-   text.
+3. **Send and observe.** `anvil-transport` resolves, connects, negotiates TLS
+   and ALPN, writes the request and reads the response. It records each phase
+   with a status (completed, failed, timed out, reused, not applicable) and
+   tracks written bytes, so dispatch is never guessed from error text.
 4. **Assemble the record.** The engine combines attempts (redirects and safe
    retries) into one redacted `ExecutionRecord` with three separate
    dimensions: transport completion, application status and assertions.
-   Content decoding is recorded separately from wire completeness
-   (`response.body.decoding`). Decoding does not complete when it stops at
-   `max_decoded_bytes`, when the bytes do not decode, when data follows the
-   end of the compressed stream (a gzip body may still hold several members,
-   and a zstd body several frames), or when the coding is unsupported,
-   including bogus codings such as `Content-Encoding: none`. Encoded bytes
-   that are only a prefix of the body are never recorded as `complete`, even
-   when they decode cleanly: a prefix cut by a local limit is
-   `truncated_at_limit`, one the peer or a cancel cut short is `failed`.
-   Then a `partial_visibility` warning says so, body assertions fail with
-   "could not evaluate" (the complete response body is not available), body
-   extractions are not run, and a response below HTTP 400 gets the
-   application status `not_evaluated`. A collection run keeps a content-encoded body in history
-   only when it was fully decoded and holds no sensitive run value.
-   Complete transport consumption is also distinct from complete body
-   evidence. When only a prefix of the body is available (the body exceeded
-   `limits.capture_bytes`, or an HTTP response ended before its framing
-   completed, was canceled, or stopped at `max_response_bytes`), body
-   assertions fail as not evaluated and body extractions are not run, so a
-   prefix never passes a whole-body check or publishes a shortened value.
-   Status, header, trailer, latency and transport assertions still run. A
-   `partial_visibility` warning names the gap when the request has
-   assertions or extractions. For a streaming session (WebSocket, gRPC
-   stream, SSE, TCP, UDP), which ends on its own terms, only the capture
-   limit counts. A SOAP or GraphQL request reports its fault or errors in a
-   2xx body, so when only a prefix of that body was captured its application
-   status is `not_evaluated` (not determined from the body), never `success`,
-   and a `partial_visibility` warning says why. Other requests are judged by
-   their status, which a prefix does not hide.
-5. **Diagnose.** `anvil-diagnostics` turns the typed evidence into
-   findings. It uses Ferrum markers only for destinations declared as Ferrum
-   gateways, caps their confidence (see `docs/diagnostics.md`), and orders
+   See [Partial bodies](#partial-bodies) for what happens when only part of
+   the body is available.
+5. **Diagnose.** `anvil-diagnostics` turns the typed evidence into findings.
+   It uses Ferrum markers only for destinations declared as Ferrum gateways,
+   caps their confidence (see [diagnostics.md](diagnostics.md)), and orders
    hop-specific findings before the generic status-code explanation.
 6. **Store.** `anvil-app` stores the record in encrypted history. Response
    bodies are kept only if the history policy allows it.
 
+### Partial bodies
+
+A whole-body check never passes on a prefix, and a prefix never publishes a
+shortened value. The record keeps two things apart:
+
+- **Wire completeness.** Only a prefix is available when the body exceeded
+  `limits.capture_bytes`, or an HTTP response ended before its framing
+  completed, was canceled, or stopped at `max_response_bytes`. For a streaming
+  session (WebSocket, gRPC stream, SSE, TCP, UDP), which ends on its own
+  terms, only the capture limit counts.
+- **Content decoding** (`response.body.decoding`). Decoding is not complete
+  when it stops at `max_decoded_bytes` (`truncated_at_limit`), when the bytes
+  do not decode or data follows the end of the compressed stream (`failed`;
+  a gzip body may still hold several members and a zstd body several frames),
+  or when the coding is unsupported, including bogus codings such as
+  `Content-Encoding: none` (`unsupported`). Encoded bytes that are only a
+  prefix of the body are never `complete`, even when they decode cleanly: a
+  prefix cut by a local limit is `truncated_at_limit`, and one the peer or a
+  cancel cut short is `failed`.
+
+In either case:
+
+- body assertions fail with "could not evaluate" and body extractions are not
+  run;
+- status, header, trailer, latency and transport assertions still run;
+- a `partial_visibility` warning names the gap when the request has
+  assertions or extractions.
+
+When decoding is incomplete, a response below HTTP 400 gets the application
+status `not_evaluated`. A SOAP or GraphQL request reports its fault or errors
+in a 2xx body, so when only a prefix of that body was captured its application
+status is also `not_evaluated`, never `success`, with a `partial_visibility`
+warning. Other requests are judged by their status, which a prefix does not
+hide. A collection run keeps a content-encoded body in history only under the
+rules in [runner.md](runner.md#redaction).
+
 ## Data contracts
 
 `anvil-domain` is the single source of truth. `anvil schema` writes
-`contracts/schemas/*.schema.json`, and `npm run contracts` generates
-`apps/desktop/src/generated/contracts.ts`. CI regenerates both and fails on
-drift.
+`contracts/schemas/*.schema.json`, and `npm run contracts` (in `apps/desktop`)
+generates `apps/desktop/src/generated/contracts.ts`. CI regenerates both and
+fails on drift.
 
 ## Where to read next
 
-- `docs/adr/`: architecture decisions and their rationale.
-- `docs/threat-model.md`: assets, trust boundaries and mitigations.
-- `docs/diagnostics.md`: the evidence model, confidence rules and the Ferrum catalog.
-- `docs/storage-and-recovery.md`: the vault, recovery, backups and migration.
-- `docs/g01-gateway-diagnostic-contract.md`: the proposed gateway contract.
-- `docs/protocols.md`, `docs/import.md`, `docs/load.md`, `docs/runner.md`, `docs/identity.md`, `docs/lab/*.md`.
+- [adr/](adr/): architecture decisions and their rationale.
+- [threat-model.md](threat-model.md): assets, trust boundaries and mitigations.
+- [diagnostics.md](diagnostics.md): the evidence model, confidence rules and the Ferrum catalog.
+- [storage-and-recovery.md](storage-and-recovery.md): the vault, recovery, backups and migration.
+- [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md): the proposed gateway contract.
+- [protocols.md](protocols.md), [import.md](import.md), [load.md](load.md), [runner.md](runner.md), [identity.md](identity.md), [lab/](lab/).

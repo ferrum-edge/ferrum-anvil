@@ -27,4 +27,5 @@ the app.
 - Answers are reproducible and testable against lab ground truth, which is
   never fed into the engine.
 - "Unknown" is a first-class answer. `Confirmed` gateway attribution becomes
-  possible only with a gateway-owned diagnostic contract (G01).
+  possible only with a gateway-owned diagnostic contract
+  ([G01](../g01-gateway-diagnostic-contract.md)).

@@ -1,12 +1,11 @@
 # Identity in Ferrum Anvil
 
-Anvil keeps three identities apart (build plan §8.1). They never stand in for
-one another:
+Anvil keeps three identities apart. None ever stands in for another:
 
 | # | Identity | What it is | Where it lives |
 |---|---|---|---|
 | 1 | **Application identity** | Who may unlock Anvil on this device: a local profile, unlocked by a passphrase, a recovery key or the OS keychain. It can optionally be *linked* to a provider account (Google, GitHub, Facebook) as an extra unlock policy. | `anvil-storage` (vault), `anvil-app::profiles`, `anvil-app::identity`, `anvil-identity::provider` |
-| 2 | **Target-API identity** | The credential Anvil presents to an API or gateway: API key, Basic, bearer, JWT, OAuth 2, HMAC, DPoP, mTLS, WS-Security, and SPIFFE SVIDs the Workload API issues to Anvil (an X.509-SVID as the mTLS identity, a JWT-SVID as the bearer token, §8). The OAuth authorization-code + PKCE sign-in belongs here. | auth and TLS profiles on workspace/folder/request, `anvil-engine`, `anvil-identity::api_oauth` |
+| 2 | **Target-API identity** | The credential Anvil presents to an API or gateway: API key, Basic, bearer, JWT, OAuth 2, HMAC, DPoP, mTLS, WS-Security, and SPIFFE SVIDs the Workload API issues to Anvil (an X.509-SVID as the mTLS identity, a JWT-SVID as the bearer token; see [section 8](#8-target-api-workload-identity-the-spiffe-workload-api)). The OAuth authorization-code + PKCE sign-in belongs here. | auth and TLS profiles on workspace/folder/request, `anvil-engine`, `anvil-identity::api_oauth` |
 | 3 | **Gateway-to-backend identity** | How the gateway authenticates to its upstream. Configured on the gateway; Anvil cannot change it, and no diagnostic suggests that changing identity 2 fixes identity 3. | the gateway |
 
 Rules that follow from this:
@@ -41,17 +40,17 @@ It never falls back to the client-credentials grant. If the issuer rejects the
 refresh token with `invalid_grant`, the token is dropped and the next send asks
 for a sign-in. If the issuer is unreachable or failing (HTTP 5xx, TLS or network
 errors), the send fails with `local.auth_preparation_failed` and the refresh
-token is kept for a later attempt (matrix AUTH-015). Client-credentials profiles
-behave as before. WebSocket, gRPC, SSE, TCP and UDP sessions behave the same way.
+token is kept for a later attempt. WebSocket, gRPC, SSE, TCP and UDP sessions
+behave the same way.
 
 Every cached token expires. A token response without `expires_in` (or with
-`null`) is treated as valid for one hour. An `expires_in` that is not a whole
-number of seconds up to ten years (a JSON number, or a decimal string such as
-`"3600"`) fails the acquisition with `local.auth_preparation_failed`, and nothing
-is cached. A refresh answered that way keeps the refresh token for a later
-attempt.
+`null`) is treated as valid for one hour. `expires_in` must be a whole number
+of seconds up to ten years, as a JSON number or a decimal string such as
+`"3600"`. Any other value fails the acquisition with
+`local.auth_preparation_failed` and nothing is cached; a refresh answered that
+way keeps the refresh token for a later attempt.
 
-Tokens are cached per **token identity**: the workspace isolation, token URL,
+Tokens are cached per **token identity**: the workspace, token URL,
 authorization URL (interactive grants; its query, such as an organization,
 connection or identity-provider hint, included), client id,
 client-authentication method, grant, audience, scope and the profile's
@@ -64,18 +63,22 @@ audience is never sent to another, and a sign-in through one organization is
 never sent for another. Sends, sign-in, token status and sign-out all use the
 same key.
 
-Canceling an execution ends its wait for a token at once; the send ends as
-`canceled`, not dispatched. A client-credentials request is abandoned with it.
-A refresh keeps running on its own task until the issuer answers (the issuer
-may already have rotated the refresh token), and its token is cached for the
-next send; sends that arrive meanwhile wait for it rather than presenting the
-old refresh token again. Locking (which clears the token cache) or signing out
-of a profile invalidates every acquisition, refresh and code redemption still
-in flight for it, and aborts its refresh: a token that arrives afterwards is
-discarded, never cached and never sent, and that send ends as `canceled`. A
-completed sign-in also invalidates every acquisition and refresh that began
-before it, and their tokens are discarded the same way. Sends waiting on them
-use the new sign-in's token instead of ending as `canceled`.
+Cancellation and invalidation:
+
+- Canceling an execution ends its wait for a token at once; the send ends as
+  `canceled`, not dispatched. A client-credentials request is abandoned with
+  it.
+- A refresh keeps running on its own task until the issuer answers (the
+  issuer may already have rotated the refresh token), and its token is cached
+  for the next send. Sends that arrive meanwhile wait for it rather than
+  presenting the old refresh token again.
+- Locking (which clears the token cache) or signing out of a profile
+  invalidates every acquisition, refresh and code redemption still in flight
+  for it, and aborts its refresh. A token that arrives afterwards is
+  discarded, never cached and never sent, and that send ends as `canceled`.
+- A completed sign-in also invalidates every acquisition and refresh that
+  began before it, and discards their tokens the same way. Sends waiting on
+  them use the new sign-in's token instead of ending as `canceled`.
 
 ### The sign-in flow (RFC 8252 native app, RFC 7636 S256)
 
@@ -161,8 +164,8 @@ No mode implies cloud synchronization, and no mode needs a Ferrum account.
   `VerifiedIdentity` for the linked provider and subject, at most 5 minutes old
   (60 s tolerance for a clock ahead). Otherwise: `IdentityMismatch`,
   `StaleProof`, or the vault's `WrongSecret`.
-- The **recovery key** always unlocks without a provider (DATA-019). That is
-  the documented offline and provider-outage path.
+- The **recovery key** always unlocks without a provider. That is the
+  offline and provider-outage path.
 - A `VerifiedIdentity` can only be created by a provider implementation inside
   `anvil-identity`. It is not `Clone` and not deserializable, so it cannot
   arrive over IPC from the webview, and one proof serves one unlock.
@@ -212,10 +215,9 @@ local linked identity or its policy (tested).
 `availability: unavailable` and reason
 `requires registered OAuth client id / redirect URI / broker (owner action)`.
 Their `authenticate` returns `FlowError::ProviderUnavailable` without opening a
-browser or touching the network. Consequently, in release builds no
-`VerifiedIdentity` can be produced yet, so linking and the fresh-login policy
-become usable only once a real provider is implemented against owner
-registrations.
+browser or touching the network. Release builds therefore cannot produce a
+`VerifiedIdentity`, so linking and the fresh-login policy become usable only
+once a real provider is implemented against owner registrations.
 
 The owner has to supply:
 
@@ -226,9 +228,9 @@ The owner has to supply:
 | Facebook | Facebook Login manual flow. The code exchange and token inspection need the app secret, so they run in a broker. The account is identified by the app-scoped user id. | A Meta app with Facebook Login; the exact redirect URI(s); any app review it requires; the app id and broker URL in the deployment configuration. | Broker only |
 | Identity broker (GitHub, Facebook, optionally Google) | Not built. | A minimal HTTPS service run by the owner. It receives the authorization code, PKCE verifier and state binding from the desktop, exchanges them with the provider using the secret, verifies the account, and returns a short-lived signed identity assertion whose issuer and signing key are pinned in the desktop build. It receives identity and session data only: never API bodies, workspace data or keys. | Holds all provider secrets |
 
-Tracked as ferrum-edge/ferrum-anvil#3. Provider documentation changes. Re-check these requirements during
-registration. Before production provider support is claimed, the plan also
-requires real-provider acceptance tests with test accounts.
+Tracked in ferrum-edge/ferrum-anvil#3. Provider requirements change, so
+re-check them during registration. Production provider support also needs
+real-provider acceptance tests with test accounts.
 
 ---
 
@@ -366,23 +368,22 @@ a gateway's backend identity (#3). The protocol details are in
   checks as evidence and the verifier's reason left unknown.
 - **Imports.** A Workload API source carries no secret, so an imported
   profile would draw on *this* machine's identity. Imports therefore never
-  activate "send despite failed checks" and name every imported profile that
-  fetches a JWT-SVID or presents an X.509-SVID, so the user reviews their
-  audiences, destinations and host bindings before sending. A bundle import
-  or full-backup restore also seals, on this device only, every workspace it
-  writes into (new, merged or replaced, and for a bundle import also
-  duplicated; a restore refuses Duplicate): its requests are refused
-  this device's workload identity (JWT-SVID or X.509-SVID), that is a
-  JWT-SVID from the Workload API or a token file, and a TLS profile, the
-  request's own or its proxy's, whose client identity is an X.509-SVID from
-  the Workload API, until the user allows it there (**Allow on this device**
-  in the workspace settings' Auth tab, or
-  `anvil workspace allow-device-identity <workspace>`, which takes a
-  workspace id or an exact name no other workspace has). The seal is never
-  exported or backed up, so restoring your own backup on a new device means
-  lifting it for the workspaces you trust, and deleting the workspace
-  removes it. A spec
-  import keeps the same stance under its import root (`docs/import.md`).
+  activate "send despite failed checks", and they name every imported
+  profile that fetches a JWT-SVID or presents an X.509-SVID so the user can
+  review its audiences, destinations and host bindings before sending.
+- **Device-identity seal.** A bundle import or full-backup restore seals, on
+  this device only, every workspace it writes into, whatever the conflict
+  policy. Requests in a sealed workspace may not use this device's workload
+  identity: a JWT-SVID from the Workload API or a token file, or a TLS
+  profile (the request's own or its proxy's) that presents an X.509-SVID from
+  the Workload API. To lift the seal, choose **Allow on this device** in the
+  workspace settings' Auth tab, or run
+  `anvil workspace allow-device-identity <workspace>` (a workspace id, or an
+  exact name no other workspace has). Seals are never exported or backed up,
+  so after restoring your own backup on a new device you lift them for the
+  workspaces you trust. Deleting a workspace removes its seal. A spec import
+  keeps the same stance under its import root (see
+  [import.md](import.md#persisting-an-import-anvil-app)).
 - **Probe.** *Test the Workload API* in the editors and `anvil workload probe`
   show what the endpoint issues to Anvil (and, when refused, the uid it
   attested) without keeping a key or showing a token.

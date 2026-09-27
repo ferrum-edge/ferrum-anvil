@@ -1,11 +1,9 @@
 # Failure lab: `streams` and `cpdp` profiles
 
 These two profiles run Anvil's shared engine against a **real, pinned Ferrum Edge release
-binary**: v0.9.7 by default (`lab/gateway/RELEASE.lock`), v0.9.5 with `--release v0.9.5`
-(`lab/gateway/releases/v0.9.5.lock`). The lab's trusted Ferrum profile declares the running
-release's compatibility id. They do not use mocks of the gateway. Every scenario passes on
-both releases with the same expectations; observations recorded below as "0.9.5" were
-re-observed on 0.9.7.
+binary** (v0.9.7 by default, v0.9.5 with `--release v0.9.5`), with no gateway mocks. Every
+scenario passes on both releases with the same expectations; observations recorded below as
+"0.9.5" were re-observed on 0.9.7.
 
 - `streams` sends every protocol Anvil advertises *through* the gateway: HTTP/1.1, HTTP/2
   (TLS and h2c), HTTP/3 on the gateway's QUIC listener, WebSocket bootstraps, gRPC (over
@@ -14,12 +12,17 @@ re-observed on 0.9.7.
 - `cpdp` runs a real control plane (CP, SQLite) and real data planes (DP). It creates
   genuine stale-configuration fences (matrix GW-005).
 
-Every scenario records four things. The **stimulus**. The **public evidence** Anvil saw,
-and what it concluded (findings, scope, confidence ceiling, forbidden claims).
-**Independent ground truth**, which is never passed to the engine: fixture logs, the
-gateway operator log, and admin `/health`. And a **recovery** or positive-control request.
-Where the plan requires one, a scenario also runs a **lookalike** that must *not* receive
-the diagnosis.
+Every scenario records four things:
+
+- the **stimulus**;
+- the **public evidence** Anvil saw, and what it concluded (findings, scope, confidence
+  ceiling, forbidden claims);
+- **independent ground truth**, never passed to the engine: fixture logs, the gateway
+  operator log, and admin `/health`;
+- a **recovery** or positive-control request.
+
+Where the failure matrix requires one, a scenario also runs a **lookalike** that must *not*
+receive the diagnosis.
 
 Profile code: `crates/anvil-lab/src/{streams,cpdp,fixtures_streams,fixtures_cpdp}.rs`.
 Gateway configuration: `lab/gateway/{streams.conf,streams.yaml,cpdp-*.conf,cpdp-seed-*.json}`.
@@ -29,36 +32,22 @@ DTLS and PKI fixtures.
 ## 1. Running
 
 ```sh
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH
-# The binary is verified against the release's lock before every run
-# (lab/gateway/RELEASE.lock, or lab/gateway/releases/<release>.lock with --release).
-export ANVIL_LAB_FERRUM_BIN=/path/to/lab-bin/v0.9.7/ferrum-edge-macos-aarch64   # or lab/bin/<release>/, ../lab-bin/<release>/
-ulimit -n 4096
-# cargo run -p anvil-lab -- --release v0.9.5 run streams --untrusted-pass   # the earlier release
-
 cargo run -p anvil-lab -- list streams                    # scenario ids and titles
-cargo run -p anvil-lab -- run streams --untrusted-pass    # ~25 s
+cargo run -p anvil-lab -- run streams --untrusted-pass    # ~30 s
 cargo run -p anvil-lab -- run cpdp --untrusted-pass       # ~50 s
 cargo run -p anvil-lab -- run streams --scenario PROTO-014 --scenario UP-002-tcp
+cargo run -p anvil-lab -- --release v0.9.5 run streams --untrusted-pass
 cargo run -p anvil-lab -- up streams                      # keep fixtures + gateway up (manual/desktop use)
 cargo run -p anvil-lab -- up cpdp
 ```
 
-- **Results** go to `results/lab/<UTC stamp>-<profile>/` (gitignored). That directory holds:
-  - `summary.json`;
-  - `<ID>.json` per scenario: checks, observed and recovery summaries, operator-log excerpts, and the skip reason;
-  - `<ID>.record.json`: the full Anvil execution record of the main stimulus;
-  - the gateway operator logs (`gateway-operator*.log`; for cpdp: the DP, the CP and the orphan DP).
-- **Pass structure.** `--untrusted-pass` repeats every scenario with the destination *not*
-  declared as a trusted Ferrum gateway. In that pass no `ferrum.token.*` or `ferrum.outcome`
-  finding may appear. Markers must surface only as `ferrum.marker.unverified`.
-- **Ports and binding.** Everything binds `127.0.0.1` inside the profile's block
-  (`docs/audit/gateway-lab-config.md` §3). Each run renders its configuration and a fresh
-  ephemeral PKI into `lab/.run/<instance>/`. The PKI is never installed into a trust store.
-  Every started gateway process is stopped at the end, including after a failed run
-  (`kill_on_drop`).
-- **Blocked ports.** A profile cannot start while another process holds its ports. That
-  includes another session's `up` of the same profile.
+Setup, binary lookup, results layout and the two passes: [README.md](README.md). For cpdp the
+run directory holds three operator logs: the DP, the CP and the orphan DP. In the untrusted pass
+markers may surface only as `ferrum.marker.unverified`.
+
+Each run renders its configuration and a fresh ephemeral PKI into `lab/.run/<instance>/`; the
+PKI is never installed into a trust store. Every started gateway process is stopped at the end,
+including after a failed run (`kill_on_drop`).
 
 ### Ports
 
@@ -69,21 +58,21 @@ cargo run -p anvil-lab -- up cpdp
 
 ## 2. `streams` scenarios
 
-"Trusted" is the default pass. Every row also runs untrusted, and must then make no gateway
-attribution. Every row passed in every run of the final stability batch (§5).
+49 scenarios. "Trusted" is the default pass; every row also runs untrusted (see
+[README.md](README.md)).
 
 | Scenario | Matrix | What it proves |
 |---|---|---|
 | CTRL-STREAMS | control | HTTP/1.1 through the gateway succeeds. The backend receives the request and the operator log records 200. The gateway advertises `Alt-Svc: h3=":18443"`. This is not proof of a QUIC listener: PROTO-006 is. |
 | PROTO-001 | PROTO-001 | Two sequential HTTP/1.1 requests. The second is recorded as `reused` with `prior_requests ≥ 1` and the `reused_connection` warning. No fresh DNS/TCP timing is invented. Ground truth: the same local socket address, and the gateway logged both requests. |
 | PROTO-002 | PROTO-002 | h2 over verified TLS end to end. The upstream leg is also HTTP/2 (an h2 TLS backend). **Observed:** Ferrum 0.9.5 (and 0.9.7) does not relay the backend's plain-HTTP/2 response trailers, even with `TE: trailers`, while gRPC trailers are relayed. Anvil reports exactly what arrived and invents no trailers. The direct-to-backend control proves Anvil preserves `x-checksum`/`x-fixture-complete` after a complete body. |
-| PROTO-005 | PROTO-005 | h2c prior knowledge sent to the gateway's **TLS** port fails as `exchange.protocol_error`, `exchange.closed_before_response` or `exchange.write_failed`, depending on timing. The TLS phase is `not_applicable`. There is no `client.tls.*` claim and no `exchange.h2_goaway` (see fix 1 in §4). Recovery: h2c on 18480 works. Ground truth: the gateway's upstream leg stayed HTTP/1.1 (per-leg protocols differ). |
+| PROTO-005 | PROTO-005 | h2c prior knowledge sent to the gateway's **TLS** port fails as `exchange.protocol_error`, `exchange.closed_before_response` or `exchange.write_failed`, depending on timing. The TLS phase is `not_applicable`. There is no `client.tls.*` claim and no `exchange.h2_goaway` (see §4 item 1). Recovery: h2c on 18480 works. Ground truth: the gateway's upstream leg stayed HTTP/1.1 (per-leg protocols differ). |
 | PROTO-006 | PROTO-006 | Forced HTTP/3 to 18443/udp. One attempt, ALPN `h3`, verified. A completed `quic_handshake` phase, connect `not_applicable`, no TCP-TLS phase. The response is HTTP/3. The backend received the request that the gateway relayed from QUIC. |
 | PROTO-007 | PROTO-007 | Forced HTTP/3 over a UDP-blocked path: the TCP-only relay 19420, with no QUIC behind it. The result is a `quic_handshake_timeout` in a single attempt, with `client.quic.handshake_timeout`. Ground truth: the TCP path saw **no** connection, so there was no silent TCP fallback. Recovery: forced H3 directly on 18443. |
 | PROTO-008 | PROTO-008 | H3-with-fallback over the same path. Two attempts are recorded: a failed H3 attempt, then `protocol_fallback{from:h3}`. The final response is not HTTP/3, with `client.h3.fallback_used` and the `protocol_fallback` warning. The fallback really travelled TCP to the gateway (relay and operator log). Contrast: the same policy on 18443 uses H3 in one attempt. |
 | PROTO-009 | PROTO-009 | WebSocket over HTTP/1.1 Upgrade through the gateway. The backend's Close 1000 is relayed: `closed_by` is peer, the finding is `ws.closed_normally`, and the transport completed. No `exchange.*` fault. Echo order is kept. |
-| PROTO-009-client-close | PROTO-009 | The backend never closes, so Anvil ends the session (1000, `closed_by` client). The finding must **not** say the peer closed it (fix 2 in §4). |
-| PROTO-010 | PROTO-010 | The backend drops TCP without a Close frame. **Observed:** the gateway sends its own Close **1002 "protocol error"**, which answers the audit's open question. Anvil reports a peer close that is not normal and not a success. It keeps the message sent before the drop, and does not pin the close on the application (fix 3 in §4). Recovery: a normal session. |
+| PROTO-009-client-close | PROTO-009 | The backend never closes, so Anvil ends the session (1000, `closed_by` client). The finding must **not** say the peer closed it (§4 item 2). |
+| PROTO-010 | PROTO-010 | The backend drops TCP without a Close frame. **Observed:** the gateway sends its own Close **1002 "protocol error"**, which answers the audit's open question. Anvil reports a peer close that is not normal and not a success. It keeps the message sent before the drop, and does not pin the close on the application (§4 item 3). Recovery: a normal session. |
 | PROTO-012 | PROTO-012 | RFC 8441 extended CONNECT over h2 (TLS, 18443) and h2c (18480): method CONNECT, protocol h2, a 200 bootstrap, echo, and Close 1000. Ground truth: the gateway re-originated both sessions to the backend as HTTP/1.1 Upgrade (`GET /ws`), never CONNECT. |
 | PROTO-013 | PROTO-013 | WebSocket over HTTP/3 (RFC 9220) to the gateway's QUIC listener. Anvil waits for the gateway's `SETTINGS_ENABLE_CONNECT_PROTOCOL`, sends `CONNECT` with `:protocol = websocket`, gets 200, and the echo and the backend's Close 1000 come back over QUIC (ALPN `h3`, no TCP phase). Ground truth: the gateway's operator log records "H3 WebSocket (RFC 9220) upgrade request received", and it re-originates the session to the backend as an HTTP/1.1 Upgrade (`GET /ws`). |
 | PROTO-013-blocked | PROTO-013 | The same session to the TCP-only relay (no UDP): a `quic_handshake_timeout` in one attempt, nothing dispatched, and no fallback: the relay sees no TCP connection and the backend no session. Recovery over the real QUIC listener succeeds. |
@@ -114,7 +103,7 @@ attribution. Every row passed in every run of the final stability batch (§5).
 | PROTO-019 | PROTO-019 | TCP half-close through the stream proxy. 5 bytes are sent, then FIN. The reply arrives after the half-close, followed by the peer's FIN, and `tcp.reply_after_half_close` is emitted. Ground truth: the backend read exactly 5 bytes, then EOF (FIN propagated). |
 | PROTO-019-echo | PROTO-019 (TCP row, §7) | A newline-framed echo through the stream proxy. Anvil stops at `expect_frames`. |
 | PROTO-019-tls | PROTO-019 (TCP/TLS row, §7) | TLS is terminated at the gateway (verified against the lab root) and re-originated as **tcps** to a TLS echo that the gateway verifies. The frames are echoed. |
-| UP-002-tcp | UP-002 (L4) | The TCP proxy's backend is refused. The gateway accepts the client and then resets it without data. Anvil reports `tcp.closed_without_data` (new finding; fix 4 in §4), and the client's own connect is shown as completed. There is no `client.connect.*` or `client.tls.*` claim. Operator `error_class` is `connection_refused`. |
+| UP-002-tcp | UP-002 (L4) | The TCP proxy's backend is refused. The gateway accepts the client and then resets it without data. Anvil reports `tcp.closed_without_data` (§4 item 4), and the client's own connect is shown as completed. There is no `client.connect.*` or `client.tls.*` claim. Operator `error_class` is `connection_refused`. |
 | UP-004-tcps | UP-004 (L4 lookalike) | The client's TLS to the gateway **verifies**. Then the gateway's tcps leg rejects an untrusted backend certificate and closes without data. Anvil must not blame the client TLS leg. Operator `error_class` is `tls_error`. Recovery: the trusted tcps route. |
 | PROTO-020 | PROTO-020 | UDP to a silent backend. The result is only `udp.no_response`, which states that it proves neither delivery nor an outage. Dispatch is `may_have_been_sent`. Ground truth: the backend *did* receive the relayed datagram. |
 | PROTO-021 | PROTO-021 | UDP where every other reply is dropped: 4 sent, 2 received, with per-datagram boundaries. The finding is `udp.partial_responses`, with no confirmed loss claim. |
@@ -142,7 +131,7 @@ attribution. Every row passed in every run of the final stability batch (§5).
 |---|---|---|---|
 | CTRL-CPDP | control | GET `/cpdp/echo/` on the DP | The CP-delivered route works. Ground truth: DP `/health` is ready, and the route exists only in the CP database. |
 | GW-005-lookalike | GW-005 (lookalike) | The backend returns 503 with the fence's exact body and tries to set `X-Gateway-Error: config_stale` | The gateway replaced the backend's marker with `backend_error`. Anvil does **not** diagnose a stale fence: no `config_stale` finding, no catalog match, no confirmed "stale" claim. Ground truth: the backend produced the 503, and the DP is ready. |
-| GW-005-partition | GW-005 | A fresh snapshot, then the DP→CP relay is **cut** (connections torn down and new ones closed at accept). The CP keeps running. | **Inside** the window the DP answers 200 and shows nothing: no marker, no finding. The fence appears ≈5.0 s after the snapshot, never earlier. Public evidence: 503, `X-Gateway-Error: config_stale`, and `{"error":"Gateway configuration stale"}`. Trusted: `ferrum.token.config_stale` at **likely** (plain HTTP, and the marker is backend-spoofable on 0.9.5), scope `gateway_admission`, with a "changing the payload will not help" statement. No client, auth or crash claim. Ground truth: the refused request never reached the backend, DP `/health` is `unavailable`, CP `/health` is **ready**, and the DP log says `stale beyond the configured bound … new_traffic_blocked:true`. Recovery: heal the relay, and the DP serves again (≈2.5 s). |
+| GW-005-partition | GW-005 | A fresh snapshot, then the DP→CP relay is **cut** (connections torn down and new ones closed at accept). The CP keeps running. | **Inside** the window the DP answers 200 and shows nothing: no marker, no finding. The fence appears ≈5.0 s after the snapshot, never earlier. Public evidence: 503, `X-Gateway-Error: config_stale`, and `{"error":"Gateway configuration stale"}`. Trusted: `ferrum.token.config_stale` at **likely** (plain HTTP, and the marker is backend-spoofable), scope `gateway_admission`, with a "changing the payload will not help" statement. No client, auth or crash claim. Ground truth: the refused request never reached the backend, DP `/health` is `unavailable`, CP `/health` is **ready**, and the DP log says `stale beyond the configured bound … new_traffic_blocked:true`. Recovery: heal the relay, and the DP serves again (≈2.5 s). |
 | GW-005 | GW-005 | A fresh snapshot, then the CP is **killed** (SIGKILL, like a crash) | As for the partition. Also: the CP admin port refuses. **The public signal is byte-identical to the partition's** (status, marker, header set, body), so different root causes get indistinguishable, cautious explanations. Recovery: restart the CP on the same database; the DP reconnects and re-applies (≈2.5–3.6 s). |
 | GW-005-orphan | GW-005 | A DP whose CP address (18799) never had a listener | Before its bound (4 s), the config-less DP answers **404**. To the client that is a plain route miss (`http.not_found`, no stale claim), and it reveals nothing about missing configuration. After the bound: the same stale 503 and marker, with the fence produced without any CP ever being authoritative. Ground truth: orphan `/health` is unavailable, nothing listens on 18799, and the orphan log has the stale line. No recovery exists by design; the positive control is that the CP-backed DP still serves. |
 
@@ -158,131 +147,99 @@ attribution. Every row passed in every run of the final stability batch (§5).
 
 ## 4. Diagnostics fixes found by these runs
 
-1. **A locally detected HTTP/2 error was reported as the peer's GOAWAY**
-   (`crates/anvil-transport/src/errors.rs`).
-   - **Symptom.** In PROTO-005, h2c to a TLS listener: Anvil's h2 library read the TLS alert
-     as an oversized frame and raised a *library* GOAWAY (FRAME_SIZE_ERROR). The transport
-     typed that as `H2GoAway`, and the finding said "the server is closing the HTTP/2
-     connection".
-   - **Fix.** Only a GOAWAY or RST_STREAM whose initiator is the remote peer
-     (`h2::Error::is_remote`) maps to `H2GoAway`, `H2StreamReset` or `H2RefusedStream`.
-     Locally detected errors are `HttpProtocolError`, which yields `exchange.protocol_error`.
-   - **Tests.** A new test,
-     `http_evidence::proto_005_h2c_against_a_tls_listener_is_a_protocol_mismatch_not_a_peer_goaway`.
-     The existing h2c test no longer accepts `H2GoAway`.
-2. **`ws.closed_normally` always said "The peer closed the session"**, even when Anvil
-   closed it (a user close, or an automation idle close). The same was true for 1008 in
-   `ws.closed_policy`.
-   - **Fix.** The rule now passes `{closer}` from `closed_by`: "The peer", "Anvil", and
-     so on. The catalog wording uses it.
-   - **Tests.** `a_normal_close_names_who_closed` and
-     `a_scripted_policy_close_is_not_attributed_to_the_peer`; the live check is
-     PROTO-009-client-close.
-3. **`ws.closed_other` had no alternatives.** Through Ferrum, a backend's silent drop
-   becomes a gateway-authored 1002.
-   - **Fix.** The wording now leaves open which hop authored the Close.
-   - **Tests.** `a_peer_close_leaves_open_which_hop_authored_it`; the live check is PROTO-010.
-4. **A TCP session closed or reset by the peer before any data produced no finding**, or an
-   unexplained `tcp.closed_abnormally`. L4 gateway setup failures look exactly like this.
-   - **Fix.** A new finding, `tcp.closed_without_data`, reports it (confirmed observation,
-     client-to-peer scope). It says the client's own setup completed and that layer-4
-     proxies cannot say why they closed, lists upstream/policy alternatives, and points to
-     operator logs. `tcp.closed_abnormally` now fires only after data was received, and
-     gained alternatives and `does_not_prove` statements.
-   - **Tests.** `a_tcp_close_without_any_data_is_explained_without_blaming_the_client_leg`
-     and `a_reset_after_data_stays_an_abnormal_end_and_ordinary_ends_are_silent`; the live
-     checks are UP-002-tcp and UP-004-tcps.
+Each item is current behaviour that a run of these profiles showed was needed.
 
-Catalog version: `2026.09.25-3` (`catalog/diagnostics/findings.en.json`).
+1. **Only a peer-initiated HTTP/2 GOAWAY or RST_STREAM is reported as one**
+   (`crates/anvil-transport/src/errors.rs`). A GOAWAY or RST_STREAM maps to `H2GoAway`,
+   `H2StreamReset` or `H2RefusedStream` only when the remote peer initiated it
+   (`h2::Error::is_remote`); locally detected errors are `HttpProtocolError`
+   (`exchange.protocol_error`). In PROTO-005 (h2c to a TLS listener) the h2 library reads the
+   TLS alert as an oversized frame and raises its own GOAWAY (FRAME_SIZE_ERROR); that is not
+   the server closing the connection. Test:
+   `http_evidence::proto_005_h2c_against_a_tls_listener_is_a_protocol_mismatch_not_a_peer_goaway`.
+2. **`ws.closed_normally` and `ws.closed_policy` name who closed the session** (`{closer}`
+   from `closed_by`: "The peer", "Anvil", …), so a user or automation close is not blamed on
+   the peer. Tests: `a_normal_close_names_who_closed`,
+   `a_scripted_policy_close_is_not_attributed_to_the_peer`; live: PROTO-009-client-close.
+3. **`ws.closed_other` leaves open which hop authored the Close.** Through Ferrum, a
+   backend's silent drop becomes a gateway-authored 1002. Test:
+   `a_peer_close_leaves_open_which_hop_authored_it`; live: PROTO-010.
+4. **`tcp.closed_without_data`** reports a TCP session closed or reset by the peer before any
+   data (confirmed observation, client-to-peer scope), which is exactly how L4 gateway setup
+   failures look. It says the client's own setup completed and that layer-4 proxies cannot
+   say why they closed, lists upstream/policy alternatives, and points to operator logs.
+   `tcp.closed_abnormally` fires only after data was received. Tests:
+   `a_tcp_close_without_any_data_is_explained_without_blaming_the_client_leg`,
+   `a_reset_after_data_stays_an_abnormal_end_and_ordinary_ends_are_silent`; live: UP-002-tcp
+   and UP-004-tcps.
+
+Items 2–4 are rules in `crates/anvil-diagnostics/src/rules/protocols.rs`, with wording in
+`catalog/diagnostics/findings.en.json`.
 
 ## 5. Stability
 
-After WebSocket permessage-deflate was added (WS-DEFLATE-001/002/003 and WS-DEFLATE-lookalike,
-2026-09-26, macOS arm64), three consecutive `run streams --untrusted-pass` runs on **v0.9.7**
-gave **92 passed, 0 failed, 0 skipped** each (46 scenarios × 2 passes, about 30 s per run),
-and one run on **v0.9.5** gave the same 92/0/0. No `ferrum.*` finding appeared in any untrusted
-WS-DEFLATE record, the backend never saw a `Sec-WebSocket-Extensions` header through the
-gateway, and the lookalike's gateway close was 1002 (`closed_by` peer) in every run on both
-releases.
+All runs are `run <profile> --untrusted-pass` (or `run all`) on macOS arm64. Counts cover both
+passes; v0.9.7 is sha256 `f3bd0027…`, v0.9.5 `6a531f2c…`. The streams scenario count grew as
+features landed; the current profile has 49 scenarios.
 
-Both releases, `anvil-lab [--release v0.9.5] run all --untrusted-pass` (2026-09-26, macOS
-arm64): streams 62 passed, 0 failed, 0 skipped and cpdp 10 passed, 0 failed on **v0.9.7**
-(`f3bd0027…`) and on **v0.9.5** (`6a531f2c…`). One earlier v0.9.7 run failed UP-002-tcp's
-ground-truth check only: the operator log was read before the gateway wrote the TCP session's
-transaction line (it appears at teardown, just after the client sees the close; the archived log
-had the expected `connection_refused`). UP-002-tcp and UP-004-tcps now wait up to 3 s for that
-line.
+| Date | Scope | Release | Runs | streams per run | cpdp per run |
+|---|---|---|---|---|---|
+| 2026-09-25 | 29 streams scenarios + PROTO-013 skipped | v0.9.5 | 5 streams, 3 cpdp | 58 passed, 0 failed, 1 skipped (~24 s) | 10 passed, 0 failed (~47 s) |
+| 2026-09-25 | + RFC 9220 (31 scenarios) | v0.9.5 | 3 | 62/0/0 | — |
+| 2026-09-26 | `run all` | v0.9.7 and v0.9.5 | 1 each | 62/0/0 | 10/0/0 |
+| 2026-09-26 | + gRPC over HTTP/3 and gRPC-Web (42 scenarios) | v0.9.7 | 3 | 84/0/0 (~30–40 s) | — |
+| 2026-09-26 | all protocol branches merged, `run all` | v0.9.7 and v0.9.5 | 1 each | 84/0/0 | 10/0/0 |
+| 2026-09-26 | + LOAD-013 (45 scenarios) | v0.9.7 (3), v0.9.5 (1) | 4 | 90/0/0 | — |
+| 2026-09-26 | + WS-DEFLATE (46 scenarios) | v0.9.7 (3), v0.9.5 (1) | 4 | 92/0/0 (~30 s) | — |
 
-After every protocol branch was merged (2026-09-26), `run all` gave streams **84/0/0** and cpdp
-**10/0/0 on both v0.9.7 and v0.9.5**.
+What these runs showed:
 
-After per-protocol load units were added (LOAD-013; three load scenarios), three consecutive
-`run streams --untrusted-pass` runs on **v0.9.7** and one on **v0.9.5** gave **90 passed,
-0 failed, 0 skipped** each (45 scenarios × 2 passes). The load scenarios' counts were identical in
-every run (gRPC 0 × 20 / 7 × 10 with 3 connections opened, WebSocket 10 sessions / 20 messages /
-20 round trips, UDP 20 sent / 10 received) and matched the backend and operator-log ground truth.
-
-Earlier consecutive runs with `--untrusted-pass` on 2026-09-25 (macOS arm64, Ferrum Edge v0.9.5,
-sha256 `6a531f2c…`). The counts are harness totals: the trusted pass, the untrusted pass,
-and PROTO-013 skipped once. A streams run takes about 24 s and a cpdp run about 47 s.
-
-After RFC 9220 support was added, three more consecutive streams runs gave 62 passed,
-0 failed, 0 skipped each (31 scenarios × 2 passes).
-
-After gRPC over HTTP/3 and gRPC-Web were added (Ferrum Edge **v0.9.7**, sha256
-`f3bd0027…`, 2026-09-26), three consecutive `run streams --untrusted-pass` runs gave
-**84 passed, 0 failed, 0 skipped** each (42 scenarios × 2 passes, about 30–40 s per run), with
-no `ferrum.*` finding in any untrusted record. The GRPCWEB-lookalike observation (an appended
-`grpc-status: 2` trailer frame over HTTP/1.1 and HTTP/2, none over HTTP/3) was the same in
-every run. An earlier batch had one failure in three runs: UP-002-tcp read the operator log
-before the gateway had written the stream's transaction line (the line was present a moment
-later). The `error_class` checks of UP-002-tcp, UP-004-tcps, PROTO-014-down and UP-010-grpc
-now wait up to 3 s for the line, as the new gRPC-Web and HTTP/3 scenarios do.
-
-| Run | streams (29 × 2 + 1 skip) | cpdp (5 × 2) |
-|---|---|---|
-| 1 | 58 passed, 0 failed, 1 skipped | 10 passed, 0 failed |
-| 2 | 58 passed, 0 failed, 1 skipped | 10 passed, 0 failed |
-| 3 | 58 passed, 0 failed, 1 skipped | 10 passed, 0 failed |
-| 4 | 58 passed, 0 failed, 1 skipped | — |
-| 5 | 58 passed, 0 failed, 1 skipped | — |
-
-An earlier batch of three streams runs had one failure in each run. Two scenarios have
-legitimate race outcomes, and their checks were initially too narrow:
-
-- **PROTO-016-deadline.** Anvil and the gateway enforce the same 300 ms `grpc-timeout`.
-  Twice, the gateway won and reset the stream after DATA (`RST_STREAM INTERNAL_ERROR`, no
-  trailers). The status is missing either way.
-- **PROTO-005.** Once, the TLS listener closed the connection while the h2c preface was
-  still being written (`exchange.write_failed`).
-
-Both checks now accept every truthful outcome. They still forbid a TLS claim, a peer-GOAWAY
-claim, and an invented `DEADLINE_EXCEEDED`. Each run records which path was taken. In the
-five runs above, Anvil's own deadline fired first every time. PROTO-005 alternated between
-`exchange.protocol_error` and `exchange.closed_before_response`.
+- **No gateway attribution without trust.** No untrusted record had a `ferrum.*` finding.
+- **GRPCWEB-lookalike** saw the appended `grpc-status: 2` trailer frame over HTTP/1.1 and
+  HTTP/2, and none over HTTP/3, in every run.
+- **LOAD-013** counts were identical in every run (gRPC 0 × 20 / 7 × 10 with 3 connections
+  opened, WebSocket 10 sessions / 20 messages / 20 round trips, UDP 20 sent / 10 received) and
+  matched the backend and operator-log ground truth.
+- **WS-DEFLATE.** The backend never saw a `Sec-WebSocket-Extensions` header through the
+  gateway, and the lookalike's gateway close was 1002 (`closed_by` peer) in every run on both
+  releases.
+- **Operator-log timing.** The gateway writes a TCP session's transaction line at teardown,
+  just after the client sees the close. Two early v0.9.7 batches each failed UP-002-tcp's
+  ground-truth check once by reading the log too soon. The `error_class` checks of
+  UP-002-tcp, UP-004-tcps, PROTO-014-down, UP-010-grpc and the gRPC-Web and HTTP/3 scenarios
+  wait up to 3 s for the line.
+- **Legitimate races.** PROTO-016-deadline: Anvil and the gateway enforce the same 300 ms
+  `grpc-timeout`, and either may win (the gateway resets after DATA with `RST_STREAM
+  INTERNAL_ERROR` and no trailers); the status is missing either way. PROTO-005: the TLS
+  listener may close while the h2c preface is still being written (`exchange.write_failed`).
+  Both checks accept every truthful outcome, still forbid a TLS claim, a peer-GOAWAY claim and
+  an invented `DEADLINE_EXCEEDED`, and record which path was taken. In the five 2026-09-25
+  runs Anvil's own deadline fired first every time, and PROTO-005 alternated between
+  `exchange.protocol_error` and `exchange.closed_before_response`.
 
 ## 6. Skips and limitations
 
 - **PROTO-013 runs on a vendored `h3`.** `h3` 0.0.8 cannot send `:protocol = websocket`;
   the workspace carries the upstream fix (hyperium/h3#236) until a release includes it
-  (`vendor/README.md`). Until that change, PROTO-013 was recorded as skipped.
+  ([vendor/README.md](../../vendor/README.md)).
 - **Plain-HTTP/2 trailers through Ferrum.** 0.9.5 was observed not to relay them
   (PROTO-002). The recorded observation is the same on 0.9.7, and on both releases it is
   not stable across passes: the trusted pass saw no relayed trailers, the untrusted repeat
-  saw them relayed (2026-09-26 runs). So the lab verifies Anvil's trailer preservation against the backend
-  directly, and verifies through the gateway only that Anvil invents nothing. Root cause (dispatch-path dependent trailer relay) filed as ferrum-edge/ferrum-edge#5760. A cleartext
+  saw them relayed (2026-09-26 runs). So the lab verifies Anvil's trailer preservation against the
+  backend directly, and verifies through the gateway only that Anvil invents nothing. The root
+  cause (dispatch-path-dependent trailer relay) is ferrum-edge/ferrum-edge#5760. A cleartext
   h2c-capable backend is reached over HTTP/1.1 for non-gRPC traffic, which is why PROTO-002
   uses an h2 TLS backend.
 - **gRPC and Ferrum markers.**
   - The gateway-authored gRPC rejects seen here (`14 Backend unavailable`,
     `4 Backend deadline exceeded`) carry no `X-Gateway-Error` on H1/H2. Anvil reports them
     only as RPC failures of unknown origin.
-  - Keying a Ferrum catalog match on `grpc-status` plus the exact `grpc-message` (audit
-    §11 item 5) is not implemented.
+  - Keying a Ferrum catalog match on `grpc-status` plus the exact `grpc-message`
+    ([gateway-source-audit.md §11](../audit/gateway-source-audit.md), item 5) is not implemented.
   - The gRPC variant of the stale fence (200 / 14 without a marker on H1/H2) is not
     exercised.
-- **gRPC over HTTP/3 and gRPC-Web** (the PROTO-016-h3 … GRPCWEB-refused rows, 11 scenarios) were added
-  against the pinned **v0.9.7** binary. Configuration: the `grpcweb-translated`,
+- **gRPC over HTTP/3 and gRPC-Web** (the PROTO-016-h3 … GRPCWEB-refused rows, 11 scenarios).
+  Configuration: the `grpcweb-translated`,
   `grpcweb-passthrough` and `grpcweb-down` proxies and two proxy-scoped `grpc_web` plugin
   configs in `streams.yaml` (checked by `lint-profiles.rb` and the binary's `validate`).
   - **Pass-through gRPC-Web on v0.9.7 appends a trailer frame** over HTTP/1.1 and HTTP/2
@@ -291,7 +248,8 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
     complete gRPC-Web body; it also logs `grpc_status: 2` for these calls, including over
     HTTP/3 where the body is left alone. That looks like a gateway defect: a gRPC-Web client
     that stops at the first trailer frame sees status 0, one that reads on sees malformed
-    framing. Anvil reports what is on the wire and claims nothing about translation. Filed as ferrum-edge/ferrum-edge#5758.
+    framing. Anvil reports what is on the wire and claims nothing about translation
+    (ferrum-edge/ferrum-edge#5758).
   - The gRPC-Web routes have no marker to attribute: gateway-authored terminal statuses
     (`14 Backend unavailable`) arrive in the trailer frame with `x-grpc-web: 1` and no
     `X-Gateway-Error`, so Anvil reports RPC failures of unknown origin.
@@ -302,9 +260,8 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
   WS-DEFLATE-001/002/003 show it live, with the backend as independent witness). A compressed
   session through the gateway therefore cannot be exercised; compressed sessions, context
   takeover, window bits, fragmentation, bombs and refused answers are covered against the
-  fixture's RFC 7692 peer and Python `websockets` (`docs/protocols.md` §4). The streams
-  backend (19401) runs that peer when a request carries `pmd` query options, so no port or
-  gateway route was added.
+  fixture's RFC 7692 peer and Python `websockets` ([protocols.md §4](../protocols.md)). The
+  streams backend (19401) runs that peer when a request carries `pmd` query options.
 - **gRPC client deadline wording.** A local gRPC deadline is typed as `total_timeout` with
   `deadline_ms`. The generic `response.body_total_timeout` wording then speaks of the
   "total deadline", when this was the gRPC deadline. The value is right, but the wording is
@@ -323,7 +280,7 @@ five runs above, Anvil's own deadline fired first every time. PROTO-005 alternat
     the gateway).
   - PROTO-017 (reflection through the gateway) and PROTO-023–025.
   - The DTLS client-certificate leg, which is in the `tls` profile.
-  - Load or throughput through any of these protocols.
+  - Throughput through any of these protocols (LOAD-013 checks load accounting only).
 - **Harness evidence for extra requests.** Only the main stimulus of each scenario is saved
   as a full execution record. Lookalike, early-window and control requests appear as check
   details and as recovery summaries.
