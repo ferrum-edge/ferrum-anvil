@@ -228,9 +228,6 @@
   `grpc_client_streaming`, `grpc_bidirectional`, `udp_masque` and
   `udp_hbone` (those plans are now load tested), and adds `mixed_tunnels`,
   `grpc_unsupported_combination` and `masque_through_proxy`.
-
-### Fixed
-
 - The export preview now lists each linked local file path the bundle will
   carry, with the request or dataset that names it (`linked_files`, as
   `request 'Upload': /path/to/file`), beside the existing warning that
@@ -239,12 +236,14 @@
   leave with the export. The bundle's manifest does not repeat them. The
   desktop export dialog does not show the list yet; `anvil export --preview`
   prints it.
+
+### Fixed
+
 - Moving a request (`move_request`) reads and writes it in one write
   transaction and changes only its folder and position. It used to read the
   request first and save that copy afterwards, so a save or a linked-file
   relocation that landed in between could be undone, leaving the request
   naming its old, unbound path. A move never files a revision.
-
 - Desktop Load: switching workspaces now clears the selected plan or report
   and closes a pending run confirmation, so the Load view never shows, saves,
   runs or deletes the previous workspace's plan; the plan editor also refuses
