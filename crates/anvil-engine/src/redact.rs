@@ -121,7 +121,7 @@ impl Redactor {
     /// Take in what the resolver has seen since this redactor was built:
     /// secret values substituted by templates resolved later (a session's
     /// messages, metadata or payloads) and request fields marked sensitive.
-    pub fn refresh(&mut self, r: &Resolver) {
+    pub fn refresh_used_secrets(&mut self, r: &Resolver) {
         let before = self.secrets.len();
         for s in r.used_secrets.lock().iter() {
             if s.len() >= MIN_SECRET_LEN && !self.secrets.contains(s) {

@@ -611,7 +611,7 @@ async fn prepare_ws(
     // The messages and subprotocols were resolved after the redactor was
     // built: every redaction below (transcript, URL, PROXY header) covers
     // their secrets.
-    b.redactor.refresh(r);
+    b.redactor.refresh_used_secrets(r);
     let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
@@ -728,7 +728,7 @@ async fn prepare_sse(
     let mut b = base(engine, epoch, ctx, r, &["https", "http"])?;
     let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
     // Covers a secret in the Last-Event-ID, resolved after the redactor was built.
-    b.redactor.refresh(r);
+    b.redactor.refresh_used_secrets(r);
     let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
@@ -993,7 +993,7 @@ async fn prepare_grpc(
         grpc_call(ctx, r, &b.prep, &mut b.inferred, spec, interactive)?;
     // Covers the secrets of the service, method, messages and metadata,
     // resolved after the redactor was built.
-    b.redactor.refresh(r);
+    b.redactor.refresh_used_secrets(r);
     // An auth profile that adds query parameters is refused (the path is fixed).
     let Authorized { mut headers, facts, set, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let call_target = &request.target;
@@ -1092,7 +1092,7 @@ fn prepare_tcp(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r
         .map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some(), "tcp.proxy_protocol"))
         .transpose()?;
     // Covers the secrets of the payloads and PROXY header, resolved after the redactor was built.
-    b.redactor.refresh(r);
+    b.redactor.refresh_used_secrets(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(p) = &spec.proxy_protocol {
         b.inferred.push(crate::proxy_protocol::header_note(p));
@@ -1161,7 +1161,7 @@ async fn prepare_udp(
     let envelope =
         spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::envelope_plan(p, ctx, r, &mut b.redactor, use_dtls)).transpose()?;
     // Covers the secrets of the datagrams and envelope, resolved after the redactor was built.
-    b.redactor.refresh(r);
+    b.redactor.refresh_used_secrets(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(m) = &spec.masque {
         if envelope.is_some() {
@@ -1456,7 +1456,7 @@ async fn prepare_masque(
     };
     let proxy_target = Target { path, query, ..pt };
     // Covers the secrets of the proxy URL and URI template, resolved after the redactor was built.
-    b.redactor.refresh(r);
+    b.redactor.refresh_used_secrets(r);
     b.inferred.extend(notes);
     let settings = b.prep.settings.clone();
     let (tls, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &settings, &proxy_target, &mut b.inferred)?;
@@ -1726,7 +1726,7 @@ async fn run_prepared(
     }
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
-    redactor.refresh(resolver);
+    redactor.refresh_used_secrets(resolver);
     // A call signed once server reflection resolved its schema: the request
     // as it was signed and sent.
     let (headers, body, auth_facts) = match prep.resigned.as_ref().and_then(|s| s.lock().take()) {
