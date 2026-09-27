@@ -178,4 +178,14 @@
   or when a profile would change what an earlier signature covers: after
   HMAC, the query, the body or the `Host`, `Date`, `Digest` or
   `Content-Digest` header; after DPoP, the `Host` header. Put such a profile
-  before the signing one.
+  before the signing one. A multi-auth set can hold one HMAC profile and one
+  DPoP profile.
+- A cookie API key whose name is not an RFC 6265 cookie name (a token) or
+  whose value is not made of cookie octets (optionally in double quotes) is
+  refused before anything is sent, so its value cannot add or change another
+  cookie (for example a value `a; x=y`). The message names the cookie, never
+  its value.
+- HMAC evidence no longer records `hmac.signing_string_sha256`. With multi
+  auth the signing string can include an earlier profile's query API key,
+  and its hash could be checked against guesses of that key offline. The
+  nonce is still recorded.
