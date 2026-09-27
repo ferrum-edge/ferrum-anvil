@@ -182,6 +182,9 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let raw_target = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| path.clone());
+    // The request-target's authority: HTTP/2 `:authority` (absent for an
+    // HTTP/1.1 origin-form target, which carries it in `Host`).
+    let authority = req.uri().authority().map(|a| a.to_string());
     let qs = query(&req);
     let headers: Vec<(String, String)> =
         req.headers().iter().map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
@@ -242,7 +245,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
             json(
                 200,
                 serde_json::json!({
-                    "method": method.as_str(), "target": raw_target, "version": version,
+                    "method": method.as_str(), "target": raw_target, "authority": authority, "version": version,
                     "headers": headers.iter().map(|(n, v)| serde_json::json!([n, v])).collect::<Vec<_>>(),
                     "body": body_text, "body_len": body.len(),
                 }),

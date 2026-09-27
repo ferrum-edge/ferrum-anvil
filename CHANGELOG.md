@@ -107,6 +107,15 @@
 
 ### Fixed
 
+- The effective-request preview now resolves the `Host` / `:authority` the
+  way Send does: an explicit `Host` header wins over the URL's authority, and
+  an HMAC or DPoP signature shown in the preview covers that value. Before,
+  the preview signed for the URL's authority, so for a request with an
+  explicit `Host` it did not match what was sent. The preview also shows the
+  `Host` / `:authority` that will be sent, and when the auth profile cannot
+  be applied (for example an HMAC request with a manual `Content-Digest`
+  header) it says the request would not be sent, instead of showing it
+  without its credentials.
 - A header an auth profile produces that is not valid on the wire (for
   example a token pasted with a trailing line break, or an API-key or JWT
   header name with a space) now fails the request before anything is sent,

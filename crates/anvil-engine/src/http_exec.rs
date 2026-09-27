@@ -501,6 +501,28 @@ pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<Strin
     None
 }
 
+/// The `Host` (HTTP/1.1) or `:authority` (HTTP/2, HTTP/3) a request is sent
+/// with: the first explicit `Host` header wins over the target URL's
+/// authority, as the transport builds the request. Request signatures cover
+/// this value, so the send path, sessions and the preview all use it.
+pub(crate) fn request_authority(headers: &[(String, String)], target: &Target) -> String {
+    headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")).map(|(_, v)| v.clone()).unwrap_or_else(|| target.authority.clone())
+}
+
+/// What an auth profile signs for one send of `method` to `target` with
+/// `headers` and `body`.
+pub(crate) fn signable_request(method: &str, target: &Target, headers: &[(String, String)], body: &[u8]) -> SignableRequest {
+    SignableRequest {
+        method: method.to_string(),
+        scheme: target.scheme.clone(),
+        authority: request_authority(headers, target),
+        raw_path: target.path.clone(),
+        raw_query: target.query.clone(),
+        headers: headers.to_vec(),
+        body: body.to_vec(),
+    }
+}
+
 /// Refuse a header an auth profile produced that is not valid on the wire
 /// rather than send the request without it (see [`auth_header_problem`]).
 pub(crate) fn check_auth_headers(applied: &anvil_auth::Applied) -> Result<(), TransportFailure> {
@@ -723,20 +745,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
 
     loop {
         // ---- per-attempt auth (fresh nonces / proofs / time claims) ----
-        let signable = SignableRequest {
-            method: current.method.clone(),
-            scheme: current.target.scheme.clone(),
-            authority: current
-                .headers
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case("host"))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| current.target.authority.clone()),
-            raw_path: current.target.path.clone(),
-            raw_query: current.target.query.clone(),
-            headers: current.headers.clone(),
-            body: current.body.to_vec(),
-        };
+        let signable = signable_request(&current.method, &current.target, &current.headers, &current.body);
         let mut headers = current.headers.clone();
         let mut query = current.target.query.clone();
         let mut body = current.body.clone();

@@ -1210,6 +1210,7 @@ function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefin
       <table className="grid">
         <tbody>
           <tr><td className="k">Destination</td><td className="v">{eff.destination}</td></tr>
+          <tr><td className="k">Host / :authority</td><td className="v">{eff.authority}</td></tr>
           <tr><td className="k">Auth</td><td className="v">{eff.auth}{eff.auth_varies_per_send ? " (computed per send)" : ""}</td></tr>
           <tr>
             <td className="k">TLS</td>

@@ -18,6 +18,9 @@ pub struct EffectiveRequest {
     pub method: String,
     pub url: String,
     pub destination: String,
+    /// The `Host` (HTTP/1.1) or `:authority` (HTTP/2, HTTP/3) sent, which
+    /// request signatures cover: an explicit `Host` header, else the URL's.
+    pub authority: String,
     pub headers: Vec<HeaderEntry>,
     pub body_bytes: u64,
     pub body_preview: String,
@@ -48,15 +51,8 @@ impl Engine {
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let prep = http_exec::prepare_all(self, ctx, &resolver, &["https", "http"])?;
         let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
-        let signable = anvil_auth::SignableRequest {
-            method: prep.http.method.clone(),
-            scheme: prep.http.target.scheme.clone(),
-            authority: prep.http.target.authority.clone(),
-            raw_path: prep.http.target.path.clone(),
-            raw_query: prep.http.target.query.clone(),
-            headers: prep.http.headers.clone(),
-            body: prep.http.body.to_vec(),
-        };
+        // The same authority and signing input as the send path.
+        let signable = http_exec::signable_request(&prep.http.method, &prep.http.target, &prep.http.headers, &prep.http.body);
         let mut headers = prep.http.headers.clone();
         let mut url = prep.http.target.url();
         let varies = matches!(
@@ -68,31 +64,40 @@ impl Engine {
                 | anvil_auth::ResolvedAuth::JwtSvid { .. }
         );
         let mut inferred = prep.inferred.clone();
-        if has_unfetched_jwt_svid(&prep.auth) {
+        let unfetched_svid = has_unfetched_jwt_svid(&prep.auth);
+        if unfetched_svid {
             // The preview makes no Workload API call and reads no token file.
             inferred.push(
                 "JWT-SVID: fetched from the SPIFFE Workload API (or read from its file) and checked locally when the request is sent"
                     .into(),
             );
         }
-        if let Ok(applied) = anvil_auth::apply(&prep.auth, &signable, chrono::Utc::now()) {
-            for s in &applied.secrets {
-                redactor.add_secret(s);
-            }
-            // The engine refuses an auth header that is not valid on the wire:
-            // say so rather than show a request that would not be sent.
-            if let Some(why) = http_exec::auth_header_problem(&applied) {
-                inferred.push(format!("the request would not be sent: {why}"));
-            } else {
-                for (n, v) in applied.set_headers {
-                    headers.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
-                    headers.push((n, v));
+        match anvil_auth::apply(&prep.auth, &signable, chrono::Utc::now()) {
+            Ok(applied) => {
+                for s in &applied.secrets {
+                    redactor.add_secret(s);
                 }
-                for (k, v) in applied.append_query {
-                    let sep = if url.contains('?') { '&' } else { '?' };
-                    url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
+                // The engine refuses an auth header that is not valid on the
+                // wire: say so rather than show a request that would not be sent.
+                if let Some(why) = http_exec::auth_header_problem(&applied) {
+                    inferred.push(format!("the request would not be sent: {why}"));
+                } else {
+                    for (n, v) in applied.set_headers {
+                        headers.retain(|(h, _)| !h.eq_ignore_ascii_case(&n));
+                        headers.push((n, v));
+                    }
+                    for (k, v) in applied.append_query {
+                        let sep = if url.contains('?') { '&' } else { '?' };
+                        url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
+                    }
                 }
             }
+            // A JWT-SVID the preview does not fetch cannot be applied; that is
+            // noted above.
+            Err(_) if unfetched_svid => {}
+            // The send path fails the request when auth cannot be applied:
+            // say so rather than show the request without its credentials.
+            Err(e) => inferred.push(format!("the request would not be sent: {}", redactor.text(&e.to_string()))),
         }
         let body_preview: String = String::from_utf8_lossy(&prep.http.body[..prep.http.body.len().min(64 * 1024)]).into_owned();
         let body_preview = if prep.http.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false) {
@@ -105,6 +110,7 @@ impl Engine {
             method: prep.http.method.clone(),
             url: redactor.url(&url),
             destination: format!("{}:{}", prep.http.target.host, prep.http.target.port),
+            authority: redactor.text(&http_exec::request_authority(&prep.http.headers, &prep.http.target)),
             headers: headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect(),
             body_bytes: prep.http.body.len() as u64,
             body_preview,
