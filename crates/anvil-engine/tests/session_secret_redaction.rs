@@ -1,10 +1,12 @@
 //! A secret variable used only in what a session sends once it is open (a
-//! WebSocket message or subprotocol, a gRPC message or metadata value, an
-//! SSE `Last-Event-ID`) is redacted in the live transcript events and in the
-//! stored record, like a secret used in the URL or a header. Each case uses
-//! a secret that appears nowhere else in the request, checks from the
-//! fixture's ground truth that the value was really sent, and then that
-//! neither the events nor the record hold it.
+//! WebSocket message, binary message or subprotocol, a gRPC message or
+//! metadata value, an SSE `Last-Event-ID`, a raw TCP payload in text, base64
+//! or hex) is redacted in the live transcript events and in the stored
+//! record, like a secret used in the URL or a header, and so are the bytes a
+//! secret in an encoded field decodes to, whether the preview shows them as
+//! text or as hex. Each case uses a secret that appears nowhere else in the
+//! request, checks from the fixture's ground truth that the value was really
+//! sent, and then that neither the events nor the record hold it.
 
 use anvil_domain::Id;
 use anvil_domain::events::ExecutionEvent;
@@ -18,6 +20,7 @@ use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::GroundTruth;
 use anvil_fixtures::grpc::ECHO_PROTO;
 use anvil_fixtures::http as fx;
+use anvil_fixtures::streams::{self, TcpMode};
 use anvil_transport::recorder::{EventCtx, EventFn};
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -32,9 +35,14 @@ fn init() {
 
 /// `spec` with `name` as a secret variable holding `value` and short timeouts.
 fn with_secret(spec: RequestSpec, name: &str, value: &str) -> ExecutionContext {
+    with_secrets(spec, &[(name, value)])
+}
+
+/// `spec` with each `(name, value)` as a secret variable and short timeouts.
+fn with_secrets(spec: RequestSpec, secrets: &[(&str, &str)]) -> ExecutionContext {
     let mut c = ExecutionContext::standalone(spec);
-    c.var_layers =
-        vec![VarLayer { label: "environment:test".into(), vars: vec![VarEntry { name: name.into(), value: value.into(), secret: true }] }];
+    let vars = secrets.iter().map(|(name, value)| VarEntry { name: name.to_string(), value: value.to_string(), secret: true }).collect();
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
     let timeouts = TimeoutOverrides {
         connect_ms: Some(Some(3_000)),
         response_headers_ms: Some(Some(5_000)),
@@ -69,12 +77,16 @@ fn assert_not_leaked(label: &str, o: &ExecutionOutput, events: &[ExecutionEvent]
 }
 
 fn ws_spec(url: &str, subprotocols: Vec<String>, text: &str) -> RequestSpec {
+    ws_spec_with(url, subprotocols, WsMessage::Text { text: text.into() })
+}
+
+fn ws_spec_with(url: &str, subprotocols: Vec<String>, message: WsMessage) -> RequestSpec {
     let mut s = RequestSpec::http("GET", url);
     s.protocol = Protocol::WebSocket;
     s.websocket = Some(WsSpec {
         bootstrap: WsBootstrap::Http1Upgrade,
         subprotocols,
-        messages: vec![WsMessage::Text { text: text.into() }],
+        messages: vec![message],
         expect_messages: 1,
         max_message_bytes: 1024 * 1024,
         idle_close_ms: 1_000,
@@ -106,6 +118,33 @@ fn grpc_ctx(url: &str, message: &str, metadata: Vec<KeyValue>, secret: (&str, &s
     c
 }
 
+/// Newline-framed raw TCP to `addr`, reading back one echoed frame per payload.
+fn tcp_spec(addr: std::net::SocketAddr, payloads: Vec<StreamPayload>) -> RequestSpec {
+    let mut s = RequestSpec::http("GET", &format!("tcp://{addr}"));
+    s.protocol = Protocol::Tcp;
+    s.tcp = Some(TcpSpec {
+        tls: false,
+        framing: TcpFraming::NewlineDelimited,
+        expect_frames: payloads.len() as u32,
+        payloads,
+        half_close_after_send: false,
+        read_idle_ms: 2_000,
+        max_read_bytes: 4096,
+        proxy_protocol: None,
+    });
+    s
+}
+
+/// The previews of the transcript entries of `kind` sent (and, from an echo, received).
+fn previews<'a>(o: &'a ExecutionOutput, direction: Direction, kind: &str) -> Vec<(&'a str, bool)> {
+    let entries = stream(o).messages.iter().filter(|m| m.direction == direction && m.kind == kind);
+    entries.map(|m| (m.preview.as_str(), m.preview_is_hex)).collect()
+}
+
+fn received_bytes(log: &anvil_fixtures::GroundTruthLog) -> u64 {
+    log.entries().iter().map(|e| if let GroundTruth::MessageReceived { bytes } = e.event { bytes } else { 0 }).sum()
+}
+
 fn received_header(f: &fx::Fixture, path: &str, name: &str) -> Option<String> {
     f.log.entries().into_iter().rev().find_map(|e| match e.event {
         GroundTruth::RequestReceived { path: p, headers, .. } if p.starts_with(path) => {
@@ -131,6 +170,8 @@ async fn a_secret_in_a_websocket_message_is_redacted_live_and_in_the_record() {
     assert_not_leaked("websocket message", &o, &events, secret);
 }
 
+// A guard, not a regression test: the subprotocol is also a handshake header,
+// which the record's redactor already covered.
 #[tokio::test]
 async fn a_secret_websocket_subprotocol_is_redacted_live_and_in_the_record() {
     init();
@@ -145,6 +186,8 @@ async fn a_secret_websocket_subprotocol_is_redacted_live_and_in_the_record() {
     assert_not_leaked("websocket subprotocol", &o, &events, secret);
 }
 
+// A guard, not a regression test: metadata is also a request header, which the
+// record's redactor already covered.
 #[tokio::test]
 async fn a_secret_in_grpc_metadata_is_redacted_live_and_in_the_record() {
     init();
@@ -182,12 +225,76 @@ async fn a_secret_sse_last_event_id_is_redacted_live_and_in_the_record() {
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let e = Engine::new();
     let secret = "sse-last-event-id-secret-3m9t";
-    let mut s = RequestSpec::http("GET", &f.url("/sse?count=1&interval=1"));
+    // Events without an `id:` field keep the Last-Event-ID as their event id.
+    let mut s = RequestSpec::http("GET", &f.url("/sse?count=1&interval=1&no_id=1"));
     s.protocol = Protocol::Sse;
     s.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: Some("{{sse_last_event_id}}".into()), reconnect: false });
     let c = with_secret(s, "sse_last_event_id", secret);
     let (o, events) = run_with_events(&e, &c).await;
     assert_eq!(received_header(&f, "/sse", "last-event-id").as_deref(), Some(secret), "the Last-Event-ID was not sent");
     assert!(stream(&o).received_count > 0, "{:?}", o.record.attempts.last().and_then(|a| a.failure.as_ref()));
+    let ids: Vec<Option<&str>> = stream(&o).messages.iter().filter(|m| m.kind == "event").map(|m| m.event_id.as_deref()).collect();
+    assert_eq!(ids, vec![Some(REDACTED)], "the event inherits the Last-Event-ID, redacted");
     assert_not_leaked("SSE Last-Event-ID", &o, &events, secret);
+}
+
+#[tokio::test]
+async fn a_secret_websocket_binary_message_is_redacted_live_and_in_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    // Upper-case hex: the preview shows the bytes as lower-case hex.
+    let secret = "DEADBEEF00C0FFEE11";
+    let url = format!("ws://{}/ws?close_after=1", f.addr);
+    let message = WsMessage::Binary { hex: "{{ws_binary_secret}}".into() };
+    let c = with_secret(ws_spec_with(&url, vec![], message), "ws_binary_secret", secret);
+    let (o, events) = run_with_events(&e, &c).await;
+    assert_eq!(received_bytes(&f.log), 9, "the message was not sent");
+    assert_eq!(previews(&o, Direction::Sent, "binary"), vec![(REDACTED, true)], "the sent message is kept, redacted");
+    assert_eq!(previews(&o, Direction::Received, "binary"), vec![(REDACTED, true)], "the echo is redacted");
+    assert_not_leaked("websocket binary message", &o, &events, secret);
+    assert_not_leaked("websocket binary message (hex preview)", &o, &events, &secret.to_ascii_lowercase());
+}
+
+#[tokio::test]
+async fn a_secret_in_a_raw_tcp_payload_is_redacted_live_and_in_the_record() {
+    init();
+    let f = streams::tcp("127.0.0.1:0", TcpMode::Echo, None).await.unwrap();
+    let e = Engine::new();
+    let secret = "tcp-text-secret-4f7w";
+    let payloads = vec![StreamPayload { data: "token={{tcp_text_secret}}".into(), encoding: PayloadEncoding::Text }];
+    let c = with_secret(tcp_spec(f.addr, payloads), "tcp_text_secret", secret);
+    let (o, events) = run_with_events(&e, &c).await;
+    let wire = format!("token={secret}\n");
+    assert_eq!(received_bytes(&f.log), wire.len() as u64, "the payload was not sent");
+    let redacted = format!("token={REDACTED}");
+    assert_eq!(previews(&o, Direction::Sent, "frame"), vec![(redacted.as_str(), false)], "the sent payload is kept, redacted");
+    assert_eq!(previews(&o, Direction::Received, "frame"), vec![(redacted.as_str(), false)], "the echo is redacted");
+    assert_not_leaked("raw TCP payload", &o, &events, secret);
+}
+
+#[tokio::test]
+async fn a_secret_in_a_base64_or_hex_tcp_payload_is_redacted_as_the_bytes_it_decodes_to() {
+    init();
+    let f = streams::tcp("127.0.0.1:0", TcpMode::Echo, None).await.unwrap();
+    let e = Engine::new();
+    // Sent, and shown as text, decoded.
+    let text = "tcp-base64-secret-6c2x";
+    let b64 = "dGNwLWJhc2U2NC1zZWNyZXQtNmMyeA==";
+    // Not text: shown as lower-case hex. No 0x0a, which would end the frame.
+    let hex = "00FF7E01A5C3D2E1F0";
+    let payloads = vec![
+        StreamPayload { data: "{{tcp_b64_secret}}".into(), encoding: PayloadEncoding::Base64 },
+        StreamPayload { data: "{{tcp_hex_secret}}".into(), encoding: PayloadEncoding::Hex },
+    ];
+    let c = with_secrets(tcp_spec(f.addr, payloads), &[("tcp_b64_secret", b64), ("tcp_hex_secret", hex)]);
+    let (o, events) = run_with_events(&e, &c).await;
+    assert_eq!(received_bytes(&f.log), (text.len() + 1 + hex.len() / 2 + 1) as u64, "the payloads were not sent");
+    let expected = vec![(REDACTED, false), (REDACTED, true)];
+    assert_eq!(previews(&o, Direction::Sent, "frame"), expected, "the sent payloads are kept, redacted");
+    assert_eq!(previews(&o, Direction::Received, "frame"), expected, "the echoes are redacted");
+    for (label, value) in [("base64 template value", b64), ("decoded text", text), ("hex template value", hex)] {
+        assert_not_leaked(label, &o, &events, value);
+    }
+    assert_not_leaked("decoded bytes as hex", &o, &events, &hex.to_ascii_lowercase());
 }
