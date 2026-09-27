@@ -5,7 +5,10 @@
 // crates/anvil-app/tests/local_files.rs. Here: the binding status beside a
 // linked request body, gRPC schema or dataset, Choose file… and Rebind…
 // scoped to that referrer, Choose new location… for a file that is elsewhere
-// now, and that a cancelled dialog changes nothing.
+// now, and that a cancelled dialog changes nothing. A path is shown without
+// the Windows verbatim prefix but sent as stored, and Choose new location…
+// names the hosts the file is used for (never a path or query) and can be
+// confirmed first.
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
@@ -17,7 +20,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn(), ask:
 
 import type { LinkedFileReferrer, LinkedFileStatus } from "./api";
 import type { Dataset, LoadPlan, RequestSpec } from "./generated/contracts";
-import { LinkedFileBinding } from "./LinkedFile";
+import { LinkedFileBinding, destinationHosts, displayPath } from "./LinkedFile";
 import { PlanEditor } from "./LoadView";
 import { BodyEditor, ProtocolEditor } from "./RequestEditor";
 
@@ -490,5 +493,118 @@ describe("choosing a new location for a linked file", () => {
     } as RequestSpec;
     render(<ProtocolEditor spec={grpc} set={() => {}} workspaceId="ws" requestId="req-1" onRelocated={reloaded} />);
     expect(await within(screen.getByTestId("grpc-linked-schema")).findByRole("button", { name: /Choose new location…/ })).toBeTruthy();
+  });
+});
+
+describe("showing a linked file's path", () => {
+  it("drops the Windows verbatim prefix for display only", () => {
+    expect(displayPath("\\\\?\\C:\\Users\\me\\upload.bin")).toBe("C:\\Users\\me\\upload.bin");
+    expect(displayPath("\\\\?\\UNC\\server\\share\\upload.bin")).toBe("\\\\server\\share\\upload.bin");
+    expect(displayPath("\\\\server\\share\\upload.bin")).toBe("\\\\server\\share\\upload.bin");
+    expect(displayPath("C:\\Users\\me\\upload.bin")).toBe("C:\\Users\\me\\upload.bin");
+    expect(displayPath(PATH)).toBe(PATH);
+  });
+
+  it("shows a verbatim path without its prefix, and still sends the stored path", async () => {
+    const stored = "\\\\?\\C:\\Users\\me\\upload.bin";
+    backend([{ path: stored, state: "unbound" }], () => []);
+    render(<LinkedFileBinding referrer={REQUEST} path={stored} onRelocated={() => {}} />);
+    expect(await stateBadge()).toBe("Not chosen on this device");
+    const shown = screen.getByTestId("linked-file");
+    expect(shown.textContent).toContain("C:\\Users\\me\\upload.bin");
+    expect(shown.textContent).not.toContain("\\\\?\\");
+    const relocate = screen.getByRole("button", { name: /Choose new location…/ });
+    expect(relocate.title).not.toContain("\\\\?\\");
+    fireEvent.click(relocate);
+    await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
+    expect(calls("file_choose")[0].oldPath).toBe(stored);
+  });
+});
+
+describe("where a relocated file is used", () => {
+  it("names each destination host once, never its path, query or credentials", () => {
+    expect(
+      destinationHosts([
+        "https://user:pw@api.example.test:8443/secret/path?token=abc#frag",
+        "https://api.example.test:8443/other",
+        "grpcs://grpc.example.test/pkg.v1.S/M",
+        "localhost:8080/upload?x=1",
+        "",
+        null,
+        undefined,
+        "http://",
+      ]),
+    ).toEqual(["api.example.test:8443", "grpc.example.test", "localhost:8080"]);
+  });
+
+  it("shows the request's host beside Choose new location…", async () => {
+    backend([{ path: PATH, state: "unbound" }]);
+    render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://upload.example.test/private/path?token=secret"]} onRelocated={() => {}} />);
+    await stateBadge();
+    const text = screen.getByTestId("linked-file").textContent ?? "";
+    expect(text).toContain("It is used for requests to upload.example.test.");
+    const title = screen.getByRole("button", { name: /Choose new location…/ }).title;
+    expect(title).toContain("It is used for requests to upload.example.test.");
+    for (const hidden of ["private", "token", "secret"]) {
+      expect(text).not.toContain(hidden);
+      expect(title).not.toContain(hidden);
+    }
+  });
+
+  it("names no host for a URL without one, nor where no new location is offered", async () => {
+    backend([{ path: PATH, state: "unbound" }]);
+    const { unmount } = render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={[""]} onRelocated={() => {}} />);
+    await stateBadge();
+    expect(screen.getByTestId("linked-file").textContent).not.toContain("used for requests to");
+    unmount();
+    backend([{ path: PATH, state: "unbound" }]);
+    render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://upload.example.test/"]} />);
+    await stateBadge();
+    expect(screen.getByTestId("linked-file").textContent).not.toContain("used for requests to");
+  });
+
+  it("is passed the request's URL by the body and gRPC schema editors", async () => {
+    backend([{ path: PATH, state: "unbound" }]);
+    const spec = {
+      method: "POST",
+      url: "https://body.example.test/in?q=1",
+      body: { type: "multipart", parts: [{ name: "f", part_kind: "file", attachment: { kind: "linked_file", path: PATH }, enabled: true }] },
+    } as RequestSpec;
+    const { unmount } = render(<BodyEditor spec={spec} set={() => {}} requestId="req-1" onRelocated={async () => {}} />);
+    await stateBadge();
+    expect(screen.getByTestId("linked-file").textContent).toContain("used for requests to body.example.test.");
+    unmount();
+
+    backend([{ path: PATH, state: "unbound" }]);
+    const grpc = {
+      method: "POST",
+      url: "grpcs://grpc.example.test:9443",
+      protocol: "grpc",
+      grpc: { service: "a.v1.S", method: "M", schema: { kind: "proto_files", files: [{ kind: "linked_file", path: PATH }] }, messages: ["{}"] },
+    } as RequestSpec;
+    render(<ProtocolEditor spec={grpc} set={() => {}} workspaceId="ws" requestId="req-1" onRelocated={async () => {}} />);
+    await stateBadge();
+    expect(screen.getByTestId("linked-file").textContent).toContain("used for requests to grpc.example.test:9443.");
+  });
+});
+
+describe("confirming a new location", () => {
+  it("relocates nothing unless confirmed", async () => {
+    const reloaded = vi.fn();
+    const confirm = vi.fn(async () => false);
+    backend([{ path: PATH, state: "unbound" }], () => grant(PATH));
+    render(<LinkedFileBinding referrer={REQUEST} path={PATH} onRelocated={reloaded} confirmRelocate={confirm} />);
+    await stateBadge();
+    const relocate = screen.getByRole("button", { name: /Choose new location…/ }) as HTMLButtonElement;
+    fireEvent.click(relocate);
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(relocate.disabled).toBe(false));
+    expect(calls("file_choose")).toHaveLength(0);
+    expect(reloaded).not.toHaveBeenCalled();
+
+    confirm.mockResolvedValueOnce(true);
+    fireEvent.click(relocate);
+    await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
+    await waitFor(() => expect(reloaded).toHaveBeenCalledTimes(1));
   });
 });

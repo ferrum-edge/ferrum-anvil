@@ -231,6 +231,15 @@
 
 ### Fixed
 
+- Desktop Load: Discard is disabled while a new plan's save or Run… is on its
+  way, and a new plan discarded while its save lands is saved but no longer
+  reopened.
+- Desktop linked files: Choose new location… now names the hosts the file is
+  used for (the request's saved URL, or a dataset's plan requests; host and
+  port only, never the path or query), and asks before discarding a request
+  tab's unsaved edits, which the relocation replaces with the saved request.
+  Windows paths are shown without the `\\?\` verbatim prefix (`\\?\UNC\`
+  as `\\`); the stored path is unchanged.
 - Desktop Load: switching workspaces now clears the selected plan or report
   and closes a pending run confirmation, so the Load view never shows, saves,
   runs or deletes the previous workspace's plan; the plan editor also refuses

@@ -5,7 +5,7 @@
 // while another view is shown; closing or deleting a tab stops (after
 // confirmation) what only that tab controlled, and a tab whose work could not
 // be stopped stays open. Relocating a linked file reloads the saved request
-// into its tab's draft.
+// into its tab's draft, once the user confirms discarding unsaved edits.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -774,9 +774,15 @@ describe("relocating a linked file", () => {
     // An edit to a request naming a linked file cannot be saved here: the reload replaces it.
     fireEvent.change(urlField(), { target: { value: "https://draft.test/" } });
     expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+    // The saved request is what a relocated file is used for: its host, not the draft's, is shown.
+    expect(screen.getByTestId("linked-file").textContent).toContain("It is used for requests to u1.test.");
+    expect(screen.getByTestId("linked-file").textContent).not.toContain("draft.test");
 
+    ask.mockResolvedValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: /Choose new location…/ }));
     await waitFor(() => expect(screen.getByTestId("linked-file").textContent).toContain(NEW));
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(ask.mock.calls[0][0]).toContain("“Upload” has unsaved changes");
     expect(await screen.findByText("Chosen on this device")).toBeTruthy();
     expect(calls("file_choose")).toEqual([{ purpose: "linked_file_relocate", options: { multiple: false }, referrer: { kind: "request", id: "u1" }, oldPath: OLD }]);
     expect(calls("request_get").filter((a) => a.requestId === "u1")).toHaveLength(2);
@@ -789,6 +795,7 @@ describe("relocating a linked file", () => {
     linkedBackend(() => []);
     await openBody();
     fireEvent.change(urlField(), { target: { value: "https://draft.test/" } });
+    ask.mockResolvedValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: /Choose new location…/ }));
     await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
     await waitFor(() => expect((screen.getByRole("button", { name: /Choose new location…/ }) as HTMLButtonElement).disabled).toBe(false));
@@ -797,5 +804,30 @@ describe("relocating a linked file", () => {
     expect(urlField().value).toBe("https://draft.test/");
     expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps unsaved edits, and relocates nothing, when discarding them is declined", async () => {
+    linkedBackend((relocate) => relocate());
+    await openBody();
+    fireEvent.change(urlField(), { target: { value: "https://draft.test/" } });
+    ask.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: /Choose new location…/ }));
+    await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    expect(ask.mock.calls[0][1]).toMatchObject({ title: "Unsaved changes", kind: "warning" });
+    await waitFor(() => expect((screen.getByRole("button", { name: /Choose new location…/ }) as HTMLButtonElement).disabled).toBe(false));
+    expect(calls("file_choose")).toHaveLength(0);
+    expect(calls("request_get").filter((a) => a.requestId === "u1")).toHaveLength(1);
+    expect(screen.getByTestId("linked-file").textContent).toContain(OLD);
+    expect(urlField().value).toBe("https://draft.test/");
+    expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+  });
+
+  it("asks nothing when the tab has no unsaved edits", async () => {
+    linkedBackend((relocate) => relocate());
+    await openBody();
+    fireEvent.click(screen.getByRole("button", { name: /Choose new location…/ }));
+    await waitFor(() => expect(screen.getByTestId("linked-file").textContent).toContain(NEW));
+    expect(ask).not.toHaveBeenCalled();
+    expect(calls("file_choose")).toHaveLength(1);
   });
 });

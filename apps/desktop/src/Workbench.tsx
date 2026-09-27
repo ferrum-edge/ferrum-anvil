@@ -43,6 +43,14 @@ type Dialog =
 
 const snap = (r: RequestDefinition) => JSON.stringify({ n: r.name, s: r.spec });
 const isDirty = (t: OpenTab) => snap(t.req) !== t.saved;
+/** The URL the tab's request was last saved with, or undefined before it is known. */
+const savedUrl = (t: OpenTab): string | undefined => {
+  try {
+    return (JSON.parse(t.saved) as { s?: { url?: string } }).s?.url;
+  } catch {
+    return undefined;
+  }
+};
 /** What is still running for a tab in the backend, if anything. */
 const liveWork = (t: OpenTab): "session" | "request" | null => (t.session ? "session" : t.running ? "request" : null);
 
@@ -297,10 +305,24 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   // A linked file the saved request names was relocated: the backend rewrote
   // the saved request, so its tab shows it as saved now. Draft edits are
-  // dropped: a draft naming a linked file cannot be saved from here anyway.
+  // dropped (after confirmReload asked): a draft naming a linked file cannot be
+  // saved from here anyway.
   const reloadSaved = async (id: string) => {
     const req = await api.getRequest(id);
     setTabs((ts) => ts.map((x) => (x.req.id !== id ? x : { ...x, req, saved: snap(req) })));
+  };
+
+  // Asked before a linked file is relocated: the reload that follows replaces
+  // the tab's draft, so unsaved edits are discarded only once confirmed.
+  const confirmReload = async (id: string) => {
+    const t = tabsRef.current.find((x) => x.req.id === id);
+    if (!t || !isDirty(t)) return true;
+    return ask(`“${t.req.name}” has unsaved changes. Choosing a new location for its linked file reloads the saved request and discards them. Continue?`, {
+      title: "Unsaved changes",
+      kind: "warning",
+      okLabel: "Discard and continue",
+      cancelLabel: "Keep editing",
+    });
   };
 
   // The tab's own workspace, as it is now: a send can outlive a workspace switch
@@ -820,6 +842,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     environmentId={ws.active_environment_id ?? null}
                     profiles={profiles}
                     onReload={() => reloadSaved(tab.req.id)}
+                    confirmReload={() => confirmReload(tab.req.id)}
+                    savedUrl={savedUrl(tab)}
                   />
                 </div>
                 <div

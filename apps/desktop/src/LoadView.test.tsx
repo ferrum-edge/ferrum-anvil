@@ -6,7 +6,9 @@
 // editor, confirmation and unsaved drafts to the workspace that owns them: a
 // switch never shows, saves or starts the previous workspace's plan, a live
 // run keeps its Stop control, and switching back restores the unsaved draft.
-// jsdom only.
+// A new plan cannot be discarded while its save is on its way, and one
+// discarded as its save lands is not reopened. A linked dataset shows the hosts
+// of the plan's requests beside Choose new location…. jsdom only.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { vi } from "vitest";
@@ -509,6 +511,74 @@ describe("LoadView workspace switch", () => {
     await waitFor(() => expect(calls("load_plan_delete")).toEqual([{ planId: "pa" }]));
   });
 
+  it("cannot discard a new plan while its save or Run… is on its way", async () => {
+    let save = deferred<void>();
+    backend({
+      load_plan_save: async (a) => {
+        await save.promise;
+        return saveInto(a);
+      },
+      // The confirmation is not under test.
+      load_preflight: () => new Promise(() => {}),
+    });
+    render(view("A"));
+    await screen.findByText("Plan A");
+    fireEvent.click(button("New"));
+    fireEvent.change(planName(), { target: { value: "Draft A" } });
+    expect(button("Discard").disabled).toBe(false);
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+    expect(button("Discard").disabled).toBe(true);
+    fireEvent.click(button("Discard"));
+    expect(planName().value).toBe("Draft A");
+
+    // The save lands: the plan is saved and stays selected, with Delete instead of Discard.
+    await act(async () => save.resolve());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Discard" })).toBeNull());
+    expect(planName().value).toBe("Draft A");
+    expect(button("Delete plan")).toBeTruthy();
+
+    // Run… saves too.
+    save = deferred<void>();
+    fireEvent.click(button("New"));
+    fireEvent.click(button("Run…"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(2));
+    expect(button("Discard").disabled).toBe(true);
+    await act(async () => save.resolve());
+  });
+
+  it("never reopens a new plan discarded while its save was landing", async () => {
+    // The save is answered, but the list it reloads is held: meanwhile the plan is still new here.
+    let held: ReturnType<typeof deferred<void>> | null = null;
+    backend({
+      load_plan_save: saveInto,
+      load_plans: async (a) => {
+        if (held) await held.promise;
+        return plans[a.workspaceId as string] ?? [];
+      },
+    });
+    render(view("A"));
+    await screen.findByText("Plan A");
+    fireEvent.click(button("New"));
+    fireEvent.change(planName(), { target: { value: "Draft A" } });
+
+    held = deferred<void>();
+    const reply = held;
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+    await waitFor(() => expect(button("Discard").disabled).toBe(false));
+    fireEvent.click(button("Discard"));
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+
+    held = null;
+    await act(async () => reply.resolve());
+    await act(async () => {});
+    // Saved, as the backend answered, but not selected again.
+    expect(await within(sidebar()).findByText("Draft A")).toBeTruthy();
+    expect(screen.queryByLabelText("Plan name")).toBeNull();
+  });
+
   it("keeps B's selection when a report delete from A completes after the switch", async () => {
     const del = deferred<void>();
     backend({
@@ -658,6 +728,24 @@ describe("PlanEditor dataset linked file", () => {
     expect(reloaded).toHaveBeenCalledTimes(1);
     expect(relocateButton()).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows the hosts of the plan's requests beside Choose new location…, never their paths", async () => {
+    backend(() => []);
+    const requests = [
+      { id: "req-ws", label: "Socket", method: "GET", url: "wss://ws.example.test/feed?token=secret" },
+      { id: "req-http", label: "Echo", method: "POST", url: "https://api.example.test:8443/private/upload" },
+      { id: "req-other", label: "Other", method: "GET", url: "https://unused.example.test/" },
+    ];
+    render(<PlanEditor {...editorProps} plan={{ ...plan(), dataset_id: "ds-1" }} requests={requests} datasets={[dataset(OLD)]} />);
+    await screen.findByTestId("linked-file-state");
+    const text = screen.getByTestId("linked-file").textContent ?? "";
+    expect(text).toContain("It is used for requests to ws.example.test, api.example.test:8443.");
+    expect(relocateButton()!.title).toContain("It is used for requests to ws.example.test, api.example.test:8443.");
+    for (const hidden of ["unused.example.test", "token", "secret", "private", "upload"]) {
+      expect(text).not.toContain(hidden);
+      expect(relocateButton()!.title).not.toContain(hidden);
+    }
   });
 
   it("reloads nothing when the dialog is cancelled", async () => {

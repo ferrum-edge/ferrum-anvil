@@ -40,24 +40,62 @@ function chosen(key: string) {
 }
 
 /**
+ * `path` as shown: without the `\\?\` verbatim prefix Windows canonical paths carry (`\\?\UNC\`
+ * becomes `\\`). Only for display: the stored path, and the one sent to the backend, stay as they are.
+ */
+export function displayPath(path: string): string {
+  if (path.startsWith("\\\\?\\UNC\\")) return `\\\\${path.slice(8)}`;
+  if (path.startsWith("\\\\?\\")) return path.slice(4);
+  return path;
+}
+
+/**
+ * The hosts `urls` send to, each once, in order: host and port only, never the path, query or
+ * credentials. A URL without a host (not parsed, or not written yet) is left out.
+ */
+export function destinationHosts(urls: readonly (string | null | undefined)[]): string[] {
+  const hosts = urls.flatMap((url) => {
+    const u = (url ?? "").trim();
+    if (!u) return [];
+    for (const candidate of u.includes("://") ? [u] : [`http://${u}`]) {
+      try {
+        const host = new URL(candidate).host;
+        if (host) return [host];
+      } catch {
+        // Not a URL: nothing is shown for it.
+      }
+    }
+    return [];
+  });
+  return [...new Set(hosts)];
+}
+
+/**
  * The linked file at `path`, its binding status for `referrer`, and Choose file… (not chosen yet)
  * or Rebind… (chosen before). `referrer` is null only for a request that is not saved: only a saved
  * request or dataset that names the file can have it chosen.
  *
  * With `onRelocated`, a file not chosen yet, or missing or changed since, also offers Choose new
  * location…, which repoints the saved request or dataset to a file picked elsewhere on this device.
- * `onRelocated` then reloads what the caller shows of it, whose path changes.
+ * `onRelocated` then reloads what the caller shows of it, whose path changes. `confirmRelocate`, if
+ * set, is asked first (false changes nothing), and `urls` are the URLs of the requests that use the
+ * file: their hosts are shown beside Choose new location…, so the user sees where the file would
+ * be used before picking it.
  */
 export function LinkedFileBinding({
   referrer,
   path,
   className,
   onRelocated,
+  confirmRelocate,
+  urls,
 }: {
   referrer: LinkedFileReferrer | null;
   path: string;
   className?: string;
   onRelocated?: () => void | Promise<void>;
+  confirmRelocate?: () => Promise<boolean>;
+  urls?: readonly (string | null | undefined)[];
 }) {
   const key = referrer ? `${referrer.kind}:${referrer.id}` : null;
   // Each result is kept with the request or dataset and path it is for, so a different one never
@@ -118,6 +156,7 @@ export function LinkedFileBinding({
     if (!referrer || !key || !onRelocated) return;
     setBusy(true);
     try {
+      if (confirmRelocate && !(await confirmRelocate())) return;
       // Null when the dialog is cancelled: nothing was rewritten or bound, so nothing changes.
       if (!(await api.relocateLinkedFile(referrer, path))) return;
       setErr(null);
@@ -135,11 +174,14 @@ export function LinkedFileBinding({
   const noun = referrer?.kind ?? "request";
   const badge = status ? BADGE[status.state] : null;
   const relocatable = !!onRelocated && (status?.state === "unbound" || status?.state === "invalid");
+  const shownPath = displayPath(path);
+  const hosts = destinationHosts(urls ?? []);
+  const usedFor = hosts.length > 0 ? ` It is used for requests to ${hosts.join(", ")}.` : "";
   return (
     <div className={`linked-file${className ? ` ${className}` : ""}`} data-testid="linked-file">
-      <span className="file-chip" title={path}>
+      <span className="file-chip" title={shownPath}>
         <Icon name="file" size={14} />
-        <span className="mono">{path}</span>
+        <span className="mono">{shownPath}</span>
       </span>
       {badge && (
         <span className={`badge ${badge.cls}`} data-testid="linked-file-state" title={badge.title}>
@@ -148,7 +190,7 @@ export function LinkedFileBinding({
         </span>
       )}
       {status && (
-        <button className="btn small" disabled={busy} title={`Choose ${path} in the native dialog for this ${noun}`} onClick={() => void choose()}>
+        <button className="btn small" disabled={busy} title={`Choose ${shownPath} in the native dialog for this ${noun}`} onClick={() => void choose()}>
           <Icon name="file" size={13} />
           {status.state === "unbound" ? "Choose file…" : "Rebind…"}
         </button>
@@ -157,7 +199,7 @@ export function LinkedFileBinding({
         <button
           className="btn small"
           disabled={busy}
-          title={`Choose where this file is now on this device. The saved ${noun} is changed to name the file you choose instead of ${path}.`}
+          title={`Choose where this file is now on this device. The saved ${noun} is changed to name the file you choose instead of ${shownPath}.${usedFor}`}
           onClick={() => void relocate()}
         >
           <Icon name="file" size={13} />
@@ -172,14 +214,14 @@ export function LinkedFileBinding({
         <p className="hint">
           Anvil reads this file only once you choose it here, on this device, for this {noun}. Choose the file at this path, or attach a copy
           instead.
-          {relocatable && ` If it is somewhere else on this device, Choose new location… changes this ${noun} to name it there.`}
+          {relocatable && ` If it is somewhere else on this device, Choose new location… changes this ${noun} to name it there.${usedFor}`}
         </p>
       )}
       {status?.state === "invalid" && (
         <p className="hint">
           Chosen before, but {status.problem ?? "the file can no longer be read"}. Anvil reads it only at this path: put it back there and
           choose it again with Rebind…, or attach a copy instead.
-          {relocatable && ` If it moved, Choose new location… changes this ${noun} to name it where it is now.`}
+          {relocatable && ` If it moved, Choose new location… changes this ${noun} to name it where it is now.${usedFor}`}
         </p>
       )}
       {err && (
