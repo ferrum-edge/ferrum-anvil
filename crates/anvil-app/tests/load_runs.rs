@@ -9,7 +9,8 @@ use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport, RunCompletion, Workload};
 use anvil_domain::request::RequestSpec;
 use anvil_fixtures::http::Fixture;
-use anvil_storage::KdfParams;
+use anvil_storage::store::DB_FILE;
+use anvil_storage::{KdfParams, kind};
 use std::time::Duration;
 
 fn new_app(root: &std::path::Path) -> App {
@@ -59,7 +60,10 @@ async fn run_until_stopped(app: &App, fx: &Fixture, p: &LoadPlan, guard: &LoadRu
 }
 
 /// Once a stopped run's report is in, nothing more reaches the destination.
+/// A request already on the wire when the run stopped may still be logged
+/// just after, so the count is taken once those have landed.
 async fn assert_quiet(fx: &Fixture) {
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let sent = fx.log.count_requests();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(fx.log.count_requests(), sent, "the stopped run still sends");
@@ -75,9 +79,9 @@ async fn deleting_a_workspace_stops_its_running_load_run() {
     let b = app.create_workspace("B").unwrap().meta.id;
     let req = app.create_request(&a, None, "slow", RequestSpec::http("GET", &fx.url("/delay-headers/20"))).unwrap();
     let p = app.save_load_plan(endless(a, req.meta.id)).unwrap();
-    let other = app.register_load_run(&b);
+    let other = app.register_load_run(&b).unwrap();
 
-    let guard = app.register_load_run(&a);
+    let guard = app.register_load_run(&a).unwrap();
     assert!(!guard.is_stopped());
     let report = run_until_stopped(&app, &fx, &p, &guard, || app.delete_workspace(&a).unwrap()).await;
     assert!(guard.workspace_deleted().is_cancelled(), "the delete reaches the run");
@@ -93,7 +97,7 @@ async fn deleting_a_workspace_stops_its_running_load_run() {
     assert!(!other.is_stopped(), "a run of another workspace was stopped");
     // A run registered after the delete is stopped already: its job is never
     // handed to a worker.
-    assert!(app.register_load_run(&a).workspace_deleted().is_cancelled());
+    assert!(app.register_load_run(&a).unwrap().workspace_deleted().is_cancelled());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -106,14 +110,14 @@ async fn locking_stops_every_load_run() {
     let b = app.create_workspace("B").unwrap().meta.id;
     let req = app.create_request(&a, None, "slow", RequestSpec::http("GET", &fx.url("/delay-headers/20"))).unwrap();
     let p = app.save_load_plan(endless(a, req.meta.id)).unwrap();
-    let other = app.register_load_run(&b);
-    let guard = app.register_load_run(&a);
+    let other = app.register_load_run(&b).unwrap();
+    let guard = app.register_load_run(&a).unwrap();
     let report = run_until_stopped(&app, &fx, &p, &guard, || app.lock()).await;
     assert!(guard.locked().is_cancelled() && other.locked().is_cancelled(), "the lock reaches every run");
     assert_eq!(report.completion, RunCompletion::StoppedByLock);
     assert_quiet(&fx).await;
     // A run registered once the profile is locked is stopped already.
-    assert!(app.register_load_run(&a).locked().is_cancelled());
+    assert!(app.register_load_run(&a).unwrap().locked().is_cancelled());
 }
 
 #[test]
@@ -121,9 +125,22 @@ fn a_finished_run_is_no_longer_reached() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let a = app.create_workspace("A").unwrap().meta.id;
-    let finished = app.register_load_run(&a);
+    let finished = app.register_load_run(&a).unwrap();
     let token = finished.workspace_deleted().clone();
     drop(finished);
     app.delete_workspace(&a).unwrap();
     assert!(!token.is_cancelled(), "a dropped registration is gone");
+}
+
+#[test]
+fn a_run_is_not_registered_when_its_workspace_cannot_be_read() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let a = app.create_workspace("A").unwrap().meta.id;
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    db.execute("UPDATE objects SET payload=x'00' WHERE kind=?1 AND id=?2", rusqlite::params![kind::WORKSPACE, a.to_string()]).unwrap();
+    // Only a workspace that is gone reads as deleted; a row that does not
+    // decode is an error, and no run is registered.
+    let Err(e) = app.register_load_run(&a) else { panic!("registered a run of a workspace that could not be read") };
+    assert!(!matches!(e, AppError::NotFound(_) | AppError::Locked), "{e}");
 }

@@ -1,11 +1,12 @@
 //! Stored files no saved item can reach any more are released: a
-//! workspace's on its delete, and when a profile opens those attached and
-//! never saved past the grace period and those only orphaned revisions
-//! name. A file any saved item of any workspace references is never
-//! released.
+//! workspace's on its delete, and when a profile opens (at most once a day)
+//! those attached and never saved past the grace period and those only
+//! orphaned revisions name. A file a user attached within the grace period,
+//! which a draft may hold, and a file any saved item of any workspace
+//! references are never released.
 
 use anvil_app::App;
-use anvil_app::cleanup::{ATTACHMENT_GRACE, StorageCleanup, UndecodableObject};
+use anvil_app::cleanup::{ATTACHMENT_GRACE, CLEANUP_INTERVAL, StorageCleanup, UndecodableObject};
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
@@ -72,6 +73,21 @@ fn attached_days_ago(app: &App, a: &AttachmentRef, days: i64) {
     app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
 }
 
+/// Record the last cleanup pass as run `hours` ago.
+fn last_pass_ran_hours_ago(app: &App, hours: i64) {
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    let key = "note:storage_cleanup";
+    let note: String = db.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0)).unwrap();
+    let mut note: serde_json::Value = serde_json::from_str(&note).unwrap();
+    note["ran_at"] = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339().into();
+    db.execute("UPDATE meta SET value=?1 WHERE key=?2", [note.to_string().as_str(), key]).unwrap();
+}
+
+/// How long ago the last cleanup pass ran.
+fn since_last_pass(app: &App) -> chrono::Duration {
+    chrono::Utc::now() - app.last_storage_cleanup().unwrap().expect("a pass ran").ran_at
+}
+
 #[test]
 fn deleting_a_workspace_releases_its_files_unless_another_workspace_references_them() {
     let root = tempfile::tempdir().unwrap();
@@ -88,16 +104,31 @@ fn deleting_a_workspace_releases_its_files_unless_another_workspace_references_t
     app.create_request(&one, None, "shared", upload(&shared)).unwrap();
     app.create_request(&two, None, "shared", upload(&shared)).unwrap();
     let rows = app.create_dataset(&one, "rows", DatasetFormat::Csv, b"user\nalice\n", vec![]).unwrap();
+    // Attached within the grace period: a draft elsewhere may hold it.
+    let fresh = app.put_attachment("fresh.bin", b"payload attached to workspace One today", None).unwrap();
+    app.create_request(&one, None, "fresh", upload(&fresh)).unwrap();
+    for a in [&only, &shared, &edited, &rows.attachment] {
+        attached_days_ago(&app, a, 31);
+    }
 
     app.delete_workspace(&one).unwrap();
     assert!(!stored(&app, &only), "held only by workspace One: released");
     assert!(!stored(&app, &edited), "held only by a revision in workspace One: released");
     assert!(!stored(&app, &rows.attachment), "its dataset's file: released");
     assert!(stored(&app, &shared), "workspace Two still holds it");
+    assert!(stored(&app, &fresh), "attached within the grace period: kept");
     assert!(app.request(&r.meta.id).is_err());
     // The released files' index entries went with their content.
     let index: Vec<serde_json::Value> = app.store.list(kind::IMPORT_SOURCE, None).unwrap();
-    assert_eq!(index.len(), 1, "{index:?}");
+    assert_eq!(index.len(), 2, "{index:?}");
+
+    // Once its grace period is over and no saved item names it, the cleanup
+    // releases it.
+    assert_eq!(app.clean_up_storage().unwrap(), StorageCleanup::default(), "still within the grace period");
+    attached_days_ago(&app, &fresh, 31);
+    assert_eq!(app.clean_up_storage().unwrap().released_attachments, 1);
+    assert!(!stored(&app, &fresh));
+    assert!(stored(&app, &shared));
 }
 
 #[test]
@@ -115,7 +146,8 @@ fn a_file_attached_and_never_saved_is_released_after_the_grace_period() {
     attached_days_ago(&app, &saved, 31);
     attached_days_ago(&app, &recent, 29);
 
-    let app = reopen(app);
+    let done = app.clean_up_storage().unwrap();
+    assert_eq!(done, StorageCleanup { released_attachments: 1, ..Default::default() });
     assert!(!stored(&app, &abandoned), "past the grace period and no saved item names it: released");
     assert!(stored(&app, &recent), "still within the grace period: kept");
     assert!(stored(&app, &saved), "a saved item in another workspace references it: kept");
@@ -131,27 +163,75 @@ fn a_file_attached_and_never_saved_is_released_after_the_grace_period() {
 }
 
 #[test]
-fn opening_a_profile_removes_orphaned_revisions_and_the_files_only_they_name() {
+fn a_cleanup_removes_orphaned_revisions_and_the_files_only_they_name() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let ws = app.create_workspace("W").unwrap().meta.id;
     let other = app.create_workspace("Other").unwrap().meta.id;
     let gone = app.put_attachment("gone.bin", b"payload of a request deleted long ago", None).unwrap();
     let shared = app.put_attachment("shared.bin", b"payload another workspace still holds", None).unwrap();
+    let again = b"payload of a deleted request, attached again to a draft";
+    let reattached = app.put_attachment("again.bin", again, None).unwrap();
     let old = app.create_request(&ws, None, "old", upload(&gone)).unwrap();
-    app.save_request(RequestDefinition { spec: upload(&shared), ..old.clone() }).unwrap();
+    let old = app.save_request(RequestDefinition { spec: upload(&shared), ..old }).unwrap();
+    app.save_request(RequestDefinition { spec: upload(&reattached), ..old.clone() }).unwrap();
     let kept = app.create_request(&other, None, "kept", upload(&shared)).unwrap();
+    for a in [&gone, &shared, &reattached] {
+        attached_days_ago(&app, a, 31);
+    }
     // As a build before deletes removed revisions left it: the request is
     // gone, its revisions are not.
     app.store.delete(kind::REQUEST, &old.meta.id).unwrap();
-    assert_eq!(revisions_of(&app, &old.meta.id), 2);
+    assert_eq!(revisions_of(&app, &old.meta.id), 3);
+    // Attaching it again restarts its wait: a draft may hold it now.
+    app.put_attachment("again.bin", again, None).unwrap();
 
-    let app = reopen(app);
+    let done = app.clean_up_storage().unwrap();
+    assert_eq!(done, StorageCleanup { orphaned_revisions: 3, released_attachments: 1, ..Default::default() });
     assert_eq!(revisions_of(&app, &old.meta.id), 0, "the orphaned revisions are removed");
     assert_eq!(revisions_of(&app, &kept.meta.id), 1, "a revision of a request that exists is kept");
     assert!(!stored(&app, &gone), "named only by the orphaned revisions: released");
+    assert!(stored(&app, &reattached), "attached again within the grace period: kept");
     assert!(stored(&app, &shared), "a saved request in another workspace references it: kept");
     assert_eq!(app.clean_up_storage().unwrap(), StorageCleanup::default(), "a second pass finds nothing");
+
+    // Its new wait over and still not saved, it is released.
+    attached_days_ago(&app, &reattached, 31);
+    assert_eq!(app.clean_up_storage().unwrap().released_attachments, 1);
+    assert!(!stored(&app, &reattached));
+    assert!(stored(&app, &shared));
+}
+
+#[test]
+fn opening_a_profile_cleans_up_at_most_once_a_day_and_keeps_the_last_pass() {
+    assert_eq!(CLEANUP_INTERVAL.as_secs(), 24 * 60 * 60, "the documented interval");
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    // Opening the new profile ran a pass.
+    let first = app.last_storage_cleanup().unwrap().expect("the pass at open is kept");
+    assert_eq!(first.result, StorageCleanup::default());
+    assert!(since_last_pass(&app) < chrono::Duration::minutes(5));
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let gone = app.put_attachment("gone.bin", b"payload of a request deleted long ago", None).unwrap();
+    let old = app.create_request(&ws, None, "old", upload(&gone)).unwrap();
+    attached_days_ago(&app, &gone, 31);
+    app.store.delete(kind::REQUEST, &old.meta.id).unwrap();
+
+    // Within a day of that pass, opening the profile runs none.
+    let app = reopen(app);
+    assert_eq!(revisions_of(&app, &old.meta.id), 1);
+    assert!(stored(&app, &gone));
+    assert_eq!(app.last_storage_cleanup().unwrap(), Some(first));
+    assert_eq!(app.clean_up_storage_if_due().unwrap(), None);
+
+    // A day later, it does.
+    last_pass_ran_hours_ago(&app, 25);
+    let app = reopen(app);
+    assert_eq!(revisions_of(&app, &old.meta.id), 0);
+    assert!(!stored(&app, &gone));
+    let last = app.last_storage_cleanup().unwrap().unwrap();
+    assert_eq!(last.result, StorageCleanup { orphaned_revisions: 1, released_attachments: 1, ..Default::default() });
+    assert!(since_last_pass(&app) < chrono::Duration::minutes(5));
 }
 
 #[test]
@@ -167,17 +247,26 @@ fn an_object_that_does_not_decode_keeps_every_file_and_is_named() {
     db.execute("UPDATE objects SET payload=x'00' WHERE kind=?1 AND id=?2", rusqlite::params![kind::REQUEST, id]).unwrap();
 
     let done = app.clean_up_storage().unwrap();
-    assert_eq!(done.undecodable, vec![UndecodableObject { kind: kind::REQUEST.into(), id }]);
+    let named = vec![UndecodableObject { kind: kind::REQUEST.into(), id }];
+    assert_eq!(done.undecodable, named);
     assert_eq!(done.released_attachments, 0);
     assert!(stored(&app, &abandoned), "the damaged request could name it: kept");
-    // Opening the profile runs the same pass, and still opens.
+    // The pass is kept, so the damaged row can be found.
+    assert_eq!(app.last_storage_cleanup().unwrap().unwrap().result.undecodable, named);
+
+    // A day later, nothing it read has changed: opening the profile does not
+    // decode everything again only to find the same. It still opens.
+    last_pass_ran_hours_ago(&app, 25);
     let app = reopen(app);
     assert!(stored(&app, &abandoned));
+    assert_eq!(app.clean_up_storage_if_due().unwrap(), None);
+    assert!(since_last_pass(&app) > chrono::Duration::hours(24), "no pass ran");
 
-    // Once the damaged row is deleted, the file is released.
+    // Once the damaged row is deleted, the next pass releases the file.
     app.store.delete(kind::REQUEST, &damaged.meta.id).unwrap();
-    let done = app.clean_up_storage().unwrap();
+    let done = app.clean_up_storage_if_due().unwrap().expect("something it read changed");
     assert_eq!(done.released_attachments, 1);
     assert!(done.undecodable.is_empty());
     assert!(!stored(&app, &abandoned));
+    assert!(app.last_storage_cleanup().unwrap().unwrap().result.undecodable.is_empty());
 }

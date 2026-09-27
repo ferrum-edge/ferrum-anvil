@@ -1,7 +1,7 @@
 //! Workspace tree operations: workspaces, nested folders, requests with
 //! immutable revisions, environments, profiles and secrets.
 
-use crate::cleanup::UndecodableObject;
+use crate::cleanup::{ATTACHMENT_GRACE, UndecodableObject};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -10,7 +10,7 @@ use anvil_domain::request::{AttachmentRef, Protocol, RequestSpec};
 use anvil_domain::secret::SecretRef;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::*;
-use anvil_storage::{StoreError, StoreTx, kind};
+use anvil_storage::{StoreError, StoreRead, StoreTx, kind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -79,11 +79,18 @@ impl App {
 
     /// Delete a workspace with everything in it, and release the stored
     /// files its items held that no item of another workspace references,
-    /// in one write transaction. Its load runs are then stopped, and the
-    /// engine drops its connections, sessions and other cached state.
+    /// in one write transaction. A file a user attached within
+    /// [`ATTACHMENT_GRACE`] is kept: a request or dataset of another
+    /// workspace not saved yet may hold it, and the cleanup of files attached
+    /// and never saved decides it once the period is over. Its load runs are
+    /// then stopped, and the engine drops its connections, sessions and other
+    /// cached state.
     pub fn delete_workspace(&self, id: &Id) -> Result<()> {
+        let cutoff = grace_cutoff();
         self.store.atomically(|s| {
-            let held = workspace_attachments_in(s, id)?;
+            let entries = attachment_entries_in(&s.as_read())?;
+            let stored = entries.into_iter().filter(|e| !attached_recently(e, cutoff)).map(|e| e.attachment).collect();
+            let held = workspace_attachments_in(s, id, stored)?;
             s.delete_workspace(id)?;
             for sha in unreferenced_in(s, held)? {
                 drop_attachment_in(s, &sha)?;
@@ -673,9 +680,24 @@ pub(crate) struct AttachmentIndex {
     pub(crate) attached_at: Option<i64>,
 }
 
+/// The time, in unix milliseconds, before which a file a user attached has
+/// waited [`ATTACHMENT_GRACE`].
+pub(crate) fn grace_cutoff() -> i64 {
+    chrono::Utc::now().timestamp_millis().saturating_sub(ATTACHMENT_GRACE.as_millis() as i64)
+}
+
+/// Whether a user attached `entry` at `cutoff` ([`grace_cutoff`]) or later:
+/// a request or dataset not saved yet may hold it, so no release other than
+/// deleting or replacing a saved item that held it takes it before the
+/// period is over. A mark without a time (entries written before the time
+/// was recorded) counts as recent: its age is unknown.
+pub(crate) fn attached_recently(entry: &AttachmentIndex, cutoff: i64) -> bool {
+    entry.user && entry.attached_at.is_none_or(|t| t >= cutoff)
+}
+
 /// Every attachment index entry that decodes. One that does not is skipped:
 /// its file stays stored.
-pub(crate) fn attachment_entries_in(s: &StoreTx<'_>) -> anvil_storage::store::Result<Vec<AttachmentIndex>> {
+pub(crate) fn attachment_entries_in(s: &StoreRead<'_>) -> anvil_storage::store::Result<Vec<AttachmentIndex>> {
     let mut entries = Vec::new();
     for m in s.object_meta(kind::IMPORT_SOURCE)? {
         let Ok(id) = m.id.parse::<Id>() else { continue };
@@ -753,7 +775,8 @@ pub(crate) fn drop_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage
 }
 
 /// The kinds of object that can reference a stored attachment.
-const REFERRERS: [&str; 6] = [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN];
+pub(crate) const REFERRERS: [&str; 6] =
+    [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN];
 
 /// Of `candidates`, the attachments that no object of a [`REFERRERS`] kind
 /// references, in one pass over those objects. The match is on each
@@ -762,7 +785,7 @@ const REFERRERS: [&str; 6] = [kind::REQUEST, kind::REVISION, kind::DATASET, kind
 /// returned: a file is kept rather than deleted while something may use it.
 /// Each such object is logged as a warning (see [`reference_scan_in`]).
 pub(crate) fn unreferenced_in(s: &StoreTx<'_>, candidates: HashSet<String>) -> anvil_storage::store::Result<HashSet<String>> {
-    Ok(reference_scan_in(s, candidates, &HashSet::new())?.0)
+    Ok(reference_scan_in(&s.as_read(), candidates, &HashSet::new())?.0)
 }
 
 /// [`unreferenced_in`], with the objects that did not decode, and without
@@ -772,7 +795,7 @@ pub(crate) fn unreferenced_in(s: &StoreTx<'_>, candidates: HashSet<String>) -> a
 /// a damaged row that stops every release can be found and repaired or
 /// deleted.
 pub(crate) fn reference_scan_in(
-    s: &StoreTx<'_>,
+    s: &StoreRead<'_>,
     mut candidates: HashSet<String>,
     revisions: &HashSet<String>,
 ) -> anvil_storage::store::Result<(HashSet<String>, Vec<UndecodableObject>)> {
@@ -809,12 +832,11 @@ pub(crate) fn reference_scan_in(
     Ok((candidates, undecodable))
 }
 
-/// The stored attachments the items of workspace `ws` name: each indexed
-/// attachment whose hash appears in the JSON text of one of them, matched as
+/// Of the stored attachments `stored`, those the items of workspace `ws`
+/// name: each whose hash appears in the JSON text of one of them, matched as
 /// [`unreferenced_in`] matches. An item that does not decode names none, so
 /// the files it may hold are kept.
-fn workspace_attachments_in(s: &StoreTx<'_>, ws: &Id) -> anvil_storage::store::Result<HashSet<String>> {
-    let stored: Vec<String> = attachment_entries_in(s)?.into_iter().map(|e| e.attachment).collect();
+fn workspace_attachments_in(s: &StoreTx<'_>, ws: &Id, stored: Vec<String>) -> anvil_storage::store::Result<HashSet<String>> {
     let ws = ws.to_string();
     let mut held = HashSet::new();
     if stored.is_empty() {

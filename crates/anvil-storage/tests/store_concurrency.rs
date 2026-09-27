@@ -250,6 +250,30 @@ fn consistent_reads_take_no_write_lock_and_see_one_state() {
     assert_eq!(name(&store, &id).as_deref(), Some("changed"));
 }
 
+#[test]
+fn a_change_marker_moves_with_every_committed_write() {
+    let (dir, store, dek) = open();
+    let id = Id::new();
+    let marker = |s: &Store| s.read_consistently(|r| r.change_marker()).unwrap();
+    let start = marker(&store);
+    assert_eq!(marker(&store), start, "nothing was written");
+    // Taken in a write transaction, it is the same while nothing changed.
+    assert_eq!(store.atomically(|tx| tx.as_read().change_marker()).unwrap(), start);
+
+    store.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "one"})).unwrap();
+    let own = marker(&store);
+    assert_ne!(own, start, "a write through this store");
+    // Another connection to the same database, as another process would have.
+    let other = Store::open(dir.path(), dek).unwrap();
+    other.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "two"})).unwrap();
+    let elsewhere = marker(&store);
+    assert_ne!(elsewhere, own, "a write through another connection");
+    let checkpoint = store.checkpoint("marker").unwrap();
+    let before = marker(&store);
+    store.restore_checkpoint(&checkpoint).unwrap();
+    assert_ne!(marker(&store), before, "a checkpoint restore");
+}
+
 /// A history record whose serialization pauses until resumed. `add_history`
 /// serializes the record after storing the body blob and before writing the
 /// history row that references it, so the pause holds the insert exactly

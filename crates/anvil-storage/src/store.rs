@@ -28,6 +28,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::ThreadId;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -178,7 +179,26 @@ pub struct Store {
     /// self-deadlock, so such calls fail with `TransactionActive` instead.
     tx_owner: Mutex<Option<ThreadId>>,
     key: RwLock<Option<Key>>,
+    /// Checkpoint restores run on `conn`, which rewrite the database without
+    /// a change SQLite counts (see [`ChangeMarker`]).
+    restores: AtomicU64,
 }
+
+/// What a connection can tell of the writes to its database: one taken in a
+/// read transaction and one taken in a later transaction differ if anything
+/// was committed in between, by this connection (its change count, or a
+/// checkpoint restore) or by another one (SQLite's `data_version`). Lets a
+/// caller read in a [`Store::read_consistently`] pass and apply what it
+/// decided in a short [`Store::atomically`] one only while nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeMarker {
+    data_version: i64,
+    total_changes: u64,
+    restores: u64,
+}
+
+/// Prefix of the notes [`StoreTx::put_note`] keeps in `meta`.
+const NOTE_PREFIX: &str = "note:";
 
 fn aad(table: &str, kind: &str, id: &str) -> Vec<u8> {
     format!("anvil/v1/{table}/{kind}/{id}").into_bytes()
@@ -409,7 +429,13 @@ impl Store {
         // The key is checked before a migration re-seals anything with it.
         verify_key_on(&conn, &key)?;
         migrate_on(&mut conn, &key)?;
-        Ok(Store { dir: dir.to_path_buf(), conn: Mutex::new(conn), tx_owner: Mutex::new(None), key: RwLock::new(Some(key)) })
+        Ok(Store {
+            dir: dir.to_path_buf(),
+            conn: Mutex::new(conn),
+            tx_owner: Mutex::new(None),
+            key: RwLock::new(Some(key)),
+            restores: AtomicU64::new(0),
+        })
     }
 
     pub fn dir(&self) -> &Path {
@@ -805,6 +831,7 @@ impl Store {
         let mut conn = self.conn()?;
         // Locked meanwhile (another restore failed): nothing is copied.
         let _ = self.key()?;
+        self.restores.fetch_add(1, Ordering::SeqCst);
         let r = restore_on(&mut conn, &src, &key);
         if r.is_err() {
             *self.key.write() = None;
@@ -903,6 +930,16 @@ impl StoreTx<'_> {
         Ok(())
     }
 
+    /// Keep `value` as this database's note `name` (see [`StoreRead::note`]).
+    pub fn put_note(&self, name: &str, value: &str) -> Result<()> {
+        let _ = self.store.key()?;
+        self.tx.execute(
+            "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("{NOTE_PREFIX}{name}"), value],
+        )?;
+        Ok(())
+    }
+
     pub fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
         self.records()?.put_secret(id, workspace_id, label, value)
     }
@@ -977,6 +1014,23 @@ impl StoreRead<'_> {
 
     pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
         self.records()?.object_meta(kind)
+    }
+
+    /// Where this connection's database stands (see [`ChangeMarker`]). Taken
+    /// first in a [`Store::read_consistently`] pass, it is that pass's state.
+    pub fn change_marker(&self) -> Result<ChangeMarker> {
+        let _ = self.store.key()?;
+        let data_version = self.conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+        Ok(ChangeMarker { data_version, total_changes: self.conn.total_changes(), restores: self.store.restores.load(Ordering::SeqCst) })
+    }
+
+    /// This database's note `name`: a small plaintext value the app keeps
+    /// about this database (in `meta`), such as when it last ran a cleanup.
+    /// Never sealed and never carried by a backup or export, so never secret.
+    pub fn note(&self, name: &str) -> Result<Option<String>> {
+        let _ = self.store.key()?;
+        let key = format!("{NOTE_PREFIX}{name}");
+        Ok(self.conn.query_row("SELECT value FROM meta WHERE key=?1", params![key], |r| r.get(0)).optional()?)
     }
 
     /// Returns (label, value).

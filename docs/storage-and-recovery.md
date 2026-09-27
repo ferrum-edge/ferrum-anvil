@@ -586,19 +586,25 @@ transaction, whenever a profile opens.
 
 Deleting a workspace deletes its items and, in the same write transaction,
 releases every stored file they referenced that no item of another
-workspace still references, marked or not. A file referenced by any saved
-item in any workspace is never released.
+workspace still references, except a file a user attached within the grace
+period (below; a mark without a time counts as recent): a request or
+dataset of another workspace not saved yet may hold it, so the cleanup of
+files attached and never saved decides it once the period is over. A file
+referenced by any saved item in any workspace is never released.
 
 ### Cleanup when a profile opens
 
-After the pins are re-applied, opening a profile runs one cleanup
-(`App::clean_up_storage`) in one write transaction:
+After the pins are re-applied, opening a profile runs a cleanup
+(`App::clean_up_storage_if_due`) once a day at most
+(`anvil_app::cleanup::CLEANUP_INTERVAL`, measured from the last pass;
+`App::clean_up_storage` runs one at once):
 
 - Revisions filed under a request that no longer exists are removed
   (builds before deletes removed a request's revisions left them behind;
   after the first pass, and unless a backup restores such a profile, there
   are none). A revision filed under no request is kept. The stored files
-  only those revisions referenced are released.
+  only those revisions referenced are released, except one a user attached
+  within the grace period: attaching it again restarts its wait.
 - A file a user attached (`"user": true`) whose `"attached_at"` is older
   than the grace period, **30 days** (`anvil_app::cleanup::ATTACHMENT_GRACE`),
   is released if no saved item references it: it was attached to a request
@@ -607,14 +613,31 @@ After the pins are re-applied, opening a profile runs one cleanup
   again"). One that a saved item references loses its mark: from then on it
   is held like any other file, and later passes do not check it again.
 
-Both use the same reference check as a delete, in the transaction that
-releases. When an object does not decode, it could name any file, so the
+Both use the same reference check as a delete. The pass reads what
+references each file in a read transaction, which never takes the database
+write lock, then removes and releases in a short write transaction only if
+nothing was written to the database in between (by this connection, another
+process or a checkpoint restore; `anvil_storage::store::ChangeMarker`).
+Otherwise it reads again, up to three times, and then gives up until the
+next pass. When an object does not decode, it could name any file, so the
 pass removes and releases nothing (the orphaned revisions stay, and so keep
 track of their files, until it is repaired or deleted); each such object is
-logged as a warning by kind and id, and the pass reports them. A cleanup
+logged as a warning by kind and id, and the pass reports them. A pass with
+nothing to release decrypts only the attachment index entries and any
+orphaned revisions; a pass blocked by an object that does not decode reads
+every object that can reference a file, so while none of those objects and
+no attachment index entry has changed since (by id, parent and time
+written), the pass at open is skipped: it would find the same. A cleanup
 that fails does not stop the profile opening; it is logged and runs again at
-the next open. A pass with nothing to release decrypts only the attachment
-index entries and any orphaned revisions.
+a later open.
+
+The last pass is kept in the database's `meta` table (a plaintext note of
+this device, never carried by a backup or export): when it ran, how many
+revisions it removed and files it released, and the kind and id of each
+object that did not decode. `anvil storage-cleanup` prints it (`--json` as
+JSON, `--now` runs a pass first), and the desktop reads it with the
+`storage_cleanup_last` command (`api.storageCleanupLast()`); the desktop has
+no screen for it yet.
 
 ## Plaintext at rest
 

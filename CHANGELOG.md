@@ -11,6 +11,13 @@
   resolve either way. **Open to workspace…** asks for confirmation first;
   **Isolate again** does not. Ordinary folders have no such tab, and an
   import still never opens a collection.
+- CLI: `anvil storage-cleanup` prints the profile's last storage cleanup:
+  when it ran, how many orphaned revisions it removed and stored files it
+  released, and the kind and id of each stored object that did not decode
+  (which keeps every stored file until it is repaired or deleted).
+  `--json` prints it as JSON; `--now` runs a pass first. The desktop exposes
+  the same record through the `storage_cleanup_last` command
+  (`api.storageCleanupLast()`); it has no screen for it yet.
 
 ### Changed
 
@@ -136,10 +143,14 @@
 - **API:** `App::register_load_run` registers a load run with its profile
   before its job is prepared; the returned guard's tokens are canceled when
   the profile locks or the run's workspace is deleted (the desktop stops the
-  worker then). `App::save_load_report` now fails with `AppError::NotFound`
-  once the report's workspace is deleted. `App::clean_up_storage` runs the
-  storage cleanup that opening a profile runs, and returns what it removed
-  and which stored objects did not decode.
+  worker then). It fails, registering nothing, when whether the workspace
+  exists cannot be read. `App::save_load_report` now fails with
+  `AppError::NotFound` once the report's workspace is deleted.
+  `App::clean_up_storage` runs a storage cleanup pass now and returns what it
+  removed and which stored objects did not decode;
+  `App::clean_up_storage_if_due` runs one only when opening a profile would
+  (`cleanup::CLEANUP_INTERVAL`), and `App::last_storage_cleanup` returns the
+  last pass.
 - **Breaking (API):** `App::release_attachment` keeps a file a user attached
   (`App::put_attachment`) and returns `false` for it, even when nothing
   references it. `App::save_request`, `App::create_request` and
@@ -237,23 +248,33 @@
   Deleting a workspace now stops that workspace's running load runs, and
   `App::lock` stops every load run, so a run's engines no longer keep a
   deleted workspace's pooled connections, session tickets, cookies, prepared
-  TLS configurations and gRPC channels until the run ends. A run stopped by
-  its workspace's delete keeps no report.
+  TLS configurations and gRPC channels until the run ends. The desktop ends
+  the worker of a run stopped by its workspace's delete at once, and keeps
+  no report of it; only the window of the run's profile is told why.
 - Deleting a workspace now also releases the stored files (request bodies,
   multipart and gRPC schema files, datasets, imported spec sources) its
-  items held, unless an item of another workspace still references them.
-  Before, their encrypted content and pins stayed in the profile for good.
+  items held, unless an item of another workspace still references them or
+  you attached the file within the last 30 days (a draft not saved yet may
+  hold it; the 30-day cleanup below decides it). Before, their encrypted
+  content and pins stayed in the profile for good.
 - A file you attached to a request or dataset that was never saved is now
-  released when the profile opens, 30 days after it was last attached,
+  released by the storage cleanup, 30 days after it was last attached,
   unless a saved item references it. Saving an item that names such a file
   is refused with "attach it again", as for any released file.
-- Opening a profile now removes request revisions whose request no longer
-  exists (earlier builds left them behind when a request was deleted) and
-  releases the stored files only they referenced.
+- The storage cleanup also removes request revisions whose request no
+  longer exists (earlier builds left them behind when a request was
+  deleted) and releases the stored files only they referenced, except one
+  you attached again within the last 30 days.
+- Opening a profile runs the storage cleanup at most once a day. It reads
+  without taking the database write lock and writes in a short transaction
+  only if nothing changed meanwhile. While a stored object that does not
+  decode blocks it, the cleanup at open is skipped until something it reads
+  changes.
 - A stored object that does not decode, which keeps every stored file from
   being released, is now logged as a warning naming its kind and id (never
-  its content), and `App::clean_up_storage` reports it, so the damaged row
-  can be found and repaired or deleted.
+  its content), and the cleanup keeps it in its last pass, which
+  `anvil storage-cleanup` prints, so the damaged row can be found and
+  repaired or deleted.
 - The lock check now also counts the session tickets kept by prepared TLS
   configurations (connections without the early-data opt-in).
 - A spec reimport now compares the import's scoped configuration too, not

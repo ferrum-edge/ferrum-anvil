@@ -137,8 +137,10 @@ impl App {
     /// Register a load run of workspace `ws` before its job is prepared, so a
     /// lock or a delete of `ws` from now on reaches it (see [`LoadRunGuard`]).
     /// One that landed before the registration is seen here: the guard is then
-    /// stopped already.
-    pub fn register_load_run(&self, ws: &Id) -> LoadRunGuard {
+    /// stopped already. Fails, registering nothing, when whether `ws` still
+    /// exists cannot be read (a busy database, a row that does not decode,
+    /// an I/O error).
+    pub fn register_load_run(&self, ws: &Id) -> Result<LoadRunGuard> {
         let stops = LoadRunStops::default();
         let key = self.load_runs.next.fetch_add(1, Ordering::Relaxed);
         self.load_runs.runs.lock().insert(key, (*ws, stops.clone()));
@@ -148,10 +150,12 @@ impl App {
         // or this read sees the lock or the delete.
         match self.store.get::<Workspace>(kind::WORKSPACE, ws) {
             Ok(Some(_)) => {}
+            Ok(None) => guard.stops.workspace_deleted.cancel(),
             Err(StoreError::Locked) => guard.stops.locked.cancel(),
-            Ok(None) | Err(_) => guard.stops.workspace_deleted.cancel(),
+            // The guard is dropped, and with it the registration.
+            Err(e) => return Err(e.into()),
         }
-        guard
+        Ok(guard)
     }
 
     /// Stop every registered load run (see [`App::lock`]).

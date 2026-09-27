@@ -152,6 +152,7 @@ pub fn run() {
             commands::integration_save,
             commands::settings_get,
             commands::settings_save,
+            commands::storage_cleanup_last,
             commands::effective_request,
             commands::send_request,
             commands::cancel_execution,
