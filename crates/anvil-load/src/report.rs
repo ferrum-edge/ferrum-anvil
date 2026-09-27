@@ -388,13 +388,14 @@ pub fn protocol_lines(p: &ProtocolLoadMetrics) -> Vec<String> {
         }
         if let Some(t) = &d.tunnels {
             out.push(format!(
-                "{} tunnels (one per exchange): {} attempted, {} established, {} refused by the proxy, {} failed, {} timed out; setup p50 {}",
+                "{} tunnels (one per exchange): {} attempted, {} established, {} refused by the proxy, {} failed, {} timed out, {} canceled; setup p50 {}",
                 tunnel_name(t.kind),
                 t.attempted,
                 t.established,
                 t.refused,
                 t.failed,
                 t.timed_out,
+                t.canceled,
                 us_or_dash(&t.setup, t.setup.p50_us)
             ));
         }
@@ -491,8 +492,9 @@ pub fn check_protocol_balance(r: &LoadReport) -> Result<(), String> {
             )?;
         }
         if let Some(t) = &d.tunnels {
+            // Every attempted tunnel ended exactly one way.
             ensure(
-                t.established + t.refused + t.failed + t.timed_out <= t.attempted && t.attempted <= settled,
+                t.established + t.refused + t.failed + t.timed_out + t.canceled == t.attempted && t.attempted <= settled,
                 format!("tunnels {t:?} vs settled {settled}"),
             )?;
             ensure(t.setup.count == t.established, "tunnel setup samples ≠ established tunnels".into())?;
@@ -759,6 +761,7 @@ fn protocol_csv(p: &ProtocolLoadMetrics, add: &mut impl FnMut(&str, &str, String
             add("tunnel", "refused", t.refused.to_string());
             add("tunnel", "failed", t.failed.to_string());
             add("tunnel", "timed_out", t.timed_out.to_string());
+            add("tunnel", "canceled", t.canceled.to_string());
             latency_csv("tunnel_setup_us", &t.setup, add);
         }
     }

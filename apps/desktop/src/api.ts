@@ -321,6 +321,8 @@ export interface LoadRefusal {
     | "mixed_unit_kinds"
     | "mixed_tunnels"
     | "grpc_reflection"
+    | "grpc_unsupported_combination"
+    | "masque_through_proxy"
     | "sse_reconnect"
     | "hbone_persistent"
     | "early_data"

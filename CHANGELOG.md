@@ -46,11 +46,18 @@
 - Load testing covers UDP and DTLS through a MASQUE (CONNECT-UDP) proxy or a
   mesh HBONE datagram tunnel. Every exchange opens its own tunnel, and the
   report counts them (attempted, established, refused by the proxy, failed,
-  timed out) with the tunnel setup time. An exchange whose tunnel did not
-  open is incomplete, never "no response observed". The preflight names the
-  proxy the traffic goes to, and runs over different datagram paths are not
-  compared. A plan that mixes direct and tunneled exchanges, or two kinds of
-  tunnel, is refused (`mixed_tunnels`).
+  timed out, canceled when the run stopped) with the tunnel setup time. An
+  exchange whose tunnel did not open is incomplete, never "no response
+  observed". The preflight names the proxy the traffic goes to (with
+  variables resolved), and warns that traffic leaves this machine when
+  either the target or the proxy is not local. Runs over different datagram
+  paths are not compared. A plan that mixes direct and tunneled exchanges,
+  or two kinds of tunnel, is refused (`mixed_tunnels`), and so is UDP
+  through a MASQUE proxy while a proxy profile routes the request
+  (`masque_through_proxy`), which the engine would refuse on every send.
+- Load plan checks refuse a gRPC call the engine would refuse on every send,
+  such as gRPC-Web with client or bidirectional streaming
+  (`grpc_unsupported_combination`, quoting the engine's reason).
 
 ### Changed
 
@@ -199,9 +206,17 @@
   `App::save_dataset` can now fail with `AppError::Invalid` ("an attached
   file ... is no longer stored; attach it again, then save") when they name a
   stored file the item did not hold before and that is not stored.
+- **Breaking (API):** `anvil_load::RefusalCode` no longer has
+  `grpc_client_streaming`, `grpc_bidirectional`, `udp_masque` and
+  `udp_hbone` (those plans are now load tested), and adds `mixed_tunnels`,
+  `grpc_unsupported_combination` and `masque_through_proxy`.
 
 ### Fixed
 
+- The load preflight's "Traffic leaves this machine" warning now compares
+  each destination's whole host: a host that only contains `localhost` or
+  `127.0.0.1` (such as `localhost.example.com`) no longer counts as this
+  machine, and a tunnel's proxy is judged apart from its target.
 - The effective-request preview now shows what a WebSocket, SSE or gRPC
   request sends. A `ws://`, `wss://`, `grpc://` or `grpcs://` URL is
   previewed (before, it was refused, and a URL without a scheme was

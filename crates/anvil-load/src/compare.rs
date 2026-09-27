@@ -418,6 +418,7 @@ mod tests {
                         refused: 0,
                         failed: 0,
                         timed_out: 0,
+                        canceled: 0,
                         setup: LatencySummary::default(),
                     }),
                     ..Default::default()

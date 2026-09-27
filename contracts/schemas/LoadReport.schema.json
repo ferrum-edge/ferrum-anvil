@@ -1615,6 +1615,12 @@
           "format": "uint64",
           "minimum": 0
         },
+        "canceled": {
+          "description": "The exchange was canceled during setup (the run stopped). Every\nattempted tunnel is exactly one of established, refused, failed,\ntimed out or canceled.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "setup": {
           "description": "Setup time of established tunnels: exchange start → tunnel open.",
           "$ref": "#/$defs/LatencySummary"
@@ -1627,6 +1633,7 @@
         "refused",
         "failed",
         "timed_out",
+        "canceled",
         "setup"
       ]
     },

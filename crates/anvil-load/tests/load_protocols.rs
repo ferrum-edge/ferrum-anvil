@@ -951,6 +951,52 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
             assert!(LoadRun::prepare(p, job, opts()).is_ok());
         }
     }
+    // Plans the engine would refuse on every send are refused up front, with
+    // the engine's own reason: gRPC-Web has no client stream.
+    let web = [("ClientStream", GrpcMode::ClientStreaming, GrpcWire::GrpcWeb), ("Bidi", GrpcMode::Bidirectional, GrpcWire::GrpcWebText)];
+    for (method, mode, wire) in web {
+        let (p, reqs) = one(grpc_ctx(&format!("http://{}", f.addr), method, mode, "{}", wire), ConnectionMode::Persistent);
+        let r = refused(p, reqs);
+        assert_eq!(r.code, RefusalCode::GrpcUnsupportedCombination, "{}", r.message);
+        assert!(r.message.contains("gRPC-Web carries only unary and server-streaming calls"), "{}", r.message);
+    }
+    // The same check covers the HTTP version: native gRPC never runs over HTTP/1.1.
+    let mut c = grpc_ctx(&url, "Unary", GrpcMode::Unary, "{}", GrpcWire::Grpc);
+    version(&mut c, HttpVersionPolicy::Http1Only);
+    let (p, reqs) = one(c, ConnectionMode::Persistent);
+    assert_eq!(refused(p, reqs).code, RefusalCode::GrpcUnsupportedCombination);
+    // A MASQUE proxy is reached over QUIC, which no proxy profile carries:
+    // with one routing the request, every exchange would be refused.
+    let masque_via = |kind: ProxyKind, no_proxy: &str| {
+        let mut c = masque();
+        let pid = Id::new();
+        c.proxy_profiles.push(ProxyProfile {
+            id: pid,
+            workspace_id: Id::new(),
+            name: "corporate".into(),
+            kind,
+            address: "127.0.0.1:3128".into(),
+            username: None,
+            password: None,
+            no_proxy: no_proxy.into(),
+            tls_profile_id: None,
+            hbone: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
+        c
+    };
+    for kind in [ProxyKind::Http, ProxyKind::Socks5, ProxyKind::Hbone] {
+        let (p, reqs) = one(masque_via(kind, ""), ConnectionMode::Fresh);
+        let r = refused(p, reqs);
+        assert_eq!(r.code, RefusalCode::MasqueThroughProxy, "{kind:?}: {}", r.message);
+        assert!(r.message.contains("'corporate'") && r.message.contains("QUIC"), "{}", r.message);
+    }
+    // A target the profile's NO_PROXY bypasses goes to the MASQUE proxy directly.
+    let (p, reqs) = one(masque_via(ProxyKind::Http, "127.0.0.1"), ConnectionMode::Fresh);
+    let job = LoadJob { requests: reqs.into_iter().collect(), dataset: None };
+    assert!(LoadRun::prepare(p, job, opts()).is_ok());
     // One plan, one unit kind: mixing HTTP requests with WebSocket sessions is refused.
     let (a, b) = (Id::new(), Id::new());
     let r = refused(

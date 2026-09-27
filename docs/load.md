@@ -61,7 +61,7 @@ on the request's protocol (`anvil_load::protocol`):
 | `sse_stream` | SSE | one stream | the stream ended without a failure: the server ended it, or the request's `max_events` / idle timeout stopped it; an error status completes as an application failure | a 2xx event stream and assertions pass | stream duration | streams opened, events received, streams with events, **time to first event**, how streams ended (peer / client / timeout / abnormal) |
 | `websocket_session` | WebSocket (HTTP/1.1 Upgrade, HTTP/2 or HTTP/3 extended CONNECT) | one session: handshake, scripted messages, close | handshake answered and the session ended without a failure (close by either side, `expect_messages`, idle close); a rejected handshake completes as an application failure | accepted handshake, close 1000/1001/none, assertions pass | session duration (connect … close) | opened, handshake rejected, not opened, closed cleanly, messages sent/received, close codes by who closed, **round-trip time only when `expect_messages` is set** |
 | `tcp_exchange` | raw TCP / TLS | one connection carrying the request's frames | connected, frames sent, reading stopped on a stop condition (expected frames, max bytes, read-idle, peer close) without a failure | completed, the expected frames arrived (when `expect_frames` is set with a framing preset), assertions pass; fewer frames = application failure | exchange duration (connect … end of reading; includes the read-idle wait when the exchange ends on idle) | connections, frames sent/received, payload bytes, partial trailing frames, peer closes, expectation met/short |
-| `udp_exchange` / `dtls_exchange` | UDP / DTLS, direct or through a MASQUE (CONNECT-UDP) or HBONE datagram tunnel | the request's datagrams, then its response window (DTLS: after a handshake; tunneled: after the exchange's own tunnel opened) | the window elapsed (or `max_datagrams` arrived) without a local failure — says nothing about delivery | at least one datagram received and assertions pass; **a completed exchange with nothing received is "no response observed": neither success nor failure, and it has no latency** | time to first response (first datagram sent → first received in the same exchange; not attributed to a specific datagram) | datagrams sent, datagrams received (separate counts), exchanges with a response / with no response observed, repeated payloads, echoed / other payloads, ICMP-unreachable exchanges, DTLS handshakes (attempted, completed, failed, timed out, duration), **tunnels** (attempted, established, refused by the proxy, failed, timed out, setup time) |
+| `udp_exchange` / `dtls_exchange` | UDP / DTLS, direct or through a MASQUE (CONNECT-UDP) or HBONE datagram tunnel | the request's datagrams, then its response window (DTLS: after a handshake; tunneled: after the exchange's own tunnel opened) | the window elapsed (or `max_datagrams` arrived) without a local failure — says nothing about delivery | at least one datagram received and assertions pass; **a completed exchange with nothing received is "no response observed": neither success nor failure, and it has no latency** | time to first response (first datagram sent → first received in the same exchange; not attributed to a specific datagram) | datagrams sent, datagrams received (separate counts), exchanges with a response / with no response observed, repeated payloads, echoed / other payloads, ICMP-unreachable exchanges, DTLS handshakes (attempted, completed, failed, timed out, duration), **tunnels** (attempted, established, refused by the proxy, failed, timed out, canceled, setup time) |
 
 **SOAP and GraphQL outcomes need the whole body.** A SOAP fault or a GraphQL
 `errors` array arrives with an HTTP 2xx, so the application outcome of a
@@ -92,6 +92,8 @@ with a `RefusalCode`; the editor shows it and cannot start the run):
 | `mixed_unit_kinds` | A chain or mix whose requests produce different units (e.g. an HTTP login followed by a WebSocket session). Their counts and latencies have different denominators; split the plan per protocol. |
 | `mixed_tunnels` | Datagram exchanges that mix direct sends with a tunnel, or a MASQUE tunnel with an HBONE one: the tunnel counts would cover only part of the units, and a tunnel's setup changes what an exchange costs. Split the plan per path. |
 | `grpc_reflection` | With server reflection every call would first run a reflection RPC, so a unit would not be one call. Import the `.proto` files or a descriptor set. |
+| `grpc_unsupported_combination` | A gRPC call the engine refuses before every send, found by the engine's own check with the request's wire, call mode, HTTP version, URL scheme and proxy route: gRPC-Web with client or bidirectional streaming (gRPC-Web has no client stream), native gRPC over HTTP/1.1-only, HTTP/3 without TLS or through a proxy, and so on. The refusal quotes the engine's reason. |
+| `masque_through_proxy` | UDP or DTLS through a MASQUE proxy while a proxy profile routes the request (its `NO_PROXY` list does not bypass the target): the MASQUE proxy is reached over QUIC, which HTTP CONNECT, SOCKS5 and HBONE tunnels do not carry, so every exchange would be refused. |
 | `sse_reconnect` | Automatic reconnection turns one stream into several connections with server-chosen delays. |
 | `hbone_persistent` | HTTP or gRPC through a mesh HBONE proxy in persistent mode: tunnels carry one execution's identity and are never pooled, so persistent mode could not be honoured. Fresh mode is allowed (it is what would happen). |
 | `early_data` | The request enables 0-RTT early data: handshakes that share session tickets are serialized (their evidence is per connection) and the report has no early-data denominators. |
@@ -107,7 +109,8 @@ client stream is half-closed, and the call is read until its terminal
 status, so each call has one completion. A load-run counts the messages it
 sent (the half-close is not a message); it never claims the server
 processed them, and it pairs no reply with a sent message. gRPC-Web cannot
-carry these modes and keeps failing per send (`unsupported_combination`).
+carry these modes, so such a plan is refused before any traffic
+(`grpc_unsupported_combination`).
 
 **Datagram tunnels.** UDP and DTLS exchanges through a MASQUE (CONNECT-UDP)
 proxy or a mesh HBONE proxy open **one tunnel per exchange** (a QUIC
@@ -115,8 +118,8 @@ connection or an mTLS connection, and its CONNECT); tunnels are never
 pooled, in either connection mode. The datagram block's `tunnels`
 denominators count them: attempted (the exchange got past preparation),
 established, refused (the proxy answered the CONNECT with a non-2xx
-status), failed, timed out, and the setup time of established tunnels
-(exchange start → tunnel open). Setup is not part of the time to first
+status), failed, timed out, canceled (the run stopped during setup), and
+the setup time of established tunnels (exchange start → tunnel open). Setup is not part of the time to first
 response. An exchange whose tunnel did not open never ran: it is a
 transport failure, never a completed exchange with no response observed —
 also for a MASQUE refusal, which a manual Send records as the proxy's
@@ -124,7 +127,9 @@ complete answer. Its status is tunnel evidence and stays out of the status
 distribution. Datagram counts are what Anvil wrote into and read from the
 tunnel; what the proxy relayed to the target is never inferred. The
 preflight names the proxy next to the target, because every exchange's
-traffic reaches the proxy first.
+traffic reaches the proxy first, and warns that traffic leaves this machine
+when either the target or the proxy is not a loopback address or
+`localhost` (each host is judged on its own).
 
 Combinations the engine itself refuses (e.g. native gRPC with HTTP/1.1-only,
 gRPC over HTTP/3 with a cleartext URL, UDP through an HTTP proxy) keep failing
@@ -239,7 +244,7 @@ and the HTML report says "WARNING: counts do not balance" otherwise. With
 * UDP/DTLS: `exchanges_with_response + exchanges_silent = completed`;
   echoed and repeated payloads ≤ datagrams received; DTLS
   `completed + failed + timed_out ≤ attempted ≤ settled`; tunnels
-  `established + refused + failed + timed_out ≤ attempted ≤ settled`,
+  `established + refused + failed + timed_out + canceled = attempted ≤ settled`,
   setup samples = established, and `completed ≤ established`.
 
 Progress snapshots are **one consistent cut**: a finished unit updates its
@@ -565,7 +570,7 @@ Observations that shaped the implementation:
 | LOAD-010 | `load_010_bounded_samples_under_sustained_failures_and_large_bodies`, `metrics::tests::load_010_…` |
 | LOAD-011 | `load_011_report_roundtrip_and_html_escape_response_content`, `report::tests::load_011_…`, `html::tests::load_011_…` |
 | LOAD-012 | not implemented |
-| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
+| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…` (the local-traffic warning judges target and proxy hosts separately); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
 | LOAD-014 | `compare::tests::load_014_incompatible_runs_withhold_latency_deltas` |
 
 ### Live lab check (real gateway)

@@ -465,7 +465,7 @@ pub enum TunnelEnd {
     Refused,
     Failed,
     TimedOut,
-    /// Canceled before it opened: attempted only.
+    /// Canceled before it opened.
     Canceled,
 }
 
@@ -737,6 +737,7 @@ pub struct ProtoAccum {
     pub tn_refused: u64,
     pub tn_failed: u64,
     pub tn_timed_out: u64,
+    pub tn_canceled: u64,
     pub tn_setup: LatencyStat,
 }
 
@@ -795,6 +796,7 @@ impl ProtoAccum {
             tn_refused: 0,
             tn_failed: 0,
             tn_timed_out: 0,
+            tn_canceled: 0,
             tn_setup: LatencyStat::new(SECONDARY_SIGFIG),
         }
     }
@@ -894,7 +896,7 @@ impl ProtoAccum {
                     TunnelEnd::Refused => self.tn_refused += 1,
                     TunnelEnd::Failed => self.tn_failed += 1,
                     TunnelEnd::TimedOut => self.tn_timed_out += 1,
-                    TunnelEnd::Canceled => {}
+                    TunnelEnd::Canceled => self.tn_canceled += 1,
                 }
             }
         }
@@ -951,6 +953,7 @@ impl ProtoAccum {
         self.tn_refused += o.tn_refused;
         self.tn_failed += o.tn_failed;
         self.tn_timed_out += o.tn_timed_out;
+        self.tn_canceled += o.tn_canceled;
         self.tn_setup.merge(&o.tn_setup);
     }
 
@@ -1055,6 +1058,7 @@ impl ProtoAccum {
                         refused: self.tn_refused,
                         failed: self.tn_failed,
                         timed_out: self.tn_timed_out,
+                        canceled: self.tn_canceled,
                         setup: self.tn_setup.summary(),
                     }),
                 })
@@ -1367,5 +1371,36 @@ mod tests {
         let s = "é".repeat(MAX_EXAMPLE_CHARS + 10);
         let t = truncate_chars(&s, MAX_EXAMPLE_CHARS);
         assert_eq!(t.chars().count(), MAX_EXAMPLE_CHARS + 1);
+    }
+
+    /// Every attempted tunnel ends exactly one way; one canceled when the
+    /// run stopped is counted as canceled, never left unaccounted for.
+    #[test]
+    fn tunnel_denominators_count_canceled_setups() {
+        let mut acc = ProtoAccum::new();
+        let ends = [
+            (Terminal::Completed, TunnelEnd::Established { setup_us: 900 }),
+            (Terminal::TransportFailure, TunnelEnd::Refused),
+            (Terminal::TransportFailure, TunnelEnd::Failed),
+            (Terminal::Timeout, TunnelEnd::TimedOut),
+            (Terminal::Canceled, TunnelEnd::Canceled),
+            (Terminal::Canceled, TunnelEnd::Canceled),
+        ];
+        for (terminal, end) in ends {
+            let dgram = DgramObs { tunnel: Some(TunnelObs { end }), ..Default::default() };
+            acc.record(&SendObservation { terminal, proto: ProtoObs { dgram: Some(dgram), ..Default::default() }, ..Default::default() });
+        }
+        let step = StepUnit {
+            kind: LoadUnitKind::UdpExchange,
+            tcp_expect_frames: None,
+            ws_expect_messages: 0,
+            application_from_body: false,
+            tunnel: Some(anvil_domain::execution::TunnelKind::Hbone),
+        };
+        let m = acc.summary(LoadUnitKind::UdpExchange, ConnectionMode::Fresh, &[step]);
+        let t = m.datagram.and_then(|d| d.tunnels).expect("tunnel denominators");
+        assert_eq!((t.attempted, t.established, t.refused, t.failed, t.timed_out, t.canceled), (6, 1, 1, 1, 1, 2));
+        assert_eq!(t.established + t.refused + t.failed + t.timed_out + t.canceled, t.attempted);
+        assert_eq!(t.setup.count, 1);
     }
 }

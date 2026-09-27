@@ -478,8 +478,15 @@ fn protocol_section(p: &ProtocolLoadMetrics) -> String {
             h.push_str(&kv_table(&[
                 (what.as_str(), fmt_n(t.attempted)),
                 (
-                    "Established / refused by the proxy / failed / timed out",
-                    format!("{} / {} / {} / {}", fmt_n(t.established), fmt_n(t.refused), fmt_n(t.failed), fmt_n(t.timed_out)),
+                    "Established / refused by the proxy / failed / timed out / canceled",
+                    format!(
+                        "{} / {} / {} / {} / {}",
+                        fmt_n(t.established),
+                        fmt_n(t.refused),
+                        fmt_n(t.failed),
+                        fmt_n(t.timed_out),
+                        fmt_n(t.canceled)
+                    ),
                 ),
             ]));
         }

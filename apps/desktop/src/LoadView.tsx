@@ -1235,8 +1235,14 @@ export function ProtocolCards({ p }: { p: ProtocolLoadMetrics }) {
             <Card
               label={`${TUNNEL_NAME[p.datagram.tunnels.kind]} tunnels open`}
               value={`${p.datagram.tunnels.established} / ${p.datagram.tunnels.attempted}`}
-              sub={p.datagram.tunnels.refused ? `${p.datagram.tunnels.refused} refused by the proxy` : "one per exchange"}
-              bad={p.datagram.tunnels.established < p.datagram.tunnels.attempted}
+              sub={
+                p.datagram.tunnels.refused
+                  ? `${p.datagram.tunnels.refused} refused by the proxy`
+                  : p.datagram.tunnels.canceled
+                    ? `${p.datagram.tunnels.canceled} canceled when the run stopped`
+                    : "one per exchange"
+              }
+              bad={p.datagram.tunnels.refused + p.datagram.tunnels.failed + p.datagram.tunnels.timed_out > 0}
             />
           )}
         </>
@@ -1366,8 +1372,8 @@ export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; request
                 ? ([
                     [`${TUNNEL_NAME[p.datagram.tunnels.kind]} tunnels attempted (one per exchange)`, String(p.datagram.tunnels.attempted)],
                     [
-                      "Established / refused by the proxy / failed / timed out",
-                      `${p.datagram.tunnels.established} / ${p.datagram.tunnels.refused} / ${p.datagram.tunnels.failed} / ${p.datagram.tunnels.timed_out}`,
+                      "Established / refused by the proxy / failed / timed out / canceled",
+                      `${p.datagram.tunnels.established} / ${p.datagram.tunnels.refused} / ${p.datagram.tunnels.failed} / ${p.datagram.tunnels.timed_out} / ${p.datagram.tunnels.canceled}`,
                     ],
                   ] as [string, string][])
                 : []),

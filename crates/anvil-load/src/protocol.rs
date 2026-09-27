@@ -21,6 +21,12 @@
 //!   tunnel (the tunnel denominators would cover only part of the units);
 //! * gRPC with server reflection as the schema source (every call would
 //!   first run a reflection RPC, so a unit would not be one call);
+//! * a gRPC call the engine refuses on every send (gRPC-Web with client or
+//!   bidirectional streaming, or a wire/HTTP version/TLS/proxy combination
+//!   that cannot be sent), found by the engine's own check;
+//! * UDP or DTLS through a MASQUE proxy while a proxy profile routes the
+//!   request (the proxy's QUIC connection cannot go through it, so the
+//!   engine refuses every exchange);
 //! * SSE with automatic reconnection (one unit would become several
 //!   connections with server-chosen delays);
 //! * a mesh HBONE proxy with persistent connections for HTTP and gRPC
@@ -30,8 +36,9 @@ use anvil_domain::Id;
 use anvil_domain::execution::TunnelKind;
 use anvil_domain::load::{ConnectionMode, LoadUnitKind, UnitSemantics};
 use anvil_domain::request::{Body, GrpcMode, GrpcSchemaSource, Protocol, TcpFraming};
-use anvil_domain::tls::ProxyKind;
+use anvil_domain::tls::{ProxyKind, ProxyProfile};
 use anvil_engine::ExecutionContext;
+use anvil_engine::prepare::Target;
 use serde::{Deserialize, Serialize};
 
 /// Why a plan cannot be load tested.
@@ -45,6 +52,13 @@ pub enum RefusalCode {
     MixedTunnels,
     /// gRPC with server reflection as the schema source.
     GrpcReflection,
+    /// A gRPC call the engine refuses before every send: gRPC-Web with
+    /// client or bidirectional streaming, or a wire, HTTP version, TLS and
+    /// proxy combination that cannot be sent.
+    GrpcUnsupportedCombination,
+    /// UDP or DTLS through a MASQUE proxy while a proxy profile routes the
+    /// request: the MASQUE proxy's QUIC connection cannot go through it.
+    MasqueThroughProxy,
     /// SSE with automatic reconnection enabled.
     SseReconnect,
     /// A mesh HBONE proxy with the persistent connection mode (HTTP, gRPC).
@@ -127,6 +141,20 @@ fn uses_dtls(ctx: &ExecutionContext) -> bool {
     url.trim().to_ascii_lowercase().starts_with("dtls://")
 }
 
+/// The request's resolved target and the proxy profile the engine's
+/// preparation routes it through (`NO_PROXY` applied), from a throwaway
+/// resolver. `None` when the URL does not resolve or parse: every send then
+/// fails on the URL itself.
+fn send_route<'a>(ctx: &'a ExecutionContext, schemes: &[&str]) -> Option<(Target, Option<&'a ProxyProfile>)> {
+    let url = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None).resolve(&ctx.spec.url, "url").ok()?;
+    let target = anvil_engine::prepare::parse_target(&url, schemes, &mut Vec::new()).ok()?;
+    let proxy = anvil_engine::settings::resolve(&ctx.settings_layers)
+        .proxy_profile_id
+        .and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id))
+        .filter(|p| !anvil_transport::net::no_proxy_matches(&p.no_proxy, &target.host, target.port));
+    Some((target, proxy))
+}
+
 /// Classify one request, or refuse it.
 pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) -> Result<StepUnit, Refusal> {
     let refuse = |code: RefusalCode, message: String| Err(Refusal { code, request_id: id, message });
@@ -168,6 +196,19 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
                     "gRPC load needs a local schema: with server reflection every call would first run a reflection RPC, so one unit would not be one call. Import the .proto files or a descriptor set".into(),
                 );
             }
+            // The engine's own pre-traffic check, with the inputs its
+            // preparation uses: a call it refuses fails every unit.
+            if let Some((target, proxy)) = send_route(ctx, &["grpcs", "grpc", "https", "http"]) {
+                let version = anvil_engine::settings::resolve(&ctx.settings_layers).http_version;
+                let tls = matches!(target.scheme.as_str(), "grpcs" | "https");
+                let refused = anvil_transport::grpc::unsupported_combination(g.wire, g.mode, false, version, tls, proxy.is_some());
+                if let Some((why, _)) = refused {
+                    return refuse(
+                        RefusalCode::GrpcUnsupportedCombination,
+                        format!("this gRPC call cannot be load tested because the engine refuses it before every send: {why}"),
+                    );
+                }
+            }
             if hbone_persistent {
                 return refuse(RefusalCode::HbonePersistent, hbone_msg("gRPC calls"));
             }
@@ -195,7 +236,17 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             // A MASQUE tunnel is part of the request; an HBONE one comes from
             // the selected proxy profile. Either way every exchange opens its
             // own tunnel, counted in the tunnel denominators.
-            let tunnel = if ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some()) {
+            let masque = ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some());
+            if masque && let Some((_, Some(p))) = send_route(ctx, &["udp", "dtls"]) {
+                return refuse(
+                    RefusalCode::MasqueThroughProxy,
+                    format!(
+                        "UDP through a MASQUE proxy cannot also go through the proxy profile '{}': the MASQUE proxy is reached over QUIC, which HTTP CONNECT, SOCKS5 and HBONE tunnels do not carry, so the engine would refuse every exchange. Clear the proxy selection for this request or add its target to the profile's NO_PROXY list",
+                        p.name
+                    ),
+                );
+            }
+            let tunnel = if masque {
                 Some(TunnelKind::ConnectUdp)
             } else if is_hbone(ctx) {
                 Some(TunnelKind::Hbone)

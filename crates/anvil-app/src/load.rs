@@ -277,15 +277,20 @@ impl App {
         let (unit, steps) = anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode)
             .map_err(|r| AppError::Invalid(format!("this plan cannot be load tested: {r}")))?;
         let mut destinations = Vec::new();
+        // Whether any host a unit's traffic reaches (a target or a tunnel's
+        // proxy) is off this machine; each host is judged on its own.
+        let mut leaves = false;
         for id in ids {
             let ctx = &job.requests[&id];
-            destinations.push(match ctx.spec.protocol {
+            let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
                     let preview = self.engine.preview(ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
-                    format!("{} {}", preview.method, url_origin(&preview.url))
+                    (format!("{} {}", preview.method, url_origin(&preview.url)), url_is_loopback(&preview.url))
                 }
                 other => session_destination(ctx, other),
-            });
+            };
+            leaves |= !local;
+            destinations.push(destination);
         }
         destinations.dedup();
         let (workload, max_duration_secs, peak_target) = describe(p);
@@ -293,7 +298,7 @@ impl App {
         if !p.trusted {
             warnings.push("This plan was imported and has not been reviewed; saving it marks it as yours.".into());
         }
-        if destinations.iter().any(|d| !d.contains("127.0.0.1") && !d.contains("localhost") && !d.contains("[::1]")) {
+        if leaves {
             warnings.push("Traffic leaves this machine. Only load-test systems you own or are authorized to test.".into());
         }
         if !anvil_load::protocol::connection_mode_applies(unit) {
@@ -382,11 +387,13 @@ fn validate_plan(p: &LoadPlan) -> Result<()> {
 }
 
 /// `WS ws://host:port`-style destination of a session request, from its URL
-/// with the context's variables resolved (nothing is sent).
-fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol) -> String {
-    let url = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None)
-        .resolve(&ctx.spec.url, "url")
-        .unwrap_or_else(|_| ctx.spec.url.clone());
+/// with the context's variables resolved (nothing is sent), and whether all
+/// of its traffic stays on this machine: the target and a datagram tunnel's
+/// proxy are judged separately, so either one off this machine counts.
+fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol) -> (String, bool) {
+    let r = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None);
+    let resolve = |raw: &str, field: &str| r.resolve(raw, field).unwrap_or_else(|_| raw.to_string());
+    let url = resolve(&ctx.spec.url, "url");
     let label = match protocol {
         Protocol::WebSocket => "WebSocket",
         Protocol::Grpc => "gRPC",
@@ -396,9 +403,12 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
         Protocol::Http => "HTTP",
     };
     let mut d = format!("{label} {}", url_origin(&url));
+    let mut local = url_is_loopback(&url);
     // A datagram tunnel sends every exchange's traffic to the proxy first.
     if let Some(m) = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| protocol == Protocol::Udp) {
-        d.push_str(&format!(" via MASQUE proxy {}", url_origin(&m.proxy_url)));
+        let proxy_url = resolve(&m.proxy_url, "udp.masque.proxy_url");
+        d.push_str(&format!(" via MASQUE proxy {}", url_origin(&proxy_url)));
+        local &= url_is_loopback(&proxy_url);
     } else if protocol == Protocol::Udp
         && let Some(proxy) = anvil_engine::settings::resolve(&ctx.settings_layers)
             .proxy_profile_id
@@ -406,8 +416,32 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
             .filter(|p| p.kind == anvil_domain::tls::ProxyKind::Hbone)
     {
         d.push_str(&format!(" via HBONE proxy {}", proxy.address));
+        local &= address_is_loopback(&proxy.address);
     }
-    d
+    (d, local)
+}
+
+/// Whether `url`'s host is this machine: a loopback address or `localhost`.
+/// A URL that does not parse is not (the preflight keeps its warning).
+fn url_is_loopback(url: &str) -> bool {
+    url::Url::parse(url.trim()).is_ok_and(|u| u.host_str().is_some_and(host_is_loopback))
+}
+
+/// [`url_is_loopback`] for a proxy profile's `host:port` address.
+fn address_is_loopback(address: &str) -> bool {
+    url_is_loopback(&format!("http://{}", address.trim()))
+}
+
+/// A host as a URL carries it: an IP literal (IPv6 in brackets) or a name.
+/// Only the whole host is compared, so `localhost.example.com` or an
+/// address merely containing `127.0.0.1` is not this machine.
+fn host_is_loopback(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    match h.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
+        Ok(std::net::IpAddr::V6(a)) => a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
+        Err(_) => h.strip_suffix('.').unwrap_or(h).eq_ignore_ascii_case("localhost"),
+    }
 }
 
 fn url_origin(url: &str) -> String {

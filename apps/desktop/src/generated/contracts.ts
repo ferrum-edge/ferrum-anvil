@@ -3963,6 +3963,12 @@ export interface TunnelLoadMetrics {
    * A deadline elapsed during setup.
    */
   timed_out: number;
+  /**
+   * The exchange was canceled during setup (the run stopped). Every
+   * attempted tunnel is exactly one of established, refused, failed,
+   * timed out or canceled.
+   */
+  canceled: number;
   setup: LatencySummary8;
 }
 /**

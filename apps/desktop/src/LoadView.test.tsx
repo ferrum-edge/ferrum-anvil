@@ -165,16 +165,24 @@ describe("ProtocolPanel", () => {
 
   it("counts one tunnel per exchange and keeps refusals as the proxy's answer", () => {
     const p = udp(false);
-    p.datagram!.tunnels = { kind: "connect_udp", attempted: 8, established: 6, refused: 2, failed: 0, timed_out: 0, setup: some };
-    render(<ProtocolPanel p={p} requests={units({ started: 8, completed: 6, transport_failures: 2 })} />);
+    p.datagram!.tunnels = { kind: "connect_udp", attempted: 9, established: 6, refused: 2, failed: 0, timed_out: 0, canceled: 1, setup: some };
+    render(<ProtocolPanel p={p} requests={units({ started: 9, completed: 6, transport_failures: 2, canceled: 1 })} />);
     const t = screen.getByTestId("datagram-summary").textContent ?? "";
-    expect(t).toContain("MASQUE (CONNECT-UDP) tunnels attempted (one per exchange)8");
-    expect(t).toContain("Established / refused by the proxy / failed / timed out6 / 2 / 0 / 0");
+    expect(t).toContain("MASQUE (CONNECT-UDP) tunnels attempted (one per exchange)9");
+    expect(t).toContain("Established / refused by the proxy / failed / timed out / canceled6 / 2 / 0 / 0 / 1");
     expect(screen.getByText(/Tunnel setup \(established\)/)).toBeTruthy();
     expect(screen.getByText(/a refused tunnel is the proxy's answer, not a claim about the target/)).toBeTruthy();
     cleanup();
     render(<ProtocolCards p={p} />);
     expect(screen.getByTestId("protocol-cards").textContent).toContain("2 refused by the proxy");
+    cleanup();
+    // Tunnels canceled when the run stopped are counted, and are not failures.
+    const stopped = udp(false);
+    stopped.datagram!.tunnels = { kind: "hbone", attempted: 5, established: 3, refused: 0, failed: 0, timed_out: 0, canceled: 2, setup: some };
+    render(<ProtocolCards p={stopped} />);
+    const cards = screen.getByTestId("protocol-cards");
+    expect(cards.textContent).toContain("2 canceled when the run stopped");
+    expect(cards.querySelector(".bad")).toBeNull();
   });
 
   it("live cards call received datagrams a separate count, not deliveries", () => {
