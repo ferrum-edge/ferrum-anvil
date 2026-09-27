@@ -154,10 +154,10 @@ impl App {
             return Ok(LoadPlanCheck { unit: None, unit_label: None, semantics: None, refusal: None, protocols });
         }
         Ok(match anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode) {
-            Ok((unit, _)) => LoadPlanCheck {
+            Ok((unit, steps)) => LoadPlanCheck {
                 unit: Some(unit),
                 unit_label: Some(anvil_load::protocol::label(unit).into()),
-                semantics: Some(anvil_load::protocol::semantics(unit, p.connection_mode)),
+                semantics: Some(anvil_load::protocol::plan_semantics(unit, p.connection_mode, &steps)),
                 refusal: None,
                 protocols,
             },
@@ -170,7 +170,7 @@ impl App {
         let job = self.load_job(p)?;
         let ids = Self::plan_requests(p);
         // Refused combinations stop here, before the user can start traffic.
-        let (unit, _) = anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode)
+        let (unit, steps) = anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode)
             .map_err(|r| AppError::Invalid(format!("this plan cannot be load tested: {r}")))?;
         let mut destinations = Vec::new();
         for id in ids {
@@ -208,7 +208,7 @@ impl App {
             warnings,
             unit,
             unit_label: anvil_load::protocol::label(unit).into(),
-            semantics: anvil_load::protocol::semantics(unit, p.connection_mode),
+            semantics: anvil_load::protocol::plan_semantics(unit, p.connection_mode, &steps),
         })
     }
 
@@ -283,7 +283,19 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
         Protocol::Udp => "UDP",
         Protocol::Http => "HTTP",
     };
-    format!("{label} {}", url_origin(&url))
+    let mut d = format!("{label} {}", url_origin(&url));
+    // A datagram tunnel sends every exchange's traffic to the proxy first.
+    if let Some(m) = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| protocol == Protocol::Udp) {
+        d.push_str(&format!(" via MASQUE proxy {}", url_origin(&m.proxy_url)));
+    } else if protocol == Protocol::Udp
+        && let Some(proxy) = anvil_engine::settings::resolve(&ctx.settings_layers)
+            .proxy_profile_id
+            .and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id))
+            .filter(|p| p.kind == anvil_domain::tls::ProxyKind::Hbone)
+    {
+        d.push_str(&format!(" via HBONE proxy {}", proxy.address));
+    }
+    d
 }
 
 fn url_origin(url: &str) -> String {

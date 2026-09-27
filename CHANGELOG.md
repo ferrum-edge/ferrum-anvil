@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Load testing covers every gRPC call mode: client-streaming and
+  bidirectional calls are load units of their own (`grpc_client_stream`,
+  `grpc_bidi_stream`). Each unit is one call: the request's scripted
+  messages, a half-close, and reading until the terminal status, on the same
+  pooled channels as unary calls. Reports add the messages sent to the gRPC
+  and stream counts; no round trip is claimed.
+- Load testing covers UDP and DTLS through a MASQUE (CONNECT-UDP) proxy or a
+  mesh HBONE datagram tunnel. Every exchange opens its own tunnel, and the
+  report counts them (attempted, established, refused by the proxy, failed,
+  timed out) with the tunnel setup time. An exchange whose tunnel did not
+  open is incomplete, never "no response observed". The preflight names the
+  proxy the traffic goes to, and runs over different datagram paths are not
+  compared. A plan that mixes direct and tunneled exchanges, or two kinds of
+  tunnel, is refused (`mixed_tunnels`).
+
 ### Changed
 
 - Encrypted-transfer bundles now use bundle format 2: the encrypted vault is

@@ -1,23 +1,27 @@
 //! Per-protocol load units (LOAD-013) against real loopback fixtures: HTTP/3
-//! (forced and automatic fallback), unary and server-streaming gRPC (native
-//! over HTTP/2 and HTTP/3, gRPC-Web over HTTP/1.1), SSE, WebSocket, TCP
-//! framed exchanges and DTLS. UDP datagram accounting (LOAD-013 itself) is in
-//! `load_scenarios.rs`. Every report must balance its unit ledger and its
+//! (forced and automatic fallback), gRPC in all four call modes (native over
+//! HTTP/2 and HTTP/3, gRPC-Web over HTTP/1.1), SSE, WebSocket, TCP framed
+//! exchanges, DTLS, and UDP/DTLS through MASQUE and HBONE tunnels. UDP
+//! datagram accounting (LOAD-013 itself) is in `load_scenarios.rs`. Every report must balance its unit ledger and its
 //! protocol denominators, reopen with a verified integrity hash and render
 //! offline. Fixture ground truth confirms what actually reached the server.
 
 use anvil_domain::Id;
+use anvil_domain::execution::TunnelKind;
 use anvil_domain::load::*;
 use anvil_domain::outcome::ClosedBy;
 use anvil_domain::request::*;
+use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{HttpVersionPolicy, ProxySelection, SettingsOverrides, TimeoutOverrides};
-use anvil_domain::tls::{ProxyKind, ProxyProfile, TlsMinVersion, TlsProfile};
+use anvil_domain::tls::{ClientIdentity, HboneMarker, ProxyKind, ProxyProfile, ServerSpiffeIdentity, TlsMinVersion, TlsProfile};
 use anvil_engine::ExecutionContext;
 use anvil_engine::context::MemoryAttachments;
 use anvil_fixtures::dtls::{self as fxdtls, DtlsServerOptions};
+use anvil_fixtures::hbone::{self, HboneFixture};
 use anvil_fixtures::http as fx;
-use anvil_fixtures::streams::{self, TcpMode};
-use anvil_fixtures::{GroundTruth, GroundTruthLog, LabPki, TlsServerOptions, h3server};
+use anvil_fixtures::mesh_pki::{self, MeshPki};
+use anvil_fixtures::streams::{self, TcpMode, UdpMode};
+use anvil_fixtures::{ClientAuth, GroundTruth, GroundTruthLog, LabPki, TlsServerOptions, h3server};
 #[cfg(unix)]
 use anvil_load::LoadController;
 use anvil_load::report::{check_balance, check_protocol_balance, check_request_balance};
@@ -26,7 +30,6 @@ use bytes::Bytes;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-#[cfg(unix)]
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -352,6 +355,74 @@ async fn load_grpc_server_streams_count_messages_and_deadlines() {
     assert!(anvil_load::html::to_html(&r).contains("<div class=\"value\">—</div>"), "no successful stream → no percentile");
 }
 
+/// Client-streaming and bidirectional calls run the automation path: the
+/// scripted messages, a half-close, then reading until the terminal status.
+/// One call is one unit, on the same pooled channels as unary calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_grpc_client_and_bidi_streams_are_one_unit_per_call_on_pooled_channels() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let url = format!("grpc://{}", f.addr);
+    let scripted = |method: &str, mode: GrpcMode, last: &str| {
+        let mut c = grpc_ctx(&url, method, mode, r#"{"message":"a"}"#, GrpcWire::Grpc);
+        c.spec.grpc.as_mut().unwrap().messages = vec![r#"{"message":"a"}"#.into(), r#"{"message":"b"}"#.into(), last.into()];
+        c
+    };
+
+    // Client streaming: three messages in, one reply out. Dataset rows make
+    // every other call end with PERMISSION_DENIED (no reply message).
+    let data = Dataset::parse(DatasetFormat::Csv, b"fail\n0\n7\n".to_vec()).unwrap();
+    for (mode, conns) in [(ConnectionMode::Persistent, 1usize..=3), (ConnectionMode::Fresh, 12..=12)] {
+        f.log.clear();
+        let id = Id::new();
+        let mut p = plan(iterations(12, 3), vec![id], mode);
+        p.dataset_id = Some(Id::new());
+        let c = scripted("ClientStream", GrpcMode::ClientStreaming, r#"{"message":"c{{anvil.iteration}}","failWith":{{fail}}}"#);
+        let r = run(p, vec![(id, c)], Some(data.clone())).await;
+        let pm = proto(&r);
+        assert_eq!(pm.unit, LoadUnitKind::GrpcClientStream);
+        assert_eq!(pm.semantics.unit_plural, "calls");
+        let (g, s) = (pm.grpc.clone().unwrap(), pm.stream.clone().unwrap());
+        assert_eq!(g.status_codes, vec![(0, 6), (7, 6)], "{:?}", r.failure_categories);
+        assert_eq!((r.requests.completed, r.requests.application_failures), (12, 6));
+        assert_eq!(s.messages_sent, Some(36), "three scripted messages per call; the half-close is not a message");
+        assert_eq!((s.opened, s.messages_received, s.with_messages), (12, 6, 6), "a reply only on OK calls");
+        assert_eq!(r.latency_success.count, 6);
+        assert_eq!(requests_to(&f.log, "/anvil.lab.v1.Echo/ClientStream"), 12, "every call reached the fixture once");
+        let accepted = accepted(&f.log);
+        assert!(conns.contains(&accepted), "{mode:?}: {accepted} connections");
+        assert_eq!(r.requests.connections_opened as usize, accepted, "channel evidence matches ground truth");
+    }
+
+    // Bidirectional: the fixture echoes every message, then ends with OK.
+    f.log.clear();
+    let id = Id::new();
+    let c = scripted("Bidi", GrpcMode::Bidirectional, r#"{"message":"c"}"#);
+    let r = run_one(plan(iterations(10, 2), vec![id], ConnectionMode::Persistent), c).await;
+    let pm = proto(&r);
+    assert_eq!(pm.unit, LoadUnitKind::GrpcBidiStream);
+    let (g, s) = (pm.grpc.clone().unwrap(), pm.stream.clone().unwrap());
+    assert_eq!((g.ok, g.non_ok, g.missing_status), (10, 0, 0), "{:?}", r.failure_categories);
+    assert_eq!((s.messages_sent, s.messages_received, s.with_messages), (Some(30), 30, 10));
+    assert_eq!(s.time_to_first_message.count, 10);
+    assert!(pm.semantics.latency_means.contains("no round trip is claimed"));
+    assert!((1..=2).contains(&accepted(&f.log)), "one pooled channel per virtual user");
+    let csv = anvil_load::report::summary_csv(&r);
+    assert!(csv.contains("stream,messages_sent,30"), "{csv}");
+    assert!(anvil_load::html::to_html(&r).contains("Messages sent (scripted, before the half-close)"));
+
+    // A client stream still sending when its gRPC deadline elapses is a
+    // censored timeout with an unknown status, as for server streams.
+    let mut c = scripted("Bidi", GrpcMode::Bidirectional, r#"{"message":"c"}"#);
+    c.spec.grpc.as_mut().unwrap().messages = vec![r#"{"message":"x"}"#.into(); 2_000];
+    c.spec.grpc.as_mut().unwrap().deadline_ms = Some(1);
+    let id = Id::new();
+    let r = run_one(plan(iterations(3, 1), vec![id], ConnectionMode::Persistent), c).await;
+    let g = proto(&r).grpc.clone().unwrap();
+    assert_eq!(r.latency_success.count, 0);
+    assert_eq!(g.ok, 0, "{g:?}");
+}
+
 // -------------------------------------------------------------------- SSE
 
 fn sse_ctx(url: &str, max_events: u32) -> ExecutionContext {
@@ -542,6 +613,217 @@ async fn load_dtls_handshakes_are_measured_as_their_own_phase() {
     assert_eq!(r.latency_success.count, 5, "time to first response of every responding exchange");
 }
 
+// ------------------------------------------------- datagram tunnels
+
+fn mesh() -> &'static MeshPki {
+    static P: OnceLock<MeshPki> = OnceLock::new();
+    P.get_or_init(MeshPki::generate)
+}
+
+async fn hbone_endpoint(allowed: Vec<String>) -> HboneFixture {
+    hbone::serve(
+        "127.0.0.1:0",
+        hbone::HboneOptions {
+            server_cert_chain_pem: mesh().ztunnel.chain_with(&mesh().ca),
+            server_key_pem: mesh().ztunnel.key.clone(),
+            client_auth: ClientAuth::Required { ca_pem: mesh().ca.cert.clone() },
+            alpn: vec!["h2".into()],
+            allowed,
+            unavailable: vec![],
+            udp_faults: vec![],
+        },
+    )
+    .await
+    .unwrap()
+}
+
+fn udp_spec(dtls: bool, datagrams: &[&str], window_ms: u64) -> UdpSpec {
+    UdpSpec {
+        dtls,
+        datagrams: datagrams.iter().map(|d| StreamPayload { data: d.to_string(), encoding: PayloadEncoding::Text }).collect(),
+        response_window_ms: window_ms,
+        max_datagrams: datagrams.len() as u32,
+        masque: None,
+        proxy_protocol: None,
+    }
+}
+
+/// `url` through the HBONE endpoint: the proxy profile carries the mesh
+/// client SVID and verifies the endpoint by SPIFFE ID.
+fn via_hbone_endpoint(url: &str, udp: UdpSpec, ep: &HboneFixture) -> ExecutionContext {
+    let mut c = ctx(Protocol::Udp, url);
+    c.spec.udp = Some(udp);
+    let svid = TlsProfile {
+        id: Id::new(),
+        workspace_id: Id::new(),
+        name: "mesh SVID".into(),
+        verify: true,
+        use_system_roots: false,
+        extra_roots_pem: vec![mesh().ca.cert.clone()],
+        client_identity: Some(ClientIdentity::Pem {
+            cert_chain_pem: mesh().client.chain_with(&mesh().ca),
+            private_key_pem: SensitiveValue::template(mesh().client.key.clone()),
+        }),
+        bindings: vec![],
+        min_version: Default::default(),
+        server_name_override: None,
+        server_spiffe: Some(ServerSpiffeIdentity {
+            expected_server_spiffe_id: Some(mesh_pki::ZTUNNEL_SPIFFE_ID.into()),
+            trust_domain: None,
+        }),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let pid = Id::new();
+    c.proxy_profiles.push(ProxyProfile {
+        id: pid,
+        workspace_id: Id::new(),
+        name: "mesh".into(),
+        kind: ProxyKind::Hbone,
+        address: ep.address(),
+        username: None,
+        password: None,
+        no_proxy: String::new(),
+        tls_profile_id: Some(svid.id),
+        hbone: Some(anvil_domain::tls::HboneOptions { marker: HboneMarker::None, baggage: None, extra_headers: vec![] }),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    });
+    c.tls_profiles.push(svid);
+    layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
+    c
+}
+
+fn tunnels(r: &LoadReport) -> TunnelLoadMetrics {
+    proto(r).datagram.as_ref().and_then(|d| d.tunnels.clone()).expect("tunnel denominators")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_udp_and_dtls_through_hbone_open_one_counted_tunnel_per_exchange() {
+    let _g = serial().await;
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let ep = hbone_endpoint(vec![echo.addr.to_string()]).await;
+    let c = via_hbone_endpoint(&format!("udp://{}", echo.addr), udp_spec(false, &["one", "two"], 400), &ep);
+    let id = Id::new();
+    // Persistent mode is accepted: datagram exchanges never pool, tunnels included.
+    let r = run_one(plan(iterations(8, 2), vec![id], ConnectionMode::Persistent), c).await;
+    let p = proto(&r);
+    assert_eq!(p.unit, LoadUnitKind::UdpExchange);
+    assert!(p.semantics.connection_mode_means.contains("its own HBONE datagram tunnel"), "{}", p.semantics.connection_mode_means);
+    let d = p.datagram.clone().unwrap();
+    assert_eq!((d.datagrams_sent, d.datagrams_received, d.exchanges_with_response), (16, 16, 8), "{:?}", r.failure_categories);
+    let t = tunnels(&r);
+    assert_eq!(t.kind, TunnelKind::Hbone);
+    assert_eq!((t.attempted, t.established, t.refused, t.failed, t.timed_out, t.setup.count), (8, 8, 0, 0, 0, 8));
+    assert!(t.setup.min_us > 0, "an mTLS handshake and a CONNECT take time");
+    assert_eq!(r.latency_success.count, 8, "time to first response, without the tunnel setup");
+    let mut ends = 0;
+    for _ in 0..40 {
+        ends = ep.log.udp_tunnel_ends.lock().len();
+        if ends >= 8 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(ends, 8, "ground truth: one tunnel per exchange");
+    let html = anvil_load::html::to_html(&r);
+    assert!(html.contains("HBONE tunnels attempted (one per exchange)") && html.contains("Tunnel setup (established)"));
+    assert!(anvil_load::report::summary_csv(&r).contains("tunnel,established,8"));
+
+    // The endpoint refuses the destination: the proxy's answer, counted as a
+    // refused tunnel, and nothing reaches the target.
+    echo.log.clear();
+    let ep = hbone_endpoint(vec![]).await;
+    let c = via_hbone_endpoint(&format!("udp://{}", echo.addr), udp_spec(false, &["never"], 200), &ep);
+    let id = Id::new();
+    let r = run_one(plan(iterations(4, 1), vec![id], ConnectionMode::Fresh), c).await;
+    let t = tunnels(&r);
+    assert_eq!((t.attempted, t.established, t.refused, t.setup.count), (4, 0, 4, 0), "{:?}", r.failure_categories);
+    assert_eq!(r.requests.completed, 0, "an exchange never completes without its tunnel");
+    assert_eq!(proto(&r).datagram.as_ref().unwrap().datagrams_sent, 0);
+    assert!(echo.log.entries().is_empty(), "nothing reached the target");
+
+    // DTLS inside the tunnel: tunnels and DTLS handshakes are both counted.
+    let dtls = fxdtls::serve(
+        "127.0.0.1:0",
+        DtlsServerOptions { cert_pem: pki().server.cert.clone(), key_pem: pki().server.key.clone(), client_ca_pem: None },
+    )
+    .await
+    .unwrap();
+    let ep = hbone_endpoint(vec![dtls.addr.to_string()]).await;
+    let mut c = via_hbone_endpoint(&dtls.url(), udp_spec(true, &["secure"], 300), &ep);
+    lab_trust(&mut c);
+    let id = Id::new();
+    let r = run_one(plan(iterations(4, 1), vec![id], ConnectionMode::Fresh), c).await;
+    let p = proto(&r);
+    assert_eq!(p.unit, LoadUnitKind::DtlsExchange);
+    let d = p.datagram.clone().unwrap();
+    let h = d.dtls_handshakes.clone().unwrap();
+    assert_eq!((h.attempted, h.completed), (4, 4), "{:?}", r.failure_categories);
+    let t = tunnels(&r);
+    assert_eq!((t.kind, t.attempted, t.established), (TunnelKind::Hbone, 4, 4));
+    assert_eq!(dtls.completed_handshakes().len(), 4, "ground truth: four handshakes through the tunnel");
+    assert_eq!(d.exchanges_with_response, 4);
+}
+
+fn via_masque(target: &str, proxy: std::net::SocketAddr, template: Option<&str>, datagrams: &[&str]) -> ExecutionContext {
+    let mut c = ctx(Protocol::Udp, target);
+    let mut u = udp_spec(false, datagrams, 400);
+    u.masque = Some(MasqueSpec {
+        proxy_url: format!("https://127.0.0.1:{}", proxy.port()),
+        uri_template: template.unwrap_or(MASQUE_DEFAULT_TEMPLATE).into(),
+        datagrams: Default::default(),
+    });
+    c.spec.udp = Some(u);
+    lab_trust(&mut c);
+    c
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_udp_through_masque_counts_tunnels_and_proxy_refusals() {
+    let _g = serial().await;
+    let proxy = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let c = via_masque(&format!("udp://{}", echo.addr), proxy.addr, None, &["one", "two"]);
+    let id = Id::new();
+    let r = run_one(plan(iterations(6, 2), vec![id], ConnectionMode::Fresh), c).await;
+    let p = proto(&r);
+    assert_eq!(p.unit, LoadUnitKind::UdpExchange);
+    let d = p.datagram.clone().unwrap();
+    assert_eq!((d.datagrams_sent, d.datagrams_received, d.exchanges_with_response), (12, 12, 6), "{:?}", r.failure_categories);
+    let t = tunnels(&r);
+    assert_eq!(t.kind, TunnelKind::ConnectUdp);
+    assert_eq!((t.attempted, t.established, t.refused, t.failed, t.setup.count), (6, 6, 0, 0, 6));
+    assert!(t.setup.min_us > 0);
+    assert_eq!(proxy.connections(), 6, "ground truth: one QUIC connection to the proxy per exchange");
+    assert!(p.semantics.connection_mode_means.contains("MASQUE"), "{}", p.semantics.connection_mode_means);
+
+    echo.log.clear();
+    let c = via_masque(
+        &format!("udp://{}", echo.addr),
+        proxy.addr,
+        Some("/.well-known/masque/udp/{target_host}/{target_port}/?refuse=403"),
+        &["never"],
+    );
+    let id = Id::new();
+    let r = run_one(plan(iterations(3, 1), vec![id], ConnectionMode::Fresh), c).await;
+    let t = tunnels(&r);
+    assert_eq!((t.attempted, t.established, t.refused), (3, 0, 3), "{:?}", r.failure_categories);
+    // The engine records the proxy's 403 as a complete answer; the exchange
+    // itself never ran, so it is incomplete and never "no response observed".
+    assert_eq!((r.requests.completed, r.requests.transport_failures), (0, 3));
+    assert_eq!(proto(&r).datagram.as_ref().unwrap().exchanges_silent, 0);
+    assert!(r.status_distribution.is_empty(), "the proxy's status is tunnel evidence: {:?}", r.status_distribution);
+    assert!(
+        r.failure_categories
+            .iter()
+            .any(|c| c.category.starts_with("transport_failure") && c.examples.iter().any(|e| e.contains("MASQUE proxy refused"))),
+        "{:?}",
+        r.failure_categories
+    );
+    assert!(echo.log.entries().is_empty(), "nothing reached the target");
+}
+
 // ---------------------------------------------------- refusals and policy
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -584,12 +866,6 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
     };
     let cases: Vec<(RefusalCode, ExecutionContext, ConnectionMode)> = vec![
         (
-            RefusalCode::GrpcClientStreaming,
-            grpc_ctx(&url, "ClientStream", GrpcMode::ClientStreaming, "{}", GrpcWire::Grpc),
-            ConnectionMode::Persistent,
-        ),
-        (RefusalCode::GrpcBidirectional, grpc_ctx(&url, "Bidi", GrpcMode::Bidirectional, "{}", GrpcWire::Grpc), ConnectionMode::Persistent),
-        (
             RefusalCode::GrpcReflection,
             {
                 let mut c = grpc_ctx(&url, "Unary", GrpcMode::Unary, "{}", GrpcWire::Grpc);
@@ -606,26 +882,6 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
                 c
             },
             ConnectionMode::Persistent,
-        ),
-        (
-            RefusalCode::UdpMasque,
-            {
-                let mut c = ctx(Protocol::Udp, "udp://127.0.0.1:9");
-                c.spec.udp = Some(UdpSpec {
-                    dtls: false,
-                    datagrams: vec![],
-                    response_window_ms: 100,
-                    max_datagrams: 1,
-                    masque: Some(MasqueSpec {
-                        proxy_url: "https://127.0.0.1:9".into(),
-                        uri_template: MASQUE_DEFAULT_TEMPLATE.into(),
-                        datagrams: Default::default(),
-                    }),
-                    proxy_protocol: None,
-                });
-                c
-            },
-            ConnectionMode::Fresh,
         ),
         (
             RefusalCode::HbonePersistent,
@@ -651,10 +907,6 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
             },
             ConnectionMode::Persistent,
         ),
-        (RefusalCode::UdpHbone, via_hbone("udp://127.0.0.1:9"), ConnectionMode::Fresh),
-        // DTLS through HBONE is refused the same way: its handshake would run
-        // in a fresh tunnel per exchange.
-        (RefusalCode::UdpHbone, via_hbone("dtls://127.0.0.1:9"), ConnectionMode::Fresh),
     ];
     for (code, c, mode) in cases {
         let (p, reqs) = one(c, mode);
@@ -662,9 +914,43 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
         assert_eq!(r.code, code, "{}", r.message);
         assert!(r.to_string().contains("LOAD-013"));
     }
-    let (p, reqs) = one(via_hbone("dtls://127.0.0.1:9"), ConnectionMode::Fresh);
-    let r = refused(p, reqs);
-    assert!(r.message.starts_with("DTLS through an HBONE tunnel"), "{}", r.message);
+    // Datagram exchanges take one path: direct and tunneled, or two kinds of
+    // tunnel, would give tunnel counts that cover only part of the units.
+    let masque = || {
+        let mut c = ctx(Protocol::Udp, "udp://127.0.0.1:9");
+        c.spec.udp = Some(UdpSpec {
+            masque: Some(MasqueSpec {
+                proxy_url: "https://127.0.0.1:9".into(),
+                uri_template: MASQUE_DEFAULT_TEMPLATE.into(),
+                datagrams: Default::default(),
+            }),
+            ..udp_spec(false, &["x"], 100)
+        });
+        c
+    };
+    let direct = || {
+        let mut c = ctx(Protocol::Udp, "udp://127.0.0.1:9");
+        c.spec.udp = Some(udp_spec(false, &["x"], 100));
+        c
+    };
+    for (a, b, text) in [
+        (direct(), masque(), "direct datagrams with a MASQUE (CONNECT-UDP) tunnel"),
+        (masque(), via_hbone("udp://127.0.0.1:9"), "a MASQUE (CONNECT-UDP) tunnel with an HBONE datagram tunnel"),
+    ] {
+        let (x, y) = (Id::new(), Id::new());
+        let r = refused(plan(iterations(1, 1), vec![x, y], ConnectionMode::Fresh), vec![(x, a), (y, b)]);
+        assert_eq!(r.code, RefusalCode::MixedTunnels);
+        assert_eq!(r.request_id, Some(y));
+        assert!(r.message.contains(text), "{}", r.message);
+    }
+    // A single tunneled request is accepted, in either connection mode.
+    for mode in [ConnectionMode::Fresh, ConnectionMode::Persistent] {
+        for c in [masque(), via_hbone("udp://127.0.0.1:9"), via_hbone("dtls://127.0.0.1:9")] {
+            let (p, reqs) = one(c, mode);
+            let job = LoadJob { requests: reqs.into_iter().collect(), dataset: None };
+            assert!(LoadRun::prepare(p, job, opts()).is_ok());
+        }
+    }
     // One plan, one unit kind: mixing HTTP requests with WebSocket sessions is refused.
     let (a, b) = (Id::new(), Id::new());
     let r = refused(
@@ -687,6 +973,8 @@ fn protocol_jobs(http: &fx::Fixture, tcp: std::net::SocketAddr) -> Vec<(LoadUnit
             LoadUnitKind::GrpcStream,
             grpc_ctx(&grpc, "ServerStream", GrpcMode::ServerStreaming, r#"{"message":"w","count":3}"#, GrpcWire::Grpc),
         ),
+        (LoadUnitKind::GrpcClientStream, grpc_ctx(&grpc, "ClientStream", GrpcMode::ClientStreaming, r#"{"message":"w"}"#, GrpcWire::Grpc)),
+        (LoadUnitKind::GrpcBidiStream, grpc_ctx(&grpc, "Bidi", GrpcMode::Bidirectional, r#"{"message":"w"}"#, GrpcWire::Grpc)),
         (LoadUnitKind::SseStream, sse_ctx(&http.url("/sse?count=3&interval=10"), 0)),
         (LoadUnitKind::WebsocketSession, ws_ctx(&format!("ws://{}/ws", http.addr), &["a"], 1, 1_000)),
         (LoadUnitKind::TcpExchange, tcp_ctx(tcp, TcpFraming::NewlineDelimited, &["hi"], 1, false)),

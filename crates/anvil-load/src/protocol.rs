@@ -2,28 +2,32 @@
 //!
 //! Every plan step is one `Engine::execute` call — the same preparation,
 //! auth, TLS, proxy and DNS path as a manual Send — and produces one *unit*
-//! of the plan's [`LoadUnitKind`]: an HTTP request, a unary gRPC call, a
-//! server-streaming gRPC call, an SSE stream, a WebSocket session, a TCP
-//! exchange or a UDP/DTLS exchange. A plan has exactly one unit kind, so
+//! of the plan's [`LoadUnitKind`]: an HTTP request, a unary,
+//! server-streaming, client-streaming or bidirectional gRPC call, an SSE
+//! stream, a WebSocket session, a TCP exchange or a UDP/DTLS exchange. A plan has exactly one unit kind, so
 //! every count and latency in its report has a single denominator.
+//!
+//! Client-streaming and bidirectional gRPC calls are units of their own: a
+//! load run uses the automation path, which sends the request's scripted
+//! messages, half-closes and reads until the terminal status, so the call
+//! has one defined completion. UDP and DTLS exchanges through a MASQUE or
+//! HBONE proxy open one tunnel per exchange, counted in the datagram block's
+//! tunnel denominators.
 //!
 //! Combinations without a defined unit are refused with a typed
 //! [`Refusal`] before any traffic — never emulated:
 //! * mixed unit kinds in one chain or mix;
-//! * client-streaming and bidirectional gRPC (long-lived two-way streams
-//!   have no single completion or message denominator yet);
+//! * datagram exchanges that mix direct sends and tunnels, or two kinds of
+//!   tunnel (the tunnel denominators would cover only part of the units);
 //! * gRPC with server reflection as the schema source (every call would
 //!   first run a reflection RPC, so a unit would not be one call);
 //! * SSE with automatic reconnection (one unit would become several
 //!   connections with server-chosen delays);
-//! * UDP or DTLS through a MASQUE proxy (a QUIC connection and CONNECT-UDP
-//!   tunnel per exchange, with no tunnel reuse or tunnel denominators);
-//! * UDP or DTLS through a mesh HBONE proxy (an mTLS connection and datagram
-//!   tunnel per exchange, likewise);
 //! * a mesh HBONE proxy with persistent connections for HTTP and gRPC
 //!   (tunnels are never pooled, so the mode could not be honoured).
 
 use anvil_domain::Id;
+use anvil_domain::execution::TunnelKind;
 use anvil_domain::load::{ConnectionMode, LoadUnitKind, UnitSemantics};
 use anvil_domain::request::{Body, GrpcMode, GrpcSchemaSource, Protocol, TcpFraming};
 use anvil_domain::tls::ProxyKind;
@@ -36,16 +40,13 @@ use serde::{Deserialize, Serialize};
 pub enum RefusalCode {
     /// The chain or mix produces more than one unit kind.
     MixedUnitKinds,
-    GrpcClientStreaming,
-    GrpcBidirectional,
+    /// Datagram exchanges that mix direct sends with tunnels, or a MASQUE
+    /// tunnel with an HBONE tunnel.
+    MixedTunnels,
     /// gRPC with server reflection as the schema source.
     GrpcReflection,
     /// SSE with automatic reconnection enabled.
     SseReconnect,
-    /// UDP through a MASQUE (CONNECT-UDP) proxy.
-    UdpMasque,
-    /// UDP or DTLS through a mesh HBONE datagram tunnel.
-    UdpHbone,
     /// A mesh HBONE proxy with the persistent connection mode (HTTP, gRPC).
     HbonePersistent,
     /// The request enables 0-RTT early data.
@@ -83,11 +84,14 @@ pub struct StepUnit {
     /// HTTP: the request is SOAP or GraphQL, whose application outcome is
     /// read from the response body (a fault or error arrives with a 2xx).
     pub application_from_body: bool,
+    /// UDP/DTLS: the tunnel every exchange opens (MASQUE CONNECT-UDP or
+    /// mesh HBONE); `None` for direct datagrams and other protocols.
+    pub tunnel: Option<TunnelKind>,
 }
 
 impl StepUnit {
     fn of(kind: LoadUnitKind) -> Self {
-        StepUnit { kind, tcp_expect_frames: None, ws_expect_messages: 0, application_from_body: false }
+        StepUnit { kind, tcp_expect_frames: None, ws_expect_messages: 0, application_from_body: false, tunnel: None }
     }
 }
 
@@ -97,6 +101,8 @@ pub fn label(kind: LoadUnitKind) -> &'static str {
         LoadUnitKind::HttpRequest => "HTTP requests",
         LoadUnitKind::GrpcCall => "unary gRPC calls",
         LoadUnitKind::GrpcStream => "server-streaming gRPC streams",
+        LoadUnitKind::GrpcClientStream => "client-streaming gRPC calls",
+        LoadUnitKind::GrpcBidiStream => "bidirectional gRPC streams",
         LoadUnitKind::SseStream => "SSE streams",
         LoadUnitKind::WebsocketSession => "WebSocket sessions",
         LoadUnitKind::TcpExchange => "TCP/TLS exchanges",
@@ -152,22 +158,10 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
                 // The engine refuses this per send; a load run has no unit for it.
                 return refuse(RefusalCode::IncompleteRequest, "the gRPC request has no service, method or schema".into());
             };
-            let kind = match g.mode {
-                GrpcMode::Unary => LoadUnitKind::GrpcCall,
-                GrpcMode::ServerStreaming => LoadUnitKind::GrpcStream,
-                GrpcMode::ClientStreaming => {
-                    return refuse(
-                        RefusalCode::GrpcClientStreaming,
-                        "client-streaming gRPC cannot be load tested yet: a long-lived client stream has no defined completion or per-message denominator, so it is refused rather than counted as calls".into(),
-                    );
-                }
-                GrpcMode::Bidirectional => {
-                    return refuse(
-                        RefusalCode::GrpcBidirectional,
-                        "bidirectional gRPC cannot be load tested yet: a long-lived two-way stream has no defined completion or per-message denominator, so it is refused rather than counted as calls".into(),
-                    );
-                }
-            };
+            // Client and bidirectional streams run the automation path: the
+            // scripted messages, a half-close, then reading until the
+            // terminal status, so every mode has one defined completion.
+            let kind = grpc_unit(g.mode);
             if matches!(g.schema, GrpcSchemaSource::Reflection) {
                 return refuse(
                     RefusalCode::GrpcReflection,
@@ -198,23 +192,18 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             Ok(StepUnit { tcp_expect_frames: expect, ..StepUnit::of(LoadUnitKind::TcpExchange) })
         }
         Protocol::Udp => {
-            if ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some()) {
-                return refuse(
-                    RefusalCode::UdpMasque,
-                    "UDP through a MASQUE (CONNECT-UDP) proxy cannot be load tested yet: every exchange would open its own QUIC connection and tunnel, and there are no tunnel denominators. Send to the UDP target directly".into(),
-                );
-            }
-            if is_hbone(ctx) {
-                return refuse(
-                    RefusalCode::UdpHbone,
-                    format!(
-                        "{} through an HBONE tunnel cannot be load tested yet: every exchange would open its own mTLS connection and datagram tunnel, and there are no tunnel denominators. Send to the {} target directly",
-                        if uses_dtls(ctx) { "DTLS" } else { "UDP" },
-                        if uses_dtls(ctx) { "DTLS" } else { "UDP" }
-                    ),
-                );
-            }
-            Ok(StepUnit::of(if uses_dtls(ctx) { LoadUnitKind::DtlsExchange } else { LoadUnitKind::UdpExchange }))
+            // A MASQUE tunnel is part of the request; an HBONE one comes from
+            // the selected proxy profile. Either way every exchange opens its
+            // own tunnel, counted in the tunnel denominators.
+            let tunnel = if ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some()) {
+                Some(TunnelKind::ConnectUdp)
+            } else if is_hbone(ctx) {
+                Some(TunnelKind::Hbone)
+            } else {
+                None
+            };
+            let kind = if uses_dtls(ctx) { LoadUnitKind::DtlsExchange } else { LoadUnitKind::UdpExchange };
+            Ok(StepUnit { tunnel, ..StepUnit::of(kind) })
         }
     }
 }
@@ -225,8 +214,10 @@ pub fn classify_plan<'a>(
     mode: ConnectionMode,
 ) -> Result<(LoadUnitKind, Vec<StepUnit>), Refusal> {
     let mut units: Vec<StepUnit> = Vec::new();
+    let mut ids: Vec<Id> = Vec::new();
     for (id, ctx) in steps {
         units.push(classify(Some(id), ctx, mode)?);
+        ids.push(id);
     }
     let Some(first) = units.first().map(|u| u.kind) else {
         return Ok((LoadUnitKind::HttpRequest, units));
@@ -242,7 +233,36 @@ pub fn classify_plan<'a>(
             ),
         });
     }
+    let tunnel = units[0].tunnel;
+    if let Some((i, other)) = units.iter().enumerate().find(|(_, u)| u.tunnel != tunnel) {
+        return Err(Refusal {
+            code: RefusalCode::MixedTunnels,
+            request_id: ids.get(i).copied(),
+            message: format!(
+                "a load plan's datagram exchanges must all take the same path, and this one mixes {} with {}: the tunnel counts would cover only part of the exchanges, and a tunnel's setup changes what an exchange costs. Split the plan per path",
+                path_label(tunnel),
+                path_label(other.tunnel)
+            ),
+        });
+    }
     Ok((first, units))
+}
+
+fn grpc_unit(mode: GrpcMode) -> LoadUnitKind {
+    match mode {
+        GrpcMode::Unary => LoadUnitKind::GrpcCall,
+        GrpcMode::ServerStreaming => LoadUnitKind::GrpcStream,
+        GrpcMode::ClientStreaming => LoadUnitKind::GrpcClientStream,
+        GrpcMode::Bidirectional => LoadUnitKind::GrpcBidiStream,
+    }
+}
+
+fn path_label(t: Option<TunnelKind>) -> &'static str {
+    match t {
+        None => "direct datagrams",
+        Some(TunnelKind::ConnectUdp) => "a MASQUE (CONNECT-UDP) tunnel",
+        Some(TunnelKind::Hbone) => "an HBONE datagram tunnel",
+    }
 }
 
 /// The definitions reported with every run of this unit kind.
@@ -291,6 +311,22 @@ pub fn semantics(kind: LoadUnitKind, mode: ConnectionMode) -> UnitSemantics {
             "Stream duration: call start … terminal status, connection setup included. Time to first message is reported separately.",
             grpc_conn,
         ),
+        LoadUnitKind::GrpcClientStream => s(
+            "call",
+            "calls",
+            "The request's scripted messages were sent, the client stream was half-closed, and the server answered with a terminal grpc-status and complete framing (any code).",
+            "Completed with grpc-status 0 (OK) and every assertion passing.",
+            "Call duration: call start … terminal status, connection setup and sending the scripted messages included. Time to the response message is reported separately.",
+            grpc_conn,
+        ),
+        LoadUnitKind::GrpcBidiStream => s(
+            "stream",
+            "streams",
+            "The request's scripted messages were sent and the client stream was half-closed, and the server ended the stream with a terminal grpc-status and complete framing (any code).",
+            "Completed with grpc-status 0 (OK) and every assertion passing.",
+            "Stream duration: call start … terminal status, connection setup included. Time to first message is reported separately; no round trip is claimed, because a server message is not paired with a sent one.",
+            grpc_conn,
+        ),
         LoadUnitKind::SseStream => s(
             "stream",
             "streams",
@@ -334,13 +370,32 @@ pub fn semantics(kind: LoadUnitKind, mode: ConnectionMode) -> UnitSemantics {
     }
 }
 
+/// [`semantics`] for a classified plan: datagram exchanges through a tunnel
+/// say that each exchange opens its own tunnel.
+pub fn plan_semantics(kind: LoadUnitKind, mode: ConnectionMode, steps: &[StepUnit]) -> UnitSemantics {
+    let mut s = semantics(kind, mode);
+    if let Some(t) = steps.first().and_then(|u| u.tunnel) {
+        let (what, how) = match t {
+            TunnelKind::ConnectUdp => ("MASQUE (CONNECT-UDP) tunnel", "a QUIC connection to the proxy and an extended CONNECT"),
+            TunnelKind::Hbone => ("HBONE datagram tunnel", "an mTLS connection to the mesh endpoint and an HTTP/2 CONNECT"),
+        };
+        s.connection_mode_means = format!(
+            "Each exchange opens its own {what} ({how}){}, never pooled; the plan's connection mode does not apply to it. Tunnel setup is counted separately and is not part of the time to first response.",
+            if kind == LoadUnitKind::DtlsExchange { " and runs its DTLS handshake inside it" } else { "" }
+        );
+        s.completed_means.push_str(
+            " A tunnel that does not open (refused by the proxy, or failed) leaves the exchange incomplete: a transport failure, never an exchange with no response observed.",
+        );
+    }
+    s
+}
+
 /// Best-effort unit kind of a request spec, without refusals (for labels, e.g.
 /// a crash report whose worker never announced its run).
 pub fn unit_of_spec(spec: &anvil_domain::request::RequestSpec) -> LoadUnitKind {
     match spec.protocol {
         Protocol::Http => LoadUnitKind::HttpRequest,
-        Protocol::Grpc if spec.grpc.as_ref().is_some_and(|g| g.mode == GrpcMode::ServerStreaming) => LoadUnitKind::GrpcStream,
-        Protocol::Grpc => LoadUnitKind::GrpcCall,
+        Protocol::Grpc => grpc_unit(spec.grpc.as_ref().map(|g| g.mode).unwrap_or_default()),
         Protocol::Sse => LoadUnitKind::SseStream,
         Protocol::WebSocket => LoadUnitKind::WebsocketSession,
         Protocol::Tcp => LoadUnitKind::TcpExchange,
@@ -353,5 +408,12 @@ pub fn unit_of_spec(spec: &anvil_domain::request::RequestSpec) -> LoadUnitKind {
 
 /// Whether the plan's connection mode changes how units connect.
 pub fn connection_mode_applies(kind: LoadUnitKind) -> bool {
-    matches!(kind, LoadUnitKind::HttpRequest | LoadUnitKind::GrpcCall | LoadUnitKind::GrpcStream)
+    matches!(
+        kind,
+        LoadUnitKind::HttpRequest
+            | LoadUnitKind::GrpcCall
+            | LoadUnitKind::GrpcStream
+            | LoadUnitKind::GrpcClientStream
+            | LoadUnitKind::GrpcBidiStream
+    )
 }

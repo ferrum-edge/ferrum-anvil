@@ -258,6 +258,19 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
     let rec = &out.record;
     let mut obs = observe_record(rec, wall_us);
     obs.proto = protocol_obs(out, step, obs.terminal);
+    // A datagram exchange whose tunnel never opened sent nothing and had no
+    // response window, so it is not completed (and never "no response
+    // observed"), even when the engine records the proxy's refusal as a
+    // complete answer (MASQUE). The proxy's status is tunnel evidence,
+    // counted as a refused tunnel, not a status of the exchange.
+    if obs.terminal == Terminal::Completed
+        && obs.proto.dgram.as_ref().and_then(|d| d.tunnel).is_some_and(|t| !matches!(t.end, TunnelEnd::Established { .. }))
+    {
+        obs.terminal = Terminal::TransportFailure;
+        obs.application_failure = false;
+        obs.assertion_failure = false;
+        obs.status = None;
+    }
     if obs.terminal == Terminal::Completed {
         match step.kind {
             // Fewer framed replies than the request expects: the exchange
@@ -437,6 +450,29 @@ pub struct DgramObs {
     pub ttfr_us: Option<u64>,
     /// DTLS handshake phase status and duration, when it started.
     pub handshake: Option<(PhaseStatus, Option<u64>)>,
+    /// The exchange's tunnel (MASQUE or HBONE), when it set one up.
+    pub tunnel: Option<TunnelObs>,
+}
+
+/// How one exchange's tunnel setup ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelEnd {
+    /// Open, after `setup_us` (exchange start → tunnel open).
+    Established {
+        setup_us: u64,
+    },
+    /// The proxy answered the CONNECT with a non-2xx status.
+    Refused,
+    Failed,
+    TimedOut,
+    /// Canceled before it opened: attempted only.
+    Canceled,
+}
+
+/// Tunnel facts of one datagram exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TunnelObs {
+    pub end: TunnelEnd,
 }
 
 /// Protocol facts of one unit; only the family of its kind is filled.
@@ -449,6 +485,8 @@ pub struct ProtoObs {
     /// A gRPC response without a terminal status (not canceled).
     pub grpc_missing_status: bool,
     pub stream_opened: bool,
+    /// Client-streaming and bidirectional gRPC: request messages sent.
+    pub messages_sent: u64,
     pub messages_received: u64,
     /// Unit start → first message/event (µs).
     pub first_message_us: Option<u64>,
@@ -474,13 +512,15 @@ fn protocol_obs(out: &ExecutionOutput, step: &StepUnit, terminal: Terminal) -> P
     };
     match step.kind {
         LoadUnitKind::HttpRequest => {}
-        LoadUnitKind::GrpcCall | LoadUnitKind::GrpcStream => {
+        LoadUnitKind::GrpcCall | LoadUnitKind::GrpcStream | LoadUnitKind::GrpcClientStream | LoadUnitKind::GrpcBidiStream => {
             if let ProtocolStatus::Grpc { http_status, grpc_status, source, .. } = status {
                 p.grpc_status = *grpc_status;
                 p.grpc_missing_status = *source == GrpcStatusSource::Missing && http_status.is_some() && terminal != Terminal::Canceled;
                 p.stream_opened = *http_status == Some(200);
             }
             p.messages_received = tr.map(|t| t.received_count).unwrap_or(0);
+            // Data messages only: the half-close is a control entry.
+            p.messages_sent = tr.map(|t| t.sent_count).unwrap_or(0);
             // The transcript clock starts with the attempt that carried the
             // call; earlier (failed HTTP/3) attempts come before it.
             let prior: u64 = rec.attempts.iter().rev().skip(1).map(|a| a.duration_us).sum();
@@ -580,10 +620,51 @@ fn protocol_obs(out: &ExecutionOutput, step: &StepUnit, terminal: Terminal) -> P
                 } else {
                     None
                 },
+                tunnel: step.tunnel.and_then(|_| tunnel_obs(rec, terminal)),
             });
         }
     }
     p
+}
+
+/// How a tunneled exchange's tunnel setup ended; `None` when the exchange
+/// never got past preparation (no tunnel was attempted). The tunnel leg is
+/// the `proxy_tunnel` phase (HBONE; MASQUE once a DTLS session runs inside
+/// it); a plain UDP exchange through MASQUE keeps the CONNECT's own phases
+/// and opens its datagram `session` once the tunnel is up.
+fn tunnel_obs(rec: &ExecutionRecord, terminal: Terminal) -> Option<TunnelObs> {
+    let a = rec.attempts.last()?;
+    let attempted = a.phases.iter().any(|ph| ph.phase != Phase::Prepare && ph.status != PhaseStatus::NotApplicable);
+    if !attempted {
+        return None;
+    }
+    let connect_status =
+        a.connection.as_ref().and_then(|c| c.tunnel.as_ref()).and_then(|t| t.connect_status).or(match &rec.outcome.protocol_status {
+            ProtocolStatus::Udp { masque: Some(m), .. } => m.connect_status,
+            _ => None,
+        });
+    let refused = connect_status.is_some_and(|c| !(200..300).contains(&c));
+    let not_open = |timed_out: bool| {
+        if refused {
+            TunnelEnd::Refused
+        } else if timed_out || terminal == Terminal::Timeout {
+            TunnelEnd::TimedOut
+        } else if terminal == Terminal::Canceled {
+            TunnelEnd::Canceled
+        } else {
+            TunnelEnd::Failed
+        }
+    };
+    let end = match (a.phase(Phase::ProxyTunnel), a.phase(Phase::Session)) {
+        (Some(t), _) => match t.status {
+            PhaseStatus::Completed => TunnelEnd::Established { setup_us: t.end_us.unwrap_or(0) },
+            PhaseStatus::TimedOut => not_open(true),
+            _ => not_open(false),
+        },
+        (None, Some(session)) => TunnelEnd::Established { setup_us: session.start_us.unwrap_or(0) },
+        (None, None) => not_open(false),
+    };
+    Some(TunnelObs { end })
 }
 
 fn closed_key(c: ClosedBy) -> u8 {
@@ -650,6 +731,13 @@ pub struct ProtoAccum {
     pub hs_failed: u64,
     pub hs_timed_out: u64,
     pub hs_duration: LatencyStat,
+    pub messages_sent: u64,
+    pub tn_attempted: u64,
+    pub tn_established: u64,
+    pub tn_refused: u64,
+    pub tn_failed: u64,
+    pub tn_timed_out: u64,
+    pub tn_setup: LatencyStat,
 }
 
 impl Default for ProtoAccum {
@@ -701,6 +789,13 @@ impl ProtoAccum {
             hs_failed: 0,
             hs_timed_out: 0,
             hs_duration: LatencyStat::new(SECONDARY_SIGFIG),
+            messages_sent: 0,
+            tn_attempted: 0,
+            tn_established: 0,
+            tn_refused: 0,
+            tn_failed: 0,
+            tn_timed_out: 0,
+            tn_setup: LatencyStat::new(SECONDARY_SIGFIG),
         }
     }
 
@@ -715,6 +810,7 @@ impl ProtoAccum {
         }
         self.grpc_missing_status += p.grpc_missing_status as u64;
         self.streams_opened += p.stream_opened as u64;
+        self.messages_sent += p.messages_sent;
         self.messages_received += p.messages_received;
         if p.stream_opened && p.messages_received > 0 {
             self.with_messages += 1;
@@ -788,6 +884,19 @@ impl ProtoAccum {
                     _ => {}
                 }
             }
+            if let Some(t) = d.tunnel {
+                self.tn_attempted += 1;
+                match t.end {
+                    TunnelEnd::Established { setup_us } => {
+                        self.tn_established += 1;
+                        self.tn_setup.record(setup_us);
+                    }
+                    TunnelEnd::Refused => self.tn_refused += 1,
+                    TunnelEnd::Failed => self.tn_failed += 1,
+                    TunnelEnd::TimedOut => self.tn_timed_out += 1,
+                    TunnelEnd::Canceled => {}
+                }
+            }
         }
     }
 
@@ -836,6 +945,13 @@ impl ProtoAccum {
         self.hs_failed += o.hs_failed;
         self.hs_timed_out += o.hs_timed_out;
         self.hs_duration.merge(&o.hs_duration);
+        self.messages_sent += o.messages_sent;
+        self.tn_attempted += o.tn_attempted;
+        self.tn_established += o.tn_established;
+        self.tn_refused += o.tn_refused;
+        self.tn_failed += o.tn_failed;
+        self.tn_timed_out += o.tn_timed_out;
+        self.tn_setup.merge(&o.tn_setup);
     }
 
     fn ends(&self) -> Vec<ClosedCount> {
@@ -848,7 +964,7 @@ impl ProtoAccum {
         let mut m = ProtocolLoadMetrics {
             version: PROTOCOL_METRICS_VERSION,
             unit: kind,
-            semantics: crate::protocol::semantics(kind, mode),
+            semantics: crate::protocol::plan_semantics(kind, mode, steps),
             ..Default::default()
         };
         let grpc = || {
@@ -863,6 +979,7 @@ impl ProtoAccum {
         };
         let stream = |ended_by: Vec<ClosedCount>| StreamLoadMetrics {
             opened: self.streams_opened,
+            messages_sent: matches!(kind, LoadUnitKind::GrpcClientStream | LoadUnitKind::GrpcBidiStream).then_some(self.messages_sent),
             messages_received: self.messages_received,
             with_messages: self.with_messages,
             time_to_first_message: self.first_message.summary(),
@@ -877,7 +994,7 @@ impl ProtoAccum {
                 })
             }
             LoadUnitKind::GrpcCall => m.grpc = Some(grpc()),
-            LoadUnitKind::GrpcStream => {
+            LoadUnitKind::GrpcStream | LoadUnitKind::GrpcClientStream | LoadUnitKind::GrpcBidiStream => {
                 m.grpc = Some(grpc());
                 m.stream = Some(stream(vec![]));
             }
@@ -930,6 +1047,15 @@ impl ProtoAccum {
                         failed: self.hs_failed,
                         timed_out: self.hs_timed_out,
                         duration: self.hs_duration.summary(),
+                    }),
+                    tunnels: steps.first().and_then(|s| s.tunnel).map(|kind| TunnelLoadMetrics {
+                        kind,
+                        attempted: self.tn_attempted,
+                        established: self.tn_established,
+                        refused: self.tn_refused,
+                        failed: self.tn_failed,
+                        timed_out: self.tn_timed_out,
+                        setup: self.tn_setup.summary(),
                     }),
                 })
             }

@@ -253,6 +253,12 @@ pub enum LoadUnitKind {
     GrpcCall,
     /// One server-streaming gRPC or gRPC-Web call.
     GrpcStream,
+    /// One client-streaming gRPC call: the request's scripted messages, a
+    /// half-close, then the single response and terminal status.
+    GrpcClientStream,
+    /// One bidirectional gRPC call: the request's scripted messages and a
+    /// half-close, while the server's messages are read until its terminal status.
+    GrpcBidiStream,
     /// One server-sent-events stream.
     SseStream,
     /// One WebSocket session: handshake, scripted messages, close.
@@ -317,11 +323,16 @@ pub struct GrpcLoadMetrics {
     pub protocol_fallback_attempts: u64,
 }
 
-/// Server-streaming gRPC calls and SSE streams.
+/// Streaming gRPC calls (server, client and bidirectional) and SSE streams.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct StreamLoadMetrics {
     /// Streams whose response head was accepted (gRPC: HTTP 200; SSE: 2xx).
     pub opened: u64,
+    /// Client-streaming and bidirectional gRPC only: request messages sent,
+    /// over all measured streams (the half-close is not a message). Sent
+    /// counts what Anvil wrote, never what the server processed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_sent: Option<u64>,
     /// gRPC response messages or SSE events received, over all measured streams.
     pub messages_received: u64,
     /// Opened streams that received at least one message or event.
@@ -432,10 +443,38 @@ pub struct DatagramLoadMetrics {
     /// DTLS exchanges only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dtls_handshakes: Option<HandshakeMetrics>,
+    /// Exchanges through a tunnel (a MASQUE CONNECT-UDP proxy or a mesh
+    /// HBONE datagram tunnel) only: every exchange opens its own tunnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnels: Option<TunnelLoadMetrics>,
+}
+
+/// The per-exchange tunnels of datagram exchanges through a MASQUE or HBONE
+/// proxy. A tunnel is set up per exchange (never pooled), so these are one
+/// tunnel per exchange that got past preparation. Datagram counts above are
+/// what Anvil wrote into and read from the tunnel; the tunnel endpoint's
+/// relaying is never inferred from them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelLoadMetrics {
+    pub kind: crate::execution::TunnelKind,
+    /// Tunnel setups started (DNS, connection and handshake to the proxy, CONNECT).
+    pub attempted: u64,
+    /// The proxy answered the CONNECT with a 2xx and the tunnel opened.
+    pub established: u64,
+    /// The proxy answered the CONNECT with another status: the proxy's
+    /// answer, never a claim about the target.
+    pub refused: u64,
+    /// The setup failed before an answer (DNS, connect, TLS or QUIC, a
+    /// missing capability, a reset).
+    pub failed: u64,
+    /// A deadline elapsed during setup.
+    pub timed_out: u64,
+    /// Setup time of established tunnels: exchange start → tunnel open.
+    pub setup: LatencySummary,
 }
 
 /// Protocol-specific denominators of a run (LOAD-013). Exactly one family
-/// block is set for the plan's unit kind (gRPC streams set `grpc` and `stream`).
+/// block is set for the plan's unit kind (streaming gRPC calls set `grpc` and `stream`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ProtocolLoadMetrics {
     /// [`PROTOCOL_METRICS_VERSION`] of the producing engine.

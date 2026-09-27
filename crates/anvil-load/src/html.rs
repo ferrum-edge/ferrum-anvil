@@ -384,12 +384,16 @@ fn protocol_section(p: &ProtocolLoadMetrics) -> String {
     }
     if let Some(s) = &p.stream {
         let per = if s.opened == 0 { "—".to_string() } else { format!("{:.1}", s.messages_received as f64 / s.opened as f64) };
-        h.push_str(&kv_table(&[
-            ("Streams opened", fmt_n(s.opened)),
+        let mut rows = vec![("Streams opened", fmt_n(s.opened))];
+        if let Some(sent) = s.messages_sent {
+            rows.push(("Messages sent (scripted, before the half-close)", fmt_n(sent)));
+        }
+        rows.extend([
             (if p.unit == LoadUnitKind::SseStream { "Events received" } else { "Messages received" }, fmt_n(s.messages_received)),
             ("Opened streams with at least one", fmt_n(s.with_messages)),
             ("Mean per opened stream", per),
-        ]));
+        ]);
+        h.push_str(&kv_table(&rows));
         h.push_str(lat_head);
         h.push_str(&latency_row("Time to first message/event", &s.time_to_first_message));
         h.push_str("</table>");
@@ -465,7 +469,20 @@ fn protocol_section(p: &ProtocolLoadMetrics) -> String {
         if let Some(hs) = &d.dtls_handshakes {
             h.push_str(&latency_row("DTLS handshake (completed)", &hs.duration));
         }
+        if let Some(t) = &d.tunnels {
+            h.push_str(&latency_row("Tunnel setup (established)", &t.setup));
+        }
         h.push_str("</table>");
+        if let Some(t) = &d.tunnels {
+            let what = format!("{} tunnels attempted (one per exchange)", crate::report::tunnel_name(t.kind));
+            h.push_str(&kv_table(&[
+                (what.as_str(), fmt_n(t.attempted)),
+                (
+                    "Established / refused by the proxy / failed / timed out",
+                    format!("{} / {} / {} / {}", fmt_n(t.established), fmt_n(t.refused), fmt_n(t.failed), fmt_n(t.timed_out)),
+                ),
+            ]));
+        }
         if let Some(hs) = &d.dtls_handshakes {
             h.push_str(&kv_table(&[
                 ("DTLS handshakes attempted", fmt_n(hs.attempted)),
@@ -473,6 +490,9 @@ fn protocol_section(p: &ProtocolLoadMetrics) -> String {
             ]));
         }
         h.push_str(r#"<p class="sub">Sent and received are separate counts. UDP has no acknowledgement: nothing here claims delivery or loss, and received datagrams are not attributed to sent ones. Silence means only that no response was observed.</p>"#);
+        if d.tunnels.is_some() {
+            h.push_str(r#"<p class="sub">Through a tunnel, sent and received count what Anvil wrote into and read from the tunnel; what the proxy relayed to the target is not inferred. A refused tunnel is the proxy's answer, not a claim about the target.</p>"#);
+        }
     }
     h.push_str("</div>");
     h

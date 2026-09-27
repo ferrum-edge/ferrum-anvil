@@ -861,6 +861,8 @@ export type LoadUnitKind =
   | "http_request"
   | "grpc_call"
   | "grpc_stream"
+  | "grpc_client_stream"
+  | "grpc_bidi_stream"
   | "sse_stream"
   | "websocket_session"
   | "tcp_exchange"
@@ -3580,7 +3582,7 @@ export interface LatencySummary3 {
 }
 /**
  * Protocol-specific denominators of a run (LOAD-013). Exactly one family
- * block is set for the plan's unit kind (gRPC streams set `grpc` and `stream`).
+ * block is set for the plan's unit kind (streaming gRPC calls set `grpc` and `stream`).
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ProtocolLoadMetrics".
@@ -3684,7 +3686,7 @@ export interface GrpcLoadMetrics {
   protocol_fallback_attempts: number;
 }
 /**
- * Server-streaming gRPC calls and SSE streams.
+ * Streaming gRPC calls (server, client and bidirectional) and SSE streams.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "StreamLoadMetrics".
@@ -3694,6 +3696,12 @@ export interface StreamLoadMetrics {
    * Streams whose response head was accepted (gRPC: HTTP 200; SSE: 2xx).
    */
   opened: number;
+  /**
+   * Client-streaming and bidirectional gRPC only: request messages sent,
+   * over all measured streams (the half-close is not a message). Sent
+   * counts what Anvil wrote, never what the server processed.
+   */
+  messages_sent?: number | null;
   /**
    * gRPC response messages or SSE events received, over all measured streams.
    */
@@ -3876,6 +3884,11 @@ export interface DatagramLoadMetrics {
    * DTLS exchanges only.
    */
   dtls_handshakes?: HandshakeMetrics | null;
+  /**
+   * Exchanges through a tunnel (a MASQUE CONNECT-UDP proxy or a mesh
+   * HBONE datagram tunnel) only: every exchange opens its own tunnel.
+   */
+  tunnels?: TunnelLoadMetrics | null;
 }
 /**
  * First datagram sent → first datagram received, per responding exchange.
@@ -3907,6 +3920,55 @@ export interface HandshakeMetrics {
  * Duration of completed handshakes.
  */
 export interface LatencySummary7 {
+  count: number;
+  min_us: number;
+  max_us: number;
+  mean_us: number;
+  p50_us: number;
+  p90_us: number;
+  p95_us: number;
+  p99_us: number;
+}
+/**
+ * The per-exchange tunnels of datagram exchanges through a MASQUE or HBONE
+ * proxy. A tunnel is set up per exchange (never pooled), so these are one
+ * tunnel per exchange that got past preparation. Datagram counts above are
+ * what Anvil wrote into and read from the tunnel; the tunnel endpoint's
+ * relaying is never inferred from them.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "TunnelLoadMetrics".
+ */
+export interface TunnelLoadMetrics {
+  kind: TunnelKind;
+  /**
+   * Tunnel setups started (DNS, connection and handshake to the proxy, CONNECT).
+   */
+  attempted: number;
+  /**
+   * The proxy answered the CONNECT with a 2xx and the tunnel opened.
+   */
+  established: number;
+  /**
+   * The proxy answered the CONNECT with another status: the proxy's
+   * answer, never a claim about the target.
+   */
+  refused: number;
+  /**
+   * The setup failed before an answer (DNS, connect, TLS or QUIC, a
+   * missing capability, a reset).
+   */
+  failed: number;
+  /**
+   * A deadline elapsed during setup.
+   */
+  timed_out: number;
+  setup: LatencySummary8;
+}
+/**
+ * Setup time of established tunnels: exchange start → tunnel open.
+ */
+export interface LatencySummary8 {
   count: number;
   min_us: number;
   max_us: number;

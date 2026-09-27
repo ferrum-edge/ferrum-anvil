@@ -227,3 +227,49 @@ async fn load_plan_check_names_the_unit_and_preflight_refuses_mixed_protocols() 
     assert!(err.contains("LOAD-013"), "{err}");
     assert!(fx.log.entries().is_empty(), "checks and preflights send nothing");
 }
+
+/// Datagram tunnels at the app boundary: the plan check describes one tunnel
+/// per exchange, the preflight names the proxy every exchange reaches first,
+/// and a plan mixing direct and tunneled exchanges is refused.
+#[test]
+fn load_preflight_names_the_masque_proxy_and_refuses_mixed_datagram_paths() {
+    use anvil_domain::request::{MASQUE_DEFAULT_TEMPLATE, MasqueSpec, PayloadEncoding, Protocol, StreamPayload, UdpSpec};
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let udp = |masque: bool| {
+        let mut s = RequestSpec::http("GET", "udp://127.0.0.1:9");
+        s.protocol = Protocol::Udp;
+        s.udp = Some(UdpSpec {
+            dtls: false,
+            datagrams: vec![StreamPayload { data: "x".into(), encoding: PayloadEncoding::Text }],
+            response_window_ms: 100,
+            max_datagrams: 1,
+            masque: masque.then(|| MasqueSpec {
+                proxy_url: "https://127.0.0.1:4433".into(),
+                uri_template: MASQUE_DEFAULT_TEMPLATE.into(),
+                datagrams: Default::default(),
+            }),
+            proxy_protocol: None,
+        });
+        s
+    };
+    let tunneled = app.create_request(&ws.meta.id, None, "via masque", udp(true)).unwrap();
+    let direct = app.create_request(&ws.meta.id, None, "direct", udp(false)).unwrap();
+
+    let p = app.save_load_plan(plan(ws.meta.id, tunneled.meta.id)).unwrap();
+    let check = app.load_plan_check(&p).unwrap();
+    assert_eq!(check.unit, Some(anvil_domain::load::LoadUnitKind::UdpExchange));
+    let sem = check.semantics.unwrap();
+    assert!(sem.connection_mode_means.contains("its own MASQUE (CONNECT-UDP) tunnel"), "{}", sem.connection_mode_means);
+    let pre = app.load_preflight(&p).unwrap();
+    assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via MASQUE proxy https://127.0.0.1:4433".to_string()]);
+    assert!(pre.semantics.completed_means.contains("never an exchange with no response observed"));
+
+    let mixed = app.save_load_plan(LoadPlan { chain: vec![direct.meta.id, tunneled.meta.id], ..plan(ws.meta.id, direct.meta.id) }).unwrap();
+    let check = app.load_plan_check(&mixed).unwrap();
+    let r = check.refusal.expect("mixed datagram paths are refused");
+    assert_eq!(r.code, anvil_load::RefusalCode::MixedTunnels);
+    assert_eq!(r.request_id, Some(tunneled.meta.id));
+    assert!(app.load_preflight(&mixed).is_err());
+}
