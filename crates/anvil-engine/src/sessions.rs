@@ -113,6 +113,17 @@ fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFai
     TransportFailure::new(Phase::Prepare, kind, msg).with_field(field)
 }
 
+/// A binary or ping message's hex, resolved and checked. The message is sent,
+/// and shown in the transcript, as the bytes it decodes to: its secrets are
+/// redacted in that form too.
+fn ws_hex(r: &Resolver, raw: &str, field: &str) -> Result<String, TransportFailure> {
+    let since = r.used_secrets.lock().len();
+    let hex = r.resolve(raw, field)?;
+    let bytes = anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, field))?;
+    crate::redact::note_decoded_secrets(r, since, PayloadEncoding::Hex, &bytes);
+    Ok(hex)
+}
+
 fn unsupported(msg: impl Into<String>, field: &str) -> TransportFailure {
     local(FailureKind::UnsupportedCombination, msg, field)
 }
@@ -366,9 +377,13 @@ fn decode_payloads(r: &Resolver, payloads: &[StreamPayload], field: &str) -> Res
         .iter()
         .enumerate()
         .map(|(i, p)| {
+            let since = r.used_secrets.lock().len();
             let data = r.resolve(&p.data, &format!("{field}[{i}].data"))?;
-            anvil_transport::session::decode_payload(&StreamPayload { data, encoding: p.encoding })
-                .map_err(|e| local(FailureKind::BodySerialization, e, &format!("{field}[{i}]")))
+            let bytes = anvil_transport::session::decode_payload(&StreamPayload { data, encoding: p.encoding })
+                .map_err(|e| local(FailureKind::BodySerialization, e, &format!("{field}[{i}]")))?;
+            // Sent, and shown in the transcript, decoded.
+            crate::redact::note_decoded_secrets(r, since, p.encoding, &bytes);
+            Ok(bytes)
         })
         .collect()
 }
@@ -544,16 +559,8 @@ impl WsOffer {
             let field = format!("websocket.messages[{i}]");
             script.push(match m {
                 WsMessage::Text { text } => WsMessage::Text { text: r.resolve(text, &field)? },
-                WsMessage::Binary { hex } => {
-                    let hex = r.resolve(hex, &field)?;
-                    anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                    WsMessage::Binary { hex }
-                }
-                WsMessage::Ping { hex } => {
-                    let hex = r.resolve(hex, &field)?;
-                    anvil_transport::session::decode_hex(&hex).map_err(|e| local(FailureKind::BodySerialization, e, &field))?;
-                    WsMessage::Ping { hex }
-                }
+                WsMessage::Binary { hex } => WsMessage::Binary { hex: ws_hex(r, hex, &field)? },
+                WsMessage::Ping { hex } => WsMessage::Ping { hex: ws_hex(r, hex, &field)? },
                 WsMessage::Close { code, reason } => WsMessage::Close { code: *code, reason: r.resolve(reason, &field)? },
             });
         }
@@ -1683,9 +1690,7 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
 /// used (the transcript was redacted as it was emitted).
 fn redact_transcript(mut t: StreamTranscript, r: &Redactor) -> StreamTranscript {
     for m in &mut t.messages {
-        if !m.preview_is_hex {
-            m.preview = r.text(&m.preview);
-        }
+        m.preview = r.text(&m.preview);
         m.event_id = m.event_id.as_deref().map(|v| r.text(v));
         m.event_type = m.event_type.as_deref().map(|v| r.text(v));
     }

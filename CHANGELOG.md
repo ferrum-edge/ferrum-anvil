@@ -529,4 +529,9 @@
   used in the URL or a header. The session's redactor was built before
   those values were resolved; it now takes them in once they are, before
   anything is redacted with it, and the stored transcript is redacted again
-  with the record's redactor.
+  with the record's redactor. Hex previews (binary messages, pings and
+  payloads that are not printable text) are now redacted too, live and
+  stored: a secret's lowercase hex is recognised. A secret in a hex- or
+  base64-encoded field (a WebSocket binary message or ping, a TCP payload, a
+  UDP datagram, a PROXY header TLV) is also redacted as the bytes it decodes
+  to, as text and as hex, when they are at least 4 bytes long.

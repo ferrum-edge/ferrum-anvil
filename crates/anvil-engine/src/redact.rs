@@ -3,21 +3,25 @@
 //! Two layers: (1) known-sensitive names (headers, query parameters, cookie
 //! and JSON field names, plus any request field the user marked sensitive)
 //! and (2) exact-value scrubbing of every secret value resolved during the
-//! execution, including its canonical percent-encoded forms. URL components
-//! are percent-decoded before they are compared, so an encoded secret is
-//! replaced whole rather than left in a reversible form, and a finished URL
-//! that still reveals a secret once decoded (a secret split across
-//! components) keeps only its scheme and authority. Arbitrary content can
-//! still contain secrets Anvil cannot recognize; exports show a preview for
-//! that reason.
+//! execution, including its canonical percent-encoded forms, its lowercase
+//! hex (as a session transcript's hex preview shows it) and, for a secret
+//! substituted into a hex- or base64-encoded session payload, the bytes it
+//! decodes to. URL components are percent-decoded before they are compared,
+//! so an encoded secret is replaced whole rather than left in a reversible
+//! form, and a finished URL that still reveals a secret once decoded (a
+//! secret split across components) keeps only its scheme and authority.
+//! Arbitrary content can still contain secrets Anvil cannot recognize;
+//! exports show a preview for that reason.
 
 use crate::vars::Resolver;
 use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::HeaderEntry;
+use anvil_domain::request::{PayloadEncoding, StreamPayload};
 use anvil_domain::secret::REDACTED;
 
-/// Shorter values are not exact-value scrubbed: they would shred ordinary
-/// text. Name-based redaction still applies to them.
+/// Shorter values (and decoded secrets of fewer bytes) are not exact-value
+/// scrubbed: they would shred ordinary text. Name-based redaction still
+/// applies to them.
 const MIN_SECRET_LEN: usize = 4;
 
 /// Percent-decoding rounds applied to one URL component (covers values that
@@ -115,15 +119,19 @@ impl Redactor {
                 all.push(n.clone());
             }
         }
-        Redactor::new(r.used_secrets.lock().clone(), all)
+        let mut secrets = r.used_secrets.lock().clone();
+        secrets.extend(r.decoded_secrets.lock().iter().cloned());
+        Redactor::new(secrets, all)
     }
 
     /// Take in what the resolver has seen since this redactor was built:
     /// secret values substituted by templates resolved later (a session's
-    /// messages, metadata or payloads) and request fields marked sensitive.
+    /// messages, metadata or payloads), what those in an encoded payload
+    /// decode to, and request fields marked sensitive.
     pub fn refresh_used_secrets(&mut self, r: &Resolver) {
         let before = self.secrets.len();
-        for s in r.used_secrets.lock().iter() {
+        let decoded = r.decoded_secrets.lock().clone();
+        for s in r.used_secrets.lock().iter().chain(decoded.iter()) {
             if s.len() >= MIN_SECRET_LEN && !self.secrets.contains(s) {
                 self.secrets.push(s.clone());
             }
@@ -141,9 +149,11 @@ impl Redactor {
     /// Longest first so overlapping values are fully covered.
     fn reindex(&mut self) {
         sort_longest_first(&mut self.secrets);
-        let mut patterns = Vec::with_capacity(self.secrets.len() * 4);
+        let mut patterns = Vec::with_capacity(self.secrets.len() * 5);
         for s in &self.secrets {
             patterns.push(s.clone());
+            // A session transcript shows bytes that are not printable text as hex.
+            patterns.push(hex::encode(s));
             patterns.extend(encoded_forms(s));
             patterns.extend(json_escaped(s));
         }
@@ -161,10 +171,10 @@ impl Redactor {
     /// Scrub raw secret values, their canonical percent encodings and JSON
     /// string escapes from arbitrary text.
     ///
-    /// Limits: only the raw value, the encodings in [`encoded_forms`] and the
-    /// value's JSON string escaping (as rendered in JSON diagnostics) are
-    /// recognized. A secret encoded any other way (partly or doubly
-    /// percent-encoded, base64, HTML-escaped), split by other
+    /// Limits: only the raw value, the encodings in [`encoded_forms`], its
+    /// lowercase hex and the value's JSON string escaping (as rendered in
+    /// JSON diagnostics) are recognized. A secret encoded any other way
+    /// (partly or doubly percent-encoded, base64, HTML-escaped), split by other
     /// content, or shorter than 4 characters passes through, and names are
     /// not consulted. Use [`Redactor::url`], [`Redactor::header`] or
     /// [`Redactor::json_text`] where the structure is known.
@@ -484,6 +494,36 @@ impl Redactor {
     }
 }
 
+/// Registers what the secrets the resolver substituted since `since` (an
+/// index into its secrets) into one hex- or base64-encoded field become once
+/// the field is `decoded`: the bytes are sent, and shown in a transcript, as
+/// text when they are UTF-8 and as lowercase hex otherwise. A secret that
+/// does not decode on its own to bytes of the field (it is split across the
+/// encoding's alignment by what precedes it) makes the whole decoded field
+/// secret. Fewer than [`MIN_SECRET_LEN`] bytes are not registered.
+pub(crate) fn note_decoded_secrets(r: &Resolver, since: usize, encoding: PayloadEncoding, decoded: &[u8]) {
+    if matches!(encoding, PayloadEncoding::Text) {
+        return;
+    }
+    let fresh: Vec<String> = r.used_secrets.lock().iter().skip(since).cloned().collect();
+    let mut forms = Vec::new();
+    for s in fresh {
+        let own = anvil_transport::session::decode_payload(&StreamPayload { data: s, encoding }).ok();
+        let bytes = match &own {
+            Some(b) if contains_bytes(decoded, b) => &b[..],
+            _ => decoded,
+        };
+        if bytes.len() < MIN_SECRET_LEN {
+            continue;
+        }
+        forms.push(hex::encode(bytes));
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            forms.push(text.to_string());
+        }
+    }
+    r.decoded_secrets.lock().extend(forms);
+}
+
 /// Longest first; equal lengths in a stable order so duplicates are adjacent.
 fn sort_longest_first(v: &mut Vec<String>) {
     v.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
@@ -582,6 +622,28 @@ mod tests {
         let out = r.json_text(r#"{"password":"hunter2","nested":{"customer_ssn":"123"},"note":"value-in-body-xyz","ok":"fine"}"#);
         assert!(!out.contains("hunter2") && !out.contains("123\"") && !out.contains("value-in-body-xyz"));
         assert!(out.contains("fine"));
+    }
+
+    #[test]
+    fn secrets_in_encoded_payloads_are_redacted_as_the_bytes_they_decode_to() {
+        let r = Resolver::new(vec![], None);
+        r.used_secrets.lock().push("DEADBEEF00C0FFEE".into());
+        note_decoded_secrets(&r, 0, PayloadEncoding::Hex, &[0xde, 0xad, 0xbe, 0xef, 0x00, 0xc0, 0xff, 0xee]);
+        r.used_secrets.lock().push("c2VjcmV0LXZhbHVl".into());
+        note_decoded_secrets(&r, 1, PayloadEncoding::Base64, b"secret-value");
+        // Two decoded bytes are too few to scrub.
+        r.used_secrets.lock().push("AbCd".into());
+        note_decoded_secrets(&r, 2, PayloadEncoding::Hex, &[0xab, 0xcd]);
+        let red = Redactor::for_execution(&r, &[]);
+        assert_eq!(red.text("sent deadbeef00c0ffee"), format!("sent {REDACTED}"));
+        assert_eq!(red.text("sent secret-value"), format!("sent {REDACTED}"));
+        assert_eq!(red.text(&hex::encode("secret-value")), REDACTED);
+        assert_eq!(red.text("abcd"), "abcd");
+        // A secret that does not decode on its own where it sits: the whole field is secret.
+        let r = Resolver::new(vec![], None);
+        r.used_secrets.lock().push("c2VjcmV0".into());
+        note_decoded_secrets(&r, 0, PayloadEncoding::Base64, b"\x01\x02misaligned");
+        assert_eq!(Redactor::for_execution(&r, &[]).text("got 01026d6973616c69676e6564"), format!("got {REDACTED}"));
     }
 
     #[test]
