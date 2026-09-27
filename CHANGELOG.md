@@ -536,3 +536,6 @@
   hex- or base64-encoded field (a WebSocket binary message or ping, a TCP
   payload, a UDP datagram, a PROXY header TLV) is also redacted as the bytes
   it decodes to, as text and as hex, when they are at least 4 bytes long.
+  The secrets a gRPC call signs with once server reflection resolves its
+  schema (such as a freshly minted token) are now redacted in live events
+  too, not only in the stored record.

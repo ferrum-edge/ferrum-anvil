@@ -97,6 +97,11 @@ struct Resigned {
 
 type ResignedSlot = Arc<parking_lot::Mutex<Option<Resigned>>>;
 
+/// The redactor of a live transcript that can learn secrets once the session
+/// is planned: those a gRPC call signed once server reflection resolved its
+/// schema (before the call's first message is recorded).
+type SharedRedactor = Arc<parking_lot::RwLock<Redactor>>;
+
 /// The workspace jar a session handshake keeps its `Set-Cookie` in: the
 /// execution's isolation, the URL the handshake stands for in the jar, and
 /// the engine's epoch (with the jar's generation) when the execution
@@ -323,17 +328,25 @@ async fn apply_auth(
 /// The fields auth sets otherwise than it set them when the call was
 /// prepared (`first`, over an empty body) replace those in `sent`, the
 /// call's prepared headers; what the call is sent with is kept in `slot`
-/// for the record.
+/// for the record, and the secrets it is signed with (a freshly minted
+/// token) join the `live` transcript redactor.
 fn sign_after_reflection(
     auth: ResolvedAuth,
     request: &SessionRequest,
     first: &[(String, String)],
     sent: &[(String, String)],
     slot: ResignedSlot,
+    live: SharedRedactor,
 ) -> grpc::SignFn {
     let (request, first, sent) = (request.clone(), first.to_vec(), sent.to_vec());
     Arc::new(move |body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
         let applied = sign_request(&auth, &SessionRequest { body: body.clone(), ..request.clone() })?;
+        {
+            let mut live = live.write();
+            for s in &applied.secrets {
+                live.add_secret(s);
+            }
+        }
         let mut headers = sent.clone();
         set_headers(&mut headers, applied.set_headers.into_iter().filter(|h| !first.contains(h)).collect());
         let wire = header_pairs(&headers)?;
@@ -450,6 +463,11 @@ fn finish_prep(
 fn redact_fn(r: &Redactor) -> RedactFn {
     let r = r.clone();
     Arc::new(move |s: &str| r.text(s))
+}
+
+fn shared_redact_fn(r: &SharedRedactor) -> RedactFn {
+    let r = r.clone();
+    Arc::new(move |s: &str| r.read().text(s))
 }
 
 /// `cancel` ends a wait for an OAuth token (nothing is sent). `epoch` is the
@@ -1009,7 +1027,8 @@ async fn prepare_grpc(
     // resolved: the call is signed then, over the framed message it sends.
     let reflected = matches!(schema, grpc::Schema::Reflection) && matches!(spec.mode, GrpcMode::Unary | GrpcMode::ServerStreaming);
     let resigned: Option<ResignedSlot> = (reflected && !matches!(b.prep.auth, ResolvedAuth::None)).then(Default::default);
-    let sign = resigned.clone().map(|slot| sign_after_reflection(b.prep.auth.clone(), &request, &set, &headers, slot));
+    let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
+    let sign = resigned.clone().map(|slot| sign_after_reflection(b.prep.auth.clone(), &request, &set, &headers, slot, live.clone()));
     let display = format!("{}://{}{}", call_target.scheme, call_target.authority, call_target.path);
     let plan = grpc::GrpcPlan {
         tls: if tls_url { b.prep.tls.clone() } else { None },
@@ -1034,7 +1053,7 @@ async fn prepare_grpc(
         display_url: b.redactor.url(&display),
         max_message_bytes: b.prep.settings.limits.max_response_bytes.min(GRPC_MAX_MESSAGE) as usize,
         transcript: TranscriptLimits::default(),
-        redact: Some(redact_fn(&b.redactor)),
+        redact: Some(shared_redact_fn(&live)),
         wire: spec.wire,
         version: b.prep.settings.http_version,
         proxy_header: b
