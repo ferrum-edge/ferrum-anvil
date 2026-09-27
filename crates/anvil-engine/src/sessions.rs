@@ -77,6 +77,21 @@ struct SessionPrep {
     require_verified_tls: bool,
     redactor: Redactor,
     extra_findings: Vec<Draft>,
+    /// Where the handshake responses' cookies are kept (WebSocket and SSE
+    /// with the cookies setting on).
+    cookies: Option<SessionCookies>,
+}
+
+/// The workspace jar a session handshake keeps its `Set-Cookie` in: the
+/// execution's isolation, the URL the handshake stands for in the jar, and
+/// the engine's epoch (with the jar's generation) when the execution
+/// started, so the cookies of a session that spans a lock or the deletion of
+/// its workspace are not kept.
+struct SessionCookies {
+    jars: crate::CookieJars,
+    epoch: SensitiveEpoch,
+    isolation: String,
+    target: Target,
 }
 
 fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFailure {
@@ -87,14 +102,46 @@ fn unsupported(msg: impl Into<String>, field: &str) -> TransportFailure {
     local(FailureKind::UnsupportedCombination, msg, field)
 }
 
-fn header_pairs(headers: &[(String, String)]) -> Vec<(HeaderName, HeaderValue)> {
-    headers
-        .iter()
-        .filter_map(|(n, v)| match (HeaderName::from_bytes(n.as_bytes()), HeaderValue::from_str(v)) {
-            (Ok(n), Ok(v)) => Some((n, v)),
-            _ => None,
-        })
-        .collect()
+/// The handshake's final headers for the wire; a header that is not valid
+/// there fails the session before anything is sent (see
+/// [`http_exec::wire_headers`]).
+fn header_pairs(headers: &[(String, String)]) -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
+    http_exec::wire_headers(headers)
+}
+
+/// The URL a handshake stands for in the cookie jar: a WebSocket URL as its
+/// HTTP counterpart (`ws` as `http`, `wss` as `https`, RFC 6455 §4.1), so
+/// `Secure` and `HttpOnly` cookies apply as for HTTP requests to the origin.
+fn cookie_target(t: &Target) -> Target {
+    let scheme = match t.scheme.as_str() {
+        "wss" => "https",
+        "ws" => "http",
+        other => other,
+    };
+    Target { scheme: scheme.to_string(), ..t.clone() }
+}
+
+/// Cookies for an HTTP-based handshake (WebSocket, SSE), as for an HTTP
+/// request when the cookies setting is on: the workspace jar's cookies for
+/// the target join `headers` (the request's own cookies win), and the
+/// handshake's `Set-Cookie` is kept when the session ends.
+fn jar_cookies(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    b: &mut Base,
+    target: &Target,
+    headers: &mut Vec<(String, String)>,
+) -> Option<SessionCookies> {
+    if !b.prep.settings.cookies {
+        return None;
+    }
+    let target = cookie_target(target);
+    for n in http_exec::add_jar_cookies(engine, &ctx.isolation, &target, headers) {
+        if !b.inferred.contains(&n) {
+            b.inferred.push(n);
+        }
+    }
+    Some(SessionCookies { jars: engine.cookie_jars(), epoch: b.prep.epoch, isolation: ctx.isolation.clone(), target })
 }
 
 fn dns_config(s: &EffectiveSettings) -> DnsConfig {
@@ -155,6 +202,7 @@ async fn apply_auth(
     };
     let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
         .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
+    http_exec::check_auth_headers(&applied)?;
     if applied.body.is_some() {
         return Err(unsupported(
             format!("the auth profile '{}' rewrites the message body, which this protocol cannot carry", applied.label),
@@ -273,6 +321,7 @@ fn finish_prep(
         inferred,
         redactor,
         extra_findings: vec![],
+        cookies: None,
     }
 }
 
@@ -380,7 +429,7 @@ async fn prepare_ws(
         .map(|(i, s)| r.resolve(s, &format!("websocket.subprotocols[{i}]")))
         .collect::<Result<Vec<_>, _>>()?;
     let method = if spec.bootstrap == WsBootstrap::Http2ExtendedConnect { "CONNECT" } else { "GET" };
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "GET", &target, headers, &[], cancel).await?;
+    let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, "GET", &target, headers, &[], cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
     }
@@ -388,6 +437,7 @@ async fn prepare_ws(
         b.inferred.push(format!("Sec-WebSocket-Extensions: {} (permessage-deflate offered, RFC 7692)", d.header_value()));
     }
     let t = Target { query, ..target.clone() };
+    let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = ws::WsPlan {
         bootstrap: spec.bootstrap,
         secure: t.scheme == "wss",
@@ -395,7 +445,7 @@ async fn prepare_ws(
         port: t.port,
         authority: t.authority.clone(),
         request_target: t.request_target(),
-        headers: header_pairs(&headers),
+        headers: header_pairs(&headers)?,
         subprotocols,
         deflate,
         script,
@@ -417,7 +467,9 @@ async fn prepare_ws(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
-    Ok(finish_prep(b, Plan::Ws(plan), method.into(), url, headers, Bytes::new(), vec![]))
+    let mut p = finish_prep(b, Plan::Ws(plan), method.into(), url, headers, Bytes::new(), vec![]);
+    p.cookies = cookies;
+    Ok(p)
 }
 
 async fn prepare_sse(
@@ -445,10 +497,21 @@ async fn prepare_sse(
         b.inferred.push("Accept-Encoding: identity (events are parsed as they arrive)".into());
     }
     let last_event_id = spec.last_event_id.as_ref().map(|v| r.resolve(v, "sse.last_event_id")).transpose()?;
+    // Refused rather than left out of the handshake (the message never holds
+    // the value, which may come from a secret).
+    if last_event_id.as_deref().is_some_and(|id| HeaderValue::from_str(id).is_err()) {
+        return Err(local(
+            FailureKind::InvalidHeader,
+            "sse.last_event_id resolves to a value that is not a valid Last-Event-ID header value (it holds a line break, control or non-ASCII character); the request was not sent",
+            "sse.last_event_id",
+        ));
+    }
     let body = b.prep.http.body.clone();
     let method = b.prep.http.method.clone();
-    let (headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &method, &target, headers, &body, cancel).await?;
+    let (mut headers, query, facts) =
+        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &method, &target, headers, &body, cancel).await?;
     let t = Target { query, ..target.clone() };
+    let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     let plan = sse::SsePlan {
         method: http::Method::from_bytes(method.as_bytes()).unwrap_or(http::Method::GET),
         https: t.scheme == "https",
@@ -456,7 +519,7 @@ async fn prepare_sse(
         port: t.port,
         authority: t.authority.clone(),
         request_target: t.request_target(),
-        headers: header_pairs(&headers),
+        headers: header_pairs(&headers)?,
         body: body.clone(),
         version: b.prep.settings.http_version,
         timeouts: b.prep.settings.timeouts,
@@ -479,7 +542,9 @@ async fn prepare_sse(
             .map(|plan| anvil_transport::proxy_protocol::ConnectionHeader { plan, redact: Some(redact_fn(&b.redactor)) }),
     };
     let url = t.url();
-    Ok(finish_prep(b, Plan::Sse(plan), method, url, headers, body, facts))
+    let mut p = finish_prep(b, Plan::Sse(plan), method, url, headers, body, facts);
+    p.cookies = cookies;
+    Ok(p)
 }
 
 async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Schema, TransportFailure> {
@@ -649,7 +714,7 @@ async fn prepare_grpc(
         mode: spec.mode,
         schema,
         messages,
-        headers: header_pairs(&headers),
+        headers: header_pairs(&headers)?,
         deadline_ms: spec.deadline_ms,
         timeouts: b.prep.settings.timeouts,
         limits: b.prep.settings.limits,
@@ -1124,7 +1189,7 @@ async fn prepare_masque(
         proxy_authority: t.authority.clone(),
         request_target: t.request_target(),
         target: target.authority.clone(),
-        headers: header_pairs(&headers),
+        headers: header_pairs(&headers)?,
         mode: m.datagrams,
         tls,
         dns: dns_config(&settings),
@@ -1323,6 +1388,13 @@ async fn run_prepared(
     workload: Option<WorkloadApiEvidence>,
 ) -> ExecutionOutput {
     let out = run_plan(&prep.plan, &events, &cancel, commands).await;
+    // The handshake responses' cookies, kept in the workspace jar unless the
+    // engine was locked or the workspace deleted since the execution started.
+    if let Some(c) = &prep.cookies {
+        for r in out.attempts.iter().filter_map(|a| a.response.as_ref()) {
+            c.jars.store(c.epoch, &c.isolation, &c.target, r);
+        }
+    }
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
     for s in resolver.used_secrets.lock().iter() {
@@ -1396,8 +1468,10 @@ async fn run_prepared(
 /// Automation execution for WebSocket, gRPC, SSE, TCP/TLS and UDP/DTLS.
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
     let started_at = Utc::now();
-    // Taken first: TLS material prepared after a lock is not cached.
-    let epoch = engine.sensitive_epoch();
+    // Taken first: TLS material prepared after a lock is not cached, and
+    // handshake cookies received after a lock or a workspace delete are not
+    // kept.
+    let epoch = engine.execution_epoch(&ctx.isolation);
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // Canceling the execution abandons a Workload API call in flight.
     let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
@@ -1511,8 +1585,10 @@ impl Engine {
     /// idle auto-close do not apply to interactive sessions.
     pub async fn open_session(&self, ctx: ExecutionContext, events: EventCtx) -> SessionHandle {
         let started_at = Utc::now();
-        // Taken first: TLS material prepared after a lock is not cached.
-        let epoch = self.sensitive_epoch();
+        // Taken first: TLS material prepared after a lock is not cached, and
+        // handshake cookies received after a lock or a workspace delete are
+        // not kept.
+        let epoch = self.execution_epoch(&ctx.isolation);
         let protocol = ctx.spec.protocol;
         let execution_id = events.execution_id;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);

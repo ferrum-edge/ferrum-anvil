@@ -82,6 +82,13 @@ against it).
   to it, whatever the redirect policy. TLS settings are prepared for each
   hop's target, and a hop whose route or TLS settings cannot be prepared is
   not followed.
+
+  SSE and WebSocket handshakes use the same jar, with the same rules and
+  workspace isolation (a `ws://` URL counts as `http://`, `wss://` as
+  `https://`). A handshake's `Set-Cookie` is stored when the session ends,
+  and not at all when the profile was locked or the session's workspace
+  deleted since the session started (the same fences as for HTTP
+  responses, below).
 - **Redirects and NO_PROXY:** the proxy route is decided for each hop's host
   and port. A redirect from a NO_PROXY host to any other host goes through
   the proxy, and a redirect to a NO_PROXY host goes direct, so a server can
@@ -251,11 +258,15 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   following is kept after it: its responses' cookies, the TLS
   configurations it prepares (which hold a client identity's private key
   and a session store), its connections (HTTP/1.1, HTTP/2 or HTTP/3) and
-  the session tickets they receive. The exceptions, both tracked for
-  follow-up: the gRPC channels of a load run's virtual users are not fenced
-  (their engines are stopped on lock and dropped with the run), and a
-  workspace delete (`Engine::clear_isolation`) clears that workspace's
-  caches without starting a new generation.
+  the session tickets they receive. A workspace delete
+  (`Engine::clear_isolation`) fences that workspace's cookie jar the same
+  way: the cookies of a request or session that started before the delete
+  are not kept, so they cannot reappear in a workspace restored with the
+  same id. The exceptions, both tracked for follow-up: the gRPC channels of
+  a load run's virtual users are not fenced (their engines are stopped on
+  lock and dropped with the run), and a workspace delete clears that
+  workspace's connections and session tickets without starting a new
+  generation.
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).

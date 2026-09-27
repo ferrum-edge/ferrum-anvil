@@ -14,7 +14,8 @@
 //! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — gRPC echo and reflection
 //!   ([`crate::grpc`]); with an `application/grpc-web*` content type, the
 //!   gRPC-Web echo ([`crate::grpc_web`])
-//! * `/sse?count=&interval=` — server-sent events
+//! * `/sse?count=&interval=&set_cookie=` — server-sent events; `set_cookie`
+//!   (`name=value`) answers with that cookie (`Path=/; HttpOnly`)
 //! * `/gzip`, `/binary`, `/html`, `/injection`, `/soap-fault`, `/graphql-errors`
 //! * `/redirect?to=&status=`, `/set-cookie?name=&value=`
 //! * `/auth/basic?user=&pass=`, `/auth/bearer?token=`, `/auth/apikey?name=&value=&in=header|query`
@@ -22,7 +23,7 @@
 //! * `/oauth/token`, `/oauth/authorize` — minimal fixture identity provider
 //! * `/ws` — WebSocket echo via H1 Upgrade or H2 extended CONNECT; with a
 //!   permessage-deflate offer or `pmd` query options, the independent
-//!   RFC 7692 peer in [`crate::ws_deflate`]
+//!   RFC 7692 peer in [`crate::ws_deflate`]; `set_cookie` as for `/sse`
 
 use crate::log::{GroundTruth, GroundTruthLog};
 use crate::tlsserver::{TlsServerOptions, client_cn, server_config};
@@ -341,7 +342,11 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
                     tokio::time::sleep(Duration::from_millis(interval)).await;
                 }
             });
-            Response::builder().status(200).header("content-type", "text/event-stream").header("cache-control", "no-cache").body(b).unwrap()
+            let mut resp = Response::builder().status(200).header("content-type", "text/event-stream").header("cache-control", "no-cache");
+            if let Some(c) = q(&qs, "set_cookie") {
+                resp = resp.header("set-cookie", format!("{c}; Path=/; HttpOnly"));
+            }
+            resp.body(b).unwrap()
         }
         (_, ["gzip"]) => {
             use std::io::Write;
@@ -573,6 +578,9 @@ async fn websocket(req: Request<Incoming>, qs: Vec<(String, String)>, log: Groun
     }
     if let Some(answer) = deflate.as_ref().and_then(|s| s.answer.as_deref()) {
         resp = resp.header("sec-websocket-extensions", answer);
+    }
+    if let Some(c) = q(&qs, "set_cookie") {
+        resp = resp.header("set-cookie", format!("{c}; Path=/; HttpOnly"));
     }
     tokio::spawn(async move {
         let Ok(upgraded) = hyper::upgrade::on(req).await else {
