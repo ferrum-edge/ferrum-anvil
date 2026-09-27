@@ -11,6 +11,7 @@ use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::assertions::{Extraction, ExtractionSource};
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::runner::RunStepStatus;
@@ -18,14 +19,14 @@ use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::ProxySelection;
 use anvil_domain::tls::{ClientIdentity, HostBinding, ProxyKind, ProxyProfile, TlsProfile};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
-use anvil_domain::workspace::{Environment, Variable, Workspace};
+use anvil_domain::workspace::{Environment, RequestRevision, Variable, Workspace};
 use anvil_engine::ExecutionContext;
 use anvil_fixtures::GroundTruth;
 use anvil_import::{ImportOptions, ReimportApproval};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
-use anvil_storage::store::DB_FILE;
+use anvil_storage::store::{DB_FILE, kind};
 use anvil_transport::recorder::EventCtx;
 use std::collections::HashSet;
 use std::path::Path;
@@ -724,4 +725,231 @@ async fn a_workspace_run_keeps_extracted_values_on_their_side_of_an_import_root(
     let sent = received_tokens(&f);
     let expected = [("me", "user-session-0001"), ("imported", "imported-0002"), ("after", "user-session-0001")];
     assert_eq!(sent, expected.map(|(s, t)| (s.to_string(), t.to_string())));
+}
+
+// ---------------------------------------------------------------- reimport
+
+const SERVER_V1: &str = r#"{"openapi":"3.0.3","info":{"title":"Audit","version":"1"},"servers":[{"url":"https://old.example.test"}],"paths":{"/health":{"get":{"operationId":"health","responses":{"200":{"description":"ok"}}}}}}"#;
+
+fn server(url: &str) -> Vec<u8> {
+    SERVER_V1.replace("https://old.example.test", url).into_bytes()
+}
+
+/// The URL `request` would be sent to.
+fn sent_to(app: &App, ws: &Id, request: &Id, environment: Option<Id>) -> String {
+    let opts = SendOptions { environment, ..Default::default() };
+    let ctx = app.build_context(Some(*request), ws, None, &opts).unwrap();
+    app.engine.preview(&ctx).unwrap_or_else(|e| panic!("{e:?}")).url
+}
+
+/// The import id a reimport of the workspace's only source uses now.
+fn current_import(app: &App, ws: &Id) -> Id {
+    app.spec_sources(ws).unwrap()[0].source.import_id
+}
+
+#[test]
+fn a_reimport_with_a_changed_server_sends_to_the_new_server() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let existing = app.create_workspace("Existing").unwrap().meta.id;
+    for (label, target) in [("new workspace", SpecTarget::NewWorkspace), ("import root", into(&existing))] {
+        let done = app.spec_import(SERVER_V1.as_bytes(), "audit.json", &ImportOptions::default(), target).unwrap();
+        let ws = done.workspace_id;
+        let health = app.requests(&ws).unwrap().pop().unwrap();
+        // Under an import root only an environment the import brought
+        // resolves, and only when it is chosen.
+        let environment = done.root_folder_id.map(|f| app.folder(&f).unwrap().import_environment_ids[0]);
+        let url = sent_to(&app, &ws, &health.meta.id, environment);
+        assert!(url.starts_with("https://old.example.test/"), "{label}: {url}");
+
+        let newer = server("https://new.example.test");
+        let plan = app.spec_reimport_plan(&done.import_id, &newer).unwrap();
+        assert_eq!(plan.unchanged, vec![health.meta.id], "{label}: the request itself says `{{{{baseUrl}}}}/health`");
+        assert!(plan.scope_updated.iter().any(|c| c.key.ends_with("/variables/baseUrl")), "{label}: {:?}", plan.scope_updated);
+        assert!(plan.scope_conflicts.is_empty(), "{label}: {:?}", plan.scope_conflicts);
+        app.spec_reimport_apply(&done.import_id, &newer, &ReimportApproval::default()).unwrap();
+        let url = sent_to(&app, &ws, &health.meta.id, environment);
+        assert!(url.starts_with("https://new.example.test/"), "{label}: {url}");
+        assert_eq!(app.request(&health.meta.id).unwrap(), health, "{label}: the request is untouched");
+
+        // Applied, it is what was generated: nothing is offered again.
+        let again = app.spec_reimport_plan(&current_import(&app, &ws), &newer).unwrap();
+        assert!(again.scope_updated.is_empty() && again.scope_conflicts.is_empty(), "{label}: {again:?}");
+    }
+}
+
+#[test]
+fn a_server_the_user_changed_is_kept_until_the_user_approves_the_new_one() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    let health = app.requests(&ws).unwrap().pop().unwrap().meta.id;
+    let mut env = app.environments(&ws).unwrap().pop().unwrap();
+    env.variables.iter_mut().find(|v| v.name == "baseUrl").unwrap().value = SensitiveValue::template("https://mine.example.test");
+    env.variables.push(Variable::plain("token", "mine"));
+    app.save_environment(env.clone()).unwrap();
+
+    let newer = server("https://new.example.test");
+    let key = format!("environments/{}/variables/baseUrl", env.meta.id);
+    let plan = app.spec_reimport_plan(&done.import_id, &newer).unwrap();
+    assert_eq!(plan.scope_conflicts.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec![key.as_str()]);
+    assert!(plan.scope_conflicts[0].user_edited);
+    app.spec_reimport_apply(&done.import_id, &newer, &ReimportApproval::default()).unwrap();
+    assert!(sent_to(&app, &ws, &health, None).starts_with("https://mine.example.test/"), "the user's server is kept");
+
+    // Declined once, it is offered again; approved, it replaces the user's.
+    let plan = app.spec_reimport_plan(&current_import(&app, &ws), &newer).unwrap();
+    assert_eq!(plan.scope_conflicts.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec![key.as_str()]);
+    let approval = ReimportApproval { overwrite_scope: vec![key], ..Default::default() };
+    app.spec_reimport_apply(&current_import(&app, &ws), &newer, &approval).unwrap();
+    assert!(sent_to(&app, &ws, &health, None).starts_with("https://new.example.test/"));
+    let env = app.environments(&ws).unwrap().pop().unwrap();
+    assert!(env.variables.iter().any(|v| v.name == "token"), "a variable of the user's own is kept");
+}
+
+#[test]
+fn a_reimport_updates_an_import_roots_own_variables_and_leaves_the_destinations_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let dest = destination_with_credentials(&app);
+    let done = import(&app, COLLECTION.as_bytes(), into(&dest.meta.id));
+    assert!(prepared(&app, &dest.meta.id, "Health").0.starts_with("https://api.example.invalid/"));
+
+    let newer = COLLECTION.replace(r#""value": "https://api.example.invalid""#, r#""value": "https://api2.example.invalid""#);
+    let plan = app.spec_reimport_plan(&done.import_id, newer.as_bytes()).unwrap();
+    assert!(plan.scope_updated.iter().any(|c| c.key == "variables/base"), "{:?}", plan.scope_updated);
+    app.spec_reimport_apply(&done.import_id, newer.as_bytes(), &ReimportApproval::default()).unwrap();
+    let (url, auth, authorization) = prepared(&app, &dest.meta.id, "Health");
+    assert!(url.starts_with("https://api2.example.invalid/"), "{url}");
+    assert_eq!((auth, authorization), (AuthConfig::None, false), "still the source's own no-auth");
+    let root_folder = app.folder(&done.root_folder_id.unwrap()).unwrap();
+    assert!(root_folder.import_root && !root_folder.use_workspace_scope);
+    assert_eq!(app.workspace(&dest.meta.id).unwrap(), dest, "the destination's own scope is untouched");
+}
+
+fn revisions(app: &App, ws: &Id) -> usize {
+    app.store.list::<RequestRevision>(kind::REVISION, Some(ws)).unwrap().len()
+}
+
+#[test]
+fn a_reimport_that_changes_a_request_points_it_at_a_new_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, CURL, SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    let mut q = app.requests(&ws).unwrap().pop().unwrap();
+    q.name = "Mine".into();
+    let saved = app.save_request(q).unwrap();
+    let old = saved.revision_id.expect("saving records a revision");
+    assert_eq!(revisions(&app, &ws), 1);
+
+    let newer = b"curl -H 'X-Version: 2' https://example.invalid/health";
+    let plan = app.spec_reimport_plan(&done.import_id, newer).unwrap();
+    assert_eq!(plan.updated.len(), 1, "not edited by the user: a safe update");
+    app.spec_reimport_apply(&done.import_id, newer, &ReimportApproval::default()).unwrap();
+    let after = app.request(&saved.meta.id).unwrap();
+    assert!(after.spec.headers.iter().any(|h| h.name == "X-Version"));
+    let new = after.revision_id.expect("the updated request has a revision");
+    assert_ne!(new, old);
+    let revision = app.revision(&new).unwrap();
+    assert_eq!((revision.request_id, &revision.spec), (after.meta.id, &after.spec));
+    assert_eq!(app.revision(&old).unwrap().spec, saved.spec, "the old revision keeps the old spec");
+    let ctx = app.build_context(Some(after.meta.id), &ws, None, &SendOptions::default()).unwrap();
+    assert_eq!(ctx.revision_id, Some(new));
+    assert_eq!(revisions(&app, &ws), 2);
+
+    // Unchanged by a reimport, it keeps its revision and gains none.
+    app.spec_reimport_apply(&current_import(&app, &ws), newer, &ReimportApproval::default()).unwrap();
+    assert_eq!(app.request(&saved.meta.id).unwrap(), after);
+    assert_eq!(revisions(&app, &ws), 2);
+}
+
+#[tokio::test]
+async fn an_approved_conflict_runs_and_is_recorded_as_its_new_revision() {
+    anvil_fixtures::init();
+    let f = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let url = f.url("/echo");
+    let done = import(&app, format!("curl {url}").as_bytes(), SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    // Edited by the user and changed upstream: a conflict.
+    let mut q = app.requests(&ws).unwrap().pop().unwrap();
+    q.spec.headers.push(KeyValue::new("X-Mine", "1"));
+    let edited = app.save_request(q).unwrap();
+    let newer = format!("curl -H 'X-Version: 2' {url}");
+    let plan = app.spec_reimport_plan(&done.import_id, newer.as_bytes()).unwrap();
+    assert_eq!(plan.conflicts.len(), 1);
+
+    // Declined, the user's request and its revision stay as they were.
+    app.spec_reimport_apply(&done.import_id, newer.as_bytes(), &ReimportApproval::default()).unwrap();
+    assert_eq!(app.request(&edited.meta.id).unwrap().revision_id, edited.revision_id);
+
+    let approval = ReimportApproval { overwrite: vec![edited.meta.id], ..Default::default() };
+    app.spec_reimport_apply(&current_import(&app, &ws), newer.as_bytes(), &approval).unwrap();
+    let after = app.request(&edited.meta.id).unwrap();
+    assert!(!after.spec.headers.iter().any(|h| h.name == "X-Mine"));
+    let rev = after.revision_id.expect("the overwritten request has a revision");
+    assert_ne!(Some(rev), edited.revision_id);
+    assert_eq!(app.revision(&rev).unwrap().spec, after.spec);
+
+    let r = app.run_folder(&ws, None, RunSettings::default(), CancellationToken::new()).await.unwrap();
+    let step = &r.iterations[0].steps[0];
+    assert_eq!(step.revision_id, Some(rev), "the run names the revision it sent");
+    let seen = f.log.last_request_headers().unwrap();
+    assert!(seen.iter().any(|(n, v)| n == "x-version" && v == "2"), "and that is what reached the peer: {seen:?}");
+    let (record, _) = app.store.get_history::<ExecutionRecord>(&step.execution_id.unwrap().to_string()).unwrap().unwrap();
+    assert_eq!(record.revision_id, Some(rev));
+}
+
+#[test]
+fn an_active_environment_a_reimport_deletes_leaves_none_active() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let two_servers = SERVER_V1.replace(
+        r#"[{"url":"https://old.example.test"}]"#,
+        r#"[{"url":"https://old.example.test"},{"url":"https://staging.example.test","description":"Staging"}]"#,
+    );
+    let done = import(&app, two_servers.as_bytes(), SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    let staging = app.environments(&ws).unwrap().into_iter().find(|e| e.name == "Staging").unwrap().meta.id;
+    let mut w = app.workspace(&ws).unwrap();
+    assert_ne!(w.active_environment_id, Some(staging), "the source makes its first server active");
+    w.active_environment_id = Some(staging);
+    app.save_workspace(w).unwrap();
+
+    let key = format!("environments/{staging}");
+    let plan = app.spec_reimport_plan(&done.import_id, SERVER_V1.as_bytes()).unwrap();
+    assert_eq!(plan.scope_removed.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec![key.as_str()]);
+    let approval = ReimportApproval { delete_scope: vec![key], ..Default::default() };
+    app.spec_reimport_apply(&done.import_id, SERVER_V1.as_bytes(), &approval).unwrap();
+    assert_eq!(app.environments(&ws).unwrap().len(), 1);
+    // As when the user deletes it: none is active, not the one the source
+    // makes active.
+    assert_eq!(app.workspace(&ws).unwrap().active_environment_id, None);
+}
+
+#[test]
+fn an_earlier_import_whose_original_cannot_be_read_can_still_be_reimported() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    // As an earlier build stored it: no record of the scope it generated.
+    let mut rec = app.spec_sources(&ws).unwrap().pop().unwrap();
+    rec.generated_scope = None;
+    app.store.put(kind::SPEC_SOURCE, &done.import_id, Some(&ws), None, 0.0, &rec).unwrap();
+    // And its stored original no longer opens.
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    db.execute_batch("UPDATE blobs SET payload = x'00';").unwrap();
+    assert!(app.get_attachment(&rec.original_sha256).is_err());
+
+    let newer = server("https://new.example.test");
+    let plan = app.spec_reimport_plan(&done.import_id, &newer).unwrap();
+    // Nothing is known of what was generated: every difference needs approval.
+    assert!(plan.scope_updated.is_empty(), "{:?}", plan.scope_updated);
+    assert!(plan.scope_conflicts.iter().any(|c| c.key.ends_with("/variables/baseUrl") && c.user_edited), "{:?}", plan.scope_conflicts);
+    app.spec_reimport_apply(&done.import_id, &newer, &ReimportApproval::default()).unwrap();
+    assert!(sent_to(&app, &ws, &app.requests(&ws).unwrap()[0].meta.id, None).starts_with("https://old.example.test/"), "declined: kept");
 }

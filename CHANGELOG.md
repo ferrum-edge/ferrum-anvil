@@ -97,6 +97,33 @@
 
 ### Fixed
 
+- A spec reimport now compares the import's scoped configuration too, not
+  only its requests: the source's own variables, auth, settings and
+  description (on the new workspace, or on the import root in an existing
+  workspace) and its environments. An OpenAPI server change, which leaves
+  every `{{baseUrl}}/…` request as it was, is now listed as a change to its
+  environment's `baseUrl` and applied, so requests are sent to the new
+  server. The same rules as for requests apply: a value you edited is a
+  conflict kept until you approve overwriting it (`overwrite_scope`), a
+  variable or environment gone from the source is kept until you approve
+  deleting it (`delete_scope`), your own variables stay, and a new server
+  arrives as a new environment. An environment you deleted is a conflict
+  when the source changed any of it, and one gone from the source is marked
+  as edited when you changed any of its variables. An approved deletion of
+  the active environment leaves none active, as deleting it yourself does.
+  Imports made by earlier builds work this out from their stored original
+  file, unless they were reimported since or that file cannot be read; then
+  every difference awaits approval, and a removal you decline is kept as
+  your own from then on. A reimport of an import root that was deleted is
+  refused, and so is an apply when the import's requests, scope or
+  environments changed after the diff was made; nothing is written then.
+  Folder-level configuration, the stored source file and request renames
+  are not handled yet (#146).
+- A reimport that changes a saved request now records a new revision for
+  it, in the same transaction, and points the request at it, so a send, run
+  or history record names the spec that was actually sent. The revision of
+  its old spec stays as it was; a request the reimport leaves unchanged
+  keeps its revision and gains none.
 - Desktop Runner: **Run folder** and **Run** start one run at a time. A
   second click while the start is still pending no longer starts another
   run, and a run that finishes before the start answers (an empty folder,

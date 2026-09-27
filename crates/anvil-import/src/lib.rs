@@ -45,7 +45,7 @@ mod wsdl;
 
 pub use builder::ANVIL_IMPORT_NAMESPACE;
 pub use detect::{Detected, Dialect, SourceKind, Syntax, detect};
-pub use reimport::{ReimportApproval, ReimportChange, ReimportPlan, ReimportRemoval, reimport_diff};
+pub use reimport::{ImportedScope, ReimportApproval, ReimportChange, ReimportPlan, ReimportRemoval, ScopeChange, ScopeDiff, reimport_diff};
 pub use report::{
     ExternalRef, ExternalRefKind, Finding, ImportCounts, ImportReport, InactiveSetting, Redaction, RequiredVariable, RetainedScript,
 };
