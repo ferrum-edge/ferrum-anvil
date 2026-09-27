@@ -902,3 +902,54 @@ async fn an_approved_conflict_runs_and_is_recorded_as_its_new_revision() {
     let (record, _) = app.store.get_history::<ExecutionRecord>(&step.execution_id.unwrap().to_string()).unwrap().unwrap();
     assert_eq!(record.revision_id, Some(rev));
 }
+
+#[test]
+fn an_active_environment_a_reimport_deletes_leaves_none_active() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let two_servers = SERVER_V1.replace(
+        r#"[{"url":"https://old.example.test"}]"#,
+        r#"[{"url":"https://old.example.test"},{"url":"https://staging.example.test","description":"Staging"}]"#,
+    );
+    let done = import(&app, two_servers.as_bytes(), SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    let staging = app.environments(&ws).unwrap().into_iter().find(|e| e.name == "Staging").unwrap().meta.id;
+    let mut w = app.workspace(&ws).unwrap();
+    assert_ne!(w.active_environment_id, Some(staging), "the source makes its first server active");
+    w.active_environment_id = Some(staging);
+    app.save_workspace(w).unwrap();
+
+    let key = format!("environments/{staging}");
+    let plan = app.spec_reimport_plan(&done.import_id, SERVER_V1.as_bytes()).unwrap();
+    assert_eq!(plan.scope_removed.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec![key.as_str()]);
+    let approval = ReimportApproval { delete_scope: vec![key], ..Default::default() };
+    app.spec_reimport_apply(&done.import_id, SERVER_V1.as_bytes(), &approval).unwrap();
+    assert_eq!(app.environments(&ws).unwrap().len(), 1);
+    // As when the user deletes it: none is active, not the one the source
+    // makes active.
+    assert_eq!(app.workspace(&ws).unwrap().active_environment_id, None);
+}
+
+#[test]
+fn an_earlier_import_whose_original_cannot_be_read_can_still_be_reimported() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let ws = done.workspace_id;
+    // As an earlier build stored it: no record of the scope it generated.
+    let mut rec = app.spec_sources(&ws).unwrap().pop().unwrap();
+    rec.generated_scope = None;
+    app.store.put(kind::SPEC_SOURCE, &done.import_id, Some(&ws), None, 0.0, &rec).unwrap();
+    // And its stored original no longer opens.
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    db.execute_batch("UPDATE blobs SET payload = x'00';").unwrap();
+    assert!(app.get_attachment(&rec.original_sha256).is_err());
+
+    let newer = server("https://new.example.test");
+    let plan = app.spec_reimport_plan(&done.import_id, &newer).unwrap();
+    // Nothing is known of what was generated: every difference needs approval.
+    assert!(plan.scope_updated.is_empty(), "{:?}", plan.scope_updated);
+    assert!(plan.scope_conflicts.iter().any(|c| c.key.ends_with("/variables/baseUrl") && c.user_edited), "{:?}", plan.scope_conflicts);
+    app.spec_reimport_apply(&done.import_id, &newer, &ReimportApproval::default()).unwrap();
+    assert!(sent_to(&app, &ws, &app.requests(&ws).unwrap()[0].meta.id, None).starts_with("https://old.example.test/"), "declined: kept");
+}

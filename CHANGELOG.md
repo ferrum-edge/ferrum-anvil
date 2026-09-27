@@ -107,10 +107,18 @@
   conflict kept until you approve overwriting it (`overwrite_scope`), a
   variable or environment gone from the source is kept until you approve
   deleting it (`delete_scope`), your own variables stay, and a new server
-  arrives as a new environment. Imports made by earlier builds work this out
-  from their stored original file, unless they were reimported since; then
-  every difference is a conflict until the next reimport. A reimport of an
-  import root that was deleted is refused.
+  arrives as a new environment. An environment you deleted is a conflict
+  when the source changed any of it, and one gone from the source is marked
+  as edited when you changed any of its variables. An approved deletion of
+  the active environment leaves none active, as deleting it yourself does.
+  Imports made by earlier builds work this out from their stored original
+  file, unless they were reimported since or that file cannot be read; then
+  every difference awaits approval, and a removal you decline is kept as
+  your own from then on. A reimport of an import root that was deleted is
+  refused, and so is an apply when the import's requests, scope or
+  environments changed after the diff was made; nothing is written then.
+  Folder-level configuration, the stored source file and request renames
+  are not handled yet (#146).
 - A reimport that changes a saved request now records a new revision for
   it, in the same transaction, and points the request at it, so a send, run
   or history record names the spec that was actually sent. The revision of

@@ -4,7 +4,9 @@ use anvil_domain::Id;
 use anvil_domain::request::KeyValue;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::{RequestDefinition, Variable};
-use anvil_import::{ImportOptions, ImportResult, ImportedScope, ReimportApproval, ReimportPlan, ScopeDiff, import, reimport_diff};
+use anvil_import::{
+    ImportOptions, ImportResult, ImportedScope, ReimportApproval, ReimportPlan, ScopeChange, ScopeDiff, import, reimport_diff,
+};
 use common::*;
 
 const V1: &str = r#"
@@ -320,4 +322,109 @@ fn source_level_variables_auth_and_description_are_compared_too() {
     let base = applied.variables.iter().find(|v| v.name == "base").unwrap();
     assert_eq!(base.value, SensitiveValue::template("https://api2.example.invalid"));
     assert_eq!(applied, ImportedScope::generated(&fresh));
+}
+
+fn keys(changes: &[ScopeChange]) -> Vec<&str> {
+    changes.iter().map(|c| c.key.as_str()).collect()
+}
+
+/// [`server`] with a server description, so the environment keeps its name
+/// ("Production") when the URL changes.
+fn named_server(url: &str) -> String {
+    server(url).replace(r#"[{"url":"#, r#"[{"description":"Production","url":"#)
+}
+
+#[test]
+fn an_environment_the_user_deleted_is_a_conflict_when_its_server_changed_upstream() {
+    let first = import(named_server("https://old.example.test").as_bytes(), &opts()).unwrap();
+    assert_eq!(first.environments[0].name, "Production");
+    let generated = ImportedScope::generated(&first).unit_hashes();
+    let env = first.environments[0].meta.id;
+    let key = format!("environments/{env}");
+    let mut current = ImportedScope::generated(&first);
+    current.environments.clear();
+
+    // Unchanged upstream, the deletion is the user's to keep.
+    let same = reimport(&first, &named_server("https://old.example.test"));
+    let fresh = ImportedScope::generated(&same);
+    let plan = reimport_diff(&first.requests, &same, ScopeDiff { current: &current, generated: Some(&generated), fresh: &fresh });
+    assert_eq!(plan.scope_preserved_edits, vec![key.clone()]);
+    assert!(plan.scope_conflicts.is_empty() && plan.scope_updated.is_empty());
+
+    // Its server changed upstream, under the same name: a conflict on the
+    // whole environment, not a kept edit.
+    let fresh_result = reimport(&first, &named_server("https://new.example.test"));
+    let fresh = ImportedScope::generated(&fresh_result);
+    let plan = reimport_diff(&first.requests, &fresh_result, ScopeDiff { current: &current, generated: Some(&generated), fresh: &fresh });
+    assert!(plan.scope_preserved_edits.is_empty(), "{:?}", plan.scope_preserved_edits);
+    assert_eq!(keys(&plan.scope_conflicts), vec![key.as_str()]);
+    assert!(plan.scope_conflicts[0].user_edited && plan.scope_conflicts[0].whole_environment);
+    assert!(plan.scope_updated.is_empty() && plan.scope_removed.is_empty());
+
+    // Declined: still deleted, and offered again next time.
+    assert!(plan.apply_scope(&current, &fresh, &ReimportApproval::default()).environments.is_empty());
+    let next = plan.next_generated_scope(&fresh, Some(&generated), &ReimportApproval::default());
+    let again = reimport_diff(&first.requests, &fresh_result, ScopeDiff { current: &current, generated: Some(&next), fresh: &fresh });
+    assert_eq!(keys(&again.scope_conflicts), vec![key.as_str()]);
+
+    // Approved: it comes back with the new server.
+    let approval = ReimportApproval { overwrite_scope: vec![key], ..Default::default() };
+    let applied = plan.apply_scope(&current, &fresh, &approval);
+    assert_eq!(base_url(&applied, env), SensitiveValue::template("https://new.example.test"));
+}
+
+#[test]
+fn an_environment_removed_upstream_is_user_edited_when_its_variables_were() {
+    let two_servers = SERVER_V1.replace(
+        r#"[{"url":"https://old.example.test"}]"#,
+        r#"[{"url":"https://old.example.test"},{"url":"https://staging.example.test","description":"Staging"}]"#,
+    );
+    let two = import(two_servers.as_bytes(), &opts()).unwrap();
+    let staging = two.environments[1].meta.id;
+    let key = format!("environments/{staging}");
+    let generated = ImportedScope::generated(&two).unit_hashes();
+    let back = reimport(&two, SERVER_V1);
+    let fresh = ImportedScope::generated(&back);
+
+    let untouched = ImportedScope::generated(&two);
+    let plan = reimport_diff(&two.requests, &back, ScopeDiff { current: &untouched, generated: Some(&generated), fresh: &fresh });
+    assert_eq!(keys(&plan.scope_removed), vec![key.as_str()]);
+    assert!(!plan.scope_removed[0].user_edited);
+
+    let mut edited = ImportedScope::generated(&two);
+    let variables = &mut edited.environments[1].variables;
+    variables.iter_mut().find(|v| v.name == "baseUrl").unwrap().value = SensitiveValue::template("http://localhost:8080");
+    let plan = reimport_diff(&two.requests, &back, ScopeDiff { current: &edited, generated: Some(&generated), fresh: &fresh });
+    assert_eq!(keys(&plan.scope_removed), vec![key.as_str()]);
+    assert!(plan.scope_removed[0].user_edited, "the user changed its baseUrl");
+    assert!(plan.scope_removed[0].whole_environment);
+
+    // Declined: kept as the user left it, and offered again next time.
+    let kept = plan.apply_scope(&edited, &fresh, &ReimportApproval::default());
+    assert_eq!(base_url(&kept, staging), SensitiveValue::template("http://localhost:8080"));
+    let next = plan.next_generated_scope(&fresh, Some(&generated), &ReimportApproval::default());
+    let again = reimport_diff(&two.requests, &back, ScopeDiff { current: &kept, generated: Some(&next), fresh: &fresh });
+    assert_eq!(keys(&again.scope_removed), vec![key.as_str()]);
+    assert!(again.scope_removed[0].user_edited);
+}
+
+#[test]
+fn a_declined_removal_with_no_record_of_what_was_generated_is_kept_as_the_users_own() {
+    let first = import(SERVER_V1.as_bytes(), &opts()).unwrap();
+    let key = format!("environments/{}/variables/token", first.environments[0].meta.id);
+    let mut current = ImportedScope::generated(&first);
+    current.environments[0].variables.push(Variable::plain("token", "mine"));
+    let again = reimport(&first, SERVER_V1);
+    let fresh = ImportedScope::generated(&again);
+
+    // Not knowing what was generated, it may be the source's own: listed.
+    let plan = reimport_diff(&first.requests, &again, ScopeDiff { current: &current, generated: None, fresh: &fresh });
+    assert_eq!(keys(&plan.scope_removed), vec![key.as_str()]);
+    let next = plan.next_generated_scope(&fresh, None, &ReimportApproval::default());
+    assert!(!next.contains_key(&key), "{next:?}");
+
+    // Declined, it is the user's own from then on.
+    let plan = reimport_diff(&first.requests, &again, ScopeDiff { current: &current, generated: Some(&next), fresh: &fresh });
+    assert!(plan.scope_removed.is_empty(), "{:?}", plan.scope_removed);
+    assert_eq!(plan.scope_preserved_edits, vec![key]);
 }

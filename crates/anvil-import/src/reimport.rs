@@ -103,6 +103,12 @@ pub struct ScopeChange {
     /// The stored value differs from what the last import generated, or
     /// that is not known.
     pub user_edited: bool,
+    /// An `environments/<id>` key for an environment only one side has
+    /// (added or removed, upstream or by the user): the change covers it
+    /// whole, with its variables, and `user_edited` and the upstream change
+    /// are judged on all of it.
+    #[serde(default)]
+    pub whole_environment: bool,
     /// The freshly generated value (the whole environment for an
     /// `environments/<id>` key); `None` when the source no longer has it.
     pub fresh: Option<Value>,
@@ -122,8 +128,8 @@ pub struct ScopeDiff<'a> {
     pub fresh: &'a ImportedScope,
 }
 
-/// Stands in for a declined unit's earlier hash when there was none; it
-/// matches no value, so the unit is offered again.
+/// Stands in for a declined conflict's earlier hash when there was none; it
+/// matches no value, so the conflict is offered again.
 const DECLINED: &str = "declined";
 
 /// Result of [`reimport_diff`]. Nothing is applied until [`ReimportPlan::apply`]
@@ -282,41 +288,41 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
 fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
     let current_units = scope_units(scope.current);
     let fresh_units = scope_units(scope.fresh);
-    let current: HashMap<&str, &Value> = current_units.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    let fresh: HashMap<&str, &Value> = fresh_units.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let current: BTreeMap<String, String> = current_units.iter().map(|(k, v)| (k.clone(), unit_hash(v))).collect();
+    let fresh: BTreeMap<String, String> = fresh_units.iter().map(|(k, v)| (k.clone(), unit_hash(v))).collect();
     // An environment only one side has (added or removed, upstream or by
     // the user) is one unit; its variables go with it.
-    let one_sided: Vec<String> = scope
+    let one_sided: HashSet<String> = scope
         .current
         .environments
         .iter()
         .chain(&scope.fresh.environments)
         .map(|e| environment_key(e.meta.id))
-        .filter(|k| !(current.contains_key(k.as_str()) && fresh.contains_key(k.as_str())))
-        .map(|k| format!("{k}/"))
+        .filter(|k| !(current.contains_key(k) && fresh.contains_key(k)))
         .collect();
-    let current_only = current_units.iter().map(|(k, _)| k).filter(|k| !fresh.contains_key(k.as_str()));
+    let current_only = current_units.iter().map(|(k, _)| k).filter(|k| !fresh.contains_key(*k));
     for key in fresh_units.iter().map(|(k, _)| k).chain(current_only) {
-        if one_sided.iter().any(|p| key.starts_with(p.as_str())) {
+        if one_sided.iter().any(|e| key.starts_with(&format!("{e}/"))) {
             continue;
         }
-        let c = current.get(key.as_str()).copied().map(unit_hash);
-        let f = fresh.get(key.as_str()).copied().map(unit_hash);
+        let whole = one_sided.contains(key);
+        let (c, f) = (hash_at(&current, key, whole), hash_at(&fresh, key, whole));
         if c == f {
             continue;
         }
-        let generated = scope.generated.map(|g| g.get(key));
-        let upstream_changed = generated.is_none_or(|g| g != f.as_ref());
-        let user_edited = generated.is_none_or(|g| g != c.as_ref());
+        let generated = scope.generated.map(|g| hash_at(g, key, whole));
+        let upstream_changed = generated.as_ref().is_none_or(|g| *g != f);
+        let user_edited = generated.as_ref().is_none_or(|g| *g != c);
         if !upstream_changed {
             plan.scope_preserved_edits.push(key.clone());
             continue;
         }
         let fresh_value = match scope.fresh.environments.iter().find(|e| environment_key(e.meta.id) == *key) {
             Some(e) => Some(to_json(e)),
-            None => fresh.get(key.as_str()).copied().cloned(),
+            None => fresh_units.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()),
         };
-        let change = ScopeChange { key: key.clone(), label: scope_label(key, scope), user_edited, fresh: fresh_value };
+        let label = scope_label(key, scope);
+        let change = ScopeChange { key: key.clone(), label, user_edited, whole_environment: whole, fresh: fresh_value };
         if f.is_none() {
             plan.scope_removed.push(change);
         } else if user_edited {
@@ -325,6 +331,24 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
             plan.scope_updated.push(change);
         }
     }
+}
+
+/// The hash `hashes` (unit key to hash) hold for `key`. For a `whole`
+/// environment it is one hash over the environment and all its variables;
+/// `None` when there is no unit of it.
+fn hash_at(hashes: &BTreeMap<String, String>, key: &str, whole: bool) -> Option<String> {
+    if !whole {
+        return hashes.get(key).cloned();
+    }
+    let all: serde_json::Map<String, Value> = within(hashes, key).map(|(k, h)| (k.clone(), Value::String(h.clone()))).collect();
+    (!all.is_empty()).then(|| unit_hash(&Value::Object(all)))
+}
+
+/// The entries of `hashes` for the environment at `key` and its variables.
+fn within<'h>(hashes: &'h BTreeMap<String, String>, key: &str) -> impl Iterator<Item = (&'h String, &'h String)> {
+    let prefix = format!("{key}/");
+    let key = key.to_string();
+    hashes.iter().filter(move |(k, _)| **k == key || k.starts_with(&prefix))
 }
 
 /// Every comparable unit of `scope`: description, settings, auth, each
@@ -498,7 +522,11 @@ impl ReimportPlan {
 
     /// The unit hashes to keep for the next reimport once this plan is
     /// applied with `approval`: the fresh import's, except that a declined
-    /// conflict or removal keeps its earlier hash, so it is offered again.
+    /// conflict or removal keeps its earlier hash (for a whole environment,
+    /// those of it and its variables), so it is offered again. A declined
+    /// conflict with no earlier hash gets one that matches nothing; a
+    /// declined removal with none is left out, so the next reimport keeps
+    /// it as the user's own instead of offering to delete it again.
     pub fn next_generated_scope(
         &self,
         fresh: &ImportedScope,
@@ -506,14 +534,21 @@ impl ReimportPlan {
         approval: &ReimportApproval,
     ) -> BTreeMap<String, String> {
         let mut out = fresh.unit_hashes();
-        let declined = self
-            .scope_conflicts
-            .iter()
-            .filter(|c| !approval.overwrite_scope.contains(&c.key))
-            .chain(self.scope_removed.iter().filter(|c| !approval.delete_scope.contains(&c.key)));
-        for c in declined {
-            let earlier = generated.and_then(|g| g.get(&c.key)).cloned().unwrap_or_else(|| DECLINED.to_string());
-            out.insert(c.key.clone(), earlier);
+        let conflicts = self.scope_conflicts.iter().filter(|c| !approval.overwrite_scope.contains(&c.key)).map(|c| (c, false));
+        let removals = self.scope_removed.iter().filter(|c| !approval.delete_scope.contains(&c.key)).map(|c| (c, true));
+        for (c, removal) in conflicts.chain(removals) {
+            let earlier: Vec<(String, String)> = match (generated, c.whole_environment) {
+                (None, _) => vec![],
+                (Some(g), false) => g.get_key_value(&c.key).map(|(k, h)| (k.clone(), h.clone())).into_iter().collect(),
+                (Some(g), true) => within(g, &c.key).map(|(k, h)| (k.clone(), h.clone())).collect(),
+            };
+            let prefix = format!("{}/", c.key);
+            out.retain(|k, _| *k != c.key && !(c.whole_environment && k.starts_with(&prefix)));
+            if !earlier.is_empty() {
+                out.extend(earlier);
+            } else if !removal {
+                out.insert(c.key.clone(), DECLINED.to_string());
+            }
         }
         out
     }
