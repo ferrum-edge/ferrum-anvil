@@ -7,6 +7,7 @@ Anvil workspace objects (`Workspace`, `Folder`, `RequestDefinition`,
 ```rust
 let detected = anvil_import::detect(&bytes);             // kind + dialect, no import
 let result = anvil_import::import(&bytes, &ImportOptions::default())?;
+// generated_hashes: ImportedScope::unit_hashes() plus request_unit_hashes() of what was imported last
 let scope = ScopeDiff { current: &stored_scope, generated: Some(&generated_hashes), fresh: &fresh_scope };
 let plan = anvil_import::reimport_diff(&existing_requests, &fresh_result, scope);
 let merged = plan.apply(&existing_requests, &ReimportApproval::default());
@@ -191,22 +192,69 @@ classifies each previously imported request:
 New operations are `added` (with the fresh folders they need in
 `added_folders`); requests without an import link are `unlinked` and untouched.
 `apply` keeps ids, folders, ordering and favorites of existing requests and
-moves added requests into the existing workspace. An updated request loses
-its `revision_id`, since that revision holds the old spec. Changing the sample
-mode or seed between imports changes generated hashes; every operation then
-shows up as changed upstream.
+moves added requests into the existing workspace. A request whose spec is
+updated loses its `revision_id`, since that revision holds the old spec.
+Changing the sample mode or seed between imports changes generated hashes;
+every operation then shows up as changed upstream.
+
+### Renames
+
+A request's name, description and tags are not part of its spec hash, so
+each is compared on its own by the same rule as the spec: as stored, as
+generated last time and as generated now. The table above applies to each of
+these parts, and a request is classified by all of them together:
+
+- a part that differs only because the user changed it (a rename, say) is a
+  preserved edit, and is kept;
+- a request with a part changed upstream is `updated` when the user changed
+  none of the parts that changed upstream, and a conflict when the user
+  changed one of them;
+- applying a change (a safe update, or an approved conflict) writes only the
+  parts that changed upstream (`ReimportChange::upstream_fields`: `spec`,
+  `name`, `description`, `tags`) and keeps the rest as the user left it;
+- a declined conflict keeps only the parts that conflict
+  (`ReimportChange::conflicting_fields`: those changed both upstream and by
+  the user). The other parts that changed upstream are still written, as a
+  safe update would write them.
+
+So a request the user renamed keeps the user's name when only its spec
+changed upstream (the spec is still updated), and a rename upstream of a
+request the user also renamed is a conflict kept until its id is in
+`ReimportApproval::overwrite`. If its spec changed upstream too and the user
+did not edit the spec, declining the conflict still updates the spec and
+keeps only the user's name; the name conflict is offered again next time. A
+rename upstream of a request the user did not rename is a safe update. `changed_fields` lists the differing spec fields,
+then `name`, `description` and `tags` when they differ.
+
+What was generated is recorded with the scope's hashes:
+`request_unit_hashes(requests)` gives a hash per part, keyed
+`requests/<operation key>/name` (`…/description`, `…/tags`), kept in the same
+map and passed in `ScopeDiff::generated`. A part whose hash is missing there is
+unknown: when it differs, it counts as changed both upstream and by the user,
+so it awaits approval. A removed request is `user_edited` when its spec or one
+of these parts was edited.
 
 ### Scoped configuration
 
 An import also writes configuration outside its requests (`ImportedScope`):
-the source's own description, settings, variables and auth, and its
-environments. An OpenAPI server is an environment whose `baseUrl` the
+the source's own description, settings, variables and auth, its environments
+and its folders. An OpenAPI server is an environment whose `baseUrl` the
 requests reference as `{{baseUrl}}`, so a changed server changes no request
 and is found here instead. `reimport_diff` compares it in units, each with a
 stable key: `description`, `settings`, `auth`, `variables/<name>`,
-`environments/<id>` (the environment's name) and
-`environments/<id>/variables/<name>`. A repeated variable name gets a `#n`
-suffix. An environment only one side has (added or removed, upstream or by
+`environments/<id>` (the environment's name),
+`environments/<id>/variables/<name>`, `folders/<id>` (the folder's name),
+`folders/<id>/description`, `folders/<id>/settings`, `folders/<id>/auth` and
+`folders/<id>/variables/<name>`. A repeated variable name gets a `#n`
+suffix.
+
+Folder units cover what a source configures on a folder: a Postman folder's
+description, variables and auth, and an OpenAPI tag's description (the tag's
+folder). They are compared only for a folder both sides have. A folder only
+the fresh import has arrives with the requests added in it
+(`added_folders`); one only the store has (gone from the source, or deleted by
+the user) is left alone and not listed. `apply_scope` changes only the
+compared units of a folder; its place, order and the rest stay. An environment only one side has (added or removed, upstream or by
 the user) is one unit, with its variables (`ScopeChange::whole_environment`):
 whether it changed upstream, and whether the user edited it, is judged on its
 name and all its variables together. An environment the user deleted is so a
@@ -223,10 +271,15 @@ as `ScopeDiff::generated`. Each unit is then classified as a request is, into
 is a preserved edit. Without a record of what was generated, every difference
 is a conflict or a removal awaiting approval. `apply_scope` returns the merged
 scope: variables are replaced in place, and a new environment arrives whole.
-`next_generated_scope` gives the hashes to keep after applying: the fresh
-import's, except that a declined conflict or removal keeps its earlier hash
-(for a whole environment, those of it and its variables), so it is offered
-again next time, as a declined request conflict is. A declined conflict with
+`next_generated_scope(fresh_scope, fresh_requests, generated, approval)` gives
+the hashes to keep after applying: the fresh import's (its scope's and its
+requests' names, descriptions and tags), except that a declined conflict or
+removal keeps its earlier hash (for a whole environment, those of it and its
+variables), so it is offered again next time, as a declined request conflict
+is. A removed request that is kept keeps the earlier hashes of its name,
+description and tags; a declined request conflict keeps those of the parts in
+its `conflicting_fields`, and gets the fresh hashes of the parts it applied.
+A declined conflict with
 no earlier hash is offered again too. A declined removal with no earlier hash
 (a unit that, as far as is known, only the user had) is left out, so the next
 reimport keeps it as the user's own instead of offering to delete it again.
@@ -237,20 +290,24 @@ reimport keeps it as the user's own instead of offering to delete it again.
 the import's own id namespace, so unchanged operations and environments keep
 their ids. The scope compared is the new workspace's, or the import root's in
 an existing workspace (an explicit "no auth" there stands for a source without
-auth, as at import), plus the environments the import brought. The generated
-hashes are kept in the source record (`SpecSourceRecord::generated_scope`); a
-record written by an earlier build without them gets them by importing its
-stored original again, unless it was reimported since or that original cannot
-be read; then they are unknown, and every difference awaits approval. A
-reimport of an import root that was deleted is refused.
+auth, as at import), plus the environments the import brought and its folders
+that are still stored. The generated hashes, of the scope and of the
+requests' names, descriptions and tags, are kept in the source record
+(`SpecSourceRecord::generated_scope`); a record written by an earlier build
+without them gets them by importing its stored original again, unless it was
+reimported since or that original cannot be read; then they are unknown, and
+every difference awaits approval. A record written by a build that kept only
+the scope's hashes (no `folders/…` or `requests/…` units) gets those units the
+same way. A reimport of an import root that was deleted is refused.
 
 The apply is one transaction after a restore checkpoint. It first reads the
 linked requests, the workspace's or import root's scope, the environments and
-the source record again; if any of them changed since the diff was made, the
+the source record again, with the folders it compared; if any of them changed
+since the diff was made (a folder renamed or its variables edited, say), the
 apply is refused with nothing written ("changed since the diff; re-run the
 reimport diff"). It then writes updated and added requests, the merged scope
-onto the workspace or import root, and changed or added environments, which
-are added to the import root's `import_environment_ids`. An environment
+onto the workspace or import root, changed folders, and changed or added
+environments, which are added to the import root's `import_environment_ids`. An environment
 deleted with approval is removed from there too; when it was the workspace's
 active environment, none is active afterwards, as when the user deletes an
 environment. Every request whose spec changes gets a new
@@ -258,21 +315,19 @@ immutable revision, and the request points at it, so a send, run or history
 record names the spec actually sent; the old revision is left as it was, and
 a request the reimport leaves unchanged keeps its revision.
 
-### Known limitations
-
-Tracked in
-[ferrum-edge/ferrum-anvil#146](https://github.com/ferrum-edge/ferrum-anvil/issues/146):
-
-- Folder-level variables, auth and settings are not compared: only the
-  import's own scope (the new workspace's, or the import root's), its
-  environments and its requests are, so a change on a folder inside the
-  import is neither applied nor listed.
-- The source record is not refreshed: after a reimport it still holds the
-  first import's original file and its hash; only the import id and the
-  generated scope hashes are updated.
-- Renames are overwritten: a request's name is not part of its spec hash, so
-  a request the user renamed takes the source's name again when a reimport
-  updates it.
+The same transaction refreshes the source record
+(`App::spec_reimport_apply(import_id, bytes, file_name, approval)`): the
+bytes just applied are stored as the original attachment, and the record's
+`original_sha256`, `file_name` and `source` (hash, size, title, declared
+version and import time of that file, and the new import id) describe them.
+The earlier import id is appended to `previous_import_ids`, and the id
+namespace stays the same. Anything that reads the stored original afterwards
+reads the version last applied. The original it replaces is released in the
+same transaction, by the same reference check as `App::release_attachment`:
+it is deleted unless another object still references it (another import of
+the same bytes, a request body, a revision, a dataset, a scenario or a load
+plan). A refused apply leaves the record, and the earlier original, as they
+were.
 
 ## OpenAPI and Swagger
 

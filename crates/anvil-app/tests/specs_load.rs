@@ -110,7 +110,7 @@ fn data_012_spec_reimport_adds_new_operations_and_preserves_user_edits() {
     let plan = app.spec_reimport_plan(&done.import_id, SPEC_V2.as_bytes()).unwrap();
     assert_eq!(plan.added.len(), 1, "createRefund is new");
     assert_eq!(plan.conflicts.len(), 1, "listOrders changed upstream and was edited locally");
-    let n = app.spec_reimport_apply(&done.import_id, SPEC_V2.as_bytes(), &ReimportApproval::default()).unwrap();
+    let n = app.spec_reimport_apply(&done.import_id, SPEC_V2.as_bytes(), "spec-v2.yaml", &ReimportApproval::default()).unwrap();
     assert_eq!(n, 3);
     let after = app.requests(&done.workspace_id).unwrap();
     assert_eq!(after.len(), 3);
