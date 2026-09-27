@@ -100,7 +100,9 @@ transaction to end.
 - **Request specs from the webview name no local file.** `build_context`
   refuses an unsaved draft that references a linked file
   (`AttachmentRef::LinkedFile`), and the desktop refuses to create or save a
-  request that does.
+  request that does. The only way the desktop writes a linked path into a
+  saved request or dataset is a relocation (below): the path is the one the
+  user picked in the backend's own dialog, never one from the webview.
 - **Files read at send time are bound, not granted.** A JWT-SVID token file is
   re-read at every send. `file_choose` with purpose `jwt_svid_file` records the
   chosen path in the vault (`anvil_app::token_files`; never exported or
@@ -126,8 +128,27 @@ transaction to end.
   files already bound for that referrer; an unbound path is never touched.
   "Chosen" does not check the size limit: that depends on what reads the
   file, and is enforced when it is read. A file found at another path cannot
-  be bound for a reference that names the old one: put it back, or attach a
-  copy.
+  be bound for a reference that names the old one: put it back, relocate the
+  reference, or attach a copy.
+- **Relocating a linked file.** A reference whose file is elsewhere on this
+  device (typically one imported from another machine) is repointed with
+  **Choose new location…**, shown for a request's linked file that is not
+  chosen yet or is missing or changed. `file_choose` with purpose
+  `linked_file_relocate`, the referrer and `old_path` shows the open dialog;
+  picking the file there is the consent. `App::relocate_linked_file`
+  requires `old_path` to be a linked file that request or dataset names, and
+  never looks at it on disk. The picked file must be a regular file with an
+  absolute, UTF-8 path without `{{`, and is named by its canonical path.
+  One write transaction checks that the referrer still names `old_path`,
+  rewrites every reference to it in that request (filing a new revision) or
+  dataset only, drops that referrer's binding of the old path and binds the
+  new one. Another request or dataset naming the old path is untouched and
+  stays unbound until the file is chosen for it. The lock and profile checks
+  of a bind apply before and after the write, and a dialog open when the app
+  locks or another profile opens relocates nothing. The editor then reloads
+  the saved request into its draft (a draft naming a linked file cannot be
+  saved anyway). The new path is saved in the request or dataset, so a later
+  export carries it: see the threat model.
 
 ### Connection pools
 

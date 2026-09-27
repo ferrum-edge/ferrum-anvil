@@ -2,7 +2,10 @@
 // dataset names, with whether it was chosen on this device and the native
 // dialog that chooses it. The backend binds a file only if that request or
 // dataset names that exact path; an imported path alone never lets Anvil read
-// it, and nothing here reads the file.
+// it, and nothing here reads the file. A file that is now somewhere else on
+// this device is repointed with Choose new location…: the backend rewrites the
+// saved request or dataset to the path picked in its own dialog (the webview
+// never names it) and binds it for that request or dataset only.
 import { useEffect, useState } from "react";
 import { api, type LinkedFileReferrer, type LinkedFileState, type LinkedFileStatus } from "./api";
 import { Icon } from "./icons";
@@ -40,8 +43,22 @@ function chosen(key: string) {
  * The linked file at `path`, its binding status for `referrer`, and Choose file… (not chosen yet)
  * or Rebind… (chosen before). `referrer` is null only for a request that is not saved: only a saved
  * request or dataset that names the file can have it chosen.
+ *
+ * With `onRelocated`, a file not chosen yet, or missing or changed since, also offers Choose new
+ * location…, which repoints the saved request or dataset to a file picked elsewhere on this device.
+ * `onRelocated` then reloads what the caller shows of it, whose path changes.
  */
-export function LinkedFileBinding({ referrer, path, className }: { referrer: LinkedFileReferrer | null; path: string; className?: string }) {
+export function LinkedFileBinding({
+  referrer,
+  path,
+  className,
+  onRelocated,
+}: {
+  referrer: LinkedFileReferrer | null;
+  path: string;
+  className?: string;
+  onRelocated?: () => void | Promise<void>;
+}) {
   const key = referrer ? `${referrer.kind}:${referrer.id}` : null;
   // Each result is kept with the request or dataset and path it is for, so a different one never
   // shows the previous one's status or error while its own loads.
@@ -97,8 +114,27 @@ export function LinkedFileBinding({ referrer, path, className }: { referrer: Lin
     }
   };
 
+  const relocate = async () => {
+    if (!referrer || !key || !onRelocated) return;
+    setBusy(true);
+    try {
+      // Null when the dialog is cancelled: nothing was rewritten or bound, so nothing changes.
+      if (!(await api.relocateLinkedFile(referrer, path))) return;
+      setErr(null);
+      // The saved request or dataset now names the new path: the caller reloads it, then every
+      // linked file shown for it reloads its status.
+      await onRelocated();
+      chosen(key);
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const noun = referrer?.kind ?? "request";
   const badge = status ? BADGE[status.state] : null;
+  const relocatable = !!onRelocated && (status?.state === "unbound" || status?.state === "invalid");
   return (
     <div className={`linked-file${className ? ` ${className}` : ""}`} data-testid="linked-file">
       <span className="file-chip" title={path}>
@@ -117,6 +153,17 @@ export function LinkedFileBinding({ referrer, path, className }: { referrer: Lin
           {status.state === "unbound" ? "Choose file…" : "Rebind…"}
         </button>
       )}
+      {relocatable && (
+        <button
+          className="btn small"
+          disabled={busy}
+          title={`Choose where this file is now on this device. The saved ${noun} is changed to name the file you choose instead of ${path}.`}
+          onClick={() => void relocate()}
+        >
+          <Icon name="file" size={13} />
+          Choose new location…
+        </button>
+      )}
       {!referrer && <p className="hint">A linked file can be chosen only for a saved request that names it. Attach a copy instead.</p>}
       {referrer && loaded && !status && (
         <p className="hint">The saved {noun} does not name this file, so it cannot be chosen for it on this device. Attach a copy instead.</p>
@@ -125,12 +172,14 @@ export function LinkedFileBinding({ referrer, path, className }: { referrer: Lin
         <p className="hint">
           Anvil reads this file only once you choose it here, on this device, for this {noun}. Choose the file at this path, or attach a copy
           instead.
+          {relocatable && ` If it is somewhere else on this device, Choose new location… changes this ${noun} to name it there.`}
         </p>
       )}
       {status?.state === "invalid" && (
         <p className="hint">
           Chosen before, but {status.problem ?? "the file can no longer be read"}. Anvil reads it only at this path: put it back there and
           choose it again with Rebind…, or attach a copy instead.
+          {relocatable && ` If it moved, Choose new location… changes this ${noun} to name it where it is now.`}
         </p>
       )}
       {err && (

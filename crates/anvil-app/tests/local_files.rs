@@ -4,12 +4,14 @@
 //! once it was chosen for that request or dataset in the native dialog on
 //! this device, and once the desktop confines token files, a JWT-SVID token
 //! file is read only if it was bound in the native dialog. Bindings stay on
-//! the device, and a load worker never opens a linked file itself.
+//! the device, and a load worker never opens a linked file itself. A linked
+//! file found at a new location is repointed only for the request or dataset
+//! it was picked for, and the path it replaces is never looked at.
 
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::linked_files::{LinkedFileReferrer, LinkedFileState};
 use anvil_app::port::ImportApproval;
-use anvil_app::profiles::ProfileManager;
+use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -25,6 +27,7 @@ use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
@@ -700,4 +703,205 @@ fn a_bound_token_file_keeps_working_across_a_projected_token_rotation() {
     let err = refused(app.build_context(None, &ws.meta.id, Some(draft), &SendOptions::default()), "resolved");
     assert!(err.contains("not chosen"), "{err}");
     assert_eq!(app.token_file_bindings().unwrap().len(), 1);
+}
+
+fn file_part(attachment: AttachmentRef) -> MultipartPart {
+    MultipartPart {
+        name: "file".into(),
+        enabled: true,
+        content: MultipartContent::File { attachment, file_name: None },
+        content_type: None,
+    }
+}
+
+fn part_file(part: &MultipartPart) -> &AttachmentRef {
+    match &part.content {
+        MultipartContent::File { attachment, .. } => attachment,
+        MultipartContent::Text { .. } => panic!("a text part"),
+    }
+}
+
+fn path_str(path: &Path) -> String {
+    path.to_str().unwrap().to_string()
+}
+
+/// The linked files `referrer` names, with their state.
+fn named(app: &App, referrer: LinkedFileReferrer) -> Vec<(String, LinkedFileState)> {
+    app.linked_file_status(referrer).unwrap().into_iter().map(|s| (s.path, s.state)).collect()
+}
+
+fn bindings_of(app: &App, referrer: LinkedFileReferrer) -> Vec<String> {
+    let mut paths: Vec<String> =
+        app.linked_file_bindings().unwrap().into_iter().filter(|b| b.referrer == referrer).map(|b| b.path).collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn relocating_a_linked_file_repoints_only_that_request_and_never_touches_the_old_path() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let old = canonical(&canary_file(files.path(), "upload.bin"));
+    std::fs::create_dir(files.path().join("moved")).unwrap();
+    let new = canonical(&canary_file(&files.path().join("moved"), "upload.bin"));
+    let other = canonical(&canary_file(files.path(), "other.bin"));
+    let app = Arc::new(new_app(root.path(), "relocate"));
+    let ws = app.create_workspace("W").unwrap();
+    // The old path twice, and another linked file.
+    let spec = with_body(Body::Multipart { parts: vec![file_part(linked(&old)), file_part(linked(&other)), file_part(linked(&old))] });
+    let a = app.create_request(&ws.meta.id, None, "a", spec.clone()).unwrap();
+    let b = app.create_request(&ws.meta.id, None, "b", spec).unwrap();
+    app.bind_linked_file(request(&a), &old).unwrap();
+    app.bind_linked_file(request(&a), &other).unwrap();
+    // From here on, whatever opens the old path for reading blocks (Unix).
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(&old).unwrap();
+        mkfifo(&old);
+    }
+
+    let (relocating, referrer, old_path, picked) = (app.clone(), request(&a), path_str(&old), new.clone());
+    #[cfg(unix)]
+    let binding = within_seconds(move || relocating.relocate_linked_file(referrer, &old_path, &picked).map_err(|e| e.to_string())).unwrap();
+    #[cfg(not(unix))]
+    let binding = relocating.relocate_linked_file(referrer, &old_path, &picked).unwrap();
+    assert_eq!((binding.referrer, Path::new(&binding.path)), (request(&a), new.as_path()));
+
+    // Every reference to the old path in that request names the new one; the
+    // other linked file is left as it was.
+    let saved = app.request(&a.meta.id).unwrap();
+    let Body::Multipart { parts } = &saved.spec.body else { panic!("multipart body") };
+    let attachments: Vec<&AttachmentRef> = parts.iter().map(part_file).collect();
+    assert_eq!(attachments, vec![&linked(&new), &linked(&other), &linked(&new)]);
+    // As a save does, the change files a new revision.
+    assert_ne!(saved.revision_id, a.revision_id);
+    assert_eq!(app.revision(&saved.revision_id.unwrap()).unwrap().spec, saved.spec);
+    // Its binding of the old path is replaced by one of the new path.
+    assert_eq!(named(&app, request(&a)), vec![(path_str(&new), LinkedFileState::Bound), (path_str(&other), LinkedFileState::Bound)]);
+    let mut expected = vec![path_str(&new), path_str(&other)];
+    expected.sort();
+    assert_eq!(bindings_of(&app, request(&a)), expected);
+    let ctx = app.build_context(Some(a.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
+    assert_eq!(ctx.attachments.load(&linked(&new)).unwrap().as_ref(), CANARY.as_bytes());
+
+    // Another request naming the old path is not rewritten, and stays
+    // unbound: the choice was made for the first request only.
+    assert_eq!(app.request(&b.meta.id).unwrap().spec, b.spec);
+    assert_eq!(named(&app, request(&b)), vec![(path_str(&old), LinkedFileState::Unbound), (path_str(&other), LinkedFileState::Unbound)]);
+    assert!(bindings_of(&app, request(&b)).is_empty());
+    let err = refused(app.build_context(Some(b.meta.id), &ws.meta.id, None, &SendOptions::default()), "b");
+    assert!(err.contains("not chosen on this device"), "{err}");
+
+    // The request no longer names the old path, so it cannot be relocated again.
+    let err = refused(app.relocate_linked_file(request(&a), &path_str(&old), &new), "relocated already");
+    assert!(err.contains("does not name the linked file"), "{err}");
+}
+
+#[test]
+fn a_relocation_is_refused_unless_the_referrer_names_the_old_path_and_a_regular_file_is_picked() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    // The path an imported request names: nothing is there on this device.
+    let old = path_str(&canonical(files.path()).join("gone").join("upload.bin"));
+    let new = canonical(&canary_file(files.path(), "upload.bin"));
+    let app = Arc::new(new_app(root.path(), "refused"));
+    let ws = app.create_workspace("W").unwrap();
+    let spec = with_body(Body::Binary { attachment: AttachmentRef::LinkedFile { path: old.clone() }, content_type: None });
+    let r = app.create_request(&ws.meta.id, None, "upload", spec.clone()).unwrap();
+    let d = app.save_dataset(linked_dataset(ws.meta.id, Path::new(&old))).unwrap();
+    let dataset = LinkedFileReferrer::Dataset { id: d.meta.id };
+
+    // An old path the request or dataset does not name, even one another names.
+    let plain = app.create_request(&ws.meta.id, None, "plain", RequestSpec::http("GET", URL)).unwrap();
+    let unnamed = [(request(&r), path_str(&new)), (request(&r), String::new()), (dataset, path_str(&new)), (request(&plain), old.clone())];
+    for (referrer, old_path) in unnamed {
+        let err = refused(app.relocate_linked_file(referrer, &old_path, &new), &old_path);
+        assert!(err.contains("does not name the linked file"), "{old_path}: {err}");
+    }
+    for referrer in [LinkedFileReferrer::Request { id: Id::new() }, LinkedFileReferrer::Dataset { id: Id::new() }] {
+        assert!(matches!(app.relocate_linked_file(referrer, &old, &new), Err(AppError::NotFound(_))));
+    }
+
+    // Anything but an absolute path to a regular file whose path reads as itself.
+    let templated = canary_file(files.path(), "{{file}}");
+    for picked in [PathBuf::from("upload.bin"), files.path().to_path_buf(), files.path().join("missing.bin"), templated] {
+        for referrer in [request(&r), dataset] {
+            assert!(app.relocate_linked_file(referrer, &old, &picked).is_err(), "{}", picked.display());
+        }
+    }
+    // A FIFO is refused without being opened.
+    #[cfg(unix)]
+    {
+        let fifo = files.path().join("rows.fifo");
+        mkfifo(&fifo);
+        let (relocating, referrer, old_path) = (app.clone(), request(&r), old.clone());
+        let relocate = move || relocating.relocate_linked_file(referrer, &old_path, &fifo).map(|_| ()).map_err(|e| e.to_string());
+        let err = within_seconds(relocate).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    // Nothing was rewritten or bound.
+    assert_eq!(app.request(&r.meta.id).unwrap().spec, spec);
+    assert_eq!(app.dataset(&d.meta.id).unwrap().attachment, AttachmentRef::LinkedFile { path: old.clone() });
+    assert!(app.linked_file_bindings().unwrap().is_empty());
+}
+
+#[test]
+fn a_locked_app_relocates_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let old = path_str(&canonical(files.path()).join("gone.bin"));
+    let new = canonical(&canary_file(files.path(), "upload.bin"));
+    let app = new_app(root.path(), "locked");
+    let ws = app.create_workspace("W").unwrap();
+    let spec = with_body(Body::Binary { attachment: AttachmentRef::LinkedFile { path: old.clone() }, content_type: None });
+    let r = app.create_request(&ws.meta.id, None, "upload", spec.clone()).unwrap();
+
+    // The app locks while the dialog is open.
+    app.lock();
+    assert!(matches!(app.relocate_linked_file(request(&r), &old, &new), Err(AppError::Locked)));
+    let (_, key) = ProfileManager::unlock(&app.dir, Unlock::Passphrase("correct horse battery")).unwrap();
+    app.unlock(key).unwrap();
+    assert_eq!(app.request(&r.meta.id).unwrap().spec, spec);
+    assert!(app.linked_file_bindings().unwrap().is_empty());
+
+    app.relocate_linked_file(request(&r), &old, &new).unwrap();
+    assert_eq!(named(&app, request(&r)), vec![(path_str(&new), LinkedFileState::Bound)]);
+}
+
+#[test]
+fn a_relocated_dataset_reads_its_new_file_and_a_later_export_names_the_new_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let gone = canonical(files.path()).join("from-another-machine");
+    let rows = files.path().join("rows.csv");
+    std::fs::write(&rows, "id\n1\n").unwrap();
+    let rows = canonical(&rows);
+    let upload = canonical(&canary_file(files.path(), "upload.bin"));
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("W").unwrap();
+    let d = a.save_dataset(linked_dataset(ws.meta.id, &gone.join("rows.csv"))).unwrap();
+    let dataset = LinkedFileReferrer::Dataset { id: d.meta.id };
+    let spec = with_body(Body::Binary { attachment: linked(&gone.join("upload.bin")), content_type: None });
+    let r = a.create_request(&ws.meta.id, None, "upload", spec).unwrap();
+
+    a.relocate_linked_file(dataset, &path_str(&gone.join("rows.csv")), &rows).unwrap();
+    a.relocate_linked_file(request(&r), &path_str(&gone.join("upload.bin")), &upload).unwrap();
+    let d = a.dataset(&d.meta.id).unwrap();
+    assert_eq!(d.attachment, linked(&rows));
+    assert_eq!(named(&a, dataset), vec![(path_str(&rows), LinkedFileState::Bound)]);
+    assert_eq!(a.run_dataset(&d).unwrap().rows.len(), 1);
+
+    // The export carries the new paths (not the bindings), and its preview
+    // says that requests or datasets name linked local files.
+    let preview = a.export_preview(None, ExportMode::EncryptedTransfer, false).unwrap();
+    assert!(preview.manifest.device_bindings.iter().any(|b| b.contains("linked local files")), "{:?}", preview.manifest.device_bindings);
+    let (bytes, _) = a.export(None, ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
+    let b = new_app(root.path(), "b");
+    let imported = b.import_preview(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    let mut listed = imported.linked_files.clone();
+    listed.sort();
+    assert_eq!(listed, vec![format!("dataset 'rows': {}", path_str(&rows)), format!("request 'upload': {}", path_str(&upload))]);
+    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    assert!(b.linked_file_bindings().unwrap().is_empty(), "the bindings stay on the device that made them");
 }

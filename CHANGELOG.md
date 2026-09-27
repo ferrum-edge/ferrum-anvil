@@ -4,6 +4,21 @@
 
 ### Added
 
+- Desktop: a linked local file that a saved request names (for example one
+  imported from another machine) can be repointed to where the file is on
+  this device. When the file is not chosen yet, or is missing or changed,
+  **Choose new location…** opens the native dialog for that request and
+  reference (`file_choose` with the new purpose `linked_file_relocate`,
+  the referrer and `old_path`). The backend rewrites every reference to the
+  old path in that request only (filing a new revision) to the canonical
+  path of the regular file picked there, moves the request's binding to it
+  in the same transaction, and never looks at the old path. Other requests
+  naming the old path stay unbound. The editor then reloads the saved
+  request. The new path is saved in the request, so a later export carries
+  it; the export preview warns that linked local files are named. A load
+  plan's linked-file dataset offers the same **Choose new location…**: the
+  backend rewrites that dataset only, and the load view then reloads its
+  datasets.
 - Desktop: an imported collection's root folder has a **Workspace scope** tab
   in its folder settings. It shows whether the collection is isolated from
   its workspace (the default) or opened to it on this device, and which

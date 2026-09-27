@@ -4,7 +4,9 @@
 // Rust side (canonical path, regular file, size, referrer) is covered by
 // crates/anvil-app/tests/local_files.rs. Here: the binding status beside a
 // linked request body, gRPC schema or dataset, Choose file… and Rebind…
-// scoped to that referrer, and that a cancelled dialog changes nothing.
+// scoped to that referrer, Choose new location… for a file that is elsewhere
+// now, and that a cancelled dialog changes nothing.
+import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -372,5 +374,120 @@ describe("where linked files are chosen", () => {
     // No dataset selected: no status.
     fireEvent.change(screen.getByLabelText("Dataset (one row per iteration)"), { target: { value: "" } });
     expect(screen.queryByTestId("linked-file")).toBeNull();
+  });
+});
+
+describe("choosing a new location for a linked file", () => {
+  const NEW = "/home/me/moved/upload.bin";
+
+  /** The saved request as its editor shows it: `onRelocated` reloads it, which then names NEW. */
+  function Editor({ onRelocated }: { onRelocated: () => void }) {
+    const [path, setPath] = useState(PATH);
+    return (
+      <LinkedFileBinding
+        referrer={REQUEST}
+        path={path}
+        onRelocated={async () => {
+          onRelocated();
+          setPath(NEW);
+        }}
+      />
+    );
+  }
+
+  const relocateButton = () => screen.queryByRole("button", { name: /Choose new location…/ });
+
+  it("is offered for a file not chosen here, or missing or changed, where the saved request can be reloaded", async () => {
+    for (const state of ["unbound", "invalid"] as const) {
+      backend([{ path: PATH, state, problem: state === "invalid" ? "the file is no longer at this path" : undefined }]);
+      render(<LinkedFileBinding referrer={REQUEST} path={PATH} onRelocated={() => {}} />);
+      await screen.findByTestId("linked-file-state");
+      expect(relocateButton()).toBeTruthy();
+      expect(screen.getByTestId("linked-file").textContent).toMatch(/Choose new location… changes this request to name it/);
+      cleanup();
+      invoke.mockReset();
+    }
+    // Not for a file that is usable where it is.
+    backend([{ path: PATH, state: "bound" }]);
+    const { unmount } = render(<LinkedFileBinding referrer={REQUEST} path={PATH} onRelocated={() => {}} />);
+    expect(await stateBadge()).toBe("Chosen on this device");
+    expect(relocateButton()).toBeNull();
+    unmount();
+    // Nor where nothing reloads what is shown of the request or dataset.
+    backend([{ path: PATH, state: "invalid", problem: "the file is no longer at this path" }]);
+    render(<LinkedFileBinding referrer={{ kind: "dataset", id: "ds-1" }} path={PATH} />);
+    expect(await stateBadge()).toBe("Missing or changed");
+    expect(relocateButton()).toBeNull();
+    expect(screen.getByTestId("linked-file").textContent).not.toContain("Choose new location");
+  });
+
+  it("repoints the saved request to the file chosen in the dialog, then reloads it", async () => {
+    const reloaded = vi.fn();
+    backend([{ path: PATH, state: "invalid", problem: "the file is no longer at this path" }], (s) => {
+      s.status = [{ path: NEW, state: "bound" }];
+      return grant(NEW);
+    });
+    render(<Editor onRelocated={reloaded} />);
+    expect(await stateBadge()).toBe("Missing or changed");
+    fireEvent.click(relocateButton()!);
+    await waitFor(() => expect(screen.getByTestId("linked-file").textContent).toContain(NEW));
+    expect(await stateBadge()).toBe("Chosen on this device");
+    // The dialog is for this request and the reference it names; the new path comes from the dialog.
+    expect(calls("file_choose")).toEqual([{ purpose: "linked_file_relocate", options: { multiple: false }, referrer: REQUEST, oldPath: PATH }]);
+    expect(reloaded).toHaveBeenCalledTimes(1);
+    expect(relocateButton()).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("changes nothing when the dialog is cancelled", async () => {
+    const reloaded = vi.fn();
+    backend([{ path: PATH, state: "unbound" }], () => []);
+    render(<Editor onRelocated={reloaded} />);
+    expect(await stateBadge()).toBe("Not chosen on this device");
+    fireEvent.click(relocateButton()!);
+    await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
+    await waitFor(() => expect((relocateButton() as HTMLButtonElement).disabled).toBe(false));
+    expect(reloaded).not.toHaveBeenCalled();
+    expect(calls("linked_file_status")).toHaveLength(1);
+    expect(screen.getByTestId("linked-file").textContent).toContain(PATH);
+    expect(screen.getByTestId("linked-file-state").textContent).toBe("Not chosen on this device");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows a refused relocation and reloads nothing", async () => {
+    const reloaded = vi.fn();
+    backend([{ path: PATH, state: "invalid", problem: "the file is no longer at this path" }], () => {
+      throw "the chosen linked file is not a regular file";
+    });
+    render(<Editor onRelocated={reloaded} />);
+    expect(await stateBadge()).toBe("Missing or changed");
+    fireEvent.click(relocateButton()!);
+    expect((await screen.findByRole("alert")).textContent).toContain("not a regular file");
+    expect(reloaded).not.toHaveBeenCalled();
+    expect(screen.getByTestId("linked-file").textContent).toContain(PATH);
+    expect(screen.getByTestId("linked-file-state").textContent).toBe("Missing or changed");
+  });
+
+  it("is passed through the request body and gRPC schema editors", async () => {
+    const reloaded = vi.fn(async () => {});
+    backend([{ path: PATH, state: "unbound" }], (s) => {
+      s.status = [{ path: NEW, state: "bound" }];
+      return grant(NEW);
+    });
+    const spec = { method: "POST", url: "https://example.test", body: { type: "binary", attachment: { kind: "linked_file", path: PATH } } } as RequestSpec;
+    const { unmount } = render(<BodyEditor spec={spec} set={() => {}} requestId="req-1" onRelocated={reloaded} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Choose new location…/ }));
+    await waitFor(() => expect(reloaded).toHaveBeenCalledTimes(1));
+    unmount();
+
+    backend([{ path: PATH, state: "unbound" }]);
+    const grpc = {
+      method: "POST",
+      url: "grpcs://example.test",
+      protocol: "grpc",
+      grpc: { service: "a.v1.S", method: "M", schema: { kind: "proto_files", files: [{ kind: "linked_file", path: PATH }] }, messages: ["{}"] },
+    } as RequestSpec;
+    render(<ProtocolEditor spec={grpc} set={() => {}} workspaceId="ws" requestId="req-1" onRelocated={reloaded} />);
+    expect(await within(screen.getByTestId("grpc-linked-schema")).findByRole("button", { name: /Choose new location…/ })).toBeTruthy();
   });
 });

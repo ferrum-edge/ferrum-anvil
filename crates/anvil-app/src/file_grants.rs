@@ -20,7 +20,8 @@
 //! A JWT-SVID token file (`jwt_svid_file`) is different: it is re-read at
 //! every send, so the choice is kept as a persistent binding in the vault
 //! (`anvil_app::token_files`) rather than as a session grant. So is a linked
-//! local file a saved request or dataset names (`linked_file`,
+//! local file a saved request or dataset names (`linked_file`, or
+//! `linked_file_relocate` to repoint it to a new location,
 //! `anvil_app::linked_files`).
 
 use parking_lot::Mutex;
@@ -66,6 +67,10 @@ pub enum FilePurpose {
     /// Bind a linked local file that a saved request or dataset names, so
     /// the backend may read it at send time.
     LinkedFile,
+    /// Repoint a linked local file that a saved request or dataset names to
+    /// a file the user picked at a new location, and bind it for that
+    /// request or dataset.
+    LinkedFileRelocate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +94,7 @@ impl FilePurpose {
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
             | FilePurpose::Dataset => Access::Read,
-            FilePurpose::JwtSvidFile | FilePurpose::LinkedFile => Access::Bind,
+            FilePurpose::JwtSvidFile | FilePurpose::LinkedFile | FilePurpose::LinkedFileRelocate => Access::Bind,
         }
     }
 
@@ -112,7 +117,8 @@ impl FilePurpose {
             | FilePurpose::LoadReportExport
             | FilePurpose::RunReportExport
             | FilePurpose::JwtSvidFile
-            | FilePurpose::LinkedFile => 0,
+            | FilePurpose::LinkedFile
+            | FilePurpose::LinkedFileRelocate => 0,
         }
     }
 }
@@ -124,9 +130,10 @@ pub struct FileGrant {
     pub token: String,
     /// The chosen file's name without its folder, for display.
     pub file_name: String,
-    /// Only for a bound file (`jwt_svid_file`, `linked_file`): the bound
-    /// path, which the auth setting or linked-file reference names. The
-    /// backend reads it only while it is bound.
+    /// Only for a bound file (`jwt_svid_file`, `linked_file`,
+    /// `linked_file_relocate`): the bound path, which the auth setting or
+    /// linked-file reference names. The backend reads it only while it is
+    /// bound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }

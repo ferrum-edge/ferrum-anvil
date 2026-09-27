@@ -22,7 +22,7 @@ against it).
 |---|---|---|
 | Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; no response can call IPC or change settings |
 | Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR | Size/node/ref limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
-| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced). A request spec from the webview may not name a linked local file, and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no open or save dialog, no filesystem plugin. |
+| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no open or save dialog, no filesystem plugin. |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
 | Worker process | — | Job over stdin (not argv/env); only referenced secrets; killed when the controller drops it and cancels itself when its parent goes away (stdin EOF); no inherited UI state |
@@ -172,6 +172,21 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
     when it runs that saved request or dataset from the same profile. A load
     run reads each bound file once, in the app, and hands the worker the
     bytes: the worker never opens a local path.
+  - A reference whose file is now elsewhere on this device is repointed only
+    with the user's pick in the native dialog (`file_choose`, purpose
+    `linked_file_relocate`, for one request or dataset and the path it
+    names). The webview names only which reference to repoint, never the new
+    path, and that old path is never looked at on disk. The picked file must
+    be a regular file, and its canonical path replaces the old one in that
+    request or dataset only, in one transaction that also moves its binding.
+    Other requests or datasets naming the old path stay unbound. A dialog
+    open when the app locks, or another profile opens, relocates nothing.
+  - **Privacy:** a relocated path is a path on this device, and it is saved
+    in the request or dataset, so a later export carries it (as it carries
+    any linked path, in every export mode). The export preview warns that
+    requests or datasets name linked local files; the receiving device's
+    import preview lists each one with its path. Attach a copy instead to
+    keep a local path out of a bundle.
 - **Altering an encrypted bundle:** the vault is sealed with associated data
   covering the format version and the SHA-256 of every other entry
   (manifest, `workspace/objects.json`, each attachment, the history). Any

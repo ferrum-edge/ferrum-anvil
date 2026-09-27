@@ -6,14 +6,18 @@
 //! (`anvil_app::token_files`, `anvil_app::linked_files`), and only a bound
 //! path is read at send time. The user lists the bound token files and
 //! removes one that should no longer be read, and sees beside each linked
-//! file whether it is bound.
+//! file whether it is bound. A linked file found at a new location is
+//! repointed the same way: the dialog is shown for the request or dataset
+//! and the reference, and only the file picked there is written into it.
 
 use crate::commands::{R, blocking, e, id};
 use crate::state::DesktopState;
+use anvil_app::App;
 use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
 use anvil_app::linked_files::{LinkedFileReferrer, LinkedFileStatus};
 use anvil_app::token_files::TokenFileBinding;
 use serde::Deserialize;
+use std::path::Path;
 use std::sync::{Arc, Weak};
 use tauri::{AppHandle, State, Window};
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -43,7 +47,10 @@ pub struct DialogOptions {
 /// (write purposes) and return a grant for each chosen file; empty if the
 /// user cancelled. Refused while locked; a lock while the dialog is open
 /// grants nothing. A linked file is bound for the saved request or dataset
-/// `referrer` names, and only if that referrer names the chosen file.
+/// `referrer` names, and only if that referrer names the chosen file. To
+/// relocate one (purpose `linked_file_relocate`), `old_path` names the
+/// reference to repoint: it must be a linked file `referrer` names, and is
+/// never looked at on disk. The new path is the one picked in the dialog.
 #[tauri::command]
 pub async fn file_choose(
     window: Window,
@@ -51,6 +58,7 @@ pub async fn file_choose(
     purpose: FilePurpose,
     options: Option<DialogOptions>,
     referrer: Option<LinkedFileReferrer>,
+    old_path: Option<String>,
 ) -> R<Vec<FileGrant>> {
     // Read before the lock check, so a lock after it always moves the
     // generation past this value.
@@ -64,11 +72,7 @@ pub async fn file_choose(
         Access::Bind if options.multiple => return Err("choose one file".into()),
         _ => {}
     }
-    match (purpose, referrer) {
-        (FilePurpose::LinkedFile, None) => return Err("choose the request or dataset the linked file is for".into()),
-        (FilePurpose::LinkedFile, Some(_)) | (_, None) => {}
-        (_, Some(_)) => return Err("only a linked file is chosen for a request or dataset".into()),
-    }
+    let bind = bind_target(purpose, referrer, old_path)?;
     let mut dialog = window.dialog().file();
     #[cfg(any(windows, target_os = "macos"))]
     {
@@ -108,41 +112,79 @@ pub async fn file_choose(
     if !Weak::ptr_eq(&shown_for, &Arc::downgrade(&app)) {
         return Err(GrantError::Revoked.to_string());
     }
-    // Whether no lock and no other profile has intervened since the dialog was shown.
-    let unchanged = || st.file_grants.generation() == generation && st.is_current(&app);
     let mut grants = Vec::with_capacity(picked.len());
     for file in picked {
         let path = file.into_path().map_err(|x| x.to_string())?;
-        let grant = match purpose.access() {
-            Access::Read => st.file_grants.grant_read_at(purpose, &path, generation),
-            Access::Write => st.file_grants.grant_write_at(purpose, &path, generation),
-            Access::Bind => {
-                // Checked again right before the bind: a profile opened since
-                // the check above must not have the file bound into the one it replaced.
-                if !unchanged() {
-                    return Err(GrantError::Revoked.to_string());
-                }
-                let (id, bound) = match (purpose, referrer) {
-                    (FilePurpose::LinkedFile, Some(referrer)) => app.bind_linked_file(referrer, &path).map(|b| (b.id, b.path)),
-                    _ => app.bind_token_file(&path).map(|b| (b.id, b.path)),
-                }
-                .map_err(e)?;
-                // A lock or another profile opening during the bind returns
-                // nothing to the webview. The binding is kept: it names only a
-                // file the user chose in the native dialog, lets nothing read
-                // it without a request that names it, and may predate this
-                // choice, so removing it here could drop a binding the user
-                // made earlier.
-                if !unchanged() {
-                    return Err(GrantError::Revoked.to_string());
-                }
-                let file_name = std::path::Path::new(&bound).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                Ok(FileGrant { token: id.to_string(), file_name, path: Some(bound) })
-            }
+        let grant = match (&bind, purpose.access()) {
+            (Some(bind), _) => bind_picked(&st, &app, generation, bind, &path)?,
+            (None, Access::Write) => st.file_grants.grant_write_at(purpose, &path, generation).map_err(|x| x.to_string())?,
+            (None, _) => st.file_grants.grant_read_at(purpose, &path, generation).map_err(|x| x.to_string())?,
         };
-        grants.push(grant.map_err(|x| x.to_string())?);
+        grants.push(grant);
     }
     Ok(grants)
+}
+
+/// What a bind-purpose dialog binds the picked file for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Bind {
+    /// A JWT-SVID token file.
+    TokenFile,
+    /// A linked file the saved request or dataset names, at that path.
+    Linked(LinkedFileReferrer),
+    /// A new location for the linked file (the path) that the saved request
+    /// or dataset names.
+    Relocate(LinkedFileReferrer, String),
+}
+
+/// What the dialog for `purpose` binds its file for (none for a read or
+/// write purpose), refusing a request or dataset, or a reference to
+/// relocate, that does not belong to the purpose. Checked before anything is
+/// shown.
+fn bind_target(purpose: FilePurpose, referrer: Option<LinkedFileReferrer>, old_path: Option<String>) -> Result<Option<Bind>, String> {
+    match (purpose, referrer, old_path) {
+        (FilePurpose::LinkedFile | FilePurpose::LinkedFileRelocate, None, _) => {
+            Err("choose the request or dataset the linked file is for".into())
+        }
+        (FilePurpose::LinkedFile, Some(referrer), None) => Ok(Some(Bind::Linked(referrer))),
+        (FilePurpose::LinkedFile, Some(_), Some(_)) => Err("a linked file is relocated only with purpose linked_file_relocate".into()),
+        (FilePurpose::LinkedFileRelocate, Some(referrer), Some(old)) => Ok(Some(Bind::Relocate(referrer, old))),
+        (FilePurpose::LinkedFileRelocate, Some(_), None) => Err("choose the linked file to relocate".into()),
+        (_, Some(_), _) => Err("only a linked file is chosen for a request or dataset".into()),
+        (_, None, Some(_)) => Err("only a linked file is relocated".into()),
+        (FilePurpose::JwtSvidFile, None, None) => Ok(Some(Bind::TokenFile)),
+        (_, None, None) => Ok(None),
+    }
+}
+
+/// Bind the file picked in a dialog shown in `generation` for `app`, as
+/// `bind` says. Nothing is bound or written once a lock or another profile
+/// has intervened since the dialog was shown.
+fn bind_picked(st: &DesktopState, app: &Arc<App>, generation: u64, bind: &Bind, path: &Path) -> Result<FileGrant, String> {
+    // Whether no lock and no other profile has intervened since the dialog was shown.
+    let unchanged = || st.file_grants.generation() == generation && st.is_current(app);
+    // Checked again right before the bind: a profile opened since the check
+    // in `file_choose` must not have the file bound into the one it replaced.
+    if !unchanged() {
+        return Err(GrantError::Revoked.to_string());
+    }
+    let (id, bound) = match bind {
+        Bind::TokenFile => app.bind_token_file(path).map(|b| (b.id, b.path)),
+        Bind::Linked(referrer) => app.bind_linked_file(*referrer, path).map(|b| (b.id, b.path)),
+        Bind::Relocate(referrer, old) => app.relocate_linked_file(*referrer, old, path).map(|b| (b.id, b.path)),
+    }
+    .map_err(e)?;
+    // A lock or another profile opening during the bind returns nothing to
+    // the webview. The binding is kept: it names only a file the user chose
+    // in the native dialog, lets nothing read it without a request that
+    // names it, and may predate this choice, so removing it here could drop
+    // a binding the user made earlier. So is a relocation written by then:
+    // it names only the file the user picked for that request or dataset.
+    if !unchanged() {
+        return Err(GrantError::Revoked.to_string());
+    }
+    let file_name = Path::new(&bound).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(FileGrant { token: id.to_string(), file_name, path: Some(bound) })
 }
 
 /// The JWT-SVID token files bound on this device (`file_choose` with purpose
@@ -185,5 +227,83 @@ fn title(purpose: FilePurpose) -> &'static str {
         FilePurpose::RunReportExport => "Export the run report",
         FilePurpose::JwtSvidFile => "Choose the JWT-SVID token file",
         FilePurpose::LinkedFile => "Choose the linked file on this device",
+        FilePurpose::LinkedFileRelocate => "Choose the linked file's new location on this device",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::tests::{PASSPHRASE, TempRoot, create};
+    use anvil_app::profiles::{ProfileManager, Unlock};
+    use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
+
+    #[test]
+    fn a_relocation_names_its_request_or_dataset_and_its_reference() {
+        let referrer = LinkedFileReferrer::Request { id: anvil_domain::Id::new() };
+        let old = || Some("/elsewhere/upload.bin".to_string());
+        assert_eq!(bind_target(FilePurpose::LinkedFileRelocate, Some(referrer), old()), Ok(Some(Bind::Relocate(referrer, old().unwrap()))));
+        assert_eq!(bind_target(FilePurpose::LinkedFile, Some(referrer), None), Ok(Some(Bind::Linked(referrer))));
+        assert_eq!(bind_target(FilePurpose::JwtSvidFile, None, None), Ok(Some(Bind::TokenFile)));
+        assert_eq!(bind_target(FilePurpose::Attachment, None, None), Ok(None));
+        let refused = |purpose, referrer, old_path| bind_target(purpose, referrer, old_path).unwrap_err();
+        assert!(refused(FilePurpose::LinkedFileRelocate, None, old()).contains("choose the request or dataset"));
+        assert!(refused(FilePurpose::LinkedFileRelocate, Some(referrer), None).contains("choose the linked file to relocate"));
+        assert!(refused(FilePurpose::LinkedFile, Some(referrer), old()).contains("only with purpose linked_file_relocate"));
+        assert!(refused(FilePurpose::Attachment, None, old()).contains("only a linked file is relocated"));
+        assert!(refused(FilePurpose::JwtSvidFile, None, old()).contains("only a linked file is relocated"));
+        assert!(refused(FilePurpose::Attachment, Some(referrer), old()).contains("only a linked file is chosen"));
+    }
+
+    #[tokio::test]
+    async fn a_lock_while_the_relocation_dialog_is_open_relocates_nothing() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, dir) = create(&st, "A");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let app = st.app().unwrap();
+        let files = root.0.join("files");
+        std::fs::create_dir_all(&files).unwrap();
+        let picked = files.join("upload.bin");
+        std::fs::write(&picked, "payload").unwrap();
+        let picked_path = std::fs::canonicalize(&picked).unwrap().to_str().unwrap().to_string();
+        // The path the request names, from another machine: nothing is there.
+        let old = files.join("gone").join("upload.bin").display().to_string();
+        let ws = app.create_workspace("W").unwrap();
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/x");
+        spec.body = Body::Binary { attachment: AttachmentRef::LinkedFile { path: old.clone() }, content_type: None };
+        let r = app.create_request(&ws.meta.id, None, "upload", spec.clone()).unwrap();
+        let referrer = LinkedFileReferrer::Request { id: r.meta.id };
+        let relocate = Bind::Relocate(referrer, old.clone());
+
+        // The dialog is shown, then the app locks and is unlocked again
+        // before the user picks the file.
+        let generation = st.file_grants.generation();
+        st.lock();
+        let seen = st.epoch();
+        let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+        st.unlock_since(&app, key, seen).unwrap();
+        assert_eq!(bind_picked(&st, &app, generation, &relocate, &picked), Err(GrantError::Revoked.to_string()));
+        assert_eq!(app.request(&r.meta.id).unwrap().spec, spec, "the request is not rewritten");
+        assert!(app.linked_file_bindings().unwrap().is_empty(), "nothing is bound");
+
+        // Still locked when the file is picked: nothing is written either.
+        let generation = st.file_grants.generation();
+        st.lock();
+        assert_eq!(bind_picked(&st, &app, generation, &relocate, &picked), Err(GrantError::Revoked.to_string()));
+        let seen = st.epoch();
+        let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+        st.unlock_since(&app, key, seen).unwrap();
+        assert_eq!(app.request(&r.meta.id).unwrap().spec, spec);
+
+        // A dialog shown after the unlock relocates the reference.
+        let generation = st.file_grants.generation();
+        let grant = bind_picked(&st, &app, generation, &relocate, &picked).unwrap();
+        assert_eq!(grant.path.as_deref(), Some(picked_path.as_str()));
+        assert_eq!(grant.file_name, "upload.bin");
+        let Body::Binary { attachment, .. } = app.request(&r.meta.id).unwrap().spec.body else { panic!("binary body") };
+        assert_eq!(attachment, AttachmentRef::LinkedFile { path: picked_path.clone() });
+        let bound: Vec<_> = app.linked_file_bindings().unwrap().into_iter().map(|b| (b.referrer, b.path)).collect();
+        assert_eq!(bound, vec![(referrer, picked_path)]);
     }
 }

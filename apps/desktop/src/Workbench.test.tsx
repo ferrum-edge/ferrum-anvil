@@ -4,7 +4,8 @@
 // one selected since; a save that finishes late keeps the edits made meanwhile; Runner and Load tests keep a backend run's Stop control
 // while another view is shown; closing or deleting a tab stops (after
 // confirmation) what only that tab controlled, and a tab whose work could not
-// be stopped stays open.
+// be stopped stays open. Relocating a linked file reloads the saved request
+// into its tab's draft.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -739,5 +740,62 @@ describe("renaming an open request", () => {
     await act(async () => saves[1].resolve({ ...renamed, revision_id: "rename-rev" }));
     expect(urlField().value).toBe("https://new-draft.test/");
     expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+  });
+});
+
+describe("relocating a linked file", () => {
+  const OLD = "/elsewhere/upload.bin";
+  const NEW = "/home/me/upload.bin";
+  const upload = (path: string) =>
+    request("u1", "A", "Upload", { method: "POST", body: { type: "binary", attachment: { kind: "linked_file", path }, content_type: null } } as Partial<RequestSpec>);
+
+  /** A backend whose `file_choose` runs `choose`; the saved request names OLD until `relocate` is called. */
+  function linkedBackend(choose: (relocate: () => unknown) => unknown) {
+    let status = [{ path: OLD, state: "unbound" }];
+    const relocate = () => {
+      requests.u1 = upload(NEW);
+      status = [{ path: NEW, state: "bound" }];
+      return [{ token: "binding-1", file_name: "upload.bin", path: NEW }];
+    };
+    backend({ linked_file_status: () => status, file_choose: () => choose(relocate) });
+    requests.u1 = upload(OLD);
+  }
+
+  async function openBody() {
+    await boot();
+    await openTab("Upload");
+    fireEvent.click(screen.getByRole("tab", { name: /^Body/ }));
+    await screen.findByText("Not chosen on this device");
+  }
+
+  it("reloads the saved request into the editor's draft", async () => {
+    linkedBackend((relocate) => relocate());
+    await openBody();
+    // An edit to a request naming a linked file cannot be saved here: the reload replaces it.
+    fireEvent.change(urlField(), { target: { value: "https://draft.test/" } });
+    expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Choose new location…/ }));
+    await waitFor(() => expect(screen.getByTestId("linked-file").textContent).toContain(NEW));
+    expect(await screen.findByText("Chosen on this device")).toBeTruthy();
+    expect(calls("file_choose")).toEqual([{ purpose: "linked_file_relocate", options: { multiple: false }, referrer: { kind: "request", id: "u1" }, oldPath: OLD }]);
+    expect(calls("request_get").filter((a) => a.requestId === "u1")).toHaveLength(2);
+    expect(urlField().value).toBe("https://u1.test/");
+    expect(screen.queryByLabelText("unsaved")).toBeNull();
+    expect(calls("request_save")).toHaveLength(0);
+  });
+
+  it("keeps the draft when the dialog is cancelled", async () => {
+    linkedBackend(() => []);
+    await openBody();
+    fireEvent.change(urlField(), { target: { value: "https://draft.test/" } });
+    fireEvent.click(screen.getByRole("button", { name: /Choose new location…/ }));
+    await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
+    await waitFor(() => expect((screen.getByRole("button", { name: /Choose new location…/ }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByTestId("linked-file").textContent).toContain(OLD);
+    expect(calls("request_get").filter((a) => a.requestId === "u1")).toHaveLength(1);
+    expect(urlField().value).toBe("https://draft.test/");
+    expect(screen.getAllByLabelText("unsaved")).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
