@@ -5,7 +5,7 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
-use anvil_domain::request::{Protocol, RequestSpec};
+use anvil_domain::request::{AttachmentRef, Protocol, RequestSpec};
 use anvil_domain::secret::SecretRef;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::*;
@@ -226,9 +226,8 @@ impl App {
                 i += 1;
             }
             let reqs: Vec<RequestDefinition> = s.list(kind::REQUEST, Some(&f.workspace_id))?;
-            for r in reqs.iter().filter(|r| r.folder_id.is_some_and(|fid| seen.contains(&fid))) {
-                s.delete(kind::REQUEST, &r.meta.id)?;
-            }
+            let reqs: Vec<RequestDefinition> = reqs.into_iter().filter(|r| r.folder_id.is_some_and(|fid| seen.contains(&fid))).collect();
+            delete_requests_in(s, &reqs)?;
             for d in &doomed {
                 s.delete(kind::FOLDER, d)?;
             }
@@ -274,26 +273,38 @@ impl App {
     }
 
     /// Explicit save: persists the definition and appends an immutable revision
-    /// when the spec changed.
+    /// when the spec changed. A stored attachment the saved request did not
+    /// hold yet must still be stored: a file released between being attached
+    /// and this save is refused, so the request never names content that is
+    /// gone. The check and the save run in one write transaction.
     pub fn save_request(&self, mut r: RequestDefinition) -> Result<RequestDefinition> {
         let hash = spec_hash(&r.spec);
-        let prev: Option<RequestRevision> = match r.revision_id {
-            Some(rid) => self.store.get(kind::REVISION, &rid)?,
-            None => None,
-        };
-        if prev.as_ref().map(|p| p.spec_sha256 != hash).unwrap_or(true) {
-            let rev = RequestRevision {
-                id: Id::new(),
-                request_id: r.meta.id,
-                created_at: chrono::Utc::now(),
-                spec_sha256: hash,
-                spec: r.spec.clone(),
+        let spec = serde_json::to_value(&r.spec)?;
+        self.store.atomically(|s| {
+            let held: Option<RequestDefinition> = s.get(kind::REQUEST, &r.meta.id)?;
+            let held = held.map(|h| serde_json::to_value(&h.spec)).transpose()?;
+            if let Some(gone) = first_unstored_attachment_in(s, &spec, held.as_ref())? {
+                return Ok(Err(unstored(&gone)));
+            }
+            let prev: Option<RequestRevision> = match r.revision_id {
+                Some(rid) => s.get(kind::REVISION, &rid)?,
+                None => None,
             };
-            self.store.put(kind::REVISION, &rev.id, Some(&r.workspace_id), Some(&r.meta.id), 0.0, &rev)?;
-            r.revision_id = Some(rev.id);
-        }
-        r.meta.updated_at = chrono::Utc::now();
-        self.store.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
+            if prev.as_ref().map(|p| p.spec_sha256 != hash).unwrap_or(true) {
+                let rev = RequestRevision {
+                    id: Id::new(),
+                    request_id: r.meta.id,
+                    created_at: chrono::Utc::now(),
+                    spec_sha256: hash,
+                    spec: r.spec.clone(),
+                };
+                s.put(kind::REVISION, &rev.id, Some(&r.workspace_id), Some(&r.meta.id), 0.0, &rev)?;
+                r.revision_id = Some(rev.id);
+            }
+            r.meta.updated_at = chrono::Utc::now();
+            s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
+            Ok(Ok(()))
+        })??;
         Ok(r)
     }
 
@@ -318,8 +329,14 @@ impl App {
         self.create_request(&r.workspace_id, r.folder_id, &format!("{} (copy)", r.name), r.spec.clone())
     }
 
+    /// Delete a request with its revisions, and release the stored
+    /// attachments it held that nothing else references any more, in one
+    /// write transaction.
     pub fn delete_request(&self, id: &Id) -> Result<()> {
-        self.store.delete(kind::REQUEST, id)?;
+        self.store.atomically(|s| match s.get::<RequestDefinition>(kind::REQUEST, id)? {
+            Some(r) => delete_requests_in(s, &[r]),
+            None => Ok(()),
+        })?;
         Ok(())
     }
 
@@ -499,20 +516,44 @@ impl App {
         Ok(self.store.list(kind::DATASET, Some(ws))?)
     }
 
+    /// Save a dataset. A stored file the saved dataset did not hold yet must
+    /// still be stored (see [`App::save_request`]), and the stored file it
+    /// replaces is released unless something else references it. Both run in
+    /// the write transaction that saves it.
     pub fn save_dataset(&self, d: Dataset) -> Result<Dataset> {
-        self.store.put(kind::DATASET, &d.meta.id, Some(&d.workspace_id), None, 0.0, &d)?;
+        let attachment = serde_json::to_value(&d.attachment)?;
+        self.store.atomically(|s| {
+            let held: Option<Dataset> = s.get(kind::DATASET, &d.meta.id)?;
+            let before = held.as_ref().map(|h| serde_json::to_value(&h.attachment)).transpose()?;
+            if let Some(gone) = first_unstored_attachment_in(s, &attachment, before.as_ref())? {
+                return Ok(Err(unstored(&gone)));
+            }
+            s.put(kind::DATASET, &d.meta.id, Some(&d.workspace_id), None, 0.0, &d)?;
+            if let Some(AttachmentRef::Stored { sha256, .. }) = held.map(|h| h.attachment)
+                && !matches!(&d.attachment, AttachmentRef::Stored { sha256: kept, .. } if *kept == sha256)
+            {
+                release_held_attachment_in(s, &sha256)?;
+            }
+            Ok(Ok(()))
+        })??;
         Ok(d)
     }
 
-    /// Store an attachment (content-addressed by sha256). The blob, its pin
-    /// and its index entry are written together or not at all.
+    /// Store an attachment a user adds (content-addressed by sha256): a
+    /// request body or multipart file, a gRPC schema file or a dataset. The
+    /// blob, its pin and its index entry are written together or not at all.
+    /// The item that will hold it is saved later, in another call, so the
+    /// entry is marked as added by a user: no automatic cleanup (such as a
+    /// reimport releasing the source file it replaces) releases it, only
+    /// deleting or replacing an item that held it, once nothing references
+    /// it any more.
     pub fn put_attachment(
         &self,
         file_name: &str,
         bytes: &[u8],
         media_type: Option<String>,
     ) -> Result<anvil_domain::request::AttachmentRef> {
-        Ok(self.store.atomically(|s| put_attachment_in(s, file_name, bytes, media_type))?)
+        Ok(self.store.atomically(|s| store_attachment_in(s, file_name, bytes, media_type, true))?)
     }
 
     /// Pin the blob of every stored attachment (idempotent). Profiles created
@@ -536,8 +577,9 @@ impl App {
     /// Content addressing means several requests, revisions, datasets or spec
     /// sources can share one attachment, so every object that can hold one is
     /// checked first. The check and the release run in one write transaction,
-    /// so nothing can reference the attachment between them. Returns whether
-    /// it was deleted.
+    /// so nothing can reference the attachment between them. One a user added
+    /// ([`App::put_attachment`]) is kept: an item not saved yet may hold it.
+    /// Returns whether it was deleted.
     pub fn release_attachment(&self, sha256: &str) -> Result<bool> {
         Ok(self.store.atomically(|s| release_attachment_in(s, sha256))?)
     }
@@ -550,25 +592,70 @@ impl App {
     }
 }
 
-/// [`App::put_attachment`] inside the caller's transaction, so the stored
-/// attachment is rolled back with everything else the caller writes.
+/// Store an attachment inside the caller's transaction, so it is rolled
+/// back with everything else the caller writes. Unlike [`App::put_attachment`]
+/// it does not mark the attachment as added by a user (an entry already
+/// marked stays marked): what the caller stores is referenced by what it
+/// writes in the same transaction.
 pub(crate) fn put_attachment_in(
     s: &StoreTx<'_>,
     file_name: &str,
     bytes: &[u8],
     media_type: Option<String>,
-) -> anvil_storage::store::Result<anvil_domain::request::AttachmentRef> {
+) -> anvil_storage::store::Result<AttachmentRef> {
+    store_attachment_in(s, file_name, bytes, media_type, false)
+}
+
+fn store_attachment_in(
+    s: &StoreTx<'_>,
+    file_name: &str,
+    bytes: &[u8],
+    media_type: Option<String>,
+    user: bool,
+) -> anvil_storage::store::Result<AttachmentRef> {
     let sha = hex::encode(Sha256::digest(bytes));
     let blob = s.put_blob(bytes)?;
     s.pin_blob(&blob)?;
-    s.put(kind::IMPORT_SOURCE, &attachment_index_id(&sha), None, None, 0.0, &serde_json::json!({"attachment": sha, "blob": blob}))?;
-    Ok(anvil_domain::request::AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+    index_attachment_in(s, &sha, &blob, user)?;
+    Ok(AttachmentRef::Stored { sha256: sha, size: bytes.len() as u64, file_name: file_name.into(), media_type })
+}
+
+/// Write the index entry of attachment `sha` stored in `blob`. `user` marks
+/// one a user added (see [`App::put_attachment`]); an entry already marked
+/// stays marked.
+pub(crate) fn index_attachment_in(s: &StoreTx<'_>, sha: &str, blob: &str, user: bool) -> anvil_storage::store::Result<()> {
+    let id = attachment_index_id(sha);
+    let held: Option<serde_json::Value> = s.get(kind::IMPORT_SOURCE, &id)?;
+    let mut index = serde_json::json!({"attachment": sha, "blob": blob});
+    if user || held.as_ref().is_some_and(user_added) {
+        index["user"] = true.into();
+    }
+    s.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &index)?;
+    Ok(())
+}
+
+/// Whether an attachment index entry is marked as added by a user. Entries
+/// written before the mark existed are not.
+fn user_added(index: &serde_json::Value) -> bool {
+    index.get("user").and_then(|u| u.as_bool()).unwrap_or(false)
 }
 
 /// [`App::release_attachment`] inside the caller's transaction: what the
 /// caller wrote before it is checked as a reference too, and the release is
-/// rolled back with everything else the caller writes.
+/// rolled back with everything else the caller writes. An attachment a user
+/// added is kept.
 pub(crate) fn release_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
+    release_in(s, sha256, false)
+}
+
+/// Release attachment `sha256` after the caller deleted or replaced, in this
+/// transaction, an item that held it: unlike [`release_attachment_in`], one a
+/// user added is released too, once nothing references it any more.
+pub(crate) fn release_held_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
+    release_in(s, sha256, true)
+}
+
+fn release_in(s: &StoreTx<'_>, sha256: &str, held: bool) -> anvil_storage::store::Result<bool> {
     for k in [kind::REQUEST, kind::REVISION, kind::DATASET, kind::SPEC_SOURCE, kind::SCENARIO, kind::LOAD_PLAN] {
         let objects: Vec<serde_json::Value> = s.list(k, None)?;
         if objects.iter().any(|o| o.to_string().contains(sha256)) {
@@ -578,11 +665,87 @@ pub(crate) fn release_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_stor
     let id = attachment_index_id(sha256);
     let idx: Option<serde_json::Value> = s.get(kind::IMPORT_SOURCE, &id)?;
     let Some(idx) = idx else { return Ok(false) };
+    if !held && user_added(&idx) {
+        return Ok(false);
+    }
     if let Some(blob) = idx.get("blob").and_then(|b| b.as_str()) {
         s.release_blob(blob)?;
     }
     s.delete(kind::IMPORT_SOURCE, &id)?;
     Ok(true)
+}
+
+/// The first stored attachment `value` names that `held` (what the item held
+/// when last saved, if it was) does not, and that is not stored: added since
+/// that save and released, or never stored here.
+fn first_unstored_attachment_in(
+    s: &StoreTx<'_>,
+    value: &serde_json::Value,
+    held: Option<&serde_json::Value>,
+) -> anvil_storage::store::Result<Option<String>> {
+    let mut kept = HashSet::new();
+    if let Some(held) = held {
+        crate::exec::collect_attachments(held, &mut |sha| {
+            kept.insert(sha.to_string());
+        });
+    }
+    let mut added = Vec::new();
+    crate::exec::collect_attachments(value, &mut |sha| {
+        if !kept.contains(sha) {
+            added.push(sha.to_string());
+        }
+    });
+    for sha in added {
+        if !attachment_stored_in(s, &sha)? {
+            return Ok(Some(sha));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether attachment `sha256` is stored: its index entry and its content.
+fn attachment_stored_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
+    let idx: Option<serde_json::Value> = s.get(kind::IMPORT_SOURCE, &attachment_index_id(sha256))?;
+    match idx.as_ref().and_then(|i| i.get("blob")).and_then(|b| b.as_str()) {
+        Some(blob) => Ok(s.get_blob(blob)?.is_some()),
+        None => Ok(false),
+    }
+}
+
+/// The refusal of a save naming stored attachment `sha256`, which is not
+/// stored.
+fn unstored(sha256: &str) -> AppError {
+    let short = sha256.get(..12).unwrap_or(sha256);
+    AppError::Invalid(format!("an attached file (sha256 {short}...) is no longer stored; attach it again, then save"))
+}
+
+/// Delete `requests` with their revisions, then release the stored
+/// attachments they held that nothing else references any more, including
+/// ones a user added.
+fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_storage::store::Result<()> {
+    let ids: HashSet<Id> = requests.iter().map(|r| r.meta.id).collect();
+    let mut specs = Vec::new();
+    for r in requests {
+        s.delete(kind::REQUEST, &r.meta.id)?;
+        specs.push(serde_json::to_value(&r.spec)?);
+    }
+    if !ids.is_empty() {
+        let revisions: Vec<RequestRevision> = s.list(kind::REVISION, None)?;
+        for rev in revisions.into_iter().filter(|x| ids.contains(&x.request_id)) {
+            s.delete(kind::REVISION, &rev.id)?;
+            specs.push(serde_json::to_value(&rev.spec)?);
+        }
+    }
+    let mut held = HashSet::new();
+    for spec in &specs {
+        crate::exec::collect_attachments(spec, &mut |sha| {
+            held.insert(sha.to_string());
+        });
+    }
+    for sha in &held {
+        release_held_attachment_in(s, sha)?;
+    }
+    Ok(())
 }
 
 /// Deterministic object id for the attachment index entry of a content hash.

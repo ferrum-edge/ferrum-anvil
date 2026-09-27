@@ -9,6 +9,7 @@
 //! the store off the async runtime (see [`crate::off_runtime`]).
 
 use crate::exec::SendOptions;
+use crate::workspace::release_held_attachment_in;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::runner::{FailOn, RunReport};
@@ -499,12 +500,17 @@ impl App {
         RunDataset::parse(&d.name, d.format, &bytes, &d.sensitive_columns).map_err(|e| AppError::Invalid(e.to_string()))
     }
 
+    /// Delete a dataset and release its stored file unless something else
+    /// references it, in one write transaction.
     pub fn delete_dataset(&self, id: &Id) -> Result<()> {
-        let d = self.dataset(id).ok();
-        self.store.delete(kind::DATASET, id)?;
-        if let Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) = d.map(|d| d.attachment) {
-            self.release_attachment(&sha256)?;
-        }
+        self.store.atomically(|s| {
+            let d: Option<Dataset> = s.get(kind::DATASET, id)?;
+            s.delete(kind::DATASET, id)?;
+            if let Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) = d.map(|d| d.attachment) {
+                release_held_attachment_in(s, &sha256)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 }

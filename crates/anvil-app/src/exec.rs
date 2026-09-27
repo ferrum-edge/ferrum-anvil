@@ -456,7 +456,7 @@ fn has_linked_file(v: &serde_json::Value) -> bool {
     }
 }
 
-fn collect_attachments(v: &serde_json::Value, f: &mut dyn FnMut(&str)) {
+pub(crate) fn collect_attachments(v: &serde_json::Value, f: &mut dyn FnMut(&str)) {
     match v {
         serde_json::Value::Object(o) => {
             if o.get("kind").and_then(|k| k.as_str()) == Some("stored")

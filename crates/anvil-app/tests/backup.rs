@@ -419,10 +419,13 @@ fn a_stored_attachment_without_its_content_is_restored_only_where_that_content_i
         ..RequestSpec::http("POST", "https://original.example.invalid/")
     };
     a.create_request(&ws.meta.id, None, "Upload", upload(&file)).unwrap();
-    // A request whose stored content this profile never held, as one created
-    // through the API can be: the backup is still written.
+    // A request whose stored content this profile does not hold, as after the
+    // loss of its blob: the backup is still written. (A save refuses a stored
+    // file that is not stored, so the row is written directly.)
     let never = AttachmentRef::Stored { sha256: "0".repeat(64), size: 1, file_name: "never.bin".into(), media_type: None };
-    a.create_request(&ws.meta.id, None, "Orphan", upload(&never)).unwrap();
+    let mut orphan = a.create_request(&ws.meta.id, None, "Orphan", RequestSpec::http("POST", "https://original.example.invalid/")).unwrap();
+    orphan.spec = upload(&never);
+    a.store.put(kind::REQUEST, &orphan.meta.id, Some(&ws.meta.id), None, orphan.sort_key, &orphan).unwrap();
     let bytes = export(&a);
     // The target stores the same content in a workspace of its own.
     let b = new_app(root.path(), "b");
