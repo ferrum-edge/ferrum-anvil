@@ -13,6 +13,23 @@ CLI also takes `--data-dir`). Each local profile has its own directory with a
 header (`profile.json`: KDF parameters, wrapped keys and protection mode, no
 plaintext key) and an encrypted SQLite database.
 
+Warnings, such as a stored object that does not decode, go to a log. The
+desktop writes `anvil.log` in its log directory at level `info`:
+
+| Platform | Desktop log directory |
+|---|---|
+| macOS | `~/Library/Logs/com.ferrumedge.anvil/` |
+| Windows | `%LOCALAPPDATA%\com.ferrumedge.anvil\logs\` |
+| Linux | `$XDG_DATA_HOME/com.ferrumedge.anvil/logs/` (default `~/.local/share/com.ferrumedge.anvil/logs/`) |
+
+Once it would pass 5 MiB (`anvil_app::logging::LOG_FILE_LIMIT`), it is
+renamed `anvil.log.1`, replacing the one before, and a new one is started.
+The CLI writes warnings and errors to stderr. `ANVIL_LOG` (`off`, `error`,
+`warn`, `info`, `debug` or `trace`) sets another level for Anvil's own
+crates in both; other crates log warnings and errors at most. A log line
+names what its call site names (a kind and id, an error), never request
+content or secrets.
+
 ## What is encrypted
 
 Everything the user creates or observes: workspaces, folders, requests and
@@ -548,7 +565,8 @@ Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so
 retention never removes them. Deleting a request (with its revisions, also
 when its folder is deleted) or a dataset, or replacing a dataset's file,
-deletes the content it held once no request, revision, dataset, spec source,
+deletes the content it held (unless a user attached it within the grace
+period, below) once no request, revision, dataset, spec source,
 scenario or load plan still refers to the same (content-addressed)
 attachment. The check and the delete run in one write transaction, so
 nothing can refer to it in between.
@@ -569,10 +587,15 @@ again), so a saved item never names content deleted in between. A duplicate
 of a request may name the files that request holds even when one is no
 longer stored.
 
-The mark does not record which draft holds a file, so deleting a saved
-request (or dataset) deletes the file it held once nothing saved references
-it, even when a request or dataset not saved yet has the same file attached.
-That draft's save is then refused with "attach it again", and attaching the
+The mark does not record which draft holds a file. Deleting a request (also
+when its folder is deleted) or a dataset, or replacing a dataset's file,
+therefore keeps a file a user attached within the grace period (below; a
+mark without a time counts as recent until the cleanup at open records
+one), even when nothing saved references it any more: a request or dataset
+not saved yet may hold it, and the cleanup of files attached and never
+saved decides it once the period is over. A file attached longer ago is
+released once nothing saved references it; a draft that still has it
+attached is then refused on save with "attach it again", and attaching the
 file again stores it again.
 
 Deleting a request decrypts only its own revisions, found by the request
@@ -587,10 +610,11 @@ transaction, whenever a profile opens.
 Deleting a workspace deletes its items and, in the same write transaction,
 releases every stored file they referenced that no item of another
 workspace still references, except a file a user attached within the grace
-period (below; a mark without a time counts as recent): a request or
-dataset of another workspace not saved yet may hold it, so the cleanup of
-files attached and never saved decides it once the period is over. A file
-referenced by any saved item in any workspace is never released.
+period (below; a mark without a time counts as recent until the cleanup at
+open records one): a request or dataset of another workspace not saved yet
+may hold it, so the cleanup of files attached and never saved decides it
+once the period is over. A file referenced by any saved item in any
+workspace is never released.
 
 ### Cleanup when a profile opens
 
@@ -612,6 +636,10 @@ After the pins are re-applied, opening a profile runs a cleanup
   the period, and a later save naming a released file is refused ("attach it
   again"). One that a saved item references loses its mark: from then on it
   is held like any other file, and later passes do not check it again.
+- A mark with no `"attached_at"` (written before the time was recorded)
+  counts as recent, so on its own it would never age. The first pass that
+  sees one records its own time there (even a pass blocked by an object that
+  does not decode), and the grace period runs from then.
 
 Both use the same reference check as a delete. The pass reads what
 references each file in a read transaction, which never takes the database
