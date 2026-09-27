@@ -1025,6 +1025,65 @@ fn a_reimport_keeps_the_version_it_replaces_while_something_else_references_it()
     assert_eq!(app.get_attachment(&v2).unwrap(), Some(newer));
 }
 
+#[test]
+fn a_file_attached_before_a_reimport_is_still_stored_when_the_request_is_saved() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let v1 = record(&app, &done.workspace_id, None).original_sha256;
+    // The user attaches the imported file as a request body; the request is
+    // saved later, in another call.
+    let file = app.put_attachment("audit.json", SERVER_V1.as_bytes(), None).unwrap();
+    // Before that save, a reimport replaces the stored original, v1.
+    let newer = server("https://new.example.test");
+    app.spec_reimport_apply(&done.import_id, &newer, "v2.json", &ReimportApproval::default()).unwrap();
+    assert_eq!(app.get_attachment(&v1).unwrap().as_deref(), Some(SERVER_V1.as_bytes()), "an attached file is never released by a reimport");
+
+    // The save that follows keeps the body intact.
+    let upload = RequestSpec {
+        body: Body::Binary { attachment: file.clone(), content_type: None },
+        ..RequestSpec::http("POST", "https://upload.example.invalid/")
+    };
+    let q = app.create_request(&done.workspace_id, None, "Upload", upload).unwrap();
+    assert_eq!(app.request(&q.meta.id).unwrap().spec.body, Body::Binary { attachment: file, content_type: None });
+    assert_eq!(app.get_attachment(&v1).unwrap().as_deref(), Some(SERVER_V1.as_bytes()));
+    // Deleting the request that holds it releases it: nothing else does.
+    app.delete_request(&q.meta.id).unwrap();
+    assert_eq!(app.get_attachment(&v1).unwrap(), None, "released with its request");
+    let v2 = record(&app, &done.workspace_id, None).original_sha256;
+    assert_eq!(app.get_attachment(&v2).unwrap(), Some(newer), "the import's own original stays");
+}
+
+#[test]
+fn deleting_a_request_that_sends_the_current_original_keeps_it() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let v1 = record(&app, &done.workspace_id, None).original_sha256;
+    let file = app.put_attachment("audit.json", SERVER_V1.as_bytes(), None).unwrap();
+    let upload = RequestSpec {
+        body: Body::Binary { attachment: file, content_type: None },
+        ..RequestSpec::http("POST", "https://upload.example.invalid/")
+    };
+    let q = app.create_request(&done.workspace_id, None, "Upload", upload).unwrap();
+    app.delete_request(&q.meta.id).unwrap();
+    // The import's record still names it as its original.
+    assert_eq!(app.get_attachment(&v1).unwrap().as_deref(), Some(SERVER_V1.as_bytes()), "the import still holds v1");
+}
+
+#[test]
+fn a_reimport_still_releases_a_replaced_original_nothing_else_holds() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = import(&app, SERVER_V1.as_bytes(), SpecTarget::NewWorkspace);
+    let v1 = record(&app, &done.workspace_id, None).original_sha256;
+    // A file attached and then held by nothing else does not keep another
+    // version alive: only the one attached is marked.
+    app.put_attachment("other.json", b"{}", None).unwrap();
+    app.spec_reimport_apply(&done.import_id, &server("https://new.example.test"), "v2.json", &ReimportApproval::default()).unwrap();
+    assert_eq!(app.get_attachment(&v1).unwrap(), None, "the original an import stored itself is released");
+}
+
 /// A Postman collection whose folder has a variable of its own that the
 /// request uses.
 const ADMIN: &str = r#"{

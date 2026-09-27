@@ -326,8 +326,9 @@ reads the version last applied. The original it replaces is released in the
 same transaction, by the same reference check as `App::release_attachment`:
 it is deleted unless another object still references it (another import of
 the same bytes, a request body, a revision, a dataset, a scenario or a load
-plan). A refused apply leaves the record, and the earlier original, as they
-were.
+plan) or a user attached the same file, which a request or dataset not saved
+yet may hold (see `docs/storage-and-recovery.md`). A refused apply leaves the
+record, and the earlier original, as they were.
 
 ## OpenAPI and Swagger
 

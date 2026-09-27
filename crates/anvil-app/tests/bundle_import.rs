@@ -682,11 +682,14 @@ fn a_stored_attachment_whose_content_is_not_stored_here_imports_with_a_warning()
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
     // A stored attachment whose content this profile does not hold, as after
-    // the loss of its blob or a request created through the API.
+    // the loss of its blob. (A save refuses a stored file that is not stored,
+    // so the row is written directly.)
     let lost = b"content that is not stored here";
     let sha256 = hex::encode(sha2::Sha256::digest(lost));
     let missing = AttachmentRef::Stored { sha256: sha256.clone(), size: lost.len() as u64, file_name: "lost.bin".into(), media_type: None };
-    a.create_request(&ws.meta.id, None, "Upload", upload(Body::Binary { attachment: missing, content_type: None })).unwrap();
+    let mut q = a.create_request(&ws.meta.id, None, "Upload", upload(Body::None)).unwrap();
+    q.spec = upload(Body::Binary { attachment: missing, content_type: None });
+    a.store.put(kind::REQUEST, &q.meta.id, Some(&ws.meta.id), None, q.sort_key, &q).unwrap();
 
     // The export says which request travels without its file.
     let preview = a.export_preview(Some(&ws.meta.id), ExportMode::EncryptedTransfer, false).unwrap();

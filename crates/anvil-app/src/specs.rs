@@ -441,8 +441,9 @@ impl App {
             s.delete(kind::SPEC_SOURCE, &rec.previous_import_ids[rec.previous_import_ids.len() - 1])?;
             s.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec)?;
             // The version it replaces is released, unless something else
-            // still references it: another import of the same bytes, a
-            // request body or a dataset.
+            // still references it (another import of the same bytes, a saved
+            // request body or dataset) or a user attached the same file,
+            // which an item not saved yet may hold.
             if !replaced.is_empty() && replaced != rec.original_sha256 {
                 release_attachment_in(s, &replaced)?;
             }

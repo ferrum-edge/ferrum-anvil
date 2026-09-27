@@ -545,12 +545,41 @@ its pin by primary key.
 
 Stored attachments (binary and multipart bodies, datasets, imported spec
 sources) are separate from history: their encrypted blobs are pinned, so
-retention never removes them. Deleting a dataset deletes its content once no
-request, revision, dataset, spec source, scenario or load plan still refers
-to the same (content-addressed) attachment. The check and the delete run in
-one write transaction, so nothing can refer to it in between. Pins are
-re-applied to existing attachments, in one write transaction, whenever a
-profile opens.
+retention never removes them. Deleting a request (with its revisions, also
+when its folder is deleted) or a dataset, or replacing a dataset's file,
+deletes the content it held once no request, revision, dataset, spec source,
+scenario or load plan still refers to the same (content-addressed)
+attachment. The check and the delete run in one write transaction, so
+nothing can refer to it in between.
+
+A file the user attaches (`App::put_attachment`: a body or multipart file, a
+gRPC schema file, a dataset) is stored before the request or dataset that
+uses it is saved, in a separate call. Its index entry is marked as added by
+a user (`"user": true`, with `"attached_at"`, the time in unix
+milliseconds it was last attached; entries written earlier have neither),
+and no automatic release, such as a reimport releasing the source file it
+replaces or `App::release_attachment`, deletes a marked attachment: only
+deleting or replacing an item that held it does. A bundle import or a
+restore stores the files its items reference without marking them (an entry
+already marked stays marked). A save checks, in its own write transaction,
+that every stored attachment the request or dataset names and did not hold
+when last saved is still stored, and is refused otherwise (attach the file
+again), so a saved item never names content deleted in between. A duplicate
+of a request may name the files that request holds even when one is no
+longer stored.
+
+The mark does not record which draft holds a file, so deleting a saved
+request (or dataset) deletes the file it held once nothing saved references
+it, even when a request or dataset not saved yet has the same file attached.
+That draft's save is then refused with "attach it again", and attaching the
+file again stores it again.
+
+Deleting a request decrypts only its own revisions, found by the request
+they are filed under, and the reference check reads every object of those
+kinds once for all the files the request held. An object there that does not
+decrypt could reference any of them, so the delete then keeps every file it
+held instead of failing. Pins are re-applied to existing attachments, in one
+write transaction, whenever a profile opens.
 
 ## Plaintext at rest
 

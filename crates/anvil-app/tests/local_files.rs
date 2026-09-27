@@ -23,6 +23,7 @@ use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +34,9 @@ use fifo::{mkfifo, within_seconds};
 
 const CANARY: &str = "anvil-local-file-canary";
 const URL: &str = "http://127.0.0.1:9/x";
+/// The stored file of a multipart spec in [`linked_specs`]: a save refuses a
+/// stored file that is not stored, so a test saving one stores it first.
+const STORED: &[u8] = b"a";
 
 /// The error of a refused call (an `ExecutionContext` is not `Debug`).
 fn refused<T>(r: Result<T, AppError>, label: &str) -> String {
@@ -76,7 +80,8 @@ fn linked_specs(path: &Path) -> Vec<(&'static str, RequestSpec)> {
         content: MultipartContent::File { attachment, file_name: None },
         content_type: None,
     };
-    let stored = AttachmentRef::Stored { sha256: "0".repeat(64), size: 1, file_name: "a".into(), media_type: None };
+    let sha256 = hex::encode(sha2::Sha256::digest(STORED));
+    let stored = AttachmentRef::Stored { sha256, size: 1, file_name: "a".into(), media_type: None };
     vec![
         ("binary body", with_body(Body::Binary { attachment: linked(path), content_type: None })),
         ("multipart part", with_body(Body::Multipart { parts: vec![part(stored), part(linked(path))] })),
@@ -360,6 +365,7 @@ async fn a_saved_linked_file_is_inert_until_it_is_chosen_for_that_request_on_thi
     let path = canonical(&canary_file(files.path(), "secret.txt"));
     let app = new_app(root.path(), "saved");
     let ws = app.create_workspace("W").unwrap();
+    app.put_attachment("a", STORED, None).unwrap();
     let mut saved = Vec::new();
     for (label, spec) in saved_linked_specs(&path) {
         let r = app.create_request(&ws.meta.id, None, label, spec).unwrap();
@@ -410,6 +416,7 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
     let path = canonical(&canary_file(files.path(), "secret.txt"));
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("W").unwrap();
+    a.put_attachment("a", STORED, None).unwrap();
     for (label, spec) in saved_linked_specs(&path) {
         let r = a.create_request(&ws.meta.id, None, label, spec).unwrap();
         // A binding on the exporting device does not travel with the bundle.

@@ -129,9 +129,16 @@
   with its name, hash, size and import time, instead of the first import's.
   The file it replaces is released from the attachment store in that
   transaction unless something else still references it (another import of
-  the same file, a request body or a dataset).
+  the same file, or a saved request body or dataset) or you attached the
+  same file yourself, even to a request or dataset not saved yet.
 - **Breaking (API):** `App::spec_reimport_apply` takes the name of the file
   it applies: `spec_reimport_apply(import_id, bytes, file_name, approval)`.
+- **Breaking (API):** `App::release_attachment` keeps a file a user attached
+  (`App::put_attachment`) and returns `false` for it, even when nothing
+  references it. `App::save_request`, `App::create_request` and
+  `App::save_dataset` can now fail with `AppError::Invalid` ("an attached
+  file ... is no longer stored; attach it again, then save") when they name a
+  stored file the item did not hold before and that is not stored.
 
 ### Fixed
 
@@ -146,6 +153,21 @@
   applied (for example an HMAC request with a manual `Content-Digest`
   header, also beside a JWT-SVID the preview does not fetch) it says the
   request would not be sent, instead of showing it without its credentials.
+- A file you attach (a request body or multipart file, a gRPC schema file, a
+  dataset) can no longer be deleted before the request or dataset that uses
+  it is saved. Before, a release in between, such as a reimport releasing
+  the source file it replaces while that same file was attached as a body,
+  left the saved request naming content that was gone. An attached file is
+  now marked in the attachment index and is released only when a request or
+  dataset that held it is deleted or replaced (a request's revisions are
+  deleted with it), never automatically. A save of a request or dataset that
+  names a stored file it did not hold before, and that is not stored, is
+  refused with a message to attach the file again. `App::delete_request` and
+  `App::delete_dataset` now also release, in the same transaction, the files
+  their item held that nothing else references; attachment index entries
+  written by earlier builds read as not marked. A marked entry records when
+  the file was attached. A duplicate of a request whose file is no longer
+  stored still saves.
 - A header an auth profile produces that is not valid on the wire (for
   example a token pasted with a trailing line break, or an API-key or JWT
   header name with a space) now fails the request before anything is sent,
