@@ -274,14 +274,25 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   connections and session tickets, and for a request, session or gRPC call
   of that workspace that started before the delete, none of those it
   prepares or receives afterwards is kept, even on a later redirect or
-  retry, so they cannot reappear in a workspace restored with the same id.
-  An execution takes the lock epoch and all of these generations between
-  the same two points, with no lock or delete of its workspace started in
-  between, so it is fenced on one side of a delete for every cache. The
-  generations are taken when the execution starts, not when the app builds
-  its context from storage: an execution whose context was built before
-  the delete but that starts after it is treated as later work of that
-  workspace. Pooled gRPC channels exist only on a load run's own engines
+  retry, so they cannot reappear in a workspace restored with the same id,
+  except for an execution whose context was built before the delete (see
+  the residual gap below). An execution takes the lock epoch and all of
+  these generations between the same two points, with no lock or delete of
+  its workspace started in between, so a snapshot never takes a transport
+  or channel generation newer than its jar generation; a snapshot taken
+  during a delete is post-delete for cookies and TLS material and keeps no
+  connection, ticket or channel. The generations are taken when the
+  execution starts, not when the app builds its context from storage.
+  Residual gap: an execution whose context was built before a workspace
+  delete but that starts executing after it (for example `App::send`
+  builds the context off the runtime before it executes,
+  `crates/anvil-app/src/exec.rs`) takes a post-delete snapshot, so it can
+  keep cookies in the deleted workspace's jar, a cached prepared TLS
+  configuration (including a client identity's private key), pooled
+  connections and 0-RTT session tickets under that workspace until the
+  next lock, visible to a workspace restored with the same id (see
+  [ferrum-anvil#163](https://github.com/ferrum-edge/ferrum-anvil/issues/163)).
+  Pooled gRPC channels exist only on a load run's own engines
   (one per virtual-user slot); a call that began before a clear of its
   engine's channels does not return its connection to them. Neither the
   lock nor a workspace delete clears those engines: the lock stops the run,

@@ -219,8 +219,12 @@ impl Engine {
 
     /// The epoch, `isolation`'s jar generation and the transports' and gRPC
     /// channels' generations, all taken between the same two points: no lock
-    /// and no delete of `isolation` started in between. `between` runs after
-    /// the epoch and the jar generation are read (a test lands a clear there).
+    /// and no delete of `isolation` started in between. A snapshot never
+    /// takes a transport or channel generation newer than its jar
+    /// generation; a snapshot taken during a delete is post-delete for
+    /// cookies and TLS material and keeps no connection, ticket or channel.
+    /// `between` runs after the epoch and the jar generation are read (a test
+    /// lands a clear there).
     fn snapshot(&self, isolation: Option<&str>, mut between: impl FnMut()) -> SensitiveEpoch {
         loop {
             let epoch = self.epoch.load(Ordering::SeqCst);

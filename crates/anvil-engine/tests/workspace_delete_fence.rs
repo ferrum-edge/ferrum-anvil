@@ -317,7 +317,7 @@ async fn https_requests_outside_the_early_data_opt_in_keep_no_session_ticket() {
 /// and keeps no session ticket. Under the opt-in, a connection resumes its
 /// own workspace's sessions only.
 #[tokio::test]
-async fn prepared_tls_sessions_are_not_shared_between_workspaces_and_are_dropped_by_the_delete() {
+async fn prepared_tls_configurations_are_per_workspace_and_dropped_by_the_delete() {
     init();
     let fx = early_data::serve_tls("127.0.0.1:0", server_tls(), EarlyMode::Disabled).await.unwrap();
     let e = Engine::new();
