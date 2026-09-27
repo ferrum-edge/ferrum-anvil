@@ -1,5 +1,5 @@
 //! Public-signal contract tests for gateway-to-upstream setup outcomes that
-//! the lab cannot (or may not) reproduce live on 0.9.5 or 0.9.7:
+//! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7 or 0.9.8:
 //!
 //! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): neither release has a
 //!   dial-admission hook, and exhausting the lab host's real ephemeral ports
@@ -13,7 +13,7 @@
 //!
 //! These are NOT live reproductions and NOT hook-based tests: they feed only
 //! the exact public signal the source-audited catalogs record for each outcome
-//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7}/outcomes.json`; every test runs
+//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7,0.9.8}/outcomes.json`; every test runs
 //! against each embedded release's catalog) through the engine's
 //! diagnosis and assert what Anvil may and may not conclude from it. No
 //! private ground truth (operator `error_class`) is ever an input.
@@ -74,7 +74,7 @@ fn diagnose_http(r: &ResponseRecord, body: &[u8], trust: FerrumTrust) -> Diagnos
 
 /// The strongest trust Anvil can have in an audited gateway release: a trusted
 /// profile over verified TLS. Markers stay spoofable on every audited release
-/// (0.9.5 and 0.9.7), so nothing may exceed `likely`.
+/// (0.9.5, 0.9.7 and 0.9.8), so nothing may exceed `likely`.
 fn trusted_verified(compat: &str) -> FerrumTrust {
     FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: true }
 }
@@ -138,7 +138,7 @@ fn ambiguous_candidates(d: &Diagnosis) -> (&DiagnosticFinding, Vec<String>) {
 }
 
 /// UP-017 — public-signal contract test, NOT a live reproduction and NOT a
-/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 have no lab dial-admission hook, and draining
+/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 / 0.9.8 have no lab dial-admission hook, and draining
 /// the host's ephemeral ports would be unsafe. The gateway answers port
 /// exhaustion with the same `502 connection_failure {"error":"Backend
 /// unavailable"}` as DNS, refused, TLS and pool failures, so Anvil must keep

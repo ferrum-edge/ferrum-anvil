@@ -4,17 +4,19 @@
 //! the relay, which forwards each datagram to a local UDP socket connected
 //! to the `:authority` (Ferrum Edge `src/proxy/hbone_proxy.rs`
 //! `handle_hbone_udp_request` / `relay_hbone_udp`,
-//! `src/proxy/mesh_udp_frame.rs`; identical in v0.9.5 and v0.9.7).
+//! `src/proxy/mesh_udp_frame.rs`; the record framing is identical in v0.9.5,
+//! v0.9.7 and v0.9.8).
 //!
 //! * The STRICT sidecar relays to the workload's declared `udp` ports on
 //!   loopback (mesh-sidecar.json 17802-17805): an echo (MESH-018), a silent
 //!   receiver (MESH-019), one that closes after its first reply (MESH-026)
 //!   and one nothing listens on (MESH-027). The mTLS refusals (MESH-020/021),
 //!   the PERMISSIVE sidecar's UDP authenticated-peer gate (MESH-022) and the
-//!   relay-synthesis 404 for an undeclared port (MESH-023) are the byte
+//!   relay-synthesis refusal for an undeclared port (MESH-023) are the byte
 //!   tunnel's, with the UDP-specific public bodies where they differ.
 //! * Ambient never relays to loopback, so only its refusals are reachable:
-//!   loopback 404 (MESH-028), a declared name whose DNS answer is loopback
+//!   loopback refusal at synthesis (MESH-028: 404 on v0.9.5 / v0.9.7, 403 from
+//!   v0.9.8), a declared name whose DNS answer is loopback
 //!   403 (MESH-024) and an unresolvable declared name 502 (MESH-025).
 //!
 //! Ground truth: the UDP fixtures' own logs (datagrams and sizes), and the
@@ -23,9 +25,9 @@
 
 use crate::fixtures_policy::{codes, send};
 use crate::mesh::{
-    AMBIENT_HBONE_PORT, Def, Env, Fut, PERMISSIVE_PORT, SIDECAR_PORT, SYNTHESIS_REFUSAL, Svid, UDP_CLOSING_PORT, UDP_ECHO_PORT,
-    UDP_SILENT_PORT, UDP_UNBOUND_PORT, attempt, not_dispatched, op_lines, outcome, transactions, tunnel_leg_failure, tunnel_of,
-    wait_op_lines,
+    AMBIENT_HBONE_PORT, Def, Env, Fut, PERMISSIVE_PORT, SIDECAR_PORT, Svid, UDP_CLOSING_PORT, UDP_ECHO_PORT, UDP_SILENT_PORT,
+    UDP_UNBOUND_PORT, attempt, not_dispatched, op_lines, outcome, synthesis_refusal, synthesis_refusal_log, transactions,
+    tunnel_leg_failure, tunnel_of, wait_op_lines,
 };
 use crate::scenario::{CheckKind, Checks};
 use anvil_domain::diagnostics::{Confidence, Severity, SourceScope};
@@ -330,7 +332,8 @@ fn mesh022(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-023: sidecar, a UDP port no workload declares: refused at relay
-/// synthesis with the generic 404 (debug reason `port_not_declared`).
+/// synthesis (0.9.5 / 0.9.7: the generic 404; 0.9.8: the UDP destination 403;
+/// reason `port_not_declared`).
 fn mesh023(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -341,9 +344,10 @@ fn mesh023(env: &Env) -> Fut<'_> {
             &env.via_hbone_udp(SIDECAR_PORT, &format!("127.0.0.1:{UNDECLARED_UDP_PORT}"), &["x"], 800, tls, HboneMarker::None),
         )
         .await;
-        udp_tunnel_refused(&mut c, &o, 404, "Not Found");
+        let refusal = synthesis_refusal();
+        udp_tunnel_refused(&mut c, &o, refusal.status, refusal.udp_body);
         no_policy_claim(&mut c, &o);
-        let log = wait_op_lines(&env.sidecar, from, &[SYNTHESIS_REFUSAL, "port_not_declared"]).await;
+        let log = synthesis_refusal_log(&env.sidecar, from, "port_not_declared").await;
         c.add(CheckKind::GroundTruth, "operator log: relay synthesis refused the authority (port_not_declared)", !log.is_empty(), "");
         outcome(o, c, log)
     })
@@ -459,7 +463,9 @@ fn mesh026(env: &Env) -> Fut<'_> {
             format!("{got:?} closed={closed}"),
         );
         // bytes_in: "first" + "second" handed to the (then closed) port; bytes_out: the one reply.
-        let log = wait_op_lines(&env.sidecar, from, &["HBONE UDP tunnel relay completed", "\"bytes_in\":11", "\"bytes_out\":5"]).await;
+        // 0.9.8 logs a relay that ends on the port's ICMP error as "ended on a
+        // socket error" (#5765) instead of "completed".
+        let log = wait_op_lines(&env.sidecar, from, &["HBONE UDP tunnel relay", "\"bytes_in\":11", "\"bytes_out\":5"]).await;
         c.add(
             CheckKind::GroundTruth,
             "operator log (debug): the gateway's UDP relay ended after relaying both datagrams and one reply",
@@ -488,7 +494,7 @@ fn mesh027(env: &Env) -> Fut<'_> {
         c.absent_prefix(&o, "udp.icmp_port_unreachable");
         c.absent_prefix(&o, "exchange.");
         tunnel_opened(&mut c, &o, &authority);
-        let log = wait_op_lines(&env.sidecar, from, &["HBONE UDP tunnel relay completed", "\"bytes_in\":6", "\"bytes_out\":0"]).await;
+        let log = wait_op_lines(&env.sidecar, from, &["HBONE UDP tunnel relay", "\"bytes_in\":6", "\"bytes_out\":0"]).await;
         c.add(
             CheckKind::GroundTruth,
             "operator log (debug): the gateway's UDP relay ended after relaying the datagram, with nothing back",
@@ -500,7 +506,8 @@ fn mesh027(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-028: Ambient, the loopback workload over UDP: refused at relay
-/// synthesis (Ambient never relays to loopback), 404.
+/// synthesis (Ambient never relays to loopback), 404 on 0.9.5 / 0.9.7 and 403
+/// on 0.9.8.
 fn mesh028(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -511,8 +518,9 @@ fn mesh028(env: &Env) -> Fut<'_> {
             &env.via_hbone_udp(AMBIENT_HBONE_PORT, &format!("127.0.0.1:{UDP_ECHO_PORT}"), &["x"], 800, tls, HboneMarker::None),
         )
         .await;
-        udp_tunnel_refused(&mut c, &o, 404, "Not Found");
-        let log = wait_op_lines(&env.ambient, from, &[SYNTHESIS_REFUSAL, "address_not_terminated_here"]).await;
+        let refusal = synthesis_refusal();
+        udp_tunnel_refused(&mut c, &o, refusal.status, refusal.udp_body);
+        let log = synthesis_refusal_log(&env.ambient, from, "address_not_terminated_here").await;
         c.add(CheckKind::GroundTruth, "operator log: relay synthesis refused the loopback authority", !log.is_empty(), "");
         outcome(o, c, log)
     })
@@ -525,7 +533,11 @@ pub(crate) fn defs() -> Vec<Def> {
         Def { id: "MESH-020", title: "UDP through HBONE without a client SVID: refused at mTLS (sidecar STRICT)", run: mesh020 },
         Def { id: "MESH-021", title: "UDP through HBONE with an untrusted-trust-domain SVID: refused at mTLS", run: mesh021 },
         Def { id: "MESH-022", title: "PERMISSIVE sidecar: unauthenticated UDP CONNECT refused 403 (UDP body)", run: mesh022 },
-        Def { id: "MESH-023", title: "UDP CONNECT to an undeclared port refused at relay synthesis (404)", run: mesh023 },
+        Def {
+            id: "MESH-023",
+            title: "UDP CONNECT to an undeclared port refused at relay synthesis (404; 403 from 0.9.8)",
+            run: mesh023,
+        },
         Def {
             id: "MESH-024",
             title: "Ambient: declared name resolving to loopback refused 403 (UDP destination not allowed)",
@@ -538,7 +550,11 @@ pub(crate) fn defs() -> Vec<Def> {
             title: "UDP tunnel to a declared port nothing listens on: no response, endpoint ends the tunnel",
             run: mesh027,
         },
-        Def { id: "MESH-028", title: "Ambient UDP to the loopback workload refused at relay synthesis (404)", run: mesh028 },
+        Def {
+            id: "MESH-028",
+            title: "Ambient UDP to the loopback workload refused at relay synthesis (404; 403 from 0.9.8)",
+            run: mesh028,
+        },
     ]
 }
 

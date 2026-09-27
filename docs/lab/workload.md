@@ -2,9 +2,10 @@
 
 Anvil as a client of the **real** Ferrum Edge SPIFFE Workload API (gRPC over a Unix socket), using what it
 issues — an X.509-SVID as the TLS client identity and a JWT-SVID as the bearer token — against the same
-release's mesh inbound listener and a `jwks_auth` route. Pinned releases: **v0.9.7** (`lab/gateway/RELEASE.lock`)
-and **v0.9.5** (`lab/gateway/releases/v0.9.5.lock`); the Workload API code is identical in both
-(`src/identity/workload_api/server.rs`, `src/identity/jwt_svid/`). No SPIRE, no Kubernetes, no control plane.
+release's mesh inbound listener and a `jwks_auth` route. Pinned releases: **v0.9.8** (`lab/gateway/RELEASE.lock`),
+**v0.9.7** and **v0.9.5** (`lab/gateway/releases/`); the Workload API code is identical in v0.9.5 and v0.9.7
+(`src/identity/workload_api/server.rs`, `src/identity/jwt_svid/`). v0.9.8 returns
+`ValidateJWTSVIDResponse.claims` as a `google.protobuf.Struct` (#5780), a field Anvil does not read. No SPIRE, no Kubernetes, no control plane.
 
 Protocol behaviour and findings: [protocols.md §3.11](../protocols.md), [diagnostics.md](../diagnostics.md)
 ("SPIFFE Workload API and JWT-SVIDs").

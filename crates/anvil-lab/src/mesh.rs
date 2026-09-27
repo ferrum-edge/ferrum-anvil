@@ -16,11 +16,13 @@
 //! * **ambient** (`lab/gateway/mesh-ambient.{conf,json}`, STRICT): the HBONE
 //!   listener (15008-equivalent) on 127.0.0.1:17618.
 //!
-//! Ferrum Edge 0.9.7 refuses a CONNECT whose authority the terminator does
-//! not own at relay synthesis with a generic `404 {"error":"Not Found"}`
-//! (debug operator line), not the documented `403
-//! hbone_relay_destination_denied` (that 403 is the post-plugin re-check).
-//! The lab asserts the observed public signal and records the difference.
+//! Ferrum Edge 0.9.5 and 0.9.7 refuse a CONNECT whose authority the
+//! terminator does not own at relay synthesis with a generic
+//! `404 {"error":"Not Found"}` (debug operator line), not the documented `403
+//! hbone_relay_destination_denied` (there that 403 is only the post-plugin
+//! re-check). 0.9.8 answers the documented 403 at synthesis too and writes a
+//! transaction line (#5763). The lab asserts the running release's signal
+//! ([`synthesis_refusal`]).
 //!
 //! Anvil verifies every mesh listener by SPIFFE identity (no bypass) and
 //! presents the lab client SVID. Ground truth is the echo fixture's request
@@ -83,7 +85,6 @@ const SVC_HOST: &str = "svc.ferrum.svc.cluster.local";
 const EAST_WEST_SNI: &str = "outbound_.17801_._.svc.ferrum.svc.cluster.local";
 /// TEST-NET-1 (RFC 5737): a destination no lab terminator owns; never dialed.
 const TEST_NET: &str = "192.0.2.10";
-const COMPAT: &str = "ferrum-edge-0.9.5";
 
 pub struct Env {
     pub engine: Engine,
@@ -108,6 +109,28 @@ impl LabEnv for Env {
     }
     fn operator_logs(&self) -> Vec<PathBuf> {
         vec![self.sidecar.log_path.clone(), self.ambient.log_path.clone(), self.permissive.log_path.clone()]
+    }
+}
+
+/// The trusted profile of the mesh listeners; it declares the running
+/// release's compatibility id, so diagnoses use that release's catalog.
+pub(crate) fn ferrum_profile() -> IntegrationProfile {
+    IntegrationProfile {
+        id: anvil_domain::Id::new(),
+        workspace_id: anvil_domain::Id::new(),
+        name: "lab mesh listeners".into(),
+        kind: IntegrationKind::FerrumGateway {
+            hosts: [SIDECAR_PORT, AMBIENT_HBONE_PORT, PERMISSIVE_PORT]
+                .iter()
+                .map(|p| HostBinding { host: "127.0.0.1".into(), port: Some(*p) })
+                .collect(),
+            compatibility_id: gateway::compatibility_id(),
+            require_verified_tls: true,
+            detail: None,
+            console_url: None,
+        },
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
 }
 
@@ -158,23 +181,7 @@ impl Env {
         let mut c = ExecutionContext::standalone(spec);
         c.isolation = self.isolation();
         if self.trusted {
-            c.integrations.push(IntegrationProfile {
-                id: anvil_domain::Id::new(),
-                workspace_id: anvil_domain::Id::new(),
-                name: "lab mesh listeners".into(),
-                kind: IntegrationKind::FerrumGateway {
-                    hosts: [SIDECAR_PORT, AMBIENT_HBONE_PORT, PERMISSIVE_PORT]
-                        .iter()
-                        .map(|p| HostBinding { host: "127.0.0.1".into(), port: Some(*p) })
-                        .collect(),
-                    compatibility_id: COMPAT.into(),
-                    require_verified_tls: true,
-                    detail: None,
-                    console_url: None,
-                },
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            });
+            c.integrations.push(ferrum_profile());
         }
         let o = SettingsOverrides {
             timeouts: Some(TimeoutOverrides {
@@ -332,8 +339,42 @@ pub(crate) async fn wait_op_lines(gw: &Gateway, from: usize, needles: &[&str]) -
     vec![]
 }
 
-/// The v0.9.7 relay-synthesis refusal (debug operator line) with its reason.
-pub(crate) const SYNTHESIS_REFUSAL: &str = "not one this proxy terminates for";
+/// The v0.9.5 / v0.9.7 relay-synthesis refusal (debug operator line) with its reason.
+const SYNTHESIS_REFUSAL: &str = "not one this proxy terminates for";
+
+/// How the release under test refuses an inbound CONNECT at relay synthesis:
+/// v0.9.5 and v0.9.7 answer a generic `404 {"error":"Not Found"}`; v0.9.8
+/// (#5763) answers the relay destination guard's documented `403`.
+pub(crate) struct SynthesisRefusal {
+    pub(crate) status: u16,
+    /// Public body text of a byte-stream CONNECT refusal.
+    pub(crate) body: &'static str,
+    /// Public body text of a datagram (UDP) CONNECT refusal.
+    pub(crate) udp_body: &'static str,
+}
+
+pub(crate) fn synthesis_refusal() -> SynthesisRefusal {
+    if gateway::release_at_least("v0.9.8") {
+        SynthesisRefusal { status: 403, body: "HBONE relay destination not allowed", udp_body: "HBONE UDP relay destination not allowed" }
+    } else {
+        SynthesisRefusal { status: 404, body: "Not Found", udp_body: "Not Found" }
+    }
+}
+
+/// Operator-log ground truth of a relay-synthesis refusal naming `detail`
+/// (the denial reason or the refused host): the debug line on v0.9.5 and
+/// v0.9.7; from v0.9.8 the transaction line (deny policy and `mesh.relay.*`
+/// metadata), else its debug line.
+pub(crate) async fn synthesis_refusal_log(gw: &Gateway, from: usize, detail: &str) -> Vec<String> {
+    if !gateway::release_at_least("v0.9.8") {
+        return wait_op_lines(gw, from, &[SYNTHESIS_REFUSAL, detail]).await;
+    }
+    let log = wait_op_lines(gw, from, &["relay_destination_denied", detail]).await;
+    if !log.is_empty() {
+        return log;
+    }
+    wait_op_lines(gw, from, &["Refusing inbound CONNECT relay synthesis", detail]).await
+}
 
 /// Transaction (access) lines since `from`.
 pub(crate) fn transactions(gw: &Gateway, from: usize) -> Vec<String> {
@@ -632,8 +673,8 @@ fn mesh008(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-009: sidecar relay destination guard: a port no local workload
-/// declares is refused at relay synthesis (0.9.7: `404`, debug reason
-/// `port_not_declared`).
+/// declares is refused at relay synthesis (0.9.5 / 0.9.7: `404`, 0.9.8: `403`;
+/// reason `port_not_declared`).
 fn mesh009(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -641,9 +682,10 @@ fn mesh009(env: &Env) -> Fut<'_> {
         let tls = env.tls("client SVID → svc", Svid::Client, ids::SVC_SPIFFE_ID, None);
         let o =
             send(&env.engine, &env.via_hbone(SIDECAR_PORT, &format!("127.0.0.1:{UNDECLARED_PORT}"), "/echo", tls, HboneMarker::None)).await;
-        tunnel_refused(&mut c, &o, 404, "Not Found");
+        let refusal = synthesis_refusal();
+        tunnel_refused(&mut c, &o, refusal.status, refusal.body);
         backend_unchanged(&mut c, env, b0);
-        let log = wait_op_lines(&env.sidecar, from, &[SYNTHESIS_REFUSAL, "port_not_declared"]).await;
+        let log = synthesis_refusal_log(&env.sidecar, from, "port_not_declared").await;
         c.add(CheckKind::GroundTruth, "operator log: relay synthesis refused the authority (port_not_declared)", !log.is_empty(), "");
         outcome(o, c, log)
     })
@@ -659,7 +701,8 @@ fn mesh010(env: &Env) -> Fut<'_> {
         let o =
             send(&env.engine, &env.via_hbone(AMBIENT_HBONE_PORT, &format!("127.0.0.1:{BACKEND_PORT}"), "/echo", tls, HboneMarker::None))
                 .await;
-        tunnel_refused(&mut c, &o, 404, "Not Found");
+        let refusal = synthesis_refusal();
+        tunnel_refused(&mut c, &o, refusal.status, refusal.body);
         c.add(
             CheckKind::Diagnosis,
             "the HBONE endpoint's identity was verified (mTLS succeeded)",
@@ -667,7 +710,7 @@ fn mesh010(env: &Env) -> Fut<'_> {
             "",
         );
         backend_unchanged(&mut c, env, b0);
-        let log = wait_op_lines(&env.ambient, from, &[SYNTHESIS_REFUSAL, "address_not_terminated_here"]).await;
+        let log = synthesis_refusal_log(&env.ambient, from, "address_not_terminated_here").await;
         c.add(
             CheckKind::GroundTruth,
             "operator log: relay synthesis refused the authority (address_not_terminated_here)",
@@ -687,7 +730,8 @@ fn mesh011(env: &Env) -> Fut<'_> {
         let o =
             send(&env.engine, &env.via_hbone(AMBIENT_HBONE_PORT, &format!("{TEST_NET}:{BACKEND_PORT}"), "/echo", tls, HboneMarker::None))
                 .await;
-        tunnel_refused(&mut c, &o, 404, "Not Found");
+        let refusal = synthesis_refusal();
+        tunnel_refused(&mut c, &o, refusal.status, refusal.body);
         c.add(
             CheckKind::Diagnosis,
             "Anvil neither resolved nor dialed the inner destination (the endpoint does)",
@@ -697,7 +741,7 @@ fn mesh011(env: &Env) -> Fut<'_> {
             }),
             "",
         );
-        let log = wait_op_lines(&env.ambient, from, &[SYNTHESIS_REFUSAL, TEST_NET]).await;
+        let log = synthesis_refusal_log(&env.ambient, from, TEST_NET).await;
         c.add(CheckKind::GroundTruth, "operator log: relay synthesis refused the TEST-NET authority (nothing dialed)", !log.is_empty(), "");
         outcome(o, c, log)
     })
@@ -834,7 +878,7 @@ const SKIPPED: &[(&str, &str, &str)] = &[
     (
         "MESH-016",
         "HBONE through the Ambient HBONE listener reaches a workload",
-        "infeasible on a loopback-only host without Kubernetes: Ferrum Edge 0.9.7's Ambient inbound relay guard categorically refuses \
+        "infeasible on a loopback-only host without Kubernetes: {release}'s Ambient inbound relay guard categorically refuses \
      loopback destinations (docs/mesh.md \"Inbound Relay Destination Guard\"; src/modes/mesh/config.rs \
      inbound_relay_destination_decision) and admits only a non-loopback accepted pod address or node-agent-enrolled pod IPs; \
      the lab binds 127.0.0.1 only and has no node agent. MESH-010/011 verify the Ambient guard live; MESH-008 drives the same \
@@ -843,13 +887,12 @@ const SKIPPED: &[(&str, &str, &str)] = &[
     (
         "MESH-017",
         "Relay destination guard 403 hbone_relay_destination_denied (post-plugin re-check)",
-        "not reachable without a control plane: Ferrum Edge 0.9.7 refuses an authority the terminator does not own at relay \
-         synthesis with a generic 404 {\"error\":\"Not Found\"} plus a debug operator line (src/proxy/mod.rs \
-         build_inbound_hbone_relay_proxy; MESH-009/010/011 verify it live). The documented 403 with \
-         mesh_authz.deny_policy=hbone_relay_destination_denied comes only from the re-check after a before_proxy route \
-         override (mesh_route_dispatch from a VirtualService) moved the effective destination, and the localized file \
-         source carries no VirtualService (gateway plugin_configs are rejected in mesh file mode). The 403 refusal \
-         contract is covered by the HBONE fixture tests (crates/anvil-engine/tests/mesh_hbone.rs).",
+        "not reachable without a control plane: the post-plugin re-check runs only after a before_proxy route override \
+         (mesh_route_dispatch from a VirtualService) moved the effective destination, and the localized file source \
+         carries no VirtualService (gateway plugin_configs are rejected in mesh file mode). MESH-009/010/011 verify the \
+         relay-synthesis refusal of {release} live (src/proxy/mod.rs build_inbound_hbone_relay_proxy: a generic 404 \
+         {\"error\":\"Not Found\"} on 0.9.5 and 0.9.7, the same documented 403 hbone_relay_destination_denied from \
+         0.9.8). The 403 refusal contract is covered by the HBONE fixture tests (crates/anvil-engine/tests/mesh_hbone.rs).",
     ),
 ];
 

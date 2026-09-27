@@ -27,6 +27,7 @@ const now = () => new Date().toISOString();
 /** Ferrum Edge releases with a source-audited catalog in anvil-diagnostics
  * (`catalog/ferrum/<id>/outcomes.json`), newest first; new profiles use the first. */
 export const FERRUM_COMPATIBILITY = [
+  { id: "ferrum-edge-0.9.8", label: "Ferrum Edge 0.9.8" },
   { id: "ferrum-edge-0.9.7", label: "Ferrum Edge 0.9.7" },
   { id: "ferrum-edge-0.9.5", label: "Ferrum Edge 0.9.5" },
 ] as const;

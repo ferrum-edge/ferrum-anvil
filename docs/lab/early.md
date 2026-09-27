@@ -1,8 +1,8 @@
 # Failure lab: `early` profile
 
 This profile drives Anvil's TLS 1.3 / QUIC **0-RTT early data** ([protocols.md §3.12](../protocols.md))
-against the **real, pinned Ferrum Edge release binary** (v0.9.7 by default, v0.9.5 with
-`--release v0.9.5`). There are no gateway mocks.
+against the **real, pinned Ferrum Edge release binary** (v0.9.8 by default, v0.9.7 or v0.9.5 with
+`--release`). There are no gateway mocks.
 
 The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3 early data)"),
 `docs/frontend_tls.md` and its source (v0.9.7 `8fed134` lines; the early-data code of v0.9.5

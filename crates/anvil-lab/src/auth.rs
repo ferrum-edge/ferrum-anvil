@@ -1778,7 +1778,7 @@ fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
         (
             "AUTH-025.nonce",
             "DPoP server-nonce challenge",
-            "infeasible on {release}: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4, re-checked in the 0.9.7 source); AUTH-025 covers the replay half live",
+            "infeasible on {release}: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4, re-checked in the 0.9.7 and 0.9.8 source); AUTH-025 covers the replay half live",
         ),
     ]
 }

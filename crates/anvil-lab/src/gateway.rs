@@ -34,9 +34,36 @@ pub struct Lock {
 
 impl Lock {
     /// The Anvil compatibility id (and diagnostics catalog) of this release,
-    /// e.g. `v0.9.7` -> `ferrum-edge-0.9.7`.
+    /// e.g. `v0.9.8` -> `ferrum-edge-0.9.8`.
     pub fn compatibility_id(&self) -> String {
         compatibility_id_for(&self.release)
+    }
+
+    /// The compatibility id a trusted lab profile declares for this release,
+    /// checked against the embedded diagnostics catalogs: it fails when Anvil
+    /// has no catalog for the release, or only one audited at another source
+    /// commit than the lock pins. A lab run never diagnoses one release with
+    /// another release's catalog, or with none.
+    pub fn catalog_compatibility_id(&self) -> Result<String> {
+        let id = self.compatibility_id();
+        let Some(catalog) = anvil_diagnostics::ferrum::catalog_for(&id) else {
+            bail!(
+                "no diagnostics catalog for Ferrum Edge {} ({id}, pinned by {}); embedded catalogs: {}",
+                self.release,
+                self.file,
+                anvil_diagnostics::ferrum::compatibility_ids().collect::<Vec<_>>().join(", ")
+            );
+        };
+        if catalog.source_sha != self.source_sha {
+            bail!(
+                "{} pins Ferrum Edge {} at {}, but the {id} diagnostics catalog was audited at {}",
+                self.file,
+                self.release,
+                self.source_sha,
+                catalog.source_sha
+            );
+        }
+        Ok(id)
     }
 }
 
@@ -128,12 +155,24 @@ pub fn current_lock() -> &'static Lock {
 
 /// Compatibility id of the release under test; every lab profile declares it
 /// in its trusted Ferrum integration profile, so diagnoses use that
-/// release's catalog.
+/// release's catalog. Panics when that catalog does not exist
+/// ([`Lock::catalog_compatibility_id`]); `anvil-lab run` and `up` check it
+/// before starting anything.
 pub fn compatibility_id() -> String {
-    current_lock().compatibility_id()
+    current_lock().catalog_compatibility_id().unwrap_or_else(|e| panic!("trusted lab profile: {e:#}"))
 }
 
-/// `Ferrum Edge 0.9.7`-style name of the release under test, for skip reasons.
+/// Whether the release under test is `min` or a later one (`v0.9.8`-style
+/// tags), for scenarios whose public signal changed in a release.
+pub fn release_at_least(min: &str) -> bool {
+    release_order(&current_lock().release) >= release_order(min)
+}
+
+fn release_order(tag: &str) -> Vec<u64> {
+    tag.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// `Ferrum Edge 0.9.8`-style name of the release under test, for skip reasons.
 pub fn release_label() -> String {
     format!("Ferrum Edge {}", current_lock().release.trim_start_matches('v'))
 }
@@ -436,23 +475,89 @@ mod tests {
     #[test]
     fn every_supported_release_has_a_lock_and_a_catalog() {
         let releases = available_releases();
-        assert!(releases.len() >= 2, "{releases:?}");
+        assert!(releases.len() >= 3, "{releases:?}");
         for r in releases {
             let l = lock_at(&format!("{RELEASES_DIR}/{r}.lock"));
             assert_eq!(l.release, r);
             assert_eq!(l.source_sha.len(), 40, "{r}: source sha");
             assert_eq!(l.sha256.len(), 64, "{r}: {} checksum", asset_name());
-            let id = l.compatibility_id();
-            let cat = anvil_diagnostics::ferrum::catalog_for(&id).unwrap_or_else(|| panic!("no diagnostics catalog for {id}"));
+            let id = l.catalog_compatibility_id().unwrap_or_else(|e| panic!("{e:#}"));
+            let cat = anvil_diagnostics::ferrum::catalog_for(&id).expect("checked above");
+            assert_eq!(cat.release_tag, r, "{id}: catalog of another release");
             assert_eq!(cat.source_sha, l.source_sha, "{r}: catalog audited at another commit than the lab runs");
         }
+    }
+
+    /// A release Anvil has no catalog for (or only a catalog of another
+    /// commit) is refused with a message naming the release, never
+    /// diagnosed with another release's catalog.
+    #[test]
+    fn a_release_without_its_catalog_fails_clearly() {
+        let mut l = lock_at(DEFAULT_LOCK);
+        l.release = "v0.9.6".into();
+        let e = format!("{:#}", l.catalog_compatibility_id().unwrap_err());
+        assert!(e.contains("no diagnostics catalog for Ferrum Edge v0.9.6 (ferrum-edge-0.9.6"), "{e}");
+        assert!(anvil_diagnostics::ferrum::compatibility_ids().all(|id| e.contains(id)), "names the embedded catalogs: {e}");
+        let mut l = lock_at(DEFAULT_LOCK);
+        l.source_sha = "0".repeat(40);
+        let e = format!("{:#}", l.catalog_compatibility_id().unwrap_err());
+        assert!(e.contains("diagnostics catalog was audited at"), "{e}");
+    }
+
+    fn declared(p: &anvil_domain::integration::IntegrationProfile) -> String {
+        let anvil_domain::integration::IntegrationKind::FerrumGateway { compatibility_id, .. } = &p.kind;
+        compatibility_id.clone()
+    }
+
+    /// The h3x, proxyproto and mesh trusted profiles declare the selected
+    /// release's compatibility id (they once hard-coded ferrum-edge-0.9.5
+    /// whatever release ran), and that id has its own catalog.
+    #[test]
+    fn trusted_profiles_declare_the_selected_releases_catalog() {
+        let lock = current_lock();
+        let id = lock.catalog_compatibility_id().unwrap_or_else(|e| panic!("{e:#}"));
+        for (profile, p) in [
+            ("h3x", crate::h3x::ferrum_profile()),
+            ("proxyproto", crate::proxyproto::ferrum_profile()),
+            ("mesh", crate::mesh::ferrum_profile()),
+        ] {
+            let got = declared(&p);
+            assert_eq!(got, id, "the {profile} profile declares another release's catalog than {} runs", lock.release);
+            let cat = anvil_diagnostics::ferrum::catalog_for(&got).unwrap_or_else(|| panic!("{profile}: no catalog for {got}"));
+            assert_eq!(cat.release_tag, lock.release, "{profile}: catalog of another release");
+        }
+    }
+
+    /// No lab module hard-codes a compatibility id: every trusted Ferrum
+    /// profile takes it from the selected release.
+    #[test]
+    fn no_lab_profile_hard_codes_a_compatibility_id() {
+        let mut bad = Vec::new();
+        for e in std::fs::read_dir(repo_root().join("crates/anvil-lab/src")).unwrap().flatten() {
+            let text = std::fs::read_to_string(e.path()).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("compatibility_id:") && !l.ends_with("gateway::compatibility_id(),") {
+                    bad.push(format!("{}:{}: {l}", e.file_name().to_string_lossy(), i + 1));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "declare crate::gateway::compatibility_id() instead:\n  {}", bad.join("\n  "));
+    }
+
+    #[test]
+    fn releases_order_numerically() {
+        assert!(release_order("v0.9.8") > release_order("v0.9.7"));
+        assert!(release_order("v0.9.10") > release_order("v0.9.8"));
+        assert!(release_order("v1.0.0") > release_order("v0.9.10"));
+        assert_eq!(release_order(" v0.9.8"), release_order("0.9.8"));
     }
 
     #[test]
     fn release_names_normalize_and_map_to_compatibility_ids() {
         assert_eq!(normalize_release(Some(" 0.9.5 ".into())), Some("v0.9.5".into()));
-        assert_eq!(normalize_release(Some("v0.9.7".into())), Some("v0.9.7".into()));
+        assert_eq!(normalize_release(Some("v0.9.8".into())), Some("v0.9.8".into()));
         assert_eq!(normalize_release(Some("".into())), None);
-        assert_eq!(compatibility_id_for("v0.9.7"), "ferrum-edge-0.9.7");
+        assert_eq!(compatibility_id_for("v0.9.8"), "ferrum-edge-0.9.8");
     }
 }

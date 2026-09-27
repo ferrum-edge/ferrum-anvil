@@ -18,9 +18,24 @@
   `--json` prints it as JSON; `--now` runs a pass first. The desktop exposes
   the same record through the `storage_cleanup_last` command
   (`api.storageCleanupLast()`); it has no screen for it yet.
+- Diagnostics: a `ferrum-edge-0.9.8` compatibility catalog for Ferrum Edge
+  v0.9.8 (540 source-audited outcomes, `docs/audit/gateway-0.9.8-delta.md`).
+  It knows the new `X-Gateway-Error: request_timeout` token: a route's total
+  request timeout that expired before any backend held the request. Anvil
+  reports it as a gateway-side timeout, not a slow backend, and on v0.9.8 a
+  route-timeout 504 with `backend_timeout` means a backend held the request.
+  Profiles declaring an older release report the new token as unknown.
 
 ### Changed
 
+- New Ferrum gateway profiles default to `ferrum-edge-0.9.8` (desktop dialog
+  and CLI), and the failure lab's default pin is Ferrum Edge v0.9.8
+  (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
+  asset). v0.9.7 and v0.9.5 stay supported with `--release`; the nightly lab
+  runs all three. Lab scenarios whose public signal changed in v0.9.8 (HBONE
+  relay-synthesis refusals are now 403, an injected
+  `X-Gateway-Upstream-Status` is stripped) expect the running release's
+  signal.
 - Encrypted-transfer bundles now use bundle format 2: the encrypted vault is
   bound to every other entry of the bundle, so a bundle changed after export
   is refused before any secret is restored. Encrypted bundles exported by
@@ -160,6 +175,12 @@
 
 ### Fixed
 
+- The failure lab's `h3x`, `proxyproto` and `mesh` profiles declared the
+  Ferrum Edge 0.9.5 catalog whatever release ran, so on the default pin their
+  diagnoses used another release's catalog. Every lab profile now declares
+  the running release's own catalog, and `anvil-lab run` and `up` refuse a
+  release Anvil has no catalog for, or only one audited at another commit
+  (#137).
 - WebSocket over HTTP/2 and HTTP/3, SSE over HTTP/2 and gRPC (native and
   gRPC-Web, every HTTP version) now send an explicit `Host` header as the
   request's authority (`:authority`, or `Host` over HTTP/1.1), as HTTP
