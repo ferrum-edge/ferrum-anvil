@@ -97,6 +97,11 @@
 
 ### Fixed
 
+- Deleting an environment clears its active workspace selection in the same
+  transaction. Older profiles with a missing workspace-default environment
+  now prepare requests without an environment, and collection run reports say
+  when that fallback was used; an explicitly selected missing environment
+  still fails clearly.
 - A load run now hands its worker every vault secret the plan's requests
   resolve: the datagram PROXY-protocol authentication secret of a UDP
   request, and the client identity of the selected proxy's own TLS profile

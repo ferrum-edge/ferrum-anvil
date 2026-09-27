@@ -263,11 +263,26 @@ impl App {
         for f in base {
             var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
         }
-        let env_id = opts.environment.or(ws.active_environment_id);
-        let env_id = env_id.filter(|eid| sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid)));
+        let selected_env = opts.environment.or(ws.active_environment_id);
+        let environments = self.environments(ws_id)?;
+        let env_id = match selected_env {
+            Some(eid) if environments.iter().any(|env| env.meta.id == eid) => Some(eid),
+            Some(eid) if opts.environment == Some(eid) => {
+                return Err(AppError::NotFound("environment".into()));
+            }
+            // A deleted workspace default can remain in older profiles. Treat
+            // it as unset; an explicit selection above remains an error.
+            Some(_) => None,
+            None => None,
+        };
+        let env_id = env_id.filter(|eid| {
+            sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid))
+        });
         if let Some(eid) = env_id {
-            let env =
-                self.environments(ws_id)?.into_iter().find(|e| e.meta.id == eid).ok_or_else(|| AppError::NotFound("environment".into()))?;
+            let env = environments
+                .into_iter()
+                .find(|e| e.meta.id == eid)
+                .ok_or_else(|| AppError::NotFound("environment".into()))?;
             var_layers.push(layer(format!("environment:{}", env.name), &env.variables, &secrets)?);
         }
         for f in nested {
