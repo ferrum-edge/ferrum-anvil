@@ -259,6 +259,15 @@ fn moves_that_land_during_saves_are_kept() {
     const SAVES: usize = 60;
     let moved = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicBool::new(false));
+    // Stops the mover on every way out of this test, a failed assertion
+    // included, so it never keeps moving after the test ended.
+    struct Stop(Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let stop = Stop(done.clone());
     let mover = {
         let (a, moved, done, id) = (a.clone(), moved.clone(), done.clone(), r.meta.id);
         std::thread::spawn(move || {
@@ -273,8 +282,12 @@ fn moves_that_land_during_saves_are_kept() {
             }
         })
     };
-    while moved.load(Ordering::SeqCst) == 0 {
+    while moved.load(Ordering::SeqCst) == 0 && !mover.is_finished() {
         std::thread::yield_now();
+    }
+    if moved.load(Ordering::SeqCst) == 0 {
+        // The mover ended before its first move, so it panicked: report why.
+        std::panic::resume_unwind(mover.join().expect_err("the mover returns only once stopped"));
     }
     let mut saved = None;
     for i in 0..SAVES {
@@ -285,7 +298,7 @@ fn moves_that_land_during_saves_are_kept() {
         assert!(placed_by(&q) + 1 >= before, "save {i} undid move {}", before - 1);
         saved = Some(q);
     }
-    done.store(true, Ordering::SeqCst);
+    drop(stop);
     let moves = mover.join().unwrap();
 
     // The request sits where the last move put it, with the last save's
@@ -295,4 +308,65 @@ fn moves_that_land_during_saves_are_kept() {
     assert_eq!(stored.spec, RequestSpec::http("GET", &format!("http://a/{}", SAVES - 1)));
     assert_eq!(stored.revision_id, saved.unwrap().revision_id);
     assert_eq!(a.revision(&stored.revision_id.unwrap()).unwrap().spec, stored.spec);
+}
+
+#[test]
+fn a_save_refuses_a_request_that_is_no_longer_stored() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "t");
+    let ws = a.create_workspace("W").unwrap();
+    let f = a.create_folder(&ws.meta.id, None, "F").unwrap();
+    let deleted = |e: AppError| assert!(matches!(&e, AppError::NotFound(m) if m.contains("deleted")), "{e}");
+
+    // The request itself was deleted while an editor still held it.
+    let r = a.create_request(&ws.meta.id, None, "R", RequestSpec::http("GET", "http://a/")).unwrap();
+    a.delete_request(&r.meta.id).unwrap();
+    deleted(a.save_request(RequestDefinition { name: "edited".into(), ..r.clone() }).unwrap_err());
+    assert!(matches!(a.request(&r.meta.id), Err(AppError::NotFound(_))));
+
+    // Its folder was deleted, and the request with it: the save must not
+    // recreate it under the deleted folder.
+    let in_f = a.create_request(&ws.meta.id, Some(f.meta.id), "in F", RequestSpec::http("GET", "http://a/")).unwrap();
+    a.delete_folder(&f.meta.id).unwrap();
+    deleted(a.save_request(in_f.clone()).unwrap_err());
+    assert!(matches!(a.request(&in_f.meta.id), Err(AppError::NotFound(_))));
+    assert!(a.requests(&ws.meta.id).unwrap().is_empty(), "nothing was recreated");
+
+    // A copy naming another workspace's folder is refused too.
+    let other = a.create_workspace("X").unwrap();
+    let theirs = a.create_folder(&other.meta.id, None, "theirs").unwrap();
+    deleted(a.save_request(RequestDefinition { folder_id: Some(theirs.meta.id), ..in_f.clone() }).unwrap_err());
+    assert!(a.requests(&other.meta.id).unwrap().is_empty());
+
+    // Its workspace was deleted.
+    let gone = a.create_workspace("Gone").unwrap();
+    let q = a.create_request(&gone.meta.id, None, "Q", RequestSpec::http("GET", "http://a/")).unwrap();
+    a.delete_workspace(&gone.meta.id).unwrap();
+    deleted(a.save_request(q.clone()).unwrap_err());
+    assert!(matches!(a.request(&q.meta.id), Err(AppError::NotFound(_))));
+    assert!(a.requests(&gone.meta.id).unwrap().is_empty());
+}
+
+#[test]
+fn creating_and_duplicating_still_store_new_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "t");
+    let ws = a.create_workspace("W").unwrap();
+    let f = a.create_folder(&ws.meta.id, None, "F").unwrap();
+
+    let r = a.create_request(&ws.meta.id, Some(f.meta.id), "R", RequestSpec::http("GET", "http://a/")).unwrap();
+    assert_eq!(a.request(&r.meta.id).unwrap(), r);
+    assert_eq!((r.workspace_id, r.folder_id, r.sort_key), (ws.meta.id, Some(f.meta.id), 1.0));
+    assert_eq!(a.revision(&r.revision_id.unwrap()).unwrap().spec, r.spec);
+
+    let copy = a.duplicate_request(&r.meta.id).unwrap();
+    assert_ne!(copy.meta.id, r.meta.id);
+    assert_eq!(a.request(&copy.meta.id).unwrap(), copy);
+    assert_eq!((copy.name.as_str(), copy.folder_id, copy.sort_key), ("R (copy)", Some(f.meta.id), 2.0));
+    assert_eq!(copy.spec, r.spec);
+
+    // Both are stored, so both save as before.
+    let saved = a.save_request(RequestDefinition { name: "renamed".into(), ..copy }).unwrap();
+    assert_eq!(a.request(&saved.meta.id).unwrap().name, "renamed");
+    assert_eq!(a.requests(&ws.meta.id).unwrap().len(), 2);
 }

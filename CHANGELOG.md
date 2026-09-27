@@ -245,6 +245,12 @@
   before. An editor's copy loaded before the request was moved used to write
   back its old folder and position, so the save silently undid the move.
   Only a new request is placed by a save; moving one takes `move_request`.
+- Saving a request that is no longer stored (`save_request`, the desktop
+  **Save**) is refused with "request (it was deleted) not found". An editor
+  tab left open after its request, folder or workspace was deleted used to
+  recreate the request on save, possibly under a deleted folder or another
+  workspace's folder. New requests are made only by creating or duplicating
+  one.
 - Moving a request (`move_request`) reads and writes it in one write
   transaction and changes only its folder and position. It used to read the
   request first and save that copy afterwards, so a save or a linked-file
