@@ -153,12 +153,12 @@ impl CookieJars {
 /// transports' cache generations taken at the same point. A lock
 /// ([`Engine::clear_sensitive_state`]) starts a new epoch, and what an
 /// execution of an earlier epoch prepares or receives afterwards is not
-/// kept: its cookies, its prepared TLS material (client identity keys and
-/// session-ticket stores), its connections, its gRPC channels and its
-/// session tickets. A workspace delete ([`Engine::clear_isolation`]) does
-/// not start a new epoch: it starts a new generation of that workspace's
-/// cookie jar and prepared TLS configurations (held by an execution's epoch,
-/// see [`Engine::execution_epoch`]) and of the transports' caches for that
+/// kept: its cookies, its prepared TLS material (client identity keys), its
+/// connections, its gRPC channels and its session tickets. A workspace
+/// delete ([`Engine::clear_isolation`]) does not start a new epoch: it
+/// starts a new generation of that workspace's cookie jar and prepared TLS
+/// configurations (held by an execution's epoch, see
+/// [`Engine::execution_epoch`]) and of the transports' caches for that
 /// workspace, and an execution in it that started before the delete keeps
 /// none of its cookies, prepared TLS material, connections, gRPC channels or
 /// session tickets. Other workspaces' executions are not affected.
@@ -207,24 +207,37 @@ impl Engine {
     /// The current sensitive-state epoch, for work outside a workspace
     /// execution (it keeps no cookies).
     pub fn sensitive_epoch(&self) -> SensitiveEpoch {
-        loop {
-            let epoch = self.epoch.load(Ordering::SeqCst);
-            let transport = CacheFence { tcp: self.http.cache_generations(), quic: self.h3.cache_generations() };
-            let channels = self.grpc_channels.as_ref().map_or(0, |c| c.generation());
-            // A lock advances the epoch before it clears the transports: an
-            // unchanged epoch means the generations are not newer than it.
-            if self.epoch.load(Ordering::SeqCst) == epoch {
-                return SensitiveEpoch { epoch, transport, channels, jar: None };
-            }
-        }
+        self.snapshot(None, || {})
     }
 
     /// The current sensitive-state epoch with the generation of
     /// `isolation`'s cookie jar, taken when an execution in that workspace
     /// starts.
     pub fn execution_epoch(&self, isolation: &str) -> SensitiveEpoch {
-        let jar = self.cookies.generation(isolation);
-        SensitiveEpoch { jar: Some(jar), ..self.sensitive_epoch() }
+        self.snapshot(Some(isolation), || {})
+    }
+
+    /// The epoch, `isolation`'s jar generation and the transports' and gRPC
+    /// channels' generations, all taken between the same two points: no lock
+    /// and no delete of `isolation` started in between. `between` runs after
+    /// the epoch and the jar generation are read (a test lands a clear there).
+    fn snapshot(&self, isolation: Option<&str>, mut between: impl FnMut()) -> SensitiveEpoch {
+        loop {
+            let epoch = self.epoch.load(Ordering::SeqCst);
+            let jar = isolation.map(|i| self.cookies.generation(i));
+            between();
+            let transport = CacheFence { tcp: self.http.cache_generations(), quic: self.h3.cache_generations() };
+            let channels = self.grpc_channels.as_ref().map_or(0, |c| c.generation());
+            // A lock advances the epoch, and a workspace delete its jar's
+            // generation, before it clears the transports and channels: an
+            // unchanged epoch and jar generation mean the transports' and
+            // channels' generations are not newer than them. Otherwise the
+            // execution could keep connections and tickets for a workspace
+            // whose delete refuses its cookies.
+            if self.epoch.load(Ordering::SeqCst) == epoch && isolation.map(|i| self.cookies.generation(i)) == jar {
+                return SensitiveEpoch { epoch, transport, channels, jar };
+            }
+        }
     }
 
     /// The engine's gRPC channels for a call of an execution of `epoch` in
@@ -249,11 +262,12 @@ impl Engine {
     }
 
     /// Validated TLS material, cached per isolation (workspace) by profile
-    /// key: the material holds a client identity's private key and the
-    /// session store its connections resume from, so one workspace never
-    /// resumes another's TLS session, and a workspace delete drops its
-    /// entries. A key `<profile variant>|<material hash>` replaces an entry
-    /// of the same variant with other material in the same isolation, so a
+    /// key: the material holds a client identity's private key and its
+    /// connections' session store (key-exchange hints only: they never
+    /// resume a session), so one workspace never uses another's, and a
+    /// workspace delete drops its entries. A key
+    /// `<profile variant>|<material hash>` replaces an entry of the same
+    /// variant with other material in the same isolation, so a
     /// rotated Workload API SVID does not leave the superseded key material
     /// behind. For an execution of an earlier `epoch` (a lock, or a delete of
     /// its workspace, since it started) or of no workspace, the material is
@@ -366,17 +380,36 @@ impl Engine {
         }
     }
 
-    /// Session tickets and sessions held for resumption (for tests and the
-    /// lock check): the 0-RTT ticket caches over TCP and QUIC, and the
-    /// session stores of the prepared TLS configurations.
+    /// Session tickets held for resumption (for tests and the lock check):
+    /// those of the 0-RTT ticket caches over TCP and QUIC. Outside the
+    /// early-data opt-in none is kept: a prepared TLS configuration's session
+    /// store keeps only key-exchange hints (see
+    /// [`anvil_transport::tls::PreparedTls`]).
     pub fn session_tickets_held(&self) -> usize {
-        let prepared: usize = self.tls.lock().values().map(|p| p.sessions_held()).sum();
-        self.early_data_tickets_held() + prepared
-    }
-
-    /// Session tickets held for 0-RTT (the early-data ticket caches over TCP
-    /// and QUIC only; for tests).
-    pub fn early_data_tickets_held(&self) -> usize {
         self.http.tickets.tickets_held() + self.h3.tickets.tickets_held()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A workspace delete that lands after an execution read its jar's
+    /// generation but before it read the transports' generations: the
+    /// execution's epoch is taken again, after the delete, so it does not
+    /// refuse its cookies while keeping its connections and tickets.
+    #[tokio::test]
+    async fn an_execution_epoch_is_taken_on_one_side_of_a_workspace_delete() {
+        let e = Engine::new();
+        let mut deleted = false;
+        let epoch = e.snapshot(Some("workspace-a"), || {
+            if !deleted {
+                deleted = true;
+                e.clear_isolation("workspace-a");
+            }
+        });
+        assert!(deleted);
+        assert_eq!(epoch, e.execution_epoch("workspace-a"), "the epoch mixes generations from both sides of the delete");
+        assert_eq!(epoch.jar, Some(1));
     }
 }

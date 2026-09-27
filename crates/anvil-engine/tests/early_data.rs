@@ -349,7 +349,7 @@ async fn h3_early_data_is_off_by_default() {
         assert_eq!(status(&o), Some(200));
         assert!(o.record.attempts[0].early_data.is_none(), "no early-data evidence without the opt-in");
     }
-    assert_eq!(e.early_data_tickets_held(), 0, "no ticket cache without the opt-in");
+    assert_eq!(e.session_tickets_held(), 0, "no ticket is kept without the opt-in");
     assert!(fx.requests().iter().all(|r| !r.0));
 }
 
