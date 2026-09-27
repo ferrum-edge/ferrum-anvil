@@ -109,6 +109,11 @@
   QUIC connections keep none of the session tickets they receive. Not yet
   fenced: the gRPC channels of a load run's virtual users, and a workspace
   delete while work is in flight.
+- Deleting an environment clears its active workspace selection in the same
+  transaction. Older profiles with a missing workspace-default environment
+  now prepare requests without an environment, and collection run reports say
+  when that fallback was used; an explicitly selected missing environment
+  still fails clearly.
 - Server-sent events: an event whose data (its `data:` lines joined with
   newlines) passes the parser's event bound, four times the line bound
   (`min(max_response_bytes, 1 MiB)`, at least 1 KiB), now stops the attempt
