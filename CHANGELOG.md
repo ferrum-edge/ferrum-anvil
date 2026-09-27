@@ -97,6 +97,23 @@
 
 ### Fixed
 
+- A header an auth profile produces that is not valid on the wire (for
+  example a token pasted with a trailing line break, or an API-key or JWT
+  header name with a space) now fails the request before anything is sent,
+  with an invalid-header error that names the header and never its value.
+  Before, the header was left out and the request was sent without the
+  credential. This applies to HTTP requests and to WebSocket, SSE, gRPC and
+  MASQUE handshakes alike.
+- SSE and WebSocket handshakes now use the workspace cookie jar as HTTP
+  requests do: with the Cookies setting on, they send the stored cookies
+  that match their URL (a `ws://` or `wss://` URL counts as its `http://` or
+  `https://` counterpart, so `Secure` and `HttpOnly` cookies apply), within
+  the workspace only, and the `Set-Cookie` of their handshake responses is
+  stored when the session ends, unless the profile was locked since the
+  session started. With Cookies off they neither send nor store cookies.
+- A stored cookie with the same name as a cookie the request sends itself
+  (a `Cookie` header or a cookie API key) is no longer sent as well: the
+  request's own cookie wins, and the jar's other cookies follow it.
 - Work still in flight when a profile locks no longer refills what the lock
   cleared. The desktop lock cancels a SPIFFE Workload API call in flight,
   and an answer that arrives after the lock anyway (an X.509-SVID, a

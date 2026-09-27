@@ -69,10 +69,48 @@ pub struct Engine {
     /// SPIFFE Workload API SVIDs and JWT bundles (memory only).
     pub workload: Arc<workload::WorkloadCache>,
     tls: Mutex<HashMap<String, Arc<PreparedTls>>>,
-    cookies: Mutex<HashMap<String, cookie_store::CookieStore>>,
+    cookies: CookieJars,
     /// Advanced by [`Engine::clear_sensitive_state`] before it clears
     /// anything (see [`SensitiveEpoch`]).
-    epoch: AtomicU64,
+    epoch: Arc<AtomicU64>,
+}
+
+/// The workspace cookie jars (one per isolation), with the engine's epoch
+/// that fences what is stored in them. Cloned into an interactive session's
+/// task, which stores its handshake cookies after the `&Engine` it was
+/// opened from is no longer borrowed.
+#[derive(Clone)]
+pub(crate) struct CookieJars {
+    jars: Arc<Mutex<HashMap<String, cookie_store::CookieStore>>>,
+    epoch: Arc<AtomicU64>,
+}
+
+impl CookieJars {
+    /// The stored cookies that match `t` under cookie rules (domain, path,
+    /// `Secure`, expiry), as `name=value` pairs.
+    pub(crate) fn header(&self, isolation: &str, t: &prepare::Target) -> Option<String> {
+        let url = url::Url::parse(&t.url()).ok()?;
+        let jars = self.jars.lock();
+        let jar = jars.get(isolation)?;
+        let pairs: Vec<String> = jar.get_request_values(&url).map(|(n, v)| format!("{n}={v}")).collect();
+        if pairs.is_empty() { None } else { Some(pairs.join("; ")) }
+    }
+
+    /// Keep the response's cookies, unless the jars were cleared since
+    /// `epoch` (a lock while the request was in flight).
+    pub(crate) fn store(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
+        let Ok(url) = url::Url::parse(&t.url()) else { return };
+        let mut jars = self.jars.lock();
+        // Checked under the jar's lock: a clear either advanced the epoch
+        // before this point or empties the jar after it.
+        if self.epoch.load(Ordering::SeqCst) != epoch.epoch {
+            return;
+        }
+        let jar = jars.entry(isolation.to_string()).or_default();
+        for v in r.header_values("set-cookie") {
+            let _ = jar.parse(v, &url);
+        }
+    }
 }
 
 /// The engine's sensitive-state epoch when an execution started, with the
@@ -104,6 +142,7 @@ impl Default for Engine {
 impl Engine {
     pub fn new() -> Self {
         anvil_transport::init();
+        let epoch = Arc::new(AtomicU64::new(0));
         Engine {
             http: Arc::new(HttpTransport::new()),
             h3: anvil_transport::h3::H3Transport::new(),
@@ -111,8 +150,8 @@ impl Engine {
             grpc_channels: None,
             workload: Arc::new(workload::WorkloadCache::default()),
             tls: Mutex::new(HashMap::new()),
-            cookies: Mutex::new(HashMap::new()),
-            epoch: AtomicU64::new(0),
+            cookies: CookieJars { jars: Arc::default(), epoch: epoch.clone() },
+            epoch,
         }
     }
 
@@ -178,27 +217,18 @@ impl Engine {
     }
 
     pub fn cookie_header(&self, isolation: &str, t: &prepare::Target) -> Option<String> {
-        let url = url::Url::parse(&t.url()).ok()?;
-        let jars = self.cookies.lock();
-        let jar = jars.get(isolation)?;
-        let pairs: Vec<String> = jar.get_request_values(&url).map(|(n, v)| format!("{n}={v}")).collect();
-        if pairs.is_empty() { None } else { Some(pairs.join("; ")) }
+        self.cookies.header(isolation, t)
     }
 
     /// Keep the response's cookies in the workspace jar, unless the jar was
     /// cleared since `epoch` (a lock while the request was in flight).
     pub fn store_cookies(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
-        let Ok(url) = url::Url::parse(&t.url()) else { return };
-        let mut jars = self.cookies.lock();
-        // Checked under the jar's lock: a clear either advanced the epoch
-        // before this point or empties the jar after it.
-        if !self.is_current(epoch) {
-            return;
-        }
-        let jar = jars.entry(isolation.to_string()).or_default();
-        for v in r.header_values("set-cookie") {
-            let _ = jar.parse(v, &url);
-        }
+        self.cookies.store(epoch, isolation, t, r);
+    }
+
+    /// The workspace cookie jars, for a session task to store into.
+    pub(crate) fn cookie_jars(&self) -> CookieJars {
+        self.cookies.clone()
     }
 
     /// Clear every per-session sensitive cache (on vault lock, workspace
@@ -222,14 +252,14 @@ impl Engine {
         self.tokens.clear();
         self.workload.clear();
         self.tls.lock().clear();
-        self.cookies.lock().clear();
+        self.cookies.jars.lock().clear();
     }
 
     pub fn clear_isolation(&self, isolation: &str) {
         self.http.pool.clear_isolation(isolation);
         self.http.tickets.clear_isolation(isolation);
         self.h3.clear_isolation(isolation);
-        self.cookies.lock().remove(isolation);
+        self.cookies.jars.lock().remove(isolation);
     }
 
     /// Session tickets held for 0-RTT, over TCP and QUIC (for tests and the

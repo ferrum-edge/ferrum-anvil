@@ -478,6 +478,95 @@ fn carries_credential(name: &str, value: &str, marked: &[String], extra_names: &
         || secrets.iter().any(|s| !s.is_empty() && (value == s.as_str() || (s.len() >= 4 && value.contains(s.as_str()))))
 }
 
+fn invalid_header(msg: String, field: &str) -> TransportFailure {
+    TransportFailure::new(Phase::Prepare, FailureKind::InvalidHeader, msg).with_field(field)
+}
+
+/// Refuse a header an auth profile produced that is not valid on the wire (a
+/// line break pasted with a token, a header name with a space) rather than
+/// send the request without it. The message names the header, never its
+/// value: the value is a credential.
+pub(crate) fn check_auth_headers(applied: &anvil_auth::Applied) -> Result<(), TransportFailure> {
+    let label = &applied.label;
+    for (n, v) in &applied.set_headers {
+        let why = if http::HeaderName::from_bytes(n.as_bytes()).is_err() {
+            format!("the auth profile {label} would send a header named {n:?}, which is not a valid header name")
+        } else if http::HeaderValue::from_str(v).is_err() {
+            format!(
+                "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break, control or non-ASCII character, for example pasted with the credential)"
+            )
+        } else {
+            continue;
+        };
+        return Err(invalid_header(format!("{why}; the request was not sent"), "auth"));
+    }
+    Ok(())
+}
+
+/// The request's final headers for the wire. A header that is not valid on
+/// the wire fails the request, naming the header (never its value), rather
+/// than being left out of what is sent.
+pub(crate) fn wire_headers(headers: &[(String, String)]) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, TransportFailure> {
+    let mut out = Vec::with_capacity(headers.len());
+    for (n, v) in headers {
+        let why = match (http::HeaderName::from_bytes(n.as_bytes()), http::HeaderValue::from_str(v)) {
+            (Ok(name), Ok(value)) => {
+                out.push((name, value));
+                continue;
+            }
+            (Err(_), _) => format!("{n:?} is not a valid header name"),
+            (_, Err(_)) => format!("the {n} header value is not a valid header value"),
+        };
+        return Err(invalid_header(format!("{why}; the request was not sent"), "headers"));
+    }
+    Ok(out)
+}
+
+/// The name of one `name=value` pair of a `Cookie` header.
+fn cookie_name(pair: &str) -> &str {
+    pair.split_once('=').map_or(pair, |(n, _)| n).trim()
+}
+
+/// Add the workspace jar's cookies for `target` (never across workspaces) to
+/// the request's `Cookie` header. A stored cookie whose name the request
+/// already sends (a configured `Cookie` header or a cookie API key) is left
+/// out: the request's own cookie wins, as a cookie API key replaces a
+/// configured cookie of the same name. Returns a note for each stored cookie
+/// that cannot be sent (its value is not a valid header value).
+pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target, headers: &mut Vec<(String, String)>) -> Vec<String> {
+    let Some(stored) = engine.cookie_header(isolation, target) else { return vec![] };
+    let sent: Vec<String> = headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, v)| v.split(';'))
+        .map(|p| cookie_name(p).to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    let mut notes = vec![];
+    let mut added = vec![];
+    for pair in stored.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let name = cookie_name(pair);
+        if sent.iter().any(|s| s == name) {
+            continue;
+        }
+        if http::HeaderValue::from_str(pair).is_err() {
+            notes.push(format!("stored cookie '{name}' not sent: its value is not a valid header value"));
+            continue;
+        }
+        added.push(pair);
+    }
+    if added.is_empty() {
+        return notes;
+    }
+    let added = added.join("; ");
+    match headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("cookie")) {
+        Some((_, v)) if v.trim().is_empty() => *v = added,
+        Some((_, v)) => *v = format!("{v}; {added}"),
+        None => headers.push(("Cookie".into(), added)),
+    }
+    notes
+}
+
 /// Whether a request body holds a resolved secret value byte for byte (at
 /// least 4 bytes, as for redaction). A backstop only: an encoded body (form
 /// fields, re-serialized GraphQL variables) is covered by
@@ -644,7 +733,10 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         let mut query = current.target.query.clone();
         let mut body = current.body.clone();
         if current.with_credentials {
-            match anvil_auth::apply(&prep.auth, &signable, Utc::now()) {
+            let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
+                .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, e.to_string()).with_field("auth"))
+                .and_then(|a| check_auth_headers(&a).map(|()| a));
+            match applied {
                 Ok(applied) => {
                     for s in &applied.secrets {
                         redactor.add_secret(s);
@@ -662,8 +754,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                     }
                     final_auth_facts = applied.facts;
                 }
-                Err(e) => {
-                    let f = TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, e.to_string()).with_field("auth");
+                Err(f) => {
                     if attempts.is_empty() {
                         return record::local_failure_with(ctx, &resolver, started_at, f, workload);
                     }
@@ -671,22 +762,25 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                 }
             }
         }
-        // Cookies from the workspace jar (never across workspaces).
+        // Cookies from the workspace jar (never across workspaces), after
+        // the request's own cookies, which win over a stored one.
         if prep.settings.cookies {
-            let jar_cookie = engine.cookie_header(&ctx.isolation, &current.target);
-            if let Some(c) = jar_cookie {
-                match headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("cookie")) {
-                    Some((_, v)) => *v = format!("{v}; {c}"),
-                    None => headers.push(("Cookie".into(), c)),
+            for n in add_jar_cookies(engine, &ctx.isolation, &current.target, &mut headers) {
+                if !prep.inferred.contains(&n) {
+                    prep.inferred.push(n);
                 }
             }
         }
-        let mut header_pairs = Vec::with_capacity(headers.len());
-        for (n, v) in &headers {
-            if let (Ok(n), Ok(v)) = (http::HeaderName::from_bytes(n.as_bytes()), http::HeaderValue::from_str(v)) {
-                header_pairs.push((n, v));
+        let header_pairs = match wire_headers(&headers) {
+            Ok(h) => h,
+            Err(f) => {
+                if attempts.is_empty() {
+                    return record::local_failure_with(ctx, &resolver, started_at, f, workload);
+                }
+                prep.inferred.push(format!("the follow-up attempt to {} was not sent: {}", current.target.authority, f.message));
+                break;
             }
-        }
+        };
         let target_for_plan = Target { query: query.clone(), ..current.target.clone() };
         let display_url = redactor.url(&target_for_plan.url());
         // The PROXY header is configured for the request's own listener: a
