@@ -124,6 +124,19 @@
   or history record names the spec that was actually sent. The revision of
   its old spec stays as it was; a request the reimport leaves unchanged
   keeps its revision and gains none.
+- Desktop Runner: **Run folder** and **Run** start one run at a time. A
+  second click while the start is still pending no longer starts another
+  run, and a run that finishes before the start answers (an empty folder,
+  for example) is no longer shown as running with a Stop control that does
+  nothing. **Stop run** pressed while a run is starting stops it as soon as
+  it starts, and a run the backend no longer has is cleared when stopped.
+  Switching workspaces now clears the Runner's selected scenario, report,
+  folder choice and pending confirmation, so the Runner never offers to run
+  the previous workspace's scenario; a live run's Stop control is kept.
+  Unsaved edits to a scenario's run options are kept per workspace for the
+  session (not written to disk): they are hidden while another workspace is
+  shown, marked **unsaved** again on return, and dropped once the scenario is
+  no longer in its workspace.
 - Deleting an environment clears its active workspace selection in the same
   transaction. Older profiles with a missing workspace-default environment
   now prepare requests without an environment, and collection run reports say

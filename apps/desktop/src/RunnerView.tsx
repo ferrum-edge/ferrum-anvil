@@ -7,6 +7,21 @@ import { Modal, SidebarResizer, fmtAgo, fmtUs, humanize } from "./ui";
 import { Icon } from "./icons";
 
 type Sel = { kind: "scenario"; id: string } | { kind: "report"; id: string } | { kind: "new" } | null;
+/** The run options a scenario page edits; the rest always comes from the saved scenario. */
+type ScenarioEdit = Pick<Scenario, "iterations" | "stop_on_failure">;
+/** Unsaved scenario edits by workspace id, then scenario id. */
+type Drafts = Record<string, Record<string, ScenarioEdit>>;
+/** The live run; `runId` is null while `run_start` has not answered yet. */
+type Live = { runId: string | null; name: string; events: RunEvent[]; stopping?: boolean };
+/**
+ * The one run slot, kept outside React state so a second click sees it at once
+ * and the run listeners can read it. While starting, events and finishes are
+ * recorded by run id: a run can finish before `run_start` returns its id.
+ */
+type Slot =
+  | { state: "idle" }
+  | { state: "starting"; cancel: boolean; early: Map<string, RunEvent[]>; finished: Set<string> }
+  | { state: "running"; runId: string };
 
 function flatRequests(nodes: TreeNode[], path: string[] = []): { id: string; label: string; method: string }[] {
   return nodes.flatMap((n) =>
@@ -33,9 +48,27 @@ export function RunnerView(props: {
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [reports, setReports] = useState<RunReport[]>([]);
   const [sel, setSel] = useState<Sel>(null);
-  const [live, setLive] = useState<{ runId: string; name: string; events: RunEvent[] } | null>(null);
+  const [live, setLive] = useState<Live | null>(null);
   const [folderPick, setFolderPick] = useState("");
   const [confirmUntrusted, setConfirmUntrusted] = useState<Scenario | null>(null);
+  // Unsaved scenario edits, kept in memory for the session (never written to
+  // disk). Only the shown workspace's drafts are read, so a switch hides them
+  // and switching back restores them.
+  const [drafts, setDrafts] = useState<Drafts>({});
+  const slot = useRef<Slot>({ state: "idle" });
+  // Selection, folder choice, confirmation and lists belong to one workspace:
+  // reset them in the render that switches, so no action of the previous
+  // workspace stays on screen. A live run (and its Stop control) is kept, and
+  // so are the previous workspace's drafts.
+  const [shownWs, setShownWs] = useState(props.workspaceId);
+  if (shownWs !== props.workspaceId) {
+    setShownWs(props.workspaceId);
+    setSel(null);
+    setFolderPick("");
+    setConfirmUntrusted(null);
+    setScenarios([]);
+    setReports([]);
+  }
   const requests = useMemo(() => flatRequests(props.tree), [props.tree]);
   const folders = useMemo(() => flatFolders(props.tree), [props.tree]);
 
@@ -48,6 +81,12 @@ export function RunnerView(props: {
     if (w !== wsRef.current) return null;
     setScenarios(s);
     setReports(r);
+    // A draft of a scenario the workspace no longer has is dropped.
+    setDrafts((d) => {
+      const own = d[w];
+      if (!own || Object.keys(own).every((id) => s.some((x) => x.id === id))) return d;
+      return { ...d, [w]: Object.fromEntries(Object.entries(own).filter(([id]) => s.some((x) => x.id === id))) };
+    });
     return r;
   };
   // The run listeners outlive renders: read the current workspace and callbacks.
@@ -60,9 +99,18 @@ export function RunnerView(props: {
     props.onLiveChange?.(!!live);
   }, [!!live]);
   useEffect(() => {
-    const a = onRunEvent((ev) => setLive((l) => (l && l.runId === ev.run_id ? { ...l, events: [...l.events, ev].slice(-500) } : l)));
+    const a = onRunEvent((ev) => {
+      const s = slot.current;
+      if (s.state === "starting") s.early.set(ev.run_id, [...(s.early.get(ev.run_id) ?? []), ev].slice(-500));
+      else if (s.state === "running" && s.runId === ev.run_id) setLive((l) => l && { ...l, events: [...l.events, ev].slice(-500) });
+    });
     const b = onRunFinished((f) => {
-      setLive((l) => (l && l.runId === f.run_id ? null : l));
+      const s = slot.current;
+      if (s.state === "starting") s.finished.add(f.run_id);
+      else if (s.state === "running" && s.runId === f.run_id) {
+        slot.current = { state: "idle" };
+        setLive(null);
+      }
       if (f.error) current.current.notify(`Run did not complete: ${f.error}`);
       // A run started in another workspace saves its report there: do not select it here.
       void current.current.reload().then((r) => r?.some((x) => x.run_id === f.run_id) && setSel({ kind: "report", id: f.run_id }));
@@ -74,14 +122,70 @@ export function RunnerView(props: {
   }, []);
 
   const start = async (target: Parameters<typeof api.runStart>[0], name: string, allowUntrusted = false) => {
+    // Claim the slot before dispatching: a second click while `run_start` is
+    // pending must not start another run.
+    if (slot.current.state !== "idle") return;
+    const pending: Extract<Slot, { state: "starting" }> = { state: "starting", cancel: false, early: new Map(), finished: new Set() };
+    slot.current = pending;
+    setLive({ runId: null, name, events: [] });
+    let runId: string;
     try {
-      const runId = await api.runStart(target, { environment_id: props.activeEnvironment, allow_untrusted: allowUntrusted });
-      setLive({ runId, name, events: [] });
+      runId = await api.runStart(target, { environment_id: props.activeEnvironment, allow_untrusted: allowUntrusted });
     } catch (e) {
-      props.notify(String((e as Error).message));
+      slot.current = { state: "idle" };
+      setLive(null);
+      current.current.notify(String((e as Error).message));
+      return;
+    }
+    // It finished before its id came back: never show it as running.
+    if (pending.finished.has(runId)) {
+      slot.current = { state: "idle" };
+      setLive(null);
+      return;
+    }
+    slot.current = { state: "running", runId };
+    setLive({ runId, name, events: pending.early.get(runId) ?? [], stopping: pending.cancel });
+    if (pending.cancel) void cancel(runId);
+  };
+
+  const cancel = async (runId: string) => {
+    let found: boolean;
+    try {
+      found = await api.runCancel(runId);
+    } catch (e) {
+      setLive((l) => (l && l.runId === runId ? { ...l, stopping: false } : l));
+      current.current.notify(String((e as Error).message));
+      return;
+    }
+    // Not running any more: its finish was missed, so do not keep a Stop control for it.
+    const s = slot.current;
+    if (!found && s.state === "running" && s.runId === runId) {
+      slot.current = { state: "idle" };
+      setLive(null);
+      void current.current.reload();
     }
   };
 
+  const stop = () => {
+    const s = slot.current;
+    setLive((l) => l && { ...l, stopping: true });
+    // No id yet: cancel as soon as `run_start` returns one.
+    if (s.state === "starting") s.cancel = true;
+    else if (s.state === "running") void cancel(s.runId);
+  };
+
+  // Only a scenario of the shown workspace's list is ever offered for a run.
+  const selScenario = sel?.kind === "scenario" ? scenarios.find((s) => s.id === sel.id) : undefined;
+  const wsDrafts = drafts[props.workspaceId] ?? {};
+  /** Sets (or, with null, drops) a draft of workspace `ws`; `only` drops it only while it is still that edit. */
+  const setDraft = (ws: string, id: string, draft: ScenarioEdit | null, only?: ScenarioEdit) =>
+    setDrafts((d) => {
+      const own = { ...d[ws] };
+      if (only && own[id] !== only) return d;
+      if (draft) own[id] = draft;
+      else delete own[id];
+      return { ...d, [ws]: own };
+    });
   const runScenario = (s: Scenario) => (s.trusted === false ? setConfirmUntrusted(s) : void start({ kind: "scenario", scenario_id: s.id }, s.name));
 
   return (
@@ -108,6 +212,7 @@ export function RunnerView(props: {
               <Icon name="listChecks" size={14} className="row-icon" />
               <span className="name">{s.name}</span>
               {s.trusted === false && <span className="badge warn">imported</span>}
+              {wsDrafts[s.id] && <span className="badge neutral">unsaved</span>}
             </div>
           ))}
           <div className="side-section-head">
@@ -162,24 +267,32 @@ export function RunnerView(props: {
       <SidebarResizer />
       <section className="work single">
         <div className="pane">
-          {live && <LiveRun live={live} onCancel={() => void api.runCancel(live.runId)} />}
+          {live && <LiveRun live={live} onCancel={stop} />}
           {!live && sel?.kind === "new" && (
             <ScenarioEditor
               requests={requests}
               onCreate={async (name, ids) => {
                 const s = await api.createScenario(props.workspaceId, name, ids);
-                await reload();
+                // Switched workspace meanwhile: do not select it in another workspace's view.
+                if ((await reload()) === null) return;
                 setSel({ kind: "scenario", id: s.id });
               }}
             />
           )}
-          {!live && sel?.kind === "scenario" && (
+          {!live && selScenario && (
             <ScenarioDetail
-              key={sel.id}
-              scenario={scenarios.find((s) => s.id === sel.id)!}
+              key={`${props.workspaceId}/${selScenario.id}`}
+              scenario={selScenario}
+              draft={wsDrafts[selScenario.id]}
+              onDraft={(d) => setDraft(props.workspaceId, selScenario.id, d)}
               requests={requests}
               onRun={runScenario}
-              onSaved={reload}
+              onSaved={(id, sent) => {
+                // Saved, even if another workspace is shown now: once the list
+                // is fresh, drop this render's workspace draft unless it was
+                // edited again while the save was pending.
+                void reload().then(() => sent && setDraft(props.workspaceId, id, null, sent));
+              }}
               onDeleted={async () => {
                 await reload();
                 setSel(null);
@@ -187,7 +300,7 @@ export function RunnerView(props: {
             />
           )}
           {!live && sel?.kind === "report" && <ReportView key={sel.id} runId={sel.id} notify={props.notify} onDeleted={async () => { await reload(); setSel(null); }} />}
-          {!live && !sel && (
+          {!live && (!sel || (sel.kind === "scenario" && !selScenario)) && (
             <div className="empty">
               <div>
                 <span className="empty-icon">
@@ -218,8 +331,14 @@ export function RunnerView(props: {
                 onClick={async () => {
                   const s = confirmUntrusted;
                   setConfirmUntrusted(null);
-                  await api.trustScenario(s.id);
-                  await reload();
+                  try {
+                    await api.trustScenario(s.id);
+                  } catch (e) {
+                    props.notify(String((e as Error).message));
+                    return;
+                  }
+                  // Switched workspace meanwhile: the scenario is trusted, but do not run it from here.
+                  if ((await reload()) === null) return;
                   void start({ kind: "scenario", scenario_id: s.id }, s.name);
                 }}
               >
@@ -299,9 +418,18 @@ function ScenarioEditor(props: { requests: { id: string; label: string; method: 
   );
 }
 
-function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; label: string }[]; onRun: (s: Scenario) => void; onSaved: () => void; onDeleted: () => void }) {
-  const [s, setS] = useState(props.scenario);
-  if (!s) return null;
+function ScenarioDetail(props: {
+  scenario: Scenario;
+  /** The unsaved edit of this scenario, held by the Runner so a workspace switch keeps it. */
+  draft?: ScenarioEdit;
+  onDraft: (edit: ScenarioEdit) => void;
+  requests: { id: string; label: string }[];
+  onRun: (s: Scenario) => void;
+  onSaved: (id: string, sent: ScenarioEdit | undefined) => void;
+  onDeleted: () => void;
+}) {
+  const s = props.draft ? { ...props.scenario, ...props.draft } : props.scenario;
+  const setS = (next: Scenario) => props.onDraft({ iterations: next.iterations, stop_on_failure: next.stop_on_failure });
   return (
     <div className="page narrow">
       <div className="page-head">
@@ -309,6 +437,7 @@ function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; lab
           <div className="page-title">
             <h2>{s.name}</h2>
             {s.trusted === false && <span className="badge warn">imported</span>}
+            {props.draft && <span className="badge neutral">unsaved</span>}
           </div>
           <div className="page-meta">
             {s.steps.length} step{s.steps.length === 1 ? "" : "s"} · {s.iterations ?? 1} iteration{(s.iterations ?? 1) === 1 ? "" : "s"}
@@ -360,8 +489,9 @@ function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; lab
           <button
             className="btn"
             onClick={async () => {
-              setS(await api.saveScenario(s));
-              props.onSaved();
+              const sent = props.draft;
+              await api.saveScenario(s);
+              props.onSaved(s.id, sent);
             }}
           >
             Save
@@ -372,7 +502,7 @@ function ScenarioDetail(props: { scenario: Scenario; requests: { id: string; lab
   );
 }
 
-function LiveRun(props: { live: { runId: string; name: string; events: RunEvent[] }; onCancel: () => void }) {
+function LiveRun(props: { live: Live; onCancel: () => void }) {
   const last = [...props.live.events].reverse().find((e) => "progress" in e) as Extract<RunEvent, { progress: unknown }> | undefined;
   const p = last?.progress;
   const steps = props.live.events.filter((e): e is Extract<RunEvent, { event: "step_finished" }> => e.event === "step_finished");
@@ -392,9 +522,9 @@ function LiveRun(props: { live: { runId: string; name: string; events: RunEvent[
           </div>
         </div>
         <div className="page-actions">
-          <button className="btn" onClick={props.onCancel}>
+          <button className="btn" disabled={props.live.stopping} onClick={props.onCancel}>
             <Icon name="stop" size={12} />
-            Stop run
+            {props.live.stopping ? "Stopping…" : "Stop run"}
           </button>
         </div>
       </div>
