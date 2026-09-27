@@ -8,10 +8,12 @@ use crate::context::ExecutionContext;
 use crate::http_exec;
 use crate::redact::Redactor;
 use crate::vars::Resolver;
+use anvil_auth::ResolvedAuth;
 use anvil_diagnostics::FerrumTrust;
 use anvil_domain::execution::{HeaderEntry, TransportFailure};
 use anvil_domain::settings::EffectiveSettings;
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EffectiveRequest {
@@ -38,11 +40,28 @@ pub struct EffectiveRequest {
     pub omitted_secrets: usize,
 }
 
-fn has_unfetched_jwt_svid(a: &anvil_auth::ResolvedAuth) -> bool {
+/// Stands in for a JWT-SVID the preview does not fetch, so the rest of the
+/// auth is applied and checked as it will be when the request is sent.
+const UNFETCHED_JWT_SVID: &str = "<JWT-SVID fetched when sent>";
+
+fn has_unfetched_jwt_svid(a: &ResolvedAuth) -> bool {
     match a {
-        anvil_auth::ResolvedAuth::JwtSvid { token, .. } => token.is_empty(),
-        anvil_auth::ResolvedAuth::Multi(v) => v.iter().any(has_unfetched_jwt_svid),
+        ResolvedAuth::JwtSvid { token, .. } => token.is_empty(),
+        ResolvedAuth::Multi(v) => v.iter().any(has_unfetched_jwt_svid),
         _ => false,
+    }
+}
+
+/// `a` with [`UNFETCHED_JWT_SVID`] as the token of every unfetched JWT-SVID.
+fn with_jwt_svid_placeholder(a: &ResolvedAuth) -> ResolvedAuth {
+    match a {
+        ResolvedAuth::JwtSvid { token, header_name, prefix } if token.is_empty() => ResolvedAuth::JwtSvid {
+            token: Zeroizing::new(UNFETCHED_JWT_SVID.to_string()),
+            header_name: header_name.clone(),
+            prefix: prefix.clone(),
+        },
+        ResolvedAuth::Multi(v) => ResolvedAuth::Multi(v.iter().map(with_jwt_svid_placeholder).collect()),
+        other => other.clone(),
     }
 }
 
@@ -57,24 +76,26 @@ impl Engine {
         let mut url = prep.http.target.url();
         let varies = matches!(
             prep.auth,
-            anvil_auth::ResolvedAuth::Hmac(_)
-                | anvil_auth::ResolvedAuth::Dpop { .. }
-                | anvil_auth::ResolvedAuth::Jwt { .. }
-                | anvil_auth::ResolvedAuth::Wsse { .. }
-                | anvil_auth::ResolvedAuth::JwtSvid { .. }
+            ResolvedAuth::Hmac(_)
+                | ResolvedAuth::Dpop { .. }
+                | ResolvedAuth::Jwt { .. }
+                | ResolvedAuth::Wsse { .. }
+                | ResolvedAuth::JwtSvid { .. }
         );
         let mut inferred = prep.inferred.clone();
-        let unfetched_svid = has_unfetched_jwt_svid(&prep.auth);
-        if unfetched_svid {
+        let auth = if has_unfetched_jwt_svid(&prep.auth) {
             // The preview makes no Workload API call and reads no token file.
             inferred.push(
                 "JWT-SVID: fetched from the SPIFFE Workload API (or read from its file) and checked locally when the request is sent"
                     .into(),
             );
-        }
-        match anvil_auth::apply(&prep.auth, &signable, chrono::Utc::now()) {
+            with_jwt_svid_placeholder(&prep.auth)
+        } else {
+            prep.auth.clone()
+        };
+        match anvil_auth::apply(&auth, &signable, chrono::Utc::now()) {
             Ok(applied) => {
-                for s in &applied.secrets {
+                for s in applied.secrets.iter().filter(|s| s.as_str() != UNFETCHED_JWT_SVID) {
                     redactor.add_secret(s);
                 }
                 // The engine refuses an auth header that is not valid on the
@@ -90,11 +111,11 @@ impl Engine {
                         let sep = if url.contains('?') { '&' } else { '?' };
                         url = format!("{url}{sep}{}={}", crate::prepare::encode_component(&k), crate::prepare::encode_component(&v));
                     }
+                    for (k, v) in &applied.facts {
+                        inferred.push(format!("auth {k}: {}", redactor.text(v)));
+                    }
                 }
             }
-            // A JWT-SVID the preview does not fetch cannot be applied; that is
-            // noted above.
-            Err(_) if unfetched_svid => {}
             // The send path fails the request when auth cannot be applied:
             // say so rather than show the request without its credentials.
             Err(e) => inferred.push(format!("the request would not be sent: {}", redactor.text(&e.to_string()))),
@@ -110,7 +131,7 @@ impl Engine {
             method: prep.http.method.clone(),
             url: redactor.url(&url),
             destination: format!("{}:{}", prep.http.target.host, prep.http.target.port),
-            authority: redactor.text(&http_exec::request_authority(&prep.http.headers, &prep.http.target)),
+            authority: redactor.text(&http_exec::request_authority(&headers, &prep.http.target)),
             headers: headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect(),
             body_bytes: prep.http.body.len() as u64,
             body_preview,

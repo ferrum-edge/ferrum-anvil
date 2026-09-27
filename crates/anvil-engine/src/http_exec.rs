@@ -503,8 +503,10 @@ pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<Strin
 
 /// The `Host` (HTTP/1.1) or `:authority` (HTTP/2, HTTP/3) a request is sent
 /// with: the first explicit `Host` header wins over the target URL's
-/// authority, as the transport builds the request. Request signatures cover
-/// this value, so the send path, sessions and the preview all use it.
+/// authority, as the HTTP send path (h1/h2/h3) and HTTP/1.1 sessions build
+/// the request. Request signatures cover this value, so the send path,
+/// sessions and the preview all use it. WebSocket over h2/h3, SSE over h2
+/// and gRPC still send the URL's authority (issue #158).
 pub(crate) fn request_authority(headers: &[(String, String)], target: &Target) -> String {
     headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")).map(|(_, v)| v.clone()).unwrap_or_else(|| target.authority.clone())
 }

@@ -3,14 +3,16 @@
 //! authority, and an HMAC signature covers that value. Each case compares the
 //! preview with what the fixture received (HTTP/1.1 `Host`, HTTP/2
 //! `:authority`) and verifies the received signature over the preview's
-//! authority. A preview whose auth cannot be applied says the request would
-//! not be sent.
+//! authority. A DPoP proof in the preview is bound to that authority, a
+//! `Host` an auth profile sets is the one shown, and a preview whose auth
+//! cannot be applied says the request would not be sent.
 
 use anvil_auth::hmac_sig;
-use anvil_domain::auth::{AuthConfig, HmacAlgorithm, HmacConfig, HmacProfile};
+use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile, KeyLocation};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides};
+use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
 use anvil_engine::preview::EffectiveRequest;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::http as fx;
@@ -164,4 +166,74 @@ async fn preview_says_a_request_whose_auth_cannot_be_applied_would_not_be_sent()
     let o = run(&e, &c).await;
     assert!(o.record.response.is_none());
     assert_eq!(f.log.count_requests(), 0, "a request reached the server: {:?}", f.log.requests());
+}
+
+#[tokio::test]
+async fn preview_binds_the_dpop_proof_to_an_explicit_host_header() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut c = ctx(&f, Some(HOST), HttpVersionPolicy::Http1Only);
+    c.spec.auth = AuthConfig::Dpop {
+        config: DpopConfig {
+            access_token: SensitiveValue::template("audit-only-dpop-token-3k9w"),
+            private_key_pem: SensitiveValue::template(anvil_auth::dpop::generate_key_pem().unwrap()),
+            dpop_scheme: true,
+            handle_nonce_challenge: true,
+        },
+    };
+    let p = e.preview(&c).unwrap();
+    assert_eq!(p.authority, HOST);
+    let htu = p.inferred.iter().find_map(|i| i.strip_prefix("auth dpop.htu: ")).unwrap_or_else(|| panic!("{:?}", p.inferred));
+    assert_eq!(htu, format!("http://{HOST}/echo"), "the proof is not bound to the Host sent");
+}
+
+#[tokio::test]
+async fn preview_authority_is_a_host_header_an_auth_profile_sets() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut c = ctx(&f, None, HttpVersionPolicy::Http1Only);
+    c.spec.auth = AuthConfig::ApiKey { name: "Host".into(), value: SensitiveValue::template(HOST), location: KeyLocation::Header };
+    let p = e.preview(&c).unwrap();
+    assert!(!p.inferred.iter().any(|i| i.starts_with("the request would not be sent")), "{:?}", p.inferred);
+    assert_ne!(p.authority, f.addr.to_string(), "the preview shows the URL's authority, not the Host the auth profile sets");
+    let host = p.headers.iter().find(|h| h.name.eq_ignore_ascii_case("host")).unwrap_or_else(|| panic!("no Host: {:?}", p.headers));
+    assert_eq!(p.authority, host.value, "the preview's authority differs from its Host header");
+    // An API key's value is a credential and stays redacted.
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(!json.contains(HOST), "the preview holds the API key: {json}");
+
+    let o = run(&e, &c).await;
+    assert_eq!(o.record.response.as_ref().map(|r| r.status), Some(200), "{:?}", o.record.attempts.last().and_then(|a| a.failure.as_ref()));
+    let received = f.log.last_request_headers().expect("the fixture received no request");
+    assert_eq!(header(&received, "host"), Some(HOST), "{received:?}");
+}
+
+#[tokio::test]
+async fn preview_reports_an_auth_error_beside_an_unfetched_jwt_svid() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let svid = AuthConfig::JwtSvid {
+        config: JwtSvidConfig {
+            source: JwtSvidSource::WorkloadApi,
+            audiences: vec!["spiffe://anvil.test/gateway".into()],
+            endpoint: "unix:///nonexistent/anvil-preview-agent.sock".into(),
+            spiffe_id: None,
+            verify_with_bundles: false,
+            send_despite_failed_checks: false,
+            header_name: "X-Workload-Token".into(),
+            prefix: String::new(),
+        },
+    };
+    // HMAC signing computes the body digest itself and refuses a manual one.
+    let mut c = ctx(&f, None, HttpVersionPolicy::Http1Only);
+    c.spec.headers.push(KeyValue::new("Content-Digest", "sha-256=:AAAA:"));
+    c.spec.auth = AuthConfig::Multi { profiles: vec![svid, hmac()] };
+    let p = e.preview(&c).unwrap();
+    assert!(p.inferred.iter().any(|i| i.starts_with("JWT-SVID: ")), "{:?}", p.inferred);
+    let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: ")).unwrap_or_else(|| panic!("{:?}", p.inferred));
+    assert!(note.contains("Content-Digest"), "the note says why: {note}");
+    assert!(!p.headers.iter().any(|h| h.name.eq_ignore_ascii_case("authorization")), "{:?}", p.headers);
 }
