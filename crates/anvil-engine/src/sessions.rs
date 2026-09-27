@@ -545,6 +545,10 @@ async fn prepare_ws(
     let offer = ws_offer(ctx)?;
     let mut b = base(engine, epoch, ctx, r, &["wss", "ws"])?;
     let WsHandshake { request, spec, deflate, script, subprotocols } = offer.handshake(ctx, r, &b.prep, &mut b.inferred)?;
+    // The messages and subprotocols were resolved after the redactor was
+    // built: every redaction below (transcript, URL, PROXY header) covers
+    // their secrets.
+    b.redactor.refresh(r);
     let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     for (k, v) in &facts {
         b.inferred.push(format!("auth {k}: {v}"));
@@ -660,6 +664,8 @@ async fn prepare_sse(
 ) -> Result<SessionPrep, TransportFailure> {
     let mut b = base(engine, epoch, ctx, r, &["https", "http"])?;
     let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
+    // Covers a secret in the Last-Event-ID, resolved after the redactor was built.
+    b.redactor.refresh(r);
     let (mut headers, query, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
@@ -914,6 +920,9 @@ async fn prepare_grpc(
     let mut b = base(engine, epoch, ctx, r, &["grpcs", "grpc", "https", "http"])?;
     let GrpcCall { request, spec, schema, messages, service, method, prefix, tls_url } =
         grpc_call(ctx, r, &b.prep, &mut b.inferred, spec, interactive)?;
+    // Covers the secrets of the service, method, messages and metadata,
+    // resolved after the redactor was built.
+    b.redactor.refresh(r);
     // An auth profile that adds query parameters is refused (the path is fixed).
     let (mut headers, _, facts) = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let call_target = &request.target;
@@ -1004,6 +1013,8 @@ fn prepare_tcp(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r
         .as_ref()
         .map(|p| crate::proxy_protocol::header_plan(p, r, b.prep.proxy.is_some(), "tcp.proxy_protocol"))
         .transpose()?;
+    // Covers the secrets of the payloads and PROXY header, resolved after the redactor was built.
+    b.redactor.refresh(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(p) = &spec.proxy_protocol {
         b.inferred.push(crate::proxy_protocol::header_note(p));
@@ -1071,6 +1082,8 @@ async fn prepare_udp(
     let datagrams = decode_payloads(r, &spec.datagrams, "udp.datagrams")?;
     let envelope =
         spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::envelope_plan(p, ctx, r, &mut b.redactor, use_dtls)).transpose()?;
+    // Covers the secrets of the datagrams and envelope, resolved after the redactor was built.
+    b.redactor.refresh(r);
     b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
     if let Some(m) = &spec.masque {
         if envelope.is_some() {
@@ -1364,6 +1377,8 @@ async fn prepare_masque(
         None => (expanded.clone(), String::new()),
     };
     let proxy_target = Target { path, query, ..pt };
+    // Covers the secrets of the proxy URL and URI template, resolved after the redactor was built.
+    b.redactor.refresh(r);
     b.inferred.extend(notes);
     let settings = b.prep.settings.clone();
     let (tls, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &settings, &proxy_target, &mut b.inferred)?;
@@ -1585,6 +1600,20 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
     out
 }
 
+/// The transcript as it is stored: every preview and event field redacted
+/// again with the record's redactor, which holds every secret the execution
+/// used (the transcript was redacted as it was emitted).
+fn redact_transcript(mut t: StreamTranscript, r: &Redactor) -> StreamTranscript {
+    for m in &mut t.messages {
+        if !m.preview_is_hex {
+            m.preview = r.text(&m.preview);
+        }
+        m.event_id = m.event_id.as_deref().map(|v| r.text(v));
+        m.event_type = m.event_type.as_deref().map(|v| r.text(v));
+    }
+    t
+}
+
 async fn run_plan(plan: &Plan, events: &EventCtx, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
     match plan {
         Plan::Ws(p) => ws::run(p, events, cancel, commands).await,
@@ -1619,9 +1648,7 @@ async fn run_prepared(
     }
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
-    for s in resolver.used_secrets.lock().iter() {
-        redactor.add_secret(s);
-    }
+    redactor.refresh(resolver);
     let mut attempts = out.attempts;
     let Some(last) = attempts.pop() else {
         let f = TransportFailure::new(Phase::Session, FailureKind::Internal, "the session adapter returned no attempt");
@@ -1678,7 +1705,7 @@ async fn run_prepared(
         protocol_fallback_from: fallback_from,
         redactor: &redactor,
         extra_findings: extra,
-        stream: out.transcript,
+        stream: out.transcript.map(|t| redact_transcript(t, &redactor)),
         protocol_status_override: Some(out.status),
         workload_api: workload,
     };
