@@ -133,6 +133,12 @@
   same file yourself, even to a request or dataset not saved yet.
 - **Breaking (API):** `App::spec_reimport_apply` takes the name of the file
   it applies: `spec_reimport_apply(import_id, bytes, file_name, approval)`.
+- **Breaking (API):** `App::release_attachment` keeps a file a user attached
+  (`App::put_attachment`) and returns `false` for it, even when nothing
+  references it. `App::save_request`, `App::create_request` and
+  `App::save_dataset` can now fail with `AppError::Invalid` ("an attached
+  file ... is no longer stored; attach it again, then save") when they name a
+  stored file the item did not hold before and that is not stored.
 
 ### Fixed
 
@@ -148,7 +154,9 @@
   refused with a message to attach the file again. `App::delete_request` and
   `App::delete_dataset` now also release, in the same transaction, the files
   their item held that nothing else references; attachment index entries
-  written by earlier builds read as not marked.
+  written by earlier builds read as not marked. A marked entry records when
+  the file was attached. A duplicate of a request whose file is no longer
+  stored still saves.
 - A header an auth profile produces that is not valid on the wire (for
   example a token pasted with a trailing line break, or an API-key or JWT
   header name with a space) now fails the request before anything is sent,

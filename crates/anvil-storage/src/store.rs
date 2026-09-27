@@ -927,6 +927,11 @@ impl StoreTx<'_> {
         self.records()?.release_blob(id)
     }
 
+    /// Whether blob `id` is stored in this transaction, without decrypting it.
+    pub fn has_blob(&self, id: &str) -> Result<bool> {
+        self.records()?.has_blob(id)
+    }
+
     /// See [`Store::add_history`].
     pub fn add_history<T: Serialize>(
         &self,
@@ -1182,6 +1187,11 @@ impl Records<'_> {
         self.conn.execute("DELETE FROM meta WHERE key=?1", params![format!("pin:{id}")])?;
         self.conn.execute("DELETE FROM blobs WHERE id=?1 AND NOT EXISTS (SELECT 1 FROM history WHERE body_blob=?1)", params![id])?;
         Ok(())
+    }
+
+    fn has_blob(&self, id: &str) -> Result<bool> {
+        let found: Option<i64> = self.conn.query_row("SELECT 1 FROM blobs WHERE id=?1", params![id], |r| r.get(0)).optional()?;
+        Ok(found.is_some())
     }
 
     fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {

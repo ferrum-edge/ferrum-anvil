@@ -7,6 +7,7 @@ use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
 use anvil_domain::workspace::{Dataset, DatasetFormat, RequestDefinition};
+use anvil_storage::store::DB_FILE;
 use anvil_storage::{KdfParams, kind};
 use anvil_transport::recorder::EventCtx;
 use tokio_util::sync::CancellationToken;
@@ -140,4 +141,69 @@ fn replacing_a_datasets_file_removes_the_old_content() {
     app.save_dataset(Dataset { attachment: next.clone(), ..d }).unwrap();
     assert!(app.get_attachment(&old).unwrap().is_none(), "the replaced file had no other owner");
     assert!(app.get_attachment(&sha(&next)).unwrap().is_some());
+}
+
+#[test]
+fn an_attached_file_is_marked_with_when_it_was_attached() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let att = app.put_attachment("payload.bin", b"payload attached now", None).unwrap();
+    let index: Vec<serde_json::Value> = app.store.list(kind::IMPORT_SOURCE, None).unwrap();
+    let entry = index.iter().find(|i| i["attachment"] == sha(&att).as_str()).expect("its index entry");
+    assert_eq!(entry["user"], true, "{entry}");
+    assert!(entry["attached_at"].as_i64().is_some_and(|t| t > 0), "{entry}");
+}
+
+#[test]
+fn a_file_shared_across_two_workspaces_survives_a_delete_in_one() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let one = app.create_workspace("One").unwrap().meta.id;
+    let two = app.create_workspace("Two").unwrap().meta.id;
+    let att = app.put_attachment("payload.bin", b"payload both workspaces send", None).unwrap();
+    let a = app.create_request(&one, None, "a", upload(&att)).unwrap();
+    let b = app.create_request(&two, None, "b", upload(&att)).unwrap();
+    app.delete_request(&a.meta.id).unwrap();
+    let kept = app.get_attachment(&sha(&att)).unwrap();
+    assert_eq!(kept.as_deref(), Some(&b"payload both workspaces send"[..]), "workspace Two still holds it");
+    app.delete_request(&b.meta.id).unwrap();
+    assert!(app.get_attachment(&sha(&att)).unwrap().is_none(), "no owner left: content deleted");
+}
+
+#[test]
+fn a_duplicate_of_a_request_whose_file_is_no_longer_stored_saves() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    // As after the loss of its content: the row is written directly.
+    let missing = AttachmentRef::Stored { sha256: "1".repeat(64), size: 1, file_name: "lost.bin".into(), media_type: None };
+    let mut q = app.create_request(&ws, None, "q", RequestSpec::http("POST", "http://127.0.0.1:9/")).unwrap();
+    q.spec = upload(&missing);
+    app.store.put(kind::REQUEST, &q.meta.id, Some(&ws), None, q.sort_key, &q).unwrap();
+    let copy = app.duplicate_request(&q.meta.id).unwrap();
+    assert_eq!(copy.name, "q (copy)");
+    assert_eq!(app.request(&copy.meta.id).unwrap().spec, upload(&missing));
+    // A request that did not hold the file still cannot take it on.
+    let other = app.create_request(&ws, None, "other", RequestSpec::http("POST", "http://127.0.0.1:9/")).unwrap();
+    let e = app.save_request(RequestDefinition { spec: upload(&missing), ..other }).unwrap_err();
+    assert!(e.to_string().contains("no longer stored; attach it again"), "{e}");
+}
+
+#[test]
+fn a_revision_elsewhere_that_does_not_decode_keeps_files_without_failing_a_delete() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let other = app.create_request(&ws, None, "other", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
+    let att = app.put_attachment("payload.bin", b"payload of a deleted request", None).unwrap();
+    let q = app.create_request(&ws, None, "q", upload(&att)).unwrap();
+    // Another request's revision whose stored payload no longer decrypts.
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    let revision = other.revision_id.expect("a revision").to_string();
+    db.execute("UPDATE objects SET payload=x'00' WHERE kind=?1 AND id=?2", rusqlite::params![kind::REVISION, revision]).unwrap();
+
+    app.delete_request(&q.meta.id).unwrap();
+    assert!(app.request(&q.meta.id).is_err(), "the request is deleted");
+    // That revision could name the file, so the file is kept, not deleted.
+    assert!(app.get_attachment(&sha(&att)).unwrap().is_some());
 }

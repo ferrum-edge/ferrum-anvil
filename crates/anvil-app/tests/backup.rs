@@ -463,6 +463,31 @@ fn a_stored_attachment_without_its_content_is_restored_only_where_that_content_i
 }
 
 #[test]
+fn a_restore_keeps_a_file_attached_here_marked_as_attached() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Shared").unwrap();
+    let content = b"placeholder attached statement";
+    let file = a.put_attachment("statement.bin", content, None).unwrap();
+    let upload = RequestSpec {
+        body: Body::Binary { attachment: file.clone(), content_type: None },
+        ..RequestSpec::http("POST", "https://original.example.invalid/")
+    };
+    a.create_request(&ws.meta.id, None, "Upload", upload).unwrap();
+    let bytes = export(&a);
+    // On the target, the same file is attached to an item not saved yet.
+    let b = new_app(root.path(), "b");
+    b.put_attachment("mine.bin", content, None).unwrap();
+    b.restore(&bytes, Some(PASS), ConflictPolicy::Merge).unwrap();
+
+    // With the restored workspace gone, an automatic release still keeps it.
+    b.delete_workspace(&ws.meta.id).unwrap();
+    let AttachmentRef::Stored { sha256, .. } = &file else { panic!("a stored attachment") };
+    assert!(!b.release_attachment(sha256).unwrap(), "still marked as attached here");
+    assert_eq!(b.get_attachment(sha256).unwrap().as_deref(), Some(&content[..]));
+}
+
+#[test]
 fn a_backup_that_claims_a_stored_workspace_is_refused_until_approved() {
     let root = tempfile::tempdir().unwrap();
     let a = small(root.path(), "a");
