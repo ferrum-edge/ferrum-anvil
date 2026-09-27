@@ -496,7 +496,7 @@ pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<Strin
         }
         if http::HeaderValue::from_str(v).is_err() {
             return Some(format!(
-                "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break, control or non-ASCII character, for example pasted with the credential)"
+                "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break or control character, for example pasted with the credential)"
             ));
         }
     }
