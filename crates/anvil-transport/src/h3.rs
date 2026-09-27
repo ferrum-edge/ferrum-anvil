@@ -15,7 +15,7 @@
 
 use crate::dns;
 use crate::errors::display_chain;
-use crate::http::{AttemptOutput, EarlyDataIntent, HttpPlan, sleep_until_opt};
+use crate::http::{AttemptOutput, CacheGenerations, EarlyDataIntent, HttpPlan, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
 use crate::tickets::{HandshakeGuard, ResumptionContext, TicketCache, TicketTransport};
 use crate::tls;
@@ -168,8 +168,8 @@ pub struct PoolStats {
 /// The sweep runs only while the pool holds connections. A connection the
 /// pool gives up is closed at once when idle, else when its last request
 /// ends; closing happens outside the pool lock. A connection opened by an
-/// attempt that began before a [`Pool::clear`] (a vault lock) is never
-/// pooled: it serves that attempt only.
+/// attempt whose execution began before a [`Pool::clear`] (a vault lock) is
+/// never pooled: it serves that attempt only (see [`HttpPlan::fence`]).
 struct Pool {
     shared: Arc<PoolShared>,
 }
@@ -1041,6 +1041,11 @@ impl H3Transport {
         self.pool.shared.sweep_at(now, false);
     }
 
+    /// The current pool and ticket-cache generations (see [`HttpPlan::fence`]).
+    pub fn cache_generations(&self) -> CacheGenerations {
+        CacheGenerations { pool: self.pool.generation(), tickets: self.tickets.generation() }
+    }
+
     /// Drop pooled connections and every session ticket.
     pub fn clear(&self) {
         self.pool.clear();
@@ -1277,10 +1282,11 @@ impl H3Transport {
         let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let key = format!("{}|h3://{}:{}|{}", plan.isolation, plan.host.to_ascii_lowercase(), plan.port, prepared.fingerprint);
 
-        // Taken first: what this attempt opens is pooled, and the tickets it
-        // receives are kept, only if nothing was cleared meanwhile.
-        let generation = self.pool.generation();
-        let ticket_generation = self.tickets.generation();
+        // Those of the execution (else taken now, first): what this attempt
+        // opens is pooled, and the tickets it receives are kept, only if
+        // nothing was cleared since.
+        let CacheGenerations { pool: generation, tickets: ticket_generation } =
+            plan.fence.map_or_else(|| self.cache_generations(), |f| f.quic);
         // The retry after `425 Too Early` goes out on the connection that
         // answered it, whose handshake is complete.
         let handed = match plan.early_data {

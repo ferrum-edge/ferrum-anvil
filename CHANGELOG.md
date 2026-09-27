@@ -98,14 +98,17 @@
 ### Fixed
 
 - Work still in flight when a profile locks no longer refills what the lock
-  cleared. A SPIFFE Workload API call in progress now ends with the send or
-  session it belongs to, and an answer that arrives after the lock anyway
-  (an X.509-SVID, a JWT-SVID or JWT bundles) is never cached; before, a
-  JWT-SVID fetched across a lock could stay in memory after it. Likewise,
-  cookies of a response that arrives after the lock are not stored, a
-  connection in use at the lock is closed instead of being pooled again
-  (HTTP/1.1, HTTP/2 and HTTP/3), and a TLS or QUIC connection whose attempt
-  began before the lock keeps none of the session tickets it receives.
+  cleared. The desktop lock cancels a SPIFFE Workload API call in flight,
+  and an answer that arrives after the lock anyway (an X.509-SVID, a
+  JWT-SVID or JWT bundles) is never cached; before, a JWT-SVID fetched
+  across a lock could stay in memory after it. Likewise, for an execution
+  that began before the lock, even one that is not canceled: the cookies of
+  its responses are not stored, the TLS configuration it prepares (which
+  holds a client identity's private key) is not cached, its connections
+  (HTTP/1.1, HTTP/2 and HTTP/3) are closed instead of pooled, and its TLS or
+  QUIC connections keep none of the session tickets they receive. Not yet
+  fenced: the gRPC channels of a load run's virtual users, and a workspace
+  delete while work is in flight.
 - Server-sent events: an event whose data (its `data:` lines joined with
   newlines) passes the parser's event bound, four times the line bound
   (`min(max_response_bytes, 1 MiB)`, at least 1 KiB), now stops the attempt

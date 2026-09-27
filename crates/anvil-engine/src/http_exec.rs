@@ -2,13 +2,13 @@
 //! (redirects, safe retries, DPoP nonce challenge), each with freshly applied
 //! auth, followed by diagnosis and record assembly.
 
-use crate::Engine;
 use crate::assertions::{self, Observed};
 use crate::context::{ExecutionContext, resolve_sensitive};
 use crate::prepare::{self, PreparedHttp, Target};
 use crate::record::{self, Assembly};
 use crate::redact::Redactor;
 use crate::vars::Resolver;
+use crate::{Engine, SensitiveEpoch};
 use anvil_auth::{ResolvedAuth, SignableRequest};
 use anvil_diagnostics::FerrumTrust;
 use anvil_domain::auth::AuthConfig;
@@ -43,6 +43,9 @@ pub struct Prepared {
     /// The request's PROXY header (HTTP-family requests), for connections to
     /// the request's own `host:port`.
     pub proxy_header: Option<anvil_transport::proxy_protocol::HeaderPlan>,
+    /// The engine's epoch when the execution started: what it prepares or
+    /// receives after a lock is not kept.
+    pub epoch: SensitiveEpoch,
 }
 
 fn host_matches(pattern: &str, host: &str) -> bool {
@@ -157,9 +160,11 @@ pub(crate) fn resolve_auth(
 /// Prepared TLS material, the selected profile's name and its host bindings.
 pub(crate) type TlsChoice = (Arc<PreparedTls>, Option<String>, Vec<anvil_domain::tls::HostBinding>);
 
-/// Build the TLS settings for a target (profile scoping + host binding).
+/// Build the TLS settings for a target (profile scoping + host binding),
+/// for an execution of `epoch` (see [`Engine::prepared_tls`]).
 pub(crate) fn tls_for(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     settings: &EffectiveSettings,
     target: &Target,
@@ -171,9 +176,9 @@ pub(crate) fn tls_for(
             return Err(TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "the selected TLS profile no longer exists")
                 .with_field("settings.tls_profile"));
         }
-        return Ok((engine.prepared_tls("default-strict", &TlsSettings::strict_system())?, None, vec![]));
+        return Ok((engine.prepared_tls(epoch, "default-strict", &TlsSettings::strict_system())?, None, vec![]));
     };
-    let prepared = prepared_from_profile(engine, ctx, p, &target.host, target.port, inferred)?;
+    let prepared = prepared_from_profile(engine, epoch, ctx, p, &target.host, target.port, inferred)?;
     Ok((prepared, Some(p.name.clone()), p.bindings.clone()))
 }
 
@@ -181,6 +186,7 @@ pub(crate) fn tls_for(
 /// to `host:port` when the profile's bindings allow it.
 pub(crate) fn prepared_from_profile(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     p: &anvil_domain::tls::TlsProfile,
     host: &str,
@@ -240,7 +246,7 @@ pub(crate) fn prepared_from_profile(
         s.client_identity.is_some(),
         anvil_transport::certs::sha256_hex(material.as_bytes())
     );
-    engine.prepared_tls(&key, &s)
+    engine.prepared_tls(epoch, &key, &s)
 }
 
 fn proxy_invalid(msg: impl Into<String>, field: &str) -> TransportFailure {
@@ -313,6 +319,7 @@ pub(crate) fn hbone_datagram_connect_headers(
 
 pub(crate) fn proxy_for(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     settings: &EffectiveSettings,
     target: &Target,
@@ -355,7 +362,7 @@ pub(crate) fn proxy_for(
             let tp = ctx.tls_profiles.iter().find(|t| t.id == id).ok_or_else(|| {
                 proxy_invalid(format!("the TLS profile selected for proxy '{}' no longer exists", p.name), "proxy.tls_profile")
             })?;
-            Some(prepared_from_profile(engine, ctx, tp, &host, port, inferred)?)
+            Some(prepared_from_profile(engine, epoch, ctx, tp, &host, port, inferred)?)
         }
         None => None,
     };
@@ -400,6 +407,17 @@ pub(crate) fn trust_for(ctx: &ExecutionContext, target: &Target) -> (FerrumTrust
 }
 
 pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, allowed: &[&str]) -> Result<Prepared, TransportFailure> {
+    prepare_all_at(engine, engine.sensitive_epoch(), ctx, r, allowed)
+}
+
+/// [`prepare_all`] for an execution of `epoch`.
+pub(crate) fn prepare_all_at(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+    allowed: &[&str],
+) -> Result<Prepared, TransportFailure> {
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let http = prepare::prepare_http(&ctx.spec, r, ctx.attachments.as_ref(), &settings, ctx.send_anyway, allowed)?;
     let mut inferred = http.inferred.clone();
@@ -409,11 +427,11 @@ pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver,
     let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{} (from {auth_scope})", auth.label()) };
     let tls_scheme = matches!(http.target.scheme.as_str(), "https" | "wss" | "grpcs");
     let (tls, tls_name, bindings) = if tls_scheme {
-        tls_for(engine, ctx, &settings, &http.target, &mut inferred).map(|(a, b, c)| (Some(a), b, c))?
+        tls_for(engine, epoch, ctx, &settings, &http.target, &mut inferred).map(|(a, b, c)| (Some(a), b, c))?
     } else {
         (None, None, vec![])
     };
-    let proxy = proxy_for(engine, ctx, &settings, &http.target, &mut inferred)?;
+    let proxy = proxy_for(engine, epoch, ctx, &settings, &http.target, &mut inferred)?;
     let proxy_header = crate::proxy_protocol::request_header(&ctx.spec, r, &settings, proxy.as_ref())?;
     if let (Some(spec), Some(_)) = (&ctx.spec.proxy_protocol, &proxy_header) {
         inferred.push(crate::proxy_protocol::request_header_note(spec, &http.target.authority));
@@ -434,6 +452,7 @@ pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver,
         oauth_key,
         inferred,
         proxy_header,
+        epoch,
     })
 }
 
@@ -542,7 +561,9 @@ impl AttemptTarget {
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
     let started_at = Utc::now();
-    // Cookies that arrive after a lock (a new epoch) are not kept.
+    // Taken first: what this execution prepares or receives after a lock (a
+    // new epoch) is not kept: its prepared TLS material, its cookies, its
+    // connections and its session tickets.
     let epoch = engine.sensitive_epoch();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
@@ -554,7 +575,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     };
     let workload = (!workload.is_empty()).then_some(workload);
     let ctx = materialized.as_ref().unwrap_or(ctx);
-    let prepared = prepare_all(engine, ctx, &resolver, &["https", "http"]);
+    let prepared = prepare_all_at(engine, epoch, ctx, &resolver, &["https", "http"]);
     let mut prep = match prepared.and_then(|p| early_data_policy_check(&p.settings.early_data).map(|()| p)) {
         Ok(p) => p,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, workload),
@@ -567,7 +588,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     // API request exists on the wire. Canceling the execution stops waiting
     // for the token (see `oauth_http::acquire`).
     if let Some((key, cfg)) = &prep.oauth_key {
-        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, &cancel).await {
+        match crate::oauth_http::acquire(engine, epoch, ctx, &prep.settings, key, cfg, &cancel).await {
             Ok(t) => {
                 replace_oauth(&mut prep.auth, &t);
             }
@@ -713,6 +734,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             proxy_header,
             proxy_header_withheld,
             early_data: early_intent(&prep.settings.early_data, &current.method, current.target.scheme == "https", &reason),
+            fence: Some(epoch.transport()),
         };
         let index = attempts.len() as u32;
         let outs = match prep.settings.http_version {
@@ -813,7 +835,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                             credentials_stripped = true;
                         }
                         let mut hop_notes = vec![];
-                        let proxy = match proxy_for(engine, ctx, &prep.settings, &t, &mut hop_notes) {
+                        let proxy = match proxy_for(engine, epoch, ctx, &prep.settings, &t, &mut hop_notes) {
                             Ok(p) => p,
                             Err(f) => {
                                 let why = format!("its proxy route could not be prepared: {}", f.message);
@@ -833,9 +855,9 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
                                         p.client_identity = None;
                                     }
                                 });
-                                tls_for(engine, &strict_ctx, &prep.settings, &t, &mut hop_notes)
+                                tls_for(engine, epoch, &strict_ctx, &prep.settings, &t, &mut hop_notes)
                             } else {
-                                tls_for(engine, ctx, &prep.settings, &t, &mut hop_notes)
+                                tls_for(engine, epoch, ctx, &prep.settings, &t, &mut hop_notes)
                             };
                             match prepared {
                                 Ok((tls, name, _)) => (Some(tls), name),

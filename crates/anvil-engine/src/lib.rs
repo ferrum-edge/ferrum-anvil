@@ -27,7 +27,7 @@ pub mod workload;
 
 use anvil_domain::execution::{ExecutionRecord, ResponseRecord, TransportFailure};
 use anvil_domain::request::Protocol;
-use anvil_transport::http::HttpTransport;
+use anvil_transport::http::{CacheFence, HttpTransport};
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::tls::{PreparedTls, TlsSettings};
 use bytes::Bytes;
@@ -75,11 +75,25 @@ pub struct Engine {
     epoch: AtomicU64,
 }
 
-/// The engine's sensitive-state epoch when an execution started. A lock
+/// The engine's sensitive-state epoch when an execution started, with the
+/// transports' cache generations taken at the same point. A lock
 /// ([`Engine::clear_sensitive_state`]) starts a new epoch, and what an
-/// execution of an earlier epoch receives afterwards (cookies) is not kept.
+/// execution of an earlier epoch prepares or receives afterwards is not
+/// kept: its cookies, its prepared TLS material (client identity keys and
+/// session-ticket stores), its connections and its session tickets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SensitiveEpoch(u64);
+pub struct SensitiveEpoch {
+    epoch: u64,
+    transport: CacheFence,
+}
+
+impl SensitiveEpoch {
+    /// The connection-pool and ticket-cache generations to plan attempts with
+    /// ([`anvil_transport::http::HttpPlan::fence`]).
+    pub fn transport(&self) -> CacheFence {
+        self.transport
+    }
+}
 
 impl Default for Engine {
     fn default() -> Self {
@@ -104,7 +118,19 @@ impl Engine {
 
     /// The current sensitive-state epoch, taken when an execution starts.
     pub fn sensitive_epoch(&self) -> SensitiveEpoch {
-        SensitiveEpoch(self.epoch.load(Ordering::SeqCst))
+        loop {
+            let epoch = self.epoch.load(Ordering::SeqCst);
+            let transport = CacheFence { tcp: self.http.cache_generations(), quic: self.h3.cache_generations() };
+            // A lock advances the epoch before it clears the transports: an
+            // unchanged epoch means the generations are not newer than it.
+            if self.epoch.load(Ordering::SeqCst) == epoch {
+                return SensitiveEpoch { epoch, transport };
+            }
+        }
+    }
+
+    fn is_current(&self, epoch: SensitiveEpoch) -> bool {
+        self.epoch.load(Ordering::SeqCst) == epoch.epoch
     }
 
     /// Execute a request of any supported protocol.
@@ -120,8 +146,11 @@ impl Engine {
     /// Validated TLS material, cached by profile key. A key
     /// `<profile variant>|<material hash>` replaces an entry of the same
     /// variant with other material, so a rotated Workload API SVID does not
-    /// leave the superseded key material behind.
-    pub fn prepared_tls(&self, key: &str, s: &TlsSettings) -> Result<Arc<PreparedTls>, TransportFailure> {
+    /// leave the superseded key material behind. For an execution of an
+    /// earlier `epoch` (a lock since it started) the material is prepared
+    /// but not cached: it holds a client identity's private key and a
+    /// session-ticket store.
+    pub fn prepared_tls(&self, epoch: SensitiveEpoch, key: &str, s: &TlsSettings) -> Result<Arc<PreparedTls>, TransportFailure> {
         if let Some(p) = self.tls.lock().get(key) {
             return Ok(p.clone());
         }
@@ -129,12 +158,23 @@ impl Engine {
         p.profile_key = key.to_string();
         let p = Arc::new(p);
         let mut cache = self.tls.lock();
+        // Checked under the cache's lock, before the variant's entries are
+        // dropped: a clear either advanced the epoch before this point or
+        // empties the cache after it.
+        if !self.is_current(epoch) {
+            return Ok(p);
+        }
         if let Some((variant, _)) = key.rsplit_once('|') {
             let prefix = format!("{variant}|");
             cache.retain(|k, _| !k.starts_with(&prefix));
         }
         cache.insert(key.to_string(), p.clone());
         Ok(p)
+    }
+
+    /// Prepared TLS configurations held (for tests and the lock check).
+    pub fn prepared_tls_len(&self) -> usize {
+        self.tls.lock().len()
     }
 
     pub fn cookie_header(&self, isolation: &str, t: &prepare::Target) -> Option<String> {
@@ -152,7 +192,7 @@ impl Engine {
         let mut jars = self.cookies.lock();
         // Checked under the jar's lock: a clear either advanced the epoch
         // before this point or empties the jar after it.
-        if self.epoch.load(Ordering::SeqCst) != epoch.0 {
+        if !self.is_current(epoch) {
             return;
         }
         let jar = jars.entry(isolation.to_string()).or_default();
@@ -166,10 +206,12 @@ impl Engine {
     /// session tickets, tokens, Workload API SVIDs, cookies and prepared
     /// client identities.
     pub fn clear_sensitive_state(&self) {
-        // First: from here on, a cookie store checked against an earlier
-        // epoch is refused. The Workload API cache, the HTTP and HTTP/3
-        // connection pools and the ticket caches fence what is in flight the
-        // same way when they are cleared below.
+        // First: from here on, a cookie store or a prepared TLS configuration
+        // checked against an earlier epoch is refused. The Workload API
+        // cache, the HTTP and HTTP/3 connection pools and the ticket caches
+        // fence what is in flight the same way when they are cleared below
+        // (the transports against the generations the execution took with
+        // its epoch).
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.http.pool.clear();
         self.http.tickets.clear();

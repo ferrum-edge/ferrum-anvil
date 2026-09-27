@@ -69,6 +69,27 @@ pub struct HttpPlan {
     pub proxy_header_withheld: Option<String>,
     /// How the 0-RTT early-data opt-in applies to this attempt.
     pub early_data: EarlyDataIntent,
+    /// The pool and ticket-cache generations when the execution this attempt
+    /// belongs to began. After a clear since (a vault lock), the attempt pools
+    /// no connection and keeps no ticket, however many attempts, redirects
+    /// or retries later it runs. `None`: taken when the attempt begins.
+    pub fence: Option<CacheFence>,
+}
+
+/// The generations of one transport's connection pool and ticket cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheGenerations {
+    pub(crate) pool: u64,
+    pub(crate) tickets: u64,
+}
+
+/// The cache generations of both HTTP transports, over TCP
+/// ([`HttpTransport`]) and QUIC ([`crate::h3::H3Transport`]), taken together
+/// when an execution begins (see [`HttpPlan::fence`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheFence {
+    pub tcp: CacheGenerations,
+    pub quic: CacheGenerations,
 }
 
 /// How the early-data opt-in applies to one attempt.
@@ -289,10 +310,11 @@ pub struct PoolStats {
 /// again. The sweep runs only while the pool holds connections.
 ///
 /// [`Pool::clear`] starts a new generation. An attempt takes the generation
-/// before it checks a connection out or opens one, and the connection is
-/// returned only while that generation is current (checked under the pool
-/// lock): a request still in flight when the pool is cleared (a vault lock)
-/// closes its connection instead of pooling it again.
+/// (its execution's, see [`HttpPlan::fence`]) before it checks a connection
+/// out or opens one, and the connection is returned only while that
+/// generation is current (checked under the pool lock): a request still in
+/// flight when the pool is cleared (a vault lock) closes its connection
+/// instead of pooling it again.
 pub struct Pool {
     shared: Arc<PoolShared>,
 }
@@ -630,6 +652,11 @@ impl HttpTransport {
         self.pool.shared.sweep_at(now, false);
     }
 
+    /// The current pool and ticket-cache generations (see [`HttpPlan::fence`]).
+    pub fn cache_generations(&self) -> CacheGenerations {
+        CacheGenerations { pool: self.pool.generation(), tickets: self.tickets.generation() }
+    }
+
     /// Execute one logical attempt. Returns one output, or two when a pooled
     /// connection proved (typed) that the request was never serialized and a
     /// fresh connection was used.
@@ -764,11 +791,11 @@ impl HttpTransport {
         }
 
         // ---- acquire a connection ----
-        // Taken first: a connection this attempt checks out or opens goes
-        // back to the pool, and the tickets it receives are kept, only if
-        // nothing was cleared meanwhile.
-        let generation = self.pool.generation();
-        let ticket_generation = self.tickets.generation();
+        // Those of the execution (else taken now, first): a connection this
+        // attempt checks out or opens goes back to the pool, and the tickets
+        // it receives are kept, only if nothing was cleared since.
+        let CacheGenerations { pool: generation, tickets: ticket_generation } =
+            plan.fence.map_or_else(|| self.cache_generations(), |f| f.tcp);
         let q = rec.start(Phase::Queue);
         // The retry after `425 Too Early` goes out on the connection that
         // answered it, whose handshake is complete.

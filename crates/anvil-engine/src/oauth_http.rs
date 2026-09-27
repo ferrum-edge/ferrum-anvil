@@ -11,10 +11,10 @@
 //! lost), and a token that arrives after a lock, a sign-out or a newer
 //! sign-in is discarded rather than cached or sent.
 
-use crate::Engine;
 use crate::context::{ExecutionContext, resolve_sensitive};
 use crate::prepare;
 use crate::vars::Resolver;
+use crate::{Engine, SensitiveEpoch};
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, Generation, OAuthResolved, TokenHttp, TokenKey};
 use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
@@ -38,6 +38,10 @@ pub struct EngineTokenHttp<'a> {
     pub engine: &'a Engine,
     pub ctx: &'a ExecutionContext,
     pub settings: &'a EffectiveSettings,
+    /// The engine's epoch when the execution (or sign-in) started: TLS
+    /// material and connections of a token request it plans after a lock
+    /// are not kept.
+    pub epoch: SensitiveEpoch,
 }
 
 impl EngineTokenHttp<'_> {
@@ -55,15 +59,16 @@ impl EngineTokenHttp<'_> {
             let value = http::HeaderValue::from_str(&format!("Basic {token}")).map_err(|e| e.to_string())?;
             headers.push((http::header::AUTHORIZATION, value));
         }
+        let epoch = self.epoch;
         let tls = if t.scheme == "https" {
             let mut inf = vec![];
-            Some(crate::http_exec::tls_for(self.engine, self.ctx, self.settings, &t, &mut inf).map_err(|e| e.message)?.0)
+            Some(crate::http_exec::tls_for(self.engine, epoch, self.ctx, self.settings, &t, &mut inf).map_err(|e| e.message)?.0)
         } else {
             None
         };
         // The token endpoint uses the request's proxy profile (and its
         // NO_PROXY list), exactly like the API request would.
-        let proxy = crate::http_exec::proxy_for(self.engine, self.ctx, self.settings, &t, &mut inferred).map_err(|e| e.message)?;
+        let proxy = crate::http_exec::proxy_for(self.engine, epoch, self.ctx, self.settings, &t, &mut inferred).map_err(|e| e.message)?;
         Ok(HttpPlan {
             method: http::Method::POST,
             https: t.scheme == "https",
@@ -90,6 +95,7 @@ impl EngineTokenHttp<'_> {
             proxy_header: None,
             proxy_header_withheld: None,
             early_data: anvil_transport::http::EarlyDataIntent::Off,
+            fence: Some(epoch.transport()),
         })
     }
 }
@@ -162,13 +168,14 @@ pub(crate) fn cache_key(ctx: &ExecutionContext, resolved: &OAuthResolved) -> Tok
 /// sign-out aborts it.
 pub(crate) async fn acquire(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     settings: &EffectiveSettings,
     key: &TokenKey,
     cfg: &OAuthResolved,
     cancel: &CancellationToken,
 ) -> Result<CachedToken, AuthError> {
-    let http = EngineTokenHttp { engine, ctx, settings };
+    let http = EngineTokenHttp { engine, ctx, settings, epoch };
     tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(AuthError::Canceled("the execution was canceled while its OAuth token was being acquired".into())),
@@ -297,7 +304,7 @@ pub async fn redeem_authorization_code(
     redirect_uri: &str,
     cancel: &CancellationToken,
 ) -> Result<TokenSummary, AuthError> {
-    let http = EngineTokenHttp { engine, ctx, settings: &target.settings };
+    let http = EngineTokenHttp { engine, ctx, settings: &target.settings, epoch: engine.sensitive_epoch() };
     engine.tokens.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t = tokio::select! {
         biased;

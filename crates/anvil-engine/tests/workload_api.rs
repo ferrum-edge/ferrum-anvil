@@ -542,7 +542,8 @@ async fn a_workload_api_answer_that_arrives_after_a_lock_is_not_cached() {
 /// Without a cancellation (an engine user that only clears), each of the
 /// three caches is still fenced: whichever Workload API answer lands after
 /// the clear, nothing the execution fetched is cached, and the execution
-/// itself completes with what it fetched.
+/// itself completes with what it fetched. Neither the TLS configuration it
+/// prepares with the SVID's private key nor its connection is kept.
 #[tokio::test]
 async fn every_workload_api_cache_is_fenced_against_answers_that_land_after_a_clear() {
     init();
@@ -567,11 +568,14 @@ async fn every_workload_api_cache_is_fenced_against_answers_that_land_after_a_cl
         assert_eq!(o.record.response.as_ref().map(|r| r.status), Some(200), "{rpc}: {:?} {:?}", failure(&o), codes(&o));
         assert_eq!(workload_calls(&w, rpc), calls + 1, "{rpc} was answered after the clear");
         assert_eq!(e.workload.len(), (0, 0, 0), "{rpc}: an answer of the step that spanned the clear was cached");
+        assert_eq!(e.prepared_tls_len(), 0, "{rpc}: the TLS configuration prepared after the clear was cached");
+        assert_eq!(e.http.pool.stats().connections, 0, "{rpc}: the connection opened after the clear was pooled");
 
         // After unlock, a fresh execution caches all three.
         let o = run(&e, &c).await;
         assert_eq!(o.record.response.as_ref().map(|r| r.status), Some(200), "{rpc}: {:?} {:?}", failure(&o), codes(&o));
         assert!(evidence(&o).calls.iter().all(|c| !c.cached), "{rpc}");
         assert_eq!(e.workload.len(), (1, 1, 1), "{rpc}");
+        assert_eq!(e.prepared_tls_len(), 1, "{rpc}");
     }
 }

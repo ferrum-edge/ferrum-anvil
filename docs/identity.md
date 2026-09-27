@@ -355,9 +355,11 @@ a gateway's backend identity (#3). The protocol details are in
   JWT-SVID and the JWT bundles are held only in the engine's memory cache
   (zeroized buffers), refreshed at half their lifetime, cleared on lock with
   the OAuth tokens, never written to the vault, history, exports or logs, and
-  never sent to the webview. Locking cancels a Workload API call in flight,
-  and an answer that arrives after the lock anyway is never cached. The record keeps public data: SPIFFE IDs, the
-  certificate summary, `aud`, `exp`, `alg`, `kid` and the check results.
+  never sent to the webview. The desktop lock cancels a Workload API call in
+  flight, and an answer that arrives after the lock anyway is never cached,
+  nor is the TLS configuration prepared with that X.509-SVID's private key.
+  The record keeps public data: SPIFFE IDs, the certificate summary, `aud`,
+  `exp`, `alg`, `kid` and the check results.
 - **Checked before use.** A JWT-SVID must be a JWT-SVID (asymmetric `alg`, a
   workload SPIFFE ID as `sub`), carry every configured audience and be
   unexpired by this machine's clock; with bundle verification, its signature
