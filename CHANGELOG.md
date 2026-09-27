@@ -133,6 +133,13 @@
   same file yourself, even to a request or dataset not saved yet.
 - **Breaking (API):** `App::spec_reimport_apply` takes the name of the file
   it applies: `spec_reimport_apply(import_id, bytes, file_name, approval)`.
+- **API:** `App::register_load_run` registers a load run with its profile
+  before its job is prepared; the returned guard's tokens are canceled when
+  the profile locks or the run's workspace is deleted (the desktop stops the
+  worker then). `App::save_load_report` now fails with `AppError::NotFound`
+  once the report's workspace is deleted. `App::clean_up_storage` runs the
+  storage cleanup that opening a profile runs, and returns what it removed
+  and which stored objects did not decode.
 - **Breaking (API):** `App::release_attachment` keeps a file a user attached
   (`App::put_attachment`) and returns `false` for it, even when nothing
   references it. `App::save_request`, `App::create_request` and
@@ -222,8 +229,26 @@
 - Pooled gRPC channels, which only a load run's virtual users keep, are no
   longer shared between workspaces, and a call that began before its
   engine's channels were cleared no longer returns its connection to them.
-  The app's lock and a workspace delete do not clear a load run's engines:
-  runs are expected to be stopped on lock (see #162).
+  Deleting a workspace now stops that workspace's running load runs, and
+  `App::lock` stops every load run, so a run's engines no longer keep a
+  deleted workspace's pooled connections, session tickets, cookies, prepared
+  TLS configurations and gRPC channels until the run ends. A run stopped by
+  its workspace's delete keeps no report.
+- Deleting a workspace now also releases the stored files (request bodies,
+  multipart and gRPC schema files, datasets, imported spec sources) its
+  items held, unless an item of another workspace still references them.
+  Before, their encrypted content and pins stayed in the profile for good.
+- A file you attached to a request or dataset that was never saved is now
+  released when the profile opens, 30 days after it was last attached,
+  unless a saved item references it. Saving an item that names such a file
+  is refused with "attach it again", as for any released file.
+- Opening a profile now removes request revisions whose request no longer
+  exists (earlier builds left them behind when a request was deleted) and
+  releases the stored files only they referenced.
+- A stored object that does not decode, which keeps every stored file from
+  being released, is now logged as a warning naming its kind and id (never
+  its content), and `App::clean_up_storage` reports it, so the damaged row
+  can be found and repaired or deleted.
 - The lock check now also counts the session tickets kept by prepared TLS
   configurations (connections without the early-data opt-in).
 - A spec reimport now compares the import's scoped configuration too, not

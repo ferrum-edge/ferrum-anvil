@@ -3,6 +3,7 @@
 //! `anvil-storage`; UI layers only call these services.
 
 pub mod backup;
+pub mod cleanup;
 pub mod device_identity;
 pub mod exec;
 pub mod file_grants;
@@ -75,15 +76,19 @@ pub struct App {
     /// user bound it in the native dialog (see [`App::confine_token_files`]).
     /// Shared with every [`App::shared`] handle.
     confined_token_files: Arc<AtomicBool>,
+    /// Load runs by workspace, for a lock or a workspace delete to stop.
+    load_runs: Arc<load::LoadRuns>,
 }
 
 impl App {
     pub fn open(dir: PathBuf, header: ProfileHeader, key: Key) -> Result<App> {
         let store = Arc::new(Store::open(&dir, key)?);
         let confined_token_files = Arc::new(AtomicBool::new(false));
-        let app = App { header, dir, store, engine: Arc::new(Engine::new()), confined_token_files };
+        let load_runs = Arc::default();
+        let app = App { header, dir, store, engine: Arc::new(Engine::new()), confined_token_files, load_runs };
         app.ensure_settings()?;
         app.pin_attachment_blobs()?;
+        app.clean_up_storage_on_open();
         Ok(app)
     }
 
@@ -97,6 +102,7 @@ impl App {
             store: self.store.clone(),
             engine: self.engine.clone(),
             confined_token_files: self.confined_token_files.clone(),
+            load_runs: self.load_runs.clone(),
         }
     }
 
@@ -104,11 +110,13 @@ impl App {
         self.store.is_locked()
     }
 
-    /// Lock: drop the key and every cached credential/connection. Active
-    /// runs must be canceled by the caller (policy: stop runs on lock).
+    /// Lock: drop the key and every cached credential/connection, and stop
+    /// every registered load run (see [`App::register_load_run`]). Other
+    /// active runs must be canceled by the caller (policy: stop runs on lock).
     pub fn lock(&self) {
         self.store.lock();
         self.engine.clear_sensitive_state();
+        self.stop_load_runs();
     }
 
     pub fn unlock(&self, key: Key) -> Result<()> {

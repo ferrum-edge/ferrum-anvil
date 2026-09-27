@@ -560,15 +560,7 @@ impl Store {
 
     /// Delete every object belonging to a workspace (and the workspace).
     pub fn delete_workspace(&self, ws: &Id) -> Result<()> {
-        let mut conn = self.writing()?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM objects WHERE workspace_id=?1", params![ws.to_string()])?;
-        tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws.to_string()])?;
-        tx.execute("DELETE FROM secrets WHERE workspace_id=?1", params![ws.to_string()])?;
-        tx.execute("DELETE FROM history WHERE workspace_id=?1", params![ws.to_string()])?;
-        tx.execute("DELETE FROM load_reports WHERE workspace_id=?1", params![ws.to_string()])?;
-        tx.commit()?;
-        Ok(())
+        self.atomically(|tx| tx.delete_workspace(ws))
     }
 
     pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
@@ -897,6 +889,18 @@ impl StoreTx<'_> {
 
     pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
         self.records()?.object_meta(kind)
+    }
+
+    /// [`Store::delete_workspace`] inside this transaction: rolled back with it.
+    pub fn delete_workspace(&self, ws: &Id) -> Result<()> {
+        let _ = self.store.key()?;
+        let ws = ws.to_string();
+        self.tx.execute("DELETE FROM objects WHERE workspace_id=?1", params![ws])?;
+        self.tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws])?;
+        self.tx.execute("DELETE FROM secrets WHERE workspace_id=?1", params![ws])?;
+        self.tx.execute("DELETE FROM history WHERE workspace_id=?1", params![ws])?;
+        self.tx.execute("DELETE FROM load_reports WHERE workspace_id=?1", params![ws])?;
+        Ok(())
     }
 
     pub fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {

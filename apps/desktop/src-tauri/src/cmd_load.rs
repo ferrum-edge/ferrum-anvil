@@ -16,6 +16,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 pub const LOAD_WORKER_FLAG: &str = "--anvil-load-worker";
 
+/// Why a run stopped when its workspace was deleted.
+const WORKSPACE_DELETED: &str = "the load run's workspace was deleted; the run was stopped and its report was not kept";
+
 #[tauri::command]
 pub fn load_plans(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec<LoadPlan>> {
     st.app()?.load_plans(&id(&workspace_id)?).map_err(e)
@@ -72,13 +75,24 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     let app = st.app()?;
     let vault = VaultId::of(&app);
     let plan_id = id(&plan_id)?;
-    // Prepared from the store, secrets and all, on a blocking thread.
+    // Prepared from the store, secrets and all, on a blocking thread. The run
+    // is registered with the profile before its job is prepared, so a delete
+    // of its workspace (or a lock) from then on stops it.
     let preparing = app.clone();
-    let job = anvil_app::off_runtime(move || preparing.worker_job(&preparing.load_plan(&plan_id)?, acknowledged)).await.map_err(e)?;
-    // A lock that landed while the job was prepared stopped this run: its
-    // job, secrets and all, is not handed to a worker.
-    if entry.lock_token().is_cancelled() {
+    let (run, job) = anvil_app::off_runtime(move || {
+        let plan = preparing.load_plan(&plan_id)?;
+        let run = preparing.register_load_run(&plan.workspace_id);
+        Ok((run, preparing.worker_job(&plan, acknowledged)?))
+    })
+    .await
+    .map_err(e)?;
+    // A lock or a workspace delete that landed while the job was prepared
+    // stopped this run: its job, secrets and all, is not handed to a worker.
+    if entry.lock_token().is_cancelled() || run.locked().is_cancelled() {
         return Err("LOCKED".into());
+    }
+    if run.workspace_deleted().is_cancelled() {
+        return Err(WORKSPACE_DELETED.into());
     }
     let exe = std::env::current_exe().map_err(|x| x.to_string())?;
     let mut controller = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await.map_err(|x| x.to_string())?;
@@ -87,6 +101,7 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     // Canceled already if a lock landed while the worker started: the loop
     // below then stops it at once.
     let lock = entry.lock_token().clone();
+    let (profile_locked, deleted) = (run.locked().clone(), run.workspace_deleted().clone());
     let key = run_key.clone();
     tauri::async_runtime::spawn(async move {
         let mut canceled = false;
@@ -108,10 +123,27 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
                     canceled = true;
                     controller.cancel_for_lock().await;
                 }
+                _ = profile_locked.cancelled(), if !canceled => {
+                    canceled = true;
+                    controller.cancel_for_lock().await;
+                }
+                // The worker process, and with it every engine, pool and
+                // session it holds for the workspace, ends.
+                _ = deleted.cancelled(), if !canceled => {
+                    canceled = true;
+                    controller.cancel().await;
+                }
             }
         }
         let result = controller.wait().await;
         drop(entry);
+        // Nothing of a deleted workspace is saved.
+        if run.workspace_deleted().is_cancelled() {
+            let ev = LoadFinishedEvent { run_key: key.clone(), run_id: None, error: Some(WORKSPACE_DELETED.into()) };
+            let _ = handle.emit("load-finished", ev);
+            return;
+        }
+        drop(run);
         // The report is saved on a blocking thread.
         let (owner, run_key) = (app.clone(), key.clone());
         // Unchecked: `finished` holds the report itself if a lock landed.

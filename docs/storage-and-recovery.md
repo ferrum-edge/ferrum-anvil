@@ -144,7 +144,8 @@ A linked provider identity is **not** an unlock method; see
 Locking (button, ⌘/Ctrl+L, idle timeout, system sleep) drops the data key,
 cached OAuth tokens and pooled connections, aborts executions and
 interactive sessions, and stops load workers (their partial reports are
-kept). Backend commands return `LOCKED` until unlock.
+kept). Deleting a workspace stops that workspace's load workers; their
+reports are not kept. Backend commands return `LOCKED` until unlock.
 
 ## Recovery
 
@@ -578,8 +579,42 @@ Deleting a request decrypts only its own revisions, found by the request
 they are filed under, and the reference check reads every object of those
 kinds once for all the files the request held. An object there that does not
 decrypt could reference any of them, so the delete then keeps every file it
-held instead of failing. Pins are re-applied to existing attachments, in one
-write transaction, whenever a profile opens.
+held instead of failing. That object is logged as a warning naming its kind
+and id (never its content), so the damaged row can be found and repaired or
+deleted. Pins are re-applied to existing attachments, in one write
+transaction, whenever a profile opens.
+
+Deleting a workspace deletes its items and, in the same write transaction,
+releases every stored file they referenced that no item of another
+workspace still references, marked or not. A file referenced by any saved
+item in any workspace is never released.
+
+### Cleanup when a profile opens
+
+After the pins are re-applied, opening a profile runs one cleanup
+(`App::clean_up_storage`) in one write transaction:
+
+- Revisions filed under a request that no longer exists are removed
+  (builds before deletes removed a request's revisions left them behind;
+  after the first pass, and unless a backup restores such a profile, there
+  are none). A revision filed under no request is kept. The stored files
+  only those revisions referenced are released.
+- A file a user attached (`"user": true`) whose `"attached_at"` is older
+  than the grace period, **30 days** (`anvil_app::cleanup::ATTACHMENT_GRACE`),
+  is released if no saved item references it: it was attached to a request
+  or dataset that was never saved. Attaching the same content again restarts
+  the period, and a later save naming a released file is refused ("attach it
+  again"). One that a saved item references loses its mark: from then on it
+  is held like any other file, and later passes do not check it again.
+
+Both use the same reference check as a delete, in the transaction that
+releases. When an object does not decode, it could name any file, so the
+pass removes and releases nothing (the orphaned revisions stay, and so keep
+track of their files, until it is repaired or deleted); each such object is
+logged as a warning by kind and id, and the pass reports them. A cleanup
+that fails does not stop the profile opening; it is logged and runs again at
+the next open. A pass with nothing to release decrypts only the attachment
+index entries and any orphaned revisions.
 
 ## Plaintext at rest
 

@@ -1,6 +1,7 @@
 //! Workspace tree operations: workspaces, nested folders, requests with
 //! immutable revisions, environments, profiles and secrets.
 
+use crate::cleanup::UndecodableObject;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -76,8 +77,20 @@ impl App {
         Ok(w)
     }
 
+    /// Delete a workspace with everything in it, and release the stored
+    /// files its items held that no item of another workspace references,
+    /// in one write transaction. Its load runs are then stopped, and the
+    /// engine drops its connections, sessions and other cached state.
     pub fn delete_workspace(&self, id: &Id) -> Result<()> {
-        self.store.delete_workspace(id)?;
+        self.store.atomically(|s| {
+            let held = workspace_attachments_in(s, id)?;
+            s.delete_workspace(id)?;
+            for sha in unreferenced_in(s, held)? {
+                drop_attachment_in(s, &sha)?;
+            }
+            Ok(())
+        })?;
+        self.stop_load_runs_of(id);
         self.engine.clear_isolation(&id.to_string());
         Ok(())
     }
@@ -647,16 +660,32 @@ fn store_attachment_in(
 /// The index entry of a stored attachment. Entries written before the mark
 /// existed have neither `user` nor `attached_at`, and read as not marked.
 #[derive(Serialize, Deserialize)]
-struct AttachmentIndex {
-    attachment: String,
-    blob: String,
+pub(crate) struct AttachmentIndex {
+    pub(crate) attachment: String,
+    pub(crate) blob: String,
     /// Added by a user (see [`App::put_attachment`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    user: bool,
-    /// When a user last added it, in unix milliseconds: what a later cleanup
-    /// of files attached and never saved can age them by.
+    pub(crate) user: bool,
+    /// When a user last added it, in unix milliseconds: what the cleanup of
+    /// files attached and never saved ages them by (see
+    /// [`crate::cleanup::ATTACHMENT_GRACE`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    attached_at: Option<i64>,
+    pub(crate) attached_at: Option<i64>,
+}
+
+/// Every attachment index entry that decodes. One that does not is skipped:
+/// its file stays stored.
+pub(crate) fn attachment_entries_in(s: &StoreTx<'_>) -> anvil_storage::store::Result<Vec<AttachmentIndex>> {
+    let mut entries = Vec::new();
+    for m in s.object_meta(kind::IMPORT_SOURCE)? {
+        let Ok(id) = m.id.parse::<Id>() else { continue };
+        match s.get::<AttachmentIndex>(kind::IMPORT_SOURCE, &id) {
+            Ok(Some(entry)) => entries.push(entry),
+            Ok(None) | Err(StoreError::Integrity | StoreError::Serde(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(entries)
 }
 
 /// Write the index entry of attachment `sha` stored in `blob`. `user` marks
@@ -712,7 +741,7 @@ fn release_in(s: &StoreTx<'_>, sha256: &str, held: bool) -> anvil_storage::store
 
 /// Delete the index entry of attachment `sha256` and release its blob,
 /// without any check. Returns whether it had an entry.
-fn drop_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
+pub(crate) fn drop_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
     let id = attachment_index_id(sha256);
     let idx: Option<serde_json::Value> = s.get(kind::IMPORT_SOURCE, &id)?;
     let Some(idx) = idx else { return Ok(false) };
@@ -731,23 +760,81 @@ const REFERRERS: [&str; 6] = [kind::REQUEST, kind::REVISION, kind::DATASET, kind
 /// object's JSON text, so a spec source's `original_sha256` counts too. An
 /// object that does not decode could reference any of them, so then none is
 /// returned: a file is kept rather than deleted while something may use it.
-fn unreferenced_in(s: &StoreTx<'_>, mut candidates: HashSet<String>) -> anvil_storage::store::Result<HashSet<String>> {
+/// Each such object is logged as a warning (see [`reference_scan_in`]).
+pub(crate) fn unreferenced_in(s: &StoreTx<'_>, candidates: HashSet<String>) -> anvil_storage::store::Result<HashSet<String>> {
+    Ok(reference_scan_in(s, candidates, &HashSet::new())?.0)
+}
+
+/// [`unreferenced_in`], with the objects that did not decode, and without
+/// the revisions `revisions` names by id (ones about to be removed). Once
+/// one object keeps every candidate, the scan goes on only to name the
+/// others, and each is logged as a warning by kind and id, never content, so
+/// a damaged row that stops every release can be found and repaired or
+/// deleted.
+pub(crate) fn reference_scan_in(
+    s: &StoreTx<'_>,
+    mut candidates: HashSet<String>,
+    revisions: &HashSet<String>,
+) -> anvil_storage::store::Result<(HashSet<String>, Vec<UndecodableObject>)> {
+    let mut undecodable = Vec::new();
     for k in REFERRERS {
         for m in s.object_meta(k)? {
-            if candidates.is_empty() {
-                return Ok(candidates);
+            if candidates.is_empty() && undecodable.is_empty() {
+                return Ok((candidates, undecodable));
             }
-            let Ok(id) = m.id.parse::<Id>() else { return Ok(HashSet::new()) };
-            let text = match s.get::<serde_json::Value>(k, &id) {
-                Ok(Some(o)) => o.to_string(),
-                Ok(None) => continue,
-                Err(StoreError::Integrity | StoreError::Serde(_)) => return Ok(HashSet::new()),
-                Err(e) => return Err(e),
+            if k == kind::REVISION && revisions.contains(&m.id) {
+                continue;
+            }
+            let decoded = match m.id.parse::<Id>() {
+                Ok(id) => match s.get::<serde_json::Value>(k, &id) {
+                    Ok(Some(o)) => Some(o.to_string()),
+                    Ok(None) => continue,
+                    Err(StoreError::Integrity | StoreError::Serde(_)) => None,
+                    Err(e) => return Err(e),
+                },
+                Err(_) => None,
             };
-            candidates.retain(|sha| !text.contains(sha.as_str()));
+            match decoded {
+                Some(text) => candidates.retain(|sha| !text.contains(sha.as_str())),
+                None => {
+                    tracing::warn!(kind = k, id = %m.id, "a stored object does not decode; stored files are kept until it is repaired");
+                    undecodable.push(UndecodableObject { kind: k.to_string(), id: m.id });
+                }
+            }
         }
     }
-    Ok(candidates)
+    if !undecodable.is_empty() {
+        candidates.clear();
+    }
+    Ok((candidates, undecodable))
+}
+
+/// The stored attachments the items of workspace `ws` name: each indexed
+/// attachment whose hash appears in the JSON text of one of them, matched as
+/// [`unreferenced_in`] matches. An item that does not decode names none, so
+/// the files it may hold are kept.
+fn workspace_attachments_in(s: &StoreTx<'_>, ws: &Id) -> anvil_storage::store::Result<HashSet<String>> {
+    let stored: Vec<String> = attachment_entries_in(s)?.into_iter().map(|e| e.attachment).collect();
+    let ws = ws.to_string();
+    let mut held = HashSet::new();
+    if stored.is_empty() {
+        return Ok(held);
+    }
+    for k in REFERRERS {
+        for m in s.object_meta(k)? {
+            if m.workspace_id.as_deref() != Some(ws.as_str()) {
+                continue;
+            }
+            let Ok(id) = m.id.parse::<Id>() else { continue };
+            let text = match s.get::<serde_json::Value>(k, &id) {
+                Ok(Some(o)) => o.to_string(),
+                Ok(None) | Err(StoreError::Integrity | StoreError::Serde(_)) => continue,
+                Err(e) => return Err(e),
+            };
+            held.extend(stored.iter().filter(|sha| text.contains(sha.as_str())).cloned());
+        }
+    }
+    Ok(held)
 }
 
 /// The first stored attachment `value` names that none of `held` (what the
