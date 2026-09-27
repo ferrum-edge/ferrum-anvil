@@ -760,7 +760,7 @@ pub(crate) struct GrpcCall {
 /// path, with the framed request message of a unary or server-streaming
 /// call as its body. A local schema validates the method, call mode and
 /// every message before traffic. An `interactive` session refuses a call
-/// that does not stream requests.
+/// that does not stream requests, and every call a URL with a query.
 pub(crate) fn grpc_call(
     ctx: &ExecutionContext,
     r: &Resolver,
@@ -771,6 +771,14 @@ pub(crate) fn grpc_call(
 ) -> Result<GrpcCall, TransportFailure> {
     let version = prep.settings.http_version;
     let target = &prep.http.target;
+    // The call is sent to the method's path alone: a query would be signed
+    // and never sent.
+    if !target.query.is_empty() {
+        return Err(unsupported(
+            "a gRPC URL cannot have a query or query parameters: the call is sent to /<service>/<method> under the URL's path, with no query, so the query would be signed but never sent; remove it",
+            "url",
+        ));
+    }
     let tls_url = matches!(target.scheme.as_str(), "grpcs" | "https");
     let reflection = matches!(spec.schema, GrpcSchemaSource::Reflection);
     if let Some((msg, field)) = grpc::unsupported_combination(spec.wire, spec.mode, reflection, version, tls_url, prep.proxy.is_some()) {
