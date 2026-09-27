@@ -16,13 +16,18 @@
 use crate::vars::Resolver;
 use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::HeaderEntry;
-use anvil_domain::request::{PayloadEncoding, StreamPayload};
+use anvil_domain::request::PayloadEncoding;
 use anvil_domain::secret::REDACTED;
+use base64::Engine as _;
 
-/// Shorter values (and decoded secrets of fewer bytes) are not exact-value
-/// scrubbed: they would shred ordinary text. Name-based redaction still
-/// applies to them.
+/// Shorter values (and shorter forms of what a secret decodes to) are not
+/// exact-value scrubbed: they would shred ordinary text. Name-based
+/// redaction still applies to them.
 const MIN_SECRET_LEN: usize = 4;
+
+/// Occurrences of one secret registered per decoded field (the first ones,
+/// which a transcript preview shows).
+const MAX_DECODED_WINDOWS: usize = 64;
 
 /// Percent-decoding rounds applied to one URL component (covers values that
 /// were encoded more than once).
@@ -497,31 +502,101 @@ impl Redactor {
 /// Registers what the secrets the resolver substituted since `since` (an
 /// index into its secrets) into one hex- or base64-encoded field become once
 /// the field is `decoded`: the bytes are sent, and shown in a transcript, as
-/// text when they are UTF-8 and as lowercase hex otherwise. A secret that
-/// does not decode on its own to bytes of the field (it is split across the
-/// encoding's alignment by what precedes it) makes the whole decoded field
-/// secret. Fewer than [`MIN_SECRET_LEN`] bytes are not registered.
+/// text when they are UTF-8 and as lowercase hex otherwise. Each secret is
+/// found in the field's canonical encoding and registered as the window of
+/// decoded bytes it covers, widened to whole bytes (hex) or whole 4-character
+/// groups (base64), so a secret split across the encoding's alignment by what
+/// precedes it is covered along with the neighbouring bits it shares bytes
+/// with. A secret that cannot be found there makes the field's first
+/// preview's worth of bytes secret. Forms shorter than [`MIN_SECRET_LEN`]
+/// are not registered.
 pub(crate) fn note_decoded_secrets(r: &Resolver, since: usize, encoding: PayloadEncoding, decoded: &[u8]) {
-    if matches!(encoding, PayloadEncoding::Text) {
-        return;
-    }
-    let fresh: Vec<String> = r.used_secrets.lock().iter().skip(since).cloned().collect();
+    let canonical = match encoding {
+        PayloadEncoding::Text => return,
+        PayloadEncoding::Hex => hex::encode(decoded),
+        PayloadEncoding::Base64 => base64::engine::general_purpose::STANDARD.encode(decoded),
+    };
+    let fresh: Vec<String> = r.used_secrets.lock().iter().skip(since).filter(|s| s.len() >= MIN_SECRET_LEN).cloned().collect();
     let mut forms = Vec::new();
     for s in fresh {
-        let own = anvil_transport::session::decode_payload(&StreamPayload { data: s, encoding }).ok();
-        let bytes = match &own {
-            Some(b) if contains_bytes(decoded, b) => &b[..],
-            _ => decoded,
-        };
-        if bytes.len() < MIN_SECRET_LEN {
-            continue;
+        let windows = secret_windows(&s, encoding, &canonical, decoded.len());
+        if windows.is_empty() {
+            preview_forms(decoded, &mut forms);
         }
-        forms.push(hex::encode(bytes));
-        if let Ok(text) = std::str::from_utf8(bytes) {
-            forms.push(text.to_string());
+        for (start, end) in windows {
+            window_forms(decoded, start, end, &mut forms);
         }
     }
-    r.decoded_secrets.lock().extend(forms);
+    let mut known = r.decoded_secrets.lock();
+    for f in forms {
+        if f.len() >= MIN_SECRET_LEN && !known.contains(&f) {
+            known.push(f);
+        }
+    }
+}
+
+/// Byte ranges of a decoded field (of `len` bytes, `canonical` once encoded
+/// again) that hold secret `s`, the first [`MAX_DECODED_WINDOWS`] of them.
+/// The secret is cleaned as the field's decoder cleans it (hex: whitespace,
+/// `:` and a `0x` prefix dropped, case ignored; base64: surrounding
+/// whitespace dropped).
+fn secret_windows(s: &str, encoding: PayloadEncoding, canonical: &str, len: usize) -> Vec<(usize, usize)> {
+    let (needle, chars, bytes) = match encoding {
+        PayloadEncoding::Text => return vec![],
+        PayloadEncoding::Hex => {
+            let cleaned: String = s.trim().trim_start_matches("0x").chars().filter(|c| !c.is_whitespace() && *c != ':').collect();
+            (cleaned.to_ascii_lowercase(), 2, 1)
+        }
+        PayloadEncoding::Base64 => (s.trim().to_string(), 4, 3),
+    };
+    if needle.is_empty() {
+        return vec![];
+    }
+    let mut windows = Vec::new();
+    for (i, m) in canonical.match_indices(needle.as_str()) {
+        let start = i / chars * bytes;
+        let end = ((i + m.len()).div_ceil(chars) * bytes).min(len);
+        windows.push((start, end));
+        if windows.len() == MAX_DECODED_WINDOWS {
+            break;
+        }
+    }
+    windows
+}
+
+/// The window `start..end` of a decoded field as hex and, as text, widened to
+/// whole characters when the field is UTF-8 (or as it is when only the
+/// window is).
+fn window_forms(decoded: &[u8], start: usize, end: usize, forms: &mut Vec<String>) {
+    let window = &decoded[start..end];
+    forms.push(hex::encode(window));
+    if let Ok(text) = std::str::from_utf8(decoded) {
+        let (mut start, mut end) = (start, end);
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        forms.push(text[start..end].to_string());
+    } else if let Ok(text) = std::str::from_utf8(window) {
+        forms.push(text.to_string());
+    }
+}
+
+/// The head of a decoded field that a transcript preview shows: its hex, and
+/// its text when the field is UTF-8. Every session plan uses the default
+/// transcript limits; if a plan ever gets custom limits, pass them here.
+fn preview_forms(decoded: &[u8], forms: &mut Vec<String>) {
+    let limit = anvil_transport::session::TranscriptLimits::default().preview_bytes;
+    forms.push(hex::encode(&decoded[..decoded.len().min(limit / 2)]));
+    if let Ok(text) = std::str::from_utf8(decoded) {
+        let mut end = text.len().min(limit);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        forms.push(text[..end].to_string());
+    }
 }
 
 /// Longest first; equal lengths in a stable order so duplicates are adjacent.
@@ -606,6 +681,10 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    fn b64(bytes: &[u8]) -> String {
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+    }
+
     #[test]
     fn auth_002_query_and_header_redaction() {
         let r = Redactor::new(vec!["planted-secret-123".into()], vec![]);
@@ -631,19 +710,80 @@ mod tests {
         note_decoded_secrets(&r, 0, PayloadEncoding::Hex, &[0xde, 0xad, 0xbe, 0xef, 0x00, 0xc0, 0xff, 0xee]);
         r.used_secrets.lock().push("c2VjcmV0LXZhbHVl".into());
         note_decoded_secrets(&r, 1, PayloadEncoding::Base64, b"secret-value");
-        // Two decoded bytes are too few to scrub.
-        r.used_secrets.lock().push("AbCd".into());
-        note_decoded_secrets(&r, 2, PayloadEncoding::Hex, &[0xab, 0xcd]);
         let red = Redactor::for_execution(&r, &[]);
         assert_eq!(red.text("sent deadbeef00c0ffee"), format!("sent {REDACTED}"));
         assert_eq!(red.text("sent secret-value"), format!("sent {REDACTED}"));
         assert_eq!(red.text(&hex::encode("secret-value")), REDACTED);
-        assert_eq!(red.text("abcd"), "abcd");
-        // A secret that does not decode on its own where it sits: the whole field is secret.
+        // A secret that does not decode on its own where it sits: the bytes it shares are secret.
         let r = Resolver::new(vec![], None);
-        r.used_secrets.lock().push("c2VjcmV0".into());
-        note_decoded_secrets(&r, 0, PayloadEncoding::Base64, b"\x01\x02misaligned");
-        assert_eq!(Redactor::for_execution(&r, &[]).text("got 01026d6973616c69676e6564"), format!("got {REDACTED}"));
+        r.used_secrets.lock().push("taXNhbGl".into());
+        let field = b"\x01\x02misaligned";
+        assert_eq!(b64(field), "AQJtaXNhbGlnbmVk");
+        note_decoded_secrets(&r, 0, PayloadEncoding::Base64, field);
+        // Characters 3..11 lie in the groups of bytes 0..9.
+        assert_eq!(*r.decoded_secrets.lock(), vec![hex::encode(&field[..9]), "\x01\x02misalig".to_string()]);
+        assert_eq!(Redactor::for_execution(&r, &[]).text("got 01026d6973616c69676e6564"), format!("got {REDACTED}6e6564"));
+    }
+
+    #[test]
+    fn short_decoded_secrets_are_redacted_by_the_length_of_each_form() {
+        // Two and three decoded bytes: their lowercase hex is 4 and 6 characters.
+        let r = Resolver::new(vec![], None);
+        r.used_secrets.lock().push("AbCd".into());
+        note_decoded_secrets(&r, 0, PayloadEncoding::Hex, &[0xab, 0xcd]);
+        r.used_secrets.lock().push("c2Vj".into());
+        note_decoded_secrets(&r, 1, PayloadEncoding::Base64, b"sec");
+        assert_eq!(*r.decoded_secrets.lock(), vec!["abcd".to_string(), "736563".to_string()]);
+        let red = Redactor::for_execution(&r, &[]);
+        assert_eq!(red.text("sent abcd"), format!("sent {REDACTED}"));
+        assert_eq!(red.text("sent 736563"), format!("sent {REDACTED}"));
+        // Three characters of text are too few to scrub.
+        assert_eq!(red.text("sec"), "sec");
+        // Neither is a secret shorter than 4 characters.
+        let r = Resolver::new(vec![], None);
+        r.used_secrets.lock().push("abc".into());
+        note_decoded_secrets(&r, 0, PayloadEncoding::Hex, &[0x0a, 0xbc]);
+        assert!(r.decoded_secrets.lock().is_empty());
+    }
+
+    #[test]
+    fn decoded_secrets_in_a_field_longer_than_the_preview_are_bounded_windows() {
+        let limit = anvil_transport::session::TranscriptLimits::default().preview_bytes;
+        let field: Vec<u8> = (0..3_000u32).map(|i| (i % 256) as u8).collect();
+        assert!(field.len() > limit);
+        // A transcript shows a binary payload's first `limit / 2` bytes as hex.
+        let preview = hex::encode(&field[..limit / 2]);
+
+        // Hex: characters 21..37 start and end mid-byte, so bytes 10..19 are secret.
+        let r = Resolver::new(vec![], None);
+        let secret = hex::encode(&field)[21..37].to_ascii_uppercase();
+        assert_eq!(secret, "A0B0C0D0E0F10111");
+        r.used_secrets.lock().push(secret);
+        note_decoded_secrets(&r, 0, PayloadEncoding::Hex, &field);
+        let window = hex::encode(&field[10..19]);
+        assert!(r.decoded_secrets.lock().iter().all(|f| f.len() <= window.len()), "{:?}", r.decoded_secrets.lock());
+        let out = Redactor::for_execution(&r, &[]).text(&preview);
+        assert!(!out.contains(&window) && !out.contains("a0b0c0d0e0f10111"));
+        assert_eq!(out, preview.replace(&window, REDACTED));
+        assert_eq!(out.matches(REDACTED).count(), 4, "once in every 256 bytes shown");
+
+        // Base64: characters 10..30 are groups 2..8, bytes 6..24.
+        let r = Resolver::new(vec![], None);
+        let secret = b64(&field)[10..30].to_string();
+        r.used_secrets.lock().push(secret);
+        note_decoded_secrets(&r, 0, PayloadEncoding::Base64, &field);
+        let window = hex::encode(&field[6..24]);
+        assert!(r.decoded_secrets.lock().iter().all(|f| f.len() <= window.len()), "{:?}", r.decoded_secrets.lock());
+        let out = Redactor::for_execution(&r, &[]).text(&preview);
+        assert!(!out.contains(&window));
+        assert_eq!(out, preview.replace(&window, REDACTED));
+
+        // A secret the field does not show verbatim: what the preview shows of the field is secret.
+        let r = Resolver::new(vec![], None);
+        r.used_secrets.lock().push("not-in-the-field".into());
+        note_decoded_secrets(&r, 0, PayloadEncoding::Hex, &field);
+        assert_eq!(*r.decoded_secrets.lock(), vec![preview.clone()]);
+        assert_eq!(Redactor::for_execution(&r, &[]).text(&preview), REDACTED);
     }
 
     #[test]

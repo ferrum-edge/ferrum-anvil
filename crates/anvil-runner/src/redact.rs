@@ -130,6 +130,9 @@ impl RunSecrets {
             // Hex previews too: the redactor knows secrets' hex forms.
             for m in &mut st.messages {
                 m.preview = red.text(&m.preview);
+                for s in [&mut m.event_id, &mut m.event_type].into_iter().flatten() {
+                    *s = red.text(s);
+                }
             }
         }
         r.outcome.summary = red.text(&r.outcome.summary);
