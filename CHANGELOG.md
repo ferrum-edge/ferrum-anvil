@@ -194,6 +194,11 @@
   the running release's own catalog, and `anvil-lab run` and `up` refuse a
   release Anvil has no catalog for, or only one audited at another commit
   (#137).
+  The `early` profile's ground-truth checks on 1-RTT HTTP/3 requests now
+  accept `Early-Data: 1` (and EARLY-005 a 425 and its retry) on gateway
+  releases before 0.9.8, which can mark such a request as early data
+  (ferrum-edge#5775), and name that in the check detail; 0.9.8 and later
+  stay strict.
 - WebSocket over HTTP/2 and HTTP/3, SSE over HTTP/2 and gRPC (native and
   gRPC-Web, every HTTP version) now send an explicit `Host` header as the
   request's authority (`:authority`, or `Host` over HTTP/1.1), as HTTP

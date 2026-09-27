@@ -84,6 +84,17 @@ cache); a round that missed the window must be reported as `handshake_completed_
 early data, and the backend must agree. In the recorded runs no round was missed (HTTP/3 setup
 ~20 µs, request written ~0.1 ms after `connect`).
 
+**Gateway race before v0.9.8.** v0.9.5 and v0.9.7 can classify an HTTP/3 stream accepted before the
+gateway's own handshake-complete signal as early data (ferrum-edge/ferrum-edge#5761, fixed in v0.9.8
+by #5775), so a request Anvil sent as ordinary 1-RTT data reaches the backend with `Early-Data: 1`,
+or draws 425 when its method is not GET. Lab run 36345042003 saw it on macOS for CTRL-EARLY and
+EARLY-001's ticket GET. On releases before v0.9.8 the ground-truth checks on 1-RTT requests through
+the early-data listener (CTRL-EARLY, EARLY-001's ticket GET, EARLY-005, EARLY-007 and missed 0-RTT
+rounds) therefore accept `Early-Data: 1`, and EARLY-005 accepts a 425 followed by its one retry; the
+check detail names the misclassification. Anvil's own evidence must still say nothing was sent
+early. On v0.9.8 and later these checks stay strict. EARLY-002's retry is sent a round trip after the
+handshake, outside the race.
+
 ## 4. Results
 
 | Release | Runs | Result |
