@@ -395,6 +395,20 @@ Data a client sends before its TLS 1.3 handshake completes (RFC 8446 §2.3; QUIC
   - on the HTTPS path a request that *carries* `Early-Data: 1` with a method outside the list also gets that 425 (`src/proxy/mod.rs` 30953–30988). The release catalogs' outcome `gateway.admission.early_data_rejected` cites both paths.
 - **Not implemented.** Early data for sessions (WebSocket, gRPC, SSE, TCP, UDP) and through proxies or tunnels; early data with more than one offered ALPN over TCP; persistent tickets (by design); load runs with early data (refused).
 
+### 3.13 HTTP/1.1 and HTTP/2 connection reuse
+
+With connection reuse on, HTTP/1.1 and HTTP/2 requests share pooled connections per pool key (isolation, destination, proxy, TLS profile, version policy, DNS settings and PROXY header plan). The pool keeps at most 8 idle connections per key and 64 in total, closing the longest idle first, and a background sweep closes connections idle for 90 s. The connection that answered `425 Too Early` is kept for the retry (§3.12) and closed after 10 s if the retry does not use it.
+
+- **A dead connection is not handed out.** On checkout, a connection whose task ended, or that hyper reports closed or not ready, is dropped and the request takes another one or opens a new one.
+- **A close that crosses the request.** A server may close an idle connection just as a request goes out on it, before the client has read the close. The request then fails on the reused connection before any response (`closed_before_response`, `reset_before_response`, or `request_write_failed`). Anvil sends it once more on a new connection only when that is safe:
+  - hyper returned the request unwritten, or no byte of it reached the connection;
+  - its method is idempotent (`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`);
+  - or it is the retry after `425 Too Early`, which the engine sends only for a method eligible for early data.
+
+  Over cleartext HTTP/1.1 it must also be that no response byte arrived. Both attempts are recorded. The first keeps its failure on the reused connection (`connection.reused`, `prior_requests`), with "reused connection #N was found closed; the request was sent once more on a new connection" in its message. The second has reason `retry{after: <that failure kind>}` and a new connection. It is sent at most once more and never reuses a pooled connection.
+- **Never resent silently.** A non-idempotent request (for example a `POST`) that was written to the reused connection is not sent again, because the server may have received it. The attempt fails with the closed or reset kind, `dispatch = may_have_been_sent`, and "not sent again: the POST request was written and is not idempotent" in its message. The engine's own retry policy (off by default) decides from there, and it too replays only a request that provably never left or an idempotent method.
+- Tested in `anvil-transport/tests/http_pool.rs`: an idempotent `GET` whose pooled connection the origin closes on receiving it succeeds on a new connection; a written `POST` is not resent; the retry after 425 on a connection closed under it is sent on a new one; and the retry on a kept connection the origin already closed ends on a new connection whether or not the client saw the close first.
+
 ## 4. Failure-matrix coverage
 
 | Case | Test (real sockets) |

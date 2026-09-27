@@ -1,9 +1,9 @@
 //! Instrumented HTTP/1.1 and HTTP/2 execution with an isolation-keyed pool.
 //!
 //! One call to [`HttpTransport::execute`] performs one logical attempt (plus a
-//! transparent re-dispatch when hyper proves a pooled request was never
-//! serialized — recorded as its own attempt). Redirects, retries and auth
-//! re-signing belong to the engine.
+//! transparent re-dispatch when a reused pooled connection turns out to be
+//! closed before any response and resending is safe — recorded as its own
+//! attempt). Redirects, retries and auth re-signing belong to the engine.
 
 use crate::connector::{self, BoxIo, Established, ProxyPlan, Target};
 use crate::dns::DnsConfig;
@@ -230,6 +230,10 @@ impl Drop for StreamLease {
 }
 
 impl Pooled {
+    /// Checked on every checkout: a connection whose task ended, or that
+    /// hyper reports closed or not ready, is dropped instead of reused. The
+    /// peer's close may still be in flight, so a request on a reused
+    /// connection can fail anyway (see [`HttpTransport::execute`]).
     fn is_usable(&self) -> bool {
         if self.closed.load(Ordering::SeqCst) {
             return false;
@@ -643,6 +647,23 @@ fn is_idempotent(m: &Method) -> bool {
     matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE | Method::PUT | Method::DELETE)
 }
 
+/// The failures of a connection closed or reset under a request before its
+/// response head: the peer closed it, typically as it went idle.
+fn closed_before_response(kind: FailureKind) -> bool {
+    matches!(kind, FailureKind::ClosedBeforeResponse | FailureKind::ResetBeforeResponse | FailureKind::RequestWriteFailed)
+}
+
+/// Whether a request that failed on a reused connection before any response
+/// may be sent once more on a new one: no byte of it reached the connection,
+/// its method is idempotent, or it is the retry after `425 Too Early` (sent
+/// only for a method eligible for early data). Anything else may already
+/// have been received and is never resent silently.
+fn resend_is_safe(plan: &HttpPlan, dispatch: DispatchState) -> bool {
+    dispatch == DispatchState::NotDispatched
+        || is_idempotent(&plan.method)
+        || plan.early_data == EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly)
+}
+
 impl HttpTransport {
     pub fn new() -> Self {
         HttpTransport::default()
@@ -664,9 +685,11 @@ impl HttpTransport {
         CacheGenerations { pool: self.pool.generation(), tickets: self.tickets.generation() }
     }
 
-    /// Execute one logical attempt. Returns one output, or two when a pooled
-    /// connection proved (typed) that the request was never serialized and a
-    /// fresh connection was used.
+    /// Execute one logical attempt. Returns one output, or two when a reused
+    /// pooled connection failed the request before any response and it was
+    /// safe to send it once more on a fresh connection: hyper returned it
+    /// unsent, no byte of it was written, its method is idempotent, or it is
+    /// the retry after `425 Too Early`.
     pub async fn execute(
         &self,
         plan: &HttpPlan,
@@ -681,12 +704,10 @@ impl HttpTransport {
         // HBONE tunnels carry one execution's identity and headers: fresh per attempt.
         let mut allow_pool = plan.keepalive && !crate::hbone::is_hbone(plan.proxy.as_ref());
         for attempt_index in (index..).take(2) {
-            let (out, redispatch) = self.execute_once(plan, &key, attempt_index, attempt_reason.clone(), allow_pool, events, cancel).await;
+            let (out, resend) = self.execute_once(plan, &key, attempt_index, attempt_reason.clone(), allow_pool, events, cancel).await;
             outputs.push(out);
-            if !redispatch {
-                break;
-            }
-            attempt_reason = AttemptReason::Retry { after: FailureKind::ClosedBeforeResponse };
+            let Some(after) = resend else { break };
+            attempt_reason = AttemptReason::Retry { after };
             allow_pool = false;
         }
         outputs
@@ -702,19 +723,19 @@ impl HttpTransport {
         allow_pool: bool,
         events: &EventCtx,
         cancel: &CancellationToken,
-    ) -> (AttemptOutput, bool) {
+    ) -> (AttemptOutput, Option<FailureKind>) {
         let mut early = (plan.early_data != EarlyDataIntent::Off && plan.https).then(|| EarlyAttempt {
             obs: early_observation(plan.early_data, EarlyDataTransport::Tls),
             info: None,
             send: false,
             t0: None,
         });
-        let (mut out, redispatch) = self.execute_once_inner(plan, key, index, reason, allow_pool, events, cancel, &mut early).await;
+        let (mut out, resend) = self.execute_once_inner(plan, key, index, reason, allow_pool, events, cancel, &mut early).await;
         if let Some(e) = early {
             let t0 = e.t0.unwrap_or_else(Instant::now);
             e.finish(&mut out.observation, t0);
         }
-        (out, redispatch)
+        (out, resend)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -728,7 +749,7 @@ impl HttpTransport {
         events: &EventCtx,
         cancel: &CancellationToken,
         early: &mut Option<EarlyAttempt>,
-    ) -> (AttemptOutput, bool) {
+    ) -> (AttemptOutput, Option<FailureKind>) {
         let started_at = Utc::now();
         let mut rec = Recorder::new(index, events.clone());
         if let Some(e) = early.as_mut() {
@@ -781,7 +802,7 @@ impl HttpTransport {
                 "h2c (cleartext HTTP/2) cannot be used with an https:// URL",
             )
             .with_field("settings.http_version");
-            return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+            return (fail(rec, obs, f, DispatchState::NotDispatched), None);
         }
         if matches!(plan.version, HttpVersionPolicy::Http2Only) && !plan.https {
             let f = TransportFailure::new(
@@ -790,11 +811,11 @@ impl HttpTransport {
                 "HTTP/2-only over TLS was selected for an http:// URL; choose h2c for cleartext HTTP/2",
             )
             .with_field("settings.http_version");
-            return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+            return (fail(rec, obs, f, DispatchState::NotDispatched), None);
         }
         if plan.https && plan.tls.is_none() {
             let f = TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "no TLS configuration for https request");
-            return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+            return (fail(rec, obs, f, DispatchState::NotDispatched), None);
         }
 
         // ---- acquire a connection ----
@@ -887,12 +908,12 @@ impl HttpTransport {
                     }
                     _ = cancel.cancelled() => {
                         let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::Canceled, "canceled during connection setup");
-                        return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+                        return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
                     _ = sleep_until_opt(total_deadline) => {
                         let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::TotalTimeout, "total deadline elapsed during connection setup")
                             .with_deadline(plan.timeouts.total_ms);
-                        return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+                        return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
                 };
                 if let Some(why) = &plan.proxy_header_withheld {
@@ -902,7 +923,7 @@ impl HttpTransport {
                     Ok(e) => e,
                     Err((f, cobs)) => {
                         obs.connection = Some(cobs);
-                        return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+                        return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
                 };
                 let early_alpn =
@@ -915,7 +936,7 @@ impl HttpTransport {
                     }
                     Err((f, cobs)) => {
                         obs.connection = Some(cobs);
-                        return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+                        return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
                 }
             }
@@ -943,7 +964,7 @@ impl HttpTransport {
                 if !reused || matches!(conn.sender, Sender::H1(_)) {
                     self.pool.checkin(key, conn, generation);
                 }
-                return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+                return (fail(rec, obs, f, DispatchState::NotDispatched), None);
             }
         };
         let (body, signal) = InstrumentedBody::new(plan.body.clone());
@@ -974,7 +995,7 @@ impl HttpTransport {
             Err(e) => {
                 let f = TransportFailure::new(Phase::Prepare, FailureKind::InvalidHeader, format!("request could not be built: {e}"))
                     .with_field("headers");
-                return (fail(rec, obs, f, DispatchState::NotDispatched), false);
+                return (fail(rec, obs, f, DispatchState::NotDispatched), None);
             }
         };
 
@@ -1042,7 +1063,7 @@ impl HttpTransport {
                         let f = TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteTimeout,
                             "the request could not be fully handed to the connection before the write deadline (peer not reading?)")
                             .with_deadline(plan.timeouts.request_write_ms);
-                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), false);
+                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), None);
                     }
                     _ = sleep_until_opt(headers_deadline), if write_done => {
                         let dispatch = dispatch_from_bytes(&conn.stats, written_before);
@@ -1050,21 +1071,21 @@ impl HttpTransport {
                         let f = TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
                             "no response headers arrived before the response-header deadline")
                             .with_deadline(plan.timeouts.response_headers_ms);
-                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), false);
+                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), None);
                     }
                     _ = sleep_until_opt(total_deadline) => {
                         let dispatch = dispatch_from_bytes(&conn.stats, written_before);
                         self.pool.evict(key, conn.template.id);
                         let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::AwaitResponseHeaders), FailureKind::TotalTimeout,
                             "total deadline elapsed before response headers").with_deadline(plan.timeouts.total_ms);
-                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), false);
+                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), None);
                     }
                     _ = cancel.cancelled() => {
                         let dispatch = dispatch_from_bytes(&conn.stats, written_before);
                         self.pool.evict(key, conn.template.id);
                         let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::AwaitResponseHeaders), FailureKind::Canceled,
                             "canceled before response headers arrived");
-                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), false);
+                        return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), None);
                     }
                 }
             }
@@ -1090,13 +1111,36 @@ impl HttpTransport {
                 } else {
                     dispatch_from_bytes(&conn.stats, written_before)
                 };
-                // A pooled connection that provably never received the request
-                // is re-dispatched once on a fresh connection.
-                let redispatch = unsent && reused;
+                // A reused connection the peer had closed (or was closing) as
+                // the request went out fails it before any response: hyper had
+                // not seen the close when the connection was checked out. It
+                // is sent once more on a fresh connection when hyper returned
+                // it unsent, or when it failed before any response with a
+                // closed-connection class and resending is safe.
+                let closed = closed_before_response(f.kind);
+                // On cleartext HTTP/1.1 the connection's byte counter shows
+                // that no part of a response arrived. Over TLS it also counts
+                // TLS records (a `close_notify`) and over HTTP/2 other streams'
+                // frames: there the missing response head is what counts.
+                let no_response = is_h2 || plan.https || conn.stats.bytes_read() == read_before;
+                let safe = resend_is_safe(plan, dispatch);
+                let resend = reused && (unsent || (closed && no_response && safe));
                 if unsent {
                     f.message = format!("{} (the request was not written to the connection)", f.message);
                 }
-                return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), redispatch);
+                if resend {
+                    f.message = format!(
+                        "{} (reused connection #{} was found closed; the request was sent once more on a new connection)",
+                        f.message, conn.template.id
+                    );
+                } else if reused && closed && !safe {
+                    f.message = format!(
+                        "{} (reused connection #{}; not sent again: the {} request was written and is not idempotent)",
+                        f.message, conn.template.id, plan.method
+                    );
+                }
+                let resend = resend.then_some(f.kind);
+                return (finalize_fail(fail(rec, obs, f, dispatch), &conn.stats, written_before, read_before), resend);
             }
         };
 
@@ -1286,8 +1330,7 @@ impl HttpTransport {
         obs.failure = failure;
         obs.duration_us = rec.us();
         obs.phases = std::mem::take(&mut rec.phases);
-        let _ = is_idempotent;
-        (AttemptOutput { observation: obs, response: Some(response), body: captured }, false)
+        (AttemptOutput { observation: obs, response: Some(response), body: captured }, None)
     }
 
     /// Set up HTTP/1.1 or HTTP/2 over an established stream. With
