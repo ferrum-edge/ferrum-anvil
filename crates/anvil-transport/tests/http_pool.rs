@@ -58,6 +58,7 @@ fn plan(url: &str) -> HttpPlan {
         isolation: "pool-test".into(),
         display_url: url.into(),
         early_data: EarlyDataIntent::Off,
+        fence: None,
     }
 }
 

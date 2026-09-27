@@ -16,7 +16,7 @@ use crate::prepare::{self, Target};
 use crate::record::{self, Assembly};
 use crate::redact::Redactor;
 use crate::vars::Resolver;
-use crate::{Engine, ExecutionOutput};
+use crate::{Engine, ExecutionOutput, SensitiveEpoch};
 use anvil_auth::{ResolvedAuth, SignableRequest};
 use anvil_diagnostics::{Draft, FerrumTrust};
 use anvil_domain::Id;
@@ -132,7 +132,7 @@ async fn apply_auth(
     cancel: &CancellationToken,
 ) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
-        match crate::oauth_http::acquire(engine, ctx, &prep.settings, key, cfg, cancel).await {
+        match crate::oauth_http::acquire(engine, prep.epoch, ctx, &prep.settings, key, cfg, cancel).await {
             Ok(t) => replace_oauth(&mut prep.auth, &t),
             Err(e) => return Err(crate::oauth_http::acquisition_failure(cfg, e, "Nothing was sent.")),
         }
@@ -233,8 +233,8 @@ struct Base {
     inferred: Vec<String>,
 }
 
-fn base(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, schemes: &[&str]) -> Result<Base, TransportFailure> {
-    let prep = http_exec::prepare_all(engine, ctx, r, schemes)?;
+fn base(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r: &Resolver, schemes: &[&str]) -> Result<Base, TransportFailure> {
+    let prep = http_exec::prepare_all_at(engine, epoch, ctx, r, schemes)?;
     let redactor = Redactor::for_execution(r, &ctx.redaction_names);
     let mut inferred = prep.inferred.clone();
     if prep.settings.early_data.enabled {
@@ -281,20 +281,22 @@ fn redact_fn(r: &Redactor) -> RedactFn {
     Arc::new(move |s: &str| r.text(s))
 }
 
-/// `cancel` ends a wait for an OAuth token (nothing is sent).
+/// `cancel` ends a wait for an OAuth token (nothing is sent). `epoch` is the
+/// engine's when the execution started.
 async fn prepare_session(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     r: &Resolver,
     interactive: bool,
     cancel: &CancellationToken,
 ) -> Result<SessionPrep, TransportFailure> {
     match ctx.spec.protocol {
-        Protocol::WebSocket => prepare_ws(engine, ctx, r, cancel).await,
-        Protocol::Grpc => prepare_grpc(engine, ctx, r, interactive, cancel).await,
-        Protocol::Sse => prepare_sse(engine, ctx, r, cancel).await,
-        Protocol::Tcp => prepare_tcp(engine, ctx, r),
-        Protocol::Udp => prepare_udp(engine, ctx, r, cancel).await,
+        Protocol::WebSocket => prepare_ws(engine, epoch, ctx, r, cancel).await,
+        Protocol::Grpc => prepare_grpc(engine, epoch, ctx, r, interactive, cancel).await,
+        Protocol::Sse => prepare_sse(engine, epoch, ctx, r, cancel).await,
+        Protocol::Tcp => prepare_tcp(engine, epoch, ctx, r),
+        Protocol::Udp => prepare_udp(engine, epoch, ctx, r, cancel).await,
         Protocol::Http => Err(unsupported("HTTP is request/response; use execute() rather than a session", "protocol")),
     }
 }
@@ -331,6 +333,7 @@ fn ws_deflate_offer(spec: &RequestSpec, o: &WsDeflateOffer) -> Result<Option<ws_
 
 async fn prepare_ws(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     r: &Resolver,
     cancel: &CancellationToken,
@@ -345,7 +348,7 @@ async fn prepare_ws(
         permessage_deflate: Default::default(),
     });
     let deflate = ws_deflate_offer(&ctx.spec, &spec.permessage_deflate)?;
-    let mut b = base(engine, ctx, r, &["wss", "ws"])?;
+    let mut b = base(engine, epoch, ctx, r, &["wss", "ws"])?;
     let target = b.prep.http.target.clone();
     let mut headers = b.prep.http.headers.clone();
     if !has_explicit_header(&ctx.spec, "accept-encoding") {
@@ -419,12 +422,13 @@ async fn prepare_ws(
 
 async fn prepare_sse(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     r: &Resolver,
     cancel: &CancellationToken,
 ) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.sse.clone().unwrap_or(SseSpec { max_events: 0, idle_timeout_ms: 30_000, last_event_id: None, reconnect: false });
-    let mut b = base(engine, ctx, r, &["https", "http"])?;
+    let mut b = base(engine, epoch, ctx, r, &["https", "http"])?;
     if let Some(f) = sse::version_unsupported(b.prep.settings.http_version, b.prep.http.target.scheme == "https", b.prep.proxy.is_some()) {
         return Err(f);
     }
@@ -511,6 +515,7 @@ async fn load_schema(ctx: &ExecutionContext, spec: &GrpcSpec) -> Result<grpc::Sc
 
 async fn prepare_grpc(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     r: &Resolver,
     interactive: bool,
@@ -519,7 +524,7 @@ async fn prepare_grpc(
     let Some(spec) = ctx.spec.grpc.clone() else {
         return Err(local(FailureKind::BodySerialization, "a gRPC request needs a service, method and schema", "grpc"));
     };
-    let mut b = base(engine, ctx, r, &["grpcs", "grpc", "https", "http"])?;
+    let mut b = base(engine, epoch, ctx, r, &["grpcs", "grpc", "https", "http"])?;
     let version = b.prep.settings.http_version;
     let target = b.prep.http.target.clone();
     let tls_url = matches!(target.scheme.as_str(), "grpcs" | "https");
@@ -691,7 +696,7 @@ fn no_auth(prep: &Prepared, protocol: &str) -> Result<(), TransportFailure> {
     }
 }
 
-fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
+fn prepare_tcp(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r: &Resolver) -> Result<SessionPrep, TransportFailure> {
     let spec = ctx.spec.tcp.clone().unwrap_or(TcpSpec {
         tls: false,
         framing: TcpFraming::None,
@@ -702,13 +707,13 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
         expect_frames: 0,
         proxy_protocol: None,
     });
-    let mut b = base(engine, ctx, r, &["tcp", "tls"])?;
+    let mut b = base(engine, epoch, ctx, r, &["tcp", "tls"])?;
     no_auth(&b.prep, "TCP")?;
     let target = b.prep.http.target.clone();
     let use_tls = target.scheme == "tls" || spec.tls;
     let mut tls: Option<Arc<PreparedTls>> = None;
     if use_tls {
-        let (t, name, _) = http_exec::tls_for(engine, ctx, &b.prep.settings, &target, &mut b.inferred)?;
+        let (t, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &b.prep.settings, &target, &mut b.inferred)?;
         tls = Some(t);
         b.prep.tls_profile_name = name;
         b.prep.tls = tls.clone();
@@ -755,6 +760,7 @@ fn prepare_tcp(engine: &Engine, ctx: &ExecutionContext, r: &Resolver) -> Result<
 
 async fn prepare_udp(
     engine: &Engine,
+    epoch: SensitiveEpoch,
     ctx: &ExecutionContext,
     r: &Resolver,
     cancel: &CancellationToken,
@@ -767,7 +773,7 @@ async fn prepare_udp(
         masque: None,
         proxy_protocol: None,
     });
-    let mut b = base(engine, ctx, r, &["udp", "dtls"])?;
+    let mut b = base(engine, epoch, ctx, r, &["udp", "dtls"])?;
     if spec.masque.is_none() {
         no_auth(&b.prep, "UDP")?;
     }
@@ -932,7 +938,7 @@ fn dtls_plan(
     path: DtlsPath,
 ) -> Result<dtls::DtlsPlan, TransportFailure> {
     let settings = b.prep.settings.clone();
-    let (t, name, _) = http_exec::tls_for(engine, ctx, &settings, target, &mut b.inferred)?;
+    let (t, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &settings, target, &mut b.inferred)?;
     b.prep.tls_profile_name = name;
     b.prep.tls = Some(t.clone());
     let identity = match identity_material(ctx, &settings, target)? {
@@ -1083,7 +1089,7 @@ async fn prepare_masque(
     let proxy_target = Target { path, query, ..pt };
     b.inferred.extend(notes);
     let settings = b.prep.settings.clone();
-    let (tls, name, _) = http_exec::tls_for(engine, ctx, &settings, &proxy_target, &mut b.inferred)?;
+    let (tls, name, _) = http_exec::tls_for(engine, b.prep.epoch, ctx, &settings, &proxy_target, &mut b.inferred)?;
     b.prep.tls_profile_name = name;
     b.prep.tls = Some(tls.clone());
     // The proxy is the only HTTP peer, so gateway trust follows the proxy.
@@ -1390,8 +1396,11 @@ async fn run_prepared(
 /// Automation execution for WebSocket, gRPC, SSE, TCP/TLS and UDP/DTLS.
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
     let started_at = Utc::now();
+    // Taken first: TLS material prepared after a lock is not cached.
+    let epoch = engine.sensitive_epoch();
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
-    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver).await;
+    // Canceling the execution abandons a Workload API call in flight.
+    let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
     let materialized = match materialized {
         Ok(m) => m,
         Err(f) => return record::local_failure_with(ctx, &resolver, started_at, f, Some(workload)),
@@ -1402,7 +1411,7 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     // cancellation abandons it and nothing is sent.
     let prepared = tokio::select! {
         biased;
-        p = prepare_session(engine, ctx, &resolver, false, &cancel) => p,
+        p = prepare_session(engine, epoch, ctx, &resolver, false, &cancel) => p,
         _ = cancel.cancelled() => {
             Err(TransportFailure::new(Phase::Prepare, FailureKind::Canceled, "the execution was canceled before anything was sent"))
         }
@@ -1502,17 +1511,19 @@ impl Engine {
     /// idle auto-close do not apply to interactive sessions.
     pub async fn open_session(&self, ctx: ExecutionContext, events: EventCtx) -> SessionHandle {
         let started_at = Utc::now();
+        // Taken first: TLS material prepared after a lock is not cached.
+        let epoch = self.sensitive_epoch();
         let protocol = ctx.spec.protocol;
         let execution_id = events.execution_id;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let cancel = CancellationToken::new();
         let fallback = Box::new(ctx.clone());
-        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver).await;
+        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver, &cancel).await;
         let (ctx, prepared, workload) = match materialized {
             Ok(m) => {
                 let ctx = m.unwrap_or(ctx);
                 let workload = (!workload.is_empty()).then_some(workload);
-                let prepared = prepare_session(self, &ctx, &resolver, true, &cancel).await;
+                let prepared = prepare_session(self, epoch, &ctx, &resolver, true, &cancel).await;
                 (ctx, prepared, workload)
             }
             Err(f) => (ctx, Err(f), Some(workload)),

@@ -97,6 +97,18 @@
 
 ### Fixed
 
+- Work still in flight when a profile locks no longer refills what the lock
+  cleared. The desktop lock cancels a SPIFFE Workload API call in flight,
+  and an answer that arrives after the lock anyway (an X.509-SVID, a
+  JWT-SVID or JWT bundles) is never cached; before, a JWT-SVID fetched
+  across a lock could stay in memory after it. Likewise, for an execution
+  that began before the lock, even one that is not canceled: the cookies of
+  its responses are not stored, the TLS configuration it prepares (which
+  holds a client identity's private key) is not cached, its connections
+  (HTTP/1.1, HTTP/2 and HTTP/3) are closed instead of pooled, and its TLS or
+  QUIC connections keep none of the session tickets they receive. Not yet
+  fenced: the gRPC channels of a load run's virtual users, and a workspace
+  delete while work is in flight.
 - A spec reimport now compares the import's scoped configuration too, not
   only its requests: the source's own variables, auth, settings and
   description (on the new workspace, or on the import root in an existing

@@ -332,7 +332,7 @@ The webview only ever sees `IdentitySummary`.
 | Full browser round trip, then a real API request with the token; forged state; stray paths and DNS-rebinding Host; timeout; cancellation; denial; refresh; revoked refresh; issuer outage and recovery; the exchange uses the request's TLS profile; refused configurations; WebSocket parity | `crates/anvil-identity/tests/api_oauth.rs` | AUTH-011–015 |
 | Real providers typed unavailable; mock provider round trip and denial | `crates/anvil-identity/src/{provider,mock}.rs` | — |
 | Link with the mock provider; fresh-login policy (refused, allowed, wrong passphrase, stale, other account, recovery offline); identity is not a key; edited hint; relink and unlink; restoring another user's backup; target-API sign-in through the app, dropped on lock; token-cache identity per defining workspace, folder or request | `crates/anvil-app/tests/identity.rs` | DATA-015, DATA-017, DATA-018, DATA-019 |
-| SPIFFE Workload API: X.509-SVID and JWT-SVID sources, local checks, caching, cleared on lock, never recorded; the probe; the import stance | `crates/anvil-transport/tests/workload_api.rs`, `crates/anvil-engine/tests/workload_api.rs`, `crates/anvil-cli/tests/cli_workload.rs`, `crates/anvil-portability/tests/bundles.rs`; live: lab `workload` (`docs/lab/workload.md`) | — |
+| SPIFFE Workload API: X.509-SVID and JWT-SVID sources, local checks, caching, cleared on lock (and not refilled by an answer that arrives after it), never recorded; the probe; the import stance | `crates/anvil-transport/tests/workload_api.rs`, `crates/anvil-engine/tests/workload_api.rs`, `crates/anvil-cli/tests/cli_workload.rs`, `crates/anvil-portability/tests/bundles.rs`; live: lab `workload` (`docs/lab/workload.md`) | — |
 
 ---
 
@@ -355,8 +355,11 @@ a gateway's backend identity (#3). The protocol details are in
   JWT-SVID and the JWT bundles are held only in the engine's memory cache
   (zeroized buffers), refreshed at half their lifetime, cleared on lock with
   the OAuth tokens, never written to the vault, history, exports or logs, and
-  never sent to the webview. The record keeps public data: SPIFFE IDs, the
-  certificate summary, `aud`, `exp`, `alg`, `kid` and the check results.
+  never sent to the webview. The desktop lock cancels a Workload API call in
+  flight, and an answer that arrives after the lock anyway is never cached,
+  nor is the TLS configuration prepared with that X.509-SVID's private key.
+  The record keeps public data: SPIFFE IDs, the certificate summary, `aud`,
+  `exp`, `alg`, `kid` and the check results.
 - **Checked before use.** A JWT-SVID must be a JWT-SVID (asymmetric `alg`, a
   workload SPIFFE ID as `sub`), carry every configured audience and be
   unexpired by this machine's clock; with bundle verification, its signature

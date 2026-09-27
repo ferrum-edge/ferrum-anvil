@@ -69,6 +69,27 @@ pub struct HttpPlan {
     pub proxy_header_withheld: Option<String>,
     /// How the 0-RTT early-data opt-in applies to this attempt.
     pub early_data: EarlyDataIntent,
+    /// The pool and ticket-cache generations when the execution this attempt
+    /// belongs to began. After a clear since (a vault lock), the attempt pools
+    /// no connection and keeps no ticket, however many attempts, redirects
+    /// or retries later it runs. `None`: taken when the attempt begins.
+    pub fence: Option<CacheFence>,
+}
+
+/// The generations of one transport's connection pool and ticket cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheGenerations {
+    pub(crate) pool: u64,
+    pub(crate) tickets: u64,
+}
+
+/// The cache generations of both HTTP transports, over TCP
+/// ([`HttpTransport`]) and QUIC ([`crate::h3::H3Transport`]), taken together
+/// when an execution begins (see [`HttpPlan::fence`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheFence {
+    pub tcp: CacheGenerations,
+    pub quic: CacheGenerations,
 }
 
 /// How the early-data opt-in applies to one attempt.
@@ -287,6 +308,13 @@ pub struct PoolStats {
 /// Idle connections are bounded per key and in total, and a background sweep
 /// closes those idle longer than the TTL even when their key is never used
 /// again. The sweep runs only while the pool holds connections.
+///
+/// [`Pool::clear`] starts a new generation. An attempt takes the generation
+/// (its execution's, see [`HttpPlan::fence`]) before it checks a connection
+/// out or opens one, and the connection is returned only while that
+/// generation is current (checked under the pool lock): a request still in
+/// flight when the pool is cleared (a vault lock) closes its connection
+/// instead of pooling it again.
 pub struct Pool {
     shared: Arc<PoolShared>,
 }
@@ -298,6 +326,8 @@ struct PoolShared {
 
 #[derive(Default)]
 struct PoolState {
+    /// Advanced by [`Pool::clear`].
+    generation: u64,
     idle: HashMap<String, Vec<Pooled>>,
     /// The connection that answered `425 Too Early` to early data, kept
     /// (even with connection reuse off) for the engine's one retry on it
@@ -333,6 +363,12 @@ impl Pool {
         stats
     }
 
+    /// The current generation, taken by an attempt before it acquires a
+    /// connection and handed back with it.
+    fn generation(&self) -> u64 {
+        self.shared.state.lock().generation
+    }
+
     fn checkout(&self, key: &str) -> Option<(Pooled, Option<StreamLease>)> {
         let now = Instant::now();
         let ttl = self.shared.limits.idle_ttl;
@@ -358,12 +394,18 @@ impl Pool {
         found
     }
 
-    fn checkin(&self, key: &str, mut p: Pooled) {
+    /// Return a connection an attempt of `generation` used. After a
+    /// [`clear`](Self::clear) since, it is closed instead.
+    fn checkin(&self, key: &str, mut p: Pooled, generation: u64) {
         let limits = self.shared.limits;
         p.idle_since = Instant::now();
         let mut dropped = Vec::new();
         {
             let mut state = self.shared.state.lock();
+            if state.generation != generation {
+                // Dropped after the lock is released.
+                return;
+            }
             let list = state.idle.entry(key.to_string()).or_default();
             if list.iter().any(|x| x.template.id == p.template.id) {
                 // A shared HTTP/2 connection is already pooled.
@@ -422,10 +464,14 @@ impl Pool {
         found
     }
 
-    fn keep_too_early(&self, key: &str, mut p: Pooled) {
+    fn keep_too_early(&self, key: &str, mut p: Pooled, generation: u64) {
         p.idle_since = Instant::now();
         let replaced = {
             let mut state = self.shared.state.lock();
+            if state.generation != generation {
+                // Cleared since the attempt began: not kept for the retry.
+                return;
+            }
             let replaced = state.too_early.insert(key.to_string(), p);
             self.ensure_sweeper(&mut state);
             replaced
@@ -453,10 +499,13 @@ impl Pool {
         }));
     }
 
-    /// Drop every pooled connection (e.g. on vault lock or workspace switch).
+    /// Drop every pooled connection (e.g. on vault lock or workspace switch)
+    /// and start a new generation: a connection in use now is not pooled
+    /// again when its request ends.
     pub fn clear(&self) {
         let removed = {
             let mut state = self.shared.state.lock();
+            state.generation = state.generation.wrapping_add(1);
             (std::mem::take(&mut state.idle), std::mem::take(&mut state.too_early))
         };
         drop(removed);
@@ -603,6 +652,11 @@ impl HttpTransport {
         self.pool.shared.sweep_at(now, false);
     }
 
+    /// The current pool and ticket-cache generations (see [`HttpPlan::fence`]).
+    pub fn cache_generations(&self) -> CacheGenerations {
+        CacheGenerations { pool: self.pool.generation(), tickets: self.tickets.generation() }
+    }
+
     /// Execute one logical attempt. Returns one output, or two when a pooled
     /// connection proved (typed) that the request was never serialized and a
     /// fresh connection was used.
@@ -737,6 +791,11 @@ impl HttpTransport {
         }
 
         // ---- acquire a connection ----
+        // Those of the execution (else taken now, first): a connection this
+        // attempt checks out or opens goes back to the pool, and the tickets
+        // it receives are kept, only if nothing was cleared since.
+        let CacheGenerations { pool: generation, tickets: ticket_generation } =
+            plan.fence.map_or_else(|| self.cache_generations(), |f| f.tcp);
         let q = rec.start(Phase::Queue);
         // The retry after `425 Too Early` goes out on the connection that
         // answered it, whose handshake is complete.
@@ -787,7 +846,13 @@ impl HttpTransport {
                         if wants && alpn.len() > 1 {
                             e.obs.not_used = Some(EarlyDataNotUsed::AlpnNotFixed);
                         }
-                        Some(connector::TlsResumption { tickets: &self.tickets, isolation: &plan.isolation, prepared, send_early: e.send })
+                        Some(connector::TlsResumption {
+                            tickets: &self.tickets,
+                            generation: ticket_generation,
+                            isolation: &plan.isolation,
+                            prepared,
+                            send_early: e.send,
+                        })
                     }
                     (Some(e), _) => {
                         if e.obs.not_used.is_none() {
@@ -869,7 +934,7 @@ impl HttpTransport {
                 let f = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, format!("request target is not a valid URI: {e}"))
                     .with_field("url");
                 if !reused || matches!(conn.sender, Sender::H1(_)) {
-                    self.pool.checkin(key, conn);
+                    self.pool.checkin(key, conn, generation);
                 }
                 return (fail(rec, obs, f, DispatchState::NotDispatched), false);
             }
@@ -1164,13 +1229,13 @@ impl HttpTransport {
         // Only an eligible request is retried after 425 (the engine's rule).
         let kept_for_retry = plan.early_data == EarlyDataIntent::Send && status == 425 && failure.is_none() && !conn_close && !tunneled;
         if kept_for_retry {
-            self.pool.keep_too_early(key, conn.clone());
+            self.pool.keep_too_early(key, conn.clone(), generation);
         }
         let reusable = failure.is_none() && plan.keepalive && !conn_close && !tunneled;
         match &conn.sender {
             Sender::H1(_) => {
                 if reusable {
-                    self.pool.checkin(key, conn.clone());
+                    self.pool.checkin(key, conn.clone(), generation);
                 } else if !kept_for_retry {
                     conn.closed.store(true, Ordering::SeqCst);
                     self.pool.evict(key, conn.template.id);
@@ -1180,7 +1245,7 @@ impl HttpTransport {
                 if s.is_closed() || !plan.keepalive || tunneled {
                     self.pool.evict(key, conn.template.id);
                 } else if !reused {
-                    self.pool.checkin(key, conn.clone());
+                    self.pool.checkin(key, conn.clone(), generation);
                 }
             }
         }

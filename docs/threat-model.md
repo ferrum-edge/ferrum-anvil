@@ -103,7 +103,8 @@ against it).
   holder resume a session. They are kept in memory only, per workspace,
   transport, host and port, TLS profile and client identity, never persisted
   or exported, and dropped with pooled connections and OAuth tokens when the
-  vault locks.
+  vault locks. A connection of an execution that began before the lock keeps
+  none of the tickets it receives afterwards.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -240,7 +241,20 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   scope is the workspace boundary: it does not separate items inside one
   workspace, so anything imported into a workspace can use its secrets.
 - **Lock bypass:** the backend refuses privileged commands while locked; the
-  key is dropped; sessions, executions and load runs are stopped.
+  key is dropped; sessions, executions and load runs are stopped. Work still
+  in flight at the lock cannot refill what it cleared, even if it is not
+  canceled: each cache the lock clears is fenced by the generation the work
+  started in, checked under the cache's own lock. A Workload API answer or
+  an OAuth token that arrives after the lock to a call made before it is
+  never cached. For an execution that began before the lock, nothing of the
+  following is kept after it: its responses' cookies, the TLS
+  configurations it prepares (which hold a client identity's private key
+  and a session store), its connections (HTTP/1.1, HTTP/2 or HTTP/3) and
+  the session tickets they receive. The exceptions, both tracked for
+  follow-up: the gRPC channels of a load run's virtual users are not fenced
+  (their engines are stopped on lock and dropped with the run), and a
+  workspace delete (`Engine::clear_isolation`) clears that workspace's
+  caches without starting a new generation.
 - **Test backdoors shipped:** E2E WebDriver and env unlock exist only under
   the `e2e` feature; the release check fails if they are present
   ([ADR 0009](adr/0009-test-hooks-excluded-from-release.md)).

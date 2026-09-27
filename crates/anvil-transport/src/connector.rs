@@ -347,6 +347,8 @@ async fn write_pre_tls_header(
 /// `send_early`, offers early data when the ticket allows it.
 pub struct TlsResumption<'a> {
     pub tickets: &'a crate::tickets::TicketCache,
+    /// The ticket cache's generation when the attempt began.
+    pub generation: u64,
     pub isolation: &'a str,
     pub prepared: Arc<PreparedTls>,
     pub send_early: bool,
@@ -419,7 +421,15 @@ async fn resumable_tls(
 ) -> (Result<Established, (TransportFailure, ConnectionObservation)>, Option<crate::early_tls::ResumableInfo>) {
     use crate::early_tls::{EarlyPending, EarlyTlsIo, ResumableInfo};
     let prepared = r.prepared.clone();
-    let ctx = r.tickets.context(r.isolation, crate::tickets::TicketTransport::Tls, target.host, target.port, &prepared, target.alpn);
+    let ctx = r.tickets.context(
+        r.generation,
+        r.isolation,
+        crate::tickets::TicketTransport::Tls,
+        target.host,
+        target.port,
+        &prepared,
+        target.alpn,
+    );
     let mut info = ResumableInfo { ctx: ctx.clone(), tickets_before: ctx.store.received(), taken: None, resumed: None, early: None };
     let (sn, handle) = match tls::routed_handle(&prepared, target.host, target.alpn) {
         Ok(x) => x,
