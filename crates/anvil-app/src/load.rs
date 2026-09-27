@@ -290,7 +290,7 @@ impl App {
                     let preview = self.engine.preview(ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
                     let mut d = format!("{} {}", preview.method, url_origin(&preview.url));
                     let mut local = url_is_loopback(&preview.url);
-                    if let Some(proxy) = route_proxy(ctx, &preview.url, Protocol::Http) {
+                    if let Some(proxy) = anvil_load::protocol::route(ctx, &preview.url, Protocol::Http).and_then(|(_, p)| p) {
                         d.push_str(&proxy_label(proxy));
                         local &= address_is_loopback(&proxy.address);
                     }
@@ -420,35 +420,11 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
         let proxy_url = resolve(&m.proxy_url, "udp.masque.proxy_url");
         d.push_str(&format!(" via MASQUE proxy {}", url_origin(&proxy_url)));
         local &= url_is_loopback(&proxy_url);
-    } else if let Some(proxy) = route_proxy(ctx, &url, protocol) {
+    } else if let Some(proxy) = anvil_load::protocol::route(ctx, &url, protocol).and_then(|(_, p)| p) {
         d.push_str(&proxy_label(proxy));
         local &= address_is_loopback(&proxy.address);
     }
     (d, local)
-}
-
-/// The proxy profile the engine sends the request for `url` through, picked
-/// as its preparation picks it: the selected profile, unless the profile's
-/// `NO_PROXY` list bypasses the target's host and port. `None` when the URL
-/// does not parse; every send then fails on the URL itself.
-fn route_proxy<'a>(ctx: &'a anvil_engine::ExecutionContext, url: &str, protocol: Protocol) -> Option<&'a ProxyProfile> {
-    let target = anvil_engine::prepare::parse_target(url, send_schemes(protocol), &mut Vec::new()).ok()?;
-    anvil_engine::settings::resolve(&ctx.settings_layers)
-        .proxy_profile_id
-        .and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id))
-        .filter(|p| !anvil_transport::net::no_proxy_matches(&p.no_proxy, &target.host, target.port))
-}
-
-/// The URL schemes the engine sends a request of `protocol` with (the first
-/// is used for a URL without one).
-fn send_schemes(protocol: Protocol) -> &'static [&'static str] {
-    match protocol {
-        Protocol::Http | Protocol::Sse => &["https", "http"],
-        Protocol::WebSocket => &["wss", "ws"],
-        Protocol::Grpc => &["grpcs", "grpc", "https", "http"],
-        Protocol::Tcp => &["tcp", "tls"],
-        Protocol::Udp => &["udp", "dtls"],
-    }
 }
 
 /// ` via HTTP proxy host:port`-style suffix of a destination.

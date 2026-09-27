@@ -1167,3 +1167,64 @@ async fn grpc_schema_attachments_travel_to_the_worker_job() {
     let (_, lj, _) = wj.into_load_job().unwrap();
     assert!(LoadRun::prepare(p, lj, opts()).is_ok());
 }
+
+/// A request of `protocol` whose selected proxy profile is an HTTP proxy
+/// with the given `NO_PROXY` list.
+fn via_http_proxy(protocol: Protocol, url: &str, no_proxy: &str) -> ExecutionContext {
+    let mut c = ctx(protocol, url);
+    let pid = Id::new();
+    c.proxy_profiles.push(ProxyProfile {
+        id: pid,
+        workspace_id: Id::new(),
+        name: "corp".into(),
+        kind: ProxyKind::Http,
+        address: "proxy.test:3128".into(),
+        username: None,
+        password: None,
+        no_proxy: no_proxy.into(),
+        tls_profile_id: None,
+        hbone: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    });
+    layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
+    c
+}
+
+/// The route the refusals and the app's preflight share: a URL without a
+/// scheme takes its protocol's first send scheme, other protocols' schemes
+/// are refused, and the selected proxy profile routes the target unless its
+/// `NO_PROXY` list bypasses the target's host and port.
+#[test]
+fn route_uses_each_protocols_schemes_and_the_no_proxy_list() {
+    use anvil_load::protocol::{route, send_schemes};
+    let cases = [
+        (Protocol::Http, "api.test/x", "https", 443),
+        (Protocol::Sse, "api.test:8080/events", "https", 8080),
+        (Protocol::WebSocket, "api.test/ws", "wss", 443),
+        (Protocol::Grpc, "api.test:50051", "grpcs", 50051),
+        (Protocol::Tcp, "api.test:7000", "tcp", 7000),
+        (Protocol::Udp, "api.test:5353", "udp", 5353),
+    ];
+    for (protocol, url, scheme, port) in cases {
+        assert_eq!(send_schemes(protocol)[0], scheme, "{protocol:?}");
+        let c = via_http_proxy(protocol, url, "");
+        let (target, proxy) = route(&c, url, protocol).expect("the URL parses");
+        assert_eq!((target.scheme.as_str(), target.host.as_str(), target.port), (scheme, "api.test", port), "{protocol:?}");
+        assert_eq!(proxy.map(|p| p.address.as_str()), Some("proxy.test:3128"), "{protocol:?}");
+        // Bypassed by host (any port), by host and its own port, and not by another port.
+        let c = via_http_proxy(protocol, url, "other.test, .api.test");
+        assert!(route(&c, url, protocol).expect("the URL parses").1.is_none(), "{protocol:?}");
+        let c = via_http_proxy(protocol, url, &format!("api.test:{port}"));
+        assert!(route(&c, url, protocol).expect("the URL parses").1.is_none(), "{protocol:?}");
+        let c = via_http_proxy(protocol, url, "api.test:1");
+        assert!(route(&c, url, protocol).expect("the URL parses").1.is_some(), "{protocol:?}");
+    }
+    // Explicit schemes the protocol sends with, and one it does not.
+    let c = via_http_proxy(Protocol::Grpc, "http://api.test:50051", "");
+    assert_eq!(route(&c, "http://api.test:50051", Protocol::Grpc).map(|(t, _)| t.scheme), Some("http".to_string()));
+    let c = via_http_proxy(Protocol::Udp, "dtls://api.test:5684", "");
+    assert_eq!(route(&c, "dtls://api.test:5684", Protocol::Udp).map(|(t, _)| t.scheme), Some("dtls".to_string()));
+    let c = via_http_proxy(Protocol::Tcp, "udp://api.test:7000", "");
+    assert!(route(&c, "udp://api.test:7000", Protocol::Tcp).is_none());
+}
