@@ -844,7 +844,7 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
         (plan(iterations(1, 1), vec![id], mode), vec![(id, c)])
     };
     // A UDP or DTLS request through a mesh HBONE proxy profile.
-    let via_hbone = |url: &str| {
+    let via_hbone = |url: &str, no_proxy: &str| {
         let mut c = ctx(Protocol::Udp, url);
         let pid = Id::new();
         c.proxy_profiles.push(ProxyProfile {
@@ -855,7 +855,7 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
             address: "127.0.0.1:15008".into(),
             username: None,
             password: None,
-            no_proxy: String::new(),
+            no_proxy: no_proxy.into(),
             tls_profile_id: None,
             hbone: None,
             created_at: Utc::now(),
@@ -935,7 +935,7 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
     };
     for (a, b, text) in [
         (direct(), masque(), "direct datagrams with a MASQUE (CONNECT-UDP) tunnel"),
-        (masque(), via_hbone("udp://127.0.0.1:9"), "a MASQUE (CONNECT-UDP) tunnel with an HBONE datagram tunnel"),
+        (masque(), via_hbone("udp://127.0.0.1:9", ""), "a MASQUE (CONNECT-UDP) tunnel with an HBONE datagram tunnel"),
     ] {
         let (x, y) = (Id::new(), Id::new());
         let r = refused(plan(iterations(1, 1), vec![x, y], ConnectionMode::Fresh), vec![(x, a), (y, b)]);
@@ -945,11 +945,41 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
     }
     // A single tunneled request is accepted, in either connection mode.
     for mode in [ConnectionMode::Fresh, ConnectionMode::Persistent] {
-        for c in [masque(), via_hbone("udp://127.0.0.1:9"), via_hbone("dtls://127.0.0.1:9")] {
+        for c in [masque(), via_hbone("udp://127.0.0.1:9", ""), via_hbone("dtls://127.0.0.1:9", "")] {
             let (p, reqs) = one(c, mode);
             let job = LoadJob { requests: reqs.into_iter().collect(), dataset: None };
             assert!(LoadRun::prepare(p, job, opts()).is_ok());
         }
+    }
+    // A target the HBONE profile's NO_PROXY bypasses is sent directly, as the
+    // engine does: no tunnel, so it shares a plan with direct datagrams and
+    // may use the persistent mode. One the list does not cover is tunneled.
+    let tunnel_of = |c: &ExecutionContext| anvil_load::protocol::classify(None, c, ConnectionMode::Fresh).unwrap().tunnel;
+    assert_eq!(tunnel_of(&via_hbone("udp://127.0.0.1:9", "127.0.0.1")), None);
+    assert_eq!(tunnel_of(&via_hbone("dtls://127.0.0.1:9", "127.0.0.0/8")), None);
+    assert_eq!(tunnel_of(&via_hbone("udp://127.0.0.1:9", "10.0.0.0/8")), Some(TunnelKind::Hbone));
+    assert_eq!(tunnel_of(&via_hbone("udp://127.0.0.1:9", "127.0.0.1:53")), Some(TunnelKind::Hbone));
+    let (x, y) = (Id::new(), Id::new());
+    let p = plan(iterations(1, 1), vec![x, y], ConnectionMode::Persistent);
+    let job = LoadJob { requests: [(x, direct()), (y, via_hbone("udp://127.0.0.1:9", "127.0.0.1"))].into_iter().collect(), dataset: None };
+    assert!(LoadRun::prepare(p, job, opts()).is_ok());
+    let r = refused(
+        plan(iterations(1, 1), vec![x, y], ConnectionMode::Fresh),
+        vec![(x, direct()), (y, via_hbone("udp://127.0.0.1:9", "10.0.0.0/8"))],
+    );
+    assert_eq!(r.code, RefusalCode::MixedTunnels, "{}", r.message);
+    assert!(r.message.contains("direct datagrams with an HBONE datagram tunnel"), "{}", r.message);
+    // The same bypass lifts the persistent-mode refusal for HTTP and gRPC.
+    let bypassed = |mut c: ExecutionContext, no_proxy: &str| {
+        let hbone = via_hbone("udp://127.0.0.1:9", no_proxy);
+        c.proxy_profiles = hbone.proxy_profiles;
+        c.settings_layers = hbone.settings_layers;
+        c
+    };
+    for c in [ctx(Protocol::Http, &f.url("/")), grpc_ctx(&url, "Unary", GrpcMode::Unary, "{}", GrpcWire::Grpc)] {
+        let persistent = |no_proxy: &str| anvil_load::protocol::classify(None, &bypassed(c.clone(), no_proxy), ConnectionMode::Persistent);
+        assert!(persistent("127.0.0.1").is_ok());
+        assert_eq!(persistent("10.0.0.0/8").unwrap_err().code, RefusalCode::HbonePersistent);
     }
     // Plans the engine would refuse on every send are refused up front, with
     // the engine's own reason: gRPC-Web has no client stream.

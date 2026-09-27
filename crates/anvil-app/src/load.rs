@@ -277,8 +277,8 @@ impl App {
         let (unit, steps) = anvil_load::protocol::classify_plan(ids.iter().map(|id| (*id, &job.requests[id])), p.connection_mode)
             .map_err(|r| AppError::Invalid(format!("this plan cannot be load tested: {r}")))?;
         let mut destinations = Vec::new();
-        // Whether any host a unit's traffic reaches (a target or a tunnel's
-        // proxy) is off this machine; each host is judged on its own.
+        // Whether a unit's target, or a datagram tunnel's proxy, is off this
+        // machine; each host is judged on its own. Other proxies are not judged.
         let mut leaves = false;
         for id in ids {
             let ctx = &job.requests[&id];

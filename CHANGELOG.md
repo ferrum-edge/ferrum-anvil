@@ -55,6 +55,9 @@
   or two kinds of tunnel, is refused (`mixed_tunnels`), and so is UDP
   through a MASQUE proxy while a proxy profile routes the request
   (`masque_through_proxy`), which the engine would refuse on every send.
+  A target the HBONE profile's `NO_PROXY` list bypasses is sent directly,
+  as the engine does: it counts as a direct exchange, and HTTP or gRPC to it
+  is not refused in persistent mode (`hbone_persistent`).
 - Load plan checks refuse a gRPC call the engine would refuse on every send,
   such as gRPC-Web with client or bidirectional streaming
   (`grpc_unsupported_combination`, quoting the engine's reason).

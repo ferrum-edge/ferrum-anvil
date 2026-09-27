@@ -95,7 +95,7 @@ with a `RefusalCode`; the editor shows it and cannot start the run):
 | `grpc_unsupported_combination` | A gRPC call the engine refuses before every send, found by the engine's own check with the request's wire, call mode, HTTP version, URL scheme and proxy route: gRPC-Web with client or bidirectional streaming (gRPC-Web has no client stream), native gRPC over HTTP/1.1-only, HTTP/3 without TLS or through a proxy, and so on. The refusal quotes the engine's reason. |
 | `masque_through_proxy` | UDP or DTLS through a MASQUE proxy while a proxy profile routes the request (its `NO_PROXY` list does not bypass the target): the MASQUE proxy is reached over QUIC, which HTTP CONNECT, SOCKS5 and HBONE tunnels do not carry, so every exchange would be refused. |
 | `sse_reconnect` | Automatic reconnection turns one stream into several connections with server-chosen delays. |
-| `hbone_persistent` | HTTP or gRPC through a mesh HBONE proxy in persistent mode: tunnels carry one execution's identity and are never pooled, so persistent mode could not be honoured. Fresh mode is allowed (it is what would happen). |
+| `hbone_persistent` | HTTP or gRPC through a mesh HBONE proxy in persistent mode: tunnels carry one execution's identity and are never pooled, so persistent mode could not be honoured. Fresh mode is allowed (it is what would happen). A target the profile's `NO_PROXY` list bypasses is sent directly and is not refused. |
 | `early_data` | The request enables 0-RTT early data: handshakes that share session tickets are serialized (their evidence is per connection) and the report has no early-data denominators. |
 | `incomplete_request` | A gRPC request without a service, method or schema. |
 
@@ -115,7 +115,9 @@ carry these modes, so such a plan is refused before any traffic
 **Datagram tunnels.** UDP and DTLS exchanges through a MASQUE (CONNECT-UDP)
 proxy or a mesh HBONE proxy open **one tunnel per exchange** (a QUIC
 connection or an mTLS connection, and its CONNECT); tunnels are never
-pooled, in either connection mode. The datagram block's `tunnels`
+pooled, in either connection mode. A target the HBONE profile's `NO_PROXY`
+list bypasses is sent directly, as the engine does: it opens no tunnel and
+counts as a direct exchange. The datagram block's `tunnels`
 denominators count them: attempted (the exchange got past preparation),
 established, refused (the proxy answered the CONNECT with a non-2xx
 status), failed, timed out, canceled (the run stopped during setup), and
@@ -131,11 +133,14 @@ traffic reaches the proxy first, and warns that traffic leaves this machine
 when either the target or the proxy is not a loopback address or
 `localhost` (each host is judged on its own).
 
-Combinations the engine itself refuses (e.g. native gRPC with HTTP/1.1-only,
-gRPC over HTTP/3 with a cleartext URL, UDP through an HTTP proxy) keep failing
-per send with `unsupported_combination` before any bytes are written; they
-are local failures in the ledger, never successes. An abort rule stops such a
-run early.
+gRPC calls the engine refuses on every send (native gRPC with HTTP/1.1-only,
+gRPC over HTTP/3 with a cleartext URL or through a proxy, gRPC-Web client or
+bidirectional streams) are refused before traffic as
+`grpc_unsupported_combination`, and UDP through a MASQUE proxy while a proxy
+profile routes the request as `masque_through_proxy`. Other combinations the
+engine itself refuses keep failing per send with `unsupported_combination`
+before any bytes are written; they are local failures in the ledger, never
+successes. An abort rule stops such a run early.
 
 **Connection modes per unit.** For HTTP requests and gRPC calls/streams,
 *persistent* keeps pooled connections per virtual user: HTTP keep-alive and
