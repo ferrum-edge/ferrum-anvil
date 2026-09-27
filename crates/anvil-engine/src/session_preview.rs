@@ -43,10 +43,9 @@ pub(crate) fn schemes(protocol: Protocol) -> Result<&'static [&'static str], Tra
             "preview not supported for raw TCP: the payloads are sent verbatim, with no HTTP request to preview",
             "protocol",
         )),
-        Protocol::Udp => Err(unsupported(
-            "preview not supported for UDP: the datagrams are sent verbatim, with no HTTP request to preview",
-            "protocol",
-        )),
+        Protocol::Udp => {
+            Err(unsupported("preview not supported for UDP: the datagrams are sent verbatim, with no HTTP request to preview", "protocol"))
+        }
     }
 }
 
@@ -178,9 +177,7 @@ fn grpc_call(
                 message = Some(m.clone());
             }
         }
-        grpc::Schema::Pool(_) => {
-            inferred.push("the request messages are streamed once the call is open; the body shown is empty".into())
-        }
+        grpc::Schema::Pool(_) => inferred.push("the request messages are streamed once the call is open; the body shown is empty".into()),
         grpc::Schema::Reflection => {
             inferred.push("server reflection: the request message is encoded when the call is sent; the body shown is empty".into())
         }

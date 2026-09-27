@@ -806,9 +806,8 @@ pub(crate) fn grpc_call(
     if version == HttpVersionPolicy::Http3Only {
         inferred.push("HTTP/3 (QUIC) only: the call never falls back to TCP".into());
     } else if version == HttpVersionPolicy::Http3WithFallback {
-        inferred.push(
-            "HTTP/3 first; if it fails before the call is sent, the call is made over TCP as a separate, recorded attempt".into(),
-        );
+        inferred
+            .push("HTTP/3 first; if it fails before the call is sent, the call is made over TCP as a separate, recorded attempt".into());
     }
     let service = r.resolve(&spec.service, "grpc.service")?;
     let method = r.resolve(&spec.method, "grpc.method")?;
