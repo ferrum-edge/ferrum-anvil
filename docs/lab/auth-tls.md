@@ -1,7 +1,7 @@
 # Gateway failure lab: `auth` and `tls` profiles
 
-These two profiles drive a **real, pinned Ferrum Edge release binary** (v0.9.7
-by default, v0.9.5 with `--release v0.9.5`) with controllable fixtures, and
+These two profiles drive a **real, pinned Ferrum Edge release binary** (v0.9.8
+by default, v0.9.7 or v0.9.5 with `--release`) with controllable fixtures, and
 check what Anvil's shared engine concludes from the public evidence alone.
 Nothing is faked: no injected headers, no injected failure enums, no fixture
 pretending to be the gateway. Every result records the gateway release, source

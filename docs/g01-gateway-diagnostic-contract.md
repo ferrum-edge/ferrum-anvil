@@ -5,18 +5,19 @@
 | **Status** | Proposal (new work in Ferrum Edge). No released gateway implements it, so Anvil keeps "authorized diagnostic detail" explicitly unavailable. |
 | **Owner** | Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer. |
 | **Tracking** | ferrum-edge/ferrum-edge#5767 (this proposal), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
-| **Compatibility** | Additive. The seven public `X-Gateway-Error` tokens, their statuses and bodies stay unchanged. |
+| **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8), their statuses and bodies stay unchanged. |
 
 ## Problem
 
 Today a client sees a coarse token (`connection_failure`, `backend_timeout`,
-…) and a status. On v0.9.5 and v0.9.7:
+…) and a status. On v0.9.5, v0.9.7 and v0.9.8:
 
 - a token merges several causes. For example, `connection_failure` covers
   DNS, TCP, TLS, pool and egress policy;
-- a backend can inject the marker on some paths (native gRPC responses,
-  plugin reject maps), so a client can never *confirm* that the gateway
-  authored it;
+- the marker is unauthenticated: on v0.9.5 and v0.9.7 a backend can inject
+  it on some paths (native gRPC responses), and on every release a plugin
+  rejection or a non-Ferrum endpoint can carry any value, so a client can
+  never *confirm* that the gateway authored it;
 - the operator has the precise `error_class`, but only in logs the caller
   cannot see.
 

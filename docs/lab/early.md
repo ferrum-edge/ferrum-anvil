@@ -1,8 +1,8 @@
 # Failure lab: `early` profile
 
 This profile drives Anvil's TLS 1.3 / QUIC **0-RTT early data** ([protocols.md §3.12](../protocols.md))
-against the **real, pinned Ferrum Edge release binary** (v0.9.7 by default, v0.9.5 with
-`--release v0.9.5`). There are no gateway mocks.
+against the **real, pinned Ferrum Edge release binary** (v0.9.8 by default, v0.9.7 or v0.9.5 with
+`--release`). There are no gateway mocks.
 
 The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3 early data)"),
 `docs/frontend_tls.md` and its source (v0.9.7 `8fed134` lines; the early-data code of v0.9.5
@@ -18,8 +18,8 @@ The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3
 - A request stream accepted before the handshake completed is early data (`src/http3/server.rs`
   1731–1790, accept loop biased ahead of the completion signal at 1973–1979). Because every
   connection starts flagged as early, a 1-RTT request that becomes ready in the same turn as handshake
-  completion can also be classified as early (source analysis, not observed here;
-  ferrum-edge/ferrum-edge#5761). A method outside the list gets `425 {"error":"Method not allowed in 0-RTT early data"}` before routing (2805–2825);
+  completion can also be classified as early (ferrum-edge/ferrum-edge#5761, fixed in v0.9.8 by
+  #5775; observed on v0.9.7 in lab run 36345042003 on macOS, see §3). A method outside the list gets `425 {"error":"Method not allowed in 0-RTT early data"}` before routing (2805–2825);
   an admitted one is forwarded with `Early-Data: 1` (`src/http3/cross_protocol.rs` 1171–1178,
   5439–5440).
 - The **HTTPS (TCP) listener never accepts early data** (`src/tls/mod.rs` `enable_early_data`,
@@ -83,6 +83,17 @@ the request itself inside the 0-RTT window, so they try up to 6 rounds (each fro
 cache); a round that missed the window must be reported as `handshake_completed_first`, never as
 early data, and the backend must agree. In the recorded runs no round was missed (HTTP/3 setup
 ~20 µs, request written ~0.1 ms after `connect`).
+
+**Gateway race before v0.9.8.** v0.9.5 and v0.9.7 can classify an HTTP/3 stream accepted before the
+gateway's own handshake-complete signal as early data (ferrum-edge/ferrum-edge#5761, fixed in v0.9.8
+by #5775), so a request Anvil sent as ordinary 1-RTT data reaches the backend with `Early-Data: 1`,
+or draws 425 when its method is not GET. Lab run 36345042003 saw it on macOS for CTRL-EARLY and
+EARLY-001's ticket GET. On releases before v0.9.8 the ground-truth checks on 1-RTT requests through
+the early-data listener (CTRL-EARLY, EARLY-001's ticket GET, EARLY-005, EARLY-007 and missed 0-RTT
+rounds) therefore accept `Early-Data: 1`, and EARLY-005 accepts a 425 followed by its one retry; the
+check detail names the misclassification. Anvil's own evidence must still say nothing was sent
+early. On v0.9.8 and later these checks stay strict. EARLY-002's retry is sent a round trip after the
+handshake, outside the race.
 
 ## 4. Results
 

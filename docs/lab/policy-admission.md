@@ -1,11 +1,13 @@
 # Failure lab: policy, admission and drain profiles
 
 Three real-gateway profiles for the WAF/policy and gateway-admission families of the failure matrix.
-Every stimulus drives a pinned Ferrum Edge release binary (v0.9.7 by default, v0.9.5 with
-`--release v0.9.5`) with controllable local fixtures. No response is faked, and no failure is
+Every stimulus drives a pinned Ferrum Edge release binary (v0.9.8 by default, v0.9.7 or v0.9.5 with
+`--release`) with controllable local fixtures. No response is faked, and no failure is
 injected as an enum. Behaviour recorded below as "0.9.5" was re-observed on 0.9.7: every scenario
 passes on both releases with the same expectations, except `GW-010-BOT.allow-edge`, whose verdict is
-release-dependent (see [gateway-0.9.7-delta.md](../audit/gateway-0.9.7-delta.md)).
+release-dependent (see [gateway-0.9.7-delta.md](../audit/gateway-0.9.7-delta.md)). v0.9.8 strips an
+injected `X-Gateway-Upstream-Status` (GW-019-ERROR/OK/FORGED); its expectations follow the source
+audit ([gateway-0.9.8-delta.md](../audit/gateway-0.9.8-delta.md)).
 
 | Profile | Gateway listeners | Fixture ports | Config | Scenarios |
 |---|---|---|---|---|
@@ -101,8 +103,8 @@ byte-identical where noted.
 | GW-020-PROVIDER | GW-020 | The **provider's 500** passes through and the gateway stamps `backend_error`. Anvil reports the token (≤ likely) with the "application itself produced" caveat and no gateway catalog attribution for the provider's envelope. Recovery: 200. |
 | GW-020-CONTENT | GW-020 | **AI response content guard.** The provider answered 200 (ground truth); the gateway blocks it with 502 `{"error":"AI response blocked by content guard",...}` **and stamps `backend_error`**. Anvil must not blame the application or the gateway-to-provider leg: no passthrough claim and no `upstream_application` or `gateway_to_upstream` finding at ≥ likely. `ferrum.token.backend_error` lists response-policy rejections. Recovery: a clean reply returns 200. |
 | GW-001-HALFOPEN | GW-001 (beyond core's open-state check) | **Circuit breaker.** Two backend 500s (ground truth: 2 hits) open it. A would-succeed request then gets 503 `circuit_breaker_open` with 0 backend hits. After 2 s, exactly one half-open probe is admitted; it fails, and the breaker re-opens immediately. After another 2 s a successful probe closes it, and traffic flows again. Operator log: `rejection_phase=circuit_breaker_open`. **Lookalike:** an application 503 with the breaker's exact body gets `backend_error` and no breaker claim. |
-| GW-019-ERROR | GW-019 | A **response hook** writes `X-Gateway-Error: lab-spoofed-token` and `X-Gateway-Upstream-Status: degraded` on a refused-backend 502. The gateway **restores** the authoritative `connection_failure`, and Anvil sees no unknown token. The hook's `degraded` **survives** (verified live); Anvil keeps it ≤ likely and names plugins as possible writers. |
-| GW-019-OK | GW-019 | The same hook on a 200. `X-Gateway-Error` is stripped and `degraded` passes. Anvil reports success and only a degraded-routing warning (≤ likely); untrusted, it reports only an unverified-marker warning. |
+| GW-019-ERROR | GW-019 | A **response hook** writes `X-Gateway-Error: lab-spoofed-token` and `X-Gateway-Upstream-Status: degraded` on a refused-backend 502. The gateway **restores** the authoritative `connection_failure`, and Anvil sees no unknown token. The hook's `degraded` **survives** on 0.9.5 and 0.9.7 (verified live); Anvil keeps it ≤ likely and names plugins as possible writers. On 0.9.8 the builder strips it (#5759) and no degraded-routing finding appears. |
+| GW-019-OK | GW-019 | The same hook on a 200. `X-Gateway-Error` is stripped and, on 0.9.5 and 0.9.7, `degraded` passes. Anvil reports success and only a degraded-routing warning (≤ likely); untrusted, it reports only an unverified-marker warning. On 0.9.8 both headers are stripped and Anvil reports plain success with no marker warning. |
 | GW-019-FORGED | GW-019, TRUST-011 | The **backend** forges both headers on a 200 (ground truth: fixture). Same result as GW-019-OK. |
 | GW-019-REJECT-UNKNOWN | GW-019, TRUST-003 | A reject-path hook adds `X-Gateway-Error: lab-future-token` to an IP-deny 403, and it reaches the client. Anvil reports `ferrum.marker.unknown_token` (unknown) and no token meaning. |
 | GW-019-REJECT-KNOWN | GW-019, TRUST-011 | A reject-path hook adds a **known** token (`overload`) to an IP-deny 403. Anvil reports `ferrum.marker.inconsistent` (conflicting evidence), with no token finding and no overload or CPU claim (§4). |
@@ -159,8 +161,9 @@ difference is `GW-010-BOT.allow-edge` (§2).
   `before_proxy`, `validate_client_request_contract`, `adaptive_concurrency` or `circuit_breaker_open`.
 - **Header protection is partial** (GW-019). The gateway restores `X-Gateway-Error` on its own error
   responses and strips hook- or backend-supplied copies on successful responses. It does **not**
-  protect `X-Gateway-Upstream-Status` anywhere. It does **not** protect `X-Gateway-Error` on plugin
-  rejection responses, which is why §4 item 1 exists.
+  protect `X-Gateway-Upstream-Status` anywhere on 0.9.5 and 0.9.7 (0.9.8 strips it on the
+  backend-response builder, #5759). No release protects `X-Gateway-Error` on plugin rejection
+  responses, which is why §4 item 1 exists.
 - **`ai_response_guard` rejections are stamped `backend_error`** even though the provider answered
   200. The source catalogs (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7}/outcomes.json`,
   `plugin.ai_response_guard.*`) list no token: a known catalog drift.
