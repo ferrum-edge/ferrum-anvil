@@ -8,14 +8,14 @@
 //! removes one that should no longer be read, and sees beside each linked
 //! file whether it is bound.
 
-use crate::commands::{R, e, id};
+use crate::commands::{R, blocking, e, id};
 use crate::state::DesktopState;
 use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
 use anvil_app::linked_files::{LinkedFileReferrer, LinkedFileStatus};
 use anvil_app::token_files::TokenFileBinding;
 use serde::Deserialize;
 use std::sync::{Arc, Weak};
-use tauri::{State, Window};
+use tauri::{AppHandle, State, Window};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 #[derive(Deserialize)]
@@ -164,10 +164,12 @@ pub fn token_file_remove(st: State<'_, DesktopState>, binding_id: String) -> R<(
 /// The binding state of each linked file the saved request or dataset
 /// `referrer` names (see `App::linked_file_status`). Read-only: it binds
 /// nothing, and looks only at the metadata of files already bound for that
-/// referrer. Refused while locked.
+/// referrer. Refused while locked. On a blocking thread (see [`blocking`]):
+/// it waits on the store and looks up paths on this device, which a slow
+/// network mount or a sleeping disk can hold for a while.
 #[tauri::command]
-pub fn linked_file_status(st: State<'_, DesktopState>, referrer: LinkedFileReferrer) -> R<Vec<LinkedFileStatus>> {
-    st.app()?.linked_file_status(referrer).map_err(e)
+pub async fn linked_file_status(handle: AppHandle, referrer: LinkedFileReferrer) -> R<Vec<LinkedFileStatus>> {
+    blocking(&handle, move |st| st.app()?.linked_file_status(referrer).map_err(e)).await
 }
 
 fn title(purpose: FilePurpose) -> &'static str {

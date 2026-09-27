@@ -119,12 +119,15 @@ transaction to end.
 - The desktop shows each linked file beside the request's binary body or
   multipart part, its gRPC schema, or a load plan's dataset, with its
   binding state (`linked_file_status`): chosen on this device, not chosen,
-  or chosen but missing or changed (moved, deleted, or replaced by a folder
-  or link). **Choose file…** or **Rebind…** opens the dialog for that
-  request or dataset. The status query binds nothing and looks only at the
-  metadata of files already bound for that referrer; an unbound path is
-  never touched. A file found at another path cannot be bound for a
-  reference that names the old one: put it back, or attach a copy.
+  or chosen but missing or changed (moved, deleted, replaced by a folder, or
+  its path now resolving to another location). **Choose file…** or
+  **Rebind…** opens the dialog for that request or dataset. The status query
+  binds nothing, runs off the UI thread, and looks only at the metadata of
+  files already bound for that referrer; an unbound path is never touched.
+  "Chosen" does not check the size limit: that depends on what reads the
+  file, and is enforced when it is read. A file found at another path cannot
+  be bound for a reference that names the old one: put it back, or attach a
+  copy.
 
 ### Connection pools
 

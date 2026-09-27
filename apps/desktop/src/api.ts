@@ -263,7 +263,8 @@ export type LinkedFileReferrer = { kind: "request"; id: string } | { kind: "data
 /**
  * Whether a linked local file a saved request or dataset names can be used on this device:
  * chosen here for it and still a regular file at that path (`bound`), not chosen here
- * (`unbound`, refused), or chosen but moved, deleted or replaced since (`invalid`).
+ * (`unbound`, refused), or chosen but moved, deleted or replaced since (`invalid`). `bound`
+ * does not check the size limit, which depends on what reads the file and is checked then.
  */
 export type LinkedFileState = "bound" | "unbound" | "invalid";
 export interface LinkedFileStatus {

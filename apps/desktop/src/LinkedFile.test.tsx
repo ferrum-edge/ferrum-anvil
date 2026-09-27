@@ -89,7 +89,7 @@ describe("linked file binding status", () => {
   it("offers no chooser for a request that is not saved", () => {
     backend([]);
     render(<LinkedFileBinding referrer={null} path={PATH} />);
-    expect(screen.getByText(/Save the request to choose this linked file/)).toBeTruthy();
+    expect(screen.getByText(/can be chosen only for a saved request that names it/)).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
   });
@@ -100,6 +100,73 @@ describe("linked file binding status", () => {
     });
     render(<LinkedFileBinding referrer={REQUEST} path={PATH} />);
     expect((await screen.findByRole("alert")).textContent).toContain("not found");
+    expect(screen.queryByRole("button", { name: /Choose file…|Rebind…/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("retries a status that failed to load, and clears the error once it loads", async () => {
+    let fail = true;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd !== "linked_file_status") throw new Error(`unexpected command ${cmd}`);
+      if (fail) throw "the store is busy";
+      return [{ path: PATH, state: "bound" }];
+    });
+    render(<LinkedFileBinding referrer={REQUEST} path={PATH} />);
+    expect((await screen.findByRole("alert")).textContent).toContain("the store is busy");
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await stateBadge()).toBe("Chosen on this device");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(calls("linked_file_status")).toEqual([{ referrer: REQUEST }, { referrer: REQUEST }]);
+  });
+
+  it("never shows the previous request's or path's status while another one loads", async () => {
+    const other: LinkedFileReferrer = { kind: "dataset", id: "ds-2" };
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd !== "linked_file_status") throw new Error(`unexpected command ${cmd}`);
+      // Only the first request's status ever loads.
+      if ((args?.referrer as LinkedFileReferrer).id !== REQUEST.id) return new Promise(() => {});
+      return [
+        { path: PATH, state: "bound" },
+        { path: "/home/me/other.bin", state: "bound" },
+      ];
+    });
+    const { rerender } = render(<LinkedFileBinding referrer={REQUEST} path={PATH} />);
+    expect(await stateBadge()).toBe("Chosen on this device");
+
+    rerender(<LinkedFileBinding referrer={other} path={PATH} />);
+    expect(screen.queryByTestId("linked-file-state")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    await waitFor(() => expect(calls("linked_file_status")).toHaveLength(2));
+    expect(screen.queryByTestId("linked-file-state")).toBeNull();
+
+    // Back to the first request, at another path: its own status loads, not the earlier one's.
+    rerender(<LinkedFileBinding referrer={REQUEST} path="/home/me/other.bin" />);
+    expect(screen.queryByTestId("linked-file-state")).toBeNull();
+    expect(await stateBadge()).toBe("Chosen on this device");
+    expect(calls("linked_file_status")).toHaveLength(3);
+  });
+
+  it("never shows an earlier request's error for another one", async () => {
+    const other: LinkedFileReferrer = { kind: "request", id: "req-2" };
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd !== "linked_file_status") throw new Error(`unexpected command ${cmd}`);
+      if ((args?.referrer as LinkedFileReferrer).id === REQUEST.id) throw "not found: request req-1";
+      return new Promise(() => {});
+    });
+    const { rerender } = render(<LinkedFileBinding referrer={REQUEST} path={PATH} />);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    rerender(<LinkedFileBinding referrer={other} path={PATH} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("says a file the saved request does not name cannot be chosen, and never suggests saving", async () => {
+    backend([{ path: "/home/me/other.bin", state: "unbound" }]);
+    render(<LinkedFileBinding referrer={REQUEST} path={PATH} />);
+    expect(await screen.findByText(/The saved request does not name this file, so it cannot be chosen for it on this device/)).toBeTruthy();
+    expect(screen.queryByText(/save it/i)).toBeNull();
     expect(screen.queryByRole("button")).toBeNull();
   });
 });
@@ -155,6 +222,35 @@ describe("choosing a linked file", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(calls("file_choose")).toHaveLength(2);
     for (const args of calls("file_choose")) expect(args.referrer).toEqual(REQUEST);
+  });
+
+  it("reloads every linked file of the request when the chosen file is another one it names", async () => {
+    const other = "/home/me/other.bin";
+    backend(
+      [
+        { path: PATH, state: "unbound" },
+        { path: other, state: "unbound" },
+      ],
+      (s) => {
+        // The dialog opened beside PATH, but the user picked the other file the request names.
+        s.status = [
+          { path: PATH, state: "unbound" },
+          { path: other, state: "bound" },
+        ];
+        return grant(other);
+      },
+    );
+    render(
+      <>
+        <LinkedFileBinding referrer={REQUEST} path={PATH} />
+        <LinkedFileBinding referrer={REQUEST} path={other} />
+      </>,
+    );
+    await waitFor(() => expect(screen.getAllByTestId("linked-file-state").map((b) => b.textContent)).toEqual(["Not chosen on this device", "Not chosen on this device"]));
+    const [first] = screen.getAllByTestId("linked-file");
+    fireEvent.click(within(first).getByRole("button", { name: /Choose file…/ }));
+    await waitFor(() => expect(screen.getAllByTestId("linked-file-state").map((b) => b.textContent)).toEqual(["Not chosen on this device", "Chosen on this device"]));
+    expect(calls("linked_file_status")).toHaveLength(4);
   });
 
   it("chooses a dataset's file for that dataset", async () => {

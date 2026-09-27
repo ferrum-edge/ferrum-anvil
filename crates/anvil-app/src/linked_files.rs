@@ -69,13 +69,15 @@ pub struct LinkedFileBinding {
 #[serde(rename_all = "snake_case")]
 pub enum LinkedFileState {
     /// Chosen on this device for the referrer, and still a regular file at
-    /// the path it was chosen at.
+    /// the path it was chosen at. The size limit is not checked here: it
+    /// depends on what reads the file, and is enforced when it is read.
     Bound,
     /// Not chosen on this device for the referrer, so it is refused. The
     /// path is not looked at.
     Unbound,
     /// Chosen for the referrer, but no longer usable as chosen: the file was
-    /// moved or deleted, or it or a folder on its path was replaced.
+    /// moved or deleted, it was replaced by something other than a regular
+    /// file, or its path now resolves to another location.
     Invalid,
 }
 
@@ -189,16 +191,24 @@ fn unbound(path: &str, noun: &str) -> AppError {
     ))
 }
 
+/// Why a bound linked file whose path no longer resolves to itself cannot be
+/// used. Which change caused it is not known.
+const RESOLVES_ELSEWHERE: &str = concat!(
+    "the path resolves to a different location than the one chosen (the file or a folder on its path may have been replaced by a link, ",
+    "or a folder on its path renamed or remapped)"
+);
+
 /// Why a bound linked file can no longer be read as chosen, if it cannot:
 /// the same path and regular-file checks as [`read_bound_file`], from
-/// metadata alone (nothing is opened, so a FIFO never blocks).
+/// metadata alone. No data is read and nothing is opened for reading, so a
+/// FIFO never blocks (on Windows, resolving the path opens a handle with no
+/// access rights). The size limit is not checked: it depends on what reads
+/// the file, and is enforced when it is read.
 fn bound_file_problem(path: &str) -> Option<String> {
     match std::fs::canonicalize(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("the file is no longer at this path".into()),
         Err(e) => Some(format!("the file cannot be reached ({e})")),
-        Ok(canonical) if canonical.to_str() != Some(path) => {
-            Some("the file, or a folder on its path, was replaced by a link since it was chosen".into())
-        }
+        Ok(canonical) if canonical.to_str() != Some(path) => Some(RESOLVES_ELSEWHERE.into()),
         Ok(_) => match std::fs::metadata(path) {
             Ok(meta) if meta.is_file() => None,
             Ok(_) => Some("the path no longer leads to a regular file".into()),

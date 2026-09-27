@@ -625,7 +625,7 @@ fn the_status_of_a_linked_file_follows_the_choice_on_this_device_and_the_file() 
         std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
         let status = app.linked_file_status(referrer).unwrap();
         assert_eq!(status[0].state, LinkedFileState::Invalid);
-        assert!(status[0].problem.as_deref().unwrap().contains("replaced by a link"), "{status:?}");
+        assert!(status[0].problem.as_deref().unwrap().contains("resolves to a different location than the one chosen"), "{status:?}");
         assert!(app.run_dataset(&d).is_err());
     }
 
