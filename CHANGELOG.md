@@ -160,6 +160,11 @@
   applied (for example an HMAC request with a manual `Content-Digest`
   header, also beside a JWT-SVID the preview does not fetch) it says the
   request would not be sent, instead of showing it without its credentials.
+- The effective-request preview now shows the body an auth profile rewrites
+  as it is sent: a WS-Security request's body includes its `wsse:Security`
+  header block (with the password redacted), and the body size is that of
+  the body sent. Before, the preview showed the body without the header
+  block and its size.
 - A file you attach (a request body or multipart file, a gRPC schema file, a
   dataset) can no longer be deleted before the request or dataset that uses
   it is saved. Before, a release in between, such as a reimport releasing
