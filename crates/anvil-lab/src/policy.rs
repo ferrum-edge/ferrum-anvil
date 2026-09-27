@@ -802,13 +802,20 @@ fn gw019_error(env: &Env) -> Fut<'_> {
         c.token(&o, "ferrum.token.connection_failure", env.trusted);
         c.max_confidence(&o, "ferrum.token.connection_failure", Confidence::Likely);
         c.absent_prefix(&o, "ferrum.marker.unknown_token");
-        // The hook's X-Gateway-Upstream-Status survives: never above likely,
-        // and the caveat that a non-gateway writer can set it is shown.
-        let spoofed_degraded = !header(&o, "x-gateway-upstream-status").is_empty();
-        c.add(CheckKind::GroundTruth, "hook-injected X-Gateway-Upstream-Status reached the client", spoofed_degraded, "");
-        if env.trusted {
-            c.max_confidence(&o, "ferrum.degraded_routing", Confidence::Likely);
-            caveat(&mut c, &o, "ferrum.degraded_routing", "plugin");
+        if strips_injected_upstream_status() {
+            // 0.9.8 (#5759): the builder strips the hook's copy too.
+            let stripped = header(&o, "x-gateway-upstream-status").is_empty();
+            c.add(CheckKind::GroundTruth, "hook-injected X-Gateway-Upstream-Status was stripped", stripped, "");
+            c.absent_prefix(&o, "ferrum.degraded_routing");
+        } else {
+            // The hook's X-Gateway-Upstream-Status survives: never above likely,
+            // and the caveat that a non-gateway writer can set it is shown.
+            let spoofed_degraded = !header(&o, "x-gateway-upstream-status").is_empty();
+            c.add(CheckKind::GroundTruth, "hook-injected X-Gateway-Upstream-Status reached the client", spoofed_degraded, "");
+            if env.trusted {
+                c.max_confidence(&o, "ferrum.degraded_routing", Confidence::Likely);
+                caveat(&mut c, &o, "ferrum.degraded_routing", "plugin");
+            }
         }
         let r = env.get("/ok/echo").await;
         c.success(CheckKind::Recovery, &r);
@@ -848,11 +855,34 @@ fn gw019_forged(env: &Env) -> Fut<'_> {
     })
 }
 
-/// Injected gateway headers on a 200: `X-Gateway-Error` is stripped, the
-/// degraded marker passes and may only surface as a capped warning.
+/// Whether the release under test strips a backend- or hook-written
+/// `X-Gateway-Upstream-Status` on its backend-response builder (0.9.8, #5759).
+fn strips_injected_upstream_status() -> bool {
+    crate::gateway::release_at_least("v0.9.8")
+}
+
+/// Injected gateway headers on a 200: `X-Gateway-Error` is stripped; the
+/// degraded marker passes (0.9.5 / 0.9.7) and may only surface as a capped
+/// warning, or is stripped too (0.9.8) and surfaces as nothing.
 fn forged_checks(c: &mut Checks, env: &Env, o: &ExecutionOutput, who: &str) {
     c.success(CheckKind::Diagnosis, o);
     c.add(CheckKind::GroundTruth, format!("{who}-injected X-Gateway-Error was stripped"), header(o, "x-gateway-error").is_empty(), "");
+    if strips_injected_upstream_status() {
+        c.add(
+            CheckKind::GroundTruth,
+            format!("{who}-injected X-Gateway-Upstream-Status was stripped"),
+            header(o, "x-gateway-upstream-status").is_empty(),
+            "",
+        );
+        c.absent_prefix(o, "ferrum.");
+        c.add(
+            CheckKind::Diagnosis,
+            "no gateway-marker warning",
+            !o.record.outcome.warnings.iter().any(|w| matches!(w.code, WarningCode::DegradedRouting | WarningCode::UnverifiedFerrumMarker)),
+            "",
+        );
+        return;
+    }
     c.add(
         CheckKind::GroundTruth,
         format!("{who}-injected X-Gateway-Upstream-Status passed"),

@@ -20,12 +20,13 @@ use std::sync::OnceLock;
 
 /// The compatibility id new integration profiles default to: the newest
 /// audited release.
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.7";
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.8";
 
 /// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
 const EMBEDDED: &[(&str, &str)] = &[
     ("ferrum-edge-0.9.5", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.5/outcomes.json")),
     ("ferrum-edge-0.9.7", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.7/outcomes.json")),
+    ("ferrum-edge-0.9.8", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.8/outcomes.json")),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -122,7 +123,7 @@ pub struct Outcome {
 #[derive(Debug)]
 pub struct FerrumCatalog {
     pub compatibility_id: String,
-    /// Gateway release tag the catalog was audited at (e.g. `v0.9.7`).
+    /// Gateway release tag the catalog was audited at (e.g. `v0.9.8`).
     pub release_tag: String,
     pub source_sha: String,
     pub tokens: Vec<String>,
@@ -315,7 +316,7 @@ pub enum MatchStrength {
 }
 
 impl FerrumCatalog {
-    /// Human-readable release name, e.g. `Ferrum Edge 0.9.7`.
+    /// Human-readable release name, e.g. `Ferrum Edge 0.9.8`.
     pub fn release_label(&self) -> String {
         let v = self.release_tag.trim_start_matches('v');
         if v.is_empty() { self.compatibility_id.clone() } else { format!("Ferrum Edge {v}") }
@@ -381,7 +382,7 @@ mod tests {
     #[test]
     fn every_embedded_catalog_loads_under_its_own_id_with_all_public_tokens() {
         let ids: Vec<&str> = compatibility_ids().collect();
-        assert_eq!(ids, ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7"]);
+        assert_eq!(ids, ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", "ferrum-edge-0.9.8"]);
         for id in ids {
             let c = catalog_for(id).expect("embedded");
             assert_eq!(c.compatibility_id, id);
@@ -395,7 +396,18 @@ mod tests {
             assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
         assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
-        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.7");
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.8");
+    }
+
+    /// `request_timeout` joined the closed vocabulary in 0.9.8; the older
+    /// catalogs do not know it, so it is not part of the shared vocabulary.
+    #[test]
+    fn request_timeout_is_a_token_of_the_0_9_8_catalog_only() {
+        assert!(catalog_for("ferrum-edge-0.9.8").expect("embedded").is_known_token("request_timeout"));
+        for id in ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7"] {
+            assert!(!catalog_for(id).expect("embedded").is_known_token("request_timeout"), "{id}");
+        }
+        assert!(!shared_tokens().iter().any(|t| t == "request_timeout"));
     }
 
     #[test]

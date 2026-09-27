@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.26-6",
+  "version": "2026.09.27-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1650,6 +1650,33 @@
         }
       ],
       "confirm_with": []
+    },
+    "ferrum.token.request_timeout": {
+      "title": "Gateway route timeout expired before a backend held the request",
+      "explanation": "Ferrum Edge reports ({token}, status {status}) that the route's total request timeout ran out before any backend held this attempt. The time went to receiving the upload, the gateway's own processing or admission, or waiting to retry an earlier attempt. {release_detail}",
+      "alternatives": [
+        "The client upload was slow or large for the route's time budget.",
+        "Gateway-side processing (plugins, DNS, backend admission) used most of the budget.",
+        "An earlier attempt failed and the budget ran out while the gateway waited to retry."
+      ],
+      "does_not_prove": [
+        "That the backend is slow.",
+        "Which phase used the time.",
+        "That no earlier attempt of this request reached a backend."
+      ],
+      "remediation": [
+        {
+          "text": "Compare the route's request timeout with upload time, gateway processing and retry backoff; the gateway's transaction log names the expired phase.",
+          "owner": "gateway_operator"
+        },
+        {
+          "text": "Send smaller or faster uploads, or ask for a longer route timeout; retry only idempotent requests.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "Gateway transaction log for this request (route_request_timeout phase)."
+      ]
     },
     "ferrum.token.backend_error": {
       "title": "Gateway classified this as a backend error",

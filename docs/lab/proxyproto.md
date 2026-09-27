@@ -1,8 +1,8 @@
 # Failure lab: `proxyproto` profile
 
 This profile runs Anvil's shared engine as a **load balancer that speaks the PROXY protocol**
-against the **real, pinned Ferrum Edge release binary** (v0.9.7 by default, v0.9.5 with
-`--release v0.9.5`).
+against the **real, pinned Ferrum Edge release binary** (v0.9.8 by default, v0.9.7 or v0.9.5 with
+`--release`).
 Every stream proxy sets `stream_proxy_protocol: true`: `tcp` and `tcp_tls` listeners require a
 PROXY v1/v2 header at the head of each connection, and `udp` / `dtls` listeners require the
 PROXY v2 `DGRAM` envelope on every datagram. There are no gateway mocks.
