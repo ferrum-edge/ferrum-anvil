@@ -262,6 +262,20 @@
   the retry after `425 Too Early`; its message now says why. This also
   fixes an intermittent failure of the retry after `425 Too Early` when the
   server had just closed the kept connection.
+- HTTP/3 with fallback to TCP: the fallback no longer sends a request over
+  TCP that may already have been received over HTTP/3 unless its method is
+  idempotent. It falls back when nothing of the request was sent over
+  HTTP/3 (the QUIC connection or handshake failed before the request stream
+  was written, or the server refused its 0-RTT early data unread and the
+  resend after the handshake never started), whatever
+  the method, or when the method is idempotent. A written non-idempotent
+  request, such as a `POST` whose HTTP/3 stream was reset before a response,
+  used to be sent a second time over TCP; it is now not sent again, and its
+  HTTP/3 attempt's message says why. The fallback is now a new attempt of
+  the engine, signed again (a new HMAC nonce, DPoP proof and JWT time
+  claims): it used to repeat the HTTP/3 attempt's signature, which a server
+  that checks for replays rejects. Both attempts are still recorded, the
+  second with reason `protocol_fallback{from: h3}`.
 - Saving a request (`save_request`) keeps the workspace, folder and position
   it has in storage, read in the save's write transaction, whatever the
   saved copy names; the name, description, tags and spec are saved as
