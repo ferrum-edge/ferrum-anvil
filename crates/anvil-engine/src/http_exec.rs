@@ -638,7 +638,8 @@ fn early_data_policy_check(p: &anvil_domain::settings::EarlyDataPolicy) -> Resul
 /// How the early-data opt-in applies to one attempt: off without the opt-in
 /// or without TLS; held (resumption only) for a method the policy does not
 /// allow and for the retry after `425 Too Early`; otherwise sent as early data
-/// when a ticket allows it.
+/// when a ticket allows it. The resend after a reused connection was found
+/// closed is given the reason of the attempt it repeats.
 fn early_intent(
     p: &anvil_domain::settings::EarlyDataPolicy,
     method: &str,
@@ -748,6 +749,9 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     let mut retries = 0u8;
     let mut dpop_challenge_used = false;
     let mut too_early_retried = false;
+    // The reason of the attempt that a resend after a reused connection was
+    // found closed repeats (at most one per execution).
+    let mut resent: Option<AttemptReason> = None;
     let mut reason = AttemptReason::Initial;
     let mut credentials_stripped = false;
     let mut final_auth_facts: Vec<(String, String)> = vec![];
@@ -809,6 +813,10 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             }
         };
         let target_for_plan = Target { query: query.clone(), ..current.target.clone() };
+        let early_reason = match (&reason, &resent) {
+            (AttemptReason::ReusedConnectionClosed { .. }, Some(r)) => r,
+            _ => &reason,
+        };
         let display_url = redactor.url(&target_for_plan.url());
         // The PROXY header is configured for the request's own listener: a
         // redirect elsewhere is followed without it, and the attempt says so.
@@ -854,15 +862,24 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             display_url,
             proxy_header,
             proxy_header_withheld,
-            early_data: early_intent(&prep.settings.early_data, &current.method, current.target.scheme == "https", &reason),
+            early_data: early_intent(&prep.settings.early_data, &current.method, current.target.scheme == "https", early_reason),
             fence: Some(epoch.transport()),
         };
         let index = attempts.len() as u32;
-        let outs = match prep.settings.http_version {
+        if matches!(reason, AttemptReason::ReusedConnectionClosed { .. })
+            && let Some(f) = attempts.last_mut().and_then(|a| a.failure.as_mut())
+        {
+            f.message = format!("{} (sent once more on a new connection as attempt {index}, with its auth applied again)", f.message);
+        }
+        let (outs, closed_under) = match prep.settings.http_version {
             anvil_domain::settings::HttpVersionPolicy::Http3Only | anvil_domain::settings::HttpVersionPolicy::Http3WithFallback => {
-                crate::h3_exec::execute(engine, &plan, prep.settings.http_version, index, reason.clone(), &events, &cancel).await
+                let h3 = crate::h3_exec::execute(engine, &plan, prep.settings.http_version, index, reason.clone(), &events, &cancel);
+                (h3.await, None)
             }
-            _ => engine.http.execute(&plan, index, reason.clone(), &events, &cancel).await,
+            _ => {
+                let e = engine.http.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
+                (e.outputs, e.resend_on_new_connection)
+            }
         };
         let mut out_iter = outs.into_iter().peekable();
         let mut out = None;
@@ -1038,6 +1055,22 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         {
             too_early_retried = true;
             reason = AttemptReason::TooEarlyRetry;
+            last = Some(out);
+            continue;
+        }
+
+        // ---- a reused connection found closed under the request ----
+        // The server closed the pooled connection as the request went out on
+        // it, and the transport did not send it again: it may have been
+        // received, idempotent, with this attempt's per-send auth. It is
+        // signed again (new nonces, proofs and time claims) and sent once
+        // more on a new connection. Not a retry: once per execution, whatever
+        // the retry setting, which it does not use up.
+        if let Some(after) = closed_under
+            && resent.is_none()
+            && out.response.is_none()
+        {
+            resent = Some(std::mem::replace(&mut reason, AttemptReason::ReusedConnectionClosed { after }));
             last = Some(out);
             continue;
         }
