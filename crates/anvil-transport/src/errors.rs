@@ -264,7 +264,7 @@ fn apply_h2(h2e: &h2::Error, stage: HyperStage, f: &mut TransportFailure) -> boo
         // or HTTP/1 answer read as a frame) it raises a local GOAWAY:
         // that is a protocol mismatch, not the server closing.
         let remote = h2e.is_remote();
-        f.kind = if remote && reason == h2::Reason::REFUSED_STREAM {
+        f.kind = if remote && h2e.is_reset() && reason == h2::Reason::REFUSED_STREAM {
             FailureKind::H2RefusedStream
         } else if remote && h2e.is_go_away() {
             FailureKind::H2GoAway
@@ -284,6 +284,21 @@ fn apply_h2(h2e: &h2::Error, stage: HyperStage, f: &mut TransportFailure) -> boo
         return true;
     }
     false
+}
+
+/// Whether the HTTP/2 peer said it did not process the request (RFC 9113
+/// §8.7): it reset the stream with `REFUSED_STREAM`, or the stream is above
+/// the last-stream-id of its graceful `GOAWAY` (`NO_ERROR`). h2 fails such a
+/// stream, and any stream opened after the `GOAWAY`, with that `GOAWAY`'s
+/// error; a stream at or below the last-stream-id that the close then cuts
+/// short fails with an I/O error. After a `GOAWAY` with an error code, h2
+/// fails those with the same error when the connection closes, so only a
+/// graceful one proves anything.
+pub fn h2_unprocessed(err: &(dyn StdError + 'static)) -> bool {
+    let Some(h2e) = find::<h2::Error>(err) else { return false };
+    let refused = h2e.is_reset() && h2e.reason() == Some(h2::Reason::REFUSED_STREAM);
+    let graceful_go_away = h2e.is_go_away() && h2e.reason() == Some(h2::Reason::NO_ERROR);
+    h2e.is_remote() && (refused || graceful_go_away)
 }
 
 /// Classify an error from `h2` driven directly (the HBONE datagram tunnel)

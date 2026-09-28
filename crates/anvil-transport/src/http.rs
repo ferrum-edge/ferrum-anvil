@@ -4,7 +4,8 @@
 //! transparent re-dispatch when a reused pooled connection turns out to be
 //! closed before any byte of the request left — recorded as its own attempt).
 //! Redirects, retries, auth re-signing and the resend of a request that may
-//! have been written belong to the engine.
+//! have been written (an idempotent one, or one the peer refused unprocessed)
+//! belong to the engine.
 
 use crate::connector::{self, BoxIo, Established, ProxyPlan, Target};
 use crate::dns::DnsConfig;
@@ -655,15 +656,18 @@ fn closed_before_response(kind: FailureKind) -> bool {
 }
 
 /// A request that failed before any response on a reused connection the
-/// peer had closed (or was closing) as it went out.
+/// peer had closed (or was closing) as it went out, or on which the peer
+/// refused it unprocessed.
 #[derive(Clone, Copy)]
 enum ClosedUnder {
     /// Hyper returned it unsent, or no byte of it was written: the transport
     /// sends it again as it is, on a new connection.
     Unsent(FailureKind),
-    /// It may have been written, and its method is idempotent. It may have
-    /// been received, so it is not sent again with the same per-send auth
-    /// (nonce, proof, time claims): only the caller, signing it again, may.
+    /// It may have been written, and its method is idempotent or the peer
+    /// said it did not process it (`REFUSED_STREAM`, or a stream above the
+    /// last-stream-id of a graceful `GOAWAY`, RFC 9113 §8.7). The server may
+    /// have seen its per-send auth (nonce, proof, time claims), so it is not
+    /// sent again as it is: only the caller, signing it again, may.
     MayHaveBeenSent(FailureKind),
 }
 
@@ -673,10 +677,13 @@ pub struct HttpExecution {
     /// connection because none of it left the reused one.
     pub outputs: Vec<AttemptOutput>,
     /// The failure kind when the last output failed before any response on
-    /// a reused connection the peer closed, and the request, idempotent, may
-    /// have been written. It was not sent again. The caller may sign it again
-    /// and send it once more with reason
-    /// [`AttemptReason::ReusedConnectionClosed`], which takes a new connection.
+    /// a reused connection, the request may have been written, and sending
+    /// it again is safe: the peer closed the connection under an idempotent
+    /// request, or refused the request unprocessed whatever its method
+    /// (`REFUSED_STREAM`, or a stream above the last-stream-id of a graceful
+    /// `GOAWAY`). It was not sent again. The caller may sign it again and send
+    /// it once more with reason [`AttemptReason::ReusedConnectionClosed`],
+    /// which takes a new connection.
     pub resend_on_new_connection: Option<FailureKind>,
 }
 
@@ -1148,11 +1155,11 @@ impl HttpTransport {
                     f.kind = FailureKind::ClosedBeforeResponse;
                     f.message = format!("{} (after the request was fully written)", f.message);
                 }
-                let dispatch = if unsent || f.kind == FailureKind::H2RefusedStream {
-                    DispatchState::NotDispatched
-                } else {
-                    dispatch_from_bytes(&conn.stats, written_before)
-                };
+                // The HTTP/2 peer said it did not process the request (RFC
+                // 9113 §8.7), even if some of it was written.
+                let refused = crate::errors::h2_unprocessed(&e);
+                let from_bytes = dispatch_from_bytes(&conn.stats, written_before);
+                let dispatch = if unsent || refused { DispatchState::NotDispatched } else { from_bytes };
                 // A reused connection the peer had closed (or was closing) as
                 // the request went out fails it before any response: hyper had
                 // not seen the close when the connection was checked out.
@@ -1162,16 +1169,17 @@ impl HttpTransport {
                 // TLS records (a `close_notify`) and over HTTP/2 other streams'
                 // frames: there the missing response head is what counts.
                 let no_response = is_h2 || plan.https || conn.stats.bytes_read() == read_before;
-                let written = dispatch != DispatchState::NotDispatched;
+                let written = !unsent && from_bytes != DispatchState::NotDispatched;
                 // Nothing of it left: this transport sends it again as it is.
                 // It may have been written: its per-send auth may have been
                 // received, so only the caller, signing it again, may resend
-                // it, and only an idempotent method.
+                // it, and only an idempotent method or one the peer refused
+                // unprocessed.
                 let under = if !reused {
                     None
-                } else if unsent || (closed && !written) {
+                } else if !written && (unsent || closed || refused) {
                     Some(ClosedUnder::Unsent(f.kind))
-                } else if closed && no_response && is_idempotent(&plan.method) {
+                } else if refused || (closed && no_response && is_idempotent(&plan.method)) {
                     Some(ClosedUnder::MayHaveBeenSent(f.kind))
                 } else {
                     None
@@ -1184,6 +1192,12 @@ impl HttpTransport {
                         f.message = format!(
                             "{} (reused connection #{} was found closed; the request was sent once more on a new connection)",
                             f.message, conn.template.id
+                        );
+                    }
+                    Some(ClosedUnder::MayHaveBeenSent(_)) if refused => {
+                        f.message = format!(
+                            "{} (reused connection #{} refused the {} request without processing it)",
+                            f.message, conn.template.id, plan.method
                         );
                     }
                     Some(ClosedUnder::MayHaveBeenSent(_)) => {
