@@ -276,6 +276,17 @@
   claims): it used to repeat the HTTP/3 attempt's signature, which a server
   that checks for replays rejects. Both attempts are still recorded, the
   second with reason `protocol_fallback{from: h3}`.
+- Server-sent events: each send of a stream is now signed afresh (a new
+  HMAC nonce, DPoP proof and JWT time claims): the initial send, the TCP
+  fallback after HTTP/3 and each reconnection. A stream used to be signed
+  once, when it was prepared, and the fallback and every reconnection
+  repeated that signature, which a server that checks for replays rejects,
+  so such a server refused every reconnection. A reconnection is signed once
+  its `retry:` delay is over and still sends `Last-Event-ID`; when the
+  fallback is made is unchanged. The record's prepared request and auth
+  facts are the last send's. A fallback or reconnection that auth cannot
+  sign again is not made, and the session notes why; it is never sent with
+  an earlier send's signature.
 - Saving a request (`save_request`) keeps the workspace, folder and position
   it has in storage, read in the save's write transaction, whatever the
   saved copy names; the name, description, tags and spec are saved as

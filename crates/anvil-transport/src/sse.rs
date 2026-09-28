@@ -32,6 +32,12 @@
 //!   including each reconnection, uses a fresh QUIC connection. Forced
 //!   HTTP/3 never touches TCP; the automatic policy records the failed
 //!   HTTP/3 attempt and then falls back to TCP as a separate attempt.
+//! * Per-send auth: with a signer ([`SsePlan::sign`]), every send (the
+//!   initial one, the TCP fallback and each reconnection) goes out with
+//!   headers signed afresh for it (a new HMAC nonce, DPoP proof and JWT time
+//!   claims), never with an earlier send's signature, which a server that
+//!   checks for replays would refuse. A fallback or reconnection that cannot
+//!   be signed is not made, and the session notes why.
 
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
@@ -212,6 +218,10 @@ impl SseParser {
     }
 }
 
+/// Signs one send: the request's headers (auth included) with per-send
+/// auth applied afresh. An error means the send is not made.
+pub type SignFn = Arc<dyn Fn() -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SsePlan {
     pub method: Method,
@@ -223,6 +233,10 @@ pub struct SsePlan {
     pub authority: String,
     pub request_target: String,
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// Signs each send afresh (the initial one, the TCP fallback, each
+    /// reconnection); its headers replace `headers` for that send. `None`
+    /// (no per-send auth): every send uses `headers`.
+    pub sign: Option<SignFn>,
     pub body: Bytes,
     pub version: HttpVersionPolicy,
     pub timeouts: Timeouts,
@@ -388,11 +402,18 @@ struct Opened {
     source: Source,
 }
 
-/// Request headers for an event stream. `pseudo` (HTTP/2, HTTP/3) drops
-/// connection-specific fields; HTTP/1.1 gets a `Host`.
-fn request_headers(plan: &SsePlan, pseudo: bool, last_event_id: Option<&String>) -> HeaderMap {
+/// The headers of one send: signed afresh by the plan's signer, or `None`
+/// to send the plan's headers (no per-send auth).
+fn sign_send(plan: &SsePlan) -> Result<Option<Vec<(HeaderName, HeaderValue)>>, TransportFailure> {
+    plan.sign.as_ref().map(|sign| sign()).transpose()
+}
+
+/// Request headers for an event stream, from `fields` (the send's headers,
+/// auth included). `pseudo` (HTTP/2, HTTP/3) drops connection-specific
+/// fields; HTTP/1.1 gets a `Host`.
+fn request_headers(plan: &SsePlan, fields: &[(HeaderName, HeaderValue)], pseudo: bool, last_event_id: Option<&String>) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for (n, v) in &plan.headers {
+    for (n, v) in fields {
         if pseudo
             && (n == http::header::HOST
                 || n == http::header::CONNECTION
@@ -422,6 +443,7 @@ fn request_headers(plan: &SsePlan, pseudo: bool, last_event_id: Option<&String>)
 /// HTTP/1.1 or HTTP/2 over the instrumented TCP (+TLS, +proxy) connector.
 async fn open_tcp(
     plan: &SsePlan,
+    fields: &[(HeaderName, HeaderValue)],
     rec: &mut Recorder,
     obs: &mut AttemptObservation,
     last_event_id: Option<&String>,
@@ -472,7 +494,7 @@ async fn open_tcp(
     };
     obs.connection = Some(cobs);
 
-    let headers = request_headers(plan, use_h2, last_event_id);
+    let headers = request_headers(plan, fields, use_h2, last_event_id);
     let uri = if use_h2 {
         format!("{}://{}{}", if plan.https { "https" } else { "http" }, plan.authority, plan.request_target)
     } else {
@@ -532,6 +554,7 @@ async fn open_tcp(
 /// inside; no TCP phase). The event stream is the request stream's DATA frames.
 async fn open_h3(
     plan: &SsePlan,
+    fields: &[(HeaderName, HeaderValue)],
     rec: &mut Recorder,
     obs: &mut AttemptObservation,
     last_event_id: Option<&String>,
@@ -575,7 +598,7 @@ async fn open_h3(
         Err((f, d))
     };
 
-    let headers = request_headers(plan, true, last_event_id);
+    let headers = request_headers(plan, fields, true, last_event_id);
     let uri = format!("https://{}{}", plan.authority, plan.request_target);
     let mut req = match Request::builder().method(plan.method.clone()).uri(uri).body(()) {
         Ok(r) => r,
@@ -654,6 +677,9 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
     let mut use_h3 = matches!(plan.version, HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback);
     let mut index: u32 = 0;
     let mut reconnects: u32 = 0;
+    // The headers of the next send, signed afresh for it: the initial send
+    // here, the TCP fallback and each reconnection before they are made.
+    let mut signed = sign_send(plan);
 
     loop {
         let mut rec = Recorder::new(index, events.clone());
@@ -663,11 +689,20 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
             attempts.push(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events));
             break;
         }
+        // A fallback or reconnection that could not be signed is not made
+        // (below), so only the initial send can get here unsigned.
+        let fields = match &signed {
+            Ok(h) => h.as_deref().unwrap_or(&plan.headers),
+            Err(f) => {
+                attempts.push(fail_attempt(rec, obs, f.clone(), DispatchState::NotDispatched, events));
+                break;
+            }
+        };
         let last_id = parser.last_event_id.clone();
         let opened_attempt = if use_h3 {
-            open_h3(plan, &mut rec, &mut obs, last_id.as_ref(), cancel, total_deadline).await
+            open_h3(plan, fields, &mut rec, &mut obs, last_id.as_ref(), cancel, total_deadline).await
         } else {
-            open_tcp(plan, &mut rec, &mut obs, last_id.as_ref(), cancel, total_deadline).await
+            open_tcp(plan, fields, &mut rec, &mut obs, last_id.as_ref(), cancel, total_deadline).await
         };
         let Opened { status, version, headers: resp_headers_map, mut source } = match opened_attempt {
             Ok(o) => o,
@@ -676,17 +711,24 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
                 // no response — recorded as its own attempt, never hidden. A
                 // request that may have been processed is replayed only when
                 // its method is idempotent.
-                let fallback = use_h3
+                let mut fallback = use_h3
                     && plan.version == HttpVersionPolicy::Http3WithFallback
                     && f.kind != FailureKind::Canceled
                     && (dispatch == DispatchState::NotDispatched || plan.method.is_idempotent());
-                if fallback {
-                    facts.notes.push(format!(
-                        "HTTP/3 did not produce a response ({:?} during {:?}); the automatic policy fell back to TCP",
-                        f.kind, f.phase
-                    ));
-                }
+                let h3_failed = format!("HTTP/3 did not produce a response ({:?} during {:?})", f.kind, f.phase);
                 attempts.push(fail_attempt(rec, obs, f, dispatch, events));
+                if fallback {
+                    // Signed afresh: the server may have received the HTTP/3
+                    // attempt's nonce or proof.
+                    signed = sign_send(plan);
+                    match &signed {
+                        Ok(_) => facts.notes.push(format!("{h3_failed}; the automatic policy fell back to TCP")),
+                        Err(e) => {
+                            facts.notes.push(format!("{h3_failed}; not sent over TCP: auth could not sign it again ({})", e.message));
+                            fallback = false;
+                        }
+                    }
+                }
                 if fallback {
                     use_h3 = false;
                     index += 1;
@@ -849,6 +891,13 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
             _ = tokio::time::sleep(delay) => {}
             _ = cancel.cancelled() => break,
             _ = sleep_until_opt(total_deadline) => break,
+        }
+        // Signed afresh once the delay is over, so its time claims are
+        // current; never sent with an earlier send's signature.
+        signed = sign_send(plan);
+        if let Err(e) = &signed {
+            facts.notes.push(format!("not reconnected: auth could not sign the reconnection again ({})", e.message));
+            break;
         }
         reconnects += 1;
         index += 1;
