@@ -289,6 +289,17 @@
   facts are the last send's. A fallback or reconnection that auth cannot
   sign again is not made, and the session notes why; it is never sent with
   an earlier send's signature.
+- Server-sent events: a send is now signed just before it is made, after
+  the HTTP/3 checks, so an HTTP/3 attempt refused before any traffic (the
+  automatic policy with an `http://` URL or through a proxy, which then
+  falls back to TCP) is no longer signed. A send whose auth would add other query
+  parameters than it did when the stream was prepared is not made
+  (`unsupported_combination`): only headers are signed again for each send,
+  and the URL is fixed. No current auth does this; an API key in the query
+  is the same on every send. The effective-request preview of a stream with
+  auth now notes that each send (the initial one, the TCP fallback and each
+  reconnection) is signed again when it is sent, not with the signature
+  shown.
 - Saving a request (`save_request`) keeps the workspace, folder and position
   it has in storage, read in the save's write transaction, whatever the
   saved copy names; the name, description, tags and spec are saved as

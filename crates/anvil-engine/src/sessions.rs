@@ -276,6 +276,8 @@ struct Authorized {
     facts: Vec<(String, String)>,
     /// The fields auth set, as it set them.
     set: Vec<(String, String)>,
+    /// The query parameters auth appended, as it appended them.
+    appended: Vec<(String, String)>,
 }
 
 /// Per-send auth for `req`, refused before anything is sent when a header
@@ -317,7 +319,13 @@ async fn apply_auth(
         }
     }
     if matches!(prep.auth, ResolvedAuth::None) {
-        return Ok(Authorized { headers: req.headers.clone(), query: req.target.query.clone(), facts: vec![], set: vec![] });
+        return Ok(Authorized {
+            headers: req.headers.clone(),
+            query: req.target.query.clone(),
+            facts: vec![],
+            set: vec![],
+            appended: vec![],
+        });
     }
     let applied = sign_request(&prep.auth, req)?;
     for s in &applied.secrets {
@@ -326,11 +334,11 @@ async fn apply_auth(
     let mut headers = req.headers.clone();
     set_headers(&mut headers, applied.set_headers.clone());
     let mut query = req.target.query.clone();
-    for (k, v) in applied.append_query {
-        let pair = format!("{}={}", prepare::encode_component(&k), prepare::encode_component(&v));
+    for (k, v) in &applied.append_query {
+        let pair = format!("{}={}", prepare::encode_component(k), prepare::encode_component(v));
         query = if query.is_empty() { pair } else { format!("{query}&{pair}") };
     }
-    Ok(Authorized { headers, query, facts: applied.facts, set: applied.set_headers })
+    Ok(Authorized { headers, query, facts: applied.facts, set: applied.set_headers, appended: applied.append_query })
 }
 
 /// Signs a gRPC request in the transport, once its path and body are known:
@@ -345,19 +353,35 @@ async fn apply_auth(
 /// none), and the secrets it is signed with (a freshly minted token) join
 /// the `live` transcript redactor and `signed`, for the record's redactor.
 /// An event stream signs each send with it too (see [`prepare_sse`]).
+///
+/// Only headers are signed again: the URL, with the query parameters auth
+/// appended when the call was prepared (`appended`), is fixed then. A
+/// signature that appends others is refused, and nothing is sent, rather
+/// than sent with a query it was not made for.
+#[allow(clippy::too_many_arguments)]
 fn sign_in_transport(
     auth: ResolvedAuth,
     request: &SessionRequest,
     first: &[(String, String)],
+    appended: &[(String, String)],
     sent: &[(String, String)],
     slot: Option<ResignedSlot>,
     live: SharedRedactor,
     signed: SignedSecrets,
 ) -> grpc::SignFn {
-    let (request, first, sent) = (request.clone(), first.to_vec(), sent.to_vec());
+    let (request, first, appended, sent) = (request.clone(), first.to_vec(), appended.to_vec(), sent.to_vec());
     Arc::new(move |path: &str, body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
         let target = Target { path: path.to_string(), ..request.target.clone() };
         let applied = sign_request(&auth, &SessionRequest { target, body: body.clone(), ..request.clone() })?;
+        if applied.append_query != appended {
+            return Err(unsupported(
+                format!(
+                    "the auth profile '{}' would send other query parameters than it did when the request was prepared, but only headers are signed again for each send (the URL is fixed); the request was not sent",
+                    applied.label
+                ),
+                "auth",
+            ));
+        }
         {
             let mut live = live.write();
             for s in &applied.secrets {
@@ -775,7 +799,8 @@ async fn prepare_sse(
     let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
     // Covers a secret in the Last-Event-ID, resolved after the redactor was built.
     b.redactor.refresh_used_secrets(r);
-    let Authorized { mut headers, query, facts, set } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let Authorized { mut headers, query, facts, set, appended } =
+        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
     // Signed above to refuse, before any traffic, what auth cannot sign.
@@ -788,7 +813,7 @@ async fn prepare_sse(
     let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
     let signed = SignedSecrets::default();
     let sign = resigned.clone().map(|slot| -> sse::SignFn {
-        let sign = sign_in_transport(b.prep.auth.clone(), &request, &set, &headers, Some(slot), live.clone(), signed.clone());
+        let sign = sign_in_transport(b.prep.auth.clone(), &request, &set, &appended, &headers, Some(slot), live.clone(), signed.clone());
         let (path, body) = (request.target.path.clone(), request.body.clone());
         Arc::new(move || sign(&path, &body))
     });
@@ -1064,7 +1089,8 @@ async fn prepare_grpc(
     // resolved after the redactor was built.
     b.redactor.refresh_used_secrets(r);
     // An auth profile that adds query parameters is refused (the path is fixed).
-    let Authorized { mut headers, facts, set, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let Authorized { mut headers, facts, set, appended, .. } =
+        apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let call_target = &request.target;
     let cookies = jar_cookies(engine, ctx, &mut b, call_target, &mut headers);
     // With server reflection the message is encoded once the schema is
@@ -1074,7 +1100,7 @@ async fn prepare_grpc(
     let resigned: Option<ResignedSlot> = reflected.then(Default::default);
     let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
     let signed = SignedSecrets::default();
-    let signer = |slot| sign_in_transport(b.prep.auth.clone(), &request, &set, &headers, slot, live.clone(), signed.clone());
+    let signer = |slot| sign_in_transport(b.prep.auth.clone(), &request, &set, &appended, &headers, slot, live.clone(), signed.clone());
     let sign = resigned.clone().map(|slot| signer(Some(slot)));
     // Each reflection request is signed for its own path and body.
     let sign_reflection = reflection.then(|| signer(None));
@@ -2044,7 +2070,8 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::expand_masque_template;
+    use super::*;
+    use anvil_domain::auth::KeyLocation;
 
     #[test]
     fn masque_uri_templates_expand_rfc_9298_variables() {
@@ -2061,5 +2088,46 @@ mod tests {
         assert!(expand_masque_template("udp/{target_host}/{target_port}/", "h", 1).is_err(), "a path is required");
         assert!(expand_masque_template("/udp/{target_host}/{target_port", "h", 1).is_err());
         assert!(expand_masque_template("/{x}/{target_host}/{target_port}/", "h", 1).is_err());
+    }
+
+    /// Only headers are signed again for each send; a signature that would
+    /// send other query parameters than prepared is refused, and nothing of
+    /// it is kept for the record.
+    #[test]
+    fn a_send_signed_with_another_query_is_refused() {
+        let request = SessionRequest {
+            method: "GET".into(),
+            target: Target {
+                scheme: "https".into(),
+                host: "example.com".into(),
+                port: 443,
+                authority: "example.com".into(),
+                path: "/events".into(),
+                query: "a=1".into(),
+            },
+            headers: vec![],
+            body: Bytes::new(),
+            content_type: None,
+            transport: vec![],
+            not_sent: &[],
+            host_from_authority: false,
+            path_only: false,
+        };
+        let auth = ResolvedAuth::ApiKey { name: "key".into(), value: zeroize::Zeroizing::new("k2".into()), location: KeyLocation::Query };
+        let prepared = [("key".to_string(), "k1".to_string())];
+        let (slot, signed) = (ResignedSlot::default(), SignedSecrets::default());
+        let sign = sign_in_transport(auth.clone(), &request, &[], &prepared, &[], Some(slot.clone()), Default::default(), signed.clone());
+        let e = sign("/events", &Bytes::new()).unwrap_err();
+        assert_eq!(e.kind, FailureKind::UnsupportedCombination);
+        assert!(e.message.contains("other query parameters"), "{}", e.message);
+        assert!(!e.message.contains("k2"), "the message never holds the value: {}", e.message);
+        assert!(slot.lock().is_none(), "a refused send is not recorded");
+        assert!(signed.lock().is_empty());
+
+        // The query it was prepared with is signed again as before.
+        let prepared = [("key".to_string(), "k2".to_string())];
+        let sign = sign_in_transport(auth, &request, &[], &prepared, &[], Some(slot.clone()), Default::default(), signed);
+        assert!(sign("/events", &Bytes::new()).is_ok());
+        assert!(slot.lock().is_some());
     }
 }
