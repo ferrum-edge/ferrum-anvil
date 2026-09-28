@@ -283,7 +283,9 @@
   repeated that signature, which a server that checks for replays rejects,
   so such a server refused every reconnection. A reconnection is signed once
   its `retry:` delay is over and still sends `Last-Event-ID`; when the
-  fallback is made is unchanged. The record's prepared request and auth
+  fallback is made is unchanged. A JWT's only per-send claim is `iat`, in
+  whole seconds, so two sends within the same second can carry the same JWT
+  (as can legacy Ferrum HMAC v1). The record's prepared request and auth
   facts are the last send's. A fallback or reconnection that auth cannot
   sign again is not made, and the session notes why; it is never sent with
   an earlier send's signature.
