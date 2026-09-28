@@ -240,6 +240,40 @@
 
 ### Fixed
 
+- Creating or duplicating a request (`create_request`, `duplicate_request`)
+  checks that its workspace and folder exist and belong together in the
+  write transaction that stores it, not before. A workspace or folder
+  delete that committed in between used to leave the new request, with its
+  first revision, under the deleted workspace or folder; the create is now
+  refused and nothing is stored.
+- HTTP/1.1 and HTTP/2: a request on a reused pooled connection that the
+  server closed just as the request went out no longer fails with "closed
+  before response" when resending it is safe. When none of it was written,
+  the transport sends it once more on a new connection. When it may have
+  been written and its method is idempotent, the engine signs it again (a
+  new HMAC nonce, DPoP proof and JWT time claims, since the server may
+  already have seen the first ones) and sends it once more on a new
+  connection. The resend happens at most once per execution, never on a
+  pooled connection or the one kept after `425 Too Early`, and is not a
+  retry: it happens with retries set to 0 and does not count toward them.
+  Both attempts are recorded, the second with the new attempt reason
+  `reused_connection_closed` and the failure kind that preceded it. A
+  written non-idempotent request, such as a `POST`, is never resent, even as
+  the retry after `425 Too Early`; its message now says why. This also
+  fixes an intermittent failure of the retry after `425 Too Early` when the
+  server had just closed the kept connection.
+- Saving a request (`save_request`) keeps the workspace, folder and position
+  it has in storage, read in the save's write transaction, whatever the
+  saved copy names; the name, description, tags and spec are saved as
+  before. An editor's copy loaded before the request was moved used to write
+  back its old folder and position, so the save silently undid the move.
+  Only a new request is placed by a save; moving one takes `move_request`.
+- Saving a request that is no longer stored (`save_request`, the desktop
+  **Save**) is refused with "request (it was deleted) not found". An editor
+  tab left open after its request, folder or workspace was deleted used to
+  recreate the request on save, possibly under a deleted folder or another
+  workspace's folder. New requests are made only by creating or duplicating
+  one.
 - Desktop Load: Discard is disabled while a new plan's save or Run… is on its
   way, and a new plan discarded while its save lands is saved but no longer
   reopened. A save that lands after another plan or report was selected

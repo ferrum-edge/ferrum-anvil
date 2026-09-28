@@ -279,12 +279,35 @@ impl App {
         self.store.get(kind::REQUEST, id)?.ok_or_else(|| AppError::NotFound("request".into()))
     }
 
+    /// Create a request in `folder` of workspace `ws`, after the requests
+    /// already there. That the workspace and the folder exist and belong
+    /// together is checked in the write transaction that stores the request,
+    /// so a delete of either that commits first refuses the create and one
+    /// that commits later deletes the request with them: a request is never
+    /// left under a deleted workspace or folder.
     pub fn create_request(&self, ws: &Id, folder: Option<Id>, name: &str, spec: RequestSpec) -> Result<RequestDefinition> {
+        self.create_request_between_phases(ws, folder, name, spec, || {})
+    }
+
+    /// [`App::create_request`], calling `between` before its write
+    /// transaction, so a test can write where another connection could. Not
+    /// for other callers.
+    #[doc(hidden)]
+    pub fn create_request_between_phases(
+        &self,
+        ws: &Id,
+        folder: Option<Id>,
+        name: &str,
+        spec: RequestSpec,
+        between: impl FnOnce(),
+    ) -> Result<RequestDefinition> {
+        between();
         self.create_request_holding(ws, folder, name, spec, None)
     }
 
     /// [`App::create_request`], where the stored files `also` names count as
-    /// held already (see [`App::save_request`]).
+    /// held already (see [`App::save_request`]). The request is placed in
+    /// [`App::save_request_holding`], in its write transaction.
     fn create_request_holding(
         &self,
         ws: &Id,
@@ -293,13 +316,6 @@ impl App {
         spec: RequestSpec,
         also: Option<&RequestSpec>,
     ) -> Result<RequestDefinition> {
-        self.workspace(ws)?;
-        if let Some(f) = folder
-            && self.folder(&f)?.workspace_id != *ws
-        {
-            return Err(AppError::Invalid("folder belongs to another workspace".into()));
-        }
-        let n = self.requests(ws)?.into_iter().filter(|r| r.folder_id == folder).count();
         let r = RequestDefinition {
             meta: Meta::new(),
             workspace_id: *ws,
@@ -308,11 +324,11 @@ impl App {
             description: String::new(),
             tags: vec![],
             favorite: false,
-            sort_key: n as f64 + 1.0,
+            sort_key: 0.0,
             spec,
             revision_id: None,
         };
-        self.save_request_holding(r, also)
+        self.save_request_holding(r, also, true)
     }
 
     /// Explicit save: persists the definition and appends an immutable revision
@@ -320,19 +336,51 @@ impl App {
     /// hold yet must still be stored: a file released between being attached
     /// and this save is refused, so the request never names content that is
     /// gone. The check and the save run in one write transaction.
+    ///
+    /// A save never places a request that is already stored: it keeps the
+    /// workspace, folder and position the store holds, read in the same
+    /// transaction, whatever `r` names. The editor's copy may predate a move
+    /// ([`App::move_request`]), which writing back its placement would undo.
+    /// A new request is placed where `r` puts it.
+    ///
+    /// Only a stored request is saved: one that is not stored is refused, not
+    /// recreated. The editor's copy may outlive the request, its folder or
+    /// its workspace, and recreating it could file it under a deleted folder
+    /// or another workspace's. New requests come from [`App::create_request`]
+    /// and [`App::duplicate_request`].
     pub fn save_request(&self, r: RequestDefinition) -> Result<RequestDefinition> {
-        self.save_request_holding(r, None)
+        self.save_request_holding(r, None, false)
     }
 
     /// [`App::save_request`], where the stored files `also` names count as
     /// held already: those of the request a duplicate copies, which it may
-    /// name even when one of them is no longer stored.
-    fn save_request_holding(&self, mut r: RequestDefinition, also: Option<&RequestSpec>) -> Result<RequestDefinition> {
+    /// name even when one of them is no longer stored. With `new`, `r` is a
+    /// request [`App::create_request`] made, stored here for the first time:
+    /// its workspace and folder are checked and it is placed after the
+    /// requests already there, in the same transaction.
+    fn save_request_holding(&self, mut r: RequestDefinition, also: Option<&RequestSpec>, new: bool) -> Result<RequestDefinition> {
         let hash = spec_hash(&r.spec);
         let spec = serde_json::to_value(&r.spec)?;
         let also = also.map(serde_json::to_value).transpose()?;
         self.store.atomically(|s| {
             let held: Option<RequestDefinition> = s.get(kind::REQUEST, &r.meta.id)?;
+            match &held {
+                Some(h) => (r.workspace_id, r.folder_id, r.sort_key) = (h.workspace_id, h.folder_id, h.sort_key),
+                None if !new => return Ok(Err(AppError::NotFound("request (it was deleted)".into()))),
+                None => {
+                    if s.get::<Workspace>(kind::WORKSPACE, &r.workspace_id)?.is_none() {
+                        return Ok(Err(AppError::NotFound("workspace".into())));
+                    }
+                    if let Some(f) = r.folder_id {
+                        let Some(f) = s.get::<Folder>(kind::FOLDER, &f)? else { return Ok(Err(AppError::NotFound("folder".into()))) };
+                        if f.workspace_id != r.workspace_id {
+                            return Ok(Err(AppError::Invalid("folder belongs to another workspace".into())));
+                        }
+                    }
+                    let siblings: Vec<RequestDefinition> = s.list(kind::REQUEST, Some(&r.workspace_id))?;
+                    r.sort_key = siblings.iter().filter(|q| q.folder_id == r.folder_id).count() as f64 + 1.0;
+                }
+            }
             let mut held: Vec<serde_json::Value> = held.map(|h| serde_json::to_value(&h.spec)).transpose()?.into_iter().collect();
             held.extend(also);
             if let Some(gone) = first_unstored_attachment_in(s, &spec, &held)? {
@@ -390,7 +438,16 @@ impl App {
     /// Save a copy of a request. The copy names the stored files the request
     /// holds, stored or not.
     pub fn duplicate_request(&self, id: &Id) -> Result<RequestDefinition> {
+        self.duplicate_request_between_phases(id, || {})
+    }
+
+    /// [`App::duplicate_request`], calling `between` after it reads the
+    /// request and before its write transaction, so a test can write where
+    /// another connection could. Not for other callers.
+    #[doc(hidden)]
+    pub fn duplicate_request_between_phases(&self, id: &Id, between: impl FnOnce()) -> Result<RequestDefinition> {
         let r = self.request(id)?;
+        between();
         self.create_request_holding(&r.workspace_id, r.folder_id, &format!("{} (copy)", r.name), r.spec.clone(), Some(&r.spec))
     }
 

@@ -1352,6 +1352,23 @@
           "required": [
             "reason"
           ]
+        },
+        {
+          "description": "The previous attempt went out on a reused pooled connection that the\nserver had closed, and it failed with `after` before any response.\nSent once more on a new connection, with per-send auth signed again.\nNot a retry: it neither needs nor uses the retry setting.",
+          "type": "object",
+          "properties": {
+            "after": {
+              "$ref": "#/$defs/FailureKind"
+            },
+            "reason": {
+              "type": "string",
+              "const": "reused_connection_closed"
+            }
+          },
+          "required": [
+            "reason",
+            "after"
+          ]
         }
       ]
     },

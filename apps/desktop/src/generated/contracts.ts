@@ -435,6 +435,10 @@ export type AttemptReason =
     }
   | {
       reason: "too_early_retry";
+    }
+  | {
+      after: FailureKind;
+      reason: "reused_connection_closed";
     };
 /**
  * Which peer identity check the TLS verifier applied (or would have applied,
