@@ -149,6 +149,13 @@ fn event_stream(
     inferred: &mut Vec<String>,
 ) -> Result<SessionRequest, TransportFailure> {
     let s = sessions::sse_request(ctx, r, prep, inferred)?;
+    // The session signs each send afresh, which the preview (sending
+    // nothing) cannot do.
+    if !matches!(prep.auth, ResolvedAuth::None) {
+        inferred.push(
+            "each send (initial, TCP fallback, each reconnection) is signed again when it is sent, not with the signature shown".into(),
+        );
+    }
     // Over TLS the version is negotiated when the stream is opened, and with
     // it whether the `Host` is sent as `Host` or as `:authority`.
     let https = prep.http.target.scheme == "https";

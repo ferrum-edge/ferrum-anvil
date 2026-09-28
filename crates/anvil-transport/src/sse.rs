@@ -36,8 +36,10 @@
 //!   initial one, the TCP fallback and each reconnection) goes out with
 //!   headers signed afresh for it (a new HMAC nonce, DPoP proof and JWT time
 //!   claims), never with an earlier send's signature, which a server that
-//!   checks for replays would refuse. A fallback or reconnection that cannot
-//!   be signed is not made, and the session notes why.
+//!   checks for replays would refuse. A send is signed just before it is
+//!   made; HTTP/3 refused before traffic is not signed. A fallback or
+//!   reconnection that cannot be signed is not made, and the session notes
+//!   why.
 
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
@@ -677,20 +679,40 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
     let mut use_h3 = matches!(plan.version, HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback);
     let mut index: u32 = 0;
     let mut reconnects: u32 = 0;
-    // The headers of the next send, signed afresh for it: the initial send
-    // here, the TCP fallback and each reconnection before they are made.
-    let mut signed = sign_send(plan);
+    // Why HTTP/3 failed, when the next send is the automatic policy's TCP
+    // fallback: its note says whether it was made.
+    let mut h3_failed: Option<String> = None;
 
     loop {
+        let refused = version_unsupported(plan.version, plan.https, plan.proxy.is_some());
+        // Each send (the initial one, the TCP fallback, each reconnection) is
+        // signed afresh just before it is made. HTTP/3 that is refused before
+        // any traffic (forced HTTP/3 here, the automatic policy in `open_h3`)
+        // is not signed, so the record never keeps a signature that was not
+        // sent. A fallback or reconnection that cannot be signed is not made.
+        let before_traffic = use_h3 && h3_unsupported(plan.https, plan.proxy.is_some()).is_some();
+        let signed = if before_traffic { Ok(None) } else { sign_send(plan) };
+        if let Some(h3_failed) = h3_failed.take() {
+            match &signed {
+                Ok(_) => facts.notes.push(format!("{h3_failed}; the automatic policy fell back to TCP")),
+                Err(e) => {
+                    facts.notes.push(format!("{h3_failed}; not sent over TCP: auth could not sign it again ({})", e.message));
+                    break;
+                }
+            }
+        } else if let (AttemptReason::Retry { .. }, Err(e)) = (&reason, &signed) {
+            facts.notes.push(format!("not reconnected: auth could not sign the reconnection again ({})", e.message));
+            break;
+        }
         let mut rec = Recorder::new(index, events.clone());
         events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: index });
         let mut obs = new_attempt(index, reason.clone(), plan.method.as_str(), &plan.display_url);
-        if let Some(f) = version_unsupported(plan.version, plan.https, plan.proxy.is_some()) {
+        if let Some(f) = refused {
             attempts.push(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events));
             break;
         }
-        // A fallback or reconnection that could not be signed is not made
-        // (below), so only the initial send can get here unsigned.
+        // Only the initial send gets here unsigned. HTTP/3 refused before
+        // traffic gets the plan's headers, which it never sends.
         let fields = match &signed {
             Ok(h) => h.as_deref().unwrap_or(&plan.headers),
             Err(f) => {
@@ -711,25 +733,16 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
                 // no response — recorded as its own attempt, never hidden. A
                 // request that may have been processed is replayed only when
                 // its method is idempotent.
-                let mut fallback = use_h3
+                let fallback = use_h3
                     && plan.version == HttpVersionPolicy::Http3WithFallback
                     && f.kind != FailureKind::Canceled
                     && (dispatch == DispatchState::NotDispatched || plan.method.is_idempotent());
-                let h3_failed = format!("HTTP/3 did not produce a response ({:?} during {:?})", f.kind, f.phase);
+                let failed = format!("HTTP/3 did not produce a response ({:?} during {:?})", f.kind, f.phase);
                 attempts.push(fail_attempt(rec, obs, f, dispatch, events));
                 if fallback {
-                    // Signed afresh: the server may have received the HTTP/3
-                    // attempt's nonce or proof.
-                    signed = sign_send(plan);
-                    match &signed {
-                        Ok(_) => facts.notes.push(format!("{h3_failed}; the automatic policy fell back to TCP")),
-                        Err(e) => {
-                            facts.notes.push(format!("{h3_failed}; not sent over TCP: auth could not sign it again ({})", e.message));
-                            fallback = false;
-                        }
-                    }
-                }
-                if fallback {
+                    // Signed afresh (above) when it is made: the server may
+                    // have received the HTTP/3 attempt's nonce or proof.
+                    h3_failed = Some(failed);
                     use_h3 = false;
                     index += 1;
                     reason = AttemptReason::ProtocolFallback { from: "h3".into() };
@@ -892,13 +905,8 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
             _ = cancel.cancelled() => break,
             _ = sleep_until_opt(total_deadline) => break,
         }
-        // Signed afresh once the delay is over, so its time claims are
-        // current; never sent with an earlier send's signature.
-        signed = sign_send(plan);
-        if let Err(e) = &signed {
-            facts.notes.push(format!("not reconnected: auth could not sign the reconnection again ({})", e.message));
-            break;
-        }
+        // Signed afresh (above) once the delay is over, so its time claims
+        // are current; never sent with an earlier send's signature.
         reconnects += 1;
         index += 1;
         reason = AttemptReason::Retry { after: after_kind.unwrap_or(FailureKind::BodyIncomplete) };

@@ -1,8 +1,8 @@
 //! Session adapter evidence against real local sockets (no mocks): SSE
 //! reconnection, per-send signing and bounded history, UDP ICMP evidence,
-//! DTLS stall, and the
-//! gRPC adapter used directly (native over HTTP/2 and HTTP/3, gRPC-Web binary
-//! and text, malformed gRPC-Web bodies). Matrix IDs are kept in test names.
+//! DTLS stall, and the gRPC adapter used directly (native over HTTP/2 and
+//! HTTP/3, gRPC-Web binary and text, malformed gRPC-Web bodies). Matrix IDs
+//! are kept in test names.
 
 use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, ProtocolStatus};
@@ -207,16 +207,17 @@ async fn sse_signs_each_send_and_a_send_that_cannot_be_signed_is_not_made() {
     assert!(seen.lock().is_empty());
     assert!(out.transcript.is_none());
 
-    // The TCP fallback after HTTP/3 is signed again (here HTTP/3 is refused
-    // before traffic: the URL is http://), and is not made when it cannot be.
-    for (ok, fell_back) in [(usize::MAX, true), (1, false)] {
+    // The TCP fallback after HTTP/3 is signed, and is not made when it
+    // cannot be. Here HTTP/3 is refused before traffic (the URL is http://),
+    // so only the fallback is signed.
+    for (ok, fell_back) in [(usize::MAX, true), (0, false)] {
         let (addr, seen) = flaky_sse_server().await;
         let calls = Arc::new(AtomicUsize::new(0));
         plan = sse_plan(addr, "/events");
         plan.version = HttpVersionPolicy::Http3WithFallback;
         plan.sign = Some(counting_signer(ok, calls.clone()));
         let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "the HTTP/3 attempt and the fallback were each signed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only the fallback, which could be sent, was signed");
         assert_eq!(out.attempts[0].observation.failure.as_ref().map(|f| f.kind), Some(FailureKind::UnsupportedCombination));
         if fell_back {
             assert_eq!(out.attempts.len(), 2);
@@ -225,10 +226,32 @@ async fn sse_signs_each_send_and_a_send_that_cannot_be_signed_is_not_made() {
         } else {
             assert_eq!(out.attempts.len(), 1, "the fallback was not made");
             assert!(seen.lock().is_empty());
-            let note = "; not sent over TCP: auth could not sign it again (the test signer refused send 2)";
+            let note = "; not sent over TCP: auth could not sign it again (the test signer refused send 1)";
             assert!(out.facts.notes.iter().any(|n| n.ends_with(note)), "{:?}", out.facts.notes);
         }
     }
+}
+
+#[tokio::test]
+async fn sse_a_forced_http3_send_refused_before_traffic_is_not_signed() {
+    init();
+    // Forced HTTP/3 needs an https:// URL: the loop's version check refuses
+    // it before anything is sent, so no signature is made (or recorded).
+    let (addr, seen) = flaky_sse_server().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut plan = sse_plan(addr, "/events");
+    plan.version = HttpVersionPolicy::Http3Only;
+    plan.reconnect = true;
+    plan.max_reconnects = 3;
+    plan.sign = Some(counting_signer(usize::MAX, calls.clone()));
+    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "a send that is refused is not signed");
+    assert_eq!(out.attempts.len(), 1);
+    let a = &out.attempts[0].observation;
+    assert_eq!(a.dispatch, DispatchState::NotDispatched);
+    assert_eq!(a.failure.as_ref().map(|f| f.kind), Some(FailureKind::UnsupportedCombination));
+    assert!(seen.lock().is_empty());
+    assert!(out.transcript.is_none());
 }
 
 #[tokio::test]

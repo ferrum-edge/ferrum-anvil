@@ -1308,7 +1308,7 @@ function NumField(props: { label: string; value?: number | null; onChange: (v: n
 
 // ------------------------------------------------------ effective request
 
-function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefinition; workspaceId: string; environmentId: string | null }) {
+export function EffectivePanel({ req, workspaceId, environmentId }: { req: RequestDefinition; workspaceId: string; environmentId: string | null }) {
   const debounced = useDebounced(req, 300);
   const [eff, setEff] = useState<EffectiveRequest | null>(null);
   const [err, setErr] = useState<string | null>(null);
