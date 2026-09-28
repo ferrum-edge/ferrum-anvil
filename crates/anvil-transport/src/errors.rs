@@ -291,9 +291,10 @@ fn apply_h2(h2e: &h2::Error, stage: HyperStage, f: &mut TransportFailure) -> boo
 /// the last-stream-id of its graceful `GOAWAY` (`NO_ERROR`). h2 fails such a
 /// stream, and any stream opened after the `GOAWAY`, with that `GOAWAY`'s
 /// error; a stream at or below the last-stream-id that the close then cuts
-/// short fails with an I/O error. After a `GOAWAY` with an error code, h2
-/// fails those with the same error when the connection closes, so only a
-/// graceful one proves anything.
+/// short fails with an I/O error, so a stream the peer may have processed is
+/// never read as unprocessed; this relies only on the peer following RFC 9113,
+/// as `REFUSED_STREAM` does. A `GOAWAY` with an error code is ignored: that is
+/// simply the conservative choice, since such a peer is failing, not draining.
 pub fn h2_unprocessed(err: &(dyn StdError + 'static)) -> bool {
     let Some(h2e) = find::<h2::Error>(err) else { return false };
     let refused = h2e.is_reset() && h2e.reason() == Some(h2::Reason::REFUSED_STREAM);
