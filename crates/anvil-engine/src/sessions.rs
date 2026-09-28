@@ -81,16 +81,19 @@ struct SessionPrep {
     /// gRPC with the cookies setting on).
     cookies: Option<SessionCookies>,
     /// What a gRPC call whose schema comes from server reflection was signed
-    /// for and sent with, once the transport encoded its message.
+    /// for and sent with, once the transport encoded its message, or the last
+    /// send of an event stream (each send is signed in the transport).
     resigned: Option<ResignedSlot>,
-    /// The secrets of every gRPC request signed in the transport (the call and
-    /// each server reflection request), for the record's redactor.
+    /// The secrets of every request signed in the transport (a gRPC call and
+    /// each server reflection request, each send of an event stream), for the
+    /// record's redactor.
     signed_secrets: Option<SignedSecrets>,
 }
 
 /// A gRPC call signed over the framed message it sent, once server
-/// reflection resolved its schema: the record's prepared request, in place
-/// of the one prepared (and signed over an empty body) before it was known.
+/// reflection resolved its schema, or the last send of an event stream,
+/// signed afresh for it: the record's prepared request, in place of the one
+/// prepared (and signed) before anything was sent.
 struct Resigned {
     headers: Vec<(String, String)>,
     body: Bytes,
@@ -106,7 +109,8 @@ type SignedSecrets = Arc<parking_lot::Mutex<Vec<String>>>;
 
 /// The redactor of a live transcript that can learn secrets once the session
 /// is planned: those a gRPC call signed once server reflection resolved its
-/// schema (before the call's first message is recorded).
+/// schema (before the call's first message is recorded), or an event stream
+/// signed for each send (before its events are recorded).
 type SharedRedactor = Arc<parking_lot::RwLock<Redactor>>;
 
 /// The workspace jar a session handshake keeps its `Set-Cookie` in: the
@@ -340,6 +344,7 @@ async fn apply_auth(
 /// is sent with is kept in `slot` for the record (a reflection request has
 /// none), and the secrets it is signed with (a freshly minted token) join
 /// the `live` transcript redactor and `signed`, for the record's redactor.
+/// An event stream signs each send with it too (see [`prepare_sse`]).
 fn sign_in_transport(
     auth: ResolvedAuth,
     request: &SessionRequest,
@@ -770,9 +775,23 @@ async fn prepare_sse(
     let SseRequest { request, spec, last_event_id } = sse_request(ctx, r, &b.prep, &mut b.inferred)?;
     // Covers a secret in the Last-Event-ID, resolved after the redactor was built.
     b.redactor.refresh_used_secrets(r);
-    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
+    let Authorized { mut headers, query, facts, set } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &request, cancel).await?;
     let t = Target { query, ..request.target.clone() };
     let cookies = jar_cookies(engine, ctx, &mut b, &t, &mut headers);
+    // Signed above to refuse, before any traffic, what auth cannot sign.
+    // Each send (the initial one, the TCP fallback, each reconnection) is
+    // signed again in the transport, with the same code: a new HMAC nonce,
+    // DPoP proof and JWT time claims, never an earlier send's, which a
+    // server that checks for replays refuses. The record keeps the last send.
+    let per_send = !matches!(b.prep.auth, ResolvedAuth::None);
+    let resigned: Option<ResignedSlot> = per_send.then(Default::default);
+    let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
+    let signed = SignedSecrets::default();
+    let sign = resigned.clone().map(|slot| -> sse::SignFn {
+        let sign = sign_in_transport(b.prep.auth.clone(), &request, &set, &headers, Some(slot), live.clone(), signed.clone());
+        let (path, body) = (request.target.path.clone(), request.body.clone());
+        Arc::new(move || sign(&path, &body))
+    });
     let plan = sse::SsePlan {
         method: http::Method::from_bytes(request.method.as_bytes()).unwrap_or(http::Method::GET),
         https: t.scheme == "https",
@@ -782,6 +801,7 @@ async fn prepare_sse(
         authority: http_exec::request_authority(&headers, &t),
         request_target: t.request_target(),
         headers: header_pairs(&headers)?,
+        sign,
         body: request.body.clone(),
         version: b.prep.settings.http_version,
         timeouts: b.prep.settings.timeouts,
@@ -796,7 +816,7 @@ async fn prepare_sse(
         reconnect: spec.reconnect,
         max_reconnects: if spec.reconnect { SSE_MAX_RECONNECTS } else { 0 },
         transcript: TranscriptLimits::default(),
-        redact: Some(redact_fn(&b.redactor)),
+        redact: Some(shared_redact_fn(&live)),
         proxy_header: b
             .prep
             .proxy_header
@@ -806,6 +826,8 @@ async fn prepare_sse(
     let url = t.url();
     let mut p = finish_prep(b, Plan::Sse(plan), request.method, url, headers, request.body, facts);
     p.cookies = cookies;
+    p.resigned = resigned;
+    p.signed_secrets = per_send.then_some(signed);
     Ok(p)
 }
 
@@ -1784,15 +1806,16 @@ async fn run_prepared(
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
     redactor.refresh_used_secrets(resolver);
-    // The secrets of the call and of each reflection request signed in the
-    // transport: any of them can be echoed in the response, notes or findings.
+    // The secrets of the requests signed in the transport (a gRPC call and
+    // each reflection request, each send of an event stream): any of them
+    // can be echoed in the response, notes or findings.
     if let Some(signed) = &prep.signed_secrets {
         for s in signed.lock().iter() {
             redactor.add_secret(s);
         }
     }
-    // A call signed once server reflection resolved its schema: the request
-    // as it was signed and sent.
+    // A call signed once server reflection resolved its schema, or the last
+    // send of an event stream: the request as it was signed and sent.
     let (headers, body, auth_facts) = match prep.resigned.as_ref().and_then(|s| s.lock().take()) {
         Some(r) => (r.headers, r.body, r.facts),
         None => (headers, body, auth_facts),

@@ -9,14 +9,21 @@
 //!   the server, and the client cannot know whether it was processed.
 //!   [`serve_h3`] follows an [`H3Script`] instead: it can answer, and leave
 //!   only the request that reuses the first QUIC connection unanswered.
-//! * Over TCP, a replay is answered `401`, any other request `200`.
+//! * Over TCP, a replay is answered `401`, any other request `200`. A
+//!   request to `/sse` that is not a replay gets an event stream: without
+//!   `Last-Event-ID`, `retry: 50` and event `1`, then the stream is cut (an
+//!   abnormal end a client may reconnect after); with it, event `2` and a
+//!   clean end.
 //!
 //! Without QUIC ([`serve`] with `quic = false`) only the TCP port is bound:
 //! a QUIC handshake to it gets no answer.
 
 use crate::tlsserver::{TlsServerOptions, server_config};
 use bytes::{Buf, Bytes};
-use http_body_util::{BodyExt, Full};
+use futures::SinkExt;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::Frame;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::Mutex;
@@ -24,6 +31,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -37,6 +45,8 @@ pub struct Received {
     pub authorization: String,
     /// Its `dpop` header, or "".
     pub dpop: String,
+    /// Its `last-event-id` header, or "".
+    pub last_event_id: String,
     /// The same `authorization` and `dpop` were received before.
     pub replayed: bool,
 }
@@ -112,11 +122,33 @@ impl Drop for ReplayFixture {
 /// Record a request: whether it is a replay.
 fn record(received: &Mutex<Vec<Received>>, protocol: &str, method: &str, headers: &http::HeaderMap) -> bool {
     let value = |n: &str| headers.get(n).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
-    let (authorization, dpop) = (value("authorization"), value("dpop"));
+    let (authorization, dpop, last_event_id) = (value("authorization"), value("dpop"), value("last-event-id"));
     let mut r = received.lock();
     let replayed = r.iter().any(|x| x.authorization == authorization && x.dpop == dpop);
-    r.push(Received { protocol: protocol.into(), method: method.into(), authorization, dpop, replayed });
+    r.push(Received { protocol: protocol.into(), method: method.into(), authorization, dpop, last_event_id, replayed });
     replayed
+}
+
+type Body = BoxBody<Bytes, std::io::Error>;
+
+/// The `/sse` event stream: after a `Last-Event-ID` (a reconnection), event
+/// `2` and a clean end; otherwise event `1`, then the stream is cut.
+fn event_stream(reconnected: bool) -> http::Response<Body> {
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(4);
+    tokio::spawn(async move {
+        if reconnected {
+            let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"id: 2\ndata: two\n\n")))).await;
+            return;
+        }
+        let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"retry: 50\nid: 1\ndata: one\n\n")))).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = tx.send(Err(std::io::Error::other("replay guard: the event stream is cut"))).await;
+    });
+    http::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .body(BodyExt::boxed(StreamBody::new(rx)))
+        .expect("static response")
 }
 
 /// A UDP port for QUIC and the same TCP port, on 127.0.0.1. Another socket
@@ -235,9 +267,12 @@ async fn serve_with(tls: TlsServerOptions, script: Option<H3Script>) -> anyhow::
                         let (parts, body) = req.into_parts();
                         let _ = body.collect().await;
                         let replayed = record(&received, protocol, parts.method.as_str(), &parts.headers);
+                        if !replayed && parts.uri.path() == "/sse" {
+                            return Ok::<_, Infallible>(event_stream(parts.headers.contains_key("last-event-id")));
+                        }
                         let status = if replayed { 401 } else { 200 };
-                        let resp =
-                            http::Response::builder().status(status).body(Full::new(Bytes::from_static(b"ok"))).expect("static response");
+                        let body: Body = Full::new(Bytes::from_static(b"ok")).map_err(|never| match never {}).boxed();
+                        let resp = http::Response::builder().status(status).body(body).expect("static response");
                         Ok::<_, Infallible>(resp)
                     }
                 });

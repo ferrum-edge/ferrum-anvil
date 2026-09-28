@@ -71,6 +71,7 @@ fn sse_plan(addr: SocketAddr, target: &str) -> sse::SsePlan {
         authority: addr.to_string(),
         request_target: target.to_string(),
         headers: vec![],
+        sign: None,
         body: Bytes::new(),
         version: HttpVersionPolicy::Http3Only,
         timeouts: timeouts(),

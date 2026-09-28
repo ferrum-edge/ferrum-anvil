@@ -276,6 +276,19 @@
   claims): it used to repeat the HTTP/3 attempt's signature, which a server
   that checks for replays rejects. Both attempts are still recorded, the
   second with reason `protocol_fallback{from: h3}`.
+- Server-sent events: each send of a stream is now signed afresh (a new
+  HMAC nonce, DPoP proof and JWT time claims): the initial send, the TCP
+  fallback after HTTP/3 and each reconnection. A stream used to be signed
+  once, when it was prepared, and the fallback and every reconnection
+  repeated that signature, which a server that checks for replays rejects,
+  so such a server refused every reconnection. A reconnection is signed once
+  its `retry:` delay is over and still sends `Last-Event-ID`; when the
+  fallback is made is unchanged. A JWT's only per-send claim is `iat`, in
+  whole seconds, so two sends within the same second can carry the same JWT
+  (as can legacy Ferrum HMAC v1). The record's prepared request and auth
+  facts are the last send's. A fallback or reconnection that auth cannot
+  sign again is not made, and the session notes why; it is never sent with
+  an earlier send's signature.
 - HTTP/3: a request on a reused pooled QUIC connection that the server
   closed (or let time out) just as the request went out is now sent once
   more on a new connection when that is safe, as over HTTP/1.1 and HTTP/2:
