@@ -312,7 +312,7 @@ impl App {
             spec,
             revision_id: None,
         };
-        self.save_request_holding(r, also)
+        self.save_request_holding(r, also, true)
     }
 
     /// Explicit save: persists the definition and appends an immutable revision
@@ -320,19 +320,37 @@ impl App {
     /// hold yet must still be stored: a file released between being attached
     /// and this save is refused, so the request never names content that is
     /// gone. The check and the save run in one write transaction.
+    ///
+    /// A save never places a request that is already stored: it keeps the
+    /// workspace, folder and position the store holds, read in the same
+    /// transaction, whatever `r` names. The editor's copy may predate a move
+    /// ([`App::move_request`]), which writing back its placement would undo.
+    /// A new request is placed where `r` puts it.
+    ///
+    /// Only a stored request is saved: one that is not stored is refused, not
+    /// recreated. The editor's copy may outlive the request, its folder or
+    /// its workspace, and recreating it could file it under a deleted folder
+    /// or another workspace's. New requests come from [`App::create_request`]
+    /// and [`App::duplicate_request`].
     pub fn save_request(&self, r: RequestDefinition) -> Result<RequestDefinition> {
-        self.save_request_holding(r, None)
+        self.save_request_holding(r, None, false)
     }
 
     /// [`App::save_request`], where the stored files `also` names count as
     /// held already: those of the request a duplicate copies, which it may
-    /// name even when one of them is no longer stored.
-    fn save_request_holding(&self, mut r: RequestDefinition, also: Option<&RequestSpec>) -> Result<RequestDefinition> {
+    /// name even when one of them is no longer stored. With `new`, `r` is a
+    /// request [`App::create_request`] made, stored here for the first time.
+    fn save_request_holding(&self, mut r: RequestDefinition, also: Option<&RequestSpec>, new: bool) -> Result<RequestDefinition> {
         let hash = spec_hash(&r.spec);
         let spec = serde_json::to_value(&r.spec)?;
         let also = also.map(serde_json::to_value).transpose()?;
         self.store.atomically(|s| {
             let held: Option<RequestDefinition> = s.get(kind::REQUEST, &r.meta.id)?;
+            match &held {
+                Some(h) => (r.workspace_id, r.folder_id, r.sort_key) = (h.workspace_id, h.folder_id, h.sort_key),
+                None if !new => return Ok(Err(AppError::NotFound("request (it was deleted)".into()))),
+                None => {}
+            }
             let mut held: Vec<serde_json::Value> = held.map(|h| serde_json::to_value(&h.spec)).transpose()?.into_iter().collect();
             held.extend(also);
             if let Some(gone) = first_unstored_attachment_in(s, &spec, &held)? {
