@@ -239,6 +239,12 @@
 
 ### Fixed
 
+- Creating or duplicating a request (`create_request`, `duplicate_request`)
+  checks that its workspace and folder exist and belong together in the
+  write transaction that stores it, not before. A workspace or folder
+  delete that committed in between used to leave the new request, with its
+  first revision, under the deleted workspace or folder; the create is now
+  refused and nothing is stored.
 - Saving a request (`save_request`) keeps the workspace, folder and position
   it has in storage, read in the save's write transaction, whatever the
   saved copy names; the name, description, tags and spec are saved as
