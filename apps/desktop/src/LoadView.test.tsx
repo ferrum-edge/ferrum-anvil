@@ -382,7 +382,7 @@ async function listed(ws: string) {
 describe("LoadView workspace switch", () => {
   it("clears discarded plan ids when switching workspaces", async () => {
     const save = deferred<void>();
-    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue("reused-plan-id");
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-4000-8000-000000000001");
     let reportPresent = true;
     backend({
       load_plan_save: async (a) => {
