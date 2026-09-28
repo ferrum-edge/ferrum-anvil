@@ -559,10 +559,10 @@ describe("where a relocated file is used", () => {
     expect(screen.getByTestId("linked-file").textContent).not.toContain("used for requests to");
     unmount();
     backend([{ path: PATH, state: "unbound" }]);
-    render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://upload.example.test/"]} />);
+    const second = render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://upload.example.test/"]} />);
     await stateBadge();
     expect(screen.getByTestId("linked-file").textContent).not.toContain("used for requests to");
-    unmount();
+    second.unmount();
     backend([{ path: PATH, state: "unbound" }]);
     render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://{{base_url}}/private/path"]} onRelocated={() => {}} />);
     await stateBadge();
