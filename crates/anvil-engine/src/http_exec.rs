@@ -1,9 +1,10 @@
 //! HTTP-family execution: one logical request = one or more attempts
-//! (redirects, safe retries, DPoP nonce challenge), each with freshly applied
-//! auth, followed by diagnosis and record assembly.
+//! (redirects, safe retries, DPoP nonce challenge, HTTP/3 → TCP fallback),
+//! each with freshly applied auth, followed by diagnosis and record assembly.
 
 use crate::assertions::{self, Observed};
 use crate::context::{ExecutionContext, resolve_sensitive};
+use crate::h3_exec::H3Fallback;
 use crate::prepare::{self, PreparedHttp, Target};
 use crate::record::{self, Assembly};
 use crate::redact::Redactor;
@@ -14,7 +15,7 @@ use anvil_diagnostics::FerrumTrust;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::execution::*;
 use anvil_domain::integration::IntegrationKind;
-use anvil_domain::settings::EffectiveSettings;
+use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
 use anvil_transport::connector::ProxyPlan;
 use anvil_transport::dns::DnsConfig;
 use anvil_transport::http::{AttemptOutput, HttpPlan};
@@ -752,6 +753,8 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     // The reason of the attempt that a resend after a reused connection was
     // found closed repeats (at most one per execution).
     let mut resent: Option<AttemptReason> = None;
+    // The reason of the HTTP/3 attempt that the TCP fallback repeats.
+    let mut fallback_repeats: Option<AttemptReason> = None;
     let mut reason = AttemptReason::Initial;
     let mut credentials_stripped = false;
     let mut final_auth_facts: Vec<(String, String)> = vec![];
@@ -813,10 +816,13 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             }
         };
         let target_for_plan = Target { query: query.clone(), ..current.target.clone() };
-        let early_reason = match (&reason, &resent) {
-            (AttemptReason::ReusedConnectionClosed { .. }, Some(r)) => r,
+        let early_reason = match (&reason, &resent, &fallback_repeats) {
+            (AttemptReason::ReusedConnectionClosed { .. }, Some(r), _) | (AttemptReason::ProtocolFallback { .. }, _, Some(r)) => r,
             _ => &reason,
         };
+        // The TCP fallback after HTTP/3 goes out over TCP (HTTP/2 or HTTP/1.1).
+        let fallback_attempt = matches!(reason, AttemptReason::ProtocolFallback { .. });
+        let version = if fallback_attempt { HttpVersionPolicy::Auto } else { prep.settings.http_version };
         let display_url = redactor.url(&target_for_plan.url());
         // The PROXY header is configured for the request's own listener: a
         // redirect elsewhere is followed without it, and the attempt says so.
@@ -847,7 +853,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             request_target: target_for_plan.request_target(),
             headers: header_pairs,
             body: body.clone(),
-            version: prep.settings.http_version,
+            version,
             timeouts: prep.settings.timeouts,
             limits: prep.settings.limits,
             keepalive: prep.settings.keepalive,
@@ -871,14 +877,26 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         {
             f.message = format!("{} (sent once more on a new connection as attempt {index}, with its auth applied again)", f.message);
         }
-        let (outs, closed_under) = match prep.settings.http_version {
-            anvil_domain::settings::HttpVersionPolicy::Http3Only | anvil_domain::settings::HttpVersionPolicy::Http3WithFallback => {
-                let h3 = crate::h3_exec::execute(engine, &plan, prep.settings.http_version, index, reason.clone(), &events, &cancel);
-                (h3.await, None)
+        if fallback_attempt
+            && let Some(a) = attempts.last_mut()
+            && a.dispatch != DispatchState::NotDispatched
+            && let Some(f) = a.failure.as_mut()
+        {
+            f.message = format!(
+                "{} (the {} request may have been received; being idempotent, it was sent over TCP as attempt {index}, signed again)",
+                f.message, current.method
+            );
+        }
+        let (outs, closed_under) = match version {
+            HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback => {
+                (vec![engine.h3.execute(&plan, index, reason.clone(), &events, &cancel).await], None)
             }
             _ => {
                 let e = engine.http.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
-                (e.outputs, e.resend_on_new_connection)
+                // The TCP fallback gets the transport's resend of a request
+                // that never left, not the engine's: its next attempt would
+                // go out over HTTP/3 again.
+                (e.outputs, e.resend_on_new_connection.filter(|_| !fallback_attempt))
             }
         };
         let mut out_iter = outs.into_iter().peekable();
@@ -1073,6 +1091,31 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
             resent = Some(std::mem::replace(&mut reason, AttemptReason::ReusedConnectionClosed { after }));
             last = Some(out);
             continue;
+        }
+
+        // ---- HTTP/3 → TCP fallback (the automatic policy) ----
+        // HTTP/3 failed without a response. The request is sent over TCP as a
+        // new attempt, signed again (new nonces, proofs and time claims: the
+        // server may have seen the first ones), only when nothing of it was
+        // sent over HTTP/3 or its method is idempotent. Not a retry: it does
+        // not use the retry setting.
+        let failed_without_response = out.response.is_none() && out.observation.failure.is_some();
+        let dispatch = out.observation.dispatch;
+        match crate::h3_exec::tcp_fallback(version, failed_without_response, dispatch, &current.method, cancel.is_cancelled()) {
+            H3Fallback::Tcp => {
+                fallback_repeats = Some(std::mem::replace(&mut reason, AttemptReason::ProtocolFallback { from: "h3".into() }));
+                last = Some(out);
+                continue;
+            }
+            H3Fallback::NotResent => {
+                if let Some(f) = attempts.last_mut().and_then(|a| a.failure.as_mut()) {
+                    f.message = format!(
+                        "{} (not sent again over TCP: the {} request may have been received over HTTP/3 and is not idempotent)",
+                        f.message, current.method
+                    );
+                }
+            }
+            H3Fallback::None => {}
         }
 
         // ---- safe automatic retries (off by default) ----

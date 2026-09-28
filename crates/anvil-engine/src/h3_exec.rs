@@ -1,32 +1,47 @@
 //! HTTP/3 execution policy: forced H3 never falls back silently; automatic
-//! mode records the failed H3 attempt and the TCP fallback as separate attempts.
+//! mode records the failed H3 attempt and the TCP fallback as separate
+//! attempts. The fallback is a new attempt of the engine's loop, with reason
+//! `protocol_fallback{from: "h3"}`, so its per-send auth (HMAC nonce, DPoP
+//! proof, JWT time claims) is signed again like any other attempt's. It is
+//! made only when sending the request again is safe (see [`tcp_fallback`]).
 
-use crate::Engine;
-use anvil_domain::execution::AttemptReason;
+use anvil_domain::execution::DispatchState;
 use anvil_domain::settings::HttpVersionPolicy;
-use anvil_transport::http::{AttemptOutput, HttpPlan};
-use anvil_transport::recorder::EventCtx;
-use tokio_util::sync::CancellationToken;
 
-pub async fn execute(
-    engine: &Engine,
-    plan: &HttpPlan,
+/// What follows an HTTP/3 attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum H3Fallback {
+    /// No fallback: forced HTTP/3, a response arrived, or the execution was
+    /// canceled.
+    None,
+    /// Send the request over TCP as a new attempt, signed again.
+    Tcp,
+    /// The request may have been received over HTTP/3 and its method is not
+    /// idempotent: it is not sent again over TCP.
+    NotResent,
+}
+
+/// Whether the automatic policy sends the request again over TCP after an
+/// HTTP/3 attempt for `method` that ended with `dispatch`, and failed without
+/// a response when `failed_without_response`. Only `not_dispatched` proves
+/// that nothing of the request was sent over HTTP/3: the connection or the
+/// handshake failed before the request stream was opened, or the server
+/// refused its 0-RTT early data unread and the transport's send after the
+/// handshake did not start. Any other state, `unknown` included, counts as
+/// possibly received, and only an idempotent method (the retry policy's
+/// definition) is then sent again.
+pub fn tcp_fallback(
     policy: HttpVersionPolicy,
-    index: u32,
-    reason: AttemptReason,
-    events: &EventCtx,
-    cancel: &CancellationToken,
-) -> Vec<AttemptOutput> {
-    let h3 = engine.h3.execute(plan, index, reason, events, cancel).await;
-    let failed_without_response = h3.response.is_none() && h3.observation.failure.is_some();
-    let canceled = cancel.is_cancelled();
-    if policy == HttpVersionPolicy::Http3WithFallback && failed_without_response && !canceled {
-        let mut tcp_plan = plan.clone();
-        tcp_plan.version = HttpVersionPolicy::Auto;
-        let mut outs = vec![h3];
-        let fb = engine.http.execute(&tcp_plan, index + 1, AttemptReason::ProtocolFallback { from: "h3".into() }, events, cancel).await;
-        outs.extend(fb);
-        return outs;
+    failed_without_response: bool,
+    dispatch: DispatchState,
+    method: &str,
+    canceled: bool,
+) -> H3Fallback {
+    if policy != HttpVersionPolicy::Http3WithFallback || !failed_without_response || canceled {
+        H3Fallback::None
+    } else if dispatch == DispatchState::NotDispatched || anvil_diagnostics::facts::is_idempotent(method) {
+        H3Fallback::Tcp
+    } else {
+        H3Fallback::NotResent
     }
-    vec![h3]
 }

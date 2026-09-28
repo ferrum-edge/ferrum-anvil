@@ -9,7 +9,7 @@
 
 pub mod assertions;
 pub mod context;
-mod h3_exec;
+pub mod h3_exec;
 pub mod http_exec;
 pub mod lint;
 mod local_checks;

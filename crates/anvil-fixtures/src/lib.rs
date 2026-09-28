@@ -26,6 +26,7 @@ pub mod pki;
 pub mod policy;
 pub mod proxy_protocol;
 pub mod raw;
+pub mod replay_guard;
 pub mod streams;
 pub mod tlsserver;
 pub mod workload_api;

@@ -1234,6 +1234,15 @@ impl H3Transport {
         Ok(Fresh::Established(Box::new((H3Conn::new(send, quic, cobs), track))))
     }
 
+    /// Execute one attempt over HTTP/3. A failed attempt's `dispatch` is
+    /// `not_dispatched` only when no part of the request can have reached the
+    /// server: it failed before its request stream was written (preparation,
+    /// DNS, the QUIC connection or handshake, HTTP/3 setup), or the server
+    /// refused its 0-RTT early data unread and the send after the handshake
+    /// did not start. From the first write on it is `may_have_been_sent`,
+    /// until a response head makes it `sent`. A caller that would send the
+    /// request again (the engine's TCP fallback) treats anything but
+    /// `not_dispatched` as possibly received.
     pub async fn execute(
         &self,
         plan: &HttpPlan,
