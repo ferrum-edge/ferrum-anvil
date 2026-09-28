@@ -239,6 +239,12 @@
 
 ### Fixed
 
+- Creating or duplicating a request (`create_request`, `duplicate_request`)
+  checks that its workspace and folder exist and belong together in the
+  write transaction that stores it, not before. A workspace or folder
+  delete that committed in between used to leave the new request, with its
+  first revision, under the deleted workspace or folder; the create is now
+  refused and nothing is stored.
 - HTTP/1.1 and HTTP/2: a request on a reused pooled connection that the
   server closed just as the request went out no longer fails with "closed
   before response" when resending it is safe. When none of it was written,

@@ -7,10 +7,10 @@ use anvil_app::{App, AppError};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::{RequestDefinition, Variable};
+use anvil_domain::workspace::{RequestDefinition, RequestRevision, Variable};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
-use anvil_storage::KdfParams;
+use anvil_storage::{KdfParams, kind};
 use anvil_transport::recorder::EventCtx;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -369,4 +369,53 @@ fn creating_and_duplicating_still_store_new_requests() {
     let saved = a.save_request(RequestDefinition { name: "renamed".into(), ..copy }).unwrap();
     assert_eq!(a.request(&saved.meta.id).unwrap().name, "renamed");
     assert_eq!(a.requests(&ws.meta.id).unwrap().len(), 2);
+}
+
+#[test]
+fn a_create_or_duplicate_refuses_a_workspace_or_folder_deleted_before_it_stores() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "t");
+    let spec = || RequestSpec::http("GET", "http://a/");
+    // Nothing of the refused create is stored: no request, no revision.
+    let nothing_stored = |a: &App| {
+        assert!(a.store.list::<RequestDefinition>(kind::REQUEST, None).unwrap().is_empty());
+        assert!(a.store.list::<RequestRevision>(kind::REVISION, None).unwrap().is_empty());
+    };
+
+    // The workspace is deleted after the create is asked for, before it
+    // stores the request.
+    let ws = a.create_workspace("W").unwrap().meta.id;
+    let e = a.create_request_between_phases(&ws, None, "R", spec(), || a.delete_workspace(&ws).unwrap()).unwrap_err();
+    assert!(matches!(e, AppError::NotFound(_)), "{e}");
+    nothing_stored(&a);
+
+    // Its folder is.
+    let ws = a.create_workspace("W").unwrap().meta.id;
+    let f = a.create_folder(&ws, None, "F").unwrap().meta.id;
+    let e = a.create_request_between_phases(&ws, Some(f), "R", spec(), || a.delete_folder(&f).unwrap()).unwrap_err();
+    assert!(matches!(e, AppError::NotFound(_)), "{e}");
+    assert!(a.requests(&ws).unwrap().is_empty());
+    nothing_stored(&a);
+
+    // A duplicate's workspace is deleted after it reads the request.
+    let ws = a.create_workspace("W").unwrap().meta.id;
+    let r = a.create_request(&ws, None, "R", spec()).unwrap().meta.id;
+    let e = a.duplicate_request_between_phases(&r, || a.delete_workspace(&ws).unwrap()).unwrap_err();
+    assert!(matches!(e, AppError::NotFound(_)), "{e}");
+    nothing_stored(&a);
+
+    // A duplicate's folder is.
+    let ws = a.create_workspace("W").unwrap().meta.id;
+    let f = a.create_folder(&ws, None, "F").unwrap().meta.id;
+    let r = a.create_request(&ws, Some(f), "R", spec()).unwrap().meta.id;
+    let e = a.duplicate_request_between_phases(&r, || a.delete_folder(&f).unwrap()).unwrap_err();
+    assert!(matches!(e, AppError::NotFound(_)), "{e}");
+    assert!(a.requests(&ws).unwrap().is_empty());
+    nothing_stored(&a);
+
+    // With nothing deleted in between, both still store.
+    let r = a.create_request_between_phases(&ws, None, "R", spec(), || {}).unwrap();
+    let copy = a.duplicate_request_between_phases(&r.meta.id, || {}).unwrap();
+    assert_eq!((r.sort_key, copy.sort_key), (1.0, 2.0));
+    assert_eq!(a.requests(&ws).unwrap().len(), 2);
 }
