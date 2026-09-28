@@ -240,6 +240,13 @@
 
 ### Fixed
 
+- The effective-request preview reports a multi-auth as varying per send
+  when any of its profiles is HMAC, DPoP, JWT, WS-Security or JWT-SVID
+  (nested sets included), and an SSE preview with such a multi-auth says
+  each send is signed again. It used to report, say, an API key with HMAC
+  as not varying, with no note, although the HMAC signature changes on
+  every send. A multi-auth of static credentials (bearer, Basic, API key,
+  a cached OAuth2 token) is still shown as sent.
 - Creating or duplicating a request (`create_request`, `duplicate_request`)
   checks that its workspace and folder exist and belong together in the
   write transaction that stores it, not before. A workspace or folder
