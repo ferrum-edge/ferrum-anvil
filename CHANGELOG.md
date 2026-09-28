@@ -300,6 +300,29 @@
   auth now notes that each send (the initial one, the TCP fallback and each
   reconnection) is signed again when it is sent, not with the signature
   shown.
+- HTTP/3: a request on a reused pooled QUIC connection that the server
+  closed (or let time out) just as the request went out is now sent once
+  more on a new connection when that is safe, as over HTTP/1.1 and HTTP/2:
+  at once by the transport when none of it left, else by the engine, signed
+  again, for an idempotent method. A request the server rejected with
+  `H3_REQUEST_REJECTED`, or whose HEADERS the closing connection cut short,
+  was not processed: it is now reported `not_dispatched` and, on a reused
+  connection, signed again and sent once more whatever its method (on a new
+  connection the TCP fallback may now take it, whatever its method). A
+  written `POST` whose connection closed under it is still not sent again,
+  and its message says why. A pooled connection whose server sent `GOAWAY`
+  is no longer handed out: its next request used to fail on it. The resend
+  has reason `reused_connection_closed`, happens with retries set to 0 and
+  does not count toward them.
+- HTTP/2: a request on a reused pooled connection that the server refused
+  unprocessed, with `REFUSED_STREAM` or by a graceful `GOAWAY` whose
+  last-stream-id is below its stream (RFC 9113 §8.7), is now signed again
+  and sent once more on a new connection whatever its method, a `POST`
+  included; it used to fail. A stream above such a `GOAWAY` is now reported
+  `not_dispatched`; a `GOAWAY` carrying an error code proves nothing and
+  keeps the previous rules. Only an `RST_STREAM` with `REFUSED_STREAM` is
+  now classified `h2_refused_stream`; a `GOAWAY` whose error code happens to
+  be `REFUSED_STREAM` is `h2_go_away`.
 - Saving a request (`save_request`) keeps the workspace, folder and position
   it has in storage, read in the save's write transaction, whatever the
   saved copy names; the name, description, tags and spec are saved as

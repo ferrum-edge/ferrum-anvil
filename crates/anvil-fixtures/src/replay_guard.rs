@@ -4,9 +4,11 @@
 //! `authorization` and `dpop` headers were both already received, over
 //! either protocol, is a replay.
 //!
-//! * Over HTTP/3, every request is read whole, then its stream is reset
-//!   (`H3_INTERNAL_ERROR`) without a response: the request reached the
-//!   server, and the client cannot know whether it was processed.
+//! * Over HTTP/3, [`serve`] reads every request whole, then resets its
+//!   stream (`H3_INTERNAL_ERROR`) without a response: the request reached
+//!   the server, and the client cannot know whether it was processed.
+//!   [`serve_h3`] follows an [`H3Script`] instead: it can answer, and leave
+//!   only the request that reuses the first QUIC connection unanswered.
 //! * Over TCP, a replay is answered `401`, any other request `200`. A
 //!   request to `/sse` that is not a replay gets an event stream: without
 //!   `Last-Event-ID`, `retry: 50` and event `1`, then the stream is cut (an
@@ -28,6 +30,7 @@ use parking_lot::Mutex;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -48,9 +51,45 @@ pub struct Received {
     pub replayed: bool,
 }
 
+/// What the fixture does with requests over HTTP/3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum H3Script {
+    /// Read every request whole, then reset its stream (`H3_INTERNAL_ERROR`)
+    /// without a response.
+    ResetEvery,
+    /// Answer every request as the TCP port does (`401` for a replay, else
+    /// `200`), except the second one on the first QUIC connection, which
+    /// reuses it: read it whole, then leave it unanswered as said.
+    SecondOnReuse(Unanswered),
+    /// Answer every request as the TCP port does. On the first QUIC
+    /// connection, send `GOAWAY` once the first request arrived (allowing
+    /// only that one), and keep the connection open.
+    GoAwayAfterFirst,
+}
+
+/// How [`H3Script::SecondOnReuse`] leaves a request unanswered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unanswered {
+    /// Reset its stream with `H3_REQUEST_REJECTED`: the server did not
+    /// process it (RFC 9114 §4.1.1).
+    Rejected,
+    /// Close the QUIC connection (`H3_NO_ERROR`): the server may have
+    /// processed it.
+    ConnectionClosed,
+}
+
+/// What one HTTP/3 request gets.
+#[derive(Clone, Copy)]
+enum H3Action {
+    Reset,
+    Answer,
+    Leave(Unanswered),
+}
+
 pub struct ReplayFixture {
     pub addr: SocketAddr,
     received: Arc<Mutex<Vec<Received>>>,
+    quic_connections: Arc<AtomicUsize>,
     endpoint: Option<quinn::Endpoint>,
     cancel: CancellationToken,
 }
@@ -63,6 +102,11 @@ impl ReplayFixture {
     /// Every request received, over either protocol, in arrival order.
     pub fn received(&self) -> Vec<Received> {
         self.received.lock().clone()
+    }
+
+    /// QUIC connections accepted.
+    pub fn quic_connections(&self) -> usize {
+        self.quic_connections.load(Ordering::SeqCst)
     }
 }
 
@@ -133,40 +177,73 @@ async fn bind(tls: &TlsServerOptions, quic: bool) -> anyhow::Result<(Option<quin
     Err(anyhow::anyhow!("no port was free over both UDP and TCP: {last:?}"))
 }
 
-/// Start the fixture on 127.0.0.1, with HTTP/3 when `quic`.
+/// Start the fixture on 127.0.0.1, with HTTP/3 when `quic`, whose every
+/// request is reset without a response ([`H3Script::ResetEvery`]).
 pub async fn serve(tls: TlsServerOptions, quic: bool) -> anyhow::Result<ReplayFixture> {
-    let (endpoint, listener) = bind(&tls, quic).await?;
+    serve_with(tls, quic.then_some(H3Script::ResetEvery)).await
+}
+
+/// Start the fixture on 127.0.0.1, with HTTP/3 following `script`.
+pub async fn serve_h3(tls: TlsServerOptions, script: H3Script) -> anyhow::Result<ReplayFixture> {
+    serve_with(tls, Some(script)).await
+}
+
+async fn serve_with(tls: TlsServerOptions, script: Option<H3Script>) -> anyhow::Result<ReplayFixture> {
+    let (endpoint, listener) = bind(&tls, script.is_some()).await?;
     let addr = listener.local_addr()?;
     let received = Arc::new(Mutex::new(Vec::new()));
+    let quic_connections = Arc::new(AtomicUsize::new(0));
     let cancel = CancellationToken::new();
-    if let Some(ep) = endpoint.clone() {
-        let (received, cancel) = (received.clone(), cancel.clone());
+    if let (Some(ep), Some(script)) = (endpoint.clone(), script) {
+        let (received, conns, cancel) = (received.clone(), quic_connections.clone(), cancel.clone());
         tokio::spawn(async move {
             loop {
                 let incoming = tokio::select! {
                     i = ep.accept() => match i { Some(i) => i, None => break },
                     _ = cancel.cancelled() => break,
                 };
-                let (received, cancel) = (received.clone(), cancel.clone());
+                let (received, conns, cancel) = (received.clone(), conns.clone(), cancel.clone());
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
+                    let first_connection = conns.fetch_add(1, Ordering::SeqCst) == 0;
+                    let quic = conn.clone();
                     let Ok(mut h3c) = h3::server::builder().build::<_, Bytes>(h3_quinn::Connection::new(conn)).await else { return };
-                    loop {
+                    for nth in 0.. {
                         let accepted = tokio::select! {
                             r = h3c.accept() => r,
                             _ = cancel.cancelled() => break,
                         };
                         let Ok(Some(resolver)) = accepted else { break };
-                        let received = received.clone();
+                        let action = match script {
+                            H3Script::ResetEvery => H3Action::Reset,
+                            H3Script::SecondOnReuse(how) if first_connection && nth == 1 => H3Action::Leave(how),
+                            H3Script::SecondOnReuse(_) | H3Script::GoAwayAfterFirst => H3Action::Answer,
+                        };
+                        let (received, quic) = (received.clone(), quic.clone());
                         tokio::spawn(async move {
                             let Ok((req, mut stream)) = resolver.resolve_request().await else { return };
                             while let Ok(Some(mut chunk)) = stream.recv_data().await {
                                 let n = chunk.remaining();
                                 chunk.advance(n);
                             }
-                            record(&received, "h3", req.method().as_str(), req.headers());
-                            stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                            let replayed = record(&received, "h3", req.method().as_str(), req.headers());
+                            match action {
+                                H3Action::Reset => stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR),
+                                H3Action::Leave(Unanswered::Rejected) => stream.stop_stream(h3::error::Code::H3_REQUEST_REJECTED),
+                                H3Action::Leave(Unanswered::ConnectionClosed) => quic.close(0x100u32.into(), b""),
+                                H3Action::Answer => {
+                                    let status = if replayed { 401 } else { 200 };
+                                    let resp = http::Response::builder().status(status).body(()).expect("static response");
+                                    if stream.send_response(resp).await.is_ok() {
+                                        let _ = stream.send_data(Bytes::from_static(b"ok")).await;
+                                        let _ = stream.finish().await;
+                                    }
+                                }
+                            }
                         });
+                        if script == H3Script::GoAwayAfterFirst && first_connection && nth == 0 {
+                            let _ = h3c.shutdown(1).await;
+                        }
                     }
                 });
             }
@@ -207,5 +284,5 @@ pub async fn serve(tls: TlsServerOptions, quic: bool) -> anyhow::Result<ReplayFi
             });
         }
     });
-    Ok(ReplayFixture { addr, received, endpoint, cancel })
+    Ok(ReplayFixture { addr, received, quic_connections, endpoint, cancel })
 }

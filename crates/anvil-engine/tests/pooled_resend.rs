@@ -4,14 +4,18 @@
 //! new DPoP proof `jti`. The origin answers a nonce or `jti` it has already
 //! received with 401, as a gateway that checks for replays does. The resend
 //! is not a retry: it happens with retries set to 0 and has its own reason.
-//! A written POST is not sent again. Real loopback sockets, no mocks.
+//! A written POST is not sent again, unless the HTTP/2 peer refused it
+//! unprocessed (`REFUSED_STREAM`, or a stream above the last-stream-id of
+//! its graceful `GOAWAY`): then it too is signed again and sent once more.
+//! Real loopback sockets, no mocks.
 
 use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile};
 use anvil_domain::execution::*;
-use anvil_domain::request::RequestSpec;
+use anvil_domain::request::{Body, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::settings::{RetryPolicy, SettingsOverrides};
+use anvil_domain::settings::{HttpVersionPolicy, RetryPolicy, SettingsOverrides};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
+use anvil_fixtures::h2_refuse::{self, Refusal};
 use anvil_transport::recorder::EventCtx;
 use base64::Engine as _;
 use std::collections::HashSet;
@@ -247,4 +251,50 @@ async fn a_written_post_on_a_pooled_connection_closed_under_it_is_not_sent_again
     assert!(out.record.response.is_none());
     assert_eq!(o.accepted(), 1, "no new connection was opened");
     assert_eq!(o.seen().len(), 2);
+}
+
+/// Over cleartext HTTP/2, the first GET leaves its connection pooled. A
+/// signed POST goes out on it whole and the peer refuses it as `refusal`
+/// says, without processing it. The engine signs the POST again and sends it
+/// once more on a new connection.
+async fn refused_post_resent_signed_again(refusal: Refusal, kind: FailureKind) {
+    init();
+    let o = h2_refuse::serve(refusal).await.unwrap();
+    let e = Engine::new();
+    let h2c = |mut c: ExecutionContext| {
+        let version = SettingsOverrides { http_version: Some(HttpVersionPolicy::H2c), ..Default::default() };
+        c.settings_layers.push(("h2c".into(), version));
+        c
+    };
+    let first = run(&e, &h2c(ctx("GET", &o.url("/echo"), hmac()))).await;
+    assert_eq!(status(&first), Some(200), "{:?}", first.record.attempts.last().and_then(|a| a.failure.as_ref()));
+
+    let mut post = ctx("POST", &o.url("/orders"), hmac());
+    post.spec.body = Body::Json { text: r#"{"order":1}"#.into() };
+    let out = run(&e, &h2c(post)).await;
+    let atts = &out.record.attempts;
+    assert_eq!(atts.len(), 2, "{:?}", atts.iter().map(|a| (&a.reason, &a.failure)).collect::<Vec<_>>());
+    let refused = &atts[0];
+    assert!(reused(refused));
+    assert_eq!(refused.dispatch, DispatchState::NotDispatched, "the peer said it did not process the POST");
+    let f = refused.failure.as_ref().expect("the refusal failed the POST");
+    assert_eq!(f.kind, kind, "{f:?}");
+    assert!(f.message.contains("refused the POST request without processing it"), "{}", f.message);
+    assert!(f.message.contains("sent once more on a new connection as attempt 1, with its auth applied again"), "{}", f.message);
+
+    let again = &atts[1];
+    assert_eq!(again.reason, AttemptReason::ReusedConnectionClosed { after: kind }, "not recorded as a retry");
+    assert!(!reused(again), "sent again on the connection that refused it");
+    assert_eq!(status(&out), Some(200));
+    assert_eq!((o.connections(), o.requests()), (2, 3));
+}
+
+#[tokio::test]
+async fn a_post_refused_with_refused_stream_is_resent_signed_again_on_a_new_connection() {
+    refused_post_resent_signed_again(Refusal::RefusedStream, FailureKind::H2RefusedStream).await;
+}
+
+#[tokio::test]
+async fn a_post_above_the_last_stream_id_of_a_graceful_goaway_is_resent_signed_again_on_a_new_connection() {
+    refused_post_resent_signed_again(Refusal::GoAway, FailureKind::H2GoAway).await;
 }

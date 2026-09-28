@@ -13,6 +13,7 @@ pub mod gateway_pki;
 pub mod goaway;
 pub mod grpc;
 pub mod grpc_web;
+pub mod h2_refuse;
 pub mod h3server;
 pub mod hbone;
 pub mod http;

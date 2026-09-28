@@ -889,7 +889,8 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         }
         let (outs, closed_under) = match version {
             HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback => {
-                (vec![engine.h3.execute(&plan, index, reason.clone(), &events, &cancel).await], None)
+                let e = engine.h3.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
+                (e.outputs, e.resend_on_new_connection)
             }
             _ => {
                 let e = engine.http.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
@@ -1079,11 +1080,15 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
 
         // ---- a reused connection found closed under the request ----
         // The server closed the pooled connection as the request went out on
-        // it, and the transport did not send it again: it may have been
-        // received, idempotent, with this attempt's per-send auth. It is
-        // signed again (new nonces, proofs and time claims) and sent once
-        // more on a new connection. Not a retry: once per execution, whatever
-        // the retry setting, which it does not use up.
+        // it (or refused the request on it unprocessed), and the transport
+        // did not send it again: it may have been received, with this
+        // attempt's per-send auth, and it is idempotent or the server did not
+        // process it (HTTP/2 `REFUSED_STREAM` or a stream above a graceful
+        // `GOAWAY`, HTTP/3 `H3_REQUEST_REJECTED` or HEADERS cut short by the
+        // close). It is signed again (new nonces, proofs and time claims) and
+        // sent once more on a new connection, over the same protocol. Not a
+        // retry: once per execution, whatever the retry setting, which it
+        // does not use up.
         if let Some(after) = closed_under
             && resent.is_none()
             && out.response.is_none()

@@ -12,6 +12,11 @@
 //! whether the server accepted it. A rejected request was discarded by the
 //! server unread, so it is written once more on the established connection
 //! (recorded as `resent_after_handshake`, never as an application retry).
+//!
+//! A request that fails before any response on a reused pooled connection is
+//! sent once more on a new connection when that is safe (see
+//! [`H3Transport::execute_attempt`]): by this transport when none of it
+//! left, else by the engine, which signs it again.
 
 use crate::dns;
 use crate::errors::display_chain;
@@ -68,8 +73,11 @@ impl H3Conn {
         }
     }
 
+    /// Neither closed nor draining: after the peer's `GOAWAY` the connection
+    /// takes no new request (RFC 9114 §5.2), and h3 would refuse to open one.
     fn is_usable(&self) -> bool {
-        self.quic.close_reason().is_none()
+        use h3::ConnectionState;
+        self.quic.close_reason().is_none() && !self.send.is_closing()
     }
 
     /// Since when the connection has carried no request; `None` while
@@ -1005,6 +1013,108 @@ fn spawn_driver(mut driver: h3::client::Connection<h3_quinn::Connection, Bytes>)
     });
 }
 
+/// What a failure before any response proves about the request (see
+/// [`unanswered`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unanswered {
+    /// Nothing of it left: the peer's `GOAWAY` had arrived before its request
+    /// stream was opened, or the connection closed before its HEADERS were
+    /// written and no stream data went out meanwhile.
+    NotSent,
+    /// The connection closed before its HEADERS frame was completely written:
+    /// some of it may have left, but the server cannot have processed it.
+    Incomplete,
+    /// The peer rejected it with `H3_REQUEST_REJECTED`: it was not processed
+    /// (RFC 9114 §4.1.1), though the server may have seen it.
+    Rejected,
+    /// The connection closed (or timed out) under it after its HEADERS were
+    /// written: the server may have processed it.
+    ConnectionClosed,
+    /// Anything else, such as a stream the peer reset with another code.
+    Other,
+}
+
+/// What `e`, the failure of a request before any response, proves.
+/// `headers_written`: h3 handed the whole HEADERS frame to QUIC (the request
+/// stream was returned). `transmitted`: a STREAM frame went out on the
+/// connection since the request's write began (any stream's, so `true` when
+/// in doubt). `closed`: the QUIC connection is closed.
+fn unanswered(e: &h3::error::StreamError, headers_written: bool, transmitted: bool, closed: bool) -> Unanswered {
+    use h3::error::StreamError as S;
+    match e {
+        S::RemoteTerminate { code } if *code == h3::error::Code::H3_REQUEST_REJECTED => Unanswered::Rejected,
+        // h3 checks for the peer's GOAWAY before it opens the stream.
+        S::RemoteClosing if !headers_written => Unanswered::NotSent,
+        // The stream could not be opened, or its HEADERS were cut short.
+        S::ConnectionError(_) if !headers_written && !transmitted => Unanswered::NotSent,
+        S::ConnectionError(_) if !headers_written => Unanswered::Incomplete,
+        _ if !headers_written => Unanswered::Other,
+        S::ConnectionError(_) | S::RemoteClosing => Unanswered::ConnectionClosed,
+        _ if closed => Unanswered::ConnectionClosed,
+        _ => Unanswered::Other,
+    }
+}
+
+/// A request that failed before any response on a reused connection, and
+/// how it is sent again on a new one (see [`H3Transport::execute_attempt`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClosedUnder {
+    /// Nothing of it left: this transport sends it again as it is.
+    Unsent(FailureKind),
+    /// Some of it may have left, and the server did not process it or its
+    /// method is idempotent. The server may have seen its per-send auth
+    /// (nonce, proof, time claims): only the caller, signing it again, may
+    /// send it again.
+    MayHaveBeenSent(FailureKind),
+}
+
+/// Apply what a failure before any response proves (`what`) to its attempt:
+/// a request the server cannot have processed is `not_dispatched`. On a
+/// reused connection, also whether it is sent again, which its message says.
+fn settle(obs: &mut AttemptObservation, what: Unanswered, reused: bool, id: u64, method: &http::Method) -> Option<ClosedUnder> {
+    if matches!(what, Unanswered::NotSent | Unanswered::Incomplete | Unanswered::Rejected) {
+        obs.dispatch = DispatchState::NotDispatched;
+    }
+    let f = obs.failure.as_mut()?;
+    if !reused {
+        return None;
+    }
+    let under = match what {
+        Unanswered::NotSent => Some(ClosedUnder::Unsent(f.kind)),
+        Unanswered::Incomplete | Unanswered::Rejected => Some(ClosedUnder::MayHaveBeenSent(f.kind)),
+        Unanswered::ConnectionClosed if method.is_idempotent() => Some(ClosedUnder::MayHaveBeenSent(f.kind)),
+        Unanswered::ConnectionClosed => None,
+        Unanswered::Other => return None,
+    };
+    let note = match what {
+        Unanswered::NotSent => format!("reused connection #{id} was found closed; the request was sent once more on a new connection"),
+        Unanswered::Incomplete => format!("reused connection #{id} was found closed before the request's HEADERS were fully written"),
+        Unanswered::Rejected => format!("reused connection #{id} rejected the {method} request unprocessed (H3_REQUEST_REJECTED)"),
+        _ if under.is_some() => {
+            format!("reused connection #{id} was found closed before any response; the {method} request may have been received")
+        }
+        _ => format!("reused connection #{id}; not sent again: the {method} request was written and is not idempotent"),
+    };
+    f.message = format!("{} ({note})", f.message);
+    under
+}
+
+/// One logical attempt over HTTP/3 (see [`H3Transport::execute_attempt`]).
+pub struct H3Execution {
+    /// One output, or two when the request was sent again on a new
+    /// connection because none of it left the reused one.
+    pub outputs: Vec<AttemptOutput>,
+    /// The failure kind when the last output failed before any response on
+    /// a reused connection, some of the request may have left, and sending
+    /// it again is safe: the server cannot have processed it (it rejected it
+    /// with `H3_REQUEST_REJECTED`, or the connection closed before its
+    /// HEADERS were fully written), whatever its method, or the connection
+    /// closed under an idempotent request. It was not sent again. The caller
+    /// may sign it again and send it once more with reason
+    /// [`AttemptReason::ReusedConnectionClosed`], which takes a new connection.
+    pub resend_on_new_connection: Option<FailureKind>,
+}
+
 impl H3Transport {
     pub fn new() -> Self {
         Self::with_pool_limits(PoolLimits::default())
@@ -1234,15 +1344,19 @@ impl H3Transport {
         Ok(Fresh::Established(Box::new((H3Conn::new(send, quic, cobs), track))))
     }
 
-    /// Execute one attempt over HTTP/3. A failed attempt's `dispatch` is
-    /// `not_dispatched` only when no part of the request can have reached the
-    /// server: it failed before its request stream was written (preparation,
-    /// DNS, the QUIC connection or handshake, HTTP/3 setup), or the server
-    /// refused its 0-RTT early data unread and the send after the handshake
-    /// did not start. From the first write on it is `may_have_been_sent`,
-    /// until a response head makes it `sent`. A caller that would send the
-    /// request again (the engine's TCP fallback) treats anything but
-    /// `not_dispatched` as possibly received.
+    /// Execute one attempt over HTTP/3, without sending it again (see
+    /// [`H3Transport::execute_attempt`]). A failed attempt's `dispatch` is
+    /// `not_dispatched` only when the server cannot have processed the
+    /// request: it failed before its request stream was written
+    /// (preparation, DNS, the QUIC connection or handshake, HTTP/3 setup, the
+    /// peer's `GOAWAY`), the server refused its 0-RTT early data unread and
+    /// the send after the handshake did not start, the connection closed
+    /// before its HEADERS frame was fully written, or the server rejected it
+    /// with `H3_REQUEST_REJECTED` (RFC 9114 §4.1.1). Otherwise, from the
+    /// first write on it is `may_have_been_sent`, until a response head makes
+    /// it `sent`. A caller that would send the request again (the engine's
+    /// TCP fallback) treats anything but `not_dispatched` as possibly
+    /// received.
     pub async fn execute(
         &self,
         plan: &HttpPlan,
@@ -1251,6 +1365,58 @@ impl H3Transport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> AttemptOutput {
+        self.execute_once(plan, index, reason, events, cancel).await.0
+    }
+
+    /// [`H3Transport::execute`], sending the request once more on a new
+    /// connection when a reused pooled one failed it before any response
+    /// and that is safe. When none of it left (the peer's `GOAWAY` arrived
+    /// before its stream was opened, or the connection closed before any of
+    /// it went out), this transport sends it again as it is: two outputs.
+    /// When some of it may have left, it is not sent again as it is (the
+    /// server may have seen its per-send auth), and
+    /// [`H3Execution::resend_on_new_connection`] says whether the caller may
+    /// sign it again and send it: whatever its method when the server cannot
+    /// have processed it, else only an idempotent one. An attempt with reason
+    /// [`AttemptReason::ReusedConnectionClosed`] takes a new connection:
+    /// neither a pooled one nor the one kept after `425`.
+    pub async fn execute_attempt(
+        &self,
+        plan: &HttpPlan,
+        index: u32,
+        reason: AttemptReason,
+        events: &EventCtx,
+        cancel: &CancellationToken,
+    ) -> H3Execution {
+        let mut outputs = Vec::new();
+        let mut resend_on_new_connection = None;
+        let mut attempt_reason = reason;
+        for attempt_index in (index..).take(2) {
+            let (out, closed) = self.execute_once(plan, attempt_index, attempt_reason.clone(), events, cancel).await;
+            outputs.push(out);
+            match closed {
+                Some(ClosedUnder::Unsent(after)) => attempt_reason = AttemptReason::ReusedConnectionClosed { after },
+                Some(ClosedUnder::MayHaveBeenSent(after)) => {
+                    resend_on_new_connection = Some(after);
+                    break;
+                }
+                None => break,
+            }
+        }
+        H3Execution { outputs, resend_on_new_connection }
+    }
+
+    async fn execute_once(
+        &self,
+        plan: &HttpPlan,
+        index: u32,
+        reason: AttemptReason,
+        events: &EventCtx,
+        cancel: &CancellationToken,
+    ) -> (AttemptOutput, Option<ClosedUnder>) {
+        // A resend after a reused connection failed the request goes out on
+        // a new connection, never on a pooled or kept one.
+        let fresh = matches!(reason, AttemptReason::ReusedConnectionClosed { .. });
         let mut rec = Recorder::new(index, events.clone());
         events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: index });
         let mut obs = AttemptObservation {
@@ -1273,7 +1439,7 @@ impl H3Transport {
         if !plan.https {
             let f = TransportFailure::new(Phase::Prepare, FailureKind::UnsupportedCombination, "HTTP/3 requires an https:// URL")
                 .with_field("settings.http_version");
-            return fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events);
+            return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events), None);
         }
         if plan.proxy.is_some() {
             let f = TransportFailure::new(
@@ -1282,15 +1448,15 @@ impl H3Transport {
                 "HTTP/3 cannot be sent through the configured proxy (HTTP CONNECT, SOCKS5 and HBONE tunnels carry TCP only)",
             )
             .with_field("settings.proxy");
-            return fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events);
+            return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events), None);
         }
         let Some(prepared) = plan.tls.clone() else {
             let f = TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "no TLS configuration for HTTP/3");
-            return fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events);
+            return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events), None);
         };
         let (req, uri) = match build_request(plan) {
             Ok(r) => r,
-            Err(f) => return fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events),
+            Err(f) => return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events), None),
         };
         let header_bytes = logical_header_bytes(plan, &uri);
         obs.bytes.request_headers_logical = header_bytes;
@@ -1305,10 +1471,10 @@ impl H3Transport {
         // The retry after `425 Too Early` goes out on the connection that
         // answered it, whose handshake is complete.
         let handed = match plan.early_data {
-            EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly) => self.pool.take_too_early(&key),
+            EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly) if !fresh => self.pool.take_too_early(&key),
             _ => None,
         };
-        let pooled = handed.or_else(|| if plan.keepalive { self.pool.checkout(&key) } else { None });
+        let pooled = handed.or_else(|| if plan.keepalive && !fresh { self.pool.checkout(&key) } else { None });
         let mut track: Option<EarlyTrack> = None;
         // Held until the attempt ends: the connection carrying this request
         // is busy, not idle. One the pool does not keep (connection reuse
@@ -1337,7 +1503,7 @@ impl H3Transport {
                 Ok(Fresh::ZeroRtt(z)) => (None, false, Some(z)),
                 Err((f, cobs, t)) => {
                     obs.connection = cobs;
-                    return fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(t), events);
+                    return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(t), events), None);
                 }
             },
             None => {
@@ -1356,7 +1522,7 @@ impl H3Transport {
                     Ok(c) => c,
                     Err((f, cobs)) => {
                         obs.connection = cobs;
-                        return fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events);
+                        return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events), None);
                     }
                 };
                 let QuicConnected { quic, send, observation: cobs, .. } = connected;
@@ -1395,7 +1561,7 @@ impl H3Transport {
                 Err(f) => {
                     quic.close(H3_NO_ERROR.into(), b"");
                     obs.connection = Some(cobs);
-                    return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                 }
             };
             let write_detail = match (&written.error, in_early_data) {
@@ -1412,13 +1578,13 @@ impl H3Transport {
                     obs.connection = Some(cobs);
                     let f = TransportFailure::new(Phase::QuicHandshake, FailureKind::QuicHandshakeTimeout,
                         format!("the QUIC handshake did not complete within {} ms after the request was sent as 0-RTT early data", hs_ms.unwrap_or(0))).with_deadline(hs_ms);
-                    return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                 }
                 _ = cancel.cancelled() => {
                     quic.close(H3_NO_ERROR.into(), b"");
                     obs.connection = Some(cobs);
                     let f = TransportFailure::new(Phase::QuicHandshake, FailureKind::Canceled, "canceled during the QUIC handshake (the request was already sent as 0-RTT early data)");
-                    return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                 }
             };
             // The handshake phase ends when Anvil first saw completion.
@@ -1441,7 +1607,7 @@ impl H3Transport {
                 drop(guard);
                 // The server may have acted on the early data before the
                 // handshake failed.
-                return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
             }
             let (tls_obs, resumed) = resumable_tls(&quic, &handle, &prepared, true);
             drop(guard);
@@ -1481,7 +1647,7 @@ impl H3Transport {
                                     FailureKind::ResetBeforeResponse,
                                     "the HTTP/3 stream ended before a response",
                                 );
-                                return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                                return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                             }
                             Some(Ok(h)) => {
                                 head = Some(h);
@@ -1504,7 +1670,7 @@ impl H3Transport {
                         FailureKind::RequestWriteFailed,
                         format!("sending the HTTP/3 request failed: {}", written.error.map(|e| e.to_string()).unwrap_or_default()),
                     );
-                    return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                 };
                 if accepted {
                     spawn_driver(driver);
@@ -1535,13 +1701,13 @@ impl H3Transport {
                     Ok(x) => x,
                     Err(f) => {
                         obs.connection = Some(cobs);
-                        return fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(track_z), events);
+                        return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(track_z), events), None);
                     }
                 };
                 spawn_driver(driver);
                 let (req, _) = match build_request(plan) {
                     Ok(r) => r,
-                    Err(f) => return fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(track_z), events),
+                    Err(f) => return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(track_z), events), None),
                 };
                 let w2 = rec.start(Phase::RequestWrite);
                 let sent = tokio::select! {
@@ -1549,12 +1715,12 @@ impl H3Transport {
                     _ = sleep_until_opt(write_deadline) => {
                         obs.connection = Some(cobs);
                         let f = TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteTimeout, "the HTTP/3 request could not be sent before the write deadline").with_deadline(plan.timeouts.request_write_ms);
-                        return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                        return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                     }
                     _ = cancel.cancelled() => {
                         obs.connection = Some(cobs);
                         let f = TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending");
-                        return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                        return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                     }
                 };
                 match sent {
@@ -1579,7 +1745,7 @@ impl H3Transport {
                             FailureKind::RequestWriteFailed,
                             format!("sending the HTTP/3 request failed: {}", error.map(|e| e.to_string()).unwrap_or_default()),
                         );
-                        return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events);
+                        return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                     }
                 }
             };
@@ -1594,6 +1760,9 @@ impl H3Transport {
             cobs.reused = reused;
             cobs.prior_requests = conn.served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             obs.connection = Some(cobs);
+            // STREAM frames sent on the connection so far: when none went out
+            // before a failed write, none of the request left.
+            let stream_frames = conn.quic.stats().frame_tx.stream;
             let w_idx = rec.start(Phase::RequestWrite);
             let write_deadline = plan.timeouts.request_write_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
             let stream = tokio::select! {
@@ -1610,17 +1779,27 @@ impl H3Transport {
                     Written { stream: None, error } => {
                         rec.finish(w_idx, PhaseStatus::Failed);
                         self.pool.evict(&key, conn.template.id);
-                        let f = TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteFailed, format!("sending the HTTP/3 request failed: {}", error.map(|e| e.to_string()).unwrap_or_default()));
-                        return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                        let what = "sending the HTTP/3 request failed";
+                        let (f, proved) = match &error {
+                            Some(e) => {
+                                let transmitted = conn.quic.stats().frame_tx.stream != stream_frames;
+                                let proved = unanswered(e, false, transmitted, conn.quic.close_reason().is_some());
+                                (stream_failure(e, Phase::RequestWrite, FailureKind::RequestWriteFailed, what), proved)
+                            }
+                            None => (TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteFailed, what), Unanswered::Other),
+                        };
+                        let mut out = fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                        let under = settle(&mut out.observation, proved, reused, conn.template.id, &plan.method);
+                        return (out, under);
                     }
                 },
                 _ = sleep_until_opt(write_deadline) => {
                     let f = TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteTimeout, "the HTTP/3 request could not be sent before the write deadline").with_deadline(plan.timeouts.request_write_ms);
-                    return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events), None);
                 }
                 _ = cancel.cancelled() => {
                     let f = TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending");
-                    return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events), None);
                 }
             };
             (conn, stream)
@@ -1630,7 +1809,11 @@ impl H3Transport {
             cobs.prior_requests = conn.served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             obs.connection = Some(cobs);
         }
-        let out = self.read_response(rec, obs, stream, plan, index, events, cancel, total_deadline, track, head).await;
+        let (mut out, head_error) = self.read_response(rec, obs, stream, plan, index, events, cancel, total_deadline, track, head).await;
+        let under = head_error.and_then(|e| {
+            let proved = unanswered(&e, true, true, conn.quic.close_reason().is_some());
+            settle(&mut out.observation, proved, reused, conn.template.id, &plan.method)
+        });
         // Only an eligible request is retried after 425 (the engine's rule).
         if plan.early_data == EarlyDataIntent::Send
             && out.observation.failure.is_none()
@@ -1639,7 +1822,7 @@ impl H3Transport {
             self.pool.keep_too_early(&key, conn, generation);
         }
         drop(lease);
-        out
+        (out, under)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1655,7 +1838,7 @@ impl H3Transport {
         total_deadline: Option<Instant>,
         track: Option<EarlyTrack>,
         head: Option<http::Response<()>>,
-    ) -> AttemptOutput {
+    ) -> (AttemptOutput, Option<h3::error::StreamError>) {
         let h_idx = rec.start(Phase::AwaitResponseHeaders);
         let headers_deadline = plan.timeouts.response_headers_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let resp = tokio::select! {
@@ -1663,21 +1846,21 @@ impl H3Transport {
                 Ok(r) => r,
                 Err(e) => {
                     rec.finish(h_idx, PhaseStatus::Failed);
-                    let f = TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse, format!("the HTTP/3 stream ended before a response: {e}"));
-                    return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                    let f = stream_failure(&e, Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse, "the HTTP/3 stream ended before a response");
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events), Some(e));
                 }
             },
             _ = sleep_until_opt(headers_deadline) => {
                 let f = TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout, "no HTTP/3 response headers before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms);
-                return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events), None);
             }
             _ = sleep_until_opt(total_deadline) => {
                 let f = TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout, "total deadline elapsed").with_deadline(plan.timeouts.total_ms);
-                return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events), None);
             }
             _ = cancel.cancelled() => {
                 let f = TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled before response headers");
-                return fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events);
+                return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events), None);
             }
         };
         rec.finish(h_idx, PhaseStatus::Completed);
@@ -1781,7 +1964,7 @@ impl H3Transport {
                 blob_sha256: if captured.is_empty() { None } else { Some(crate::certs::sha256_hex(&captured)) },
             },
         };
-        AttemptOutput { observation: obs, response: Some(response), body: captured }
+        (AttemptOutput { observation: obs, response: Some(response), body: captured }, None)
     }
 }
 
@@ -1817,5 +2000,87 @@ mod tests {
         assert!(every <= TOO_EARLY_TTL / 6, "{every:?}");
         let short = H3Transport::with_pool_limits(PoolLimits { idle_ttl: Duration::from_secs(3), ..PoolLimits::default() });
         assert_eq!(short.pool.shared.sweep_every(), sweep_interval(Duration::from_secs(3)));
+    }
+
+    fn connection_closed() -> h3::error::StreamError {
+        h3::error::StreamError::ConnectionError(h3::error::ConnectionError::Timeout)
+    }
+
+    fn reset(code: h3::error::Code) -> h3::error::StreamError {
+        h3::error::StreamError::RemoteTerminate { code }
+    }
+
+    // The races these cover (a GOAWAY or a close that arrives between the
+    // pool check and the stream open) cannot be produced on purpose by a real
+    // server; `tests/h3_pool_resend.rs` covers the rest against one.
+    #[test]
+    fn what_a_failure_before_any_response_proves() {
+        use h3::error::{Code, StreamError};
+        let rejected = || reset(Code::H3_REQUEST_REJECTED);
+        // Before h3 handed over the whole HEADERS frame: no request stream.
+        assert_eq!(unanswered(&StreamError::RemoteClosing, false, true, false), Unanswered::NotSent, "GOAWAY is checked before the open");
+        assert_eq!(unanswered(&connection_closed(), false, false, true), Unanswered::NotSent, "no stream data went out");
+        assert_eq!(unanswered(&connection_closed(), false, true, true), Unanswered::Incomplete);
+        assert_eq!(unanswered(&rejected(), false, true, false), Unanswered::Rejected);
+        let too_big = StreamError::HeaderTooBig { actual_size: 4096, max_size: 1024 };
+        assert_eq!(unanswered(&too_big, false, false, false), Unanswered::Other);
+        assert_eq!(unanswered(&reset(Code::H3_INTERNAL_ERROR), false, true, true), Unanswered::Other);
+        // Once the HEADERS were written.
+        assert_eq!(unanswered(&rejected(), true, true, false), Unanswered::Rejected);
+        assert_eq!(unanswered(&connection_closed(), true, true, true), Unanswered::ConnectionClosed);
+        assert_eq!(unanswered(&reset(Code::H3_INTERNAL_ERROR), true, true, true), Unanswered::ConnectionClosed);
+        assert_eq!(unanswered(&reset(Code::H3_INTERNAL_ERROR), true, true, false), Unanswered::Other);
+    }
+
+    fn failed() -> AttemptObservation {
+        AttemptObservation {
+            early_data: None,
+            index: 0,
+            reason: AttemptReason::Initial,
+            method: "POST".into(),
+            url: "https://example.test/orders".into(),
+            started_at: Utc::now(),
+            connection: None,
+            phases: vec![],
+            dispatch: DispatchState::MayHaveBeenSent,
+            bytes: ByteCounts::default(),
+            response_status: None,
+            failure: Some(TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteFailed, "sending failed")),
+            duration_us: 0,
+        }
+    }
+
+    #[test]
+    fn a_request_is_sent_again_on_a_new_connection_only_when_that_is_safe() {
+        let (post, get) = (http::Method::POST, http::Method::GET);
+        let after = FailureKind::RequestWriteFailed;
+        let settled = |what, reused, method: &http::Method| {
+            let mut obs = failed();
+            let under = settle(&mut obs, what, reused, 7, method);
+            (under, obs.dispatch, obs.failure.map(|f| f.message).unwrap_or_default())
+        };
+
+        // Nothing left: this transport sends it again as it is, any method.
+        let (under, dispatch, message) = settled(Unanswered::NotSent, true, &post);
+        assert_eq!((under, dispatch), (Some(ClosedUnder::Unsent(after)), DispatchState::NotDispatched));
+        assert!(message.contains("reused connection #7 was found closed; the request was sent once more"), "{message}");
+        // Not processed, some of it may have left: the caller signs it again,
+        // any method.
+        for what in [Unanswered::Incomplete, Unanswered::Rejected] {
+            let (under, dispatch, _) = settled(what, true, &post);
+            assert_eq!((under, dispatch), (Some(ClosedUnder::MayHaveBeenSent(after)), DispatchState::NotDispatched), "{what:?}");
+        }
+        // Closed under it once written: only an idempotent method.
+        let (under, dispatch, message) = settled(Unanswered::ConnectionClosed, true, &get);
+        assert_eq!((under, dispatch), (Some(ClosedUnder::MayHaveBeenSent(after)), DispatchState::MayHaveBeenSent));
+        assert!(message.contains("the GET request may have been received"), "{message}");
+        let (under, dispatch, message) = settled(Unanswered::ConnectionClosed, true, &post);
+        assert_eq!((under, dispatch), (None, DispatchState::MayHaveBeenSent));
+        assert!(message.contains("not sent again: the POST request was written and is not idempotent"), "{message}");
+        // Anything else, or a new connection: not sent again. What the
+        // failure proves still sets the dispatch state.
+        assert_eq!(settled(Unanswered::Other, true, &get), (None, DispatchState::MayHaveBeenSent, "sending failed".into()));
+        assert_eq!(settled(Unanswered::Rejected, false, &post), (None, DispatchState::NotDispatched, "sending failed".into()));
+        assert_eq!(settled(Unanswered::ConnectionClosed, false, &get), (None, DispatchState::MayHaveBeenSent, "sending failed".into()));
     }
 }
