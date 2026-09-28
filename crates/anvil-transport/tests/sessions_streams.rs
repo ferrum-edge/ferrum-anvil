@@ -1,5 +1,6 @@
 //! Session adapter evidence against real local sockets (no mocks): SSE
-//! reconnection and bounded history, UDP ICMP evidence, DTLS stall, and the
+//! reconnection, per-send signing and bounded history, UDP ICMP evidence,
+//! DTLS stall, and the
 //! gRPC adapter used directly (native over HTTP/2 and HTTP/3, gRPC-Web binary
 //! and text, malformed gRPC-Web bodies). Matrix IDs are kept in test names.
 
@@ -18,6 +19,7 @@ use anvil_transport::{dtls, grpc, sse, udp};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -55,6 +57,7 @@ fn sse_plan(addr: SocketAddr, target: &str) -> sse::SsePlan {
         authority: addr.to_string(),
         request_target: target.to_string(),
         headers: vec![],
+        sign: None,
         body: Bytes::new(),
         version: HttpVersionPolicy::Auto,
         timeouts: timeouts(),
@@ -141,6 +144,91 @@ async fn sse_reconnects_only_when_enabled_with_last_event_id() {
     assert_eq!(out.attempts.len(), 1);
     assert_eq!(seen.lock().len(), 1);
     assert!(matches!(out.status, ProtocolStatus::Sse { events: 2, closed_by: ClosedBy::Abnormal, .. }));
+}
+
+/// A signer that signs the first `ok` sends (`x-send: <n>`) and refuses
+/// every later one, counting the sends it was asked to sign in `calls`.
+fn counting_signer(ok: usize, calls: Arc<AtomicUsize>) -> sse::SignFn {
+    Arc::new(move || {
+        let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if n > ok {
+            return Err(TransportFailure::new(
+                Phase::Prepare,
+                FailureKind::AuthPreparationFailed,
+                format!("the test signer refused send {n}"),
+            ));
+        }
+        Ok(vec![(http::HeaderName::from_static("x-send"), http::HeaderValue::from(n))])
+    })
+}
+
+#[tokio::test]
+async fn sse_signs_each_send_and_a_send_that_cannot_be_signed_is_not_made() {
+    init();
+    // Each send is signed: the initial one and the reconnection.
+    let (addr, seen) = flaky_sse_server().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut plan = sse_plan(addr, "/events");
+    plan.reconnect = true;
+    plan.max_reconnects = 3;
+    plan.sign = Some(counting_signer(usize::MAX, calls.clone()));
+    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(out.attempts.len(), 2);
+    assert_eq!(*seen.lock(), vec![None, Some("2".to_string())], "the reconnection still sends Last-Event-ID");
+    assert!(matches!(out.status, ProtocolStatus::Sse { events: 3, closed_by: ClosedBy::Peer, .. }));
+
+    // A reconnection that cannot be signed again is not made, and the
+    // session ends as the abnormal end it was, with a note.
+    let (addr, seen) = flaky_sse_server().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    plan = sse_plan(addr, "/events");
+    plan.reconnect = true;
+    plan.max_reconnects = 3;
+    plan.sign = Some(counting_signer(1, calls.clone()));
+    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the reconnection was signed before it would be sent");
+    assert_eq!(out.attempts.len(), 1, "the reconnection was not made");
+    assert_eq!(seen.lock().len(), 1, "the server saw the initial send only");
+    assert!(matches!(out.status, ProtocolStatus::Sse { events: 2, closed_by: ClosedBy::Abnormal, .. }));
+    let note = "not reconnected: auth could not sign the reconnection again (the test signer refused send 2)";
+    assert!(out.facts.notes.iter().any(|n| n == note), "{:?}", out.facts.notes);
+
+    // An initial send that cannot be signed is not made.
+    let (addr, seen) = flaky_sse_server().await;
+    plan = sse_plan(addr, "/events");
+    plan.sign = Some(counting_signer(0, Arc::new(AtomicUsize::new(0))));
+    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(out.attempts.len(), 1);
+    let a = &out.attempts[0];
+    assert!(a.response.is_none());
+    assert_eq!(a.observation.dispatch, DispatchState::NotDispatched);
+    assert_eq!(a.observation.failure.as_ref().map(|f| f.kind), Some(FailureKind::AuthPreparationFailed));
+    assert!(seen.lock().is_empty());
+    assert!(out.transcript.is_none());
+
+    // The TCP fallback after HTTP/3 is signed again (here HTTP/3 is refused
+    // before traffic: the URL is http://), and is not made when it cannot be.
+    for (ok, fell_back) in [(usize::MAX, true), (1, false)] {
+        let (addr, seen) = flaky_sse_server().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        plan = sse_plan(addr, "/events");
+        plan.version = HttpVersionPolicy::Http3WithFallback;
+        plan.sign = Some(counting_signer(ok, calls.clone()));
+        let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the HTTP/3 attempt and the fallback were each signed");
+        assert_eq!(out.attempts[0].observation.failure.as_ref().map(|f| f.kind), Some(FailureKind::UnsupportedCombination));
+        if fell_back {
+            assert_eq!(out.attempts.len(), 2);
+            assert_eq!(out.attempts[1].observation.reason, AttemptReason::ProtocolFallback { from: "h3".into() });
+            assert_eq!(seen.lock().len(), 1);
+        } else {
+            assert_eq!(out.attempts.len(), 1, "the fallback was not made");
+            assert!(seen.lock().is_empty());
+            let note = "; not sent over TCP: auth could not sign it again (the test signer refused send 2)";
+            assert!(out.facts.notes.iter().any(|n| n.ends_with(note)), "{:?}", out.facts.notes);
+        }
+    }
 }
 
 #[tokio::test]
