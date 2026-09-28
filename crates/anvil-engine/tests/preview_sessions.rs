@@ -101,10 +101,14 @@ fn ws_spec(url: &str, bootstrap: WsBootstrap) -> RequestSpec {
 }
 
 fn sse(url: &str, version: HttpVersionPolicy) -> ExecutionContext {
+    sse_with(url, version, hmac())
+}
+
+fn sse_with(url: &str, version: HttpVersionPolicy, auth: AuthConfig) -> ExecutionContext {
     let mut s = RequestSpec::http("GET", url);
     s.protocol = Protocol::Sse;
     s.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
-    with_auth(s, Some(version), hmac())
+    with_auth(s, Some(version), auth)
 }
 
 /// A unary `Echo` call with the echo service's `.proto` as its schema.
@@ -599,4 +603,28 @@ async fn sse_preview_says_each_send_is_signed_again() {
     s.protocol = Protocol::Sse;
     let p = e.preview(&ExecutionContext::standalone(s)).unwrap();
     assert!(!p.inferred.iter().any(|i| i == note), "no auth, nothing is signed: {:?}", p.inferred);
+}
+
+/// A multi-auth is signed again when any of its profiles is: HMAC beside an
+/// API key gets the note, a bearer token beside an API key does not.
+#[tokio::test]
+async fn sse_preview_says_a_multi_auth_with_hmac_is_signed_again() {
+    init();
+    let e = Engine::new();
+    let note = "each send (initial, TCP fallback, each reconnection) is signed again when it is sent, not with the signature shown";
+    let key = AuthConfig::ApiKey {
+        name: "X-Api-Key".into(),
+        value: SensitiveValue::template("audit-only-api-key-1w5z"),
+        location: KeyLocation::Header,
+    };
+    let bearer = AuthConfig::Bearer { token: SensitiveValue::template("audit-only-bearer-token-7j3u"), prefix: "Bearer".into() };
+    let stream = |auth: AuthConfig| sse_with("https://sse.example.test/events", HttpVersionPolicy::Auto, auth);
+
+    let p = e.preview(&stream(AuthConfig::Multi { profiles: vec![key.clone(), hmac()] })).unwrap();
+    assert!(p.auth_varies_per_send, "{}", p.auth);
+    assert!(p.inferred.iter().any(|i| i == note), "{:?}", p.inferred);
+
+    let p = e.preview(&stream(AuthConfig::Multi { profiles: vec![bearer, key] })).unwrap();
+    assert!(!p.auth_varies_per_send, "{}", p.auth);
+    assert!(!p.inferred.iter().any(|i| i == note), "a bearer token and an API key are sent as shown: {:?}", p.inferred);
 }

@@ -5,20 +5,22 @@
 //! `:authority`) and verifies the received signature over the preview's
 //! authority. A DPoP proof in the preview is bound to that authority, a
 //! `Host` an auth profile sets is the one shown, and a preview whose auth
-//! cannot be applied says the request would not be sent.
+//! cannot be applied says the request would not be sent. Auth that changes
+//! per send is reported as varying, alone or in a multi-auth.
 
-use anvil_auth::hmac_sig;
+use anvil_auth::{HmacParams, ResolvedAuth, hmac_sig};
 use anvil_domain::auth::{AuthConfig, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile, KeyLocation};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
-use anvil_engine::preview::EffectiveRequest;
+use anvil_engine::preview::{EffectiveRequest, auth_varies_per_send};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::http as fx;
 use anvil_transport::recorder::EventCtx;
 use base64::Engine as _;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 const HOST: &str = "api.example.test:8443";
 const USERNAME: &str = "preview-client";
@@ -243,4 +245,77 @@ async fn preview_reports_an_auth_error_beside_an_unfetched_jwt_svid() {
     let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: ")).unwrap_or_else(|| panic!("{:?}", p.inferred));
     assert!(note.contains("Content-Digest"), "the note says why: {note}");
     assert!(!p.headers.iter().any(|h| h.name.eq_ignore_ascii_case("authorization")), "{:?}", p.headers);
+}
+
+fn bearer() -> AuthConfig {
+    AuthConfig::Bearer { token: SensitiveValue::template("audit-only-bearer-token-2d6x"), prefix: "Bearer".into() }
+}
+
+fn api_key() -> AuthConfig {
+    AuthConfig::ApiKey {
+        name: "X-Api-Key".into(),
+        value: SensitiveValue::template("audit-only-api-key-4m8p"),
+        location: KeyLocation::Header,
+    }
+}
+
+fn resolved_hmac() -> ResolvedAuth {
+    ResolvedAuth::Hmac(HmacParams {
+        profile: HmacProfile::FerrumV2,
+        username: USERNAME.into(),
+        secret: Zeroizing::new(SECRET.into()),
+        algorithm: HmacAlgorithm::HmacSha256,
+        digest_header: Default::default(),
+        namespace: String::new(),
+        allow_unsafe_legacy: false,
+    })
+}
+
+fn resolved_bearer() -> ResolvedAuth {
+    ResolvedAuth::Bearer { token: Zeroizing::new("audit-only-bearer-token-2d6x".into()), prefix: "Bearer".into() }
+}
+
+fn resolved_api_key() -> ResolvedAuth {
+    ResolvedAuth::ApiKey {
+        name: "X-Api-Key".into(),
+        value: Zeroizing::new("audit-only-api-key-4m8p".into()),
+        location: KeyLocation::Header,
+    }
+}
+
+#[test]
+fn auth_varies_per_send_for_a_multi_auth_with_a_per_send_profile() {
+    assert!(auth_varies_per_send(&resolved_hmac()));
+    assert!(!auth_varies_per_send(&ResolvedAuth::None));
+    assert!(!auth_varies_per_send(&resolved_bearer()));
+    assert!(!auth_varies_per_send(&resolved_api_key()));
+    // A cached OAuth2 token is sent unchanged until it is refreshed.
+    let oauth = ResolvedAuth::OAuth2 { access_token: Zeroizing::new("audit-only-oauth-token-9c2f".into()), token_type: "Bearer".into() };
+    assert!(!auth_varies_per_send(&oauth));
+
+    assert!(auth_varies_per_send(&ResolvedAuth::Multi(vec![resolved_bearer(), resolved_hmac()])));
+    assert!(auth_varies_per_send(&ResolvedAuth::Multi(vec![resolved_hmac(), resolved_api_key()])));
+    assert!(!auth_varies_per_send(&ResolvedAuth::Multi(vec![resolved_bearer(), resolved_api_key()])));
+    assert!(!auth_varies_per_send(&ResolvedAuth::Multi(vec![])));
+    // Nested sets are searched too.
+    let nested = ResolvedAuth::Multi(vec![resolved_api_key(), ResolvedAuth::Multi(vec![resolved_bearer(), resolved_hmac()])]);
+    assert!(auth_varies_per_send(&nested));
+    let nested = ResolvedAuth::Multi(vec![resolved_api_key(), ResolvedAuth::Multi(vec![resolved_bearer(), oauth])]);
+    assert!(!auth_varies_per_send(&nested));
+}
+
+#[tokio::test]
+async fn preview_says_a_multi_auth_with_hmac_varies_per_send() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let c = ctx_with(&f, None, HttpVersionPolicy::Http1Only, AuthConfig::Multi { profiles: vec![api_key(), hmac()] });
+    let p = e.preview(&c).unwrap();
+    assert!(!p.inferred.iter().any(|i| i.starts_with("the request would not be sent")), "{:?}", p.inferred);
+    assert!(p.auth_varies_per_send, "{}", p.auth);
+
+    let c = ctx_with(&f, None, HttpVersionPolicy::Http1Only, AuthConfig::Multi { profiles: vec![bearer(), api_key()] });
+    let p = e.preview(&c).unwrap();
+    assert!(!p.inferred.iter().any(|i| i.starts_with("the request would not be sent")), "{:?}", p.inferred);
+    assert!(!p.auth_varies_per_send, "a bearer token and an API key are sent as shown: {}", p.auth);
 }

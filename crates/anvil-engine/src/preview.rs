@@ -45,6 +45,32 @@ pub struct EffectiveRequest {
     pub omitted_secrets: usize,
 }
 
+/// Whether the credential `auth` sends changes from one send to the next,
+/// so the value a preview shows is not the one sent: an HMAC signature, a
+/// DPoP proof, a JWT (`iat`/`exp`/`jti`) and a WS-Security header (nonce and
+/// created time) are generated for each send, and a JWT-SVID is fetched (or
+/// read) and checked when the request is sent. A multi-auth varies when any
+/// of its profiles does.
+///
+/// An OAuth2 access token does not: sends reuse the cached token the
+/// preview shows until it nears expiry, and a refresh replaces it then, not
+/// on each send.
+pub fn auth_varies_per_send(auth: &ResolvedAuth) -> bool {
+    match auth {
+        ResolvedAuth::Hmac(_)
+        | ResolvedAuth::Dpop { .. }
+        | ResolvedAuth::Jwt { .. }
+        | ResolvedAuth::Wsse { .. }
+        | ResolvedAuth::JwtSvid { .. } => true,
+        ResolvedAuth::Multi(v) => v.iter().any(auth_varies_per_send),
+        ResolvedAuth::None
+        | ResolvedAuth::ApiKey { .. }
+        | ResolvedAuth::Basic { .. }
+        | ResolvedAuth::Bearer { .. }
+        | ResolvedAuth::OAuth2 { .. } => false,
+    }
+}
+
 /// Stands in for a JWT-SVID the preview does not fetch, so the rest of the
 /// auth is applied and checked as it will be when the request is sent.
 const UNFETCHED_JWT_SVID: &str = "<JWT-SVID fetched when sent>";
@@ -100,14 +126,7 @@ impl Engine {
         let mut target = req.target.clone();
         // The body sent: auth may rewrite it (a WS-Security header block).
         let mut body = req.body.clone();
-        let varies = matches!(
-            prep.auth,
-            ResolvedAuth::Hmac(_)
-                | ResolvedAuth::Dpop { .. }
-                | ResolvedAuth::Jwt { .. }
-                | ResolvedAuth::Wsse { .. }
-                | ResolvedAuth::JwtSvid { .. }
-        );
+        let varies = auth_varies_per_send(&prep.auth);
         let auth = if has_unfetched_jwt_svid(&prep.auth) {
             // The preview makes no Workload API call and reads no token file.
             inferred.push(
