@@ -292,8 +292,7 @@
 - Server-sent events: a send is now signed just before it is made, after
   the HTTP/3 checks, so an HTTP/3 attempt refused before any traffic (the
   automatic policy with an `http://` URL or through a proxy, which then
-  falls back to TCP) is no longer signed, and the record never shows a
-  signature that was not sent. A send whose auth would add other query
+  falls back to TCP) is no longer signed. A send whose auth would add other query
   parameters than it did when the stream was prepared is not made
   (`unsupported_combination`): only headers are signed again for each send,
   and the URL is fixed. No current auth does this; an API key in the query

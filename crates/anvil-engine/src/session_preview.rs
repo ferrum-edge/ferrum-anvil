@@ -150,8 +150,17 @@ fn event_stream(
 ) -> Result<SessionRequest, TransportFailure> {
     let s = sessions::sse_request(ctx, r, prep, inferred)?;
     // The session signs each send afresh, which the preview (sending
-    // nothing) cannot do.
-    if !matches!(prep.auth, ResolvedAuth::None) {
+    // nothing) cannot do. Only auth that changes per send (the same kinds as
+    // `EffectiveRequest::auth_varies_per_send`) gets the note: a static
+    // bearer, Basic or API key is sent exactly as shown.
+    if matches!(
+        prep.auth,
+        ResolvedAuth::Hmac(_)
+            | ResolvedAuth::Dpop { .. }
+            | ResolvedAuth::Jwt { .. }
+            | ResolvedAuth::Wsse { .. }
+            | ResolvedAuth::JwtSvid { .. }
+    ) {
         inferred.push(
             "each send (initial, TCP fallback, each reconnection) is signed again when it is sent, not with the signature shown".into(),
         );
