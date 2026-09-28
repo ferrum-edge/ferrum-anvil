@@ -165,7 +165,7 @@ Support is not one yes/no per protocol. Each protocol is rated on four separate 
 - **HTTP/3.** With `http3_only` or `http3_with_fallback`, an `https://` stream runs over QUIC: `quic_connect` measures DNS and the QUIC handshake (TLS 1.3 inside; connect is `not_applicable`), the request is sent on an HTTP/3 request stream, and the event stream is parsed from the stream's DATA frames as they arrive, with every semantic above unchanged.
   - A reset stream (for example `H3_INTERNAL_ERROR` from a gateway whose backend aborted) is a `body_reset` in the `session` phase with the peer's HTTP/3 error code in `quic_error_code`. Transport is `incomplete` and `closed_by = abnormal`, never success.
   - Every attempt, including each reconnection, uses a new QUIC connection.
-  - Forced HTTP/3 never touches TCP. With `http3_with_fallback`, an HTTP/3 attempt that produced no response is recorded and followed by a separate TCP attempt with reason `protocol_fallback{from: h3}`, and `client.h3.fallback_used` is reported.
+  - Forced HTTP/3 never touches TCP. With `http3_with_fallback`, an HTTP/3 attempt that produced no response is recorded and, when nothing of the request was sent over HTTP/3 or its method is idempotent (the same rule as §3.7), followed by a separate TCP attempt with reason `protocol_fallback{from: h3}`, and `client.h3.fallback_used` is reported.
   - The connection byte counters are QUIC UDP payload bytes. Anvil ends an HTTP/3 stream by closing its QUIC connection with `H3_NO_ERROR`, which also ends the request stream.
   - Live against Ferrum Edge 0.9.7 in the `h3x` lab (`docs/lab/h3x.md`).
 - **Not implemented.** Decompression of compressed event streams.

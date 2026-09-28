@@ -9,6 +9,7 @@
 
 pub mod assertions;
 pub mod context;
+#[doc(hidden)]
 pub mod h3_exec;
 pub mod http_exec;
 pub mod lint;

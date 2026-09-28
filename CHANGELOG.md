@@ -265,7 +265,8 @@
   TCP that may already have been received over HTTP/3 unless its method is
   idempotent. It falls back when nothing of the request was sent over
   HTTP/3 (the QUIC connection or handshake failed before the request stream
-  was written, or the server refused its 0-RTT early data unread), whatever
+  was written, or the server refused its 0-RTT early data unread and the
+  resend after the handshake never started), whatever
   the method, or when the method is idempotent. A written non-idempotent
   request, such as a `POST` whose HTTP/3 stream was reset before a response,
   used to be sent a second time over TCP; it is now not sent again, and its
