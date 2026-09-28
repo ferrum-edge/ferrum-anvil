@@ -380,6 +380,62 @@ async function listed(ws: string) {
 }
 
 describe("LoadView workspace switch", () => {
+  it("clears discarded plan ids when switching workspaces", async () => {
+    const save = deferred<void>();
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue("reused-plan-id");
+    let reportPresent = true;
+    backend({
+      load_plan_save: async (a) => {
+        await save.promise;
+        return saveInto(a);
+      },
+      load_reports: (a) =>
+        a.workspaceId === "B" && reportPresent
+          ? [
+              {
+                run_id: "run-b",
+                plan_id: "pb",
+                plan_name: "Report B",
+                started_at: "2026-09-26T00:00:00Z",
+                completion: "completed",
+                partial: false,
+                achieved_rate_per_sec: 1,
+                started: 1,
+                failures: 0,
+                p95_us: null,
+                unit: "http_request",
+              },
+            ]
+          : [],
+      load_report: () => sampleReport(),
+      load_report_delete: () => {
+        reportPresent = false;
+      },
+    });
+    const r = render(view("A"));
+    await screen.findByText("Plan A");
+    fireEvent.click(button("New"));
+    fireEvent.change(planName(), { target: { value: "Draft A" } });
+    fireEvent.click(button("Discard"));
+
+    plans.B = [loadPlan("pb", "B", "Plan B")];
+    r.rerender(view("B"));
+    await screen.findByText("Plan B");
+    fireEvent.click(button("New"));
+    fireEvent.change(planName(), { target: { value: "Draft B" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+
+    fireEvent.click(await screen.findByText("Report B"));
+    fireEvent.click(button("Delete"));
+    await waitFor(() => expect(calls("load_report_delete")).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByLabelText("Plan name")).toBeNull());
+
+    await act(async () => save.resolve());
+    await waitFor(() => expect(planName().value).toBe("Draft B"));
+    uuid.mockRestore();
+  });
+
   it("drops A's plan editor on a switch to an empty B, and saves nothing into A from B", async () => {
     backend({ load_plan_save: saveInto });
     const r = render(view("A"));
@@ -548,8 +604,7 @@ describe("LoadView workspace switch", () => {
     await act(async () => save.resolve());
   });
 
-  it("never reopens a new plan discarded while its save was landing", async () => {
-    // The save is answered, but the list it reloads is held: meanwhile the plan is still new here.
+  it("keeps Discard unavailable after the save answers while the list reloads", async () => {
     let held: ReturnType<typeof deferred<void>> | null = null;
     backend({
       load_plan_save: saveInto,
@@ -567,16 +622,16 @@ describe("LoadView workspace switch", () => {
     const reply = held;
     fireEvent.click(button("Save"));
     await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
-    await waitFor(() => expect(button("Discard").disabled).toBe(false));
-    fireEvent.click(button("Discard"));
-    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    await waitFor(() => expect(calls("load_plans").length).toBeGreaterThan(1));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Discard" })).toBeNull());
+    expect(button("Delete plan")).toBeTruthy();
+    expect(planName().value).toBe("Draft A");
 
     held = null;
     await act(async () => reply.resolve());
     await act(async () => {});
-    // Saved, as the backend answered, but not selected again.
     expect(await within(sidebar()).findByText("Draft A")).toBeTruthy();
-    expect(screen.queryByLabelText("Plan name")).toBeNull();
+    expect(planName().value).toBe("Draft A");
   });
 
   it("keeps another plan selected meanwhile when a save lands", async () => {

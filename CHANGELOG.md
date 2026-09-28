@@ -275,13 +275,15 @@
   workspace's folder. New requests are made only by creating or duplicating
   one.
 - Desktop Load: Discard is disabled while a new plan's save or Run… is on its
-  way, and a new plan discarded while its save lands is saved but no longer
-  reopened. A save that lands after another plan or report was selected
-  keeps that selection instead of reopening the saved plan.
+  way and disappears as soon as the save is acknowledged, before the list
+  reload finishes. A save that lands after another plan or report was
+  selected keeps that selection instead of reopening the saved plan. The
+  discarded-plan guard is cleared on workspace switch.
 - Desktop linked files: Choose new location… now names the hosts the file is
   used for (the request's saved URL, or a dataset's plan requests; host and
-  port only, never the path or query), and asks before discarding a request
-  tab's unsaved edits, which the relocation replaces with the saved request.
+  port only, never the path or query; template variables are omitted), and
+  asks before discarding a request tab's unsaved edits, which the relocation
+  replaces with the saved request.
   Windows paths are shown without the `\\?\` verbatim prefix (`\\?\UNC\`
   as `\\`); the stored path is unchanged.
 - Moving a request (`move_request`) reads and writes it in one write
