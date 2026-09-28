@@ -115,9 +115,9 @@ function closedText(c: ClosedCount["closed_by"]): string {
   }
 }
 
-function flatten(nodes: TreeNode[], path: string[] = []): { id: string; label: string; method: string }[] {
+function flatten(nodes: TreeNode[], path: string[] = []): { id: string; label: string; method: string; url?: string | null }[] {
   return nodes.flatMap((n) =>
-    n.kind === "folder" ? flatten(n.children, [...path, n.name]) : [{ id: n.id, label: [...path, n.name].join(" / "), method: n.method ?? "GET" }],
+    n.kind === "folder" ? flatten(n.children, [...path, n.name]) : [{ id: n.id, label: [...path, n.name].join(" / "), method: n.method ?? "GET", url: n.url }],
   );
 }
 
@@ -191,6 +191,9 @@ export function LoadView(props: {
 
   const wsRef = useRef(props.workspaceId);
   wsRef.current = props.workspaceId;
+  // New plans discarded here: a save of one that was already on its way
+  // still lands, but never selects the plan again.
+  const discarded = useRef(new Set<string>());
   /** The workspace's reports, or null when the workspace changed meanwhile. */
   const reload = async () => {
     const w = props.workspaceId;
@@ -358,8 +361,10 @@ export function LoadView(props: {
                 dropDraft(p.workspace_id, p.id, sent);
                 setFresh((f) => (f?.id === p.id ? null : f));
                 // Switched workspace meanwhile: do not select it in another workspace's view.
-                if (listed === null) return;
-                setSel({ kind: "plan", id: p.id });
+                // Discarded meanwhile: it is saved, but not reopened.
+                if (listed === null || discarded.current.has(p.id)) return;
+                // Another plan or report selected meanwhile: keep that selection.
+                setSel((s) => (s === null || (s.kind === "plan" && s.id === p.id) ? { kind: "plan", id: p.id } : s));
               }}
               onDeleted={async () => {
                 dropDraft(props.workspaceId, selPlan.id);
@@ -369,6 +374,7 @@ export function LoadView(props: {
               onDiscard={
                 selNew
                   ? () => {
+                      discarded.current.add(selPlan.id);
                       dropDraft(props.workspaceId, selPlan.id);
                       select(null);
                     }
@@ -409,7 +415,8 @@ export function PlanEditor(props: {
   unsaved?: boolean;
   /** Every edit, so the view can keep it across a workspace switch. */
   onChange?: (p: EditPlan) => void;
-  requests: { id: string; label: string; method: string }[];
+  /** `url` is the request's saved URL, whose host is shown beside a linked dataset's Choose new location…. */
+  requests: { id: string; label: string; method: string; url?: string | null }[];
   environments: Environment[];
   datasets: Dataset[];
   onDatasetsChanged: () => void | Promise<unknown>;
@@ -431,6 +438,8 @@ export function PlanEditor(props: {
   const [ack, setAck] = useState(false);
   const [datasetDlg, setDatasetDlg] = useState(false);
   const [check, setCheck] = useState<LoadPlanCheck | null>(null);
+  // A save, or a Run… (its save and preflight), is on its way: a new plan cannot be discarded meanwhile.
+  const [saving, setSaving] = useState(false);
   const useMix = p.mix.length > 0;
   const dataset = props.datasets.find((d) => d.id === p.dataset_id);
   const requestKey = JSON.stringify([p.chain, p.mix.map((m) => m.request_id), p.connection_mode]);
@@ -476,6 +485,14 @@ export function PlanEditor(props: {
       return null;
     }
   };
+  const whileSaving = async (work: () => Promise<unknown>) => {
+    setSaving(true);
+    try {
+      await work();
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="page narrow">
@@ -483,29 +500,36 @@ export function PlanEditor(props: {
         <input className="field title-input grow" aria-label="Plan name" value={p.name} onChange={(e) => setP({ ...p, name: e.target.value })} />
         <div className="page-actions">
           {props.unsaved && <span className="badge neutral">unsaved</span>}
-          <button className="btn" disabled={otherWorkspace} title={otherWorkspace ? "This plan belongs to another workspace." : undefined} onClick={() => void saveIt()}>
+          <button className="btn" disabled={otherWorkspace} title={otherWorkspace ? "This plan belongs to another workspace." : undefined} onClick={() => void whileSaving(saveIt)}>
             Save
           </button>
           <button
             className="btn primary"
             disabled={refused || otherWorkspace}
             title={refused ? "This plan cannot be load tested; see the refusal below." : undefined}
-            onClick={async () => {
-              const saved = await saveIt();
-              if (!saved) return;
-              try {
-                setAck(false);
-                setPreflight(await api.loadPreflight(saved.id));
-              } catch (e) {
-                setErr(String((e as Error).message));
-              }
-            }}
+            onClick={() =>
+              void whileSaving(async () => {
+                const saved = await saveIt();
+                if (!saved) return;
+                try {
+                  setAck(false);
+                  setPreflight(await api.loadPreflight(saved.id));
+                } catch (e) {
+                  setErr(String((e as Error).message));
+                }
+              })
+            }
           >
             <Icon name="play" size={12} />
             Run…
           </button>
           {props.onDiscard ? (
-            <button className="btn ghost danger" title="Discard this unsaved plan" onClick={props.onDiscard}>
+            <button
+              className="btn ghost danger"
+              title={saving ? "Wait until the plan is saved." : "Discard this unsaved plan"}
+              disabled={saving}
+              onClick={props.onDiscard}
+            >
               Discard
             </button>
           ) : (
@@ -687,6 +711,7 @@ export function PlanEditor(props: {
           <LinkedFileBinding
             referrer={{ kind: "dataset", id: dataset.id }}
             path={dataset.attachment.path}
+            urls={[...p.chain, ...p.mix.map((m) => m.request_id)].map((id) => props.requests.find((r) => r.id === id)?.url)}
             onRelocated={async () => {
               // The saved dataset now names the new path: reload it so this shows that path.
               await props.onDatasetsChanged();

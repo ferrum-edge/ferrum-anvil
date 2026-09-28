@@ -20,6 +20,7 @@ import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
 import { Modal, SecretField, Tabs, humanize, uid } from "./ui";
 import { Icon, type IconName } from "./icons";
+import { displayPath } from "./LinkedFile";
 import { WorkloadIdentityFields } from "./WorkloadApi";
 
 const now = () => new Date().toISOString();
@@ -735,6 +736,15 @@ const MODES = [
   { id: "full_backup", label: "Full backup", desc: "Everything including history and settings, encrypted. Restores into a clean install without this computer's keychain." },
 ];
 
+/**
+ * An export preview's linked file entry (`request 'Upload': /path/to/file`) as shown: its path
+ * without the Windows `\\?\` verbatim prefix, as `displayPath` shows it.
+ */
+export function displayLinkedFile(entry: string): string {
+  const m = /^(\w+ '.*': )(\\\\\?\\.*)$/s.exec(entry);
+  return m ? m[1] + displayPath(m[2]) : entry;
+}
+
 export function ExportDialog(props: { workspace: Workspace | null; onClose: () => void; notify: (m: string) => void }) {
   const [mode, setMode] = useState("share_safely");
   const [scope, setScope] = useState<"workspace" | "all">(props.workspace ? "workspace" : "all");
@@ -836,6 +846,18 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
           </table>
           {preview.manifest.excluded.length > 0 && <div className="hint">Excluded: {preview.manifest.excluded.join(", ")}</div>}
           {preview.manifest.device_bindings.length > 0 && <div className="warn-box">Needs rebinding on the other machine: {preview.manifest.device_bindings.join(", ")}</div>}
+          {preview.linked_files && preview.linked_files.length > 0 && (
+            <div className="warn-box" data-testid="export-linked-files">
+              The bundle names these linked files by their path on this computer:
+              <ul>
+                {preview.linked_files.map((f, i) => (
+                  <li key={i} className="mono">
+                    {displayLinkedFile(f)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {preview.manifest.content_warnings.length > 0 && (
             <details>
               <summary>{preview.manifest.content_warnings.length} content warning(s)</summary>

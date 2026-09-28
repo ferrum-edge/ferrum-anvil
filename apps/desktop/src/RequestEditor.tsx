@@ -64,6 +64,10 @@ export function RequestEditor(props: {
   profiles: Profiles;
   /** Replace the draft with the saved request, which the backend changed (a linked file was relocated). */
   onReload?: () => Promise<void>;
+  /** Asked before a linked file is relocated, as that replaces the draft; false relocates nothing. */
+  confirmReload?: () => Promise<boolean>;
+  /** The saved request's URL: a relocated linked file is used for requests to its host. */
+  savedUrl?: string;
 }) {
   const { req } = props;
   const spec = req.spec;
@@ -157,8 +161,20 @@ export function RequestEditor(props: {
             <p className="hint">Content-Type, Content-Length and auth headers are added at send time; the Effective request tab shows exactly what will be sent and why.</p>
           </div>
         )}
-        {activeSub === "body" && <BodyEditor spec={spec} set={set} requestId={req.id} onRelocated={props.onReload} />}
-        {activeSub === "protocol" && <ProtocolEditor spec={spec} set={set} workspaceId={props.workspaceId} requestId={req.id} onRelocated={props.onReload} />}
+        {activeSub === "body" && (
+          <BodyEditor spec={spec} set={set} requestId={req.id} savedUrl={props.savedUrl} onRelocated={props.onReload} confirmRelocate={props.confirmReload} />
+        )}
+        {activeSub === "protocol" && (
+          <ProtocolEditor
+            spec={spec}
+            set={set}
+            workspaceId={props.workspaceId}
+            requestId={req.id}
+            savedUrl={props.savedUrl}
+            onRelocated={props.onReload}
+            confirmRelocate={props.confirmReload}
+          />
+        )}
         {activeSub === "auth" && (
           <AuthEditor
             value={(spec.auth as AuthConfig) ?? { type: "inherit" }}
@@ -275,13 +291,19 @@ export function BodyEditor({
   spec,
   set,
   requestId,
+  savedUrl,
   onRelocated,
+  confirmRelocate,
 }: {
   spec: RequestSpec;
   set: (p: Partial<RequestSpec>) => void;
   requestId?: string | null;
+  /** The saved request's URL, whose host is shown beside a linked file's Choose new location…; else the draft's. */
+  savedUrl?: string;
   /** Reload the saved request after a linked file it names was relocated. */
   onRelocated?: () => Promise<void>;
+  /** Asked before a linked file it names is relocated; false relocates nothing. */
+  confirmRelocate?: () => Promise<boolean>;
 }) {
   const b = (spec.body ?? { type: "none" }) as Body;
   const setBody = (body: Body) => set({ body });
@@ -333,7 +355,16 @@ export function BodyEditor({
         </>
       )}
       {b.type === "form_url_encoded" && <KeyValueEditor rows={b.fields} onChange={(fields) => setBody({ ...b, fields })} nameLabel="Field" />}
-      {b.type === "multipart" && <MultipartEditor parts={b.parts} onChange={(parts) => setBody({ ...b, parts })} requestId={requestId} onRelocated={onRelocated} />}
+      {b.type === "multipart" && (
+        <MultipartEditor
+          parts={b.parts}
+          onChange={(parts) => setBody({ ...b, parts })}
+          requestId={requestId}
+          url={savedUrl ?? spec.url}
+          onRelocated={onRelocated}
+          confirmRelocate={confirmRelocate}
+        />
+      )}
       {b.type === "binary" && (
         <div className="fields">
           {b.attachment.kind === "stored" ? (
@@ -342,7 +373,14 @@ export function BodyEditor({
               {`${b.attachment.file_name} · ${fmtBytes(b.attachment.size)}`}
             </span>
           ) : (
-            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={b.attachment.path} className="grow" onRelocated={onRelocated} />
+            <LinkedFileBinding
+              referrer={linkedReferrer(requestId)}
+              path={b.attachment.path}
+              className="grow"
+              urls={[savedUrl ?? spec.url]}
+              onRelocated={onRelocated}
+              confirmRelocate={confirmRelocate}
+            />
           )}
           <button className="btn" onClick={pickBinary}>
             Choose another file…
@@ -454,12 +492,17 @@ function MultipartEditor({
   parts,
   onChange,
   requestId,
+  url,
   onRelocated,
+  confirmRelocate,
 }: {
   parts: MultipartPart[];
   onChange: (p: MultipartPart[]) => void;
   requestId?: string | null;
+  /** The request's URL, whose host is shown beside a linked file's Choose new location…. */
+  url?: string;
   onRelocated?: () => Promise<void>;
+  confirmRelocate?: () => Promise<boolean>;
 }) {
   const set = (i: number, p: MultipartPart) => onChange(parts.map((x, j) => (j === i ? p : x)));
   return (
@@ -476,7 +519,14 @@ function MultipartEditor({
               {`${p.attachment.file_name} · ${fmtBytes(p.attachment.size)}`}
             </span>
           ) : (
-            <LinkedFileBinding referrer={linkedReferrer(requestId)} path={p.attachment.path} className="grow" onRelocated={onRelocated} />
+            <LinkedFileBinding
+              referrer={linkedReferrer(requestId)}
+              path={p.attachment.path}
+              className="grow"
+              urls={[url]}
+              onRelocated={onRelocated}
+              confirmRelocate={confirmRelocate}
+            />
           )}
           <input className="field mono w-170" placeholder="content-type (auto)" aria-label="Part content type" value={p.content_type ?? ""} onChange={(e) => set(i, { ...p, content_type: e.target.value || null })} />
           <button className="btn ghost icon-btn" aria-label="Remove" title="Remove" onClick={() => onChange(parts.filter((_, j) => j !== i))}>
@@ -526,14 +576,20 @@ export function ProtocolEditor({
   set,
   workspaceId,
   requestId,
+  savedUrl,
   onRelocated,
+  confirmRelocate,
 }: {
   spec: RequestSpec;
   set: (p: Partial<RequestSpec>) => void;
   workspaceId: string;
   requestId?: string | null;
+  /** The saved request's URL, whose host is shown beside a linked file's Choose new location…; else the draft's. */
+  savedUrl?: string;
   /** Reload the saved request after a linked schema file it names was relocated. */
   onRelocated?: () => Promise<void>;
+  /** Asked before a linked schema file it names is relocated; false relocates nothing. */
+  confirmRelocate?: () => Promise<boolean>;
 }) {
   const p = spec.protocol ?? "http";
   if (p === "web_socket") {
@@ -661,7 +717,14 @@ export function ProtocolEditor({
           <div className="col" data-testid="grpc-linked-schema">
             <span className="lbl">Linked schema files (read from this device)</span>
             {linkedSchemaFiles(g.schema).map((path, i) => (
-              <LinkedFileBinding key={`${i}:${path}`} referrer={linkedReferrer(requestId)} path={path} onRelocated={onRelocated} />
+              <LinkedFileBinding
+                key={`${i}:${path}`}
+                referrer={linkedReferrer(requestId)}
+                path={path}
+                urls={[savedUrl ?? spec.url]}
+                onRelocated={onRelocated}
+                confirmRelocate={confirmRelocate}
+              />
             ))}
           </div>
         )}

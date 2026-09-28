@@ -234,8 +234,9 @@
   linked local files are named. A path repointed with **Choose new
   location…** is a path on this device, so the preview shows which ones
   leave with the export. The bundle's manifest does not repeat them. The
-  desktop export dialog does not show the list yet; `anvil export --preview`
-  prints it.
+  desktop export dialog lists them under its rebinding warning (Windows
+  paths without the `\\?\` verbatim prefix), and `anvil export --preview`
+  prints them.
 
 ### Fixed
 
@@ -273,6 +274,16 @@
   recreate the request on save, possibly under a deleted folder or another
   workspace's folder. New requests are made only by creating or duplicating
   one.
+- Desktop Load: Discard is disabled while a new plan's save or Run… is on its
+  way, and a new plan discarded while its save lands is saved but no longer
+  reopened. A save that lands after another plan or report was selected
+  keeps that selection instead of reopening the saved plan.
+- Desktop linked files: Choose new location… now names the hosts the file is
+  used for (the request's saved URL, or a dataset's plan requests; host and
+  port only, never the path or query), and asks before discarding a request
+  tab's unsaved edits, which the relocation replaces with the saved request.
+  Windows paths are shown without the `\\?\` verbatim prefix (`\\?\UNC\`
+  as `\\`); the stored path is unchanged.
 - Moving a request (`move_request`) reads and writes it in one write
   transaction and changes only its folder and position. It used to read the
   request first and save that copy afterwards, so a save or a linked-file
