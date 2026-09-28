@@ -60,7 +60,7 @@ export function destinationHosts(urls: readonly (string | null | undefined)[]): 
     for (const candidate of u.includes("://") ? [u] : [`http://${u}`]) {
       try {
         const host = new URL(candidate).host;
-        if (host) return [host];
+        if (host && !host.includes("{{")) return [host];
       } catch {
         // Not a URL: nothing is shown for it.
       }

@@ -529,6 +529,7 @@ describe("where a relocated file is used", () => {
         "https://api.example.test:8443/other",
         "grpcs://grpc.example.test/pkg.v1.S/M",
         "localhost:8080/upload?x=1",
+        "https://{{base_url}}/private/path",
         "",
         null,
         undefined,
@@ -558,9 +559,15 @@ describe("where a relocated file is used", () => {
     expect(screen.getByTestId("linked-file").textContent).not.toContain("used for requests to");
     unmount();
     backend([{ path: PATH, state: "unbound" }]);
-    render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://upload.example.test/"]} />);
+    const second = render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://upload.example.test/"]} />);
     await stateBadge();
     expect(screen.getByTestId("linked-file").textContent).not.toContain("used for requests to");
+    second.unmount();
+    backend([{ path: PATH, state: "unbound" }]);
+    render(<LinkedFileBinding referrer={REQUEST} path={PATH} urls={["https://{{base_url}}/private/path"]} onRelocated={() => {}} />);
+    await stateBadge();
+    expect(screen.getByTestId("linked-file").textContent).not.toContain("used for requests to");
+    expect(screen.getByRole("button", { name: /Choose new location…/ }).title).not.toContain("{{");
   });
 
   it("is passed the request's URL by the body and gRPC schema editors", async () => {

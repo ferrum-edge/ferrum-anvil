@@ -174,6 +174,9 @@ export function LoadView(props: {
   // is dropped when something else is selected or the workspace switches.
   const [fresh, setFresh] = useState<LoadPlan | null>(null);
   const [live, setLive] = useState<{ runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] } | null>(null);
+  // New plans discarded here: a save of one that was already on its way
+  // still lands, but never selects the plan again.
+  const discarded = useRef(new Set<string>());
   // Selection and lists belong to one workspace: reset them in the render that
   // switches, so no editor, confirmation or action of the previous workspace
   // stays on screen. A live run (and its Stop control) is kept, and so are the
@@ -181,6 +184,7 @@ export function LoadView(props: {
   const [shownWs, setShownWs] = useState(props.workspaceId);
   if (shownWs !== props.workspaceId) {
     setShownWs(props.workspaceId);
+    discarded.current.clear();
     setSel(null);
     setFresh(null);
     setPlans([]);
@@ -191,9 +195,6 @@ export function LoadView(props: {
 
   const wsRef = useRef(props.workspaceId);
   wsRef.current = props.workspaceId;
-  // New plans discarded here: a save of one that was already on its way
-  // still lands, but never selects the plan again.
-  const discarded = useRef(new Set<string>());
   /** The workspace's reports, or null when the workspace changed meanwhile. */
   const reload = async () => {
     const w = props.workspaceId;
@@ -354,6 +355,21 @@ export function LoadView(props: {
               onDatasetsChanged={reload}
               onSaved={async (p, sent) => {
                 props.notify("Plan saved.");
+                // The save response acknowledges this plan before its list
+                // reload finishes. It is no longer a new plan, so Discard
+                // must disappear during that window too.
+                setDrafts((all) => {
+                  const own = all[p.workspace_id];
+                  const draft = own?.[p.id];
+                  if (!draft?.created) return all;
+                  return {
+                    ...all,
+                    [p.workspace_id]: {
+                      ...own,
+                      [p.id]: { ...draft, created: false },
+                    },
+                  };
+                });
                 // Saved, even if another workspace is shown now: once the list
                 // is fresh, drop this render's workspace draft unless it was
                 // edited again while the save was pending.
