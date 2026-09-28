@@ -623,6 +623,13 @@ pub enum AttemptReason {
     /// answered `425 Too Early` (it did not process the request). Sent once
     /// more after the handshake completed, never as early data (RFC 8470 §5.2).
     TooEarlyRetry,
+    /// The previous attempt went out on a reused pooled connection that the
+    /// server had closed, and it failed with `after` before any response.
+    /// Sent once more on a new connection, with per-send auth signed again.
+    /// Not a retry: it neither needs nor uses the retry setting.
+    ReusedConnectionClosed {
+        after: FailureKind,
+    },
 }
 
 /// Which handshake would carry the early data.

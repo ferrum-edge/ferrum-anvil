@@ -598,6 +598,8 @@ function attemptReason(a: AttemptObservation): string {
       return `fallback from ${r.from}`;
     case "too_early_retry":
       return "retry after 425 Too Early (after the handshake)";
+    case "reused_connection_closed":
+      return `sent again on a new connection after ${humanize(r.after)} on a reused one`;
     default:
       return humanize(r.reason);
   }

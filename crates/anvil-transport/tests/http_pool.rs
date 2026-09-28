@@ -371,10 +371,17 @@ async fn a_closed_connection_kept_for_a_425_retry_is_replaced() {
 
     // The client may or may not have seen the close yet. Either the dead
     // connection is dropped when the retry takes it, or the retry fails on
-    // it before any response and is sent once more on a new connection.
+    // it before any response. It is then sent once more on a new connection:
+    // by the transport when none of it was written, else by the caller, as
+    // the engine does.
     let mut retry = p.clone();
     retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
-    let mut outs = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    let e = t.execute_attempt(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    let mut outs = e.outputs;
+    if let Some(after) = e.resend_on_new_connection {
+        assert_eq!(outs.len(), 1, "the transport sent again a request that may have been written");
+        outs.extend(resend(&t, &retry, after).await);
+    }
     let again = outs.pop().unwrap();
     assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
     assert_eq!(again.observation.response_status, Some(425));
@@ -387,8 +394,15 @@ async fn a_closed_connection_kept_for_a_425_retry_is_replaced() {
         assert_eq!(conn_id(&on_closed), conn_id(&first));
         let f = on_closed.observation.failure.as_ref().expect("the closed connection failed the retry");
         assert!(closed_under_request(f.kind), "{f:?}");
-        assert_eq!(again.observation.reason, AttemptReason::Retry { after: f.kind });
+        assert_eq!(again.observation.reason, AttemptReason::ReusedConnectionClosed { after: f.kind });
     }
+}
+
+/// Send `p` once more as the engine does after a reused connection was
+/// closed under it with `after`: a new attempt, which takes a new connection.
+async fn resend(t: &HttpTransport, p: &HttpPlan, after: FailureKind) -> Vec<AttemptOutput> {
+    let reason = AttemptReason::ReusedConnectionClosed { after };
+    t.execute(p, 1, reason, &EventCtx::none(), &CancellationToken::new()).await
 }
 
 /// A connection closed or reset under a request before its response head.
@@ -484,7 +498,7 @@ async fn read_request(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<Strin
 }
 
 #[tokio::test]
-async fn an_idempotent_request_on_a_pooled_connection_closed_under_it_is_sent_on_a_new_one() {
+async fn an_idempotent_request_on_a_pooled_connection_closed_under_it_is_left_to_the_caller_to_resend() {
     init();
     let t = HttpTransport::new();
     let o = scripted_origin(vec![Reply::Ok, Reply::Close]).await;
@@ -494,19 +508,27 @@ async fn an_idempotent_request_on_a_pooled_connection_closed_under_it_is_sent_on
 
     // The pooled connection looks alive when it is checked out; the origin
     // reads the request on it and closes the connection without answering.
-    let outs = t.execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
-    assert_eq!(outs.len(), 2, "the GET was not sent again on a new connection");
-    let (on_closed, again) = (&outs[0], &outs[1]);
+    // It may have received the request with its per-send auth (a nonce, a
+    // proof), so the transport does not send the same request again.
+    let e = t.execute_attempt(&p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert_eq!(e.outputs.len(), 1, "the transport sent the written GET again");
+    let on_closed = &e.outputs[0];
     assert!(reused(on_closed));
     assert_eq!(conn_id(on_closed), conn_id(&first));
     assert!(on_closed.response.is_none());
     assert_eq!(on_closed.observation.dispatch, DispatchState::MayHaveBeenSent);
     let f = on_closed.observation.failure.as_ref().expect("the closed connection failed the request");
     assert!(closed_under_request(f.kind), "{f:?}");
-    assert!(f.message.contains("was found closed; the request was sent once more on a new connection"), "{}", f.message);
+    assert!(f.message.contains("was found closed before any response; the GET request may have been received"), "{}", f.message);
+    assert_eq!(e.resend_on_new_connection, Some(f.kind), "the caller may send it again, signed again");
+    assert_eq!(o.accepted(), 1);
 
+    // The caller's resend goes out on a new connection.
+    let outs = resend(&t, &p, f.kind).await;
+    assert_eq!(outs.len(), 1);
+    let again = &outs[0];
     assert_eq!(again.observation.index, 1);
-    assert_eq!(again.observation.reason, AttemptReason::Retry { after: f.kind });
+    assert_eq!(again.observation.reason, AttemptReason::ReusedConnectionClosed { after: f.kind });
     assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
     assert_eq!(again.observation.response_status, Some(200));
     assert!(!reused(again), "sent again on a new connection");
@@ -527,10 +549,11 @@ async fn a_written_non_idempotent_request_on_a_pooled_connection_closed_under_it
     post.body = Bytes::from_static(b"{\"order\":1}");
 
     // The origin read the whole POST before closing: it may have acted on
-    // it, so the transport reports the failure instead of sending it again.
-    let outs = t.execute(&post, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
-    assert_eq!(outs.len(), 1, "the POST was sent again");
-    let a = &outs[0];
+    // it, so the failure is reported and nobody is told to send it again.
+    let e = t.execute_attempt(&post, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert_eq!(e.outputs.len(), 1, "the POST was sent again");
+    assert_eq!(e.resend_on_new_connection, None, "the caller was told it may send the POST again");
+    let a = &e.outputs[0];
     assert!(reused(a));
     assert_eq!(conn_id(a), conn_id(&first));
     assert!(a.response.is_none());
@@ -543,11 +566,43 @@ async fn a_written_non_idempotent_request_on_a_pooled_connection_closed_under_it
 }
 
 #[tokio::test]
-async fn the_retry_after_425_on_a_connection_closed_under_it_is_sent_on_a_new_one() {
+async fn the_retry_after_425_on_a_connection_closed_under_it_is_left_to_the_caller_to_resend() {
     init();
     let t = HttpTransport::new();
     // The kept connection is still open when the retry takes it; the origin
     // reads the retry and closes it without answering.
+    let o = scripted_origin(vec![Reply::TooEarly, Reply::Close]).await;
+    let mut p = plan(&format!("{}submit", o.url));
+    p.keepalive = false;
+    p.early_data = EarlyDataIntent::Send;
+    let first = answer_425(&t, &p).await;
+
+    let mut retry = p.clone();
+    retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
+    let e = t.execute_attempt(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert_eq!(e.outputs.len(), 1, "the transport sent the written retry again");
+    let on_closed = &e.outputs[0];
+    assert!(reused(on_closed));
+    assert_eq!(conn_id(on_closed), conn_id(&first));
+    assert_eq!(on_closed.observation.dispatch, DispatchState::MayHaveBeenSent);
+    let f = on_closed.observation.failure.as_ref().expect("the closed connection failed the retry");
+    assert!(closed_under_request(f.kind), "{f:?}");
+    assert_eq!(e.resend_on_new_connection, Some(f.kind));
+
+    let outs = resend(&t, &retry, f.kind).await;
+    assert_eq!(outs.len(), 1);
+    let again = &outs[0];
+    assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
+    assert_eq!(again.observation.response_status, Some(200));
+    assert!(!reused(again));
+    assert_eq!(o.accepted(), 2);
+    assert_eq!(o.requests(), ["GET /submit HTTP/1.1"; 3]);
+}
+
+#[tokio::test]
+async fn a_written_post_retried_after_425_on_a_connection_closed_under_it_is_not_sent_again() {
+    init();
+    let t = HttpTransport::new();
     let o = scripted_origin(vec![Reply::TooEarly, Reply::Close]).await;
     let mut p = plan(&format!("{}submit", o.url));
     p.method = http::Method::POST;
@@ -556,21 +611,57 @@ async fn the_retry_after_425_on_a_connection_closed_under_it_is_sent_on_a_new_on
     p.early_data = EarlyDataIntent::Send;
     let first = answer_425(&t, &p).await;
 
-    // The engine sends the retry after 425 only for a method eligible for
-    // early data; the transport sends it once more whatever the method.
+    // The 425 answered the earlier request, not the retry: a written POST
+    // is not sent again because it is the retry after 425.
     let mut retry = p.clone();
     retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
-    let outs = t.execute(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
-    assert_eq!(outs.len(), 2, "the retry after 425 was not sent again on a new connection");
-    let (on_closed, again) = (&outs[0], &outs[1]);
-    assert!(reused(on_closed));
-    assert_eq!(conn_id(on_closed), conn_id(&first));
-    let f = on_closed.observation.failure.as_ref().expect("the closed connection failed the retry");
+    let e = t.execute_attempt(&retry, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new()).await;
+    assert_eq!(e.outputs.len(), 1, "the POST was sent again");
+    assert_eq!(e.resend_on_new_connection, None, "the caller was told it may send the POST again");
+    let a = &e.outputs[0];
+    assert!(reused(a));
+    assert_eq!(conn_id(a), conn_id(&first));
+    assert_eq!(a.observation.dispatch, DispatchState::MayHaveBeenSent);
+    let f = a.observation.failure.as_ref().expect("the closed connection failed the retry");
     assert!(closed_under_request(f.kind), "{f:?}");
-    assert_eq!(again.observation.reason, AttemptReason::Retry { after: f.kind });
-    assert!(again.observation.failure.is_none(), "{:?}", again.observation.failure);
-    assert_eq!(again.observation.response_status, Some(200));
-    assert!(!reused(again));
+    assert!(f.message.contains("not sent again: the POST request was written and is not idempotent"), "{}", f.message);
+    assert_eq!(o.accepted(), 1, "no new connection was opened");
+    assert_eq!(o.requests(), ["POST /submit HTTP/1.1"; 2]);
+}
+
+#[tokio::test]
+async fn a_resend_after_a_closed_connection_takes_neither_the_kept_nor_a_pooled_connection() {
+    init();
+    let t = HttpTransport::new();
+    let o = scripted_origin(vec![Reply::TooEarly]).await;
+
+    // A connection is kept for the retry after 425: the resend of that retry
+    // does not take it.
+    let mut p = plan(&format!("{}submit", o.url));
+    p.keepalive = false;
+    p.early_data = EarlyDataIntent::Send;
+    let first = answer_425(&t, &p).await;
+    let mut retry = p.clone();
+    retry.early_data = EarlyDataIntent::Hold(EarlyDataNotUsed::RetryAfterTooEarly);
+    let outs = resend(&t, &retry, FailureKind::ClosedBeforeResponse).await;
+    assert_eq!(outs.len(), 1);
+    let a = &outs[0];
+    assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
+    assert_eq!(a.observation.response_status, Some(200));
+    assert!(!reused(a), "the resend took the connection kept after 425");
+    assert_ne!(conn_id(a), conn_id(&first));
     assert_eq!(o.accepted(), 2);
-    assert_eq!(o.requests(), ["POST /submit HTTP/1.1"; 3]);
+
+    // An idle connection is pooled for reuse: the resend does not take it.
+    let q = plan(&o.url);
+    let pooled = run(&t, &q).await;
+    assert_eq!(t.pool.stats(), PoolStats { keys: 1, connections: 1, idle: 1 });
+    let outs = resend(&t, &q, FailureKind::ClosedBeforeResponse).await;
+    assert_eq!(outs.len(), 1);
+    let b = &outs[0];
+    assert!(b.observation.failure.is_none(), "{:?}", b.observation.failure);
+    assert!(!reused(b), "the resend took a pooled connection");
+    assert_ne!(conn_id(b), conn_id(&pooled));
+    assert_eq!(o.accepted(), 4);
+    assert_eq!(t.pool.stats(), PoolStats { keys: 1, connections: 2, idle: 2 }, "both are pooled");
 }

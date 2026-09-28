@@ -241,15 +241,20 @@
 
 - HTTP/1.1 and HTTP/2: a request on a reused pooled connection that the
   server closed just as the request went out no longer fails with "closed
-  before response" when resending it is safe. It is sent once more on a new
-  connection when hyper returned it unwritten, none of it was written, its
-  method is idempotent, or it is the retry after `425 Too Early`. Both
-  attempts are recorded: the first on the reused connection, with a message
-  saying it was found closed and the request was resent, and the second
-  with reason `retry` after that failure kind. A non-idempotent request
-  that was written, such as a `POST`, is still never resent; its message
-  now says why. This also fixes an intermittent failure of the retry after
-  `425 Too Early` when the server had just closed the kept connection.
+  before response" when resending it is safe. When none of it was written,
+  the transport sends it once more on a new connection. When it may have
+  been written and its method is idempotent, the engine signs it again (a
+  new HMAC nonce, DPoP proof and JWT time claims, since the server may
+  already have seen the first ones) and sends it once more on a new
+  connection. The resend happens at most once per execution, never on a
+  pooled connection or the one kept after `425 Too Early`, and is not a
+  retry: it happens with retries set to 0 and does not count toward them.
+  Both attempts are recorded, the second with the new attempt reason
+  `reused_connection_closed` and the failure kind that preceded it. A
+  written non-idempotent request, such as a `POST`, is never resent, even as
+  the retry after `425 Too Early`; its message now says why. This also
+  fixes an intermittent failure of the retry after `425 Too Early` when the
+  server had just closed the kept connection.
 - Moving a request (`move_request`) reads and writes it in one write
   transaction and changes only its folder and position. It used to read the
   request first and save that copy afterwards, so a save or a linked-file
