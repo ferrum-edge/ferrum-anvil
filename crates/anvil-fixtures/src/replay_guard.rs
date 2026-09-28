@@ -159,10 +159,8 @@ pub async fn serve(tls: TlsServerOptions, quic: bool) -> anyhow::Result<ReplayFi
                         let _ = body.collect().await;
                         let replayed = record(&received, protocol, parts.method.as_str(), &parts.headers);
                         let status = if replayed { 401 } else { 200 };
-                        let resp = http::Response::builder()
-                            .status(status)
-                            .body(Full::new(Bytes::from_static(b"ok")))
-                            .expect("static response");
+                        let resp =
+                            http::Response::builder().status(status).body(Full::new(Bytes::from_static(b"ok"))).expect("static response");
                         Ok::<_, Infallible>(resp)
                     }
                 });
