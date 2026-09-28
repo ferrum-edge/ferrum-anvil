@@ -412,28 +412,39 @@ describe("LoadView workspace switch", () => {
         reportPresent = false;
       },
     });
-    const r = render(view("A"));
-    await screen.findByText("Plan A");
-    fireEvent.click(button("New"));
-    fireEvent.change(planName(), { target: { value: "Draft A" } });
-    fireEvent.click(button("Discard"));
+    try {
+      // A new plan discarded in A: its id is marked discarded.
+      const r = render(view("A"));
+      await screen.findByText("Plan A");
+      fireEvent.click(button("New"));
+      fireEvent.change(planName(), { target: { value: "Draft A" } });
+      fireEvent.click(button("Discard"));
 
-    plans.B = [loadPlan("pb", "B", "Plan B")];
-    r.rerender(view("B"));
-    await screen.findByText("Plan B");
-    fireEvent.click(button("New"));
-    fireEvent.change(planName(), { target: { value: "Draft B" } });
-    fireEvent.click(button("Save"));
-    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+      // In B a new plan gets the same id, and is saved.
+      plans.B = [loadPlan("pb", "B", "Plan B")];
+      r.rerender(view("B"));
+      await screen.findByText("Plan B");
+      fireEvent.click(button("New"));
+      fireEvent.change(planName(), { target: { value: "Draft B" } });
+      fireEvent.click(button("Save"));
+      await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+      expect((calls("load_plan_save")[0].plan as LoadPlan).id).toBe("00000000-0000-4000-8000-000000000001");
 
-    fireEvent.click(await screen.findByText("Report B"));
-    fireEvent.click(button("Delete"));
-    await waitFor(() => expect(calls("load_report_delete")).toHaveLength(1));
-    await waitFor(() => expect(screen.queryByLabelText("Plan name")).toBeNull());
+      // Nothing is selected when the save lands, so only the discarded set decides.
+      fireEvent.click(await screen.findByText("Report B"));
+      fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+      await waitFor(() => expect(calls("load_report_delete")).toHaveLength(1));
+      await screen.findByText("Test under load with the same requests you send by hand.");
+      expect(screen.queryByText("Report B")).toBeNull();
+      expect(screen.queryByLabelText("Plan name")).toBeNull();
 
-    await act(async () => save.resolve());
-    await waitFor(() => expect(planName().value).toBe("Draft B"));
-    uuid.mockRestore();
+      // Not discarded in B: the saved plan is selected.
+      await act(async () => save.resolve());
+      await waitFor(() => expect(planName().value).toBe("Draft B"));
+      expect(screen.queryByText("unsaved")).toBeNull();
+    } finally {
+      uuid.mockRestore();
+    }
   });
 
   it("drops A's plan editor on a switch to an empty B, and saves nothing into A from B", async () => {
