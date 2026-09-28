@@ -584,3 +584,19 @@ async fn sse_over_tls_says_the_authority_follows_the_negotiated_version() {
     );
     assert!(!p.headers.iter().any(|h| h.name.eq_ignore_ascii_case("host")), "{:?}", p.headers);
 }
+
+/// An event stream signs each send afresh: with auth, the preview says the
+/// signature it shows is not the one sent, as it does for server reflection.
+#[tokio::test]
+async fn sse_preview_says_each_send_is_signed_again() {
+    init();
+    let e = Engine::new();
+    let note = "each send (initial, TCP fallback, each reconnection) is signed again when it is sent, not with the signature shown";
+    let p = e.preview(&sse("https://sse.example.test/events", HttpVersionPolicy::Http3WithFallback)).unwrap();
+    assert!(p.inferred.iter().any(|i| i == note), "{:?}", p.inferred);
+
+    let mut s = RequestSpec::http("GET", "https://sse.example.test/events");
+    s.protocol = Protocol::Sse;
+    let p = e.preview(&ExecutionContext::standalone(s)).unwrap();
+    assert!(!p.inferred.iter().any(|i| i == note), "no auth, nothing is signed: {:?}", p.inferred);
+}
