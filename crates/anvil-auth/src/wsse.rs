@@ -284,11 +284,8 @@ mod tests {
 
     #[test]
     fn inserts_into_envelopes_within_the_limits() {
-        let envelopes = [
-            envelope(16, "<m:Ping>1</m:Ping>"),
-            envelope(2_000, &wide_elements(20, 200)),
-            envelope(16, &nested_namespaces(1_000)),
-        ];
+        let envelopes =
+            [envelope(16, "<m:Ping>1</m:Ping>"), envelope(2_000, &wide_elements(20, 200)), envelope(16, &nested_namespaces(1_000))];
         for env in &envelopes {
             let out = String::from_utf8(insert(env).unwrap()).unwrap();
             assert!(out.contains("<soap:Header><wsse:Security"), "{}", &out[..200]);
