@@ -656,7 +656,7 @@ fn early002(env: &Env) -> Fut<'_> {
         let (window, detail) = round_window(env, &r, "PUT");
         c.add(
             CheckKind::GroundTruth,
-            "the gateway saw the 0-RTT PUT while its handshake was pending (it answered 425 or logged its refusal)",
+            "the gateway saw the 0-RTT PUT while its handshake was pending (it answered 425, logged its refusal, or forwarded it with Early-Data: 1)",
             window == GatewayWindow::Pending,
             detail,
         );
