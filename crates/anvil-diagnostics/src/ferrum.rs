@@ -376,8 +376,16 @@ mod tests {
     use super::*;
     use crate::facts::body_facts;
 
-    const TOKENS: [&str; 7] =
-        ["connection_failure", "backend_timeout", "backend_error", "circuit_breaker_open", "overload", "config_stale", "concurrency_limit"];
+    const TOKENS: [&str; 8] = [
+        "connection_failure",
+        "backend_timeout",
+        "backend_error",
+        "circuit_breaker_open",
+        "overload",
+        "config_stale",
+        "concurrency_limit",
+        "request_timeout",
+    ];
 
     #[test]
     fn every_embedded_catalog_loads_under_its_own_id_with_all_public_tokens() {
@@ -388,7 +396,9 @@ mod tests {
             assert_eq!(c.compatibility_id, id);
             assert_eq!(format!("ferrum-edge-{}", c.release_tag.trim_start_matches('v')), id, "release tag matches the id");
             assert_eq!(c.source_sha.len(), 40, "{id}: full source sha");
-            for t in TOKENS {
+            let expected_tokens: Vec<&str> =
+                TOKENS.iter().copied().filter(|token| id == "ferrum-edge-0.9.8" || *token != "request_timeout").collect();
+            for t in expected_tokens {
                 assert!(c.is_known_token(t), "{id}: missing token {t}");
             }
             assert!(c.outcomes.len() > 50);
@@ -417,7 +427,8 @@ mod tests {
         }
         assert!(catalog_for(" ferrum-edge-0.9.5 ").is_some(), "surrounding whitespace is not a different release");
         let shared: Vec<&str> = shared_tokens().iter().map(String::as_str).collect();
-        assert_eq!(shared, TOKENS, "the coarse vocabulary is identical in every audited release");
+        let shared_tokens: Vec<&str> = TOKENS.iter().copied().filter(|token| *token != "request_timeout").collect();
+        assert_eq!(shared, shared_tokens, "only tokens shared with 0.9.5 and 0.9.7 are release-independent");
     }
 
     #[test]

@@ -349,10 +349,12 @@ version = "0.1.0"
 dependencies = [
  "anvil-domain",
  "chrono",
+ "jsonschema",
  "regex",
  "roxmltree",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "url",
 ]

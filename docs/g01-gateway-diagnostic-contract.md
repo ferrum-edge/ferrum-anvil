@@ -1,10 +1,10 @@
-# G01 — Proposed gateway diagnostic contract (v1)
+# G01 — Gateway diagnostic contract (v1)
 
 | | |
 |---|---|
-| **Status** | Proposal (new work in Ferrum Edge). No released gateway implements it, so Anvil keeps "authorized diagnostic detail" explicitly unavailable. |
+| **Status** | Implemented on Ferrum Edge `main`; not in any release (v0.9.8 lacks it); not adopted by Anvil. |
 | **Owner** | Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer. |
-| **Tracking** | ferrum-edge/ferrum-edge#5767 (this proposal), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
+| **Tracking** | ferrum-edge/ferrum-edge#5767, ferrum-edge/ferrum-edge#5845 (implementation), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
 | **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8), their statuses and bodies stay unchanged. |
 
 ## Problem
@@ -26,7 +26,29 @@ Anvil therefore caps gateway findings at *likely* and lists the alternatives
 Precise, confirmed attribution needs evidence that is **authored by the
 gateway, authenticated, and scoped**.
 
-## Design
+## Current Ferrum Edge contract
+
+Ferrum Edge `main` is normative for this contract. See Edge's
+[`docs/error_classification.md`](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/error_classification.md#gateway-diagnostic-references)
+and [`schemas/diagnostic-ref/v1`](https://github.com/ferrum-edge/ferrum-contracts/tree/main/schemas/diagnostic-ref/v1).
+This implementation is unreleased and Anvil has not adopted it. Compared with
+the original proposal below:
+
+- References use `fd1_<32 lowercase hex>` or `fd2_<8 lowercase hex>_<32 lowercase hex>`,
+  not base64url.
+- Lookup bodies use `schema_version: "ferrum.diagnostic_ref.v1"`, not
+  `"version": 1`.
+- Dispatch values are `not_dispatched`, `pre_wire_failure`,
+  `ambiguous_failure`, or `backend_response`.
+- Authentication requires an admin JWT with the `diagnostics:read` scope and
+  an `ns` claim. Missing scope or namespace returns 403; other lookup failures
+  return an indistinguishable 404.
+
+## Original proposal (historical)
+
+The following design and Anvil integration outline predate the implemented
+Edge contract above. They are retained as historical context and are not
+normative.
 
 ### 1. Public response: an opaque reference only
 
@@ -136,8 +158,9 @@ Already modelled in Anvil:
   least-privilege diagnostic credential, never an admin token.
 - Evidence source `gateway_detail` exists for authenticated gateway detail.
 
-Planned once a gateway ships the contract (not implemented; no fetch exists
-today):
+The Edge implementation provides the reference header and authenticated
+diagnostic lookup. Anvil currently models the access configuration and
+evidence source, but does not fetch diagnostic details yet:
 
 - When a response carries a ref **and** the destination matches a gateway
   profile with detail access, the user can ask Anvil to fetch the detail.
@@ -155,13 +178,14 @@ today):
 
 ## Rollout
 
-1. Gateway PR: header plus ring plus endpoint behind the default-off flag,
-   the tests above, and a docs page.
-2. Publish `outcomes.json` for that release so client catalogs stay in sync.
-   Anvil CI fails on catalog drift.
-3. Anvil ships a compatibility profile for the release (for example
-   `ferrum-edge-0.9.8`) and enables the detail fetch only for gateways that
-   advertise `diagnostics/v1` via `GET /diagnostics/v1/capabilities`.
+1. Edge implements and tests the header plus authenticated lookup (complete
+   on Edge `main`; see the tracking issues above).
+2. Publish the matching Edge release and contract vocabulary so compatibility
+   catalogs stay in sync. Anvil CI fails on drift from its pinned contract.
+3. Anvil can add detail fetching when a released Edge version exposes the
+   capability; it should only fetch for destinations with configured,
+   authenticated detail access.
 
-Until then, Anvil's answers remain honest about uncertainty. Stating "likely,
-with these alternatives" is the correct result, not a gap to hide.
+Until Anvil implements diagnostic-detail fetching, its answers remain honest
+about uncertainty. Stating "likely, with these alternatives" is the correct
+result, not a gap to hide.

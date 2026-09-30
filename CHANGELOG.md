@@ -27,6 +27,9 @@
   `spec_revision_export`) or reimports it as the import's new version after
   a preview. The response panel shows a **Contract** tab for a send of a
   request that belongs to an OpenAPI import.
+- Diagnostics: vendor Ferrum contracts at `contracts-edge-0.9.8` and verify
+  their SHA-256 pins in the offline CI suite. See
+  [ferrum-contracts.md](docs/ferrum-contracts.md) for the pin and update steps.
 - API standards: check OpenAPI descriptions against a team's own rules.
   A ruleset (YAML or JSON, `anvil_ruleset: 1`) targets version-neutral
   objects (operations, parameters, responses, media types, schemas,
@@ -126,6 +129,13 @@
 
 ### Changed
 
+- Docs: refresh the completion report, architecture and load docs for the
+  Ferrum Edge v0.9.8 default pin and its 540-outcome catalog, mark G01
+  implemented on Edge main (not in a release), correct the load limitations
+  (native client-streaming and bidirectional gRPC are supported; only their
+  gRPC-Web forms are refused), and record the plan to adopt the gateway
+  diagnostic reference. See
+  [diagnostics.md](docs/diagnostics.md#adopting-the-gateway-diagnostic-reference-g01).
 - Load testing: JSON dataset cells keep their source text, including number
   spelling such as `1.50` or `1e2`, nested `\u` escapes, and nested duplicate
   keys.
