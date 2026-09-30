@@ -116,7 +116,10 @@ impl App {
                     // a pure disable or removal cannot make it worse. A set
                     // that loads may not be broken by one.
                     let current_set = ApiStandards { include_recommended, rulesets: current.clone() };
-                    if !(only_disables_or_removals(&current, &next.rulesets) && layered(&current_set).is_err()) {
+                    if !(next.include_recommended == include_recommended
+                        && only_disables_or_removals(&current, &next.rulesets)
+                        && layered(&current_set).is_err())
+                    {
                         return Err(e);
                     }
                 }

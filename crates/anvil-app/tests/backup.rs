@@ -865,6 +865,18 @@ fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_doe
 }
 
 #[test]
+fn restore_preserves_a_backup_with_recommended_rules_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path(), "source");
+    source.set_api_standards_recommended(false).unwrap();
+    let backup = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let target = new_app(root.path(), "target");
+    target.restore(&backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(!target.api_standards().unwrap().include_recommended);
+}
+
+#[test]
 fn replace_restore_checks_matching_rulesets_at_their_stored_position() {
     let root = tempfile::tempdir().unwrap();
     let source = new_app(root.path(), "source");
@@ -880,8 +892,6 @@ rules:
     then: { field: summary, function: truthy }
 "#;
     let team = source.add_api_ruleset("team.yaml", team_text.as_bytes()).unwrap();
-    let overlay_text = "anvil_ruleset: 1\nname: Overlay\nrules:\n  team-summary: off\n";
-    let overlay = source.add_api_ruleset("overlay.yaml", overlay_text.as_bytes()).unwrap();
     let unchanged_backup = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
 
     let mut changed = team.clone();
@@ -893,6 +903,8 @@ rules:
     let target = new_app(root.path(), "target");
     target.create_workspace("Local workspace").unwrap();
     target.store.put(kind::API_RULESET, &team.id, None, None, 7.0, &team).unwrap();
+    let overlay_text = "anvil_ruleset: 1\nname: Overlay\nrules:\n  team-summary: off\n";
+    let overlay = target.add_api_ruleset("overlay.yaml", overlay_text.as_bytes()).unwrap();
     target.store.put(kind::API_RULESET, &overlay.id, None, None, 9.0, &overlay).unwrap();
     let preview = target.restore_preview(&changed_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
     assert!(preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
@@ -902,7 +914,8 @@ rules:
     let unchanged_target = new_app(root.path(), "unchanged");
     unchanged_target.create_workspace("Local workspace").unwrap();
     unchanged_target.store.put(kind::API_RULESET, &team.id, None, None, 7.0, &team).unwrap();
-    unchanged_target.store.put(kind::API_RULESET, &overlay.id, None, None, 9.0, &overlay).unwrap();
+    let unchanged_overlay = unchanged_target.add_api_ruleset("overlay.yaml", overlay_text.as_bytes()).unwrap();
+    unchanged_target.store.put(kind::API_RULESET, &unchanged_overlay.id, None, None, 9.0, &unchanged_overlay).unwrap();
     let preview = unchanged_target.restore_preview(&unchanged_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
     assert!(!preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
     let report = unchanged_target.restore(&unchanged_backup, Some(PASS), ConflictPolicy::Replace).unwrap();

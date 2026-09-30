@@ -210,8 +210,10 @@ profiles, spec-import records or load reports, and its bundle kind is
   import previews show the number carried. Imported bundle rulesets start
   disabled, so they cannot change linting until enabled in API standards.
   Replace keeps a matching local ruleset's enabled flag and position; only
-  new bundle rulesets arrive disabled. Full backups always carry rulesets and
-  restore their enabled state and order.
+  new bundle rulesets arrive disabled. Full backups always carry rulesets.
+  When Replace restores the backup's app settings, it restores ruleset order
+  and enabled state too; when local settings are kept, matching rulesets keep
+  their local positions and new rulesets follow them.
 - Each workspace's load plans, except one that names a request, dataset or
   environment deleted since (an import would refuse it; the export lists it
   among its excluded items).
@@ -578,9 +580,14 @@ different owner; Merge keeps those.
 - On profile open, the app-level settings migration moves legacy API
   standards rulesets into `api_ruleset` object records in one transaction.
   Each legacy id is written only when no ruleset record with that id already
-  exists. Rulesets skipped because an individual, count or combined-size
-  limit has been reached remain in the legacy field, so no ruleset is lost
-  and a later profile open retries the migration.
+  exists. All rulesets that fit the per-record limit are moved, even when
+  this takes the profile over the count or combined-size limits. A legacy
+  ruleset above the per-record limit is dropped with a warning. The legacy
+  field is then cleared and the migration is not retried.
+- Legacy migration can leave a profile over the ruleset count or combined-size
+  limit when it adds rulesets to existing records. Such a profile remains
+  usable for disabling and removing rulesets, but it must be trimmed below
+  the limits before its full backup can be restored elsewhere.
 
 ## History retention
 

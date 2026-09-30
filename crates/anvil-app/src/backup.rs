@@ -1078,7 +1078,9 @@ fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<V
         &anvil_domain::settings::ApiStandards { include_recommended: include_recommended(d, local, policy), rulesets: combined.clone() },
         &local.rulesets,
     ) {
-        notes.push(format!("Restored API standards exceed profile limits: {e}; the restore will be refused"));
+        notes.push(format!(
+            "Restored API standards exceed profile limits: {e}; trim the profile below the ruleset limits before its full backup can be restored elsewhere; the restore will be refused"
+        ));
     }
     if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(d, local, policy)) {
         notes.push(format!("Restored API standards would not load: {e}"));

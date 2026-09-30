@@ -59,7 +59,10 @@ fn rulesets_layer_in_order_and_lint_imported_specs() {
     // removed.
     app.remove_api_ruleset(&overlay.id).unwrap();
     let err = app.set_api_standards_recommended(false).unwrap_err();
-    assert!(err.to_string().contains("info-contact"), "{err}");
+    assert!(err.to_string().contains("info-contact"), "Team overrides a recommended rule: {err}");
+    let view = app.standards_view().unwrap();
+    assert!(view.rules.iter().any(|r| r.id == "team-summary" && r.ruleset == "Team"));
+    assert_eq!(view.standards.rulesets.len(), 1);
 
     // Replacing keeps the id, position and enabled state.
     let v2 = TEAM.replace("version: '3'", "version: '4'");
@@ -160,42 +163,46 @@ fn old_settings_rulesets_migrate_once_on_profile_open() {
 }
 
 #[test]
-fn rulesets_skipped_by_migration_limits_remain_for_a_later_open() {
+fn migration_keeps_all_legacy_rulesets_over_limits_and_the_profile_can_be_trimmed() {
     let dir = tempfile::tempdir().unwrap();
     let app = new_app(dir.path());
-    let local = app.add_api_ruleset("local.yaml", TEAM.as_bytes()).unwrap();
-    for index in 1..anvil_domain::settings::MAX_STORED_RULESETS {
-        let mut copy = local.clone();
-        copy.id = anvil_domain::Id::new();
-        copy.name = format!("Local {index}");
-        app.store.put(kind::API_RULESET, &copy.id, None, None, index as f64, &copy).unwrap();
+    let mut legacy = Vec::new();
+    for index in 0..=anvil_domain::settings::MAX_STORED_RULESETS {
+        legacy.push(anvil_domain::settings::StoredRuleset {
+            id: anvil_domain::Id::new(),
+            name: format!("Legacy {index}"),
+            file_name: format!("legacy-{index}.yaml"),
+            text: TEAM.into(),
+            sha256: hex::encode(sha2::Sha256::digest(TEAM.as_bytes())),
+            enabled: true,
+            version: None,
+            added_at: chrono::Utc::now(),
+        });
     }
-    let mut legacy = local.clone();
-    legacy.id = anvil_domain::Id::new();
-    legacy.name = "Legacy".into();
     let mut settings = app.settings().unwrap();
-    settings.api_standards.legacy_rulesets.push(legacy.clone());
+    settings.api_standards.legacy_rulesets = legacy.clone();
     app.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();
     let path = app.dir.clone();
-    let freed_id = local.id;
     drop(app);
 
     let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
-    let opened = App::open(path.clone(), header, key).unwrap();
-    assert_eq!(opened.api_standards().unwrap().rulesets.len(), anvil_domain::settings::MAX_STORED_RULESETS);
-    assert_eq!(opened.settings().unwrap().api_standards.legacy_rulesets, [legacy.clone()]);
-    drop(opened);
+    let opened = App::open(path, header, key).unwrap();
+    let records = opened.api_standards().unwrap().rulesets;
+    assert_eq!(records, legacy);
+    assert!(opened.settings().unwrap().api_standards.legacy_rulesets.is_empty());
+    assert!(opened.add_api_ruleset("extra.yaml", TEAM.as_bytes()).is_err());
 
-    let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
-    let opened = App::open(path.clone(), header, key).unwrap();
-    opened.store.delete(kind::API_RULESET, &freed_id).unwrap();
-    drop(opened);
-
-    let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
-    let retried = App::open(path, header, key).unwrap();
-    assert_eq!(retried.api_standards().unwrap().rulesets.len(), anvil_domain::settings::MAX_STORED_RULESETS);
-    assert!(retried.settings().unwrap().api_standards.legacy_rulesets.is_empty());
-    assert!(retried.api_standards().unwrap().rulesets.iter().any(|ruleset| ruleset.id == legacy.id));
+    opened.set_api_ruleset_enabled(&records[0].id, false).unwrap();
+    opened.remove_api_ruleset(&records[1].id).unwrap();
+    let mut settings = opened.settings().unwrap();
+    settings.autosave = true;
+    opened.save_settings(&settings).unwrap();
+    let saved = opened.api_standards().unwrap().rulesets;
+    assert_eq!(saved.len(), anvil_domain::settings::MAX_STORED_RULESETS);
+    assert!(!saved.iter().find(|ruleset| ruleset.id == records[0].id).unwrap().enabled);
+    assert!(!saved.iter().any(|ruleset| ruleset.id == records[1].id));
+    assert!(saved.iter().all(|ruleset| records.iter().any(|original| original.id == ruleset.id)));
+    assert!(opened.settings().unwrap().autosave);
 }
 
 #[test]
@@ -226,13 +233,14 @@ fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
     let source = new_app(root.path());
     let ws = source.create_workspace("Standards workspace").unwrap();
     let ruleset = source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    source.add_api_ruleset("overlay.yaml", OVERLAY.as_bytes()).unwrap();
     let (bundle, _) = source
         .export_with_standards(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false, true)
         .unwrap();
 
     let target = new_app(root.path());
     let preview = target.import_preview(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
-    assert_eq!(preview.plan.to_create, 2, "workspace and ruleset are separate importable objects");
+    assert_eq!(preview.plan.to_create, 3, "workspace and rulesets are separate importable objects");
     let mut changed = ruleset.clone();
     changed.name = "Local version".into();
     target.store.put(kind::API_RULESET, &changed.id, None, None, 0.0, &changed).unwrap();
@@ -242,10 +250,15 @@ fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
     assert_eq!(target.api_standards().unwrap().rulesets[0].name, "Local version");
 
     let round_trip = new_app(root.path());
+    round_trip.set_api_standards_recommended(false).unwrap();
     round_trip.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    assert!(!round_trip.api_standards().unwrap().include_recommended, "import keeps the local recommended-rules setting");
     let mut imported = ruleset;
     imported.enabled = false;
-    assert_eq!(round_trip.api_standards().unwrap().rulesets, [imported]);
+    let carried = round_trip.api_standards().unwrap();
+    assert_eq!(carried.rulesets[0], imported);
+    assert_eq!(carried.rulesets[1].name, "Overlay");
+    assert!(!carried.rulesets[1].enabled);
 }
 
 #[test]
@@ -254,19 +267,21 @@ fn replace_import_keeps_enabled_state_and_sort_order_for_matching_ruleset_id() {
     let source = new_app(root.path());
     let ws = source.create_workspace("Replace standards workspace").unwrap();
     let ruleset = source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    source.add_api_ruleset("overlay.yaml", OVERLAY.as_bytes()).unwrap();
     let (bundle, _) = source
         .export_with_standards(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false, true)
         .unwrap();
 
     let target = new_app(root.path());
     let mut local = ruleset.clone();
-    local.enabled = false;
+    local.enabled = true;
     target.store.put(kind::API_RULESET, &local.id, None, None, 7.0, &local).unwrap();
     target.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
 
     let imported = target.api_standards().unwrap().rulesets;
-    assert_eq!(imported.len(), 1);
-    assert!(!imported[0].enabled, "Replace keeps the local enabled flag");
+    assert_eq!(imported.len(), 2);
+    assert!(imported[0].enabled, "Replace keeps the matching local enabled flag");
+    assert!(!imported[1].enabled, "new rulesets arrive disabled in Replace imports");
     assert_eq!(imported[0].text, ruleset.text);
     let meta = target.store.object_meta(kind::API_RULESET).unwrap();
     assert_eq!(meta.iter().find(|row| row.id == ruleset.id.to_string()).unwrap().sort_key, 7.0);
@@ -430,6 +445,7 @@ fn duplicate_import_skips_matching_ruleset_hashes_and_combined_limits_refuse_exc
     let backup = source.export_backup_with("backup passphrase", anvil_storage::KdfParams::testing()).unwrap().0;
     let preview = full_target.restore_preview(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
     assert!(preview.warnings.iter().any(|warning| warning.contains("the restore will be refused")), "{:?}", preview.warnings);
+    assert!(preview.warnings.iter().any(|warning| warning.contains("trim the profile below the ruleset limits")), "{:?}", preview.warnings);
     let err = full_target.restore(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap_err();
     assert!(err.to_string().contains("32 rulesets"));
 }
