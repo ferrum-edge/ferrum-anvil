@@ -252,8 +252,7 @@ impl<'de> serde::de::Visitor<'de> for JsonDatasetVisitor<'_> {
                     return Err(serde::de::Error::custom(format!("dataset has more than {MAX_COLUMNS} distinct keys")));
                 }
                 check_column_name(key, self.columns.len()).map_err(|e| A::Error::custom(load_error_message(e)))?;
-                check_cells(row_index, self.columns.len() + 1, self.limits)
-                    .map_err(|e| A::Error::custom(load_error_message(e)))?;
+                check_cells(row_index, self.columns.len() + 1, self.limits).map_err(|e| A::Error::custom(load_error_message(e)))?;
                 let index = self.columns.len();
                 self.columns.push(key.clone());
                 self.column_indexes.insert(key.clone(), index);
@@ -261,8 +260,7 @@ impl<'de> serde::de::Visitor<'de> for JsonDatasetVisitor<'_> {
                     previous.push(None);
                 }
             }
-            check_cells(row_index, self.columns.len(), self.limits)
-                .map_err(|e| A::Error::custom(load_error_message(e)))?;
+            check_cells(row_index, self.columns.len(), self.limits).map_err(|e| A::Error::custom(load_error_message(e)))?;
             let mut values = vec![None; self.columns.len()];
             for (key, value) in row {
                 let index = *self.column_indexes.get(&key).expect("row key was added as a column");
