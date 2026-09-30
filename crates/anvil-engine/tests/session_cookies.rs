@@ -240,20 +240,13 @@ async fn session_cookie_names_with_secrets_are_refused_and_ordinary_cookies_are_
     let e = Engine::new();
 
     let secret = "reflected-cookie-secret-4k7w";
-    let mut c = sse(&f.url(
-        "/sse?count=1&interval=1&set_cookie=reflected%252dcookie-secret-4k7w%3Dordinary&secret={{reflected}}",
-    ));
+    let mut c = sse(&f.url("/sse?count=1&interval=1&set_cookie=reflected%252dcookie-secret-4k7w%3Dordinary&secret={{reflected}}"));
     c.var_layers = vec![VarLayer {
         label: "environment:test".into(),
         vars: vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true }],
     }];
     let o = ok(&e, &c).await;
-    assert!(o
-        .record
-        .prepared
-        .inferred
-        .iter()
-        .any(|n| n == "a response cookie was not stored because its name contains a request secret"));
+    assert!(o.record.prepared.inferred.iter().any(|n| n == "a response cookie was not stored because its name contains a request secret"));
     let set_cookie = o.record.response.as_ref().unwrap().header_values("set-cookie");
     assert_eq!(set_cookie[0], format!("{REDACTED}={REDACTED}; Path=/; HttpOnly"));
     ok(&e, &get(&f.url("/echo"))).await;

@@ -275,11 +275,7 @@ impl Redactor {
                     .map(|c| match c.split_once('=') {
                         Some((k, _)) => {
                             let name = k.trim();
-                            if self.hides_secret(name) {
-                                format!("{REDACTED}={REDACTED}")
-                            } else {
-                                format!("{name}={REDACTED}")
-                            }
+                            if self.hides_secret(name) { format!("{REDACTED}={REDACTED}") } else { format!("{name}={REDACTED}") }
                         }
                         None => REDACTED.to_string(),
                     })
@@ -769,14 +765,8 @@ mod tests {
             r.header("Set-Cookie", "sid=x; Domain=encoded%252dcookie-secret-7q2m.example; Secure"),
             format!("sid={REDACTED}; Domain={REDACTED}; Secure")
         );
-        assert_eq!(
-            r.header("Set-Cookie", "encoded%2dcookie-secret-7q2m=x; Path=/"),
-            format!("{REDACTED}={REDACTED}; Path=/")
-        );
-        assert_eq!(
-            r.header("Cookie", "ordinary=x; encoded%2dcookie-secret-7q2m=y"),
-            format!("ordinary={REDACTED}; {REDACTED}={REDACTED}")
-        );
+        assert_eq!(r.header("Set-Cookie", "encoded%2dcookie-secret-7q2m=x; Path=/"), format!("{REDACTED}={REDACTED}; Path=/"));
+        assert_eq!(r.header("Cookie", "ordinary=x; encoded%2dcookie-secret-7q2m=y"), format!("ordinary={REDACTED}; {REDACTED}={REDACTED}"));
     }
 
     #[test]

@@ -150,14 +150,10 @@ impl CookieJars {
         let jar = jars.by_isolation.entry(isolation.to_string()).or_default();
         let mut skipped_secret_name = false;
         for v in set_cookie {
-            let secret_name = v
-                .split(';')
-                .next()
-                .and_then(|pair| pair.split_once('='))
-                .is_some_and(|(name, _)| {
-                    let name = name.trim();
-                    redactor.text(name) != name || redactor.hides_secret(name)
-                });
+            let secret_name = v.split(';').next().and_then(|pair| pair.split_once('=')).is_some_and(|(name, _)| {
+                let name = name.trim();
+                redactor.text(name) != name || redactor.hides_secret(name)
+            });
             if secret_name {
                 skipped_secret_name = true;
                 continue;
@@ -610,13 +606,7 @@ mod tests {
     async fn a_cookie_scoped_to_a_public_suffix_is_not_stored() {
         let e = Engine::new();
         let store = |url: &str, values: &[&str]| {
-            e.store_cookies(
-                e.execution_epoch("ws"),
-                "ws",
-                &target(url),
-                &with_set_cookie(values),
-                &redact::Redactor::default(),
-            )
+            e.store_cookies(e.execution_epoch("ws"), "ws", &target(url), &with_set_cookie(values), &redact::Redactor::default())
         };
         let header = |url: &str| e.cookie_header("ws", &target(url));
 
