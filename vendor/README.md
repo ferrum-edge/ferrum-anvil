@@ -4,31 +4,66 @@
 
 `h3` 0.0.8 exactly as published on crates.io (checksum
 `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be`, built from
-hyperium/h3 `22c1aa3f44d1463cd7644c8f654fffc9a6da305c`), with one change:
-`patches/h3-0.0.8-rfc9220-websocket.patch`.
+hyperium/h3 `22c1aa3f44d1463cd7644c8f654fffc9a6da305c`), with two changes:
+`patches/h3-0.0.8-rfc9220-websocket.patch` and
+`patches/h3-0.0.8-frame-limits.patch`.
 
-The patch is the upstream commit
+The first patch is the upstream commit
 [`154ff8d`](https://github.com/hyperium/h3/commit/154ff8d4eb939cddf8136e45cfb757d7f9e55866)
 ("Add WebSocket :protocol extension per RFC 9220", hyperium/h3#236, merged
 2026-01-04), backported to 0.0.8. It adds `Protocol::WEBSOCKET`, the
 `:protocol = websocket` value of an RFC 9220 Extended CONNECT. The upstream
 commit also touches a `CONNECT_IP` variant that 0.0.8 does not have; only the
-WebSocket lines are applied. No other file differs from the published crate.
+WebSocket lines are applied.
+
+The second patch bounds what a peer can make h3 buffer before a frame is
+decoded. h3 0.0.8 keeps reading a frame other than DATA until all of the
+payload its header declares has arrived, and only then decodes it, so a
+HEADERS frame that declares gigabytes is buffered as it arrives, whatever
+`max_field_section_size` says (that limit applies to the decoded section,
+after the whole frame is in memory). With the patch the frame decoder
+checks the declared length as soon as the frame header is in:
+
+* A request stream accepts frames other than DATA up to the connection's
+  `max_field_section_size` (client and server alike; the library default is
+  still unlimited). A larger HEADERS frame fails that stream with
+  `StreamError::HeaderTooBig`, as a decoded section over the limit does, and
+  the client stops the stream with `H3_REQUEST_CANCELLED`; any other known
+  frame over it is a connection error (`H3_EXCESSIVE_LOAD`).
+* Other streams with frames (the control and push streams) accept at most
+  64 KiB (`frame::DEFAULT_MAX_FRAME_PAYLOAD`); more is a connection error
+  (`H3_EXCESSIVE_LOAD`).
+* An unknown frame type over the bound is skipped as it arrives, never
+  buffered (RFC 9114 §7.2.8 says to ignore it; a truncated one at the end of
+  the stream is still `H3_FRAME_ERROR`).
+
+It adds `FrameStream::with_max_payload` and the `FrameStreamError::TooLarge`
+variant. It is Anvil's own change, not a backport; check upstream for an
+equivalent bound before bumping `h3`. Anvil sets the limit from
+`max_response_header_bytes` on every HTTP/3 connection it opens. The patch
+is tested as Anvil code, against a raw HTTP/3 origin
+(`crates/anvil-fixtures/src/h3raw.rs`,
+`crates/anvil-transport/tests/h3_response_limits.rs`). No other file differs
+from the published crate.
 
 The workspace uses it through `[patch.crates-io]` in `Cargo.toml` (so
 `h3-quinn` 0.0.10 links against it too), and `vendor/` is excluded from the
 workspace so the crate is not linted or tested as Anvil code. The license is
 upstream's MIT license (`h3-0.0.8-rfc9220/LICENSE`).
 
-**Retire it** when an `h3` release after 0.0.8 includes `Protocol::WEBSOCKET`:
-bump `h3` (and `h3-quinn`) in `Cargo.toml`, delete the `[patch.crates-io]`
-entry, this directory and the patch, and regenerate `THIRD_PARTY_LICENSES.md`.
+**Retire it** when an `h3` release after 0.0.8 includes `Protocol::WEBSOCKET`
+and bounds a frame's declared length before buffering it: bump `h3` (and
+`h3-quinn`) in `Cargo.toml`, delete the `[patch.crates-io]` entry, this
+directory and the patches, and regenerate `THIRD_PARTY_LICENSES.md`. Until a
+release bounds frames, re-vendor it with the frame-limit patch instead.
 
 To check the vendored copy against crates.io:
 
 ```bash
 cargo download h3@0.0.8   # or unpack ~/.cargo/registry/src/*/h3-0.0.8
-diff -ru <unpacked h3-0.0.8> vendor/h3-0.0.8-rfc9220   # only src/ext.rs differs
+patch -d <unpacked h3-0.0.8> -p1 < vendor/patches/h3-0.0.8-rfc9220-websocket.patch
+patch -d <unpacked h3-0.0.8> -p1 < vendor/patches/h3-0.0.8-frame-limits.patch
+diff -ru <unpacked h3-0.0.8> vendor/h3-0.0.8-rfc9220   # only Cargo.lock (and .cargo-ok) differ
 ```
 
 ## `h3-quinn-0.0.10-stop-sending/`

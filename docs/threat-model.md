@@ -114,6 +114,18 @@ against it).
   none of the tickets it receives afterwards. Outside the early-data opt-in
   no ticket and no TLS 1.2 session is kept at all (such a connection could
   never resume one): only the key-exchange group each server chose.
+- **Hostile HTTP/3 responses:** the server (or MASQUE proxy) chooses frame
+  sizes and when the stream ends. Every HTTP/3 connection advertises
+  `max_response_header_bytes` as `SETTINGS_MAX_FIELD_SECTION_SIZE`; a HEADERS
+  frame (headers or trailers) that declares more is refused before it is
+  buffered, and a decoded field section over it before any of it is kept
+  (`response_headers_too_large`; only that stream is stopped). Other frames
+  with a payload are bounded too (64 KiB on the control stream), and an
+  unknown frame over the bound is skipped unbuffered. The total deadline,
+  the body idle deadline and cancellation end a response in every phase,
+  including a body sent slowly past `total_ms` and trailers after which the
+  stream never ends; Anvil then stops the stream rather than wait for the
+  peer.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
