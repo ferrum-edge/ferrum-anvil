@@ -210,6 +210,35 @@ pub enum ImportError {
     UnsafeXml { message: String },
 }
 
+/// Parse JSON or YAML text of any shape under the import bounds (size, node
+/// budget, nesting depth). Performs no I/O.
+pub fn parse_document(bytes: &[u8], opts: &ImportOptions) -> Result<(serde_json::Value, Syntax), ImportError> {
+    if bytes.len() > opts.max_bytes {
+        return Err(ImportError::TooLarge { size: bytes.len(), max: opts.max_bytes });
+    }
+    let text = detect::decode_text(bytes).map_err(|message| ImportError::Unrecognized { message })?;
+    structured::parse(text, opts.max_nodes)
+}
+
+/// Parse an OpenAPI 3.0/3.1/3.2 or Swagger 2.0 document without importing
+/// it, under the same bounds as [`import`] (size, node budget, nesting
+/// depth). For tools that inspect the description itself (linting,
+/// contract checks). Any other format, and an unsupported OpenAPI version,
+/// is refused. Performs no I/O.
+pub fn parse_openapi(bytes: &[u8], opts: &ImportOptions) -> Result<(Detected, serde_json::Value), ImportError> {
+    let (detected, parsed) = detect::detect_parsed(bytes, opts)?;
+    match (parsed, detected.dialect) {
+        (Parsed::Structured(v), Dialect::Swagger20 | Dialect::OpenApi30 | Dialect::OpenApi31 | Dialect::OpenApi32) => Ok((detected, v)),
+        (_, Dialect::OpenApiUnsupported) => Err(ImportError::UnsupportedDialect {
+            dialect: detected.dialect,
+            message: detected.note.clone().unwrap_or_else(|| "unsupported OpenAPI version".into()),
+        }),
+        (_, dialect) => Err(ImportError::Unrecognized {
+            message: format!("not an OpenAPI or Swagger document (detected {dialect}); supported: 2.0, 3.0.x, 3.1.x, 3.2.x"),
+        }),
+    }
+}
+
 /// Import `bytes` (format auto-detected). Performs no I/O.
 pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, ImportError> {
     if bytes.len() > opts.max_bytes {

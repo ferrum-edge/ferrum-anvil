@@ -27,7 +27,7 @@ pub enum SpecInput {
 }
 
 impl SpecInput {
-    fn load(&self, grants: &FileGrants) -> R<(Vec<u8>, String)> {
+    pub(crate) fn load(&self, grants: &FileGrants) -> R<(Vec<u8>, String)> {
         match self {
             SpecInput::File { grant } => {
                 let file = grants.read(grant, FilePurpose::SpecSource).map_err(|x| x.to_string())?;

@@ -660,6 +660,13 @@ fieldset.plain { border: 0; padding: 0; background: none; }
 .card-sub { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.bad { border-color: color-mix(in srgb, var(--bad) 32%, var(--border)); }
 .card.bad .card-value { color: var(--bad); }
+button.card { font: inherit; color: inherit; text-align: left; cursor: pointer; }
+button.card:hover { border-color: var(--border-strong); }
+.card.selected, button.card[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.wrap-anywhere { overflow-wrap: anywhere; }
+label.tree-row.check { gap: 8px; }
+.tree-row > input[type="checkbox"] { margin: 0; flex: none; }
+table.grid.rules td:first-child { width: 1%; }
 .page { display: flex; flex-direction: column; gap: 18px; max-width: 1180px; min-width: 0; }
 .page.narrow { max-width: 900px; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; }

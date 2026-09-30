@@ -200,6 +200,7 @@ dependencies = [
 name = "anvil-app"
 version = "0.1.0"
 dependencies = [
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -267,6 +268,7 @@ version = "0.1.0"
 dependencies = [
  "anvil-app",
  "anvil-auth",
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -289,11 +291,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvil-contract"
+version = "0.1.0"
+dependencies = [
+ "anvil-import",
+ "hex",
+ "jsonschema",
+ "proptest",
+ "regex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "anvil-desktop"
 version = "0.1.0"
 dependencies = [
  "anvil-app",
  "anvil-auth",
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
