@@ -125,19 +125,9 @@ impl App {
                 error: row_error,
             });
         }
-        let (sources, rules, disabled) = if error.is_some() {
-            (vec![], vec![], vec![])
-        } else {
-            (set.sources.clone(), set.list(), set.disabled.clone())
-        };
-        Ok(StandardsView {
-            include_recommended: standards.include_recommended,
-            sources,
-            rules,
-            disabled,
-            rulesets,
-            error,
-        })
+        let (sources, rules, disabled) =
+            if error.is_some() { (vec![], vec![], vec![]) } else { (set.sources.clone(), set.list(), set.disabled.clone()) };
+        Ok(StandardsView { include_recommended: standards.include_recommended, sources, rules, disabled, rulesets, error })
     }
 
     /// The source text for one ruleset, fetched only when the user opens it.

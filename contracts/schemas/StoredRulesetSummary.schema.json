@@ -62,6 +62,7 @@
       "format": "uuid"
     },
     "RulesetLoadStatus": {
+      "description": "How one stored ruleset participates in the current standards view.",
       "type": "string",
       "enum": [
         "loaded",
