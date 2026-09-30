@@ -47,8 +47,9 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
   *not* declared as a trusted Ferrum profile. In that pass no `ferrum.token*` or `ferrum.outcome*`
   finding may appear (`crates/anvil-lab/src/harness.rs`). A skip is never counted as a pass.
 - **Skips.** A scenario is skipped when it cannot run in this environment, or when the condition it
-  tests was not observed within its bounded attempts (`Checks::skip`, for example EARLY-002 in
-  [early.md](early.md)). The result names the reason; a failed check still fails the scenario.
+  tests was not observed within its bounded attempts (`Checks::skip`, for example EARLY-001 and
+  EARLY-002 in [early.md](early.md), whose reasons start `window not observed: `). The result names
+  the reason; a failed check still fails the scenario.
 
 ## Profiles
 

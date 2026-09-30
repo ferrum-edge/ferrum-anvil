@@ -104,6 +104,12 @@ impl Checks {
         }
     }
 
+    /// The result's status and, for a skip, its reason.
+    pub fn verdict(&self) -> (&'static str, Option<String>) {
+        let status = self.status();
+        (status, if status == "skipped" { self.skip_reason.clone() } else { None })
+    }
+
     pub fn add(&mut self, kind: CheckKind, name: impl Into<String>, passed: bool, detail: impl Into<String>) {
         self.items.push(Check { name: name.into(), kind, passed, detail: detail.into() });
     }
@@ -257,10 +263,10 @@ mod tests {
     fn a_skip_never_passes_and_never_hides_a_failure() {
         let mut c = Checks::new();
         c.add(CheckKind::Diagnosis, "ok", true, "");
-        assert_eq!(c.status(), "passed");
+        assert_eq!(c.verdict(), ("passed", None));
         c.skip("the window under test was not observed");
-        assert_eq!(c.status(), "skipped");
+        assert_eq!(c.verdict(), ("skipped", Some("the window under test was not observed".to_string())));
         c.add(CheckKind::GroundTruth, "violation", false, "");
-        assert_eq!(c.status(), "failed");
+        assert_eq!(c.verdict(), ("failed", None));
     }
 }

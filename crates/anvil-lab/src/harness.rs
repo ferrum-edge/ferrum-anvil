@@ -106,13 +106,12 @@ pub async fn run_defs<E: LabEnv>(
                 checks.absent_prefix(m, "ferrum.token");
                 checks.absent_prefix(m, "ferrum.outcome");
             }
-            let status = checks.status();
+            let (status, skip_reason) = checks.verdict();
             let id = if trusted { def.id.to_string() } else { format!("{}-untrusted", def.id) };
             eprintln!("{:22} {:7} {}", id, status, def.title);
             for c in checks.items.iter().filter(|c| !c.passed) {
                 eprintln!("    ✗ [{:?}] {} — {}", c.kind, c.name, c.detail);
             }
-            let skip_reason = if status == "skipped" { checks.skip_reason.clone() } else { None };
             if let Some(reason) = &skip_reason {
                 eprintln!("    — {reason}");
             }

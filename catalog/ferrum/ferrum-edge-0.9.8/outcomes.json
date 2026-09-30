@@ -4251,7 +4251,7 @@
       "remediation": "Caller/CDN: retry without early data.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "Anvil lab `early` (EARLY-002, EARLY-006) observes both paths with the same public signal. v0.9.8 (#5761): the HTTP/3 accept loop re-checks quinn's handshake-completion signal for every accepted stream, so a 1-RTT request that arrives with the client's Finished is no longer classified as early data (on v0.9.7 it could draw this 425). A 0-RTT request checked after the handshake completed is handled as 1-RTT (RFC 8470 section 6.4); EARLY-002 records that 200 as a missed window, not as this outcome."
+      "notes": "Anvil lab `early` (EARLY-002, EARLY-006) observes both paths with the same public signal. v0.9.8 (#5761): the HTTP/3 accept loop re-checks quinn's handshake-completion signal for every accepted stream, so a 1-RTT request that arrives with the client's Finished is no longer classified as early data (on v0.9.7 it could draw this 425). A 0-RTT request checked after the handshake completed is handled as 1-RTT (RFC 8470 section 6.4); EARLY-001 and EARLY-002 record such a round as a missed window, not as this outcome."
     },
     {
       "id": "gateway.routing.no_route",
