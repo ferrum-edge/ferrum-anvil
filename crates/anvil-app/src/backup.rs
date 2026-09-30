@@ -446,6 +446,8 @@ struct Local {
     records: HashMap<(String, String), Option<String>>,
     /// Stored objects and secrets with their owners, and stored workspaces.
     existing: Existing,
+    /// Spec import namespaces already assigned in this profile.
+    spec_sources: Vec<SpecSourceRecord>,
     /// The content hashes among the backup's uncarried attachments whose
     /// content is stored here.
     stored: HashSet<String>,
@@ -490,6 +492,7 @@ impl App {
     pub fn restore_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         let local = self.store.read_consistently(|r| local(r, &d))?;
+        check_id_namespaces(&d, &local, policy)?;
         let notes = restore_notes(&d, &local, policy)?;
         let plan = restore_plan(&d, &local, policy);
         Ok(report(plan, &manifest, &d, notes, None, port::file_sha256(bytes)))
@@ -788,6 +791,12 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     }
     for x in &d.spec_sources {
         owned("spec import", &x.file_name, &x.workspace_id)?;
+        if let Some(root_id) = x.root_folder_id {
+            let root = g.folders.iter().find(|folder| folder.meta.id == root_id);
+            if !root.is_some_and(|folder| folder.workspace_id == x.workspace_id && folder.import_root) {
+                return Err(invalid(format!("spec import '{}' has an invalid root folder", x.file_name)));
+            }
+        }
     }
     for x in &d.run_reports {
         owned("run report", &x.name, &x.workspace_id)?;
@@ -942,7 +951,13 @@ fn local(r: &StoreRead<'_>, d: &Decoded) -> anvil_storage::store::Result<Local> 
     let records = existing_records(r)?;
     let mut items = existing_items(r)?;
     items.extend(records.keys().cloned());
-    Ok(Local { items, records, existing: port::existing(r)?, stored: port::stored_among(r, &d.uncarried)? })
+    Ok(Local {
+        items,
+        records,
+        existing: port::existing(r)?,
+        spec_sources: r.list(kind::SPEC_SOURCE, None)?,
+        stored: port::stored_among(r, &d.uncarried)?,
+    })
 }
 
 /// Whether a restore keeps this profile's app settings although the backup
@@ -1035,10 +1050,28 @@ fn foreign_secrets(d: &Decoded, existing: &Existing) -> Vec<String> {
 /// Every check a restore makes before writing: its plan, and a warning for
 /// each item that names a stored file the backup does not include.
 fn checked_plan(d: &Decoded, local: &Local, policy: ConflictPolicy, approval: &ImportApproval) -> Result<(ImportPlan, Vec<String>)> {
+    check_id_namespaces(d, local, policy)?;
     let notes = restore_notes(d, local, policy)?;
     let plan = restore_plan(d, local, policy);
     refuse_unapproved(&plan, approval)?;
     Ok((plan, notes))
+}
+
+fn check_id_namespaces(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<()> {
+    let replaced_workspaces = if policy == ConflictPolicy::Replace { d.workspace_ids() } else { HashSet::new() };
+    for incoming in &d.spec_sources {
+        if local.spec_sources.iter().any(|stored| {
+            stored.source.id_namespace == incoming.source.id_namespace
+                && stored.workspace_id != incoming.workspace_id
+                && !replaced_workspaces.contains(&stored.workspace_id)
+        }) {
+            return Err(AppError::Invalid(format!(
+                "spec import '{}' reuses an id namespace already used in another workspace; nothing was restored",
+                incoming.file_name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a restore that writes into a workspace stored here that the user
@@ -1223,4 +1256,128 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::ProfileManager;
+    use crate::specs::SpecTarget;
+    use anvil_import::ImportOptions;
+
+    const SPEC: &str = r#"curl https://example.invalid/health"#;
+
+    #[test]
+    fn backup_spec_roots_must_be_owned_import_roots_in_the_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let pm = ProfileManager::new(root.path());
+        let (profile, dek, _) = pm.create_passphrase("test", "correct horse battery", KdfParams::testing()).unwrap();
+        let header = anvil_storage::vault::read_header(&profile.dir).unwrap();
+        let app = App::open(profile.dir, header, dek).unwrap();
+        let destination = app.create_workspace("Destination").unwrap();
+        let victim = app.create_workspace("Victim").unwrap();
+        let foreign = app.create_folder(&victim.meta.id, None, "Private").unwrap();
+        let imported = app
+            .spec_import(
+                SPEC.as_bytes(),
+                "source.txt",
+                &ImportOptions::default(),
+                SpecTarget::Workspace { workspace_id: destination.meta.id },
+            )
+            .unwrap();
+        let mut contents = app.backup_contents().unwrap();
+
+        decode(&contents).expect("a legitimate import root is included in its backup");
+        let source = contents.objects.iter_mut().find(|row| row.kind == kind::SPEC_SOURCE).unwrap();
+        source.value["root_folder_id"] = serde_json::to_value(foreign.meta.id).unwrap();
+        assert!(decode(&contents).is_err(), "a source cannot reference a folder outside its backup workspace");
+        assert_eq!(imported.workspace_id, destination.meta.id);
+    }
+
+    #[test]
+    fn a_moved_import_root_remains_valid_in_a_backup() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = new_test_app(source_dir.path());
+        let workspace = source.create_workspace("Workspace").unwrap();
+        let parent = source.create_folder(&workspace.meta.id, None, "Parent").unwrap();
+        let imported = source
+            .spec_import(
+                SPEC.as_bytes(),
+                "source.txt",
+                &ImportOptions::default(),
+                SpecTarget::Workspace { workspace_id: workspace.meta.id },
+            )
+            .unwrap();
+        let root_id = imported.root_folder_id.unwrap();
+        source.move_folder(&root_id, Some(parent.meta.id), 1.0).unwrap();
+        let bytes = source.export_backup_with("backup passphrase 1", KdfParams::testing()).unwrap().0;
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = new_test_app(target_dir.path());
+        target.restore(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
+        assert_eq!(target.folder(&root_id).unwrap().parent_id, Some(parent.meta.id));
+    }
+
+    #[test]
+    fn replace_ignores_spec_namespaces_in_workspaces_it_replaces() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = new_test_app(source_dir.path());
+        let a = source.spec_import(SPEC.as_bytes(), "a.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let b = source.spec_import(SPEC.as_bytes(), "b.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let namespace_b = source.spec_source(&b.import_id).unwrap().source.id_namespace;
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = new_test_app(target_dir.path());
+        let original = source.export_backup_with("backup passphrase 1", KdfParams::testing()).unwrap().0;
+        target.restore(&original, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
+        let mut source_a = target.spec_source(&a.import_id).unwrap();
+        source_a.source.id_namespace = namespace_b;
+        target.store.put(kind::SPEC_SOURCE, &a.import_id, Some(&a.workspace_id), None, 0.0, &source_a).unwrap();
+
+        target
+            .restore_approved(
+                &original,
+                Some("backup passphrase 1"),
+                ConflictPolicy::Replace,
+                &ImportApproval::for_file(&original, vec![a.workspace_id, b.workspace_id]),
+            )
+            .expect("the source using this namespace belongs to a workspace Replace will restore");
+    }
+
+    #[test]
+    fn replace_refuses_a_spec_namespace_used_by_an_untouched_workspace() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = new_test_app(source_dir.path());
+        let a = source.spec_import(SPEC.as_bytes(), "a.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let b = source.spec_import(SPEC.as_bytes(), "b.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let namespace_b = source.spec_source(&b.import_id).unwrap().source.id_namespace;
+        let snapshot = source.snapshot().unwrap();
+        let mut contents = snapshot.contents.clone();
+        let source_a = contents.objects.iter_mut().find(|row| row.kind == kind::SPEC_SOURCE && row.id == a.import_id.to_string()).unwrap();
+        source_a.value["source"]["id_namespace"] = serde_json::to_value(namespace_b).unwrap();
+        let bytes = seal(&build_manifest(&snapshot), &contents, "backup passphrase 1", KdfParams::testing()).unwrap();
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = new_test_app(target_dir.path());
+        let original = source.export_backup_with("backup passphrase 1", KdfParams::testing()).unwrap().0;
+        target.restore(&original, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
+        let untouched = target.spec_import(SPEC.as_bytes(), "untouched.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let mut untouched_source = target.spec_source(&untouched.import_id).unwrap();
+        untouched_source.source.id_namespace = namespace_b;
+        target.store.put(kind::SPEC_SOURCE, &untouched.import_id, Some(&untouched.workspace_id), None, 0.0, &untouched_source).unwrap();
+        let before = target.backup_contents().unwrap();
+
+        let preview_err = target.restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();
+        assert!(preview_err.to_string().contains("id namespace already used in another workspace"), "{preview_err}");
+        let err = target.restore(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();
+
+        assert!(err.to_string().contains("id namespace already used in another workspace"), "{err}");
+        assert_eq!(target.backup_contents().unwrap(), before, "a refused restore leaves every workspace unchanged");
+    }
+
+    fn new_test_app(root: &std::path::Path) -> App {
+        let pm = ProfileManager::new(root);
+        let (profile, dek, _) = pm.create_passphrase("test", "correct horse battery", KdfParams::testing()).unwrap();
+        let header = anvil_storage::vault::read_header(&profile.dir).unwrap();
+        App::open(profile.dir, header, dek).unwrap()
+    }
 }

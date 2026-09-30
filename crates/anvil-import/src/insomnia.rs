@@ -21,7 +21,7 @@ use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 64;
 
@@ -136,13 +136,47 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
             message: "missing `resources` array".into(),
         });
     };
-    let mut by_parent: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut seen = Visited { handled: vec![false; resources.len()], walked: HashSet::new() };
+    // Resources point at their parent by id. A repeated id among resources
+    // that can be parents would give children several parents (or make a
+    // group its own ancestor) and repeat subtrees, so it is refused; a
+    // repeated id of any other resource only skips the later copy.
+    let mut ids: HashMap<&str, usize> = HashMap::new();
     for (i, r) in resources.iter().enumerate() {
-        by_parent.entry(str_of(r, "parentId").unwrap_or("").to_string()).or_default().push(i);
+        let Some(id) = str_of(r, "_id").filter(|id| !id.is_empty()) else { continue };
+        match ids.get(id) {
+            None => {
+                ids.insert(id, i);
+            }
+            Some(&first) if can_be_parent(r) || can_be_parent(&resources[first]) => {
+                return Err(ImportError::Invalid {
+                    dialect: Dialect::InsomniaV4,
+                    pointer: format!("/resources/{i}/_id"),
+                    message: format!(
+                        "resource id is already used by /resources/{first}; workspaces, request groups and environments need unique ids"
+                    ),
+                });
+            }
+            Some(&first) => {
+                b.report.warn(
+                    "duplicate_resource_id",
+                    &format!("/resources/{i}"),
+                    format!("resource id is already used by /resources/{first}; this copy is skipped"),
+                );
+                seen.handled[i] = true;
+            }
+        }
+    }
+    // Resources without a parent id are never anyone's children: an empty id
+    // is not looked up as a parent.
+    let mut by_parent: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, r) in resources.iter().enumerate() {
+        if let Some(pid) = str_of(r, "parentId").filter(|p| !p.is_empty()) {
+            by_parent.entry(pid).or_default().push(i);
+        }
     }
     b.workspace.auth = AuthConfig::None;
     let workspaces: Vec<usize> = (0..resources.len()).filter(|i| str_of(&resources[*i], "_type") == Some("workspace")).collect();
-    let mut handled = vec![false; resources.len()];
     let multi = workspaces.len() > 1;
     if multi {
         b.report.warn(
@@ -152,7 +186,7 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
         );
     }
     for &w in &workspaces {
-        handled[w] = true;
+        seen.handled[w] = true;
         let ws = &resources[w];
         let wid = str_of(ws, "_id").unwrap_or("").to_string();
         let name = str_of(ws, "name").unwrap_or("Insomnia workspace").to_string();
@@ -165,10 +199,13 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
             None
         };
         // Environments: base (child of the workspace) and sub-environments.
-        let envs: Vec<usize> =
-            by_parent.get(&wid).into_iter().flatten().copied().filter(|i| str_of(&resources[*i], "_type") == Some("environment")).collect();
+        let envs: Vec<usize> = children_of(&by_parent, &wid)
+            .iter()
+            .copied()
+            .filter(|i| !seen.handled[*i] && str_of(&resources[*i], "_type") == Some("environment"))
+            .collect();
         for (n, &e) in envs.iter().enumerate() {
-            handled[e] = true;
+            seen.handled[e] = true;
             let base = &resources[e];
             let bp = format!("/resources/{e}/data");
             let vars = env_vars(b, base.get("data"), &bp);
@@ -186,11 +223,11 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
                     vars,
                 );
             }
-            let bid = str_of(base, "_id").unwrap_or("").to_string();
-            let mut subs: Vec<usize> = by_parent.get(&bid).into_iter().flatten().copied().collect();
+            let bid = str_of(base, "_id").unwrap_or("");
+            let mut subs: Vec<usize> = children_of(&by_parent, bid).iter().copied().filter(|s| !seen.handled[*s]).collect();
             subs.sort_by(|a, c| sort_key(&resources[*a]).total_cmp(&sort_key(&resources[*c])));
             for s in subs {
-                handled[s] = true;
+                seen.handled[s] = true;
                 let sub = &resources[s];
                 let sp = format!("/resources/{s}/data");
                 let vars = env_vars(b, sub.get("data"), &sp);
@@ -211,10 +248,10 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
                 }
             }
         }
-        walk_v4(b, resources, &by_parent, &wid, parent, &mut handled, 0);
+        walk_v4(b, resources, &by_parent, &wid, parent, &mut seen, 0);
     }
     for (i, r) in resources.iter().enumerate() {
-        if handled[i] {
+        if seen.handled[i] {
             continue;
         }
         let ty = str_of(r, "_type").unwrap_or("unknown");
@@ -253,15 +290,38 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
     Ok(())
 }
 
+/// Resources that other resources name as their parent.
+fn can_be_parent(r: &Value) -> bool {
+    matches!(str_of(r, "_type"), Some("workspace" | "request_group" | "environment"))
+}
+
+/// The children of parent id `pid`; an empty id has none.
+fn children_of<'m>(by_parent: &'m HashMap<&str, Vec<usize>>, pid: &str) -> &'m [usize] {
+    if pid.is_empty() {
+        return &[];
+    }
+    by_parent.get(pid).map(Vec::as_slice).unwrap_or_default()
+}
+
+/// What the v4 walk has already done: each resource is imported at most
+/// once and each parent's children are listed at most once.
+struct Visited {
+    handled: Vec<bool>,
+    walked: HashSet<String>,
+}
+
 fn walk_v4(
     b: &mut Builder,
     res: &[Value],
-    by_parent: &HashMap<String, Vec<usize>>,
+    by_parent: &HashMap<&str, Vec<usize>>,
     pid: &str,
     folder: Option<Id>,
-    handled: &mut [bool],
+    seen: &mut Visited,
     depth: usize,
 ) {
+    if pid.is_empty() || !seen.walked.insert(pid.to_string()) {
+        return;
+    }
     if depth > MAX_DEPTH {
         b.report.warn(
             "folder_depth_limit",
@@ -270,22 +330,28 @@ fn walk_v4(
         );
         return;
     }
-    let mut kids: Vec<usize> = by_parent.get(pid).into_iter().flatten().copied().collect();
+    let mut kids: Vec<usize> = children_of(by_parent, pid).iter().copied().filter(|i| !seen.handled[*i]).collect();
     kids.sort_by(|a, c| sort_key(&res[*a]).total_cmp(&sort_key(&res[*c])).then(a.cmp(c)));
     for i in kids {
+        // Every resource is visited at most once, so the walk is linear in
+        // the number of resources whatever the parent links say.
+        if seen.handled[i] {
+            continue;
+        }
         let r = &res[i];
         let at = format!("/resources/{i}");
         match str_of(r, "_type") {
             Some("request_group") => {
-                handled[i] = true;
+                seen.handled[i] = true;
                 let id = str_of(r, "_id").unwrap_or("").to_string();
                 let name = str_of(r, "name").unwrap_or("Folder").to_string();
                 let fid =
                     group(b, r, &at, folder, &id, &name, r.get("environment"), r.get("preRequestScript"), r.get("afterResponseScript"));
-                walk_v4(b, res, by_parent, &id, Some(fid), handled, depth + 1);
+                // A group without an id is nobody's parent (see `children_of`).
+                walk_v4(b, res, by_parent, &id, Some(fid), seen, depth + 1);
             }
             Some("request") => {
-                handled[i] = true;
+                seen.handled[i] = true;
                 if !b.admit(&at) {
                     continue;
                 }
