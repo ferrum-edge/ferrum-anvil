@@ -2,14 +2,19 @@
 # prove they contain no test hooks, generate checksums, SBOMs, a license
 # report and release evidence, and create a DRAFT GitHub release.
 #
-#   push tag anvil-vX.Y.Z  -> full build + draft release
-#   manual, tag input      -> same for an existing tag
-#   manual, no tag         -> dry run: artifacts + evidence uploaded to the run only
+#   push tag anvil-vX.Y.Z             -> full build + draft release
+#   manual from the tag (input empty
+#     or the same tag)                -> same for an existing tag
+#   manual from a branch, no input    -> dry run: unsigned artifacts + evidence uploaded to the run only
 #
-# Code signing/notarization runs only when the owner's credentials exist as
-# repository secrets and is recorded as signed only after the signature is
-# verified on the runner. Otherwise every target is recorded as
-# "unsigned — owner credentials not configured". See docs/release.md.
+# Signing runs only for a tagged release: its build jobs run in the protected
+# `release` environment, which should hold the owner's credentials (Apple and
+# Windows code signing, TAURI_SIGNING_PRIVATE_KEY for the updater), and the
+# workflow passes none of them to a dry run. They reach only the bundle step,
+# never the compile step. A target is recorded as signed only after the
+# signature is verified on the runner; otherwise it is "unsigned — owner
+# credentials not configured". Signed updater artifacts and latest.json also
+# need the variable ANVIL_UPDATER_PUBKEY. See docs/release.md.
 name: Release
 
 on:
@@ -18,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build (anvil-vX.Y.Z). Leave empty for a dry run of the selected ref (nothing is published)."
+        description: "Existing tag to release (anvil-vX.Y.Z); run the workflow from that tag. A run from a tag is a full signed release even when this is empty; a run from a branch with this empty is an unsigned dry run (nothing is published)."
         required: false
         default: ""
 
@@ -47,7 +52,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          # The fully qualified ref of the run: a bare tag name would resolve to
+          # a branch of the same name if one exists.
+          ref: ${{ github.ref }}
           persist-credentials: false
       - name: Resolve version, tag and commit
         id: version
@@ -60,14 +67,28 @@ jobs:
           [ "$version" = "$app" ] && [ "$version" = "$ui" ] || { echo "::error::version mismatch: Cargo $version, tauri.conf $app, package.json $ui"; exit 1; }
           tag=""
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then tag="${GITHUB_REF_NAME}"; fi
-          if [ -n "$INPUT_TAG" ]; then tag="$INPUT_TAG"; fi
+          if [ -n "$INPUT_TAG" ]; then
+            # A manual release runs from the tag itself ("Use workflow from: <tag>"),
+            # never from a branch, and a branch named like a tag is not a tag.
+            if [ "$GITHUB_REF" != "refs/tags/$INPUT_TAG" ]; then
+              echo "::error::run the workflow from the tag itself (Use workflow from: $INPUT_TAG); it runs from $GITHUB_REF"; exit 1
+            fi
+            tag="$INPUT_TAG"
+          fi
+          if [ -n "$tag" ] && ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::refs/tags/$tag does not exist"; exit 1
+          fi
+          if [ -n "$tag" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$tag^{commit}")" ]; then
+            echo "::error::HEAD $(git rev-parse HEAD) is not the commit of $tag"; exit 1
+          fi
           if [ -n "$tag" ] && [ "$tag" != "anvil-v$version" ]; then
             echo "::error::tag $tag does not match workspace version $version (expected anvil-v$version)"; exit 1
           fi
           {
             echo "version=$version"
             echo "tag=$tag"
-            echo "ref=${tag:-$GITHUB_SHA}"
+            # Build and publish check out this exact commit, never a name.
+            echo "ref=$(git rev-parse HEAD)"
             echo "commit=$(git rev-parse HEAD)"
             echo "epoch=$(git log -1 --format=%ct)"
           } >> "$GITHUB_OUTPUT"
@@ -94,6 +115,10 @@ jobs:
   build:
     name: Build · ${{ matrix.target }}
     needs: preflight
+    # A tagged release runs in the protected `release` environment (required
+    # reviewers, anvil-v* deployment rule; the updater key lives there). A dry
+    # run uses no environment and never sees the updater key.
+    environment: ${{ needs.preflight.outputs.tag != '' && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -125,6 +150,11 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.ref }}
           persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
       - uses: ./.github/actions/setup
         with:
           targets: ${{ matrix.target }}
@@ -139,9 +169,50 @@ jobs:
         with:
           tool: cargo-cyclonedx@0.5.9
 
-      - name: Import Windows signing certificate (only with owner credentials)
+      - name: Updater config (tagged release with the owner's updater key only)
+        id: updater
+        shell: bash
+        env:
+          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
+          # Whether the key exists, never the key itself.
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          # Signed updater artifacts need both halves of the owner's updater key
+          # and a real tag: dry runs never sign updates. The public key is
+          # compiled into the app, so build and bundle both get this config.
+          # One normalized key (all whitespace stripped) is compiled in and recorded.
+          pubkey="$(tr -d '[:space:]' <<<"${ANVIL_UPDATER_PUBKEY:-}")"
+          if [ -n "$TAG" ] && [ "$HAS_KEY" = "true" ] && [ -n "$pubkey" ]; then
+            cfg="$RUNNER_TEMP/anvil-updater.conf.json"
+            PUBKEY="$pubkey" node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey: process.env.PUBKEY } } }))' "$cfg"
+            { echo "updater=true"; echo "config=$cfg"; echo "pubkey=$pubkey"; } >> "$GITHUB_OUTPUT"
+            echo "Updater key configured; creating signed updater artifacts."
+          else
+            if [ -z "$TAG" ]; then
+              echo "Dry run: no updater artifacts."
+            elif [ "$HAS_KEY" = "true" ] || [ -n "$pubkey" ]; then
+              echo "::warning::only one of TAURI_SIGNING_PRIVATE_KEY / ANVIL_UPDATER_PUBKEY is set; building without updater artifacts"
+            fi
+            { echo "updater=false"; echo "config="; echo "pubkey="; } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build desktop app (release profile, default features — no e2e; no signing credentials)
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
+        run: |
+          # Compiling (build scripts, proc macros, beforeBuildCommand) runs with
+          # no signing key or certificate present; only the bundle step below
+          # gets them (defense in depth: both share this runner).
+          args=(build --ci --target "$TARGET" --no-bundle)
+          if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
+          npx tauri "${args[@]}"
+
+      - name: Import Windows signing certificate (tagged release with owner credentials only)
         id: wincert
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && needs.preflight.outputs.tag != ''
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -153,33 +224,59 @@ jobs:
             exit 0
           }
           $pfx = Join-Path $env:RUNNER_TEMP "anvil-signing.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
-          Remove-Item $pfx
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            # A PFX with a chain imports several certificates: record them all for removal first.
+            $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw)
+            "thumbprints=$(($imported | ForEach-Object Thumbprint) -join ' ')" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+          $cert = $imported | Where-Object HasPrivateKey | Select-Object -First 1
+          if (-not $cert) { throw "the Windows signing PFX holds no certificate with a private key" }
           $cfg = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Compress -Depth 5
           "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
-      - name: Build desktop bundles (release profile, default features — no e2e)
+      - name: Bundle and sign
         shell: bash
         working-directory: apps/desktop
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_TEAM_ID || '' }}
           WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config }}
+          UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
+          # Only a tagged release (in the `release` environment) receives any
+          # signing credential; a dry run is always unsigned.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           BUNDLES: ${{ matrix.bundles }}
         run: |
           # Unset empty credentials so Tauri never attempts a half-configured signing.
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             [ -n "${!v:-}" ] || unset "$v"
           done
-          args=(build --ci --target "$TARGET" --bundles "$BUNDLES")
+          if [ -z "${UPDATER_CONFIG:-}" ]; then unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; fi
+          # The same --config values as the build (Tauri merges them in order).
+          args=(bundle --ci --target "$TARGET" --bundles "$BUNDLES")
           if [ -n "${WIN_SIGN_CONFIG:-}" ]; then args+=(--config "$WIN_SIGN_CONFIG"); fi
+          if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
           npx tauri "${args[@]}"
+
+      - name: Remove Windows signing certificates
+        if: always() && steps.wincert.outputs.thumbprints != ''
+        shell: pwsh
+        env:
+          THUMBPRINTS: ${{ steps.wincert.outputs.thumbprints }}
+        run: |
+          foreach ($t in $env:THUMBPRINTS -split ' ' | Where-Object { $_ }) {
+            $c = Get-Item -Path "Cert:\CurrentUser\My\$t" -ErrorAction SilentlyContinue
+            if ($c -and $c.HasPrivateKey) { Remove-Item -Path $c.PSPath -DeleteKey } elseif ($c) { Remove-Item -Path $c.PSPath }
+          }
 
       - name: Build CLI
         shell: bash
@@ -193,9 +290,19 @@ jobs:
           mkdir -p "$out"
           b="target/$TARGET/release/bundle"
           shopt -s nullglob
-          for f in "$b"/dmg/*.dmg "$b"/deb/*.deb "$b"/rpm/*.rpm "$b"/appimage/*.AppImage "$b"/msi/*.msi "$b"/nsis/*-setup.exe; do
+          for f in "$b"/dmg/*.dmg "$b"/deb/*.deb "$b"/rpm/*.rpm "$b"/appimage/*.AppImage "$b"/msi/*.msi "$b"/nsis/*-setup.exe \
+                   "$b"/appimage/*.AppImage.sig "$b"/msi/*.msi.sig "$b"/nsis/*-setup.exe.sig; do
             name="$(basename "$f" | tr ' ' '-')"
             cp "$f" "$out/$name"
+          done
+          # Updater archives (only with the updater key). Both macOS targets
+          # produce "<Product>.app.tar.gz"; name them like the DMGs.
+          for f in "$b"/macos/*.app.tar.gz; do
+            [ -f "$f.sig" ] || { echo "::error::$f has no updater signature"; exit 1; }
+            arch="${TARGET%%-*}"; [ "$arch" = "x86_64" ] && arch=x64
+            name="$(basename "$f" .app.tar.gz | tr ' ' '-')_${VERSION}_${arch}.app.tar.gz"
+            cp "$f" "$out/$name"
+            cp "$f.sig" "$out/$name.sig"
           done
           stage="$RUNNER_TEMP/anvil-cli-$VERSION-$TARGET"
           mkdir -p "$stage"
@@ -222,7 +329,7 @@ jobs:
           args=(--report "$out/release-check-$VERSION-$TARGET.json")
           [ "$PROBE" = "true" ] && args+=(--runtime-probe)
           shopt -s nullglob
-          files=("$out"/*.dmg "$out"/*.deb "$out"/*.rpm "$out"/*.AppImage "$out"/*.msi "$out"/*-setup.exe "$out"/anvil-cli-* "$APP")
+          files=("$out"/*.dmg "$out"/*.deb "$out"/*.rpm "$out"/*.AppImage "$out"/*.msi "$out"/*-setup.exe "$out"/*.app.tar.gz "$out"/anvil-cli-* "$APP")
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a scripts/release-check.sh "${args[@]}" "${files[@]}"
           else
@@ -234,8 +341,16 @@ jobs:
         shell: bash
         env:
           RUNNER_LABEL: ${{ matrix.os }}
+          UPDATER: ${{ steps.updater.outputs.updater }}
+          UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
+          APP: ${{ steps.collect.outputs.app }}
         run: |
           out="dist/$TARGET"
+          # Evidence that the updater public key is compiled into the app binary.
+          if [ "$UPDATER" = "true" ]; then
+            [ -n "$UPDATER_PUBKEY" ] || { echo "::error::updater configured without a public key"; exit 1; }
+            LC_ALL=C grep -aqF "$UPDATER_PUBKEY" "$APP" || { echo "::error::the updater public key is not in $APP"; exit 1; }
+          fi
           signed=false; method="none"; detail="unsigned — owner credentials not configured"
           case "$RUNNER_OS" in
             macOS)
@@ -262,16 +377,20 @@ jobs:
           echo "signed=$signed method=$method detail=$detail"
           # shellcheck disable=SC2016 # JavaScript source, not shell
           node -e '
-            const [target, os, arch, runner, signed, method, detail] = process.argv.slice(1);
+            const [target, os, arch, runner, signed, method, detail, updater, pubkey] = process.argv.slice(1);
             const { execSync } = require("node:child_process");
             const v = (c) => { try { return execSync(c, { encoding: "utf8" }).trim(); } catch { return null; } };
             const info = {
               target, os, arch, runner,
               toolchain: { rustc: v("rustc -V"), cargo: v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
               signing: { signed: signed === "true", method, detail },
+              // Built with the owner updater key: the public key compiled into the
+              // app (found in the binary above), which the publish job verifies
+              // every signature against.
+              updater: updater === "true" ? { configured: true, pubkey, embedded: true } : { configured: false },
             };
             require("node:fs").writeFileSync(`dist/${target}/build-info.json`, JSON.stringify(info, null, 2) + "\n");
-          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail"
+          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail" "$UPDATER" "$UPDATER_PUBKEY"
 
       - name: CycloneDX SBOMs (Rust, per target)
         shell: bash
@@ -308,6 +427,11 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.ref }}
           persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
       - uses: ./.github/actions/setup
         with:
           tauri-deps: "false"
@@ -330,6 +454,8 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$RELEASE_COMMIT&per_page=100" \
             --jq '[.workflow_runs[] | {workflow: .name, run_id: .id, event: .event, status: .status, conclusion: .conclusion, url: .html_url}]' > "$RUNNER_TEMP/runs.json"
           cat "$RUNNER_TEMP/runs.json"
+      - name: Updater manifest (only with signed updater artifacts)
+        run: node scripts/updater-manifest.mjs --dist dist --repo "$GITHUB_REPOSITORY" --tag "${TAG:-anvil-v$VERSION}" --version "$VERSION"
       - name: Checksums and release evidence
         run: |
           args=(--dist dist --test-runs "$RUNNER_TEMP/runs.json")
@@ -353,11 +479,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           signing="$(node -p 'require("./upload/release-evidence.json").signing')"
+          updater="$(node -p 'const u = require("./upload/release-evidence.json").updater; u.manifest ? u.detail : ""')"
           {
             echo "Draft release of Ferrum Anvil $VERSION built from \`$RELEASE_COMMIT\` by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
             echo
             echo "**Signing:** $signing."
             echo
+            if [ -n "$updater" ]; then echo "**In-app updates:** $updater."; echo; fi
             echo "Verify downloads with \`SHA256SUMS\`. \`release-evidence.json\` ties every artifact to its hash, platform, release check, SBOM, license report, compatibility catalog and test runs."
             echo
             echo "This draft is not published. Review the evidence (docs/release.md) before publishing."

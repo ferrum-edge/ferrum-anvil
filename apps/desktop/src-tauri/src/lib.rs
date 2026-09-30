@@ -8,6 +8,7 @@ mod cmd_runner;
 mod cmd_sessions;
 mod cmd_specs;
 mod cmd_standards;
+mod cmd_update;
 mod commands;
 mod state;
 
@@ -67,7 +68,7 @@ pub fn run() {
         Err(err) => eprintln!("could not build the async runtime, using Tauri's default: {err}"),
     }
     let data_dir = std::env::var_os("ANVIL_DATA_DIR").map(std::path::PathBuf::from).unwrap_or_else(anvil_storage::default_data_dir);
-    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(feature = "e2e")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
     builder
@@ -239,6 +240,11 @@ pub fn run() {
             cmd_drift::drift_reimport_plan,
             cmd_drift::drift_reimport_apply,
             cmd_drift::drift_export,
+            cmd_update::update_check_on_launch,
+            cmd_update::update_check,
+            cmd_update::update_install,
+            cmd_update::update_restart,
+            cmd_update::update_open_release_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ferrum Anvil");
