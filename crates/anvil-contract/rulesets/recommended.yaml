@@ -1,0 +1,231 @@
+# Anvil's recommended API description rules (`extends: anvil:recommended`).
+# They apply to Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2 alike. Change a
+# rule's severity or turn it off from your own ruleset:
+#
+#   rules:
+#     info-license: error
+#     operation-description: off
+anvil_ruleset: 1
+name: Anvil recommended
+version: "1"
+description: Correctness and documentation basics for any OpenAPI or Swagger description.
+rules:
+  openapi-version-current:
+    description: Swagger 2.0 is superseded by OpenAPI 3.
+    severity: info
+    given: document
+    then:
+      field: dialect
+      function: pattern
+      options: { not_match: "^swagger-" }
+    message: "The description is Swagger 2.0; OpenAPI 3.1 or later describes more (servers, request bodies, nullability, webhooks)."
+    how_to_fix: Convert the description to OpenAPI 3.1 (most converters handle it) and keep linting the result.
+
+  info-description:
+    description: The API has a description.
+    severity: warn
+    given: info
+    then: { field: description, function: truthy }
+    message: "info.description is missing: say what the API is for and who should use it."
+    how_to_fix: Add `info.description`.
+
+  info-contact:
+    description: The API names a contact.
+    severity: warn
+    given: info
+    then: { field: contact, function: defined }
+    message: "info.contact is missing: consumers cannot tell who owns this API."
+    how_to_fix: "Add `info.contact` with a `name` and an `email` or `url` of the owning team."
+
+  info-license:
+    description: The API declares its license.
+    severity: info
+    given: info
+    then: { field: license, function: defined }
+    message: "info.license is missing."
+    how_to_fix: Add `info.license` (`name`, plus `url` or `identifier`).
+
+  servers-defined:
+    description: The description says where the API is served.
+    severity: warn
+    given: document
+    then: { field: has_servers, function: truthy }
+    message: "No servers are declared (OpenAPI `servers`, Swagger `host`), so clients cannot tell where to send requests."
+    how_to_fix: Add a `servers` entry per environment (production, staging, …).
+
+  server-https:
+    description: Servers use HTTPS, except loopback ones.
+    severity: warn
+    given: server
+    where:
+      field: url
+      function: pattern
+      options: { not_match: "^http://(localhost|127\\.0\\.0\\.1|\\[::1\\])([:/]|$)" }
+    then:
+      field: url
+      function: pattern
+      options: { not_match: "^http://" }
+    message: "Server {{url}} uses plain HTTP."
+    how_to_fix: Serve the API over HTTPS and change the URL to `https://`.
+
+  operation-operation-id:
+    description: Every operation has an operationId.
+    severity: warn
+    given: operation
+    then: { field: operation_id, function: truthy }
+    message: "{{label}} has no operationId; code generators and tests then invent unstable names."
+    how_to_fix: Add a unique, stable `operationId` such as `listPets`.
+
+  operation-operation-id-unique:
+    description: operationIds are unique.
+    severity: error
+    given: operation
+    then: { field: operation_id_duplicate, function: falsy }
+    message: "operationId '{{operation_id}}' of {{label}} is used by another operation too."
+    how_to_fix: Give every operation its own `operationId`.
+
+  operation-summary:
+    description: Every operation has a summary.
+    severity: warn
+    given: operation
+    then: { field: summary, function: truthy }
+    message: "{{label}} has no summary."
+    how_to_fix: Add a one-line `summary` (it becomes the request name in most tools).
+
+  operation-description:
+    description: Every operation has a description.
+    severity: hint
+    given: operation
+    then: { field: description, function: truthy }
+    message: "{{label}} has no description."
+    how_to_fix: Describe what the operation does, its side effects and notable errors.
+
+  operation-tags:
+    description: Every operation is tagged.
+    severity: warn
+    given: operation
+    then: { field: tags, function: truthy }
+    message: "{{label}} has no tags."
+    how_to_fix: Add at least one tag so the operation is grouped with related ones.
+
+  operation-tag-defined:
+    description: Operation tags are declared in the top-level `tags`.
+    severity: warn
+    given: operation
+    then: { field: undeclared_tags, function: falsy }
+    message: "{{label}} uses tag(s) {{value}} that the top-level `tags` list does not declare."
+    how_to_fix: Declare each tag (with a description) in the top-level `tags` list, or fix the spelling.
+
+  operation-success-response:
+    description: Every operation declares a success (2xx or 3xx) response.
+    severity: warn
+    given: operation
+    then: { field: success_codes, function: truthy }
+    message: "{{label}} declares no 2xx or 3xx response."
+    how_to_fix: Document the response the operation returns when it succeeds.
+
+  operation-parameters-unique:
+    description: A parameter list names each parameter once.
+    severity: error
+    given: operation
+    then: { field: duplicate_parameters, function: falsy }
+    message: "{{label}} lists {{value}} more than once."
+    how_to_fix: Remove the duplicate parameter.
+
+  operation-security-defined:
+    description: Security requirements name declared security schemes.
+    severity: error
+    given: operation
+    then: { field: undefined_security_schemes, function: falsy }
+    message: "{{label}} requires security scheme(s) {{value}} that are not declared."
+    how_to_fix: Declare the scheme under `components.securitySchemes` (Swagger `securityDefinitions`) or fix the name.
+
+  path-params-declared:
+    description: Every `{param}` in a path is declared as a path parameter.
+    severity: error
+    given: operation
+    then: { field: undeclared_path_params, function: falsy }
+    message: "{{label}} uses path parameter(s) {{value}} that are not declared."
+    how_to_fix: "Add each one to `parameters` with `in: path` and `required: true`."
+
+  path-params-used:
+    description: Every path parameter appears in the path.
+    severity: error
+    given: operation
+    then: { field: unused_path_params, function: falsy }
+    message: "{{label}} declares path parameter(s) {{value}} that the path does not contain."
+    how_to_fix: Remove the parameter or add `{name}` to the path.
+
+  path-trailing-slash:
+    description: Paths do not end with a slash.
+    severity: warn
+    given: path
+    then:
+      field: path
+      function: pattern
+      options: { not_match: ".+/$" }
+    message: "Path {{path}} ends with a slash."
+    how_to_fix: Remove the trailing slash (servers disagree on whether `/pets/` is `/pets`).
+
+  path-no-query-string:
+    description: Paths carry no query string.
+    severity: error
+    given: path
+    then:
+      field: path
+      function: pattern
+      options: { not_match: "\\?" }
+    message: "Path {{path}} contains a query string."
+    how_to_fix: "Describe query values as parameters with `in: query`."
+
+  response-description:
+    description: Every response has a description.
+    severity: warn
+    given: response
+    then: { field: description, function: truthy }
+    message: "The {{label}} has no description."
+    how_to_fix: Say when the response is returned.
+
+  media-type-schema:
+    description: Request and response bodies have a schema.
+    severity: warn
+    given: media_type
+    where:
+      field: media_type
+      function: pattern
+      options: { match: "json|xml|form|text/plain|^\\*/\\*$" }
+    then: { field: has_schema, function: truthy }
+    message: "{{label}} has no schema, so its shape cannot be checked."
+    how_to_fix: Add a `schema` (or a `$ref` to a component schema).
+
+  example-valid:
+    description: Examples match their schema.
+    severity: warn
+    given: media_type
+    then: { field: example_errors, function: falsy }
+    message: "An example of {{label}} does not match its schema: {{value}}"
+    how_to_fix: Fix the example or the schema so they agree.
+
+  tag-description:
+    description: Declared tags have a description.
+    severity: info
+    given: tag
+    then: { field: description, function: truthy }
+    message: "Tag '{{name}}' has no description."
+    how_to_fix: Describe what the tag's operations have in common.
+
+  schema-unused:
+    description: Component schemas are used.
+    severity: info
+    given: schema
+    then: { field: referenced, function: truthy }
+    message: "Schema {{name}} is not referenced anywhere."
+    how_to_fix: Remove it, or reference it where it is meant to be used.
+
+  parameter-description:
+    description: Parameters have a description.
+    severity: hint
+    given: parameter
+    then: { field: description, function: truthy }
+    message: "The {{label}} has no description."
+    how_to_fix: Describe the parameter's meaning, format and default.

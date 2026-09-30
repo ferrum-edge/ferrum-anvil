@@ -21,7 +21,7 @@ against it).
 | Boundary | Untrusted side | Controls |
 |---|---|---|
 | Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; no response can call IPC or change settings |
-| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR | Size/node/ref limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
+| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size/node/ref limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
 | Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no open or save dialog, no filesystem plugin. |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
@@ -123,6 +123,12 @@ against it).
 The mechanics are in [import.md](import.md#persisting-an-import-anvil-app)
 and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 
+- **Hostile ruleset or spec given to the linter:** a ruleset is data, never
+  code: rules name built-in functions only, regular expressions use the
+  linear-time `regex` crate with a size limit, `extends` names built-in
+  rulesets only and nothing is fetched or read; specs are parsed under the
+  import bounds and `$ref` resolution is internal and capped
+  ([contract.md](contract.md#guarantees)).
 - **Malicious bundle trying to enable insecure settings:** import
   normalisation (TLS bypass, plain-HTTP marker trust, credential forwarding,
   0-RTT early data, legacy HMAC, scenario/plan trust) with warnings in the

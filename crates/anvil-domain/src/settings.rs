@@ -366,6 +366,44 @@ pub struct AppSettings {
     /// by the redactor (in addition to built-in patterns).
     pub redaction_names: Vec<String>,
     pub check_for_updates: bool,
+    /// The API standards OpenAPI descriptions are linted against.
+    #[serde(default)]
+    pub api_standards: ApiStandards,
+}
+
+/// Rulesets that describe what a team's OpenAPI descriptions must look like
+/// (`anvil_contract::ruleset`). They are layered in order: Anvil's
+/// recommended rules (when included), then each enabled ruleset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApiStandards {
+    #[serde(default = "crate::request::default_true")]
+    pub include_recommended: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rulesets: Vec<StoredRuleset>,
+}
+
+impl Default for ApiStandards {
+    fn default() -> Self {
+        ApiStandards { include_recommended: true, rulesets: vec![] }
+    }
+}
+
+/// A ruleset file the user added, kept verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StoredRuleset {
+    pub id: Id,
+    /// The ruleset's `name`, else the file name.
+    pub name: String,
+    pub file_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The ruleset text (YAML or JSON) as added.
+    pub text: String,
+    /// SHA-256 (hex) of `text`.
+    pub sha256: String,
+    pub added_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default = "crate::request::default_true")]
+    pub enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -379,6 +417,7 @@ impl Default for AppSettings {
             autosave: false,
             redaction_names: vec![],
             check_for_updates: false,
+            api_standards: ApiStandards::default(),
         }
     }
 }

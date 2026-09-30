@@ -219,6 +219,16 @@ impl App {
         Ok(self.store.list(kind::SPEC_SOURCE, Some(ws))?)
     }
 
+    /// The source record of an import by its current id or an earlier one
+    /// (a request a reimport did not rewrite keeps the id that wrote it).
+    pub fn spec_source_any(&self, import_id: &Id) -> Result<SpecSourceRecord> {
+        if let Some(rec) = self.store.get(kind::SPEC_SOURCE, import_id)? {
+            return Ok(rec);
+        }
+        let all: Vec<SpecSourceRecord> = self.store.list(kind::SPEC_SOURCE, None)?;
+        all.into_iter().find(|r| r.previous_import_ids.contains(import_id)).ok_or_else(|| AppError::NotFound(format!("import {import_id}")))
+    }
+
     fn spec_source(&self, import_id: &Id) -> Result<SpecSourceRecord> {
         self.store.get(kind::SPEC_SOURCE, import_id)?.ok_or_else(|| AppError::NotFound(format!("import {import_id}")))
     }

@@ -1,0 +1,273 @@
+//! OpenAPI Schema Objects as JSON Schema 2020-12 validators.
+//!
+//! OpenAPI 3.1 and 3.2 schemas are JSON Schema 2020-12 already. Swagger 2.0
+//! and OpenAPI 3.0 use an extended subset of draft 4/5, converted here:
+//! `nullable` / `x-nullable` become a `null` type (or `anyOf` with `null`),
+//! boolean `exclusiveMinimum`/`exclusiveMaximum` become the numeric form,
+//! siblings of `$ref` are dropped (they are ignored in those versions) and
+//! the 2.0 `file` type accepts anything. In every version a `required`
+//! property that is `readOnly` is not required in a request, and one that
+//! is `writeOnly` is not required in a response.
+//!
+//! A validator is built from the schema plus only the component schemas it
+//! reaches through internal `$ref`s, copied at their original pointers, so
+//! references resolve as in the document. External references are never
+//! fetched: a schema that uses one cannot be compiled.
+
+use crate::model::Direction;
+use crate::spec::{Spec, internal_pointer};
+use anvil_import::Dialect;
+use serde_json::{Map, Value, json};
+
+const MAX_DEPTH: usize = 64;
+/// Distinct `$ref` targets copied into one validator.
+const MAX_REF_TARGETS: usize = 4_096;
+
+/// Build a validator for `schema` (located at `pointer`), as it applies in
+/// `direction`.
+pub fn compile(spec: &Spec, schema: &Value, direction: Direction) -> Result<jsonschema::Validator, String> {
+    let wrapper = bundle(spec, schema, direction)?;
+    jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .should_validate_formats(true)
+        .build(&wrapper)
+        .map_err(|e| format!("the schema cannot be compiled: {e}"))
+}
+
+/// The converted schema with the `$ref` targets it reaches, as one document.
+pub fn bundle(spec: &Spec, schema: &Value, direction: Direction) -> Result<Value, String> {
+    let root = convert(spec, schema, direction, 0);
+    let mut doc = Value::Object(Map::new());
+    let mut pending: Vec<String> = vec![];
+    collect_refs(&root, &mut pending)?;
+    // Copied targets; a target inside one of them is already present.
+    let mut copied: Vec<String> = vec![];
+    while let Some(target) = pending.pop() {
+        if copied.iter().any(|c| target == *c || target.starts_with(&format!("{c}/"))) {
+            continue;
+        }
+        copied.push(target.clone());
+        if copied.len() > MAX_REF_TARGETS {
+            return Err(format!("the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
+        }
+        let Some(raw) = spec.root.pointer(&target) else {
+            return Err(format!("unresolved reference #{target}"));
+        };
+        let converted = convert(spec, raw, direction, 0);
+        collect_refs(&converted, &mut pending)?;
+        insert_at(&mut doc, &target, converted);
+    }
+    let Value::Object(mut map) = doc else { unreachable!("the bundle is an object") };
+    // Keywords at the root would apply to the bundle; nest the schema.
+    map.insert("$schema".into(), json!("https://json-schema.org/draft/2020-12/schema"));
+    map.insert("allOf".into(), json!([root]));
+    Ok(Value::Object(map))
+}
+
+fn collect_refs(v: &Value, out: &mut Vec<String>) -> Result<(), String> {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Object(o) => {
+                if let Some(r) = o.get("$ref").and_then(Value::as_str) {
+                    match internal_pointer(r) {
+                        Some(p) => out.push(p),
+                        None => return Err(format!("external reference '{r}' is not resolved")),
+                    }
+                }
+                stack.extend(o.values());
+            }
+            Value::Array(a) => stack.extend(a),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn unescape(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+fn insert_at(doc: &mut Value, pointer: &str, value: Value) {
+    let tokens: Vec<String> = pointer.split('/').skip(1).map(unescape).collect();
+    let Some((last, parents)) = tokens.split_last() else { return };
+    let mut cur = doc;
+    for t in parents {
+        if !cur.is_object() {
+            return;
+        }
+        cur = cur.as_object_mut().expect("checked").entry(t.clone()).or_insert_with(|| Value::Object(Map::new()));
+    }
+    if let Some(o) = cur.as_object_mut() {
+        o.insert(last.clone(), value);
+    }
+}
+
+fn legacy(d: Dialect) -> bool {
+    matches!(d, Dialect::Swagger20 | Dialect::OpenApi30)
+}
+
+/// Convert one schema (not following `$ref`s) for `direction`.
+pub fn convert(spec: &Spec, schema: &Value, direction: Direction, depth: usize) -> Value {
+    let Value::Object(src) = schema else {
+        // `true`/`false` schemas (3.1+) and anything malformed pass through.
+        return schema.clone();
+    };
+    if depth > MAX_DEPTH {
+        return json!({});
+    }
+    let old = legacy(spec.dialect);
+    if old && let Some(r) = src.get("$ref") {
+        let nullable = src.get("x-nullable").and_then(Value::as_bool).unwrap_or(false);
+        return if nullable { json!({"anyOf": [{"$ref": r}, {"type": "null"}]}) } else { json!({"$ref": r}) };
+    }
+    let mut out = Map::new();
+    for (k, v) in src {
+        let converted = match k.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => match v {
+                Value::Object(m) => Value::Object(m.iter().map(|(n, s)| (n.clone(), convert(spec, s, direction, depth + 1))).collect()),
+                other => other.clone(),
+            },
+            "items"
+            | "additionalProperties"
+            | "not"
+            | "contains"
+            | "if"
+            | "then"
+            | "else"
+            | "propertyNames"
+            | "unevaluatedProperties"
+            | "unevaluatedItems"
+            | "additionalItems" => match v {
+                Value::Array(a) => Value::Array(a.iter().map(|s| convert(spec, s, direction, depth + 1)).collect()),
+                s => convert(spec, s, direction, depth + 1),
+            },
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => match v {
+                Value::Array(a) => Value::Array(a.iter().map(|s| convert(spec, s, direction, depth + 1)).collect()),
+                other => other.clone(),
+            },
+            "required" => match v {
+                Value::Array(names) => Value::Array(names.iter().filter(|n| !excluded(spec, src, n, direction)).cloned().collect()),
+                other => other.clone(),
+            },
+            // Annotations of OpenAPI with no validation meaning.
+            "discriminator" | "xml" | "externalDocs" | "example" if old => continue,
+            "nullable" | "x-nullable" if old => continue,
+            "$id" | "id" if old => continue,
+            "exclusiveMinimum" | "exclusiveMaximum" if old && v.is_boolean() => continue,
+            "type" if old && v.as_str() == Some("file") => continue,
+            _ => v.clone(),
+        };
+        out.insert(k.clone(), converted);
+    }
+    if old {
+        for (flag, bound) in [("exclusiveMinimum", "minimum"), ("exclusiveMaximum", "maximum")] {
+            if src.get(flag).and_then(Value::as_bool) == Some(true)
+                && let Some(b) = src.get(bound)
+            {
+                out.remove(bound);
+                out.insert(flag.into(), b.clone());
+            }
+        }
+        let nullable = src.get("nullable").or_else(|| src.get("x-nullable")).and_then(Value::as_bool).unwrap_or(false);
+        if nullable {
+            match out.get("type").cloned() {
+                Some(Value::String(t)) => {
+                    out.insert("type".into(), json!([t, "null"]));
+                    if let Some(Value::Array(e)) = out.get_mut("enum")
+                        && !e.contains(&Value::Null)
+                    {
+                        e.push(Value::Null);
+                    }
+                }
+                Some(_) => {}
+                None => return json!({"anyOf": [Value::Object(out), {"type": "null"}]}),
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// Whether required property `name` of `parent` does not apply in `direction`.
+fn excluded(spec: &Spec, parent: &Map<String, Value>, name: &Value, direction: Direction) -> bool {
+    let Some(name) = name.as_str() else { return false };
+    let Some(prop) = parent.get("properties").and_then(|p| p.get(name)) else { return false };
+    let (prop, _) = spec.deref(prop, "");
+    let flag = match direction {
+        Direction::Request => "readOnly",
+        Direction::Response => "writeOnly",
+    };
+    prop.get(flag).and_then(Value::as_bool).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(text: &str) -> Spec {
+        Spec::parse(text.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn openapi30_nullable_and_exclusive_bounds() {
+        let s = spec(
+            r##"{"openapi":"3.0.3","info":{"title":"t","version":"1"},"paths":{},"components":{"schemas":{
+              "Pet":{"type":"object","required":["id","name","secret"],"properties":{
+                "id":{"type":"integer","readOnly":true},
+                "name":{"type":"string","nullable":true,"enum":["a","b"]},
+                "age":{"type":"number","minimum":0,"exclusiveMinimum":true},
+                "secret":{"type":"string","writeOnly":true},
+                "owner":{"$ref":"#/components/schemas/Owner","description":"ignored sibling"}}},
+              "Owner":{"type":"object","required":["email"],"properties":{"email":{"type":"string","format":"email"}}}}}}"##,
+        );
+        let pet = s.root.pointer("/components/schemas/Pet").unwrap();
+        let v = compile(&s, pet, Direction::Response).unwrap();
+        assert!(v.is_valid(&json!({"id": 1, "name": null})));
+        assert!(v.is_valid(&json!({"id": 1, "name": "a", "age": 1})));
+        assert!(!v.is_valid(&json!({"id": 1, "name": "a", "age": 0})), "exclusive minimum");
+        assert!(!v.is_valid(&json!({"name": "a"})), "id is required in a response");
+        assert!(!v.is_valid(&json!({"id": 1, "name": "c"})), "enum");
+        assert!(!v.is_valid(&json!({"id": 1, "name": "a", "owner": {"email": "not-an-email"}})), "format via $ref");
+        let r = compile(&s, pet, Direction::Request).unwrap();
+        assert!(!r.is_valid(&json!({"name": "a"})), "secret is required in a request");
+        assert!(r.is_valid(&json!({"name": "a", "secret": "x"})), "id is read-only");
+    }
+
+    #[test]
+    fn openapi31_is_used_as_is_and_recursion_resolves() {
+        let s = spec(
+            r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},"components":{"schemas":{
+              "Node":{"type":["object","null"],"properties":{"next":{"$ref":"#/components/schemas/Node"},"v":{"type":"integer","exclusiveMinimum":0}}}}}}"##,
+        );
+        let node = s.root.pointer("/components/schemas/Node").unwrap();
+        let v = compile(&s, node, Direction::Response).unwrap();
+        assert!(v.is_valid(&json!({"v": 1, "next": {"v": 2, "next": null}})));
+        assert!(!v.is_valid(&json!({"v": 1, "next": {"v": 0}})));
+    }
+
+    #[test]
+    fn swagger2_definitions_and_file() {
+        let s = spec(
+            r##"{"swagger":"2.0","info":{"title":"t","version":"1"},"paths":{},"definitions":{
+              "Err":{"type":"object","properties":{"code":{"type":"integer","x-nullable":true},"f":{"type":"file"}}}}}"##,
+        );
+        let v = compile(&s, &json!({"$ref": "#/definitions/Err"}), Direction::Response).unwrap();
+        assert!(v.is_valid(&json!({"code": null, "f": 3})));
+        assert!(!v.is_valid(&json!({"code": "x"})));
+    }
+
+    #[test]
+    fn formats_are_asserted_and_unknown_ones_ignored() {
+        let s = spec(r##"{"openapi":"3.0.3","info":{"title":"t","version":"1"},"paths":{}}"##);
+        let v = compile(&s, &json!({"type": "object", "properties": {"at": {"type": "string", "format": "date-time"}, "n": {"type": "integer", "format": "int64"}}}), Direction::Response).unwrap();
+        assert!(v.is_valid(&json!({"at": "2026-09-30T10:00:00Z", "n": 5})));
+        assert!(!v.is_valid(&json!({"at": "yesterday"})));
+    }
+
+    #[test]
+    fn external_references_are_refused() {
+        let s = spec(r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"##);
+        assert!(compile(&s, &json!({"$ref": "https://example.com/x.json"}), Direction::Response).is_err());
+        assert!(compile(&s, &json!({"$ref": "#/components/schemas/Missing"}), Direction::Response).is_err());
+    }
+}

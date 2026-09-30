@@ -16,6 +16,7 @@ anvil-portability.workspace = true
 anvil-diagnostics.workspace = true
 anvil-load.workspace = true
 anvil-import.workspace = true
+anvil-contract.workspace = true
 url.workspace = true
 anvil-runner.workspace = true
 anvil-identity.workspace = true
@@ -45,6 +46,7 @@ winapi-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+anvil-contract.workspace = true
 # Fault injection in the import atomicity tests (a trigger that fails a write).
 rusqlite.workspace = true
 tokio-util.workspace = true
