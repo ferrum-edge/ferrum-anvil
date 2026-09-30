@@ -194,8 +194,11 @@ scheduling); otherwise the **chain** runs in order, feeding
 `ExecutionOutput.extracted` into later steps. A chain continues after an
 application or assertion failure (a complete response exists) and stops at a
 transport failure, timeout or cancellation. **Datasets** (CSV with header row,
-or a JSON array of flat objects; ≤ 64 MiB, ≤ 1 M rows, ≤ 256 columns) supply
-row `iteration mod rows`; the SHA-256 of the exact bytes goes into the report.
+or a JSON array of flat objects; ≤ 64 MiB, ≤ 1 M rows, ≤ 256 columns and
+≤ 16 Mi cells, rows × columns) supply row `iteration mod rows`; the SHA-256
+of the exact bytes goes into the report. Every row keeps a slot for every
+column, including JSON keys it lacks, so the cell budget is checked while
+parsing, before the rows are built.
 
 **Warmup**: iterations that start (closed/iterations) or are scheduled (open)
 in the first `warmup_secs` are excluded from every summary metric. They stay
@@ -248,7 +251,10 @@ and the HTML report says "WARNING: counts do not balance" otherwise. With
 
 * gRPC: `Σ status_codes = ok + non_ok = completed`, `non_ok = application_failures`,
   `missing_status ≤ transport_failures + timeouts` (a missing status is
-  incomplete, never completed).
+  incomplete, never completed). `status_codes` has an entry per valid code
+  (0–16) and one for every other value together, under `-1` ("invalid: any
+  code outside 0–16"), so a peer cannot grow it with a new code per reply;
+  the raw value stays in the execution record and the failure examples.
 * Streams: `opened ≤ settled`, `with_messages ≤ opened`; SSE `Σ ended_by = opened`.
 * WebSocket: `opened + handshake_rejected + not_opened = settled`,
   `closed_cleanly ≤ opened`, `Σ close_codes = opened`, and no RTT pairs
@@ -413,7 +419,8 @@ reader cannot keep a finished worker alive.
   observation, and empty distributions have empty values, not zeros.
 * **HTML** (`html::to_html`): one self-contained file — inline CSS and inline
   SVG only, no JavaScript, no external fonts/images/stylesheets, and an
-  embedded CSP (`default-src 'none'`). Every dynamic string is escaped;
+  embedded CSP (`default-src 'none'`). Every dynamic string is escaped,
+  including the unit nouns of an imported report's protocol semantics;
   response-derived text (e.g. a header value quoted by a failed assertion) is
   rendered inert. Charts: sends completed/failed and arrivals
   dropped per second, success p50/p99 per second, status distribution; native

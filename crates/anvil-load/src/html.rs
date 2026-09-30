@@ -312,6 +312,7 @@ pub fn grpc_code_name(code: i32) -> &'static str {
         14 => "UNAVAILABLE",
         15 => "DATA_LOSS",
         16 => "UNAUTHENTICATED",
+        crate::metrics::GRPC_STATUS_INVALID => "invalid: any code outside 0–16",
         _ => "non-standard code",
     }
 }
@@ -576,8 +577,11 @@ pub fn to_html(r: &LoadReport) -> String {
     // Tiles.
     let c = &r.counts;
     let q = &r.requests;
+    // The unit nouns come from the report, which may be imported: plain text
+    // for the escaping helpers, escaped where written into markup directly.
     let (one, many) = unit_words(r);
     let title_many = capitalize(&many);
+    let (one_html, title_many_html) = (esc(&one), esc(&title_many));
     let failed = q.transport_failures + q.timeouts + q.application_failures.max(q.assertion_failures);
     let finished = q.completed + q.transport_failures + q.timeouts;
     let err_pct = if finished > 0 { failed as f64 * 100.0 / finished as f64 } else { 0.0 };
@@ -615,7 +619,7 @@ pub fn to_html(r: &LoadReport) -> String {
     );
     let _ = write!(
         h,
-        r#"<tr><td>{title_many}</td><td class="num">—</td><td class="num">{}</td><td class="num">—</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td></tr></table>"#,
+        r#"<tr><td>{title_many_html}</td><td class="num">—</td><td class="num">{}</td><td class="num">—</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td></tr></table>"#,
         fmt_n(q.started),
         fmt_n(q.completed),
         fmt_n(q.transport_failures),
@@ -628,7 +632,7 @@ pub fn to_html(r: &LoadReport) -> String {
     let balanced = balanced && crate::report::check_protocol_balance(r).is_ok();
     let _ = write!(
         h,
-        r#"<p class="sub">{} One iteration runs the plan's chain (or one weighted pick); each step is one {one}. Scheduled = started + dropped; started = completed + transport failures + timeouts + canceled + in flight at end. Application and assertion failures are subsets of completed. Connections: {} opened, {} reused. Bytes (logical): {} sent, {} received over {:.1} s measured.</p></div>"#,
+        r#"<p class="sub">{} One iteration runs the plan's chain (or one weighted pick); each step is one {one_html}. Scheduled = started + dropped; started = completed + transport failures + timeouts + canceled + in flight at end. Application and assertion failures are subsets of completed. Connections: {} opened, {} reused. Bytes (logical): {} sent, {} received over {:.1} s measured.</p></div>"#,
         if balanced { "Counts balance." } else { "WARNING: counts do not balance — treat this report as suspect." },
         fmt_n(q.connections_opened),
         fmt_n(q.connections_reused),
@@ -720,7 +724,7 @@ pub fn to_html(r: &LoadReport) -> String {
                     (b.second as f64, format!("{} s: p50 {}, p99 {} (successful {many})", b.second, fmt_us(b.p50_us), fmt_us(b.p99_us)))
                 })
                 .collect();
-            let _ = write!(h, r#"<h2>Successful-{one} latency per second</h2><div class="card">"#);
+            let _ = write!(h, r#"<h2>Successful-{one_html} latency per second</h2><div class="card">"#);
             h.push_str(&legend(&[("p50", "--series-1"), ("p99", "--series-2")]));
             h.push_str(&line_chart(
                 &format!("Successful-{one} latency p50 and p99 per second, milliseconds"),
@@ -833,6 +837,30 @@ mod tests {
         }
         assert!(html.contains("Content-Security-Policy"));
         assert!(html.contains("default-src 'none'"));
+    }
+
+    /// An imported report's unit nouns are text at every sink, never markup.
+    #[test]
+    fn hostile_unit_labels_are_escaped_everywhere() {
+        let mut r = sample_report();
+        let one = r#"</td></tr></table><style>main{display:none}</style><a href="https://example.invalid/">"#;
+        let many = r#"</td><meta http-equiv="refresh" content="0;url=https://example.invalid/"><style>*{color:red}</style>"#;
+        let sem = &mut r.protocol_metrics.as_mut().expect("protocol metrics").semantics;
+        sem.unit_singular = one.into();
+        sem.unit_plural = many.into();
+        let html = to_html(&r);
+        let lower = html.to_ascii_lowercase();
+        assert_eq!(lower.matches("<style").count(), 1, "only the report's own stylesheet");
+        assert_eq!(lower.matches("<meta").count(), 4, "only the report's own meta elements");
+        assert!(!lower.contains("<a "), "no injected link");
+        assert!(!lower.contains(r#"http-equiv="refresh""#), "no injected refresh");
+        // The three sinks written directly into markup, as text.
+        assert!(html.contains(&format!("<tr><td>{}</td>", esc(&capitalize(many)))));
+        assert!(html.contains(&format!("each step is one {}.", esc(one))));
+        assert!(html.contains(&format!("<h2>Successful-{} latency per second</h2>", esc(one))));
+        // The policy is intact.
+        assert_eq!(html.matches("Content-Security-Policy").count(), 1);
+        assert!(html.contains("default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"));
     }
 
     #[test]

@@ -12,6 +12,32 @@ use std::sync::Arc;
 pub const MAX_DATASET_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ROWS: usize = 1_000_000;
 pub const MAX_COLUMNS: usize = 256;
+/// Most cells (rows × columns) a parsed dataset may hold. Every row keeps a
+/// slot for every column, present or not, so the row and column limits alone
+/// would let a few megabytes of mostly empty JSON objects (or of empty CSV
+/// fields) expand into gigabytes. Checked before a row beyond it is built.
+pub const MAX_CELLS: usize = 16 * 1024 * 1024;
+
+/// Bounds a caller applies while a dataset is parsed, before any row is
+/// built. Each is capped at this module's global limit, so a caller can only
+/// tighten them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatasetLimits {
+    pub max_rows: usize,
+    pub max_cells: usize,
+}
+
+impl Default for DatasetLimits {
+    fn default() -> Self {
+        DatasetLimits { max_rows: MAX_ROWS, max_cells: MAX_CELLS }
+    }
+}
+
+impl DatasetLimits {
+    fn capped(self) -> DatasetLimits {
+        DatasetLimits { max_rows: self.max_rows.min(MAX_ROWS), max_cells: self.max_cells.min(MAX_CELLS) }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,13 +65,20 @@ pub struct Dataset {
 
 impl Dataset {
     pub fn parse(format: DatasetFormat, bytes: impl Into<Arc<[u8]>>) -> Result<Dataset, LoadError> {
+        Dataset::parse_with_limits(format, bytes, DatasetLimits::default())
+    }
+
+    /// Parse under a caller's own bounds (the collection runner's tighter row
+    /// limit, say). They are enforced while parsing, before rows are built.
+    pub fn parse_with_limits(format: DatasetFormat, bytes: impl Into<Arc<[u8]>>, limits: DatasetLimits) -> Result<Dataset, LoadError> {
+        let limits = limits.capped();
         let raw: Arc<[u8]> = bytes.into();
         if raw.len() > MAX_DATASET_BYTES {
             return Err(LoadError::Invalid(format!("dataset is {} bytes; the limit is {MAX_DATASET_BYTES}", raw.len())));
         }
         let (columns, rows) = match format {
-            DatasetFormat::Csv => parse_csv(&raw)?,
-            DatasetFormat::Json => parse_json(&raw)?,
+            DatasetFormat::Csv => parse_csv(&raw, limits)?,
+            DatasetFormat::Json => parse_json(&raw, limits)?,
         };
         if rows.is_empty() {
             return Err(LoadError::Invalid("dataset has no rows".into()));
@@ -107,7 +140,19 @@ fn check_columns(cols: &[String]) -> Result<(), LoadError> {
     Ok(())
 }
 
-fn parse_csv(raw: &[u8]) -> Result<Parsed, LoadError> {
+/// Refuse a matrix of `rows` × `columns` cells over the budget. Error text
+/// carries only counts, never cell values.
+fn check_cells(rows: usize, columns: usize, limits: DatasetLimits) -> Result<(), LoadError> {
+    match rows.checked_mul(columns) {
+        Some(cells) if cells <= limits.max_cells => Ok(()),
+        _ => Err(LoadError::Invalid(format!(
+            "dataset has {rows} rows of {columns} columns; the limit is {} cells (rows × columns)",
+            limits.max_cells
+        ))),
+    }
+}
+
+fn parse_csv(raw: &[u8], limits: DatasetLimits) -> Result<Parsed, LoadError> {
     let mut rdr = csv::ReaderBuilder::new().has_headers(true).flexible(false).from_reader(raw);
     let headers = rdr.headers().map_err(|e| LoadError::Invalid(format!("dataset CSV header: {e}")))?;
     let columns: Vec<String> = headers.iter().map(|h| h.trim().to_string()).collect();
@@ -115,19 +160,22 @@ fn parse_csv(raw: &[u8]) -> Result<Parsed, LoadError> {
     let mut rows = Vec::new();
     for (i, rec) in rdr.records().enumerate() {
         let rec = rec.map_err(|e| LoadError::Invalid(format!("dataset CSV row {}: {e}", i + 1)))?;
-        if rows.len() >= MAX_ROWS {
-            return Err(LoadError::Invalid(format!("dataset has more than {MAX_ROWS} rows")));
+        if rows.len() >= limits.max_rows {
+            return Err(LoadError::Invalid(format!("dataset has more than {} rows", limits.max_rows)));
         }
+        check_cells(rows.len() + 1, columns.len(), limits)?;
         rows.push(rec.iter().map(|v| Some(v.to_string())).collect());
     }
     Ok((columns, rows))
 }
 
-fn parse_json(raw: &[u8]) -> Result<Parsed, LoadError> {
+fn parse_json(raw: &[u8], limits: DatasetLimits) -> Result<Parsed, LoadError> {
     let v: serde_json::Value = serde_json::from_slice(raw).map_err(|e| LoadError::Invalid(format!("dataset JSON: {e}")))?;
-    let arr = v.as_array().ok_or_else(|| LoadError::Invalid("dataset JSON must be an array of objects".into()))?;
-    if arr.len() > MAX_ROWS {
-        return Err(LoadError::Invalid(format!("dataset has more than {MAX_ROWS} rows")));
+    let serde_json::Value::Array(arr) = v else {
+        return Err(LoadError::Invalid("dataset JSON must be an array of objects".into()));
+    };
+    if arr.len() > limits.max_rows {
+        return Err(LoadError::Invalid(format!("dataset has more than {} rows", limits.max_rows)));
     }
     let mut columns: Vec<String> = Vec::new();
     for (i, row) in arr.iter().enumerate() {
@@ -142,23 +190,26 @@ fn parse_json(raw: &[u8]) -> Result<Parsed, LoadError> {
         }
     }
     check_columns(&columns)?;
+    // Every row gets a slot for every column, including keys it lacks: bound
+    // the whole matrix before building it.
+    check_cells(arr.len(), columns.len(), limits)?;
     let rows = arr
-        .iter()
+        .into_iter()
         .map(|row| {
-            let obj = row.as_object().expect("checked above");
-            columns
-                .iter()
-                .map(|c| {
-                    obj.get(c).map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Null => String::new(),
-                        other => other.to_string(),
-                    })
-                })
-                .collect()
+            let serde_json::Value::Object(mut obj) = row else { unreachable!("every row was checked to be an object") };
+            columns.iter().map(|c| obj.remove(c.as_str()).map(cell_text)).collect()
         })
         .collect();
     Ok((columns, rows))
+}
+
+/// Strings as-is, `null` as empty, other values as their compact JSON text.
+fn cell_text(v: serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +243,54 @@ mod tests {
         assert!(Dataset::parse(DatasetFormat::Csv, b"a,b\n1\n".to_vec()).is_err());
         assert!(Dataset::parse(DatasetFormat::Json, br#"{"a":1}"#.to_vec()).is_err());
         assert!(Dataset::parse(DatasetFormat::Json, br#"[1,2]"#.to_vec()).is_err());
+    }
+
+    /// One object with every column, then empty objects: a small file whose
+    /// rows would each still get a slot for every column.
+    fn sparse_wide_json(rows: usize) -> Vec<u8> {
+        let wide: Vec<String> = (0..MAX_COLUMNS).map(|i| format!("\"c{i}\":1")).collect();
+        let mut s = format!("[{{{}}}", wide.join(","));
+        for _ in 1..rows {
+            s.push_str(",{}");
+        }
+        s.push(']');
+        s.into_bytes()
+    }
+
+    #[test]
+    fn sparse_json_is_refused_before_it_expands_into_a_dense_matrix() {
+        let bytes = sparse_wide_json(MAX_CELLS / MAX_COLUMNS + 1);
+        assert!(bytes.len() < 1024 * 1024, "the input stays small: {} bytes", bytes.len());
+        let e = Dataset::parse(DatasetFormat::Json, bytes.clone()).unwrap_err().to_string();
+        assert!(e.contains("cells"), "{e}");
+        // A caller can only tighten the bounds, never loosen them.
+        let loose = DatasetLimits { max_rows: usize::MAX, max_cells: usize::MAX };
+        let e = Dataset::parse_with_limits(DatasetFormat::Json, bytes, loose).unwrap_err().to_string();
+        assert!(e.contains("cells"), "{e}");
+    }
+
+    /// Parse under a caller's bounds of 3 rows and 6 cells.
+    fn limited(format: DatasetFormat, bytes: &[u8]) -> Result<Dataset, LoadError> {
+        Dataset::parse_with_limits(format, bytes.to_vec(), DatasetLimits { max_rows: 3, max_cells: 6 })
+    }
+
+    #[test]
+    fn caller_limits_apply_while_parsing() {
+        let s = |v: &str| Some(v.to_string());
+        // Within both bounds: a key missing from a row stays undefined.
+        let d = limited(DatasetFormat::Json, br#"[{"a":1,"b":2},{},{"b":"x"}]"#).unwrap();
+        assert_eq!(d.rows, vec![vec![s("1"), s("2")], vec![None, None], vec![None, s("x")]]);
+        assert_eq!(limited(DatasetFormat::Csv, b"a,b\n1,2\n3,4\n5,6\n").unwrap().rows.len(), 3);
+        // More rows than this caller accepts.
+        let e = limited(DatasetFormat::Json, br#"[{},{},{},{}]"#).unwrap_err().to_string();
+        assert!(e.contains("more than 3 rows"), "{e}");
+        let e = limited(DatasetFormat::Csv, b"a\n1\n2\n3\n4\n").unwrap_err().to_string();
+        assert!(e.contains("more than 3 rows"), "{e}");
+        // Within the row bound, over the cell budget.
+        let e = limited(DatasetFormat::Json, br#"[{"a":1,"b":2,"c":3},{},{}]"#).unwrap_err().to_string();
+        assert!(e.contains("cells"), "{e}");
+        let e = limited(DatasetFormat::Csv, b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n").unwrap_err().to_string();
+        assert!(e.contains("cells"), "{e}");
     }
 
     #[test]

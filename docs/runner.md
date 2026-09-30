@@ -82,7 +82,9 @@ the same code as the load engine. JSON strings are used as-is, other scalars
 use their JSON text, `null` becomes an empty string, and a key missing from
 a row leaves that variable *undefined* for that row (not empty).
 
-Bounds: 16 MiB, 100,000 rows and 256 columns. Empty, duplicate or
+Bounds: 16 MiB, 100,000 rows, 256 columns and the load engine's budget of
+16 Mi cells (rows × columns); rows and cells are checked while parsing,
+before the rows are built. Empty, duplicate or
 brace-containing column names are rejected, and a dataset must have at least
 one row.
 

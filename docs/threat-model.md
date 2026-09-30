@@ -117,6 +117,11 @@ against it).
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
+- **A load target inflating the run's metrics:** every aggregate a load
+  worker keeps from responses is bounded, whatever the target answers:
+  failure categories and their examples, destinations, protocols, timeline
+  buckets, and gRPC status counts, where every `grpc-status` outside 0–16
+  shares one bucket.
 
 ### Imports, bundles and backups
 
@@ -255,6 +260,16 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   vault authenticated nothing else in the archive, are refused, and no
   secret from such a vault is ever restored. Their other entries were never
   encrypted: a copy exposes its objects, attachments, settings and history.
+- **Datasets that expand when parsed:** a dataset (chosen by the user, or
+  carried by a bundle or backup) is bounded in bytes, rows, columns and
+  cells (rows × columns) while it is parsed, before its rows are built, so a
+  small file of mostly empty JSON objects cannot expand into a matrix of
+  gigabytes in the app. The collection runner's tighter row limit applies
+  the same way.
+- **Imported load reports exported as HTML:** a restored report's text,
+  including the unit nouns of its protocol semantics, is escaped wherever
+  the HTML export writes it, and the export's CSP blocks scripts, forms and
+  external resources.
 - **An OAuth profile imported from a bundle** never keeps the bundle's
   token-cache id, so it cannot share a token with a profile stored here.
 

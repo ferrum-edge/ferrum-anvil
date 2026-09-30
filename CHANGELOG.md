@@ -783,6 +783,24 @@
 
 ### Security
 
+- Datasets are now bounded in cells (rows × columns, at most 16,777,216)
+  while they are parsed, before any row is built, for CSV and JSON alike.
+  Every row keeps a slot for every column, so before this a small JSON file
+  of mostly empty objects could expand into a matrix of several gigabytes
+  in the app when the dataset was added or a load plan was checked. The
+  collection runner's 100,000-row limit is now enforced while parsing
+  rather than afterwards, and parsed rows are moved instead of copied.
+- A load run's gRPC status counts now keep one entry per valid code (0–16)
+  and count every other `grpc-status` together under `-1` ("invalid: any
+  code outside 0–16"). Before, each distinct value a target returned added
+  an entry, growing the worker's memory and the work of every progress
+  snapshot for the length of the run. The raw value is still kept in the
+  execution record and the bounded failure examples.
+- The HTML export of a load report now escapes the unit nouns from the
+  report's protocol semantics everywhere it writes them. A report imported
+  from a file or a full backup could otherwise place markup and inline
+  styles in the exported page (the page's CSP already blocked scripts).
+
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted

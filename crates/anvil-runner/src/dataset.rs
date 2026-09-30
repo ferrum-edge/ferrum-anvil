@@ -45,16 +45,12 @@ impl RunDataset {
             DatasetFormat::Csv => anvil_load::DatasetFormat::Csv,
             DatasetFormat::Json => anvil_load::DatasetFormat::Json,
         };
-        let parsed = anvil_load::Dataset::parse(lf, bytes.to_vec()).map_err(|e| {
+        // The runner's row limit applies while parsing, before any row is built.
+        let limits = anvil_load::DatasetLimits { max_rows: MAX_DATASET_ROWS, ..Default::default() };
+        let parsed = anvil_load::Dataset::parse_with_limits(lf, bytes.to_vec(), limits).map_err(|e| {
             let msg = e.to_string();
             RunError::Dataset(format!("'{name}': {}", msg.strip_prefix("invalid load plan: ").unwrap_or(&msg)))
         })?;
-        if parsed.rows.len() > MAX_DATASET_ROWS {
-            return Err(RunError::Dataset(format!(
-                "'{name}' has {} rows; the collection runner accepts at most {MAX_DATASET_ROWS}",
-                parsed.rows.len()
-            )));
-        }
         let mut sensitive = Vec::new();
         let mut missing = Vec::new();
         for c in sensitive_columns {
@@ -71,9 +67,9 @@ impl RunDataset {
         Ok(RunDataset {
             name: name.to_string(),
             format,
-            columns: parsed.columns.clone(),
-            rows: parsed.rows.clone(),
-            sha256: parsed.sha256.clone(),
+            columns: parsed.columns,
+            rows: parsed.rows,
+            sha256: parsed.sha256,
             sensitive_columns: sensitive,
             missing_sensitive_columns: missing,
         })
@@ -172,7 +168,28 @@ mod tests {
         let big = vec![b'a'; MAX_DATASET_BYTES + 1];
         let e = RunDataset::parse("big", DatasetFormat::Csv, &big, &[]).unwrap_err().to_string();
         assert!(e.contains("at most"), "{e}");
+        let rows = format!("[{{}}{}]", ",{}".repeat(MAX_DATASET_ROWS));
+        let e = RunDataset::parse("rows", DatasetFormat::Json, rows.as_bytes(), &[]).unwrap_err().to_string();
+        assert!(e.contains("rows") && e.contains(&MAX_DATASET_ROWS.to_string()), "{e}");
         assert_eq!(RunDataset::format_for_path("rows.CSV"), Some(DatasetFormat::Csv));
         assert_eq!(RunDataset::format_for_path("rows.txt"), None);
+    }
+
+    /// One object with every column, then empty objects up to the runner's
+    /// row limit: well within its byte and row bounds, but every row would
+    /// get a slot for every column.
+    #[test]
+    fn sparse_wide_json_is_refused_before_dense_expansion() {
+        let wide: Vec<String> = (0..anvil_load::dataset::MAX_COLUMNS).map(|i| format!("\"c{i}\":1")).collect();
+        let sparse = format!("[{{{}}}{}]", wide.join(","), ",{}".repeat(MAX_DATASET_ROWS - 1));
+        assert!(sparse.len() < MAX_DATASET_BYTES);
+        let e = RunDataset::parse("sparse", DatasetFormat::Json, sparse.as_bytes(), &[]).unwrap_err().to_string();
+        assert!(e.contains("sparse") && e.contains("cells"), "{e}");
+        // A narrow dataset of as many rows is accepted, missing keys undefined.
+        let narrow = format!("[{{\"a\":1}}{}]", ",{}".repeat(MAX_DATASET_ROWS - 1));
+        let d = RunDataset::parse("narrow", DatasetFormat::Json, narrow.as_bytes(), &[]).unwrap();
+        assert_eq!(d.row_count(), MAX_DATASET_ROWS);
+        assert_eq!(d.row_layer(0).vars.len(), 1);
+        assert!(d.row_layer(1).vars.is_empty());
     }
 }
