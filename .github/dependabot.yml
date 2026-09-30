@@ -7,6 +7,31 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+    # Keep these pinned to their patched local copies; retire the ignores by
+    # following vendor/README.md when upstream releases contain the fixes.
+    ignore:
+      - dependency-name: h3
+      - dependency-name: h3-quinn
+      - dependency-name: tungstenite
+      - dependency-name: tokio-tungstenite
+      # Tauri's Rust crate and JavaScript CLI must move together by hand.
+      # Patch skew is supported; major/minor changes need a coordinated bump.
+      - dependency-name: tauri*
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@tauri-apps/*'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: tauri-plugin-wdio-webdriver
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@wdio/tauri-service'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
     commit-message:
       prefix: deps
     labels:
@@ -25,6 +50,25 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+    # Tauri's Rust crates and JavaScript CLI must move together by hand.
+    # Patch skew is supported; major/minor changes need a coordinated bump.
+    ignore:
+      - dependency-name: tauri*
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@tauri-apps/*'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: tauri-plugin-wdio-webdriver
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@wdio/tauri-service'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
     commit-message:
       prefix: deps
     labels:
@@ -38,7 +82,9 @@ updates:
           - patch
 
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
       day: monday

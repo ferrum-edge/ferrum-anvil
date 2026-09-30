@@ -16,6 +16,23 @@ release) and `actions: read` (to list the test runs for the release commit).
 `ci.yml` and `e2e.yml` are the required checks for a change. The nightly lab
 run does not replace them.
 
+## Dependabot version updates
+
+Dependabot PRs may need manual follow-up before CI passes. On the Dependabot
+branch, regenerate the third-party license report with
+`node scripts/licenses.mjs`, commit the updated
+`THIRD_PARTY_LICENSES.md`, and push that commit to the same branch. Do not add a
+workflow that writes repository contents with a token. Contract & catalog
+drift can also fail when `json-schema-to-typescript` or `schemars` changes
+generated output. Regenerate the contracts with the commands below, and update
+any affected catalog entries if the catalog drift check reports a failure;
+commit the resulting files and push them to that branch.
+
+Dependabot ignores major and minor updates for Tauri packages because the Rust
+crates and JavaScript packages must move together. Bump `tauri` and the related
+`@tauri-apps/*`, `tauri-plugin-wdio-webdriver`, and `@wdio/tauri-service`
+packages together by hand, then update both lockfiles in the same change.
+
 ## `ci.yml` jobs
 
 | Job | Steps |
