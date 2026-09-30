@@ -347,6 +347,12 @@ fn handshake(seen: &Seen, out: &ExecutionOutput, spec: &McpSpec, r: &Redactor) -
     }
     // A session id the server issued, if Anvil can send it back.
     let issued = seen.session_id.as_deref().filter(|id| is_session_id(id)).map(str::to_string);
+    // Quoted server text must not reveal the session id this same response issued.
+    let mut known = r.clone();
+    if let Some(id) = seen.session_id.as_deref() {
+        known.add_secret(id);
+    }
+    let r = &known;
     let Some(message) = &seen.message else {
         let stream = seen.events.map(|n| format!(" in its event stream of {n} event(s)")).unwrap_or_default();
         return Err(refused(format!("MCP initialize (HTTP {status}) got no JSON-RPC response{stream}"), issued));
