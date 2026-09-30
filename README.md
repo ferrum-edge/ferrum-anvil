@@ -34,6 +34,13 @@ happened on the wire. No account, works offline.
 - **Auth and TLS built in** — API key, Basic, Bearer, JWT, OAuth 2.0 (incl.
   PKCE), HMAC, DPoP, mTLS, private CAs and SPIFFE identities.
 - **Import from anywhere** — OpenAPI, WSDL, Postman, Insomnia, cURL and HAR.
+- **API standards** — check OpenAPI descriptions (Swagger 2.0 to OpenAPI
+  3.2) against your company's own ruleset, with the line to edit and how to
+  fix each finding; SARIF output for CI.
+- **Contract drift** — compare what your API actually did (your sends, or a
+  HAR capture) with its OpenAPI description: undeclared paths, statuses,
+  media types and properties, schema mismatches, slow or oversized calls,
+  with suggested revisions you can apply and reimport.
 - **Private by default** — everything is encrypted on disk, with optional
   passphrase, auto-lock and encrypted backups.
 - **Ferrum Edge aware** — deeper troubleshooting for Ferrum Edge gateways
@@ -62,6 +69,8 @@ anvil workspace create Demo
 anvil add Demo "Health" --url https://example.com/health --folder Smoke
 anvil send Health --workspace Demo
 anvil import-spec Demo --file openapi.yaml
+anvil lint-spec openapi.yaml --ruleset api-standards.yaml
+anvil spec-drift openapi.yaml --har traffic.har --revised openapi.revised.yaml
 anvil run Demo --folder Smoke --junit report.xml
 ```
 
@@ -96,6 +105,7 @@ cargo run -p anvil-lab -- up core                 # keep a lab up for manual tes
 | Load testing | [docs/load.md](docs/load.md) |
 | Collection runner | [docs/runner.md](docs/runner.md) |
 | Imports | [docs/import.md](docs/import.md) |
+| API standards and contract drift | [docs/contract.md](docs/contract.md) |
 | Identities and sign-in | [docs/identity.md](docs/identity.md) |
 | Storage and recovery | [docs/storage-and-recovery.md](docs/storage-and-recovery.md) |
 | Architecture | [docs/architecture.md](docs/architecture.md) |

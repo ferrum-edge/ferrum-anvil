@@ -288,7 +288,7 @@ pub async fn open(
             match tokio::time::timeout(idle, rx.data()).await {
                 Ok(Some(Ok(d))) => {
                     let _ = rx.flow_control().release_capacity(d.len());
-                    let room = hbone::MAX_REFUSAL_BODY.saturating_sub(captured.len());
+                    let room = hbone::REFUSAL_CAPTURE.saturating_sub(captured.len());
                     if d.len() > room {
                         truncated = true;
                     }
@@ -649,6 +649,17 @@ fn reason_name(code: u32) -> String {
     format!("{:?}", h2::Reason::from(code))
 }
 
+/// An interactive send the tunnel did not take before the session was
+/// canceled (the endpoint withheld flow-control credit). Interactive
+/// sessions have no total deadline, so cancellation is what ends it.
+fn send_interrupted() -> TransportFailure {
+    TransportFailure::new(
+        Phase::Session,
+        FailureKind::Canceled,
+        "the UDP exchange through the HBONE tunnel was canceled while a datagram was waiting for the tunnel to take it",
+    )
+}
+
 /// Send one datagram through the tunnel and record it (or why it was not sent).
 async fn send_recorded(chan: &mut HboneChannel, tr: &mut Transcript, payload: &[u8]) {
     match chan.send(payload).await {
@@ -753,12 +764,18 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
             Ev::In(Inbound::PortUnreachable(_) | Inbound::Error(_) | Inbound::Dropped(_)) => {}
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    send_recorded(&mut chan, &mut tr, text.as_bytes()).await;
+                    if guarded(send_recorded(&mut chan, &mut tr, text.as_bytes()), cancel, total_deadline).await.is_err() {
+                        failure = Some(send_interrupted());
+                        chan.set_closed_by(ClosedBy::Client);
+                    }
                     window_end = Instant::now() + window;
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                     Ok(b) => {
-                        send_recorded(&mut chan, &mut tr, &b).await;
+                        if guarded(send_recorded(&mut chan, &mut tr, &b), cancel, total_deadline).await.is_err() {
+                            failure = Some(send_interrupted());
+                            chan.set_closed_by(ClosedBy::Client);
+                        }
                         window_end = Instant::now() + window;
                     }
                     Err(e) => tr.note("error", &format!("datagram not sent: {e}")),

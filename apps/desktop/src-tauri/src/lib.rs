@@ -1,11 +1,13 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_drift;
 mod cmd_files;
 mod cmd_identity;
 mod cmd_load;
 mod cmd_runner;
 mod cmd_sessions;
 mod cmd_specs;
+mod cmd_standards;
 mod cmd_update;
 mod commands;
 mod state;
@@ -223,6 +225,20 @@ pub fn run() {
             cmd_specs::spec_sources,
             cmd_specs::spec_reimport_plan,
             cmd_specs::spec_reimport_apply,
+            cmd_standards::standards_view,
+            cmd_standards::standards_add,
+            cmd_standards::standards_replace,
+            cmd_standards::standards_remove,
+            cmd_standards::standards_set_enabled,
+            cmd_standards::standards_set_recommended,
+            cmd_standards::standards_lint,
+            cmd_standards::standards_report_export,
+            cmd_drift::drift_report,
+            cmd_drift::drift_check_execution,
+            cmd_drift::drift_revise,
+            cmd_drift::drift_reimport_plan,
+            cmd_drift::drift_reimport_apply,
+            cmd_drift::drift_export,
             cmd_update::update_check_on_launch,
             cmd_update::update_check,
             cmd_update::update_install,

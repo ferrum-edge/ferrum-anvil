@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 anvil-domain.workspace = true
+anvil-xml-limits.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -32,6 +33,7 @@ uuid.workspace = true
 roxmltree.workspace = true
 
 [dev-dependencies]
+anvil-xml-limits = { workspace = true, features = ["test-support"] }
 tokio.workspace = true
 
 [lints]

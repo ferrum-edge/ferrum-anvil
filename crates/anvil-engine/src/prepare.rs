@@ -47,9 +47,11 @@ pub struct PreparedHttp {
     /// credentials of the request's own origin, like `Authorization`.
     pub sensitive_headers: Vec<String>,
     pub body: Bytes,
-    /// Whether resolving the body substituted a secret variable. Decided
-    /// structurally, before encoding: a form-urlencoded or re-serialized
-    /// GraphQL body holds the secret in a form a byte scan does not find.
+    /// Whether the body holds a secret: resolving it substituted a secret
+    /// variable, or it has a form field the user marked sensitive (whatever
+    /// its value, literal or not). Decided structurally, before encoding: a
+    /// form-urlencoded or re-serialized GraphQL body holds the secret in a
+    /// form a byte scan does not find.
     pub body_uses_secret: bool,
     pub content_type: Option<String>,
     pub inferred: Vec<String>,
@@ -241,6 +243,20 @@ pub fn prepare_http(
     send_anyway: bool,
     allowed_schemes: &[&str],
 ) -> Result<PreparedHttp, TransportFailure> {
+    prepare_http_with_redaction_names(spec, r, attachments, settings, &[], send_anyway, allowed_schemes)
+}
+
+/// Prepare an HTTP request using configured credential names to identify
+/// credential-bearing form fields for cross-origin redirect handling.
+pub(crate) fn prepare_http_with_redaction_names(
+    spec: &RequestSpec,
+    r: &Resolver,
+    attachments: &dyn AttachmentResolver,
+    settings: &EffectiveSettings,
+    redaction_names: &[String],
+    send_anyway: bool,
+    allowed_schemes: &[&str],
+) -> Result<PreparedHttp, TransportFailure> {
     let mut inferred = Vec::new();
     let method = r.resolve(spec.method.trim(), "method")?.to_ascii_uppercase();
     if method.is_empty() || !method.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'_') {
@@ -308,6 +324,7 @@ pub fn prepare_http(
 
     // ---- body ----
     let secret_substitutions_before_body = r.secret_substitutions();
+    let mut sensitive_body_field = false;
     let (body, inferred_ct, lint_target): (Vec<u8>, Option<String>, Option<(&str, String)>) = match &spec.body {
         Body::None => (vec![], None, None),
         Body::Raw { text, content_type } => {
@@ -330,6 +347,9 @@ pub fn prepare_http(
                 if f.sensitive {
                     r.mark_sensitive(&k, &v);
                 }
+                if f.sensitive || crate::redact::is_credential_name(&k, redaction_names) {
+                    sensitive_body_field = true;
+                }
                 parts.push(format!(
                     "{}={}",
                     url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(),
@@ -344,11 +364,17 @@ pub fn prepare_http(
             let boundary = format!("----AnvilFormBoundary{}", hex::encode(b));
             let mut out: Vec<u8> = Vec::new();
             for (i, p) in parts.iter().enumerate().filter(|(_, p)| p.enabled) {
-                let name = r.resolve(&p.name, &format!("body.parts[{i}].name"))?.replace('"', "%22");
+                let resolved_name = r.resolve(&p.name, &format!("body.parts[{i}].name"))?;
+                let name = resolved_name.replace('"', "%22");
                 out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
                 match &p.content {
                     MultipartContent::Text { value } => {
                         let v = r.resolve(value, &format!("body.parts[{i}].value"))?;
+                        // Multipart parts carry no sensitive flag; a credential-like name alone
+                        // keeps the body off cross-origin redirects.
+                        if crate::redact::is_credential_name(&resolved_name, redaction_names) {
+                            sensitive_body_field = true;
+                        }
                         out.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes());
                         if let Some(ct) = &p.content_type {
                             out.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
@@ -447,7 +473,7 @@ pub fn prepare_http(
             (t.clone().into_bytes(), Some(ct), Some(("xml", t)))
         }
     };
-    let body_uses_secret = r.secret_substitutions() > secret_substitutions_before_body;
+    let body_uses_secret = sensitive_body_field || r.secret_substitutions() > secret_substitutions_before_body;
 
     // ---- lint ----
     let mut lint_bypassed = None;
@@ -455,9 +481,16 @@ pub fn prepare_http(
         && spec.lint_policy != LintSendPolicy::Off
     {
         let res = if kind == "json" { lint::json(&text) } else { lint::xml(&text) };
-        if let LintResult::Invalid { issues } = res {
-            let i = &issues[0];
-            let msg = format!("{} body is not well-formed at line {}, column {}: {}", kind.to_uppercase(), i.line, i.column, i.message);
+        let finding = match res {
+            LintResult::Invalid { issues } => {
+                let i = &issues[0];
+                Some(format!("{} body is not well-formed at line {}, column {}: {}", kind.to_uppercase(), i.line, i.column, i.message))
+            }
+            // Not parsed at all, so there is no position to report.
+            LintResult::Refused { reason } => Some(format!("{} body was not linted: {reason}", kind.to_uppercase())),
+            LintResult::Valid | LintResult::Skipped { .. } => None,
+        };
+        if let Some(msg) = finding {
             if spec.lint_policy == LintSendPolicy::Block && !send_anyway {
                 return Err(local(FailureKind::LintBlocked, msg, "body"));
             }
@@ -593,6 +626,88 @@ mod tests {
                 content: MultipartContent::Text { value: "{{password}}".into() },
                 content_type: None,
             }],
+        };
+        assert!(prepared(&spec).body_uses_secret);
+    }
+
+    /// A form field marked sensitive holds a secret whether its value is a
+    /// secret variable or a literal; once form-encoded, a literal's bytes are
+    /// not in the body as such.
+    #[test]
+    fn a_sensitive_form_field_marks_the_body_whatever_its_value() {
+        use anvil_domain::request::KeyValue;
+        let literal = "tok-SENSITIVE-lit p@ss+w/rd";
+        let mut spec = RequestSpec::http("POST", "https://api.example.com/login");
+        let password = KeyValue { sensitive: true, ..KeyValue::new("password", literal) };
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), password.clone()] };
+        let form = prepared(&spec);
+        assert!(form.body_uses_secret, "a sensitive literal form field marks the body");
+        assert!(!holds(&form.body, literal), "the encoded form does not hold the literal byte for byte");
+
+        // A short sensitive value, below the byte scan's minimum, still marks it.
+        let pin = KeyValue { sensitive: true, ..KeyValue::new("pin", "123") };
+        spec.body = Body::FormUrlEncoded { fields: vec![pin] };
+        assert!(prepared(&spec).body_uses_secret);
+
+        // Credential-named literal fields are sensitive even when the user
+        // did not mark them explicitly.
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", literal)] };
+        assert!(prepared(&spec).body_uses_secret);
+
+        let vars = Resolver::new(vec![], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        let custom_name = prepare_http_with_redaction_names(
+            &RequestSpec {
+                body: Body::FormUrlEncoded { fields: vec![KeyValue::new("access_code", "1234")] },
+                ..RequestSpec::http("POST", "https://api.example.com/login")
+            },
+            &vars,
+            &attachments,
+            &EffectiveSettings::default(),
+            &["access_code".into()],
+            false,
+            &["https"],
+        )
+        .unwrap();
+        assert!(custom_name.body_uses_secret, "configured credential names mark literal fields");
+
+        // A disabled sensitive field is not sent, so it does not either.
+        let disabled = KeyValue { enabled: false, ..password };
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), disabled] };
+        assert!(!prepared(&spec).body_uses_secret);
+    }
+
+    #[test]
+    fn credential_name_fields_do_not_register_literal_values_as_secrets() {
+        use anvil_domain::request::KeyValue;
+        let value = "John Smith";
+        let spec = RequestSpec {
+            body: Body::FormUrlEncoded { fields: vec![KeyValue::new("author", value)] },
+            ..RequestSpec::http("POST", "https://api.example.com/submit")
+        };
+        let resolver = Resolver::new(vec![], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        let request = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+
+        assert!(resolver.used_secrets.lock().is_empty(), "a heuristic name does not register its value as a secret");
+        let redactor = crate::redact::Redactor::for_execution(&resolver, &[]);
+        let preview = redactor.text(&String::from_utf8_lossy(&request.body));
+        let decoded_value = url::form_urlencoded::parse(preview.as_bytes()).find(|(name, _)| name == "author").map(|(_, value)| value);
+        assert_eq!(decoded_value.as_deref(), Some(value), "the preview still shows the author value");
+    }
+
+    #[test]
+    fn a_multipart_credential_named_text_part_marks_the_body() {
+        let spec = RequestSpec {
+            body: Body::Multipart {
+                parts: vec![anvil_domain::request::MultipartPart {
+                    name: "password".into(),
+                    enabled: true,
+                    content: MultipartContent::Text { value: "literal-password".into() },
+                    content_type: None,
+                }],
+            },
+            ..RequestSpec::http("POST", "https://api.example.com/login")
         };
         assert!(prepared(&spec).body_uses_secret);
     }

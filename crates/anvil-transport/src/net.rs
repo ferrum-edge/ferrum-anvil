@@ -1,11 +1,15 @@
 //! TCP connect and forward-proxy tunnels with per-address evidence.
 
 use crate::errors::{classify_connect_io, display_chain, io_kind_name};
+use crate::stats::ConnStats;
 use anvil_domain::execution::{ConnectAttempt, FailureKind, Phase, TransportFailure};
 use base64::Engine;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
 pub struct ConnectResult<S = TcpStream> {
@@ -33,6 +37,59 @@ pub async fn connect_tcp(
     let r = race(addrs, deadline, TcpStream::connect).await?;
     let _ = r.stream.set_nodelay(true);
     Ok(r)
+}
+
+/// A connected TCP stream that is reset instead of ended when it is dropped
+/// after [`ConnStats::request_abortive_close`]: `SO_LINGER` 0 makes the OS
+/// send RST, not FIN, and discard what was not sent yet. A session whose
+/// write was interrupted may have left a partial payload, and a FIN after it
+/// would present that payload to the peer as complete.
+pub struct AbortableTcp {
+    stream: TcpStream,
+    stats: Arc<ConnStats>,
+}
+
+impl AbortableTcp {
+    pub fn new(stream: TcpStream, stats: Arc<ConnStats>) -> Self {
+        AbortableTcp { stream, stats }
+    }
+}
+
+impl Drop for AbortableTcp {
+    fn drop(&mut self) {
+        if self.stats.abortive_close_requested() {
+            // Best effort: if it cannot be set, the connection ends with a FIN.
+            let _ = socket2::SockRef::from(&self.stream).set_linger(Some(Duration::ZERO));
+        }
+    }
+}
+
+impl AsyncRead for AbortableTcp {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AbortableTcp {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, data)
+    }
+
+    fn poll_write_vectored(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[std::io::IoSlice<'_>]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 /// The [`connect_tcp`] race over any connector, so tests can script when each

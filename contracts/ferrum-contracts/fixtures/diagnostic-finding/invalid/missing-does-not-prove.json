@@ -1,0 +1,40 @@
+{
+  "code": "ferrum.token.connection_failure",
+  "rule_id": "ferrum.marker",
+  "rule_version": 1,
+  "title": "Gateway could not prepare a connection to the backend",
+  "explanation": "Ferrum Edge reports (connection_failure, status 502) that it could not set up a connection to the configured backend. This coarse value combines DNS, TCP connect, TLS, connection-pool and related setup failures; it does not say which step failed. Your own connection to the gateway completed.",
+  "scope": "gateway_to_upstream",
+  "confidence": "confirmed",
+  "severity": "error",
+  "evidence": [
+    {
+      "source": "ferrum_marker_trusted",
+      "key": "header.x-gateway-error",
+      "value": "connection_failure",
+      "attempt": 0
+    },
+    {
+      "source": "http_status",
+      "key": "status",
+      "value": "502",
+      "attempt": 0
+    }
+  ],
+  "alternatives": [
+    "The gateway could not resolve the backend host.",
+    "The backend refused or did not accept the connection.",
+    "The gateway's TLS connection to the backend failed.",
+    "A gateway connection-pool or connection-limit problem."
+  ],
+  "remediation": [
+    {
+      "text": "Check the backend host and port, the gateway's DNS/network access to it, and the gateway's backend TLS settings.",
+      "owner": "gateway_operator"
+    }
+  ],
+  "owner": "gateway_operator",
+  "confirm_with": [
+    "Gateway logs or authorized diagnostic detail for this request."
+  ]
+}

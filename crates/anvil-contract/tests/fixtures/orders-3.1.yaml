@@ -1,0 +1,70 @@
+openapi: 3.1.0
+info:
+  title: Orders
+  version: 1.0.0
+  description: Orders of the shop.
+  contact: { name: Orders team, email: orders@acme.example }
+  license: { name: Apache-2.0, identifier: Apache-2.0 }
+servers:
+  - url: http://orders.acme.example/v1
+tags:
+  - name: orders
+    description: Orders
+security:
+  - oauth: [orders]
+paths:
+  /v1/orders:
+    get:
+      operationId: listOrders
+      summary: List orders
+      description: Lists orders, newest first.
+      tags: [orders]
+      parameters:
+        - name: page_size
+          in: query
+          description: Page size.
+          schema: { type: integer }
+      responses:
+        '200':
+          description: A page of orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Order' }
+              example: [{ id: 1, total_amount: 10 }]
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/orders/{orderId}:
+    get:
+      operationId: get_order
+      description: One order.
+      tags: [orders]
+      responses:
+        '200':
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+components:
+  securitySchemes:
+    oauth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.acme.example/token
+          scopes: { orders: Orders }
+  schemas:
+    Order:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+        total_amount: { type: number, minimum: 0 }
+    Problem:
+      type: object
+      properties:
+        title: { type: string }

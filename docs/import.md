@@ -27,7 +27,7 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 | Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are copied verbatim into `report.scripts` with `enabled: false, trusted: false` and never attached to requests. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
 | No invented credentials | Auth is imported as configs whose secrets are `{{variable}}` references, listed in `report.required_variables` and deliberately *not* defined, so a request fails validation (unresolved variable) until the user supplies a value. Credential-like body fields and parameters are never generated in samples. |
 | Credential redaction (migrations) | Literal credentials in HAR, cURL, Postman and Insomnia input (Authorization/Cookie/API-key-like headers, credential-like query parameters, form fields and JSON members, auth helper secrets, secret variables, cached OAuth tokens) are replaced by `{{placeholder}}` variables and listed in `report.redactions`, unless `ImportOptions::include_credentials` is set (kept values are then marked sensitive). A value that is only variable references plus an auth scheme word (`Bearer {{token}}`) is not a literal secret and is kept. Detection is name-based and best effort; bodies that cannot be scanned (XML, arbitrary text, unparsable JSON) produce a `body_not_scanned` warning. |
-| Bounded work | `max_bytes` (input size), `max_nodes` (parsed JSON/YAML nodes — charged *during* deserialization, so YAML alias bombs are refused — and XML nodes), a fixed nesting-depth limit, `max_ref_depth`, `max_ref_expansions` (whole import), `max_sample_nodes` (per payload), `max_operations`. Malformed input yields an `ImportError`, never a panic (property-tested). |
+| Bounded work | `max_bytes` (input size), `max_nodes` (parsed JSON/YAML nodes — charged *during* deserialization, so YAML alias bombs are refused — and XML nodes), the string bytes a parsed JSON/YAML document keeps (string values and map keys, alias expansions included; at most twice `max_bytes`, charged before each copy), a fixed nesting-depth limit, `max_ref_depth` (direct `$ref`s and those followed while merging `allOf`), `max_ref_expansions` (whole import), `$ref`s of at most 2048 bytes (longer ones are reported as `ref_too_long` and not followed), `max_sample_nodes` (per payload; also charged per `allOf` branch, and for WSDL per schema node looked at: each child of a construct, each element, attribute, group reference, extension base and message part), bytes generated or copied into OpenAPI samples (generated values at about 32 bytes each plus their text, examples, defaults, merged schemas, per-operation parameters, and the work a sample repeats on each visit: the pointer of every value, a byte per member, `required` name, `type` entry, `$ref` sibling key, `oneOf`/`anyOf` alternative or `enum` value looked at plus its length, the size of `const` once per `enum` value it is compared with, and in `allOf` merges each key, property name, property compared (by its size), `required` name and pair of `type` or `enum` values compared; four times `max_bytes` per import), generated WSDL envelope bytes (8 MiB per envelope, four times `max_bytes` per import), text copied from the source into the imported objects (names, keys, request URLs and source pointers, folder names, descriptions, SOAP actions, server URLs and variables, the pointer of every OpenAPI 3.2 additional operation, the JSON size of every operation and security scheme each time it is imported; four times `max_bytes` per import, after which later operations are skipped with `text_size_limit`), at most 1024 `xmlns` declarations in an XML document, 256 attributes on any element, 2^24 attribute pairs over the whole document (n·(n−1)/2 per element, the comparisons the parser makes), 1 KiB per attribute name, 256 bytes per namespace prefix and 2 KiB per namespace URI, 256 namespace declarations in scope of any element (its own and its ancestors', a prefix declared again counting again), 2^26 for the squares of the declarations in scope summed over the elements that declare one (all counted in the text before it is parsed, which relies on DTDs being refused), 256 XML namespaces in scope of any element after parsing, `max_operations`. Byte budgets are charged before the copy is made. The 1024 `xmlns` cap can refuse a large WSDL that declares its prefixes again on every element, as WCF `singleWsdl` output and some other generators do; such a document fails with `LimitExceeded` ("XML namespace declarations (xmlns)"). Malformed input yields an `ImportError`, never a panic (property-tested). |
 
 ## Report
 
@@ -44,6 +44,13 @@ argument index for cURL (`/args/7`).
   `required_variables` — see above.
 * `counts` — operations found/imported/skipped, `$ref` resolutions and the
   sizes of every list.
+
+The report is bounded: at most 1000 findings of one code are kept (one
+`report_truncated` warning notes the rest), a stored pointer longer than 512
+characters is clipped and suffixed with a hash of the whole pointer (so
+distinct locations stay distinct), messages and values are clipped to 2048, an external reference or
+required variable keeps at most 1000 locations, and at most 10,000 inactive
+settings, redactions and scripts are kept.
 
 Codes are stable strings (for example `recursive_schema`,
 `composition_first_branch`, `contradictory_schema`, `openapi32_construct`,
@@ -391,8 +398,13 @@ forms), `multipleOf`, `int32`/`int64`, `minItems`/`maxItems`/`uniqueItems`,
 disjoint enums reported), `oneOf`/`anyOf` use the first viable branch (warned;
 a discriminator property gets the mapping key), `$ref` with 3.1 siblings is
 treated as `allOf` (3.0 siblings are ignored and reported). Recursion stops
-at the first repeated `$ref` (`recursive_schema`), required members that
-cannot be produced become `null` with a warning. `format: password`,
+at the first repeated `$ref` (`recursive_schema`); an `allOf` branch whose
+`$ref` would exceed `max_ref_depth` is left out (`ref_depth_limit`), and
+merging stops when the payload budget is spent. Required members that
+cannot be produced, and required names with no schema, become `null` with a
+warning; each such `null` counts as a generated value, and once a budget is
+spent the remaining members are left out. Optional members that are not
+generated are skipped before their schema is resolved. `format: password`,
 `binary` and credential-like member names are never generated.
 Contradictions (min > max, lengths, empty ranges, `const` outside `enum`,
 example type mismatches) are reported; the sample is never claimed valid.
@@ -445,8 +457,18 @@ extension (base content first) and restriction, `simpleContent`,
 `simpleType` restriction with `enumeration`, numeric and length facets,
 `list`, `union` (first member, warned), built-in types. Optional elements
 appear with `<!--Optional:-->` when `include_optional` is set; repeated
-elements are annotated. Recursive types stop at the first repetition.
-Credential-like elements (`password`, …) are left empty.
+elements are annotated. Recursive types, and `group`/`attributeGroup`
+references back to a group being expanded, stop at the first repetition
+(`recursive_schema`). An attribute is written once per element. An envelope
+that reaches its node or byte budget keeps what was generated so far, still
+well-formed (`sample_size_limit`); once the import's envelope budget is
+spent, later envelopes are left empty. Credential-like elements
+(`password`, …) are left empty. Each binding (its protocol, portType, style
+and transport), binding operation and portType operation is indexed once;
+a port only looks its binding up, findings about a binding are reported by
+the first port that imports it, and a port's folder is created when its
+first operation is admitted. The message parts and `soap:header`s an
+operation writes are charged to its envelope's budget.
 
 Reported: HTTP GET/POST bindings and other non-SOAP bindings, non-HTTP SOAP
 transports, `use="encoded"` (generated as literal), SOAP-encoding types and
@@ -494,7 +516,12 @@ untouched); literal values are percent-encoded like `encodeURIComponent`,
 `{{variable}}` references are kept, and an empty value becomes a required
 variable. A body MIME type the body kind cannot express (a vendor `+json`
 type, `text/xml`, parameters such as `charset`) is kept as an explicit
-`Content-Type` header unless the request already sets one.
+`Content-Type` header unless the request already sets one. In a v4 export,
+workspaces, request groups and environments need unique `_id`s: an export
+that repeats one of those is refused, and a repeated id of any other resource
+skips the later copy (`duplicate_resource_id`). A resource without an `_id`
+has no children, and each workspace, group, request and environment is
+imported at most once.
 
 Reported: other template tags (`{% response %}`, `{% base64 %}`, …) and
 Nunjucks filters (left in place), digest/NTLM/Hawk/IAM/netrc/ASAP auth,

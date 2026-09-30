@@ -25,6 +25,7 @@ anvil-auth.workspace = true
 anvil-diagnostics.workspace = true
 anvil-load.workspace = true
 anvil-import.workspace = true
+anvil-contract.workspace = true
 anvil-runner.workspace = true
 anvil-identity.workspace = true
 tauri = { version = "2.11.6", features = [] }

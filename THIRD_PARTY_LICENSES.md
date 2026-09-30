@@ -16,14 +16,14 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-716 Rust crates, 5 npm packages.
+717 Rust crates, 5 npm packages.
 
 | License expression | Components |
 | --- | --- |
 | MIT OR Apache-2.0 | 321 |
 | MIT | 154 |
 | Apache-2.0 OR MIT | 112 |
-| MIT/Apache-2.0 | 34 |
+| MIT/Apache-2.0 | 35 |
 | Unicode-3.0 | 18 |
 | BSD-3-Clause | 12 |
 | Apache-2.0 | 10 |
@@ -66,7 +66,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (716)
+## Rust crates (717)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -217,7 +217,7 @@ the modified file under MPL-2.0.
 | des | 0.9.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
 | digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | digest | 0.11.3 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
-| dimpl | 0.6.2 | MIT OR Apache-2.0 | https://github.com/algesten/dimpl |
+| dimpl | 0.7.4 | MIT OR Apache-2.0 | https://github.com/algesten/dimpl |
 | dirs | 6.0.0 | MIT OR Apache-2.0 | https://github.com/soc/dirs-rs |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 | https://github.com/dirs-dev/dirs-sys-rs |
 | dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
@@ -368,9 +368,9 @@ the modified file under MPL-2.0.
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/jobserver-rs |
 | json-patch | 3.0.1 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
 | jsonptr | 0.6.3 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
-| jsonschema | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-regex | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-value | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-regex | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-value | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.7.0 | MIT OR Apache-2.0 | https://github.com/pyfisch/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
@@ -503,6 +503,7 @@ the modified file under MPL-2.0.
 | prost-types | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
 | protox | 0.9.1 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
 | protox-parse | 0.9.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
+| psl | 2.1.238 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
 | psl-types | 2.0.11 | MIT/Apache-2.0 | https://github.com/addr-rs/psl-types |
 | publicsuffix | 2.3.0 | MIT/Apache-2.0 | https://github.com/rushmorem/publicsuffix |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
@@ -524,7 +525,7 @@ the modified file under MPL-2.0.
 | rcgen | 0.14.10 | MIT OR Apache-2.0 | https://github.com/rustls/rcgen |
 | ref-cast | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
 | ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
-| referencing | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
+| referencing | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
@@ -761,7 +762,7 @@ the modified file under MPL-2.0.
 | xattr | 1.6.1 | MIT OR Apache-2.0 | https://github.com/Stebalien/xattr |
 | yasna | 0.6.0 | MIT OR Apache-2.0 | https://github.com/qnighy/yasna.rs |
 | yoke | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| yoke-derive | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| yoke-derive | 0.8.2 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zbus | 5.19.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | zbus_macros | 5.19.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | zbus_names | 4.3.4 | MIT | https://github.com/z-galaxy/zbus/ |

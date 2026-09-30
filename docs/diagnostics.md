@@ -259,8 +259,13 @@ catalog whose id equals the profile's `compatibility_id`:
   TLS. The same cap applies to a release without a catalog.
 - A trusted profile used over plain HTTP (lab use) is also capped at likely.
 - `confirmed` gateway attribution needs a gateway-owned, authenticated
-  diagnostic contract that no release provides yet (see
-  [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md)).
+  diagnostic contract. G01 is implemented on Ferrum Edge main
+  (`ferrum-edge/ferrum-edge#5767` closed; #5845, #5857/#5862 and #5868) and
+  its `ferrum.diagnostic_ref.v1` schema ships in `ferrum-contracts`
+  `contracts-edge-0.9.8`, but no released gateway binary contains it yet, so
+  Anvil does not use it (see
+  [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md)
+  and the adoption plan below).
 
 ### The tokens are coarse, and stay coarse
 
@@ -279,6 +284,65 @@ A missing marker does not prove the response came from the backend
 (`ferrum.marker.absent` explains this). A 403 alone never proves a WAF:
 WAF and bot-detection default bodies are byte-identical, and backend 403s
 look the same.
+
+## Adopting the gateway diagnostic reference (G01)
+
+Ferrum Edge main implements G01: `ferrum-edge/ferrum-edge#5767` is closed,
+#5845, #5857 and #5862 add the `X-Ferrum-Diagnostic-Ref` response header and
+`GET /diagnostics/v1/refs/{ref}`, and #5868 adds cross-replica lookup. The
+reference body is a published contract (`ferrum.diagnostic_ref.v1`,
+`schemas/diagnostic-ref/v1.schema.json` in `ferrum-contracts`
+`contracts-edge-0.9.8`) whose `x-contract.edge_availability` reads "Edge main
+only; not in v0.9.8 or any earlier release". Anvil therefore keeps gateway
+findings capped at *likely* until a released gateway binary carries it.
+
+What Edge provides:
+
+- `X-Ferrum-Diagnostic-Ref: fd1_…` on gateway-authored error responses
+  (`FERRUM_DIAGNOSTIC_REFS=errors|all`), plus
+  `X-Ferrum-Diagnostic-Owner-Replica` when replica tagging is on
+  (`FERRUM_DIAGNOSTIC_REF_REPLICA_TAG=true`, refs `fd2_<replica>_<hex>`).
+- `GET /diagnostics/v1/refs/{ref}` on the admin listener, which needs both a
+  `diagnostics:read` scope and an `ns` claim covering the ref's namespace;
+  the admin `role` implies neither. A missing scope or `ns` claim is refused
+  with `403`, and an unknown, expired, evicted or out-of-namespace ref with
+  an indistinguishable `404`.
+- A body (`schema_version: ferrum.diagnostic_ref.v1`) naming the public token
+  and status, the protocol, the granular `error_class`, the body-streaming
+  class, the rejection or route-timeout phase, how far the request reached a
+  backend (`not_dispatched`, `pre_wire_failure`, `ambiguous_failure`,
+  `backend_response`), the matched `proxy_id` and origin, the per-attempt
+  outcomes and a coarse duration bucket — never bodies, headers, paths,
+  credentials or client addresses.
+
+This differs from the G01 proposal in
+[g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md) in
+four ways Anvil must model: the schema name and fields
+(`ferrum.diagnostic_ref.v1`, `gateway_error`, `detail.*`, `backend_dispatch`)
+replace the proposed `version`/`outcome_id` envelope; authorization needs
+*both* the scope and the `ns` claim, and a credential failure is `403` rather
+than the proposed "everything is `404`"; the replica-owner header exists (the
+proposal had no replica concept); and `all` mode can reference plugin and
+routing rejections with a `null` `gateway_error`.
+
+Plan (merge only when a released Edge binary carries the reference, matching
+Alloy's adopt-on-release rule). All of it is blocked on an Edge release:
+
+- [ ] Extend `IntegrationProfile`'s `DiagnosticDetailAccess`
+  (`crates/anvil-domain/src/integration.rs`) into the ref lookup: a
+  least-privilege `diagnostics:read` credential with an `ns` claim, plus the
+  admin endpoint. Treat a successful lookup as authenticated gateway
+  evidence, the only path that can raise a Ferrum finding above *likely*.
+- [ ] Unblock and implement TRUST-009 (cross-tenant lookup), TRUST-010
+  (expired/evicted detail) and TRUST-011 (spoofed detail), which are blocked
+  on G01 in `docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json`.
+- [ ] Add a lab profile or case against the first release that carries the
+  reference: the header is present on errors; the lookup succeeds; and it is
+  refused without `diagnostics:read` and for the wrong namespace.
+- [ ] Add the catalog for that release and bump `lab/gateway/RELEASE.lock`.
+
+Until then Anvil's answers remain honest about uncertainty, and this doc and
+the completion report say so.
 
 ## Ordering
 

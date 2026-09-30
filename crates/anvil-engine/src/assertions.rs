@@ -6,6 +6,35 @@ use anvil_domain::assertions::*;
 use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::{ResponseRecord, StreamTranscript};
 use anvil_domain::outcome::{ProtocolStatus, TransportState};
+use anvil_xml_limits::{XmlLimits, check_xml_limits};
+
+/// XML nodes an XPath assertion or extraction parses. A response body can be
+/// up to 256 MiB, and the parsed tree costs more than the text.
+const XPATH_MAX_NODES: u32 = 4_000_000;
+/// What a response body may contain before it is parsed for XPath. The
+/// parser compares each attribute with every earlier one on its element,
+/// names and full namespace URIs; for each element that declares a namespace
+/// it copies the n in scope, checking each against those already copied
+/// (about n²/2 prefix comparisons); and it looks every element and prefixed
+/// attribute name up among the namespaces in scope. With these bounds a body
+/// of any size stays under about 2^22 attribute comparisons of at most
+/// 768 bytes, 2^25 prefix comparisons of at most 64 bytes while copying
+/// scopes, 8192 · 128 = 2^20 copied namespace references, and 129 comparisons
+/// per name looked up: about 1.6·10^9 for the at most 12 million names that
+/// 4 million nodes and 2^22 attribute pairs allow. A service that declares
+/// the same prefix again on many sibling elements costs little per element.
+const XPATH_XML_LIMITS: XmlLimits = XmlLimits {
+    attributes_per_element: 256,
+    attribute_pairs: 1 << 22,
+    attribute_name_bytes: 256,
+    xmlns_declarations: 8_192,
+    xmlns_prefix_bytes: 64,
+    xmlns_uri_bytes: 512,
+    in_scope_namespaces: 128,
+    namespace_scope_work: 1 << 26,
+};
+/// How a body over those bounds is reported.
+const TOO_COMPLEX: &str = "XML too complex to evaluate safely";
 
 pub struct Observed<'a> {
     pub response: Option<&'a ResponseRecord>,
@@ -189,12 +218,20 @@ fn xpath_elements<'a, 'i>(
 /// `/a/b`, `//b`, `/a/b[2]`, `/a/*`, `/a/@attr`, `//@attr`, `/a/text()`.
 /// Names match local names (namespace prefixes ignored). The result is the
 /// first selected node in document order: an element's full text, an
-/// attribute value or a text node. Any other syntax is an error.
+/// attribute value or a text node. Any other syntax is an error, and so is a
+/// body over `XPATH_XML_LIMITS` or `XPATH_MAX_NODES` ("XML too complex to
+/// evaluate safely"), which is not parsed.
 pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
     let steps = parse_xpath(path)?;
     let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8".to_string())?;
-    let doc = roxmltree::Document::parse_with_options(text, roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() })
-        .map_err(|e| format!("body is not XML: {e}"))?;
+    // A malicious server controls the body: bound the parser's work before it
+    // runs. The scan relies on DTDs being refused (it stops at a DOCTYPE).
+    check_xml_limits(text, &XPATH_XML_LIMITS).map_err(|e| format!("{TOO_COMPLEX} ({e})"))?;
+    let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: XPATH_MAX_NODES, ..Default::default() };
+    let doc = roxmltree::Document::parse_with_options(text, opts).map_err(|e| match e {
+        roxmltree::Error::NodesLimitReached => format!("{TOO_COMPLEX} (more than {XPATH_MAX_NODES} nodes)"),
+        e => format!("body is not XML: {e}"),
+    })?;
     let mut nodes: Vec<roxmltree::Node> = vec![doc.root()];
     for step in steps {
         match step {
@@ -416,5 +453,18 @@ mod tests {
         assert_eq!(selected_ids(xml, "//b"), ["b1", "b2", "b3", "b4"]);
         // `//` below an element selects its descendants, never the element itself.
         assert_eq!(selected_ids(r#"<b id="outer"><b id="inner"><b id="deepest"/></b></b>"#, "/b//b"), ["inner", "deepest"]);
+    }
+
+    /// GHSA-mvjp-hhjj-mh63: a body with the most namespace work the limits
+    /// allow (the deepest chain of the longest prefixes, siblings until the
+    /// scope budget is spent, and names the parser finds last in the scope)
+    /// is evaluated, promptly.
+    #[test]
+    fn a_body_at_the_namespace_limits_is_evaluated_promptly() {
+        let worst = anvil_xml_limits::test_support::namespace_worst_case(&XPATH_XML_LIMITS, 0, 100_000);
+        let body = format!("<r>{worst}</r>");
+        let started = std::time::Instant::now();
+        assert_eq!(xpath(body.as_bytes(), "//e[100000]").unwrap().as_deref(), Some(""));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
     }
 }

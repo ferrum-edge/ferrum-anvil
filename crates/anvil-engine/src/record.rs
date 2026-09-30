@@ -47,6 +47,18 @@ pub struct Assembly<'a> {
     pub workload_api: Option<WorkloadApiEvidence>,
 }
 
+/// A tunnel refusal body as the record keeps it: redacted, then cut to
+/// [`anvil_transport::hbone::MAX_REFUSAL_BODY`], and whether it was cut. The
+/// transport captures more than the bound, so a secret the endpoint echoes
+/// across it is recognised whole instead of leaving its prefix.
+fn refusal_body(r: &Redactor, captured: &str) -> (String, bool) {
+    let mut cut = captured.len().min(anvil_transport::hbone::MAX_REFUSAL_BODY);
+    while !captured.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    (anvil_transport::session::redact_then_cut(&|s: &str| r.text(s), captured, cut), cut < captured.len())
+}
+
 fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     for a in attempts {
         a.url = r.url(&a.url);
@@ -58,7 +70,9 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
                 f.message = r.text(&f.message);
             }
             if let Some(b) = &mut t.refusal_body {
-                *b = r.text(b);
+                let (kept, cut) = refusal_body(r, b);
+                *b = kept;
+                t.refusal_body_truncated |= cut;
             }
             // A CONNECT-UDP request carries the request's auth headers.
             for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
@@ -212,6 +226,10 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         (_, t) => t,
     };
 
+    // Excerpts a finding quotes from the response are redacted before they
+    // are cut: the findings are redacted again below, but a secret that
+    // crossed a cut would no longer match there.
+    let redact_excerpt = |s: &str| redactor.text(s);
     let diag_input = DiagnosticInput {
         protocol: ctx.spec.protocol,
         method: &a.prepared_method,
@@ -226,6 +244,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         credentials_stripped_on_redirect: a.credentials_stripped,
         protocol_fallback_from: a.protocol_fallback_from.clone(),
         workload: a.workload_api.as_ref(),
+        redact: Some(&redact_excerpt),
     };
     let mut diagnosis = anvil_diagnostics::diagnose(&diag_input);
     for d in a.extra_findings {
@@ -465,6 +484,7 @@ pub fn local_failure_with(
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: workload.as_ref(),
+        redact: Some(&|s: &str| redactor.text(s)),
     });
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let summary = diag.findings.first().map(|x| x.title.clone()).unwrap_or_else(|| "Not sent".into());
@@ -541,6 +561,21 @@ pub fn local_failure_with(
 mod tests {
     use super::*;
     use anvil_domain::secret::REDACTED;
+
+    #[test]
+    fn a_refusal_body_is_redacted_before_it_is_cut_to_its_bound() {
+        let secret = "tok-SENSITIVE-refusal-8d1p";
+        let r = Redactor::new(vec![secret.into()], vec![]);
+        // The bound falls 4 characters into the secret.
+        let pad = "p".repeat(anvil_transport::hbone::MAX_REFUSAL_BODY - 4);
+        let (kept, cut) = refusal_body(&r, &format!("{pad}{secret} and more"));
+        assert_eq!(kept, format!("{pad}{REDACTED}"));
+        assert!(cut, "a body past the bound is marked as cut");
+        // Within the bound: kept whole, redacted.
+        let (kept, cut) = refusal_body(&r, &format!("denied: {secret}"));
+        assert_eq!(kept, format!("denied: {REDACTED}"));
+        assert!(!cut);
+    }
 
     #[test]
     fn inferred_auth_facts_are_redacted_and_the_htu_as_a_url() {

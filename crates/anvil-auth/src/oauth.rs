@@ -31,6 +31,7 @@
 use crate::AuthError;
 use anvil_domain::Id;
 use anvil_domain::auth::OAuthGrant;
+use anvil_domain::secret::REDACTED;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
@@ -475,6 +476,7 @@ impl TokenCache {
     ) -> Refreshed {
         let mut form = refresh_form(&rt);
         let basic = client_auth(cfg, &mut form);
+        let secrets = request_secrets(&form, basic.as_ref());
         let request = http.post_form(&cfg.token_url, form, basic);
         let (state, task_key, grant, skew) = (self.state.clone(), key.clone(), cfg.grant, cfg.refresh_skew_secs);
         // The generation check and registration share the state lock, so a
@@ -493,7 +495,7 @@ impl TokenCache {
             let task = tokio::spawn(async move {
                 let key = task_key;
                 let answer = match request.await {
-                    Ok((status, body)) => parse_token_response(status, &body),
+                    Ok((status, body)) => parse_token_response(status, &body, &secrets),
                     Err(e) => Err(TokenFailure::Transport(e)),
                 };
                 state.lock().refresh_finished(&key, id);
@@ -585,26 +587,105 @@ pub fn sanitize_error_code(s: &str) -> String {
     if out.is_empty() { "unknown_error".into() } else { out }
 }
 
-fn sanitize_text(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(200).collect()
+/// Characters of an issuer's `error_description` kept in the message.
+const DESCRIPTION_CHARS: usize = 200;
+/// Characters of it scanned for the request's secrets before the cut.
+const DESCRIPTION_SCAN_CHARS: usize = 64 * 1024;
+
+/// Form fields whose values are credentials an issuer could echo back.
+const SECRET_FORM_FIELDS: &[&str] =
+    &["client_secret", "refresh_token", "code", "code_verifier", "password", "assertion", "client_assertion"];
+
+/// The credentials a token request carries (form fields and the Basic
+/// client secret) in every form an issuer may echo them in ([`echo_forms`]),
+/// longest first, so an error description that echoes one is redacted before
+/// it is cut.
+fn request_secrets(form: &[(String, String)], basic: Option<&(String, String)>) -> Vec<Zeroizing<String>> {
+    let mut secrets: Vec<Zeroizing<String>> = form
+        .iter()
+        .filter(|(k, _)| SECRET_FORM_FIELDS.contains(&k.as_str()))
+        .map(|(_, v)| v)
+        .chain(basic.map(|(_, secret)| secret))
+        .filter(|v| v.len() >= 4)
+        .flat_map(|v| echo_forms(v.as_str()))
+        .collect();
+    secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.as_str().cmp(b.as_str())));
+    secrets.dedup_by(|a, b| a.as_str() == b.as_str());
+    secrets
+}
+
+/// A credential as sent, and percent-encoded as a URL component (upper- and
+/// lower-case hex) and as a form value: the encoded forms the record's
+/// redactor knows, since the token request sends its credentials
+/// form-encoded and an issuer may echo them that way.
+fn echo_forms(secret: &str) -> Vec<Zeroizing<String>> {
+    let upper = crate::encode_query_component(secret);
+    let lower = lower_hex(&upper);
+    let form: String = url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+    let mut forms = vec![Zeroizing::new(secret.to_string())];
+    for f in [upper, lower, form] {
+        if !forms.iter().any(|x| x.as_str() == f) {
+            forms.push(Zeroizing::new(f));
+        }
+    }
+    forms
+}
+
+/// `encoded` with the hex digits of its percent escapes in lower case.
+fn lower_hex(encoded: &str) -> String {
+    let mut out = String::with_capacity(encoded.len());
+    let mut hex_left = 0;
+    for c in encoded.chars() {
+        if hex_left > 0 {
+            out.push(c.to_ascii_lowercase());
+            hex_left -= 1;
+        } else {
+            if c == '%' {
+                hex_left = 2;
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A remote-supplied description, printable and bounded. The request's own
+/// secrets (raw or percent-encoded) are replaced before the cut: one that
+/// crosses it is replaced whole, never left as a prefix (the cut never
+/// splits the marker either). The record's redaction then covers every
+/// other secret.
+fn sanitize_text(s: &str, secrets: &[Zeroizing<String>]) -> String {
+    let mut text: String = s.chars().filter(|c| !c.is_control()).take(DESCRIPTION_SCAN_CHARS).collect();
+    for secret in secrets {
+        if text.contains(secret.as_str()) {
+            text = text.replace(secret.as_str(), REDACTED);
+        }
+    }
+    let mut cut = text.char_indices().nth(DESCRIPTION_CHARS).map_or(text.len(), |(i, _)| i);
+    if let Some((_, end)) = text.match_indices(REDACTED).map(|(i, m)| (i, i + m.len())).find(|&(i, end)| i < cut && cut < end) {
+        cut = end;
+    }
+    text.truncate(cut);
+    text
 }
 
 async fn request_token(cfg: &OAuthResolved, mut form: Vec<(String, String)>, http: &dyn TokenHttp) -> Result<CachedToken, TokenFailure> {
     let basic = client_auth(cfg, &mut form);
+    let secrets = request_secrets(&form, basic.as_ref());
     let (status, body) = http.post_form(&cfg.token_url, form, basic).await.map_err(TokenFailure::Transport)?;
-    parse_token_response(status, &body)
+    parse_token_response(status, &body, &secrets)
 }
 
 fn refresh_form(refresh_token: &str) -> Vec<(String, String)> {
     vec![("grant_type".to_string(), "refresh_token".to_string()), ("refresh_token".into(), refresh_token.to_string())]
 }
 
-fn parse_token_response(status: u16, body: &[u8]) -> Result<CachedToken, TokenFailure> {
+fn parse_token_response(status: u16, body: &[u8], secrets: &[Zeroizing<String>]) -> Result<CachedToken, TokenFailure> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|_| TokenFailure::Malformed(format!("token endpoint returned HTTP {status} with a non-JSON body")))?;
     if !(200..300).contains(&status) {
         let error = v.get("error").and_then(|e| e.as_str()).map(sanitize_error_code).unwrap_or_else(|| "unknown_error".into());
-        let description = v.get("error_description").and_then(|e| e.as_str()).map(sanitize_text).unwrap_or_default();
+        let description = v.get("error_description").and_then(|e| e.as_str()).map(|d| sanitize_text(d, secrets)).unwrap_or_default();
         return Err(TokenFailure::Rejected { status, error, description });
     }
     let access = v
@@ -782,6 +863,54 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn an_echoed_secret_crossing_the_description_cut_leaves_no_prefix() {
+        let secret = "Cs-8f2e-client-secret-value";
+        let form = vec![("grant_type".to_string(), "client_credentials".to_string()), ("client_secret".to_string(), secret.to_string())];
+        let secrets = request_secrets(&form, None);
+        // The cut (200 characters) falls after the secret's first 4 characters, then after all but its last.
+        for keep in [4, secret.len() - 1] {
+            let pad = "p".repeat(DESCRIPTION_CHARS - keep);
+            let body = serde_json::json!({ "error": "invalid_client", "error_description": format!("{pad}{secret} was refused") });
+            let e = parse_token_response(401, body.to_string().as_bytes(), &secrets).err().expect("rejected");
+            let TokenFailure::Rejected { description, .. } = e else { panic!("not a rejection") };
+            assert!(!(4..=secret.len()).any(|n| description.contains(&secret[..n])), "a secret prefix survived the cut");
+            assert!(description.starts_with(&format!("{pad}{REDACTED}")), "the secret is replaced whole where it starts");
+        }
+    }
+
+    /// An issuer may echo a credential the way the token request sent it,
+    /// form-encoded, or percent-encoded in either case: each form crossing the
+    /// cut is replaced whole too.
+    #[test]
+    fn an_encoded_echo_of_a_secret_crossing_the_description_cut_leaves_no_prefix() {
+        let secret = "Cs+8f/2e client=secret";
+        let form = vec![("client_secret".to_string(), secret.to_string())];
+        let secrets = request_secrets(&form, None);
+        let echoes = ["Cs%2B8f%2F2e%20client%3Dsecret", "Cs%2b8f%2f2e%20client%3dsecret", "Cs%2B8f%2F2e+client%3Dsecret"];
+        for echo in echoes {
+            assert!(secrets.iter().any(|s| s.as_str() == echo), "{echo} is not a known form of the secret");
+            for keep in [4, echo.len() - 1] {
+                let pad = "p".repeat(DESCRIPTION_CHARS - keep);
+                let description = sanitize_text(&format!("{pad}{echo} was refused"), &secrets);
+                assert!(!(4..=echo.len()).any(|n| description.contains(&echo[..n])), "a prefix of {echo} survived the cut");
+                assert!(description.starts_with(&format!("{pad}{REDACTED}")), "{echo} is replaced whole where it starts");
+            }
+        }
+        assert_eq!(secrets.len(), 4, "the secret and its three encoded forms, each once");
+    }
+
+    #[test]
+    fn descriptions_keep_their_bound_and_what_is_not_secret() {
+        let basic = ("client".to_string(), "basic-secret-7Hq".to_string());
+        let secrets = request_secrets(&[("scope".to_string(), "read write".to_string())], Some(&basic));
+        assert_eq!(secrets.len(), 1, "only credentials are secrets, not the scope");
+        let long = format!("scope read write denied; {}", "d".repeat(500));
+        assert_eq!(sanitize_text(&long, &secrets), long.chars().take(DESCRIPTION_CHARS).collect::<String>());
+        assert_eq!(sanitize_text("bad basic-secret-7Hq\u{7}", &secrets), format!("bad {REDACTED}"));
+        assert_eq!(sanitize_text("short", &[]), "short");
+    }
 
     /// Scriptable issuer: answers per grant type and counts every request.
     /// A handle: token requests share its state and borrow nothing.

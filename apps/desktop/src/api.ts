@@ -3,7 +3,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ApiStandards,
   AppSettings,
+  DriftReport,
+  LintReport,
+  Revision,
+  RuleInfo,
+  RulesetSummary,
+  StoredRuleset,
   AttachmentRef,
   Dataset,
   LoadCounts,
@@ -153,7 +160,12 @@ export interface LintIssue {
   column: number;
   message: string;
 }
-export type LintResult = { status: "valid" } | { status: "invalid"; issues: LintIssue[] } | { status: "skipped"; reason: string };
+export type LintResult =
+  | { status: "valid" }
+  | { status: "invalid"; issues: LintIssue[] }
+  | { status: "skipped"; reason: string }
+  /** Not parsed: the body is over the pre-parse XML limits. Sending treats it as a lint error. */
+  | { status: "refused"; reason: string };
 export interface SystemInfo {
   version: string;
   engine: string;
@@ -244,9 +256,12 @@ export type FilePurpose =
   | "pkcs12_file"
   | "spec_source"
   | "dataset"
+  | "ruleset"
   | "bundle_export"
   | "load_report_export"
   | "run_report_export"
+  | "lint_report_export"
+  | "spec_revision_export"
   | "jwt_svid_file"
   | "linked_file"
   | "linked_file_relocate";
@@ -463,6 +478,57 @@ export interface SpecImported {
   report: SpecImportReport;
 }
 export type SpecTarget = { kind: "new_workspace" } | { kind: "workspace"; workspace_id: string };
+/** Provenance of a spec import (`anvil_app::specs::SpecSourceRecord`). */
+export interface SpecSourceRecord {
+  source: {
+    import_id: string;
+    kind: string;
+    dialect: string;
+    declared_version?: string | null;
+    title?: string | null;
+    sha256: string;
+    size_bytes: number;
+    imported_at: string;
+  };
+  workspace_id: string;
+  root_folder_id?: string | null;
+  original_sha256: string;
+  file_name: string;
+  previous_import_ids?: string[];
+}
+
+// ----------------------------------------------------------- API standards
+export type { ApiStandards, LintReport, RuleInfo, RulesetSummary, StoredRuleset };
+/** The layered rules in effect (`anvil_app::standards::StandardsView`). */
+export interface StandardsView {
+  standards: ApiStandards;
+  sources: RulesetSummary[];
+  rules: RuleInfo[];
+  /** Rules a later ruleset turned off. */
+  disabled: string[];
+  /** Why the stored rulesets do not load; they can still be disabled or removed. */
+  error?: string | null;
+}
+export type { DriftReport, Revision };
+/** One send checked against the description of the import its request belongs to. */
+export interface ExecutionDrift {
+  import_id: string;
+  file_name: string;
+  title?: string | null;
+  report: DriftReport;
+}
+/** What reimporting a revised description would do to the collection. */
+export interface DriftPlan {
+  revision: Revision;
+  /** Names of the requests new operations become. */
+  added: string[];
+  updated: number;
+  conflicts: number;
+  removed: number;
+  unchanged: number;
+}
+/** What to lint: an import's stored original, or a spec file chosen in the native dialog. */
+export type LintTarget = { kind: "import"; import_id: string } | { kind: "spec"; input: SpecInput };
 
 // ------------------------------------------------------------- runner/oauth
 export type RunTarget = { kind: "scenario"; scenario_id: string } | { kind: "folder"; workspace_id: string; folder_id: string | null };
@@ -690,6 +756,31 @@ export const api = {
 
   specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
   specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
+  specSources: (workspaceId: string) => call<SpecSourceRecord[]>("spec_sources", { workspaceId }),
+
+  standards: () => call<StandardsView>("standards_view"),
+  /** Keep the ruleset file chosen in the native dialog (purpose `ruleset`); refused when it does not load with the others. */
+  standardsAdd: (grant: string) => call<StoredRuleset>("standards_add", { grant }),
+  standardsReplace: (rulesetId: string, grant: string) => call<StoredRuleset>("standards_replace", { rulesetId, grant }),
+  standardsRemove: (rulesetId: string) => call<ApiStandards>("standards_remove", { rulesetId }),
+  standardsSetEnabled: (rulesetId: string, enabled: boolean) => call<ApiStandards>("standards_set_enabled", { rulesetId, enabled }),
+  standardsSetRecommended: (include: boolean) => call<ApiStandards>("standards_set_recommended", { include }),
+  lintSpec: (target: LintTarget) => call<LintReport>("standards_lint", { target }),
+  /** The import's collection history compared with its description. */
+  driftReport: (importId: string) => call<DriftReport>("drift_report", { importId }),
+  /** One recorded send checked against its import's description; null when it belongs to none. */
+  driftCheckExecution: (executionId: string) => call<ExecutionDrift | null>("drift_check_execution", { executionId }),
+  driftRevise: (importId: string, suggestionIds: string[]) => call<Revision>("drift_revise", { importId, suggestionIds }),
+  driftReimportPlan: (importId: string, suggestionIds: string[]) => call<DriftPlan>("drift_reimport_plan", { importId, suggestionIds }),
+  /** Reimport the revised description; returns how many requests changed. */
+  driftReimportApply: (importId: string, suggestionIds: string[], digest: string) =>
+    call<number>("drift_reimport_apply", { importId, suggestionIds, digest }),
+  /** Write the revised description or its JSON Patch to a save-dialog grant (purpose `spec_revision_export`). */
+  driftExport: (importId: string, suggestionIds: string[], format: "spec" | "patch", grant: string) =>
+    call<number>("drift_export", { importId, suggestionIds, format, grant }),
+  /** Lint again and write JSON or SARIF to a save-dialog grant (purpose `lint_report_export`). */
+  exportLintReport: (target: LintTarget, format: "json" | "sarif", artifact: string, grant: string) =>
+    call<number>("standards_report_export", { target, format, artifact, grant }),
   readTextFile: (grant: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
     call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { grant, workspaceId, storeAsSecret, base64 }),
 };

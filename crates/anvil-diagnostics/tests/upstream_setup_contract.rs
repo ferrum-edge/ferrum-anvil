@@ -69,6 +69,7 @@ fn diagnose_http(r: &ResponseRecord, body: &[u8], trust: FerrumTrust) -> Diagnos
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact: None,
     })
 }
 

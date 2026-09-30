@@ -672,6 +672,13 @@ fieldset.plain { border: 0; padding: 0; background: none; }
 .card-sub { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.bad { border-color: color-mix(in srgb, var(--bad) 32%, var(--border)); }
 .card.bad .card-value { color: var(--bad); }
+button.card { font: inherit; color: inherit; text-align: left; cursor: pointer; }
+button.card:hover { border-color: var(--border-strong); }
+.card.selected, button.card[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.wrap-anywhere { overflow-wrap: anywhere; }
+label.tree-row.check { gap: 8px; }
+.tree-row > input[type="checkbox"] { margin: 0; flex: none; }
+table.grid.rules td:first-child { width: 1%; }
 .page { display: flex; flex-direction: column; gap: 18px; max-width: 1180px; min-width: 0; }
 .page.narrow { max-width: 900px; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; }
@@ -767,3 +774,14 @@ input.field.small-field { height: var(--h-sm); padding: 0 8px; }
 @media (max-height: 620px) {
   .brand-logo { aspect-ratio: 3 / 1; }
 }
+
+/* API contract: suggested revisions and coverage */
+.spec-tabs { margin-bottom: 14px; }
+.suggestion { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); margin: 8px 0; }
+.suggestion > label.check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.suggestion-detail { font-size: 12px; color: var(--text-3); padding-left: 24px; }
+.suggestion details { padding-left: 24px; }
+.suggestion details > summary { font-size: 12px; color: var(--text-2); }
+.suggestion pre.code { margin-top: 6px; max-height: 320px; overflow: auto; }
+table.grid.coverage td:nth-child(2) { width: 1%; text-align: right; }
+h4.subhead { margin: 14px 0 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-3); font-weight: 600; }

@@ -1445,7 +1445,10 @@ export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; request
           {p.grpc.status_codes.length > 0 && (
             <Rows
               testid="grpc-codes"
-              rows={p.grpc.status_codes.map(([code, n]) => [`${String(code)} ${GRPC_CODES[Number(code)] ?? "non-standard code"}`, String(n)] as [string, string])}
+              rows={p.grpc.status_codes.map(([code, n]) => [
+                `${String(code)} ${code === -1 ? "invalid: any code outside 0–16" : GRPC_CODES[Number(code)] ?? "non-standard code"}`,
+                String(n),
+              ] as [string, string])}
             />
           )}
         </>

@@ -15,6 +15,8 @@
 //! same user; use only in isolated CI). Keychain profiles unlock automatically.
 
 mod collection;
+mod drift;
+mod lint;
 mod specs_load;
 
 use anvil_app::exec::SendOptions;
@@ -76,6 +78,13 @@ enum Cmd {
     Run(RunArgs),
     /// Import an API spec or collection (OpenAPI, WSDL, Postman, Insomnia, cURL, HAR).
     ImportSpec(specs_load::ImportSpecArgs),
+    /// Check an OpenAPI/Swagger description against API standards (rulesets).
+    /// Needs no profile. Exit 2 when a finding reaches `--fail-on`.
+    LintSpec(lint::LintSpecArgs),
+    /// Compare observed traffic (a HAR file, or an imported spec's history)
+    /// with an OpenAPI description and suggest revisions. Exit 2 when a
+    /// finding reaches `--fail-on`.
+    SpecDrift(drift::SpecDriftArgs),
     /// Load plans, runs (in a worker process) and reports.
     Load {
         #[command(subcommand)]
@@ -689,12 +698,13 @@ async fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Schema { out } => {
             std::fs::create_dir_all(out)?;
-            for (name, schema) in anvil_domain::schema::all() {
-                let mut bytes = serde_json::to_vec_pretty(&schema)?;
+            let all: Vec<_> = anvil_domain::schema::all().into_iter().chain(anvil_contract::contract_schemas()).collect();
+            for (name, schema) in &all {
+                let mut bytes = serde_json::to_vec_pretty(schema)?;
                 bytes.push(b'\n');
                 std::fs::write(out.join(format!("{name}.schema.json")), bytes)?;
             }
-            println!("wrote {} schemas to {}", anvil_domain::schema::all().len(), out.display());
+            println!("wrote {} schemas to {}", all.len(), out.display());
             Ok(0)
         }
         Cmd::Workload { cmd: WorkloadCmd::Probe { endpoint, audience, timeout_ms, json } } => {
@@ -709,6 +719,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 && p.jwt_svid.as_ref().is_none_or(|j| j.failed_checks().next().is_none());
             Ok(if ok { 0 } else { 2 })
         }
+        Cmd::LintSpec(a) => lint::lint_spec(a),
+        Cmd::SpecDrift(a) if !a.needs_profile() => drift::spec_drift_files(a),
         Cmd::Jwt { token } => {
             let i = anvil_auth::jwt::inspect(token, chrono::Utc::now(), 0).map_err(|e| anyhow!(e.to_string()))?;
             println!("{}", serde_json::to_string_pretty(&i)?);
@@ -940,6 +952,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
         }
         Cmd::Run(a) => collection::run_collection(&app, a).await,
         Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),
+        Cmd::SpecDrift(a) => drift::spec_drift_import(&app, a),
         Cmd::Load { cmd } => specs_load::load_cmd(&app, cmd).await,
         Cmd::Scenario { cmd } => collection::scenario_cmd(&app, cmd),
         Cmd::StorageCleanup { now, json } => {

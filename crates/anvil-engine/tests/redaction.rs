@@ -2,9 +2,14 @@
 //! of a secret are compared after percent-decoding and replaced whole, and
 //! request fields marked sensitive are redacted by name and by value.
 
+use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::REDACTED;
 use anvil_engine::redact::Redactor;
-use anvil_engine::vars::Resolver;
+use anvil_engine::vars::{Resolver, VarEntry, VarLayer};
+use anvil_engine::{Engine, ExecutionContext};
+use anvil_fixtures::http as fx;
+use anvil_transport::recorder::EventCtx;
+use tokio_util::sync::CancellationToken;
 
 const SECRET: &str = "AUDIT/secret+with=reserved";
 
@@ -270,6 +275,7 @@ fn authorization_endpoint_evidence_is_redacted_as_a_url() {
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact: None,
     });
     let mut finding = diagnosis.findings.into_iter().find(|f| f.code == "auth.browser_session_required").expect("login redirect finding");
     assert!(finding.explanation.contains("path%2Dsecret-7f3a"), "precondition: {}", finding.explanation);
@@ -282,4 +288,37 @@ fn authorization_endpoint_evidence_is_redacted_as_a_url() {
     for text in std::iter::once(&finding.explanation).chain(finding.evidence.iter().map(|e| &e.value)) {
         assert!(!reveals(text, "path-secret-7f3a"), "{text}");
     }
+}
+
+/// A server can echo a secret it received into the parts of a credential
+/// header that redaction keeps (a `Set-Cookie` name, here): they are scrubbed
+/// of known secrets too, so the stored record (which a history export
+/// serializes as it is) does not hold it.
+#[tokio::test]
+async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "reflected-cookie-secret-4k7w";
+    let mut c = ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/set-cookie?name={{reflected}}&value=ordinary")));
+    let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let engine = Engine::new();
+    let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains(secret), "the first stored record holds the echoed secret");
+    assert!(o.record.prepared.inferred.iter().any(|n| n == "a response cookie was not stored because its name contains a request secret"));
+    let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
+    let r = o.record.response.as_ref().unwrap_or_else(|| panic!("no response: {failure:?}"));
+    assert_eq!(r.status, 200);
+    let set_cookie: Vec<&str> = r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("set-cookie")).map(|h| h.value.as_str()).collect();
+    // The attributes without a secret in them are kept.
+    assert_eq!(set_cookie, vec![format!("{REDACTED}={REDACTED}; Path=/; HttpOnly")]);
+
+    let second = engine
+        .execute(&ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo"))), EventCtx::none(), CancellationToken::new())
+        .await;
+    let second_record = serde_json::to_string(&second.record).unwrap();
+    assert!(!second_record.contains(secret), "the second record contains a cookie named with the first execution's secret");
+    assert!(second.record.prepared.inferred.iter().all(|note| !note.contains(secret)));
 }

@@ -422,7 +422,15 @@ pub(crate) fn prepare_all_at(
     allowed: &[&str],
 ) -> Result<Prepared, TransportFailure> {
     let settings = crate::settings::resolve(&ctx.settings_layers);
-    let http = prepare::prepare_http(&ctx.spec, r, ctx.attachments.as_ref(), &settings, ctx.send_anyway, allowed)?;
+    let http = prepare::prepare_http_with_redaction_names(
+        &ctx.spec,
+        r,
+        ctx.attachments.as_ref(),
+        &settings,
+        &ctx.redaction_names,
+        ctx.send_anyway,
+        allowed,
+    )?;
     let mut inferred = http.inferred.clone();
     let (auth_scope, auth_cfg) = ctx.effective_auth();
     let mut oauth_key = None;
@@ -917,7 +925,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         if prep.settings.cookies
             && let Some(r) = &out.response
         {
-            engine.store_cookies(epoch, &ctx.isolation, &current.target, r);
+            if engine.store_cookies(epoch, &ctx.isolation, &current.target, r, &redactor)
+                && !prep.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE)
+            {
+                prep.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
+            }
         }
 
         // ---- redirects ----

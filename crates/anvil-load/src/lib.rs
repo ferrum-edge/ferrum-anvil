@@ -38,7 +38,7 @@ pub mod worker;
 
 pub use compare::{Comparison, compare};
 pub use controller::LoadController;
-pub use dataset::{Dataset, DatasetFormat};
+pub use dataset::{Dataset, DatasetFormat, DatasetLimits};
 pub use executor::{LoadJob, LoadRun, Progress, ProgressSink, RunOptions, validate_plan};
 pub use job::WorkerJob;
 pub use protocol::{Refusal, RefusalCode};

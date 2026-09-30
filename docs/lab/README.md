@@ -46,6 +46,10 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 - **Two passes.** `--untrusted-pass` repeats every scenario (as `<ID>-untrusted`) with the destination
   *not* declared as a trusted Ferrum profile. In that pass no `ferrum.token*` or `ferrum.outcome*`
   finding may appear (`crates/anvil-lab/src/harness.rs`). A skip is never counted as a pass.
+- **Skips.** A scenario is skipped only when it cannot run in this environment, and the result names
+  the reason. A scenario whose condition was not reached within its bounded attempts fails; the
+  `early` profile's EARLY-001 and EARLY-002 hold the gateway's 0-RTT window open with a relay instead
+  of skipping ([early.md](early.md)).
 
 ## Profiles
 

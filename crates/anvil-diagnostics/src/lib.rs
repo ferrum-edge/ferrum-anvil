@@ -141,7 +141,8 @@ pub struct Diagnosis {
 
 /// Run every rule over the input and render findings.
 pub fn diagnose(input: &DiagnosticInput<'_>) -> Diagnosis {
-    let body = input.response.map(|r| facts::body_facts(r.body.content_type.as_deref(), input.body)).unwrap_or_default();
+    let body =
+        input.response.map(|r| facts::body_facts_redacted(r.body.content_type.as_deref(), input.body, input.redact)).unwrap_or_default();
     let mut drafts: Vec<Draft> = Vec::new();
     let mut warnings: Vec<OutcomeWarning> = Vec::new();
     let ctx = rules::Ctx { input, body: &body };
@@ -184,7 +185,9 @@ pub fn assess_application(protocol: Protocol, status: &ProtocolStatus, body: &Bo
         ProtocolStatus::Http { status, .. } | ProtocolStatus::Sse { http_status: status, .. } => {
             if *status >= 400 {
                 ApplicationState::Failure
-            } else if !body_complete {
+            } else if !body_complete || body.xml_not_inspected.is_some() {
+                // A fault past a cut, or in an envelope too complex to
+                // inspect, would go unseen.
                 ApplicationState::NotEvaluated
             } else if body.soap_fault.is_some() || body.graphql.is_some() {
                 ApplicationState::Failure

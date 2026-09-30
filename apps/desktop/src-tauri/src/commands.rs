@@ -454,9 +454,11 @@ pub fn settings_get(st: State<'_, DesktopState>) -> R<AppSettings> {
     st.app()?.settings().map_err(e)
 }
 
+/// API standards change only through their own commands (`cmd_standards`),
+/// so a settings dialog opened earlier never undoes them.
 #[tauri::command]
 pub fn settings_save(st: State<'_, DesktopState>, settings: AppSettings) -> R<()> {
-    st.app()?.save_settings(&settings).map_err(e)
+    st.app()?.save_settings_keeping_standards(&settings).map_err(e)
 }
 
 /// The last storage cleanup of the open profile (`None` before the first):

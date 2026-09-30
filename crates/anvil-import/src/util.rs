@@ -309,14 +309,16 @@ pub fn is_xml_media(ct: &str) -> bool {
     e == "application/xml" || e == "text/xml" || e.ends_with("+xml")
 }
 
-/// Truncate a string for inclusion in a report message.
+/// Truncate a string for inclusion in a report message. Looks at no more
+/// than `max` characters of `s`, however long it is.
 pub fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
+    match s.char_indices().nth(max) {
+        None => s.to_string(),
+        Some((end, _)) => {
+            let mut out = s[..end].to_string();
+            out.push('…');
+            out
+        }
     }
 }
 
@@ -335,6 +337,35 @@ pub fn json_type(v: &Value) -> &'static str {
 
 pub fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
+}
+
+/// Roughly the JSON text size of `v` (string and key bytes plus one per
+/// value), or `None` when it exceeds `limit`. The walk stops as soon as the
+/// limit is passed, so it costs at most `limit`.
+pub fn text_size_within(v: &Value, limit: usize) -> Option<usize> {
+    fn walk(v: &Value, left: &mut usize) -> bool {
+        let own = match v {
+            Value::String(s) => s.len() + 1,
+            _ => 1,
+        };
+        if own > *left {
+            return false;
+        }
+        *left -= own;
+        match v {
+            Value::Array(a) => a.iter().all(|x| walk(x, left)),
+            Value::Object(o) => o.iter().all(|(k, x)| {
+                if k.len() > *left {
+                    return false;
+                }
+                *left -= k.len();
+                walk(x, left)
+            }),
+            _ => true,
+        }
+    }
+    let mut left = limit;
+    walk(v, &mut left).then_some(limit - left)
 }
 
 /// Render a primitive JSON value as the text a user would type.

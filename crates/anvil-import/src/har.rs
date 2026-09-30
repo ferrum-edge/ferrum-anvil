@@ -247,9 +247,11 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str, declared: &mut Option<String
     }
     if is_json_media(&mime) || (mime.is_empty() && text.trim_start().starts_with(['{', '['])) {
         if let Ok(mut v) = serde_json::from_str::<Value>(&text) {
-            let before = b.report.redactions.len();
+            // Counted apart from the (capped) list, so a body is rewritten
+            // whenever it was scrubbed.
+            let before = b.report.redactions_made();
             scrub_json(b, &mut v, &ptr(at, "text"));
-            let text = if b.report.redactions.len() > before { serde_json::to_string_pretty(&v).unwrap_or(text) } else { text };
+            let text = if b.report.redactions_made() > before { serde_json::to_string_pretty(&v).unwrap_or(text) } else { text };
             let (body, ct) = body_from_text(Some(if mime.is_empty() { "application/json" } else { &mime }), text);
             *declared = ct;
             return body;

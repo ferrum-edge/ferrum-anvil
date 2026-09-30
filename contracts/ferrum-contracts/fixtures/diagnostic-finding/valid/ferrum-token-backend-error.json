@@ -1,0 +1,35 @@
+{
+  "code": "ferrum.token.backend_error",
+  "rule_id": "ferrum.marker",
+  "rule_version": 1,
+  "title": "Gateway reports a backend error",
+  "explanation": "Ferrum Edge reports (backend_error, status 503).",
+  "scope": "unknown",
+  "confidence": "likely",
+  "severity": "error",
+  "evidence": [
+    {
+      "source": "ferrum_marker_unverified",
+      "key": "header.x-gateway-error",
+      "value": "backend_error"
+    },
+    {
+      "source": "http_status",
+      "key": "status",
+      "value": "503",
+      "attempt": null
+    }
+  ],
+  "alternatives": [
+    "The application returned its own 5xx.",
+    "A gateway response policy refused the response."
+  ],
+  "does_not_prove": [
+    "Which leg of the path failed."
+  ],
+  "remediation": [],
+  "owner": "unknown",
+  "confirm_with": [
+    "Gateway logs or authorized diagnostic detail for this request."
+  ]
+}

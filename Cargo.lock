@@ -200,6 +200,7 @@ dependencies = [
 name = "anvil-app"
 version = "0.1.0"
 dependencies = [
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -239,6 +240,7 @@ name = "anvil-auth"
 version = "0.1.0"
 dependencies = [
  "anvil-domain",
+ "anvil-xml-limits",
  "base64 0.23.1",
  "chrono",
  "hex",
@@ -267,6 +269,7 @@ version = "0.1.0"
 dependencies = [
  "anvil-app",
  "anvil-auth",
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -289,11 +292,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvil-contract"
+version = "0.1.0"
+dependencies = [
+ "anvil-import",
+ "base64 0.23.1",
+ "chrono",
+ "hex",
+ "jsonschema",
+ "proptest",
+ "regex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "serde_norway",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "anvil-desktop"
 version = "0.1.0"
 dependencies = [
  "anvil-app",
  "anvil-auth",
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -328,11 +352,14 @@ name = "anvil-diagnostics"
 version = "0.1.0"
 dependencies = [
  "anvil-domain",
+ "anvil-xml-limits",
  "chrono",
+ "jsonschema",
  "regex",
  "roxmltree",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "url",
 ]
@@ -358,6 +385,7 @@ dependencies = [
  "anvil-domain",
  "anvil-fixtures",
  "anvil-transport",
+ "anvil-xml-limits",
  "base64 0.23.1",
  "bytes",
  "chrono",
@@ -371,6 +399,7 @@ dependencies = [
  "p12-keystore",
  "parking_lot",
  "percent-encoding",
+ "psl",
  "rand 0.10.3",
  "regex",
  "roxmltree",
@@ -457,6 +486,7 @@ name = "anvil-import"
 version = "0.1.0"
 dependencies = [
  "anvil-domain",
+ "anvil-xml-limits",
  "base64 0.23.1",
  "chrono",
  "hex",
@@ -646,6 +676,10 @@ dependencies = [
  "zeroize",
  "zstd",
 ]
+
+[[package]]
+name = "anvil-xml-limits"
+version = "0.1.0"
 
 [[package]]
 name = "anyhow"
@@ -2030,9 +2064,9 @@ dependencies = [
 
 [[package]]
 name = "dimpl"
-version = "0.6.2"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7afb6878ee6941d3ee770bd8a391c0c083ee2102a7e8e91a730fb722ef1e46b9"
+checksum = "07d467d37bfdcc290bb8dcbedc8ca356eb730e46459b1687f98c3bae28aa6814"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -3918,9 +3952,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.57.0"
+version = "0.58.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71160ed5f6dbe36a2d6be79f4ca03ee09a99d2866f340faed49458913449aefa"
+checksum = "905edfa6eee835291d6efe33f733f7fcb40c2a24be93b78b74df95e56aef8611"
 dependencies = [
  "ahash",
  "bytecount",
@@ -3946,18 +3980,18 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.57.0"
+version = "0.58.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48d2120d8466ffcdc1b3be4b88ff0e9191bf5b6b09b1b1af1eef9aff8f465ea3"
+checksum = "023cf6b6c38655c1e9cedf72b9c534fd361bd35d20ac06e074f2c93b7dd0836c"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.57.0"
+version = "0.58.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fbfa40a42415369d940b3848f3ce08099f1f1ac04d73e8580f4d652617c4f44"
+checksum = "43519639b8e32075ef90a9b6b19136e516a3236b7943c3fe6b1622dafdced8ea"
 dependencies = [
  "ahash",
  "bytecount",
@@ -5557,6 +5591,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl"
+version = "2.1.238"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e6aa2cd4e8e062e78ac5d7df6206e2f8e39b624f658efd6f34f9aa1928ac5da"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
 name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5829,9 +5872,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.57.0"
+version = "0.58.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b06f6798be4fed305e74df8b1fb90cf59c6b8cc17aa3febeb1830c0c6b627b3e"
+checksum = "ead446bbb5527785ff232eb96625ac03daa627945470374c553db8f13090e30f"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -9055,14 +9098,14 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
- "synstructure 0.14.0",
+ "syn 2.0.119",
+ "synstructure 0.13.2",
 ]
 
 [[package]]

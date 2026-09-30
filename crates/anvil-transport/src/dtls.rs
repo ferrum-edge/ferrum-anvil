@@ -46,7 +46,7 @@ use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
 use anvil_domain::settings::Timeouts;
 use bytes::Bytes;
-use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion};
+use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion, SecurityError};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -291,9 +291,8 @@ fn alert_name(code: u8) -> String {
     .to_string()
 }
 
-/// Typed classification of a dimpl error. dimpl reports received alerts only
-/// inside its own formatted error (`description=N`); the numeric alert code
-/// is extracted from that fixed format — no cause is inferred from wording.
+/// Typed classification of a dimpl error. Received fatal alerts carry their
+/// numeric description directly; no cause is inferred from error wording.
 fn classify_dimpl(e: &dimpl::Error, deadline_ms: u64) -> TransportFailure {
     match e {
         dimpl::Error::Timeout(what) => TransportFailure::new(
@@ -302,27 +301,26 @@ fn classify_dimpl(e: &dimpl::Error, deadline_ms: u64) -> TransportFailure {
             format!("the DTLS handshake did not complete ({what}); retransmissions were exhausted"),
         )
         .with_deadline(Some(deadline_ms)),
-        dimpl::Error::SecurityError(msg) => {
-            let code =
-                msg.split("description=").nth(1).and_then(|s| s.trim().split(|c: char| !c.is_ascii_digit()).next()?.parse::<u8>().ok());
+        dimpl::Error::SecurityError(SecurityError::FatalAlert { description }) => {
+            let code = *description;
             let mut f = TransportFailure::new(Phase::DtlsHandshake, FailureKind::DtlsHandshakeFailed, "");
-            match code {
-                Some(c) => {
-                    let name = alert_name(c);
-                    f.message = format!(
-                        "the DTLS peer sent a fatal alert ({name}) during the handshake{}",
-                        if matches!(c, 42 | 43 | 44 | 45 | 46 | 48 | 49 | 116) {
-                            " — this alert concerns certificates; the peer may have rejected the client identity or the negotiated parameters"
-                        } else {
-                            ""
-                        }
-                    );
-                    f.tls_alert = Some(name);
+            let name = alert_name(code);
+            f.message = format!(
+                "the DTLS peer sent a fatal alert ({name}) during the handshake{}",
+                if matches!(code, 42 | 43 | 44 | 45 | 46 | 48 | 49 | 116) {
+                    " — this alert concerns certificates; the peer may have rejected the client identity or the negotiated parameters"
+                } else {
+                    ""
                 }
-                None => f.message = format!("the DTLS handshake failed a security check: {msg}"),
-            }
+            );
+            f.tls_alert = Some(name);
             f
         }
+        dimpl::Error::SecurityError(reason) => TransportFailure::new(
+            Phase::DtlsHandshake,
+            FailureKind::DtlsHandshakeFailed,
+            format!("the DTLS handshake failed a security check: {reason}"),
+        ),
         dimpl::Error::CertificateError(msg) => TransportFailure::new(
             Phase::DtlsHandshake,
             FailureKind::DtlsHandshakeFailed,
@@ -339,17 +337,26 @@ fn version_label(v: Option<ProtocolVersion>) -> Option<String> {
         ProtocolVersion::DTLS1_0 => Some("DTLSv1_0".into()),
         ProtocolVersion::DTLS1_2 => Some("DTLSv1_2".into()),
         ProtocolVersion::DTLS1_3 => Some("DTLSv1_3".into()),
-        ProtocolVersion::Unknown(n) => Some(format!("DTLS(0x{n:04x})")),
+        version => Some(format!("DTLS(0x{:04x})", version.as_u16())),
     }
 }
 
-/// Notes from the datagram path, each recorded once.
+/// Notes from the datagram path, each recorded once, and whether a send the
+/// path had not taken was interrupted.
 #[derive(Default)]
-struct PathNotes(HashSet<String>);
+struct PathNotes {
+    seen: HashSet<String>,
+    /// A flight, a datagram or the closing `close_notify` was still being
+    /// handed to the path when cancellation or a deadline stopped it: it may
+    /// have been partly written, so a tunnel is reset instead of finished.
+    /// An exchange that ends while nothing is being sent (waiting for the
+    /// peer, say) leaves it unset, and the tunnel is finished cleanly.
+    send_interrupted: bool,
+}
 
 impl PathNotes {
     fn once(&mut self, facts: &mut SessionFacts, note: String) {
-        if self.0.insert(note.clone()) {
+        if self.seen.insert(note.clone()) {
             facts.notes.push(note);
         }
     }
@@ -374,6 +381,98 @@ async fn send_all<C: DatagramChannel>(
     }
     Ok(())
 }
+
+/// [`send_all`] raced against cancellation and `deadline`: a path that stops
+/// taking datagrams (a tunnel withholding flow-control credit) must not hold
+/// the handshake or the exchange past either. `on_deadline` is the failure
+/// when the deadline passes first. The caller treats the path as ended, as
+/// a datagram may have been partly handed to it, and an interrupted send is
+/// noted ([`PathNotes::send_interrupted`]).
+async fn send_bounded<C: DatagramChannel>(
+    chan: &mut C,
+    outs: &[Out],
+    notes: &mut PathNotes,
+    facts: &mut SessionFacts,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+    on_deadline: impl FnOnce() -> TransportFailure,
+) -> Result<(), TransportFailure> {
+    let sent = guarded(send_all(chan, outs, notes, facts), cancel, deadline).await;
+    if sent.is_err() {
+        notes.send_interrupted = true;
+    }
+    match sent {
+        Ok(r) => r,
+        Err(Interrupted::Canceled) => {
+            Err(TransportFailure::new(Phase::Session, FailureKind::Canceled, "canceled while the datagram path was not taking datagrams"))
+        }
+        Err(Interrupted::Deadline) => Err(on_deadline()),
+    }
+}
+
+/// A tunnel a DTLS session runs through ([`crate::masque::MasqueChannel`] or
+/// [`crate::hbone_udp::HboneChannel`]).
+trait Tunnel: DatagramChannel {
+    /// The tunnel's own evidence.
+    type Facts;
+    /// Record how the session ended the tunnel.
+    fn mark_closed_by(&mut self, by: ClosedBy);
+    /// End the tunnel: finished cleanly, or reset when `reset`. Returns its
+    /// evidence and the bytes written and read while it was open.
+    fn finish_tunnel(self, reset: bool) -> impl Future<Output = (Self::Facts, u64, u64)> + Send;
+}
+
+impl Tunnel for crate::masque::MasqueChannel {
+    type Facts = anvil_domain::outcome::MasqueTunnel;
+
+    fn mark_closed_by(&mut self, by: ClosedBy) {
+        self.set_closed_by(by);
+    }
+
+    fn finish_tunnel(self, reset: bool) -> impl Future<Output = (Self::Facts, u64, u64)> + Send {
+        self.close(reset)
+    }
+}
+
+impl Tunnel for crate::hbone_udp::HboneChannel {
+    type Facts = HboneDatagramChannel;
+
+    fn mark_closed_by(&mut self, by: ClosedBy) {
+        self.set_closed_by(by);
+    }
+
+    fn finish_tunnel(self, reset: bool) -> impl Future<Output = (Self::Facts, u64, u64)> + Send {
+        self.close(reset)
+    }
+}
+
+/// [`exchange`] inside a tunnel, then the tunnel's end. The tunnel is reset
+/// only when a send it had not taken was interrupted, as that send may have
+/// left a partial record (a capsule, or a `[u16 length][payload]` record) on
+/// the stream. An exchange canceled or timed out while nothing was being
+/// sent finishes the tunnel cleanly.
+#[allow(clippy::too_many_arguments)]
+async fn exchange_in<T: Tunnel>(
+    plan: &DtlsPlan,
+    mut chan: T,
+    rec: &mut Recorder,
+    obs: &mut AttemptObservation,
+    facts: &mut SessionFacts,
+    id: &Identity<'_>,
+    session_notes: &[(&str, String)],
+    events: &EventCtx,
+    cancel: &CancellationToken,
+    commands: Option<CommandRx>,
+) -> (Option<Session>, T::Facts, u64, u64) {
+    let (session, send_interrupted) = exchange(plan, &mut chan, rec, obs, facts, id, session_notes, events, cancel, commands).await;
+    let failure_kind = obs.failure.as_ref().map(|f| f.kind);
+    chan.mark_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
+    let (tunnel, written, read) = chan.finish_tunnel(send_interrupted).await;
+    (session, tunnel, written, read)
+}
+
+/// How long the closing `close_notify` may take to be handed to the path.
+const CLOSE_NOTIFY_WRITE: Duration = Duration::from_millis(250);
 
 pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
     let rec = Recorder::new(0, events.clone());
@@ -447,7 +546,7 @@ async fn run_direct(
         session_notes.push(("proxy_protocol_envelope", e.summary()));
     }
     let mut chan = SocketChannel::new(sock, env);
-    let session = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &session_notes, events, cancel, commands).await;
+    let (session, _) = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &session_notes, events, cancel, commands).await;
     if let (Some(e), Some(c)) = (chan.envelope(), obs.connection.as_mut()) {
         c.proxy_header = Some(e.observation());
     }
@@ -484,17 +583,16 @@ async fn run_tunneled(
 ) -> SessionOutput {
     let mut obs = new_attempt(0, AttemptReason::Initial, "CONNECT", &m.display_url);
     let total_deadline = if commands.is_some() { None } else { deadline_from(plan.timeouts.total_ms) };
-    let mut chan = match crate::masque::open(m, &mut rec, &mut obs, &mut facts, events, cancel, total_deadline).await {
+    let chan = match crate::masque::open(m, &mut rec, &mut obs, &mut facts, events, cancel, total_deadline).await {
         Ok(c) => c,
         Err(n) => return n.into_output(rec, obs, facts, plan.response_window_ms, events),
     };
     chan.into_outer_leg(&mut rec, &mut obs, "DTLS", &plan.display_url);
     let encoding = chan.status().encoding.map(crate::masque::encoding_name).unwrap_or("HTTP Datagrams");
     let note = format!("DTLS with {} inside the CONNECT-UDP tunnel through {} (records as {encoding})", m.target, m.proxy_authority);
-    let session = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &[("tunnel", note)], events, cancel, commands).await;
-    let failure_kind = obs.failure.as_ref().map(|f| f.kind);
-    chan.set_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
-    let (tunnel, written, read) = chan.close(failure_kind == Some(FailureKind::Canceled)).await;
+    let notes = [("tunnel", note)];
+    let (session, tunnel, written, read) =
+        exchange_in(plan, chan, &mut rec, &mut obs, &mut facts, &id, &notes, events, cancel, commands).await;
     crate::masque::note_dropped(&mut facts, &tunnel);
     obs.bytes.connection_bytes_written = Some(written);
     obs.bytes.connection_bytes_read = Some(read);
@@ -541,7 +639,7 @@ async fn run_hbone(
     let opened =
         crate::hbone_udp::open_channel(&mut rec, &mut obs, p, &plan.host, plan.port, &plan.dns, &plan.timeouts, total_deadline, cancel)
             .await;
-    let mut chan = match opened {
+    let chan = match opened {
         Ok(c) => c,
         Err(f) => return SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, status(0, 0), facts),
     };
@@ -552,10 +650,9 @@ async fn run_hbone(
         chan.marker()
     );
     facts.notes.push(note.clone());
-    let session = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &[("tunnel", note)], events, cancel, commands).await;
-    let failure_kind = obs.failure.as_ref().map(|f| f.kind);
-    chan.set_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
-    let (channel, written, read) = chan.close(matches!(failure_kind, Some(FailureKind::Canceled | FailureKind::TotalTimeout))).await;
+    let notes = [("tunnel", note)];
+    let (session, channel, written, read) =
+        exchange_in(plan, chan, &mut rec, &mut obs, &mut facts, &id, &notes, events, cancel, commands).await;
     obs.bytes.connection_bytes_written = Some(written);
     obs.bytes.connection_bytes_read = Some(read);
     if let Some(t) = obs.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
@@ -610,7 +707,8 @@ impl Inbox {
 
 /// The DTLS handshake and the application datagrams over any datagram path.
 /// Fills the connection's TLS evidence, the phases, `obs.failure` and
-/// `obs.dispatch`; returns the session when the handshake completed.
+/// `obs.dispatch`; returns the session when the handshake completed, and
+/// whether a send the path had not taken was interrupted.
 #[allow(clippy::too_many_arguments)]
 async fn exchange<C: DatagramChannel>(
     plan: &DtlsPlan,
@@ -623,7 +721,7 @@ async fn exchange<C: DatagramChannel>(
     events: &EventCtx,
     cancel: &CancellationToken,
     mut commands: Option<CommandRx>,
-) -> Option<Session> {
+) -> (Option<Session>, bool) {
     let interactive = commands.is_some();
     let mut notes = PathNotes::default();
     let hs_ms = plan.timeouts.tls_handshake_ms.or(plan.timeouts.connect_ms).unwrap_or(10_000);
@@ -642,7 +740,7 @@ async fn exchange<C: DatagramChannel>(
             obs.failure =
                 Some(TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, format!("DTLS configuration rejected: {e:?}")));
             obs.dispatch = DispatchState::NotDispatched;
-            return None;
+            return (None, false);
         }
     };
     let cert = DtlsCertificate { certificate: id.identity.cert_der.clone(), private_key: id.identity.key_der.to_vec() };
@@ -653,7 +751,7 @@ async fn exchange<C: DatagramChannel>(
     if let Err(e) = dtls.handle_timeout(start) {
         obs.failure = Some(TransportFailure::new(Phase::Prepare, FailureKind::Internal, format!("the DTLS client could not start: {e:?}")));
         obs.dispatch = DispatchState::NotDispatched;
-        return None;
+        return (None, false);
     }
 
     // ---- handshake ----
@@ -664,6 +762,14 @@ async fn exchange<C: DatagramChannel>(
     let mut peer_chain: Vec<CertificateSummary> = vec![];
     let mut peer_spiffe_id: Option<String> = None;
     let mut cert_requested = false;
+    let hs_timeout = || {
+        TransportFailure::new(
+            Phase::DtlsHandshake,
+            FailureKind::DtlsHandshakeTimeout,
+            format!("no DTLS handshake completed within {hs_ms} ms; UDP gives no signal whether the datagrams reached a DTLS listener"),
+        )
+        .with_deadline(Some(hs_ms))
+    };
     enum HsEv {
         In(Inbound),
         Timer,
@@ -685,7 +791,8 @@ async fn exchange<C: DatagramChannel>(
                 }
             }
         }
-        if let Err(mut f) = send_all(chan, &outs, &mut notes, facts).await {
+        // The flight goes out within the handshake deadline too.
+        if let Err(mut f) = send_bounded(chan, &outs, &mut notes, facts, cancel, Some(hs_deadline), hs_timeout).await {
             f.phase = Phase::DtlsHandshake;
             break Err(f);
         }
@@ -743,16 +850,7 @@ async fn exchange<C: DatagramChannel>(
                     break Err(classify_dimpl(&e, hs_ms));
                 }
             }
-            HsEv::Deadline => {
-                break Err(TransportFailure::new(
-                    Phase::DtlsHandshake,
-                    FailureKind::DtlsHandshakeTimeout,
-                    format!(
-                        "no DTLS handshake completed within {hs_ms} ms; UDP gives no signal whether the datagrams reached a DTLS listener"
-                    ),
-                )
-                .with_deadline(Some(hs_ms)));
-            }
+            HsEv::Deadline => break Err(hs_timeout()),
             HsEv::Canceled => {
                 break Err(TransportFailure::new(Phase::DtlsHandshake, FailureKind::Canceled, "canceled during the DTLS handshake"));
             }
@@ -806,7 +904,7 @@ async fn exchange<C: DatagramChannel>(
         // Handshake datagrams only: no application data was dispatched.
         obs.failure = Some(f);
         obs.dispatch = DispatchState::NotDispatched;
-        return None;
+        return (None, notes.send_interrupted);
     }
     rec.finish_with(hs_idx, PhaseStatus::Completed, version.clone().unwrap_or_else(|| "DTLS".into()));
 
@@ -821,6 +919,11 @@ async fn exchange<C: DatagramChannel>(
     let mut inbox = Inbox::default();
     // The path ended: nothing more can be sent through it (no close_notify).
     let mut path_ended = false;
+    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
+    let total_timeout = || {
+        TransportFailure::new(Phase::Session, FailureKind::TotalTimeout, "the total deadline elapsed during the DTLS exchange")
+            .with_deadline(plan.timeouts.total_ms)
+    };
     for d in &plan.datagrams {
         if let Err(e) = dtls.send_application_data(d) {
             failure = Some(TransportFailure::new(
@@ -831,7 +934,7 @@ async fn exchange<C: DatagramChannel>(
             break;
         }
         let outs = drain(&mut dtls, &mut next_timeout);
-        if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+        if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
             failure = Some(f);
             path_ended = true;
             break;
@@ -841,7 +944,6 @@ async fn exchange<C: DatagramChannel>(
         tr.data(Direction::Sent, "datagram", d);
         inbox.record(&outs, &mut tr, facts);
     }
-    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
     let window = Duration::from_millis(plan.response_window_ms);
     let mut window_end = Instant::now() + window;
     enum Ev {
@@ -871,7 +973,7 @@ async fn exchange<C: DatagramChannel>(
                     break;
                 }
                 let outs = drain(&mut dtls, &mut next_timeout);
-                if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+                if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                     failure = Some(f);
                     path_ended = true;
                 }
@@ -896,7 +998,7 @@ async fn exchange<C: DatagramChannel>(
                 next_timeout = None;
                 if dtls.handle_timeout(Instant::now()).is_ok() {
                     let outs = drain(&mut dtls, &mut next_timeout);
-                    if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+                    if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                         failure = Some(f);
                         path_ended = true;
                     }
@@ -922,7 +1024,7 @@ async fn exchange<C: DatagramChannel>(
                 if let Some(p) = payload {
                     if dtls.send_application_data(&p).is_ok() {
                         let outs = drain(&mut dtls, &mut next_timeout);
-                        if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+                        if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                             failure = Some(f);
                             path_ended = true;
                         } else {
@@ -945,11 +1047,16 @@ async fn exchange<C: DatagramChannel>(
             Ev::Canceled => failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the DTLS exchange was canceled")),
         }
     }
-    // Graceful close_notify (not retransmitted per RFC 6347 §4.2.7).
+    // Graceful close_notify (not retransmitted per RFC 6347 §4.2.7), within
+    // its own short bound: the path may not be taking datagrams.
     if !inbox.peer_closed && !path_ended && dtls.close().is_ok() {
         let outs = drain(&mut dtls, &mut next_timeout);
-        if send_all(chan, &outs, &mut notes, facts).await.is_ok() {
-            tr.control(Direction::Sent, "close_notify", b"");
+        let closed = tokio::time::timeout(CLOSE_NOTIFY_WRITE, send_all(chan, &outs, &mut notes, facts)).await;
+        match closed {
+            Ok(Ok(())) => tr.control(Direction::Sent, "close_notify", b""),
+            Ok(Err(_)) => {}
+            // Not taken within its bound: it may have been partly written.
+            Err(_) => notes.send_interrupted = true,
         }
     }
     if facts.repeated_datagrams > 0 {
@@ -975,12 +1082,158 @@ async fn exchange<C: DatagramChannel>(
     obs.failure = failure;
     obs.bytes.request_body = tr.sent_bytes();
     obs.bytes.response_body_wire = Some(tr.received_bytes());
-    Some(Session { transcript: tr.finish(), sent, received: inbox.received })
+    (Some(Session { transcript: tr.finish(), sent, received: inbox.received }), notes.send_interrupted)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A datagram path that takes datagrams, or (stalled) never takes one, as
+    /// a tunnel withholding flow-control credit does.
+    struct Path {
+        stalled: bool,
+        taken: usize,
+    }
+
+    impl DatagramChannel for Path {
+        async fn send(&mut self, _datagram: &[u8]) -> Result<Sent, TransportFailure> {
+            if self.stalled {
+                std::future::pending::<()>().await;
+            }
+            self.taken += 1;
+            Ok(Sent::Sent(None))
+        }
+
+        async fn recv(&mut self) -> Inbound {
+            std::future::pending().await
+        }
+    }
+
+    fn flight() -> Vec<Out> {
+        vec![Out::Packet(vec![22; 100]), Out::Connected, Out::Packet(vec![22; 50])]
+    }
+
+    fn hs_timeout() -> TransportFailure {
+        TransportFailure::new(Phase::DtlsHandshake, FailureKind::DtlsHandshakeTimeout, "handshake deadline")
+    }
+
+    /// The flight's result, and whether the send was noted as interrupted.
+    async fn send_flight(path: &mut Path, cancel: &CancellationToken, deadline: Option<Instant>) -> (Result<(), TransportFailure>, bool) {
+        let (mut notes, mut facts) = (PathNotes::default(), SessionFacts::default());
+        let outs = flight();
+        let sent = send_bounded(path, &outs, &mut notes, &mut facts, cancel, deadline, hs_timeout);
+        let r = tokio::time::timeout(Duration::from_secs(5), sent).await.expect("the flight must end without the path taking it");
+        (r, notes.send_interrupted)
+    }
+
+    fn cancel_after(ms: u64) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            c.cancel();
+        });
+        cancel
+    }
+
+    #[tokio::test]
+    async fn the_handshake_deadline_ends_a_flight_the_path_never_takes() {
+        let mut path = Path { stalled: true, taken: 0 };
+        let deadline = Some(Instant::now() + Duration::from_millis(200));
+        let (r, interrupted) = send_flight(&mut path, &CancellationToken::new(), deadline).await;
+        assert_eq!(r.unwrap_err().kind, FailureKind::DtlsHandshakeTimeout);
+        assert!(interrupted, "the interrupted send is noted, so a tunnel is reset, not finished");
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_a_flight_the_path_never_takes() {
+        let mut path = Path { stalled: true, taken: 0 };
+        let (r, interrupted) = send_flight(&mut path, &cancel_after(100), None).await;
+        assert_eq!(r.unwrap_err().kind, FailureKind::Canceled);
+        assert!(interrupted);
+    }
+
+    #[tokio::test]
+    async fn a_path_that_takes_datagrams_gets_the_whole_flight() {
+        let mut path = Path { stalled: false, taken: 0 };
+        let deadline = Some(Instant::now() + Duration::from_secs(5));
+        let (r, interrupted) = send_flight(&mut path, &CancellationToken::new(), deadline).await;
+        r.unwrap();
+        assert_eq!(path.taken, 2, "every packet of the flight, nothing else");
+        assert!(!interrupted);
+    }
+
+    /// The fake path as a tunnel: its evidence is whether it was reset.
+    impl Tunnel for Path {
+        type Facts = bool;
+
+        fn mark_closed_by(&mut self, _by: ClosedBy) {}
+
+        async fn finish_tunnel(self, reset: bool) -> (bool, u64, u64) {
+            (reset, 0, 0)
+        }
+    }
+
+    fn tunnel_plan() -> DtlsPlan {
+        crate::init();
+        let settings = crate::tls::TlsSettings { verify: false, use_system_roots: false, ..Default::default() };
+        let tls = crate::tls::prepare(&settings).expect("profile");
+        DtlsPlan {
+            host: "127.0.0.1".into(),
+            port: 9,
+            dns: DnsConfig::default(),
+            timeouts: Timeouts { tls_handshake_ms: Some(300), total_ms: Some(10_000), ..Timeouts::default() },
+            tls: Arc::new(tls),
+            identity: None,
+            datagrams: vec![Bytes::from_static(b"hi")],
+            response_window_ms: 200,
+            max_datagrams: 10,
+            display_url: "dtls://127.0.0.1:9".into(),
+            transcript: TranscriptLimits::default(),
+            redact: None,
+            envelope: None,
+            masque: None,
+            hbone: None,
+        }
+    }
+
+    /// A DTLS exchange inside `path` as a tunnel, then its end: the failure
+    /// kind and whether the tunnel was reset (`close(true)`) or finished.
+    async fn through_tunnel(path: Path, cancel: &CancellationToken) -> (Option<FailureKind>, bool) {
+        let plan = tunnel_plan();
+        let identity = ephemeral_identity().expect("an ephemeral identity");
+        let id = Identity { identity: &identity, ephemeral: true };
+        let events = EventCtx::none();
+        let mut rec = Recorder::new(0, events.clone());
+        let mut obs = new_attempt(0, AttemptReason::Initial, "DTLS", &plan.display_url);
+        let mut facts = SessionFacts::default();
+        let run = exchange_in(&plan, path, &mut rec, &mut obs, &mut facts, &id, &[], &events, cancel, None);
+        let (_, reset, _, _) = tokio::time::timeout(Duration::from_secs(10), run).await.expect("the exchange must end");
+        (obs.failure.as_ref().map(|f| f.kind), reset)
+    }
+
+    /// A flight the tunnel never takes may be partly written when the cancel
+    /// stops it: the tunnel is reset.
+    #[tokio::test]
+    async fn a_tunnel_is_reset_when_a_send_it_had_not_taken_is_interrupted() {
+        let (kind, reset) = through_tunnel(Path { stalled: true, taken: 0 }, &cancel_after(100)).await;
+        assert_eq!(kind, Some(FailureKind::Canceled));
+        assert!(reset, "the tunnel is reset (close(true)), not finished");
+    }
+
+    /// Canceled, or out of handshake time, while waiting for the peer (every
+    /// flight was taken): nothing was being written, so the tunnel is
+    /// finished cleanly.
+    #[tokio::test]
+    async fn a_tunnel_is_finished_when_the_exchange_ends_while_nothing_is_sent() {
+        let (kind, reset) = through_tunnel(Path { stalled: false, taken: 0 }, &cancel_after(100)).await;
+        assert_eq!(kind, Some(FailureKind::Canceled));
+        assert!(!reset, "no send was interrupted: the tunnel is finished, not reset");
+        let (kind, reset) = through_tunnel(Path { stalled: false, taken: 0 }, &CancellationToken::new()).await;
+        assert_eq!(kind, Some(FailureKind::DtlsHandshakeTimeout));
+        assert!(!reset, "a handshake that timed out waiting for the peer finishes the tunnel");
+    }
 
     #[test]
     fn certificate_request_is_found_in_a_plaintext_flight() {
@@ -1007,10 +1260,20 @@ mod tests {
 
     #[test]
     fn alert_codes_are_extracted() {
-        let f = classify_dimpl(&dimpl::Error::SecurityError("Received fatal alert: level=2, description=48".into()), 1000);
+        let f = classify_dimpl(&dimpl::Error::SecurityError(SecurityError::FatalAlert { description: 48 }), 1000);
         assert_eq!(f.kind, FailureKind::DtlsHandshakeFailed);
         assert_eq!(f.tls_alert.as_deref(), Some("unknown_ca"));
-        let t = classify_dimpl(&dimpl::Error::Timeout("handshake"), 1000);
+        assert_eq!(
+            f.message,
+            "the DTLS peer sent a fatal alert (unknown_ca) during the handshake — this alert concerns certificates; the peer may have rejected the client identity or the negotiated parameters"
+        );
+        let t = classify_dimpl(&dimpl::Error::Timeout(dimpl::TimeoutError::Handshake), 1000);
         assert_eq!(t.kind, FailureKind::DtlsHandshakeTimeout);
+    }
+
+    #[test]
+    fn unknown_protocol_versions_keep_the_wire_value() {
+        assert_eq!(version_label(Some(ProtocolVersion::DTLS1_2)).as_deref(), Some("DTLSv1_2"));
+        assert_eq!(version_label(Some(ProtocolVersion::from_u16(0xFEFE))).as_deref(), Some("DTLS(0xfefe)"));
     }
 }

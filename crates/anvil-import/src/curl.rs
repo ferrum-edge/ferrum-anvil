@@ -717,9 +717,10 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
                 if let Body::Json { text } = &mut bd
                     && let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text)
                 {
-                    let before = b.report.redactions.len();
+                    // Counted apart from the (capped) list.
+                    let before = b.report.redactions_made();
                     crate::common::scrub_json(b, &mut v, "/args#json");
-                    if b.report.redactions.len() > before {
+                    if b.report.redactions_made() > before {
                         *text = serde_json::to_string_pretty(&v).unwrap_or_default();
                     }
                 }

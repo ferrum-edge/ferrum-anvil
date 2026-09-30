@@ -52,7 +52,8 @@ fn token_scope(t: &str) -> SourceScope {
         // capacity or response-phase policy rejections (live: UP-015,
         // GW-020 content guard). The token alone does not identify the leg.
         "backend_error" => SourceScope::Unknown,
-        _ => SourceScope::GatewayAdmission,
+        "circuit_breaker_open" | "overload" | "config_stale" | "concurrency_limit" => SourceScope::GatewayAdmission,
+        _ => SourceScope::Unknown,
     }
 }
 
@@ -64,7 +65,10 @@ fn token_owner(t: &str) -> Owner {
         // A slow client upload is the caller's, gateway processing and the
         // route's budget the operator's; the token cannot tell them apart.
         "request_timeout" => Owner::Unknown,
-        _ => Owner::GatewayOperator,
+        "connection_failure" | "backend_timeout" | "circuit_breaker_open" | "overload" | "config_stale" | "concurrency_limit" => {
+            Owner::GatewayOperator
+        }
+        _ => Owner::Unknown,
     }
 }
 
@@ -357,7 +361,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                     )
                     .ev_at(E::HttpHeader, "header.via", via.clone(), idx)
                     .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
-                    .ev_at(E::BodyContent, "body.signature", body_text.chars().take(160).collect::<String>(), idx)
+                    .ev_at(E::BodyContent, "body.signature", ctx.excerpt(&body_text, 160), idx)
                     .ev(E::Configuration, "catalog.contradicted", ids.join(", "))
                     .ev(E::Configuration, "catalog.compatibility_id", cat.compatibility_id.clone())
                     .var("status", r.status.to_string())
@@ -382,7 +386,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             Severity::Error,
         )
         .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
-        .ev_at(E::BodyContent, "body.signature", body_text.chars().take(160).collect::<String>(), idx)
+        .ev_at(E::BodyContent, "body.signature", ctx.excerpt(&body_text, 160), idx)
         .ev(E::Configuration, "catalog.outcome", o.id.clone())
         .ev(E::Configuration, "catalog.compatibility_id", cat.compatibility_id.clone())
         .var("outcome", o.id.clone())
@@ -410,7 +414,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             Severity::Error,
         )
         .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
-        .ev_at(E::BodyContent, "body.signature", body_text.chars().take(160).collect::<String>(), idx)
+        .ev_at(E::BodyContent, "body.signature", ctx.excerpt(&body_text, 160), idx)
         .ev(E::Configuration, "catalog.candidates", ids.join(", "))
         .ev(E::Configuration, "catalog.compatibility_id", cat.compatibility_id.clone())
         .var("count", ids.len().to_string())
@@ -504,11 +508,47 @@ fn catalog_title(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{token_owner, token_scope};
     use crate::facts::{DiagnosticInput, FerrumTrust};
-    use anvil_domain::diagnostics::{Confidence, DiagnosticFinding};
+    use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Owner, SourceScope};
     use anvil_domain::execution::{BodyCapture, BodyCompleteness, HeaderEntry, ResponseRecord};
     use anvil_domain::outcome::ProtocolStatus;
     use anvil_domain::request::Protocol;
+
+    #[test]
+    fn token_scope_and_owner_cover_the_pinned_vocabulary() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/ferrum-contracts/vocabularies/gateway-errors.json"))
+                .expect("pinned gateway error vocabulary");
+        let tokens = contract["x_gateway_error_tokens"].as_array().expect("token list");
+        let expected: std::collections::BTreeSet<&str> = [
+            "connection_failure",
+            "backend_timeout",
+            "backend_error",
+            "circuit_breaker_open",
+            "overload",
+            "config_stale",
+            "concurrency_limit",
+            "request_timeout",
+        ]
+        .into_iter()
+        .collect();
+        let actual: std::collections::BTreeSet<&str> = tokens.iter().map(|token| token["token"].as_str().unwrap()).collect();
+        assert_eq!(actual, expected, "update the explicit scope/owner mappings for any vocabulary change");
+        for token in actual {
+            let expected_scope = match token {
+                "connection_failure" | "backend_timeout" => SourceScope::GatewayToUpstream,
+                "backend_error" => SourceScope::Unknown,
+                _ => SourceScope::GatewayAdmission,
+            };
+            let expected_owner = match token {
+                "backend_error" | "request_timeout" => Owner::Unknown,
+                _ => Owner::GatewayOperator,
+            };
+            assert_eq!(token_scope(token), expected_scope, "token_scope({token})");
+            assert_eq!(token_owner(token), expected_owner, "token_owner({token})");
+        }
+    }
 
     fn response(status: u16, content_type: &str, headers: &[(&str, &str)]) -> ResponseRecord {
         ResponseRecord {
@@ -539,6 +579,16 @@ mod tests {
     }
 
     fn diagnose_as(protocol: Protocol, r: &ResponseRecord, body: &[u8], compat: &str) -> Vec<DiagnosticFinding> {
+        diagnose_redacted(protocol, r, body, compat, None)
+    }
+
+    fn diagnose_redacted(
+        protocol: Protocol,
+        r: &ResponseRecord,
+        body: &[u8],
+        compat: &str,
+        redact: Option<&dyn Fn(&str) -> String>,
+    ) -> Vec<DiagnosticFinding> {
         let trust = FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: false };
         let ps = ProtocolStatus::Http { status: r.status, reason: None };
         crate::diagnose(&DiagnosticInput {
@@ -555,8 +605,37 @@ mod tests {
             credentials_stripped_on_redirect: false,
             protocol_fallback_from: None,
             workload: None,
+            redact,
         })
         .findings
+    }
+
+    /// A catalog finding quotes the first 160 characters of the body as its
+    /// signature, redacted before the cut: a secret the gateway echoes across
+    /// the cut (here in a rejected header name) leaves no prefix.
+    #[test]
+    fn a_quoted_body_signature_is_redacted_before_it_is_cut() {
+        const SECRET: &str = "zq7-echoed-secret-5r7t";
+        let scrub = |s: &str| s.replace(SECRET, anvil_domain::secret::REDACTED);
+        // `{"error":"Request header '` is 26 characters: the cut falls 4 characters into the secret.
+        let name = format!("{}{SECRET}", "h".repeat(130));
+        let body = format!(r#"{{"error":"Request header '{name}' exceeds maximum size of 8192 bytes"}}"#);
+        let r = response(431, "application/json", &[]);
+        let signature = |f: &[DiagnosticFinding]| {
+            f.iter().flat_map(|x| x.evidence.iter()).find(|e| e.key == "body.signature").map(|e| e.value.clone()).expect("a quoted body")
+        };
+        // Ground truth: cut first, the signature ends with the secret's first 4 characters.
+        let plain = diagnose(Protocol::Http, &r, body.as_bytes());
+        assert!(signature(&plain).ends_with(&SECRET[..4]), "{}", signature(&plain));
+
+        let f = diagnose_redacted(Protocol::Http, &r, body.as_bytes(), "ferrum-edge-0.9.5", Some(&scrub));
+        let expected = format!(r#"{{"error":"Request header '{}{}"#, "h".repeat(130), anvil_domain::secret::REDACTED);
+        assert_eq!(signature(&f), expected);
+        for x in &f {
+            for text in std::iter::once(&x.explanation).chain(x.evidence.iter().map(|e| &e.value)) {
+                assert!(!(4..=SECRET.len()).any(|n| text.contains(&SECRET[..n])), "{}: a prefix of the secret is quoted: {text}", x.code);
+            }
+        }
     }
 
     fn find<'a>(f: &'a [DiagnosticFinding], code: &str) -> Option<&'a DiagnosticFinding> {

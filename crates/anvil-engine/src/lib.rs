@@ -86,6 +86,8 @@ pub struct Engine {
 /// Source of `Engine::id`.
 static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) const SECRET_COOKIE_NAME_NOTE: &str = "a response cookie was not stored because its name contains a request secret";
+
 /// The workspace cookie jars (one per isolation), with the engine's epoch
 /// that fences what is stored in them. Cloned into an interactive session's
 /// task, which stores its handshake cookies after the `&Engine` it was
@@ -124,23 +126,42 @@ impl CookieJars {
 
     /// Keep the response's cookies, unless the jars were cleared since
     /// `epoch` (a lock while the request was in flight) or the isolation's
-    /// jar was removed since then (its workspace was deleted).
-    pub(crate) fn store(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
+    /// jar was removed since then (its workspace was deleted). A cookie
+    /// scoped to a public suffix is not kept (see [`scoped_cookie`]).
+    pub(crate) fn store(
+        &self,
+        epoch: SensitiveEpoch,
+        isolation: &str,
+        t: &prepare::Target,
+        r: &ResponseRecord,
+        redactor: &redact::Redactor,
+    ) -> bool {
         let set_cookie = r.header_values("set-cookie");
         if set_cookie.is_empty() {
-            return;
+            return false;
         }
-        let Ok(url) = url::Url::parse(&t.url()) else { return };
+        let Ok(url) = url::Url::parse(&t.url()) else { return false };
         let mut jars = self.jars.lock();
         // Checked under the jars' lock: a lock or a workspace delete either
         // advanced its counter before this point or empties the jar after it.
         if self.epoch.load(Ordering::SeqCst) != epoch.epoch || epoch.jar != Some(jars.generation(isolation)) {
-            return;
+            return false;
         }
         let jar = jars.by_isolation.entry(isolation.to_string()).or_default();
+        let mut skipped_secret_name = false;
         for v in set_cookie {
-            let _ = jar.parse(v, &url);
+            let secret_name = v.split(';').next().and_then(|pair| pair.split_once('=')).is_some_and(|(name, _)| {
+                let name = name.trim();
+                redactor.text(name) != name || redactor.hides_secret(name)
+            });
+            if secret_name {
+                skipped_secret_name = true;
+                continue;
+            }
+            let Some(cookie) = scoped_cookie(v, &url) else { continue };
+            let _ = jar.insert(cookie, &url);
         }
+        skipped_secret_name
     }
 
     fn generation(&self, isolation: &str) -> u64 {
@@ -155,6 +176,42 @@ impl CookieJars {
         let g = jars.generations.entry(isolation.to_string()).or_default();
         *g = g.wrapping_add(1);
     }
+}
+
+/// The cookie that a `Set-Cookie` value received from `url` sets, or `None`
+/// when it is not stored. The jar applies the domain, path, `Secure` and
+/// expiry rules, but it has no public suffix list: a `Domain` attribute that
+/// is a public suffix (`com`, `co.uk`, `github.io`) or an unknown single-label
+/// domain (`internal`, `lan`, `corp`) could scope a cookie too broadly. Such a
+/// cookie is refused unless the domain is the request host itself; then it is
+/// kept as a host-only cookie (RFC 6265 §5.3, step 5).
+fn scoped_cookie(set_cookie: &str, url: &url::Url) -> Option<cookie_store::Cookie<'static>> {
+    let mut cookie = cookie_store::Cookie::parse(set_cookie, url).ok()?.into_owned();
+    let restricted = matches!(
+        &cookie.domain,
+        cookie_store::CookieDomain::Suffix(d) if is_public_suffix(d) || is_single_label_domain(d)
+    );
+    if restricted {
+        if !cookie.domain.host_is_identical(url) {
+            return None;
+        }
+        cookie.domain = cookie_store::CookieDomain::host_only(url).ok()?;
+    }
+    Some(cookie)
+}
+
+/// Whether `domain` (canonical: lowercase ASCII, no leading dot) is a suffix
+/// listed in the public suffix list, ICANN or private section. A name the
+/// list does not know (such as a local `.test` name) is not one.
+fn is_public_suffix(domain: &str) -> bool {
+    psl::suffix(domain.as_bytes()).is_some_and(|s| s.is_known() && s == domain.as_bytes())
+}
+
+/// A `Domain` with one label is not useful for sharing a cookie across hosts.
+/// Private local suffixes such as `.internal` are not in the PSL, so reject
+/// them just like known public suffixes unless the request host is identical.
+fn is_single_label_domain(domain: &str) -> bool {
+    !domain.trim_end_matches('.').contains('.')
 }
 
 /// The engine's sensitive-state epoch when an execution started (or when its
@@ -397,9 +454,18 @@ impl Engine {
 
     /// Keep the response's cookies in the workspace jar, unless the jar was
     /// cleared since `epoch` (a lock or a workspace delete while the request
-    /// was in flight).
-    pub fn store_cookies(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
-        self.cookies.store(epoch, isolation, t, r);
+    /// was in flight). Single-label and public-suffix `Domain` attributes are
+    /// refused unless they match the response host, in which case they become
+    /// host-only cookies.
+    pub fn store_cookies(
+        &self,
+        epoch: SensitiveEpoch,
+        isolation: &str,
+        t: &prepare::Target,
+        r: &ResponseRecord,
+        redactor: &redact::Redactor,
+    ) -> bool {
+        self.cookies.store(epoch, isolation, t, r, redactor)
     }
 
     /// The workspace cookie jars, for a session task to store into.
@@ -514,5 +580,91 @@ mod tests {
         ctx.epoch = Some(e.context_epoch("workspace-a"));
         assert_eq!(e.epoch_for(&ctx), e.execution_epoch("workspace-a"), "a context built after the delete starts before it");
         assert_eq!(e.epoch_for(&ctx).jar, Some(1));
+    }
+
+    fn with_set_cookie(values: &[&str]) -> ResponseRecord {
+        use anvil_domain::execution::{BodyCapture, BodyCompleteness, HeaderEntry};
+        ResponseRecord {
+            status: 200,
+            reason: None,
+            http_version: "HTTP/1.1".into(),
+            headers: values.iter().map(|v| HeaderEntry { name: "Set-Cookie".into(), value: (*v).into() }).collect(),
+            trailers: vec![],
+            trailers_received: false,
+            body: BodyCapture {
+                completeness: BodyCompleteness::NoBody,
+                wire_bytes: 0,
+                declared_length: None,
+                captured_bytes: 0,
+                display_truncated: false,
+                content_type: None,
+                content_encoding: None,
+                decoded_bytes: None,
+                decoding: None,
+                decoding_detail: None,
+                blob_sha256: None,
+            },
+        }
+    }
+
+    fn target(url: &str) -> prepare::Target {
+        prepare::parse_target(url, &["https"], &mut Vec::new()).unwrap()
+    }
+
+    /// A server cannot scope a cookie to a public suffix (ICANN or private
+    /// section, single- or multi-label), so it never reaches another site
+    /// under that suffix. Parent-domain and host-only cookies are kept.
+    #[tokio::test]
+    async fn a_cookie_scoped_to_a_public_suffix_is_not_stored() {
+        let e = Engine::new();
+        let store = |url: &str, values: &[&str]| {
+            e.store_cookies(e.execution_epoch("ws"), "ws", &target(url), &with_set_cookie(values), &redact::Redactor::default())
+        };
+        let header = |url: &str| e.cookie_header("ws", &target(url));
+
+        store("https://www.attacker.com/", &["tld=1; Domain=com", "dotted=1; Domain=.COM"]);
+        store("https://www.attacker.com./", &["fqdn=1; Domain=com."]);
+        store("https://shop.attacker.co.uk/", &["multi=1; Domain=co.uk", "uk=1; Domain=uk"]);
+        store("https://www.attacker.co.uk./", &["trailing=1; Domain=co.uk."]);
+        store("https://attacker.github.io/", &["private=1; Domain=github.io"]);
+        assert_eq!(header("https://victim.com/"), None, "a cookie for com reaches no other .com site");
+        assert_eq!(header("https://victim.com./"), None, "a cookie for com. reaches no other .com site");
+        assert_eq!(header("https://victim.co.uk/"), None, "a cookie for co.uk or uk reaches no other .co.uk site");
+        assert_eq!(header("https://victim.co.uk./"), None, "a cookie for co.uk. reaches no other .co.uk site");
+        assert_eq!(header("https://victim.github.io/"), None, "a cookie for a private-section suffix reaches no other site");
+
+        // Positive controls: a registrable parent domain and a host-only
+        // cookie keep their scope.
+        store("https://api.example.com/", &["parent=1; Domain=example.com", "host=1"]);
+        assert_eq!(header("https://www.example.com/").as_deref(), Some("parent=1"));
+        let own = header("https://api.example.com/").unwrap_or_default();
+        assert!(own.contains("parent=1") && own.contains("host=1"), "{own}");
+        store("https://shop.example.co.uk/", &["uk_parent=1; Domain=example.co.uk"]);
+        assert_eq!(header("https://www.example.co.uk/").as_deref(), Some("uk_parent=1"));
+
+        // A public suffix that is the request host itself stays host-only.
+        store("https://github.io/", &["self=1; Domain=github.io"]);
+        assert_eq!(header("https://github.io/").as_deref(), Some("self=1"));
+        assert_eq!(header("https://other.github.io/"), None, "kept as host-only, not for the whole suffix");
+    }
+
+    #[tokio::test]
+    async fn a_cookie_scoped_to_an_unknown_single_label_domain_is_not_shared() {
+        let e = Engine::new();
+        let store = |url: &str, cookie: &str| {
+            e.store_cookies(e.execution_epoch("ws"), "ws", &target(url), &with_set_cookie(&[cookie]), &redact::Redactor::default())
+        };
+        let header = |url: &str| e.cookie_header("ws", &target(url));
+
+        store("https://api.internal/", "private=1; Domain=internal");
+        assert_eq!(header("https://other.internal/"), None);
+        assert_eq!(header("https://api.internal/"), None);
+
+        // A single-label domain that is the request host itself is retained
+        // as host-only, following the same exception as a public suffix.
+        store("https://internal/", "self=1; Domain=internal");
+        assert_eq!(header("https://internal/").as_deref(), Some("self=1"));
+        assert_eq!(header("https://sub.internal/"), None, "host-only cookies do not reach subdomains");
+        assert_eq!(header("https://api.internal/"), None, "host-only cookies do not reach sibling hosts");
     }
 }

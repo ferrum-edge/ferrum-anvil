@@ -88,8 +88,9 @@ transaction to end.
 - **File commands never take a path from the webview.** The backend shows the
   native open or save dialog itself (`file_choose`), keeps the chosen path and
   returns an opaque grant bound to one purpose: bundle import or export,
-  attachment, PEM or PKCS#12 file, spec source, dataset, or load or run report
-  export (`anvil_app::file_grants`).
+  attachment, PEM or PKCS#12 file, spec source, API-standards ruleset,
+  dataset, or load, run or standards report or revised spec export
+  (`anvil_app::file_grants`).
 - A read grant is refused if the file, or a folder on its path, was replaced
   after the choice. A write goes to a new temporary file that is renamed over
   the chosen name, and spends the grant. A bundle or backup is created
@@ -205,6 +206,8 @@ secrets its requests reference. See [load.md](load.md#worker-process-and-ipc).
 | `anvil-storage` | SQLite store in which every payload is sealed with XChaCha20-Poly1305 and a record-bound AAD. Data keys are wrapped by an Argon2id passphrase key and a recovery key, or held in the OS keychain. Covers migrations, checkpoints and the plaintext-leak audit. |
 | `anvil-portability` | Workspace bundles: share-safely (placeholders) and encrypted transfer. Bundles that describe a full backup are refused (full backups are ANVILBAK files, see `anvil-app`). Import is hardened (limits, traversal, symlinks, bombs, checksums), normalises trust, applies conflict policies, and writes objects and secrets in one transaction that a failure rolls back (see [storage-and-recovery.md](storage-and-recovery.md)). |
 | `anvil-import` | OpenAPI 2.0/3.0/3.1/3.2, WSDL 1.1, Postman, Insomnia, cURL and HAR importers with reports and reimport diffs. |
+| `anvil-xml-limits` | The pre-parse XML scan every XML parse runs first (WSDL import, body lint, XPath, SOAP fault detection, WS-Security): in one pass it bounds `xmlns` declarations, the declarations in scope of each element and the work of resolving them, attributes and attribute pairs, and name, prefix and URI lengths. |
+| `anvil-contract` | OpenAPI contract tooling: API-standards rulesets and the linter (a version-neutral model of Swagger 2.0 and OpenAPI 3.x, source positions, OpenAPI schemas as JSON Schema 2020-12, SARIF output), and contract drift between observed traffic and a description, with suggested revisions (routing, schema inference, patches). |
 | `anvil-identity` | Interactive identity flows: the OAuth authorization-code + PKCE sign-in to a target API (loopback redirect) and optional provider accounts linked to a profile (see [identity.md](identity.md)). |
 | `anvil-load` | Open, closed and iteration workloads over the same engine; mergeable HDR histograms; balanced ledgers; generator health; the worker protocol; JSON, CSV and HTML reports; run comparison. |
 | `anvil-runner` | Collection runner: scenarios and folders, datasets, chained extraction, stop-on-failure, JUnit/HTML/JSON reports. |
@@ -282,7 +285,8 @@ rules in [runner.md](runner.md#redaction).
 
 ## Data contracts
 
-`anvil-domain` is the single source of truth. `anvil schema` writes
+`anvil-domain` is the single source of truth (with the lint report of
+`anvil-contract`). `anvil schema` writes
 `contracts/schemas/*.schema.json`, and `npm run contracts` (in `apps/desktop`)
 generates `apps/desktop/src/generated/contracts.ts`. CI regenerates both and
 fails on drift.
@@ -293,5 +297,5 @@ fails on drift.
 - [threat-model.md](threat-model.md): assets, trust boundaries and mitigations.
 - [diagnostics.md](diagnostics.md): the evidence model, confidence rules and the Ferrum catalog.
 - [storage-and-recovery.md](storage-and-recovery.md): the vault, recovery, backups and migration.
-- [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md): the proposed gateway contract.
-- [protocols.md](protocols.md), [import.md](import.md), [load.md](load.md), [runner.md](runner.md), [identity.md](identity.md), [lab/](lab/).
+- [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md): the gateway diagnostic contract (implemented on Ferrum Edge main; not in a release, so not yet adopted).
+- [protocols.md](protocols.md), [import.md](import.md), [contract.md](contract.md), [load.md](load.md), [runner.md](runner.md), [identity.md](identity.md), [lab/](lab/).

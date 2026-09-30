@@ -17,6 +17,56 @@
   The release workflow creates signed updater artifacts and `latest.json` only
   with that key (docs/release.md, In-app updates). The launch check fails
   silently; the request carries only Anvil's version.
+- Contract drift: compare observed traffic with an OpenAPI description
+  (`anvil_contract::analyze`). Exchanges are routed to operations through
+  the declared server base paths and checked for undeclared paths, methods,
+  statuses, media types, request body types and query parameters; JSON
+  bodies that do not match their schema; missing required parameters and
+  response headers; deprecated operations; unknown servers; and calls slower
+  or larger than an `x-anvil-expectations` budget. Findings are grouped with
+  a count and a coverage table lists every operation. Suggested revisions
+  are dialect-aware patches (additions recommended, relaxations not) with
+  schemas inferred from the shape of observed bodies, never their values;
+  undeclared paths keep only short lower-case words (other segments become
+  parameters) and map keys become `*`. `revise` returns the revised
+  description, an RFC 6902 JSON Patch and a digest; reimporting applies only
+  the previewed digest.
+- CLI: `anvil spec-drift <spec> --har FILE` (no profile) or
+  `anvil spec-drift --import ID` (an imported spec's history) prints the
+  report, writes `--revised`/`--patch`, and exits 2 at `--fail-on`.
+- Desktop: an imported spec in the Contract view has a **Live traffic** tab
+  (differences, suggestions to select, coverage, undeclared endpoints) that
+  saves the revision or its JSON Patch (file purpose
+  `spec_revision_export`) or reimports it as the import's new version after
+  a preview. The response panel shows a **Contract** tab for a send of a
+  request that belongs to an OpenAPI import.
+- Diagnostics: vendor Ferrum contracts at `contracts-edge-0.9.8` and verify
+  their SHA-256 pins in the offline CI suite. See
+  [ferrum-contracts.md](docs/ferrum-contracts.md) for the pin and update steps.
+- API standards: check OpenAPI descriptions against a team's own rules.
+  A ruleset (YAML or JSON, `anvil_ruleset: 1`) targets version-neutral
+  objects (operations, parameters, responses, media types, schemas,
+  properties, servers, tags, security schemes, or any node by JSONPath) with
+  checks such as `pattern`, `casing`, `enumeration`, `includes`, `length`
+  and `schema`, so one standard applies to Swagger 2.0 and OpenAPI 3.0, 3.1
+  and 3.2 alike. Rulesets layer in order, may extend the built-in
+  `anvil:recommended` rules and change or turn off inherited ones, and are
+  checked when loaded. Each finding names the rule, the JSON Pointer and the
+  line and column to edit, and how to fix it; body examples are validated
+  against their schemas. New crate `anvil-contract`; see
+  `docs/contract.md` and `samples/api-standards/`.
+- CLI: `anvil lint-spec <spec> [--ruleset FILE]...` prints text, JSON or
+  SARIF 2.1.0 (for code scanning) and exits with 2 when a finding reaches
+  `--fail-on` (default `error`), and with 3 on a local error, including a
+  description too large to lint completely unless `--allow-incomplete` is
+  passed. It needs no profile.
+- Desktop: a **Contract** view checks the workspace's imported OpenAPI
+  descriptions, or a chosen file, against the profile's API standards,
+  filters findings by severity and exports JSON or SARIF. Rulesets are kept
+  in the app settings (new `api_standards`), added from a file (file purpose
+  `ruleset`), replaced, enabled and removed there; a change that would not
+  load with the others is refused. The settings dialog never changes them.
+
 - Desktop: a linked local file that a saved request names (for example one
   imported from another machine) can be repointed to where the file is on
   this device. When the file is not chosen yet, or is missing or changed,
@@ -92,6 +142,20 @@
 
 ### Changed
 
+- Docs: refresh the completion report, architecture and load docs for the
+  Ferrum Edge v0.9.8 default pin and its 540-outcome catalog, mark G01
+  implemented on Edge main (not in a release), correct the load limitations
+  (native client-streaming and bidirectional gRPC are supported; only their
+  gRPC-Web forms are refused), and record the plan to adopt the gateway
+  diagnostic reference. See
+  [diagnostics.md](docs/diagnostics.md#adopting-the-gateway-diagnostic-reference-g01).
+- Load testing: JSON dataset cells keep their source text, including number
+  spelling such as `1.50` or `1e2`, nested `\u` escapes, and nested duplicate
+  keys.
+- CI: Dependabot now covers GitHub composite actions, keeps patched vendored
+  crates pinned, and leaves coordinated Tauri updates for a manual bump.
+  Dependabot dependency PRs may require manual license and generated-contract
+  updates before the required CI checks pass.
 - New Ferrum gateway profiles default to `ferrum-edge-0.9.8` (desktop dialog
   and CLI), and the failure lab's default pin is Ferrum Edge v0.9.8
   (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
@@ -253,6 +317,41 @@
 
 ### Fixed
 
+- The failure lab's EARLY-001 and EARLY-002 test the gateway's pending
+  0-RTT window deterministically. The client's "offered and accepted"
+  evidence does not prove the gateway saw the request early: Ferrum Edge
+  classifies each HTTP/3 stream when it accepts it and handles a 0-RTT
+  stream accepted after its handshake as 1-RTT (RFC 8470 section 6.4), and
+  lab run 36557709775 got one 200 for EARLY-002's PUT and failed (#221).
+  The scenarios now reach the gateway's HTTP/3 listener through a UDP relay
+  fixture (`127.0.0.1:17302`). The relay holds the client's
+  Handshake-space packets (its TLS Finished), its 1-RTT packets and any
+  packet it cannot read, while its 0-RTT packets pass. It releases the
+  Finished on an event: the backend receiving a request of the round's
+  method, or the gateway logging its refusal. When neither happens, it
+  releases after at most 2 s. The gateway's handshake is therefore still
+  pending when it handles the 0-RTT stream.
+  - A request of the method that reached the backend before the release
+    was processed while the handshake was pending. For EARLY-002's PUT that
+    is a hard failure.
+  - EARLY-001 requires its admitted GET to arrive before the release,
+    unless the hold ran to its cap.
+  - EARLY-002 also accepts a 425 with the refusal log after the cap.
+  - A round whose hold ran to the cap and that then served the permitted
+    shape (one 200, no retry, one backend request without `Early-Data`, no
+    refusal logged) is retried. Running out of rounds fails; there is no
+    run-time skip.
+  - The client's queued 1-RTT data, such as EARLY-002's retry, waits for
+    the first gateway datagram relayed after the release, and 20 ms more on
+    releases before v0.9.8. Their accept loop can take a 1-RTT stream that
+    arrives with the Finished for early data (ferrum-edge#5761).
+  - 1-RTT data coalesced into a Handshake datagram goes out without that
+    wait. The check detail counts such datagrams (#223).
+- UDP load-scenario silence coverage keeps its non-responding target socket
+  bound for the whole sub-case, then checks ICMP-unreachable counts on a
+  released port with up to five fresh-port retries for parallel UDP replies.
+  PROTO-020 uses the same bounded retry for its ICMP-unreachable assertion;
+  both tests fail clearly if every attempt receives foreign traffic.
 - The effective-request preview reports a multi-auth as varying per send
   when any of its profiles is HMAC, DPoP, JWT, WS-Security or JWT-SVID
   (nested sets included), and an SSE preview with such a multi-auth says
@@ -792,6 +891,282 @@
 
 ### Security
 
+- XML parsing (GHSA-mvjp-hhjj-mh63): the pre-parse scan WSDL imports use
+  now runs before every XML parse, from the new internal crate
+  `anvil-xml-limits`, with limits chosen per site. It bounds `xmlns`
+  declarations, the declarations in scope of any element and the work of
+  resolving namespace scopes, attributes per element, attribute pairs over
+  the document, and the length of attribute names, namespace prefixes and
+  namespace URIs. Every site parses with DTDs refused and a node limit.
+  WSDL imports now also refuse, before parsing, an element with more than
+  256 declarations in scope. Request body lint returns the new status
+  `refused` ("too complex to lint safely"), which a send treats like a lint
+  error. XPath assertions and extractions fail with "XML too complex to
+  evaluate safely" (a response body is now also limited to 4,000,000 XML
+  nodes; see [runner.md](docs/runner.md#xpath-subset)). A SOAP envelope in a
+  response that is over the limits, or has more than 50,000 nodes, is not
+  inspected for a fault: its application outcome is `not_evaluated`, with a
+  `partial_visibility` warning. XML whose root is not an `Envelope` is no
+  longer parsed for a SOAP fault. WS-Security refuses the envelope (now also
+  limited to 1,000,000 XML nodes).
+- Imports (GHSA-c9jq-p5rq-wj3h): more of the work a small spec can repeat
+  during preview is now charged or done once. OpenAPI samples charge the
+  schema lists they read on every visit to the import's byte budget: each
+  member looked at (optional members are skipped before their schema is
+  resolved), the `required` names (now a set, not a list scanned per
+  member), the `enum` values scanned and each `const`/`enum` comparison. A
+  `null` inserted for a required name counts as a generated value, so once a
+  budget is spent the remaining members are left out
+  (`sample_size_limit`). The structural lookups made while writing XML and
+  multipart payloads borrow the resolved schema instead of copying it, so
+  they no longer spend the byte budget and cut samples short. WSDL imports
+  read each binding, binding operation and portType operation once however
+  many ports use it, and charge the message parts and `soap:header`s each
+  operation writes. An XML document with more than 1024 `xmlns`
+  declarations, or an element with more than 256 attributes, is refused
+  before it is parsed (`LimitExceeded`): the parser copies the namespaces in
+  scope for every element that declares one and compares every attribute
+  with each earlier one. A quote-, comment- and CDATA-aware scan counts both
+  in one pass, which also bounds the attribute pairs of the whole document
+  (2^24), attribute names (1 KiB), namespace prefixes (256 bytes) and
+  namespace URIs (2 KiB), since the parser compares names and full URIs per
+  pair. Also charged or done once now: the pointer of every generated
+  value and every `$ref` resolution (a `$ref` over 2048 bytes is not
+  followed, `ref_too_long`), `type` arrays, `$ref` sibling keys,
+  `oneOf`/`anyOf` alternatives and discriminator mappings, and the lookups
+  and comparisons of `allOf` merges (non-string `required` entries are
+  ignored with `invalid_required`). Text copied into imported objects
+  (names, keys, request URLs and pointers, folder names, descriptions, SOAP
+  actions, server URLs and variables, OpenAPI 3.2 additional-operation
+  pointers, and each operation and security scheme every time it is
+  imported) has a budget of four times `max_bytes`; once it is spent, later
+  operations are skipped (`text_size_limit`). A Path Item `$ref` is read in
+  place instead of copied for every path, server variables are rendered
+  once per server (one environment variable per name), a WSDL port's folder
+  is created only once one of its operations is admitted, and a repeated
+  operation key takes its `#n` suffix from a counter. The report keeps at
+  most 1000 findings per code (`report_truncated`), clips stored pointers
+  (keeping a hash of the whole pointer) and messages, and indexes its
+  external references and required variables. HAR and cURL imports decide
+  whether a JSON body was scrubbed from a redaction count that the report's
+  list limit does not cap, so bodies stay scrubbed past 10,000 redactions.
+- Cookie domains that are a single, unknown label (`internal`, `lan`, `corp`)
+  are no longer shared across matching hosts; a cookie may still be stored
+  host-only when its single-label domain is the responding host. URL-encoded
+  and multipart text fields named as credentials are now treated as
+  secret-bearing for cross-origin redirects, even when their literal values
+  were not marked sensitive. This also applies to 301/302 redirects that keep
+  the body, such as for PUT, PATCH and DELETE.
+- Redaction of credential headers (`Authorization`, `Proxy-Authorization`,
+  `Cookie`, `Set-Cookie` and other sensitive names) now scrubs every known
+  secret value from the parts it keeps: the authorization scheme word,
+  cookie names and `Set-Cookie` attributes. Before, a response that echoed
+  a credential the request sent into one of those parts kept it in the
+  execution record, run history and history-inclusive exports. The whole
+  value is scrubbed before it is split, so a secret that spans a `;`, `=`
+  or space is replaced whole; a header value marked sensitive as a whole
+  (scheme included) is now shown as `‹redacted›` without its scheme.
+  Mixed and double percent-encoded secret echoes in `Set-Cookie` names,
+  Path and Domain attributes are redacted too. A `Set-Cookie` whose name
+  contains a secret used by that execution is not kept in the workspace cookie
+  jar, so it cannot appear in a later request's `Cookie` header or notes. History
+  recorded before this change is not rewritten.
+  (GHSA-vvjj-4xxf-966f)
+- gRPC metadata marked sensitive is now redacted by name and by value, like
+  a request header marked sensitive, in the effective-request preview, the
+  live session events, the execution record and run history, for gRPC and
+  both gRPC-Web modes. Before, a literal value under a name that is not a
+  known credential name was shown as is. (GHSA-653v-gxx9-r5pv)
+- The WS-Security SAML assertion (as stored and as embedded, trimmed) and
+  the XML-escaped form of a PasswordText password are now known secrets of
+  the request, so the effective-request preview of a WS-Security body and
+  the execution record redact them. Before, an assertion taken directly
+  from the vault was shown in the preview. (GHSA-6j83-rrqr-953h)
+- A redirect that would resend a request body to another origin is no
+  longer followed when the body has a form field marked sensitive, even
+  when its value is a literal rather than a secret variable. Before, only
+  secret variables marked the body structurally, and a literal whose form
+  encoding changed its bytes (such as one holding `@` or a space) was
+  resent by a 307 or 308 redirect. Allowing credentials to be forwarded
+  cross-origin in the redirect policy still lifts the refusal.
+  (GHSA-c8jq-hq57-v523)
+- The workspace cookie jar no longer stores a cookie whose `Domain` is a
+  public suffix, such as `com`, `co.uk` or a private-section suffix like
+  `github.io`, so one site can no longer set a cookie that Anvil then sends
+  to unrelated sites under that suffix. When the suffix is the responding
+  host itself, the cookie is kept for that host only. Cookies scoped to a
+  registrable parent domain and host-only cookies are unchanged. The Public
+  Suffix List is compiled in (the `psl` crate). (GHSA-vv3h-gm7f-3hm7)
+- Fixed GHSA-6g2g-2mvw-7h7v and GHSA-x6q9-gx98-c5wc: gRPC reflection now
+  has a 30-second absolute deadline, shortened by the call's total deadline,
+  including interactive sessions. Its cumulative budget counts wire and
+  decoded response bytes across every reflection request, and it accepts only
+  one response message per request. gRPC-Web percent decoding reads escape
+  digits as bytes, preserving malformed escapes without panicking on
+  multibyte UTF-8.
+- Full backup restores now reject spec provenance whose root is missing,
+  belongs to another workspace, or is not an import root. Import roots may be
+  nested in their workspace and remain valid for restore and reimport; a
+  deleted root retains the guidance to import the source again. Restore rejects
+  an imported spec namespace already used in another workspace, and reimport
+  refuses generated IDs owned by another workspace before writing. This keeps
+  restored provenance from changing unrelated objects. Fixes
+  GHSA-2c97-mfx4-3g7r.
+- Datasets are now bounded at 4,194,304 cells (rows × columns), with at most
+  1 MiB of raw JSON text per cell. CSV checks the cell budget before storing
+  each row; JSON parses one object at a time and checks row, column and cell
+  limits before expanding the stored matrix. A 64 MiB dataset can retain up
+  to about 350 MiB of dataset data at the configured maxima, before allocator
+  and parser overhead. This prevents mostly empty JSON rows from first being
+  built into a multi-gigabyte `Value` tree. The collection runner's
+  100,000-row limit is enforced while parsing, and parsed rows are moved
+  instead of copied.
+- A load run's gRPC status counts now keep one entry per valid code (0–16)
+  and count every other `grpc-status` together under `-1` ("invalid: any
+  code outside 0–16"). Before, each distinct value a target returned added
+  an entry, growing the worker's memory and the work of every progress
+  snapshot for the length of the run. The raw value is still kept in the
+  execution record and the bounded failure examples.
+- The HTML export of a load report now escapes the unit nouns from the
+  report's protocol semantics everywhere it writes them. A report imported
+  from a file or a full backup could otherwise place markup and inline
+  styles in the exported page (the page's CSP already blocked scripts).
+
+- Imports: parsing a JSON or YAML document now also bounds the string bytes
+  it keeps (string values and map keys, every YAML alias expansion
+  included) at twice `max_bytes`, charged before each string is copied. A
+  long scalar that many aliases repeat was charged one node per copy, so a
+  small file could make the preview allocate far more than its size; it is
+  now refused with `LimitExceeded` ("document string bytes").
+- WSDL imports: envelope generation is bounded by the envelope's
+  `max_sample_nodes` budget and by the bytes it may generate (8 MiB per
+  envelope, four times `max_bytes` per import, both charged before the text
+  is built). Every schema node looked at counts: group and attributeGroup
+  references, extension bases, particles, attributes, message parts and the
+  children of each construct. `group` and `attributeGroup` references back to
+  a group being expanded stop at the first repetition (`recursive_schema`).
+  An attribute is written once per element. Once the import's envelope budget
+  is spent, the remaining envelopes are left empty (`sample_size_limit`).
+  A document in which an element has more than 256 namespaces in scope is
+  refused (`LimitExceeded`), and once `max_operations` is reached the
+  remaining operations are counted without being walked again for each
+  port. Branching or self-referencing groups and types could make generation
+  grow exponentially, and many message parts could exceed the envelope limit.
+- OpenAPI imports: `allOf` merging charges each branch against the payload's
+  `max_sample_nodes` budget, and a `$ref` it follows counts toward
+  `max_ref_depth` like a direct `$ref` (`ref_depth_limit`). Generated
+  values (including `minLength` padding), examples, defaults, merged schemas
+  and per-operation parameter copies now share a byte budget for the whole
+  import (four times `max_bytes`), charged before each value is made. When
+  it is spent, the remaining samples are left out (`sample_size_limit`).
+  The structural lookups made while writing one payload (XML names,
+  multipart parts) share a node budget of their own and no longer use up the
+  payload's. Long or branching composition chains, large examples reused
+  many times and long generated strings in many operations could previously
+  do unbounded work.
+- Insomnia v4 imports: an export in which a workspace, request group or
+  environment shares its `_id` with another resource is refused (`Invalid`,
+  naming both). A repeated id of any other resource skips the later copy
+  (`duplicate_resource_id`). A resource without an `_id` is never treated as
+  a parent, the walk lists each parent's children once, and each request or
+  group is imported at most once. Repeated, empty or self-referencing ids
+  could make the import repeat subtrees exponentially.
+- HTTP/3 response headers and trailers are now held to
+  `max_response_header_bytes` (256 KiB by default) on every HTTP/3
+  connection: requests, SSE, WebSocket, gRPC and the connection to a MASQUE
+  proxy. For HTTP/3 the limit is at least 8 KiB (as for HTTP/1) and at most
+  2^62-1 bytes, the largest a SETTINGS value can carry. Anvil advertises it
+  as `SETTINGS_MAX_FIELD_SECTION_SIZE` (before, it advertised no limit), and
+  a pooled connection (or gRPC channel) is reused only by requests with the
+  same limit. It refuses a HEADERS frame that declares more before
+  buffering any more of it, and refuses a decoded field section over it
+  before keeping any of it. The request fails with
+  `response_headers_too_large` (for gRPC trailers too) and the response
+  stream is stopped. A pooled HTTP/3 request connection stays usable; a
+  gRPC call that ends this way closes its HTTP/3 connection, as any call
+  that does not end cleanly does. Other frames with a payload are bounded
+  as well (at most 64 KiB on the control stream), and an unknown frame over
+  the bound is skipped without being buffered. The vendored `h3` carries
+  the change as a second patch (`vendor/README.md`).
+- An HTTP/3 response can no longer outlive its deadlines or a cancel. The
+  total deadline now also ends the response body (a body that keeps
+  arriving just inside the idle deadline stopped only at
+  `max_response_bytes`), and the wait for the end of the stream after the
+  trailers is bounded by the body idle deadline, the total deadline and
+  cancellation (before, it waited for the server however long it took).
+  When any of them ends the response, Anvil stops the stream with
+  `H3_REQUEST_CANCELLED` instead of leaving it open, and the response body
+  phase is recorded as timed out or canceled rather than failed.
+- Session transcript previews (text and hex), SSE event ids and types, and
+  the effective-request body preview are now redacted before they are cut
+  to their display size, not after. A known secret that crosses the cut is
+  replaced whole, and the preview ends with the redaction marker where the
+  secret starts, instead of keeping all but the part past the cut in live
+  events and stored records (GHSA-jjvp-frqf-xw3p). An OAuth issuer's
+  `error_description` now has the token request's own credentials replaced
+  before it is cut to 200 characters.
+- An SSE stream can no longer make a session retain metadata out of
+  proportion to its limits (GHSA-gwfc-m32p-636g). An `id:` or `event:`
+  value over 4 KiB stops the stream as a local limit as soon as the partial
+  line is one, not once the line reaches the 1 MiB line bound; events share
+  the last event id instead of copying it, and the transcript redacts that
+  shared id once instead of once per event; a chunk is parsed only until
+  `max_events` events are in hand; and a transcript entry keeps at most
+  256 bytes of an event id or type (a longer one ends with `…`).
+- A session peer that stops reading, or withholds HTTP/2 or QUIC
+  flow-control credit, can no longer keep a session running after it is
+  canceled (or the profile locks) or past its deadline
+  (GHSA-24m4-27gj-gvmx). WebSocket scripted messages, interactive commands
+  and automatic Pong and Close frames, raw TCP scripted and interactive
+  sends and half-closes (scripted sends now honour the total deadline too,
+  not only the write deadline), DTLS handshake flights and datagrams (over
+  UDP, HBONE or MASQUE), HBONE interactive datagrams and MASQUE capsules are
+  raced against cancellation and the applicable deadline. An interrupted
+  write is never followed by a clean end: raw TCP skips its shutdown,
+  WebSocket over HTTP/3 resets its stream, and HBONE and MASQUE tunnels
+  (DTLS ones included) are reset. A raw TCP payload that was partly written
+  is reported as possibly dispatched. Graceful Close frames and
+  `close_notify` have their own short bound.
+- Follow-ups to the three entries above (GHSA-jjvp-frqf-xw3p,
+  GHSA-gwfc-m32p-636g, GHSA-24m4-27gj-gvmx):
+  - The excerpts a diagnostic finding quotes from a response (a JSON
+    `error`, a GraphQL or SOAP fault message, an HBONE tunnel refusal body,
+    a Ferrum Edge body signature) are now redacted with the record's
+    redactor before they are cut to 160–300 characters. Before, a secret
+    the response echoed across the cut kept its prefix in the finding,
+    because the record's redaction could no longer match it.
+    `DiagnosticInput` has a new `redact` field for this. An HBONE refusal
+    body is now captured up to 64 KiB past its 8 KiB bound and redacted
+    before the record cuts it to the bound, and a malformed gRPC-Web trailer
+    line quoted in a failure is redacted before it is cut to 64 characters.
+  - An OAuth issuer's `error_description` also has the percent-encoded and
+    form-encoded forms of the token request's credentials replaced before
+    it is cut.
+  - An interactive session no longer outlives its `SessionHandle`: dropping
+    the handle cancels the session and aborts its task. A session task that
+    ignores its cancel is aborted 5 s after `cancel()`, so `finish()` and
+    `is_finished()` are bounded once a session is canceled (the record then
+    says the session was aborted).
+  - A raw TCP session, or a WebSocket session over HTTP/1.1 or HTTP/2, whose
+    write was interrupted now resets its connection (`SO_LINGER` 0: RST
+    instead of FIN), so the peer cannot read a partly written payload as a
+    complete one. A WebSocket Close frame sent after a
+    peer's protocol violation that is not written within 500 ms now counts
+    as an interrupted write (over HTTP/3 the stream is reset, not finished).
+  - DTLS inside an HBONE or MASQUE tunnel resets the tunnel only when a
+    record was being sent when the cancel or deadline stopped it. Before,
+    every cancel, total timeout and handshake timeout reset the tunnel, even
+    while the session was only waiting for the peer.
+  - The SSE transcript redacts the shared last event id again on each
+    connection attempt, so the credentials a reconnection is signed with
+    are redacted in it too.
+- A WS-Security PasswordDigest UsernameToken's digest and nonce are now
+  known secrets of the request, redacted in the effective-request preview
+  and the execution record like the password. Together with the creation
+  time they can be replayed against a service that keeps no nonce cache or
+  Timestamp limit. (Part of #244.)
+- Desktop development dependencies now override Mocha's vulnerable
+  `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted

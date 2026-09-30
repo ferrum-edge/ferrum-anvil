@@ -42,8 +42,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Refusal bodies are evidence, bounded.
-pub(crate) const MAX_REFUSAL_BODY: usize = 8 * 1024;
+/// Refusal bodies are evidence, bounded: a record keeps at most this much.
+pub const MAX_REFUSAL_BODY: usize = 8 * 1024;
+/// How much of a refusal body is captured: [`MAX_REFUSAL_BODY`] plus the
+/// lookahead the record's redaction needs to recognise a secret that crosses
+/// that bound ([`crate::session::REDACT_LOOKAHEAD_BYTES`]). The record
+/// redacts the capture, then cuts it to [`MAX_REFUSAL_BODY`].
+pub(crate) const REFUSAL_CAPTURE: usize = MAX_REFUSAL_BODY + crate::session::REDACT_LOOKAHEAD_BYTES;
 
 /// The open tunnel stream. Holds the HTTP/2 request handle so the HBONE
 /// connection lives exactly as long as the inner connection.
@@ -416,7 +421,7 @@ pub async fn open(
             match frame {
                 Ok(Some(Ok(fr))) => {
                     if let Ok(d) = fr.into_data() {
-                        let room = MAX_REFUSAL_BODY.saturating_sub(captured.len());
+                        let room = REFUSAL_CAPTURE.saturating_sub(captured.len());
                         if d.len() > room {
                             truncated = true;
                         }

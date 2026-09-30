@@ -35,6 +35,19 @@ pub const MAX_EXAMPLE_CHARS: usize = 400;
 pub const MAX_DESTINATIONS: usize = 16;
 pub const MAX_PROTOCOLS: usize = 8;
 pub const OTHER_CATEGORY: &str = "other (category limit reached)";
+/// Highest `grpc-status` the protocol defines (UNAUTHENTICATED); 0..=16 are
+/// the valid codes.
+pub const GRPC_STATUS_MAX: i32 = 16;
+/// The single bucket every `grpc-status` outside 0..=16 is counted under, so
+/// a peer cannot grow the status counts with a new value per reply. It is
+/// itself outside the valid range. The raw value stays in the execution
+/// record and in the bounded failure examples.
+pub const GRPC_STATUS_INVALID: i32 = -1;
+
+/// Status-count key of a terminal `grpc-status`.
+pub fn grpc_status_bucket(code: i32) -> i32 {
+    if (0..=GRPC_STATUS_MAX).contains(&code) { code } else { GRPC_STATUS_INVALID }
+}
 
 pub fn new_histogram(sigfig: u8) -> Histogram<u64> {
     Histogram::new_with_bounds(1, LATENCY_MAX_US, sigfig).expect("static histogram bounds are valid")
@@ -693,7 +706,9 @@ pub struct ProtoAccum {
     pub fallback_attempts: u64,
     pub units_with_fallback: u64,
     pub units_over_h3: u64,
-    pub grpc_codes: BTreeMap<i32, u64>,
+    /// Terminal status → completed units. Keys are the valid codes and
+    /// [`GRPC_STATUS_INVALID`] only: written by `record` and `merge` alone.
+    grpc_codes: BTreeMap<i32, u64>,
     pub grpc_missing_status: u64,
     pub streams_opened: u64,
     pub messages_received: u64,
@@ -808,7 +823,7 @@ impl ProtoAccum {
         self.units_with_fallback += (p.fallback_attempts > 0) as u64;
         self.units_over_h3 += p.final_h3 as u64;
         if completed && let Some(c) = p.grpc_status {
-            *self.grpc_codes.entry(c).or_default() += 1;
+            *self.grpc_codes.entry(grpc_status_bucket(c)).or_default() += 1;
         }
         self.grpc_missing_status += p.grpc_missing_status as u64;
         self.streams_opened += p.stream_opened as u64;
@@ -907,7 +922,7 @@ impl ProtoAccum {
         self.units_with_fallback += o.units_with_fallback;
         self.units_over_h3 += o.units_over_h3;
         for (c, n) in &o.grpc_codes {
-            *self.grpc_codes.entry(*c).or_default() += n;
+            *self.grpc_codes.entry(grpc_status_bucket(*c)).or_default() += n;
         }
         self.grpc_missing_status += o.grpc_missing_status;
         self.streams_opened += o.streams_opened;
@@ -1402,5 +1417,33 @@ mod tests {
         assert_eq!((t.attempted, t.established, t.refused, t.failed, t.timed_out, t.canceled), (6, 1, 1, 1, 1, 2));
         assert_eq!(t.established + t.refused + t.failed + t.timed_out + t.canceled, t.attempted);
         assert_eq!(t.setup.count, 1);
+    }
+
+    /// A peer answering each call with a new out-of-range grpc-status adds
+    /// one bucket to the status counts, never one entry per value.
+    #[test]
+    fn invalid_grpc_status_values_share_one_bucket() {
+        let completed = |code: i32| SendObservation {
+            terminal: Terminal::Completed,
+            proto: ProtoObs { grpc_status: Some(code), ..Default::default() },
+            ..Default::default()
+        };
+        let (mut a, mut b) = (ProtoAccum::new(), ProtoAccum::new());
+        for code in 0..=GRPC_STATUS_MAX {
+            a.record(&completed(code));
+        }
+        for i in 0..10_000 {
+            a.record(&completed(GRPC_STATUS_MAX + 1 + i));
+            b.record(&completed(-2 - i));
+        }
+        b.record(&completed(i32::MIN));
+        b.record(&completed(i32::MAX));
+        a.merge(&b);
+        let g = a.summary(LoadUnitKind::GrpcCall, ConnectionMode::Fresh, &[]).grpc.expect("gRPC metrics");
+        // Every valid code keeps its own count; all invalid ones share one.
+        let mut expected: Vec<(i32, u64)> = vec![(GRPC_STATUS_INVALID, 20_002)];
+        expected.extend((0..=GRPC_STATUS_MAX).map(|c| (c, 1)));
+        assert_eq!(g.status_codes, expected);
+        assert_eq!((g.ok, g.non_ok), (1, 20_018), "an invalid status is never OK");
     }
 }
