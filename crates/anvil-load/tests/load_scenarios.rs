@@ -718,6 +718,38 @@ async fn load_013_udp_sends_more_than_it_receives_and_never_claims_delivery() {
     let d = datagram_metrics(&r);
     assert_eq!(d.datagrams_received, 0, "{d:?}");
     assert_eq!((d.datagrams_sent, d.exchanges_silent, d.echoed_payloads), (2, 2, 0), "{d:?}");
+
+    // A released port also exercises the OS's ICMP port-unreachable report.
+    // Another test can bind it in the gap, so retry foreign replies against
+    // fresh ports and payloads rather than weakening the ICMP assertion.
+    let mut clean_attempt = false;
+    for _ in 0..5 {
+        let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+
+        let id = Id::new();
+        let payload = Id::new().to_string();
+        let r = run(
+            plan(Workload::Iterations { iterations: 2, concurrency: 1 }, vec![id]),
+            vec![(id, udp_ctx(closed_addr, &[&payload], 150))],
+            None,
+        )
+        .await;
+        let d = datagram_metrics(&r);
+        if d.datagrams_received > 0 {
+            continue;
+        }
+
+        assert_eq!(d.datagrams_received, 0, "{d:?}");
+        if cfg!(unix) {
+            assert_eq!(d.icmp_unreachable_exchanges, 2, "{d:?}");
+        }
+        assert_eq!((d.datagrams_sent, d.exchanges_silent, d.echoed_payloads), (2, 2, 0), "{d:?}");
+        clean_attempt = true;
+        break;
+    }
+    assert!(clean_attempt, "all five released-port attempts received foreign UDP replies");
 }
 
 /// A UDP load whose datagram PROXY-protocol envelope is authenticated with a

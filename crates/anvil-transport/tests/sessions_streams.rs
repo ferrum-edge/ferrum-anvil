@@ -5,6 +5,7 @@
 //! are kept in test names.
 
 use anvil_domain::execution::*;
+use anvil_domain::Id;
 use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, ProtocolStatus};
 use anvil_domain::request::{GrpcMode, GrpcWire};
 use anvil_domain::settings::{HttpVersionPolicy, Limits, Timeouts};
@@ -274,33 +275,42 @@ async fn proto_018_sse_history_is_bounded_but_counted() {
 #[tokio::test]
 async fn proto_020_udp_icmp_unreachable_is_recorded_as_such() {
     init();
-    // Use a just-released loopback UDP port to exercise the OS ICMP report.
-    // Drop it immediately before sending to minimize the chance another test
-    // binds the same port in parallel.
-    let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    let plan = udp::UdpPlan {
-        host: "127.0.0.1".into(),
-        port,
-        dns: DnsConfig::default(),
-        timeouts: timeouts(),
-        datagrams: vec![Bytes::from_static(b"one"), Bytes::from_static(b"two")],
-        response_window_ms: 300,
-        max_datagrams: 10,
-        display_url: format!("udp://127.0.0.1:{port}"),
-        transcript: TranscriptLimits::default(),
-        redact: None,
-        envelope: None,
-    };
-    drop(closed);
-    let out = udp::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
-    assert!(matches!(out.status, ProtocolStatus::Udp { datagrams_received: 0, .. }));
-    let t = out.transcript.unwrap();
-    if cfg!(unix) {
-        assert!(out.facts.icmp_port_unreachable, "loopback ICMP port-unreachable is reported to a connected socket");
-        assert!(t.messages.iter().any(|m| m.kind == "icmp_port_unreachable"));
+    let mut clean_attempt = false;
+    for _ in 0..5 {
+        // A parallel test can claim the released port, so retry any attempt
+        // that receives a reply using a fresh port and unique random payload.
+        let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        let payload = Id::new().to_string();
+        let plan = udp::UdpPlan {
+            host: "127.0.0.1".into(),
+            port,
+            dns: DnsConfig::default(),
+            timeouts: timeouts(),
+            datagrams: vec![Bytes::from(payload.into_bytes())],
+            response_window_ms: 300,
+            max_datagrams: 10,
+            display_url: format!("udp://127.0.0.1:{port}"),
+            transcript: TranscriptLimits::default(),
+            redact: None,
+            envelope: None,
+        };
+        drop(closed);
+        let out = udp::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+        if matches!(&out.status, ProtocolStatus::Udp { datagrams_received, .. } if *datagrams_received > 0) {
+            continue;
+        }
+        assert!(matches!(&out.status, ProtocolStatus::Udp { datagrams_received: 0, .. }), "{:?}", out.status);
+        let t = out.transcript.unwrap();
+        if cfg!(unix) {
+            assert!(out.facts.icmp_port_unreachable, "loopback ICMP port-unreachable is reported to a connected socket");
+            assert!(t.messages.iter().any(|m| m.kind == "icmp_port_unreachable"));
+        }
+        assert!(out.attempts[0].observation.failure.is_none(), "silence/ICMP is evidence, not a transport failure");
+        clean_attempt = true;
+        break;
     }
-    assert!(out.attempts[0].observation.failure.is_none(), "silence/ICMP is evidence, not a transport failure");
+    assert!(clean_attempt, "all five released-port attempts received foreign UDP replies");
 }
 
 #[tokio::test]
