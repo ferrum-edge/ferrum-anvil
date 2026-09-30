@@ -38,10 +38,29 @@ const MAX_REF_TARGETS: usize = 4_096;
 /// Build a validator for `schema` (located at `pointer`), as it applies in
 /// `direction`.
 pub fn compile(spec: &Spec, schema: &Value, direction: Direction) -> Result<jsonschema::Validator, String> {
+    compile_within(spec, schema, direction, &mut 0, usize::MAX)
+}
+
+/// [`compile`], adding the members and items scanned to `steps` and
+/// refusing once they exceed `budget` (shared by many compiles, e.g. every
+/// example of a lint): each compile scans, bundles and builds its schema.
+pub fn compile_within(
+    spec: &Spec,
+    schema: &Value,
+    direction: Direction,
+    steps: &mut usize,
+    budget: usize,
+) -> Result<jsonschema::Validator, String> {
+    if *steps > budget {
+        return Err("the checks' scanning budget is spent".into());
+    }
     // Validation walks the schema with references expanded: a schema that
     // fans out through repeated `$ref`s (each level twice, forty levels
     // deep) compiles cheaply and then validates for ever.
-    measure(spec, schema)?;
+    measure_counted(spec, schema, steps)?;
+    if *steps > budget {
+        return Err("the checks' scanning budget is spent".into());
+    }
     let wrapper = bundle(spec, schema, direction)?;
     jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
@@ -176,10 +195,6 @@ const ROOT: &str = "#root";
 /// schema that expands to more than [`MAX_EXPANDED_NODES`] nodes with every
 /// `$ref` expanded (repeated references count each time). Both passes are
 /// iterative, so neither nesting nor reference chains use the call stack.
-fn measure(spec: &Spec, schema: &Value) -> Result<usize, String> {
-    measure_counted(spec, schema, &mut 0)
-}
-
 /// [`measure`], adding the members and items it looked at to `steps`.
 fn measure_counted(spec: &Spec, schema: &Value, steps: &mut usize) -> Result<usize, String> {
     let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");

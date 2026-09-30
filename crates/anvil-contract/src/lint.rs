@@ -14,6 +14,9 @@ use std::collections::{HashMap, HashSet};
 
 /// Examples validated per lint (each compiles a validator).
 pub const MAX_EXAMPLE_CHECKS: usize = 1_000;
+/// Schema members and items scanned by all the example checks of a lint
+/// together (each compile scans, bundles and builds its schema).
+pub const MAX_EXAMPLE_SCAN_STEPS: usize = 20 * schema::MAX_SCAN_STEPS;
 /// Findings collected before sorting; later ones are only counted.
 const MAX_COLLECTED: usize = 100_000;
 
@@ -147,6 +150,8 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
         not_checked: 0,
         compiled: HashMap::new(),
         compiles: 0,
+        scan_steps: 0,
+        scan_budget: MAX_EXAMPLE_SCAN_STEPS,
     };
     let mut examples = |m: &Media<'_>, dir: Direction| checker.check(spec, m, dir);
     let model = Model::build(spec, &mut examples);
@@ -397,6 +402,9 @@ struct ExampleChecker {
     compiled: HashMap<(String, bool), Option<jsonschema::Validator>>,
     /// Compiles attempted.
     compiles: usize,
+    /// Members and items scanned by those compiles, and the limit.
+    scan_steps: usize,
+    scan_budget: usize,
 }
 
 impl ExampleChecker {
@@ -434,16 +442,20 @@ impl ExampleChecker {
             self.not_checked += examples.len();
             return vec![];
         }
-        // Media types that only `$ref` the same schema share its validator.
+        // Media types whose schema is only a `$ref` to the same target share
+        // its validator. The key is the first hop, not the end of the chain:
+        // in 3.1 and 3.2 an object with `$ref` and other keywords along the
+        // way constrains the value too.
         let target = match schema.as_object() {
-            Some(o) if o.len() == 1 => spec.resolve(schema, &m.schema_pointer).map(|(_, at)| at),
+            Some(o) if o.len() == 1 => o.get("$ref").and_then(Value::as_str).and_then(crate::spec::internal_pointer),
             _ => None,
         };
         let key = (target.unwrap_or_else(|| m.schema_pointer.clone()), dir == Direction::Request);
         if !self.compiled.contains_key(&key) {
             self.budget -= 1;
             self.compiles += 1;
-            self.compiled.insert(key.clone(), schema::compile(spec, schema, dir).ok());
+            let v = schema::compile_within(spec, schema, dir, &mut self.scan_steps, self.scan_budget).ok();
+            self.compiled.insert(key.clone(), v);
         }
         let Some(validator) = self.compiled.get(&key).and_then(Option::as_ref) else {
             self.not_checked += examples.len();
@@ -470,6 +482,47 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn checker(scan_budget: usize) -> ExampleChecker {
+        ExampleChecker { budget: MAX_EXAMPLE_CHECKS, not_checked: 0, compiled: HashMap::new(), compiles: 0, scan_steps: 0, scan_budget }
+    }
+
+    #[test]
+    fn a_ref_with_constraining_siblings_is_its_own_validator() {
+        // 3.1: X1 = Y plus `maximum: 5`. A refers to X1, B to Y.
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "components": {"schemas": {"Y": {"type": "integer"}, "X1": {"$ref": "#/components/schemas/Y", "maximum": 5}}},
+        "paths": {
+            "/a": {"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/X1"}, "example": 7}}}}}},
+            "/b": {"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Y"}, "example": 7}}}}}}
+        }});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let r = lint(&spec, &RuleSet::recommended(), &LintOptions::default());
+        let bad: Vec<&str> = r.findings.iter().filter(|f| f.rule == "example-valid").map(|f| f.label.as_str()).collect();
+        assert_eq!(bad, ["application/json in the 200 response of GET /a"], "{:#?}", r.findings);
+    }
+
+    #[test]
+    fn compiles_share_one_scanning_budget() {
+        // Each media type wraps the big schema, so none shares a validator.
+        let mut paths = Map::new();
+        for i in 0..100 {
+            paths.insert(
+                format!("/p{i}"),
+                json!({"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"allOf": [{"$ref": "#/components/schemas/Big"}]}, "example": 3}}}}}}),
+            );
+        }
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
+            "components": {"schemas": {"Big": {"type": "integer", "enum": (0..50_000).collect::<Vec<u32>>()}}}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let mut checker = checker(200_000);
+        let mut examples = |m: &Media<'_>, dir: Direction| checker.check(&spec, m, dir);
+        drop(Model::build(&spec, &mut examples));
+        assert_eq!(checker.compiles, 100);
+        assert!(checker.scan_steps <= 200_000 + 50_010, "{}", checker.scan_steps);
+        assert!(checker.not_checked >= 95, "{}", checker.not_checked);
+    }
+
     #[test]
     fn media_types_sharing_a_schema_compile_it_once() {
         let mut paths = Map::new();
@@ -483,7 +536,7 @@ mod tests {
         let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
             "components": {"schemas": {"Big": {"type": "integer", "enum": (0..50_000).collect::<Vec<u32>>()}}}});
         let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
-        let mut checker = ExampleChecker { budget: MAX_EXAMPLE_CHECKS, not_checked: 0, compiled: HashMap::new(), compiles: 0 };
+        let mut checker = checker(MAX_EXAMPLE_SCAN_STEPS);
         let mut examples = |m: &Media<'_>, dir: Direction| checker.check(&spec, m, dir);
         let model = Model::build(&spec, &mut examples);
         assert_eq!(model.of_kind(TargetKind::MediaType).count(), 1_000);
