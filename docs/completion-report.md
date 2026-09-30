@@ -11,8 +11,8 @@ pass.
 |---|---|
 | Source | `ferrum-edge/ferrum-anvil`, branch `claude/anvil-desktop-client-3f372d`, draft PR ferrum-edge/ferrum-anvil#1 |
 | Website (staged, pre-release) | `ferrum-edge/ferrumedge`, branch `claude/anvil-website`, draft PR ferrum-edge/ferrumedge#54. Do not merge before a release. |
-| Gateway compatibility targets | Ferrum Edge v0.9.7 release binary (source `8fed134`, the default pin, `lab/gateway/RELEASE.lock`) and v0.9.5 (source `20e7603`, `lab/gateway/releases/v0.9.5.lock`), both checksum-pinned; each has its own source-audited catalog |
-| Gateway changes | None. The proposed authorized diagnostic API (G01) is specified in `docs/g01-gateway-diagnostic-contract.md` but is not implemented in the gateway. |
+| Gateway compatibility targets | Ferrum Edge v0.9.8 release binary (source `e27f210`, the default pin, `lab/gateway/RELEASE.lock`), v0.9.7 (source `8fed134`, `lab/gateway/releases/v0.9.7.lock`) and v0.9.5 (source `20e7603`, `lab/gateway/releases/v0.9.5.lock`), each checksum-pinned; each has its own source-audited catalog |
+| Gateway changes | None in a release. G01, the authorized diagnostic reference, is implemented on Ferrum Edge main (`ferrum-edge/ferrum-edge#5767` closed; #5845, #5857/#5862 and #5868) and its `ferrum.diagnostic_ref.v1` schema ships in `ferrum-contracts` `contracts-edge-0.9.8`, but no released gateway binary contains it, so Anvil has not adopted it. The contract is in `docs/g01-gateway-diagnostic-contract.md`; the adoption plan is in `docs/diagnostics.md`. |
 | Signed artifacts, checksums | None: signing is blocked on owner credentials. The release workflow only produces draft releases (see `docs/release.md`). |
 
 ## Implemented
@@ -40,7 +40,7 @@ pass.
 - **Evidence-based diagnostics.**
   - Deterministic rules run over typed evidence.
   - Each finding has a confidence (confirmed/likely/unknown/conflicting), a scope (the leg it concerns), an owner, what it does not prove, alternatives and next steps.
-  - Source-audited catalogs back the Ferrum-specific findings: 538 Ferrum Edge 0.9.7 outcomes and 528 Ferrum Edge 0.9.5 outcomes. A declared gateway uses the catalog of its own release; a release without a catalog gets no outcome matching and an explicit finding saying so.
+  - Source-audited catalogs back the Ferrum-specific findings: 540 Ferrum Edge 0.9.8 outcomes, 538 Ferrum Edge 0.9.7 outcomes and 528 Ferrum Edge 0.9.5 outcomes. A declared gateway uses the catalog of its own release; a release without a catalog gets no outcome matching and an explicit finding saying so.
   - Markers count only for declared gateways and are capped at "likely". The seven coarse `X-Gateway-Error` values are never refined into precise causes.
   - No cloud service or LLM is involved.
   - See `docs/diagnostics.md` and `catalog/`.
@@ -59,7 +59,7 @@ pass.
   - Locking the app stops the run and keeps a partial report.
   - See `docs/load.md`.
 - **Real-gateway failure lab.**
-  - 13 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto, workload, early) drive a pinned gateway binary with controllable fixtures: v0.9.7 by default, v0.9.5 with `--release v0.9.5`. The mesh profile runs the gateway in mesh mode (HBONE for TCP and UDP, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP (UDP and DTLS in the tunnel); proxyproto covers PROXY protocol listeners (TCP, UDP/DTLS, and HTTP listeners that do not expect a header); workload covers the SPIFFE Workload API (X.509-SVIDs and JWT-SVIDs); early covers TLS 1.3 / QUIC 0-RTT early data and `425 Too Early`.
+  - 13 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto, workload, early) drive a pinned gateway binary with controllable fixtures: v0.9.8 by default, v0.9.7 or v0.9.5 with `--release`. The mesh profile runs the gateway in mesh mode (HBONE for TCP and UDP, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP (UDP and DTLS in the tunnel); proxyproto covers PROXY protocol listeners (TCP, UDP/DTLS, and HTTP listeners that do not expect a header); workload covers the SPIFFE Workload API (X.509-SVIDs and JWT-SVIDs); early covers TLS 1.3 / QUIC 0-RTT early data and `425 Too Early`.
   - Ground truth is independent of the diagnosis.
   - Every scenario runs twice: trusted, and with the gateway untrusted.
   - See `docs/lab/`.
@@ -79,8 +79,8 @@ Exact commands are in `docs/release.md` → "Local verification record".
 | `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo test --workspace --exclude anvil-desktop` | 93 test binaries, 716 passed, 0 failed, 2 ignored (the real OS keychain round trip, run by CI on each OS; the Python `websockets` interop check) |
 | Renderer (`tsc`, `vitest`) | clean; 78 passed |
-| Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway on Ferrum Edge 0.9.7) | 9 spec files, 18 tests passed (earlier also on the release-profile e2e build) |
-| `anvil-lab [--release v0.9.5] run <profile> --untrusted-pass` (13 profiles) | v0.9.7 and v0.9.5 each: 530 passed, 0 failed, 19 skipped with stated reasons |
+| Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway on the pinned Ferrum Edge v0.9.8) | 9 spec files, 18 tests passed (earlier also on the release-profile e2e build) |
+| `anvil-lab [--release <release>] run <profile> --untrusted-pass` (13 profiles) | v0.9.8 (the default pin), v0.9.7 and v0.9.5 each: 530 passed, 0 failed, 19 skipped with stated reasons |
 | Release check on the production `.app`, `.dmg`, raw binary and CLI, with runtime probe | pass. The e2e build fails as required. |
 | Plaintext-at-rest audit (profile files, WAL/SHM side files, temp files) | no leak |
 | `cargo deny`, license inventory, `gitleaks` over the branch | clean |
@@ -126,7 +126,7 @@ results and reasoned statuses.
 
 - **No signed release.** There are no installers, notarization, updater or download assets. The website says "not yet released". Owner steps: ferrum-edge/ferrum-anvil#2.
 - **Platforms.** Only macOS arm64 was built and exercised locally. Linux and Windows are covered by CI only. No minimum OS versions have been established.
-- **G01 is not implemented** in the gateway, so gateway attribution never exceeds "likely".
+- **G01 is implemented on Ferrum Edge main but not in a released gateway** (`ferrum-edge/ferrum-edge#5767` closed; #5845, #5857/#5862 and #5868), so Anvil has not adopted the diagnostic reference and gateway attribution never exceeds "likely" (see [diagnostics.md](diagnostics.md#adopting-the-gateway-diagnostic-reference-g01)).
 - **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md` and ferrum-edge/ferrum-anvil#3.
 - **Protocol and load gaps:**
   - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).

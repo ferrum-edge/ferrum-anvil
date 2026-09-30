@@ -533,12 +533,15 @@ Observations that shaped the implementation:
 ## Limitations
 
 * **LOAD-012** (optional JMeter adapter) is not implemented.
-* **Refused protocol combinations** (table above): client-streaming and
-  bidirectional gRPC, gRPC with server reflection, SSE with reconnection,
-  UDP through MASQUE, HTTP/gRPC through HBONE in persistent mode, and
-  mixed-protocol plans. There is no "long-lived stream" load action yet
-  (sessions held open while messages are sent at a rate); a WebSocket session
-  unit is connect → scripted messages → close.
+* **Refused protocol combinations** (table above): gRPC-Web client-streaming
+  and bidirectional streams, gRPC with server reflection, SSE with
+  reconnection, UDP through MASQUE, HTTP/gRPC through HBONE in persistent
+  mode, and mixed-protocol plans. Native client-streaming and bidirectional
+  gRPC are supported load units (`grpc_client_stream`, `grpc_bidi_stream`);
+  only their gRPC-Web forms are refused (gRPC-Web has no client stream).
+  There is no "long-lived stream" load action yet (sessions held open while
+  messages are sent at a rate); a WebSocket session unit is connect →
+  scripted messages → close.
 * WebSocket round trips pair the i-th scripted data message with the i-th
   data message received (the adapter sends the whole script, then reads), so
   they fit echo-style exchanges; a session whose reply arrives before its

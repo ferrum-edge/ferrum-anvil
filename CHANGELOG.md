@@ -103,6 +103,13 @@
 
 ### Changed
 
+- Docs: refresh the completion report, architecture and load docs for the
+  Ferrum Edge v0.9.8 default pin and its 540-outcome catalog, mark G01
+  implemented on Edge main (not in a release), correct the load limitations
+  (native client-streaming and bidirectional gRPC are supported; only their
+  gRPC-Web forms are refused), and record the plan to adopt the gateway
+  diagnostic reference. See
+  [diagnostics.md](docs/diagnostics.md#adopting-the-gateway-diagnostic-reference-g01).
 - CI: Dependabot now covers GitHub composite actions, keeps patched vendored
   crates pinned, and leaves coordinated Tauri updates for a manual bump.
   Dependabot dependency PRs may require manual license and generated-contract

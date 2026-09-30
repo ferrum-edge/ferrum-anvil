@@ -295,5 +295,5 @@ fails on drift.
 - [threat-model.md](threat-model.md): assets, trust boundaries and mitigations.
 - [diagnostics.md](diagnostics.md): the evidence model, confidence rules and the Ferrum catalog.
 - [storage-and-recovery.md](storage-and-recovery.md): the vault, recovery, backups and migration.
-- [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md): the proposed gateway contract.
+- [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md): the gateway diagnostic contract (implemented on Ferrum Edge main; not in a release, so not yet adopted).
 - [protocols.md](protocols.md), [import.md](import.md), [contract.md](contract.md), [load.md](load.md), [runner.md](runner.md), [identity.md](identity.md), [lab/](lab/).
