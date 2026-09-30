@@ -251,8 +251,17 @@ impl Redactor {
         false
     }
 
+    /// A header value with its credential redacted. A header with a
+    /// sensitive name keeps only the parts that describe its credential (the
+    /// scheme word of an `Authorization`-like header, cookie names and
+    /// `Set-Cookie` attributes), and those are scrubbed of every known secret
+    /// value first: a server can echo a credential it received into any of
+    /// them. Scrubbing the whole value before it is split also replaces a
+    /// secret that spans a `;`, `=` or space whole.
     pub fn header(&self, name: &str, value: &str) -> String {
         if is_sensitive_name(name, &self.extra_names) {
+            let value = self.text(value);
+            let value = value.as_str();
             // Keep the scheme word for Authorization-like headers (e.g. "Bearer").
             let lower = name.to_ascii_lowercase();
             if (lower == "authorization" || lower == "proxy-authorization")
@@ -693,6 +702,39 @@ mod tests {
         assert_eq!(r.header("X-Custom", "v=planted-secret-123"), format!("v={REDACTED}"));
         assert_eq!(r.header("Cookie", "a=1; session=zzz"), format!("a={REDACTED}; session={REDACTED}"));
         assert_eq!(r.url("https://user:pw@h/p"), format!("https://{REDACTED}@h/p"));
+    }
+
+    #[test]
+    fn known_secrets_are_scrubbed_from_the_parts_of_a_credential_header_that_are_kept() {
+        let secret = "reflected-known-secret-7q2m";
+        // Sent percent-encoded in a URL path as `tok%2Fen%3Dvalue`.
+        let reserved = "tok/en=value";
+        let r = Redactor::new(vec![secret.into(), reserved.into()], vec![]);
+        let cases = [
+            ("Set-Cookie", format!("ordinary=x; Path=/{secret}; HttpOnly"), format!("ordinary={REDACTED}; Path=/{REDACTED}; HttpOnly")),
+            ("Set-Cookie", format!("{secret}=x; Path=/"), format!("{REDACTED}={REDACTED}; Path=/")),
+            ("Set-Cookie", format!("sid=x; Domain={secret}.example"), format!("sid={REDACTED}; Domain={REDACTED}.example")),
+            ("Set-Cookie", "sid=x; Path=/tok%2Fen%3Dvalue".into(), format!("sid={REDACTED}; Path=/{REDACTED}")),
+            ("Cookie", format!("a=1; {secret}=2"), format!("a={REDACTED}; {REDACTED}={REDACTED}")),
+            ("Authorization", format!("{secret} opaque"), format!("{REDACTED} {REDACTED}")),
+            ("Proxy-Authorization", format!("X-{secret} opaque"), format!("X-{REDACTED} {REDACTED}")),
+        ];
+        for (i, (name, value, expected)) in cases.iter().enumerate() {
+            let out = r.header(name, value);
+            assert!(!out.contains(secret) && !out.contains("tok%2Fen%3Dvalue"), "case {i} ({name}): a known secret is kept");
+            assert_eq!(&out, expected, "case {i} ({name})");
+        }
+        // A secret that spans the delimiters the value is split on is replaced whole.
+        let r = Redactor::new(vec!["span;Path=/secret".into(), "name-part=value-part".into(), "Bearer whole-value".into()], vec![]);
+        assert_eq!(r.header("Set-Cookie", "sid=span;Path=/secret; Secure"), format!("sid={REDACTED}; Secure"));
+        assert_eq!(r.header("Cookie", "name-part=value-part; b=2"), format!("{REDACTED}; b={REDACTED}"));
+        // A secret that holds the scheme word too (a whole header value marked sensitive) leaves nothing of it.
+        assert_eq!(r.header("Authorization", "Bearer whole-value"), REDACTED);
+        // Without a known secret in them, the kept parts are unchanged.
+        let r = Redactor::new(vec![], vec![]);
+        assert_eq!(r.header("Set-Cookie", "sid=abc; Path=/app; HttpOnly"), format!("sid={REDACTED}; Path=/app; HttpOnly"));
+        assert_eq!(r.header("Cookie", "a=1; b=2"), format!("a={REDACTED}; b={REDACTED}"));
+        assert_eq!(r.header("Authorization", "Bearer abc.def"), format!("Bearer {REDACTED}"));
     }
 
     #[test]

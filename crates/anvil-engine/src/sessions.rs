@@ -1025,6 +1025,12 @@ pub(crate) fn grpc_call(
     for (i, kv) in spec.metadata.iter().enumerate().filter(|(_, kv)| kv.enabled) {
         let n = r.resolve(kv.name.trim(), &format!("grpc.metadata[{i}].name"))?.to_ascii_lowercase();
         let v = r.resolve(&kv.value, &format!("grpc.metadata[{i}].value"))?;
+        // Metadata marked sensitive is redacted by name and by value, as a
+        // request header marked sensitive is: registered before anything
+        // (the preview, the session's redactor, the record) is redacted.
+        if kv.sensitive {
+            r.mark_sensitive(&n, &v);
+        }
         if HeaderName::from_bytes(n.as_bytes()).is_err() || n.starts_with(':') || n.starts_with("grpc-") {
             return Err(local(
                 FailureKind::InvalidHeader,
