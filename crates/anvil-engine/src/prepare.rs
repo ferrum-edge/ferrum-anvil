@@ -243,15 +243,7 @@ pub fn prepare_http(
     send_anyway: bool,
     allowed_schemes: &[&str],
 ) -> Result<PreparedHttp, TransportFailure> {
-    prepare_http_with_redaction_names(
-        spec,
-        r,
-        attachments,
-        settings,
-        &[],
-        send_anyway,
-        allowed_schemes,
-    )
+    prepare_http_with_redaction_names(spec, r, attachments, settings, &[], send_anyway, allowed_schemes)
 }
 
 /// Prepare an HTTP request using configured credential names to identify
@@ -580,15 +572,7 @@ mod tests {
         ];
         let r = Resolver::new(vec![crate::vars::VarLayer { label: "environment:test".into(), vars }], Some(1));
         let attachments = crate::context::MemoryAttachments::default();
-        prepare_http(
-            spec,
-            &r,
-            &attachments,
-            &EffectiveSettings::default(),
-            false,
-            &["https"],
-        )
-        .unwrap()
+        prepare_http(spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap()
     }
 
     fn holds(body: &[u8], s: &str) -> bool {
@@ -660,9 +644,7 @@ mod tests {
 
         // Credential-named literal fields are sensitive even when the user
         // did not mark them explicitly.
-        spec.body = Body::FormUrlEncoded {
-            fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", literal)],
-        };
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", literal)] };
         assert!(prepared(&spec).body_uses_secret);
 
         let vars = Resolver::new(vec![], Some(1));
@@ -698,15 +680,7 @@ mod tests {
         };
         let resolver = Resolver::new(vec![], Some(1));
         let attachments = crate::context::MemoryAttachments::default();
-        let request = prepare_http(
-            &spec,
-            &resolver,
-            &attachments,
-            &EffectiveSettings::default(),
-            false,
-            &["https"],
-        )
-        .unwrap();
+        let request = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
 
         assert!(resolver.used_secrets.lock().is_empty(), "a heuristic name does not register its value as a secret");
         let redactor = crate::redact::Redactor::for_execution(&resolver, &[]);
@@ -781,39 +755,15 @@ mod tests {
         let cdata = r#"<document><![CDATA[<!DOCTYPE html><html><body>Report</body></html>]]></document>"#;
         let mut spec = RequestSpec::http("POST", "https://api.example.com/");
         spec.body = Body::Xml { text: cdata.into() };
-        let form = prepare_http(
-            &spec,
-            &r,
-            &attachments,
-            &EffectiveSettings::default(),
-            false,
-            &["https"],
-        )
-        .unwrap();
+        let form = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
         assert_eq!(&form.body[..], cdata.as_bytes());
 
         let comment = r#"<document><!-- documentation example: <!ENTITY example 'value'> --><value>ok</value></document>"#;
         spec.body = Body::Xml { text: comment.into() };
-        prepare_http(
-            &spec,
-            &r,
-            &attachments,
-            &EffectiveSettings::default(),
-            false,
-            &["https"],
-        )
-        .unwrap();
+        prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
 
         spec.body = Body::Xml { text: r#"<!DOCTYPE r [<!ENTITY a "b">]><r>&a;</r>"#.into() };
-        let err = prepare_http(
-            &spec,
-            &r,
-            &attachments,
-            &EffectiveSettings::default(),
-            false,
-            &["https"],
-        )
-        .unwrap_err();
+        let err = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap_err();
         assert_eq!(err.kind, FailureKind::LintBlocked);
         assert_eq!(err.phase, Phase::Prepare);
     }

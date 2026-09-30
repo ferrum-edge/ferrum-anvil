@@ -628,11 +628,7 @@ mod tests {
         store("https://www.attacker.co.uk./", &["trailing=1; Domain=co.uk."]);
         store("https://attacker.github.io/", &["private=1; Domain=github.io"]);
         assert_eq!(header("https://victim.com/"), None, "a cookie for com reaches no other .com site");
-        assert_eq!(
-            header("https://victim.com./"),
-            None,
-            "a cookie for com. reaches no other .com site"
-        );
+        assert_eq!(header("https://victim.com./"), None, "a cookie for com. reaches no other .com site");
         assert_eq!(header("https://victim.co.uk/"), None, "a cookie for co.uk or uk reaches no other .co.uk site");
         assert_eq!(header("https://victim.co.uk./"), None, "a cookie for co.uk. reaches no other .co.uk site");
         assert_eq!(header("https://victim.github.io/"), None, "a cookie for a private-section suffix reaches no other site");
@@ -656,13 +652,7 @@ mod tests {
     async fn a_cookie_scoped_to_an_unknown_single_label_domain_is_not_shared() {
         let e = Engine::new();
         let store = |url: &str, cookie: &str| {
-            e.store_cookies(
-                e.execution_epoch("ws"),
-                "ws",
-                &target(url),
-                &with_set_cookie(&[cookie]),
-                &redact::Redactor::default(),
-            )
+            e.store_cookies(e.execution_epoch("ws"), "ws", &target(url), &with_set_cookie(&[cookie]), &redact::Redactor::default())
         };
         let header = |url: &str| e.cookie_header("ws", &target(url));
 
