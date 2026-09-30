@@ -6,7 +6,7 @@
 //! `/definitions/binding[@name='QuoteSoap']/operation[@name='GetQuote']`;
 //! for cURL they point into the argument vector (`/args/3`).
 
-use crate::util::clip;
+use crate::util::{clip, fnv1a64};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -28,6 +28,13 @@ const MAX_TEXT_CHARS: usize = 2_048;
 /// clip looks at no more than `max` characters).
 fn bounded(s: &str, max: usize) -> String {
     if s.len() <= max { s.to_string() } else { clip(s, max) }
+}
+
+/// A pointer as stored in a report: whole when short; otherwise clipped and
+/// suffixed with a hash of the whole pointer, so distinct long pointers stay
+/// distinct (for de-duplication too).
+fn bounded_pointer(p: &str) -> String {
+    if p.len() <= MAX_POINTER_CHARS { p.to_string() } else { format!("{}#{:016x}", clip(p, MAX_POINTER_CHARS), fnv1a64(p)) }
 }
 
 /// [`bounded`] for text that is already owned.
@@ -172,6 +179,8 @@ struct Seen {
     refs: HashMap<String, (usize, HashSet<String>)>,
     /// Required variable name → its index in `required_variables` and its pointers.
     vars: HashMap<String, (usize, HashSet<String>)>,
+    /// Redactions made, including those past the list's limit.
+    redactions: usize,
 }
 
 impl PartialEq for Seen {
@@ -210,7 +219,7 @@ enum Admit {
 impl ImportReport {
     /// Record a warning once per (code, pointer).
     pub fn warn(&mut self, code: &str, pointer: &str, message: impl Into<String>) {
-        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        let pointer = bounded_pointer(pointer);
         match self.seen.admit(code, &pointer) {
             Admit::Keep => {
                 let message = bounded_owned(message.into(), MAX_TEXT_CHARS);
@@ -223,7 +232,7 @@ impl ImportReport {
 
     /// Record an unsupported construct once per (code, pointer).
     pub fn unsupported(&mut self, code: &str, pointer: &str, message: impl Into<String>) {
-        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        let pointer = bounded_pointer(pointer);
         match self.seen.admit(&format!("u:{code}"), &pointer) {
             Admit::Keep => {
                 let message = bounded_owned(message.into(), MAX_TEXT_CHARS);
@@ -247,7 +256,7 @@ impl ImportReport {
     }
 
     pub fn external_ref(&mut self, reference: &str, pointer: &str) {
-        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        let pointer = bounded_pointer(pointer);
         if let Some((i, seen)) = self.seen.refs.get_mut(reference) {
             let e = &mut self.external_refs[*i];
             if e.pointers.len() < MAX_POINTERS_PER_ENTRY && seen.insert(pointer.clone()) {
@@ -287,7 +296,7 @@ impl ImportReport {
             return self.truncated("inactive_setting");
         }
         self.inactive_settings.push(InactiveSetting {
-            pointer: bounded(pointer, MAX_POINTER_CHARS),
+            pointer: bounded_pointer(pointer),
             setting: bounded(setting, MAX_TEXT_CHARS),
             value: bounded(value, MAX_TEXT_CHARS),
             reason: bounded_owned(reason.into(), MAX_TEXT_CHARS),
@@ -295,11 +304,12 @@ impl ImportReport {
     }
 
     pub fn redacted(&mut self, pointer: &str, field: impl Into<String>, placeholder: &str) {
+        self.seen.redactions += 1;
         if self.redactions.len() >= MAX_ENTRIES {
             return self.truncated("redaction");
         }
         self.redactions.push(Redaction {
-            pointer: bounded(pointer, MAX_POINTER_CHARS),
+            pointer: bounded_pointer(pointer),
             field: field.into(),
             placeholder: placeholder.into(),
         });
@@ -307,7 +317,7 @@ impl ImportReport {
 
     /// Declare a variable that must be supplied by the user.
     pub fn require_var(&mut self, name: &str, secret: bool, reason: &str, pointer: &str) {
-        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        let pointer = bounded_pointer(pointer);
         if let Some((i, seen)) = self.seen.vars.get_mut(name) {
             let v = &mut self.required_variables[*i];
             v.secret |= secret;
@@ -318,6 +328,12 @@ impl ImportReport {
         }
         self.seen.vars.insert(name.to_string(), (self.required_variables.len(), HashSet::from([pointer.clone()])));
         self.required_variables.push(RequiredVariable { name: name.into(), secret, reason: reason.into(), pointers: vec![pointer] });
+    }
+
+    /// Redactions made so far, however many the list keeps: what an importer
+    /// compares to learn whether a value it scrubbed changed.
+    pub(crate) fn redactions_made(&self) -> usize {
+        self.seen.redactions
     }
 
     pub fn has_code(&self, code: &str) -> bool {

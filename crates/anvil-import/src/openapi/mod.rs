@@ -498,9 +498,15 @@ fn import_path_item(
     }
     if let Some(Value::Object(extra)) = field("additionalOperations") {
         if is_32(ctx.dialect) {
+            let abase = ptr(pptr, "additionalOperations");
             for (m, op) in extra {
+                // Every entry's pointer copies the path (a long path times many
+                // entries): charged before it is built.
+                if !b.charge_text(&abase, abase.len().saturating_add(m.len()).saturating_add(1)) {
+                    break;
+                }
                 let upper = m.to_ascii_uppercase();
-                let aptr = ptr(&ptr(pptr, "additionalOperations"), m);
+                let aptr = ptr(&abase, m);
                 if !upper.bytes().all(|c| c.is_ascii_alphabetic() || c == b'-' || c == b'_') {
                     b.report.warn("invalid_method", &aptr, format!("'{m}' is not a valid HTTP method token; skipped"));
                     continue;

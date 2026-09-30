@@ -861,14 +861,18 @@
   before it is parsed (`LimitExceeded`): the parser copies the namespaces in
   scope for every element that declares one and compares every attribute
   with each earlier one. A quote-, comment- and CDATA-aware scan counts both
-  in one pass. Also charged or done once now: the pointer of every generated
+  in one pass, which also bounds the attribute pairs of the whole document
+  (2^24), attribute names (1 KiB), namespace prefixes (256 bytes) and
+  namespace URIs (2 KiB), since the parser compares names and full URIs per
+  pair. Also charged or done once now: the pointer of every generated
   value and every `$ref` resolution (a `$ref` over 2048 bytes is not
   followed, `ref_too_long`), `type` arrays, `$ref` sibling keys,
   `oneOf`/`anyOf` alternatives and discriminator mappings, and the lookups
   and comparisons of `allOf` merges (non-string `required` entries are
   ignored with `invalid_required`). Text copied into imported objects
-  (names, keys, folder names, descriptions, SOAP actions, server URLs and
-  variables, and each operation and security scheme every time it is
+  (names, keys, request URLs and pointers, folder names, descriptions, SOAP
+  actions, server URLs and variables, OpenAPI 3.2 additional-operation
+  pointers, and each operation and security scheme every time it is
   imported) has a budget of four times `max_bytes`; once it is spent, later
   operations are skipped (`text_size_limit`). A Path Item `$ref` is read in
   place instead of copied for every path, server variables are rendered
@@ -876,7 +880,10 @@
   is created only once one of its operations is admitted, and a repeated
   operation key takes its `#n` suffix from a counter. The report keeps at
   most 1000 findings per code (`report_truncated`), clips stored pointers
-  and messages, and indexes its external references and required variables.
+  (keeping a hash of the whole pointer) and messages, and indexes its
+  external references and required variables. HAR and cURL imports decide
+  whether a JSON body was scrubbed from a redaction count that the report's
+  list limit does not cap, so bodies stay scrubbed past 10,000 redactions.
 - Redaction of credential headers (`Authorization`, `Proxy-Authorization`,
   `Cookie`, `Set-Cookie` and other sensitive names) now scrubs every known
   secret value from the parts it keeps: the authorization scheme word,

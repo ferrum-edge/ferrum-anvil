@@ -510,3 +510,25 @@ fn namespace_declarations_are_counted_before_parsing() {
         }
     }
 }
+
+#[test]
+fn namespace_uris_and_attribute_pairs_are_bounded_before_parsing() {
+    let refused = |doc: &str, word: &str, want: usize| match import(doc.as_bytes(), &opts()) {
+        Err(ImportError::LimitExceeded { what, limit }) => {
+            assert_eq!(limit, want);
+            assert!(what.contains(word), "{what}");
+        }
+        other => panic!("expected the {word} limit, got {:?}", other.map(|r| r.requests.len())),
+    };
+    // The parser compares the full namespace URI of every pair of prefixed
+    // attributes: one 64 KiB URI shared by 256 of them was about 2 GB per element.
+    let uri = format!("urn:{}", "u".repeat(64 * 1024));
+    let attrs: String = (0..250).map(|i| format!(r#" p:a{i}="{i}""#)).collect();
+    let doc = format!(r#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:p="{uri}"><x{attrs}/></definitions>"#);
+    refused(&doc, "URI", 2_048);
+    // 100 attributes on each of 4000 elements: about 2e7 pairs, over 2^24.
+    let attrs: String = (0..100).map(|i| format!(r#" a{i}="{i}""#)).collect();
+    let kids = format!("<x{attrs}/>").repeat(4_000);
+    let doc = format!(r#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/">{kids}</definitions>"#);
+    refused(&doc, "pairs", 1 << 24);
+}

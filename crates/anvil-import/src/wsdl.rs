@@ -11,7 +11,7 @@
 use crate::builder::Builder;
 use crate::report::ImportReport;
 use crate::util::{SplitMix64, clip, fnv1a64, is_credential_name, sanitize_var};
-use crate::xml_limits::{XmlLimitExceeded, check_xml_limits};
+use crate::xml_limits::{XmlLimitExceeded, XmlLimits, check_xml_limits};
 use crate::{ImportError, SampleMode};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -44,10 +44,19 @@ const MAX_IN_SCOPE_NAMESPACES: usize = 256;
 /// this cap it stays around a million entries (a few MiB), while any one
 /// element can still have [`MAX_IN_SCOPE_NAMESPACES`] in scope.
 const MAX_XMLNS_DECLARATIONS: usize = 4 * MAX_IN_SCOPE_NAMESPACES;
-/// Attributes allowed on one element, counted before the document is
-/// parsed: the parser compares each attribute with every earlier one on the
-/// same element.
-const MAX_ATTRIBUTES_PER_ELEMENT: usize = 256;
+/// What the pre-parse scan allows. The parser compares each attribute with
+/// every earlier one on the same element (names and full namespace URIs), so
+/// the attributes per element, the pairs over the whole document and the
+/// lengths compared are all bounded: at most about 2^24 pairs of 2 KiB URIs
+/// and 1 KiB names.
+const XML_LIMITS: XmlLimits = XmlLimits {
+    attributes_per_element: 256,
+    attribute_pairs: 1 << 24,
+    attribute_name_bytes: 1_024,
+    xmlns_declarations: MAX_XMLNS_DECLARATIONS,
+    xmlns_prefix_bytes: 256,
+    xmlns_uri_bytes: 2_048,
+};
 /// The only SOAP transport imported.
 const SOAP_HTTP: &str = "http://schemas.xmlsoap.org/soap/http";
 
@@ -101,11 +110,16 @@ fn text_of(doc: Option<Node>) -> String {
 pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     // Counted in one pass over the text, before the parser does work that
     // grows with the square of either count.
-    check_xml_limits(text, MAX_ATTRIBUTES_PER_ELEMENT, MAX_XMLNS_DECLARATIONS).map_err(|e| match e {
-        XmlLimitExceeded::AttributesPerElement(limit) => ImportError::LimitExceeded { what: "XML attributes on one element".into(), limit },
-        XmlLimitExceeded::NamespaceDeclarations(limit) => {
-            ImportError::LimitExceeded { what: "XML namespace declarations (xmlns)".into(), limit }
-        }
+    check_xml_limits(text, &XML_LIMITS).map_err(|e| {
+        let (what, limit) = match e {
+            XmlLimitExceeded::AttributesPerElement(l) => ("XML attributes on one element", l),
+            XmlLimitExceeded::AttributePairs(l) => ("XML attribute pairs on the elements of one document", l),
+            XmlLimitExceeded::AttributeNameBytes(l) => ("bytes in one XML attribute name", l),
+            XmlLimitExceeded::NamespaceDeclarations(l) => ("XML namespace declarations (xmlns)", l),
+            XmlLimitExceeded::NamespacePrefixBytes(l) => ("bytes in one XML namespace prefix", l),
+            XmlLimitExceeded::NamespaceUriBytes(l) => ("bytes in one XML namespace URI", l),
+        };
+        ImportError::LimitExceeded { what: what.into(), limit }
     })?;
     let limit = u32::try_from(b.opts.max_nodes).unwrap_or(u32::MAX);
     let opts = ParsingOptions { allow_dtd: false, nodes_limit: limit, ..ParsingOptions::default() };

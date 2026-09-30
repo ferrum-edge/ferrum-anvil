@@ -753,8 +753,8 @@ fn long_pointers_and_refs_are_charged_and_clipped() {
     assert!(has(&r, "sample_size_limit"));
     let values = count_leaves(&json_body(&req(&r, "a").spec));
     assert!(values < 100, "{values} values generated");
-    // Stored pointers are clipped.
-    assert!(r.report.warnings.iter().all(|w| w.pointer.chars().count() <= 513), "a long pointer was stored");
+    // Stored pointers are clipped (with a hash of the whole pointer).
+    assert!(r.report.warnings.iter().all(|w| w.pointer.chars().count() <= 530), "a long pointer was stored");
 
     // A `$ref` longer than the limit is not followed.
     let mut schemas = serde_json::Map::new();
@@ -830,4 +830,35 @@ fn server_variables_are_rendered_once() {
     let env = &r.environments[0];
     assert_eq!(env.variables.iter().filter(|v| v.name == "v").count(), 1);
     assert!(!has(&r, "contradictory_schema"));
+}
+
+/// Base-26 letters, a valid method token for every `i`.
+fn method_token(mut i: usize) -> String {
+    let mut s = String::new();
+    loop {
+        s.push((b'A' + (i % 26) as u8) as char);
+        i /= 26;
+        if i == 0 {
+            return s;
+        }
+    }
+}
+
+#[test]
+fn operations_under_a_long_path_charge_their_urls_and_pointers() {
+    // 5000 OpenAPI 3.2 additional operations under one 1 MB path, each with a
+    // short operationId: every one copied the path into its pointers and its
+    // URL, about 10 GB. Both are charged to the text budget (8 MiB for a
+    // 2 MiB input limit), so the import stops after a few operations.
+    let path = format!("/{}", "a".repeat(1024 * 1024));
+    let mut extra = serde_json::Map::new();
+    for i in 0..5_000 {
+        extra.insert(method_token(i + 26 * 26), json!({"operationId": format!("o{i}"), "responses": {}}));
+    }
+    let mut paths = serde_json::Map::new();
+    paths.insert(path, json!({"additionalOperations": extra}));
+    let doc = json!({"openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": paths});
+    let r = import(doc.to_string().as_bytes(), &ImportOptions { max_bytes: 2 * 1024 * 1024, ..opts() }).unwrap();
+    assert!(has(&r, "text_size_limit"));
+    assert!(r.requests.len() < 10, "{} requests", r.requests.len());
 }

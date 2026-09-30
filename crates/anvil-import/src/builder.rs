@@ -132,7 +132,12 @@ impl<'o> Builder<'o> {
 
     /// Get or create the folder identified by `key` (stable across reimports
     /// when the same id namespace is used). The key (looked up every time)
-    /// and a new folder's name are charged as text.
+    /// and a new folder's name are charged as text. The folder is made even
+    /// when they do not fit: every caller makes folders either for an
+    /// operation it has just admitted (and the next one is not admitted once
+    /// the budget is spent) or once per element of the source (a Postman or
+    /// Insomnia folder, a tag, a WSDL service), so what is copied stays
+    /// proportional to the input.
     pub fn folder(&mut self, parent: Option<Id>, key: &str, name: &str) -> Id {
         self.charge_text("/", key.len());
         if let Some(id) = self.folder_index.get(key) {
@@ -216,9 +221,10 @@ impl<'o> Builder<'o> {
 
     /// Add a request. `operation_key` is made unique (duplicates get a
     /// `#n` suffix and a warning, found from a counter per key); `source` and
-    /// `generated_hash` are set from the final spec. The key and name are
-    /// charged as text (the request is added either way: its operation was
-    /// admitted, and the next one will not be once the budget is spent).
+    /// `generated_hash` are set from the final spec. The key, name, URL and
+    /// source pointer are charged as text (the request is added either way:
+    /// its operation was admitted, and the next one will not be once the
+    /// budget is spent, so the overshoot is one request).
     pub fn add_request(
         &mut self,
         folder: Option<Id>,
@@ -227,7 +233,8 @@ impl<'o> Builder<'o> {
         mut spec: RequestSpec,
         pointer: &str,
     ) -> &mut RequestDefinition {
-        self.charge_text(pointer, operation_key.len().saturating_add(name.len()));
+        let text = operation_key.len().saturating_add(name.len()).saturating_add(spec.url.len()).saturating_add(pointer.len());
+        self.charge_text(pointer, text);
         let mut key = operation_key.to_string();
         if self.op_keys.contains(&key) {
             let n = self.key_suffix.entry(key.clone()).or_insert(2);

@@ -307,8 +307,9 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   envelopes charge the schema nodes they look at and the bytes they generate
   (per envelope and per import) and cut recursive groups; bindings are
   indexed once and each port only looks its binding up, and before the XML
-  parser runs, `xmlns` declarations and the attributes of every element are
-  counted. An Insomnia v4 export with a repeated workspace, group or
+  parser runs, `xmlns` declarations, the attributes of every element and
+  the attribute pairs of the document are counted, and attribute names,
+  namespace prefixes and namespace URIs are bounded in length. An Insomnia v4 export with a repeated workspace, group or
   environment id is refused, and each resource is walked once. These are
   budgets, not a proof that every code path is linear: a preview can still
   take time and memory proportional to those limits.
