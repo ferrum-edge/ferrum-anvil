@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn a_refusal_body_is_redacted_before_it_is_cut_to_its_bound() {
-        let secret = "zq7-refusal-secret-8d1p";
+        let secret = "tok-SENSITIVE-refusal-8d1p";
         let r = Redactor::new(vec![secret.into()], vec![]);
         // The bound falls 4 characters into the secret.
         let pad = "p".repeat(anvil_transport::hbone::MAX_REFUSAL_BODY - 4);
