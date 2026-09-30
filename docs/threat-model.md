@@ -107,11 +107,11 @@ against it).
     applied;
   - a redirect that would resend a body to another origin is not followed
     when preparing the body substituted a secret variable or included a form
-    field marked sensitive, literal value or not (whatever the body type and
-    encoding: form fields are percent-encoded, GraphQL variables are
-    re-serialized), or when the body holds a resolved secret value byte for
-    byte (an attachment, say). This covers 301/302 redirects that keep the
-    body, such as for PUT, PATCH and DELETE.
+    field marked sensitive or named as a credential, literal value or not
+    (whatever the body type and encoding: form fields are percent-encoded,
+    GraphQL variables are re-serialized), or when the body holds a resolved
+    secret value byte for byte (an attachment, say). This covers 301/302
+    redirects that keep the body, such as for PUT, PATCH and DELETE.
 
   The workspace cookie jar is separate: on each hop it sends the stored
   cookies that match that hop's target under cookie rules, which do not
@@ -121,9 +121,10 @@ against it).
   whose `Domain` is a public suffix (`com`, `co.uk`, a private-section
   suffix such as `github.io`; from the Public Suffix List compiled into
   Anvil) is not stored, so one site cannot set a cookie that the jar sends
-  to unrelated sites under that suffix; when the suffix is the responding
-  host itself, the cookie is kept for that host only. The TLS client
-  identity is never presented to another origin unless a TLS profile is bound
+  to unrelated sites under that suffix. Unknown single-label domains such as
+  `internal`, `lan` and `corp` are also refused unless one is the responding
+  host itself; in either case the cookie is kept for that host only. The TLS
+  client identity is never presented to another origin unless a TLS profile is bound
   to it, whatever the redirect policy. TLS settings are prepared for each
   hop's target, and a hop whose route or TLS settings cannot be prepared is
   not followed.

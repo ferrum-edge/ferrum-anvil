@@ -308,7 +308,10 @@ async fn redirect_that_would_resend_a_secret_body_to_another_origin_is_not_follo
     let e = Engine::new();
     for status in [307u16, 308] {
         a.log.clear();
-        let mut ctx = ctx_for(&a.url(&format!("/redirect?to={}&status={status}", url_encode(&b.url("/echo")))));
+        let mut ctx = ctx_for(&a.url(&format!(
+            "/redirect?to={}&status={status}",
+            url_encode(&b.url("/echo"))
+        )));
         with_configured_credentials(&mut ctx);
         post(&mut ctx, "tenant=t-{{tenant_key}}&note=hello");
         let o = run(&e, &ctx).await;
@@ -384,7 +387,10 @@ async fn redirect_that_would_resend_a_sensitive_form_field_to_another_origin_is_
     let password = KeyValue { sensitive: true, ..KeyValue::new("password", "tok-SENSITIVE-p@ss w/rd+=") };
     let form = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), password] };
     let ctx_with = |status: u16, forward: bool| {
-        let mut ctx = ctx_for(&a.url(&format!("/redirect?to={}&status={status}", url_encode(&b.url("/echo")))));
+        let mut ctx = ctx_for(&a.url(&format!(
+            "/redirect?to={}&status={status}",
+            url_encode(&b.url("/echo"))
+        )));
         ctx.spec.method = "POST".into();
         ctx.spec.body = form.clone();
         let policy = RedirectPolicy { follow: true, max: 10, forward_credentials_cross_origin: forward };
@@ -408,6 +414,41 @@ async fn redirect_that_would_resend_a_sensitive_form_field_to_another_origin_is_
     let o = run(&e, &ctx_with(307, true)).await;
     assert_eq!(o.record.attempts.len(), 2);
     assert_eq!(b.log.count_requests(), 1, "the policy allows forwarding the body");
+}
+
+#[tokio::test]
+async fn redirect_that_would_resend_a_credential_named_form_field_is_not_followed() {
+    init();
+    let a = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let b = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    for status in [307u16, 308] {
+        a.log.clear();
+        b.log.clear();
+        let mut ctx = ctx_for(&a.url(&format!(
+            "/redirect?to={}&status={status}",
+            url_encode(&b.url("/echo"))
+        )));
+        ctx.spec.method = "POST".into();
+        ctx.spec.body = Body::FormUrlEncoded {
+            fields: vec![KeyValue::new("password", "literal-p@ssword")],
+        };
+        let o = run(&e, &ctx).await;
+        assert_eq!(o.record.attempts.len(), 1, "{status}");
+        assert_eq!(a.log.count_requests(), 1, "{status}");
+        assert_eq!(
+            b.log.count_requests(),
+            0,
+            "{status}: credential-named form data stays at its origin"
+        );
+        assert!(
+            inferred(&o)
+                .iter()
+                .any(|i| i.contains("not followed") && i.contains("body holding a secret")),
+            "{status}: {:?}",
+            inferred(&o)
+        );
+    }
 }
 
 #[tokio::test]

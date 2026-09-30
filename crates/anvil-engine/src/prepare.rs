@@ -243,6 +243,26 @@ pub fn prepare_http(
     send_anyway: bool,
     allowed_schemes: &[&str],
 ) -> Result<PreparedHttp, TransportFailure> {
+    prepare_http_with_redaction_names(
+        spec,
+        r,
+        attachments,
+        settings,
+        &[],
+        send_anyway,
+        allowed_schemes,
+    )
+}
+
+pub(crate) fn prepare_http_with_redaction_names(
+    spec: &RequestSpec,
+    r: &Resolver,
+    attachments: &dyn AttachmentResolver,
+    settings: &EffectiveSettings,
+    redaction_names: &[String],
+    send_anyway: bool,
+    allowed_schemes: &[&str],
+) -> Result<PreparedHttp, TransportFailure> {
     let mut inferred = Vec::new();
     let method = r.resolve(spec.method.trim(), "method")?.to_ascii_uppercase();
     if method.is_empty() || !method.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'_') {
@@ -330,7 +350,7 @@ pub fn prepare_http(
             for (i, f) in fields.iter().enumerate().filter(|(_, f)| f.enabled) {
                 let k = r.resolve(&f.name, &format!("body.fields[{i}].name"))?;
                 let v = r.resolve(&f.value, &format!("body.fields[{i}].value"))?;
-                if f.sensitive {
+                if f.sensitive || crate::redact::is_credential_name(&k, redaction_names) {
                     r.mark_sensitive(&k, &v);
                     sensitive_body_field = true;
                 }
@@ -550,7 +570,15 @@ mod tests {
         ];
         let r = Resolver::new(vec![crate::vars::VarLayer { label: "environment:test".into(), vars }], Some(1));
         let attachments = crate::context::MemoryAttachments::default();
-        prepare_http(spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap()
+        prepare_http(
+            spec,
+            &r,
+            &attachments,
+            &EffectiveSettings::default(),
+            false,
+            &["https"],
+        )
+        .unwrap()
     }
 
     fn holds(body: &[u8], s: &str) -> bool {
@@ -620,9 +648,29 @@ mod tests {
         spec.body = Body::FormUrlEncoded { fields: vec![pin] };
         assert!(prepared(&spec).body_uses_secret);
 
-        // The same literal in a field not marked sensitive does not.
-        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", literal)] };
-        assert!(!prepared(&spec).body_uses_secret);
+        // Credential-named literal fields are sensitive even when the user
+        // did not mark them explicitly.
+        spec.body = Body::FormUrlEncoded {
+            fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", literal)],
+        };
+        assert!(prepared(&spec).body_uses_secret);
+
+        let vars = Resolver::new(vec![], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        let custom_name = prepare_http_with_redaction_names(
+            &RequestSpec {
+                body: Body::FormUrlEncoded { fields: vec![KeyValue::new("access_code", "1234")] },
+                ..RequestSpec::http("POST", "https://api.example.com/login")
+            },
+            &vars,
+            &attachments,
+            &EffectiveSettings::default(),
+            &["access_code".into()],
+            false,
+            &["https"],
+        )
+        .unwrap();
+        assert!(custom_name.body_uses_secret, "configured credential names mark literal fields");
 
         // A disabled sensitive field is not sent, so it does not either.
         let disabled = KeyValue { enabled: false, ..password };
@@ -678,15 +726,39 @@ mod tests {
         let cdata = r#"<document><![CDATA[<!DOCTYPE html><html><body>Report</body></html>]]></document>"#;
         let mut spec = RequestSpec::http("POST", "https://api.example.com/");
         spec.body = Body::Xml { text: cdata.into() };
-        let form = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+        let form = prepare_http(
+            &spec,
+            &r,
+            &attachments,
+            &EffectiveSettings::default(),
+            false,
+            &["https"],
+        )
+        .unwrap();
         assert_eq!(&form.body[..], cdata.as_bytes());
 
         let comment = r#"<document><!-- documentation example: <!ENTITY example 'value'> --><value>ok</value></document>"#;
         spec.body = Body::Xml { text: comment.into() };
-        prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+        prepare_http(
+            &spec,
+            &r,
+            &attachments,
+            &EffectiveSettings::default(),
+            false,
+            &["https"],
+        )
+        .unwrap();
 
         spec.body = Body::Xml { text: r#"<!DOCTYPE r [<!ENTITY a "b">]><r>&a;</r>"#.into() };
-        let err = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap_err();
+        let err = prepare_http(
+            &spec,
+            &r,
+            &attachments,
+            &EffectiveSettings::default(),
+            false,
+            &["https"],
+        )
+        .unwrap_err();
         assert_eq!(err.kind, FailureKind::LintBlocked);
         assert_eq!(err.phase, Phase::Prepare);
     }
