@@ -347,7 +347,7 @@ impl ImportReport {
         c.external_refs = self.external_refs.len();
         c.scripts = self.scripts.len();
         c.inactive_settings = self.inactive_settings.len();
-        c.redactions = self.redactions.len();
+        c.redactions = self.seen.redactions;
         c.required_variables = self.required_variables.len();
     }
 }
