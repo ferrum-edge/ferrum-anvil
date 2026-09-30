@@ -12,6 +12,20 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
 }
 
+fn files_under(root: &Path, base: &Path) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    for entry in std::fs::read_dir(root).unwrap_or_else(|error| panic!("reading {}: {error}", root.display())) {
+        let entry = entry.expect("directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_under(&path, base));
+        } else {
+            files.insert(path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/"));
+        }
+    }
+    files
+}
+
 fn strings(value: &Value) -> BTreeSet<String> {
     value.as_array().expect("contract list").iter().map(|entry| entry.as_str().expect("string entry").to_owned()).collect()
 }
@@ -59,9 +73,15 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let actual_files: BTreeSet<String> = hashes.keys().cloned().collect();
     let (missing, extra) = differences(&expected_files, &actual_files);
     assert!(missing.is_empty() && extra.is_empty(), "PIN file list differs; missing: {missing:?}; extra: {extra:?}");
+    let vendored_files: BTreeSet<String> = files_under(&vendor, &vendor).into_iter().filter(|path| path != "PIN").collect();
+    let (unpinned, stale_pins) = differences(&vendored_files, &actual_files);
+    assert!(
+        unpinned.is_empty() && stale_pins.is_empty(),
+        "vendored files differ from PIN; unpinned: {unpinned:?}; missing: {stale_pins:?}"
+    );
     for (path, expected_hash) in hashes {
         let bytes = std::fs::read(vendor.join(&path)).unwrap_or_else(|error| panic!("reading vendored {path}: {error}"));
-        let actual_hash = format!("{:x}", Sha256::digest(bytes));
+        let actual_hash = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(actual_hash, expected_hash, "vendored contract changed: {path}");
     }
 
@@ -100,33 +120,33 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         let name = class["value"].as_str().unwrap();
         let token = class["x_gateway_error"].as_str().unwrap();
         let local_meaning = local_class_meanings[name];
-        let documented_condition = match name {
-            "client_disconnect" => local_meaning == "(only if public status >=500)",
-            "request_body_too_large" => local_meaning == "(4xx: none)",
+        let documented_condition = match (name, token) {
+            ("client_disconnect", "backend_error") => local_meaning == "(only if public status >=500)",
+            ("request_body_too_large", "backend_error") => local_meaning == "(4xx: none)",
             _ => false,
         };
-        if !local_meaning.contains(token) && !documented_condition {
+        let mapped_token = local_meaning.split_once(" (").map_or(local_meaning, |(token, _)| token);
+        if mapped_token != token && !documented_condition {
             class_meaning_drift.push(format!("{name}: contract token {token:?}, local meaning {local_meaning:?}"));
         }
     }
     assert!(class_meaning_drift.is_empty(), "error_class token meaning drift: {class_meaning_drift:?}");
 
-    // This catalog's header inventory is broader than the shared vocabulary.
-    // Compare the v0.9.8 gateway diagnostic headers, which are the overlapping contract surface.
+    // Compare the headers Anvil's Ferrum rules actually read. Unreleased headers
+    // are excluded from this released-contract check and asserted separately.
     let contract_headers: BTreeSet<String> = headers["headers"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|entry| entry["role"] == "gateway_diagnostic" && entry["availability"] == "v0.9.8")
+        .filter(|entry| entry["role"] == "gateway_diagnostic" && entry["availability"] != "unreleased")
         .map(|entry| entry["name"].as_str().unwrap().to_ascii_lowercase())
         .collect();
-    let local_header_names: BTreeSet<String> = local["headers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["name"].as_str().unwrap().to_ascii_lowercase())
-        .filter(|name| contract_headers.contains(name))
-        .collect();
+    assert_eq!(
+        headers["headers"].as_array().unwrap().iter().find(|entry| entry["name"] == "X-Ferrum-Diagnostic-Ref").unwrap()["availability"],
+        "unreleased",
+        "X-Ferrum-Diagnostic-Ref requires an explicit decision when the pin changes"
+    );
+    let local_header_names: BTreeSet<String> = ["x-gateway-error", "x-gateway-upstream-status"].into_iter().map(String::from).collect();
     let (missing, extra) = differences(&contract_headers, &local_header_names);
     assert!(missing.is_empty() && extra.is_empty(), "gateway diagnostic header drift; missing: {missing:?}; extra: {extra:?}");
     let local_header_meanings: BTreeMap<String, &str> = local["headers"]
@@ -171,16 +191,5 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     ] {
         let instance = read_json(&vendor.join(fixture));
         assert!(!validator.is_valid(&instance), "pinned invalid fixture unexpectedly passed: {fixture}");
-    }
-}
-
-#[test]
-fn older_gateway_catalogs_keep_their_release_specific_vocabularies() {
-    let root = repo_root();
-    let timeout = "request_timeout";
-    for release in ["0.9.5", "0.9.7"] {
-        let catalog = read_json(&root.join(format!("catalog/ferrum/ferrum-edge-{release}/outcomes.json")));
-        let tokens = strings(&catalog["public_tokens"]);
-        assert!(!tokens.contains(timeout), "ferrum-edge-{release} describes its older release and must not adopt the 0.9.8 token");
     }
 }

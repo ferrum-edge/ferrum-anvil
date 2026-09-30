@@ -396,8 +396,12 @@ mod tests {
             assert_eq!(c.compatibility_id, id);
             assert_eq!(format!("ferrum-edge-{}", c.release_tag.trim_start_matches('v')), id, "release tag matches the id");
             assert_eq!(c.source_sha.len(), 40, "{id}: full source sha");
-            let expected_tokens = if id == "ferrum-edge-0.9.8" { &TOKENS[..] } else { &TOKENS[..7] };
-            for &t in expected_tokens {
+            let expected_tokens: Vec<&str> = TOKENS
+                .iter()
+                .copied()
+                .filter(|token| id == "ferrum-edge-0.9.8" || *token != "request_timeout")
+                .collect();
+            for t in expected_tokens {
                 assert!(c.is_known_token(t), "{id}: missing token {t}");
             }
             assert!(c.outcomes.len() > 50);
@@ -426,7 +430,8 @@ mod tests {
         }
         assert!(catalog_for(" ferrum-edge-0.9.5 ").is_some(), "surrounding whitespace is not a different release");
         let shared: Vec<&str> = shared_tokens().iter().map(String::as_str).collect();
-        assert_eq!(shared, TOKENS[..7], "only the seven tokens shared with 0.9.5 and 0.9.7 are release-independent");
+        let shared_tokens: Vec<&str> = TOKENS.iter().copied().filter(|token| *token != "request_timeout").collect();
+        assert_eq!(shared, shared_tokens, "only tokens shared with 0.9.5 and 0.9.7 are release-independent");
     }
 
     #[test]

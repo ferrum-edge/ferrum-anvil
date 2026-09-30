@@ -4,13 +4,8 @@
 
 ### Added
 
-- Diagnostics: vendor Ferrum contracts at `contracts-edge-0.9.8` and check
-  their SHA-256 pins, gateway vocabulary, gateway diagnostic headers,
-  DiagnosticFinding schema, and shared fixtures in the offline CI suite. The
-  0.9.8 catalog already included `request_timeout`, but its test list omitted
-  the eighth token. The test now checks that token for 0.9.8 while retaining
-  the seven-token vocabulary for the older catalogs.
-  The 0.9.5 and 0.9.7 catalogs remain release-specific. See
+- Diagnostics: vendor Ferrum contracts at `contracts-edge-0.9.8` and verify
+  their SHA-256 pins in the offline CI suite. See
   [ferrum-contracts.md](docs/ferrum-contracts.md) for the pin and update steps.
 - API standards: check OpenAPI descriptions against a team's own rules.
   A ruleset (YAML or JSON, `anvil_ruleset: 1`) targets version-neutral

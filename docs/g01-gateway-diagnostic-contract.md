@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Implemented in Ferrum Edge (ferrum-edge#5767, #5845). The public contract is implemented on Edge `main`; the reference header remains unreleased in v0.9.8. |
+| **Status** | Implemented on Ferrum Edge `main`; not in any release (v0.9.8 lacks it); not adopted by Anvil. |
 | **Owner** | Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer. |
 | **Tracking** | ferrum-edge/ferrum-edge#5767, ferrum-edge/ferrum-edge#5845 (implementation), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
 | **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8), their statuses and bodies stay unchanged. |
@@ -26,7 +26,29 @@ Anvil therefore caps gateway findings at *likely* and lists the alternatives
 Precise, confirmed attribution needs evidence that is **authored by the
 gateway, authenticated, and scoped**.
 
-## Design
+## Current Ferrum Edge contract
+
+Ferrum Edge `main` is normative for this contract. See Edge's
+[`docs/error_classification.md`](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/error_classification.md#gateway-diagnostic-references)
+and [`schemas/diagnostic-ref/v1`](https://github.com/ferrum-edge/ferrum-contracts/tree/main/schemas/diagnostic-ref/v1).
+This implementation is unreleased and Anvil has not adopted it. Compared with
+the original proposal below:
+
+- References use `fd1_<32 lowercase hex>` or `fd2_<8 lowercase hex>_<32 lowercase hex>`,
+  not base64url.
+- Lookup bodies use `schema_version: "ferrum.diagnostic_ref.v1"`, not
+  `"version": 1`.
+- Dispatch values are `not_dispatched`, `pre_wire_failure`,
+  `ambiguous_failure`, or `backend_response`.
+- Authentication requires an admin JWT with the `diagnostics:read` scope and
+  an `ns` claim. Missing scope or namespace returns 403; other lookup failures
+  return an indistinguishable 404.
+
+## Original proposal (historical)
+
+The following design and Anvil integration outline predate the implemented
+Edge contract above. They are retained as historical context and are not
+normative.
 
 ### 1. Public response: an opaque reference only
 
