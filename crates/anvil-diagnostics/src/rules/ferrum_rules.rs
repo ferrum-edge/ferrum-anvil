@@ -381,13 +381,8 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         && passthrough.is_empty()
         && let Some(e) = &ctx.body.jsonrpc_error
     {
-        let signal = JsonRpcSignal {
-            status: r.status,
-            token: token.as_deref(),
-            code: e.code,
-            message: &e.message,
-            gateway: e.gateway.as_deref(),
-        };
+        let signal =
+            JsonRpcSignal { status: r.status, token: token.as_deref(), code: e.code, message: &e.message, gateway: e.gateway.as_deref() };
         jsonrpc_outcomes(ctx, cat, &signal, body_ceiling, out);
         return;
     }

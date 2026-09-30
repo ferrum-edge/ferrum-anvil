@@ -31,7 +31,13 @@ impl App {
     /// Discover the tools of the MCP endpoint `request_id` addresses (a saved
     /// MCP request of workspace `ws`) and save a request per tool in the same
     /// folder.
-    pub async fn mcp_discover_tools(&self, ws: &Id, request_id: &Id, opts: SendOptions, cancel: CancellationToken) -> Result<McpDiscovered> {
+    pub async fn mcp_discover_tools(
+        &self,
+        ws: &Id,
+        request_id: &Id,
+        opts: SendOptions,
+        cancel: CancellationToken,
+    ) -> Result<McpDiscovered> {
         let template = self.request(request_id)?;
         if template.spec.protocol != Protocol::Mcp || template.spec.mcp.is_none() {
             return Err(AppError::Invalid(format!("'{}' is not an MCP request; tools are discovered with one", template.name)));

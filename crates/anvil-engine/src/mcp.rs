@@ -71,10 +71,8 @@ const MAX_NOTE_TEXT: usize = 80;
 const SESSION_PLACEHOLDER: &str = "<issued-by-initialize>";
 const NO_MCP_SETTINGS: &str = "an MCP request needs its MCP settings (the operation to send)";
 const BAD_VERSION: &str = "MCP initialize answered a protocolVersion that is not a version token; the session was not used";
-const BAD_SESSION_ID: &str =
-    "the server's Mcp-Session-Id is not a session id Anvil sends back (1 to 1024 visible ASCII characters, without '{{' or '}}'); the session was not used";
-const PREVIEW_NOTE: &str =
-    "MCP: sent after initialize and notifications/initialized, with the Mcp-Session-Id that initialize issues and the protocol version the server chose (until then the offered one)";
+const BAD_SESSION_ID: &str = "the server's Mcp-Session-Id is not a session id Anvil sends back (1 to 1024 visible ASCII characters, without '{{' or '}}'); the session was not used";
+const PREVIEW_NOTE: &str = "MCP: sent after initialize and notifications/initialized, with the Mcp-Session-Id that initialize issues and the protocol version the server chose (until then the offered one)";
 
 /// Which of the request's checks an exchange runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
