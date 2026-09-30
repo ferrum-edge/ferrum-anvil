@@ -1335,9 +1335,7 @@ mod tests {
         let original = source.export_backup_with("backup passphrase 1", KdfParams::testing()).unwrap().0;
         target.restore(&original, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
         let before = target.backup_contents().unwrap();
-        let preview_err = target
-            .restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace)
-            .unwrap_err();
+        let preview_err = target.restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();
         assert!(preview_err.to_string().contains("id namespace already used in another workspace"), "{preview_err}");
         let err = target.restore(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();
 

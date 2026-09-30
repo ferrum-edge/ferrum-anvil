@@ -543,12 +543,7 @@ fn valid_root(s: &StoreRead<'_>, rec: &SpecSourceRecord) -> anvil_storage::store
     Ok(if folder.workspace_id == rec.workspace_id && folder.import_root { RootStatus::Valid } else { RootStatus::Invalid })
 }
 
-fn foreign_workspace_owns(
-    owners: &HashMap<&str, HashMap<String, Option<String>>>,
-    object_kind: &str,
-    id: &Id,
-    workspace_id: &Id,
-) -> bool {
+fn foreign_workspace_owns(owners: &HashMap<&str, HashMap<String, Option<String>>>, object_kind: &str, id: &Id, workspace_id: &Id) -> bool {
     let expected = workspace_id.to_string();
     owners
         .get(object_kind)
