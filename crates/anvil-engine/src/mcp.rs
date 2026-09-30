@@ -36,12 +36,16 @@ use crate::{Engine, ExecutionOutput, http_exec};
 use anvil_domain::execution::{FailureKind, Phase, ResponseRecord, TransportFailure};
 use anvil_domain::outcome::{ApplicationState, OutcomeWarning, WarningCode};
 use anvil_domain::request::{Body, KeyValue, McpOperation, McpSpec, Protocol};
+use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
 use anvil_transport::recorder::EventCtx;
+use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use anvil_transport::sse::SseParser;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde_json::Value;
+use std::time::Duration;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// JSON-RPC id of the `initialize` request.
@@ -287,16 +291,25 @@ fn is_session_id(v: &str) -> bool {
         && !v.contains("}}")
 }
 
-/// A server-chosen text as a note quotes it: no control characters, cut.
-fn quoted(v: Option<&Value>) -> String {
-    let s = v.and_then(Value::as_str).unwrap_or("?");
-    s.chars().filter(|c| !c.is_control()).take(MAX_NOTE_TEXT).collect()
+/// A server-chosen text as a note quotes it: no control characters, and at
+/// most [`MAX_NOTE_TEXT`] characters, redacted before it is cut (a secret
+/// the server echoes across the cut is replaced whole).
+fn quoted(v: Option<&Value>, r: &Redactor) -> String {
+    let text = v.and_then(Value::as_str).unwrap_or("?");
+    let window: String = text.chars().filter(|c| !c.is_control()).take(MAX_NOTE_TEXT + REDACT_LOOKAHEAD_BYTES).collect();
+    let cut = window.char_indices().nth(MAX_NOTE_TEXT).map_or(window.len(), |(i, _)| i);
+    redact_then_cut(&|x: &str| r.text(x), &window, cut)
 }
 
-/// `code: message` of a JSON-RPC error object.
-fn error_label(e: &Value) -> String {
-    let code = e.get("code").map(|c| c.to_string()).unwrap_or_else(|| "?".into());
-    format!("{code} ({})", quoted(e.get("message")))
+/// A JSON-RPC error code as a note shows it: the integer, never the
+/// server's raw JSON.
+fn code_label(e: &Value) -> String {
+    e.get("code").and_then(Value::as_i64).map_or_else(|| "(not an integer)".to_string(), |c| c.to_string())
+}
+
+/// `code (message)` of a JSON-RPC error object.
+fn error_label(e: &Value, r: &Redactor) -> String {
+    format!("{} ({})", code_label(e), quoted(e.get("message"), r))
 }
 
 /// Why an exchange has no response, or its status.
@@ -317,44 +330,53 @@ struct Session {
     note: String,
 }
 
-/// The session `initialize` opened, or why there is none.
-fn handshake(seen: &Seen, out: &ExecutionOutput, spec: &McpSpec) -> Result<Session, String> {
-    let Some(status) = seen.status else { return Err(exchange_note("initialize", out)) };
+/// Why the handshake failed, and the session id it issued nonetheless (a
+/// valid one, which the session's close ends).
+struct Refused {
+    why: String,
+    issued: Option<String>,
+}
+
+/// The session `initialize` opened, or why there is none. Server texts are
+/// quoted redacted with `r`.
+fn handshake(seen: &Seen, out: &ExecutionOutput, spec: &McpSpec, r: &Redactor) -> Result<Session, Refused> {
+    let refused = |why: String, issued: Option<String>| Refused { why, issued };
+    let Some(status) = seen.status else { return Err(refused(exchange_note("initialize", out), None)) };
     if !(200..300).contains(&status) {
-        return Err(format!("MCP initialize was answered with HTTP {status}, not a session"));
+        return Err(refused(format!("MCP initialize was answered with HTTP {status}, not a session"), None));
     }
+    // A session id the server issued, if Anvil can send it back.
+    let issued = seen.session_id.as_deref().filter(|id| is_session_id(id)).map(str::to_string);
     let Some(message) = &seen.message else {
         let stream = seen.events.map(|n| format!(" in its event stream of {n} event(s)")).unwrap_or_default();
-        return Err(format!("MCP initialize (HTTP {status}) got no JSON-RPC response{stream}"));
+        return Err(refused(format!("MCP initialize (HTTP {status}) got no JSON-RPC response{stream}"), issued));
     };
     if let Some(e) = message.get("error") {
-        return Err(format!("MCP initialize was refused with JSON-RPC error {}", error_label(e)));
+        return Err(refused(format!("MCP initialize was refused with JSON-RPC error {}", error_label(e, r)), issued));
     }
     let result = message.get("result");
-    let version = match result.and_then(|r| r.get("protocolVersion")) {
+    let version = match result.and_then(|x| x.get("protocolVersion")) {
         None => None,
         Some(Value::String(v)) if is_token(v) => Some(v.clone()),
-        Some(_) => return Err(BAD_VERSION.into()),
+        Some(_) => return Err(refused(BAD_VERSION.into(), issued)),
     };
-    let id = match &seen.session_id {
-        None => None,
-        Some(id) if is_session_id(id) => Some(id.clone()),
-        Some(_) => return Err(BAD_SESSION_ID.into()),
-    };
+    if seen.session_id.is_some() && issued.is_none() {
+        return Err(refused(BAD_SESSION_ID.into(), None));
+    }
     let server = result
-        .and_then(|r| r.get("serverInfo"))
-        .map(|s| format!(", server {} {}", quoted(s.get("name")), quoted(s.get("version"))))
+        .and_then(|x| x.get("serverInfo"))
+        .map(|s| format!(", server {} {}", quoted(s.get("name"), r), quoted(s.get("version"), r)))
         .unwrap_or_default();
     let offered = spec.protocol_version.trim();
     let mut note = format!(
         "MCP initialize: HTTP {status}, protocol version {}{server}; {}",
         version.as_deref().unwrap_or("(not given)"),
-        if id.is_some() { "a session id was issued (sent redacted)" } else { "no session id (the server keeps no session)" }
+        if issued.is_some() { "a session id was issued (sent redacted)" } else { "no session id (the server keeps no session)" }
     );
     if let Some(v) = version.as_deref().filter(|v| *v != offered) {
         note.push_str(&format!("; the server chose {v} over the offered {offered}, and the session continued on it"));
     }
-    Ok(Session { id, version, note })
+    Ok(Session { id: issued, version, note })
 }
 
 /// How the operation's response arrived, when it was an event stream.
@@ -386,34 +408,154 @@ fn not_sent(ctx: &ExecutionContext, started_at: DateTime<Utc>, why: &str, field:
     record::local_failure(ctx, &resolver, started_at, TransportFailure::new(Phase::Prepare, kind, why).with_field(field))
 }
 
-/// The session's result: `out` (the operation's exchange, or the handshake's
-/// when it failed) as an MCP record, with the session's notes around its
-/// own. `expects_response`: the exchange's request is not a notification.
-fn finish(
-    ctx: &ExecutionContext,
-    mut out: ExecutionOutput,
+/// A session's exchanges run one after the other within one deadline: the
+/// request's effective total timeout, counted from the session's start.
+/// Each exchange gets only what is left of it (as its total timeout, and
+/// canceled when it is over), and what each exchange's redactor knows is
+/// kept to redact the session's notes.
+struct Run<'a> {
+    engine: &'a Engine,
+    cancel: &'a CancellationToken,
+    deadline: Option<Instant>,
+    total_ms: Option<u64>,
+    redactor: Redactor,
+    /// The deadline was reached during an exchange.
+    timed_out: bool,
+}
+
+impl Run<'_> {
+    fn expired(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    async fn exchange(&mut self, mut c: ExecutionContext, events: EventCtx, view: Option<BodyView<'_>>) -> ExecutionOutput {
+        if let Some(d) = self.deadline {
+            // Rounded up: the exchange's own deadline is never before the session's.
+            let left = d.saturating_duration_since(Instant::now()).as_millis() + 1;
+            let timeouts = TimeoutOverrides { total_ms: Some(Some(u64::try_from(left).unwrap_or(u64::MAX))), ..Default::default() };
+            c.settings_layers.push(("mcp session".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+        }
+        let child = self.cancel.child_token();
+        let keep = Mutex::new(None);
+        let exec = http_exec::execute_viewing(self.engine, &c, events, child.clone(), view, Some(&keep));
+        let out = match self.deadline {
+            None => exec.await,
+            Some(d) => {
+                tokio::pin!(exec);
+                let first = tokio::select! {
+                    out = &mut exec => Some(out),
+                    () = tokio::time::sleep_until(d + DEADLINE_GRACE) => None,
+                };
+                match first {
+                    Some(out) => out,
+                    None => {
+                        // Attempts after a redirect or a retry each got the
+                        // whole remainder: end the exchange now.
+                        child.cancel();
+                        exec.await
+                    }
+                }
+            }
+        };
+        if let Some(r) = keep.into_inner() {
+            self.redactor.absorb(&r);
+        }
+        if self.expired() {
+            self.timed_out = true;
+        }
+        out
+    }
+
+    fn deadline_note(&self, during: &str) -> String {
+        let total = self.total_ms.map(|ms| format!("{ms} ms, ")).unwrap_or_default();
+        format!("MCP session deadline ({total}the request's total timeout, over the whole session) reached during {during}")
+    }
+
+    /// End the session with `DELETE`, unless closing is off, the execution
+    /// was canceled or its time is up.
+    async fn close(
+        &mut self,
+        ctx: &ExecutionContext,
+        spec: &McpSpec,
+        sid: &str,
+        version: &str,
+        events: &EventCtx,
+        after: &mut Vec<String>,
+    ) {
+        if !spec.close_session {
+            after.push("MCP session left open (closing is off for this request)".into());
+        } else if self.cancel.is_cancelled() {
+            after.push("MCP session not closed: the execution was canceled".into());
+        } else if self.expired() {
+            after.push("MCP session not closed: the session deadline was reached".into());
+        } else {
+            let close = exchange(ctx, "DELETE", None, Some(sid), Some(version), Checks::None);
+            let closed = self.exchange(close, events.clone(), None).await;
+            after.push(close_note(&closed));
+        }
+    }
+}
+
+/// Grace after the session deadline before an exchange still running is
+/// canceled (its own total timeout, set to the remainder, normally ends it).
+const DEADLINE_GRACE: Duration = Duration::from_millis(500);
+
+/// What the session adds to its result's record.
+#[derive(Default)]
+struct Notes {
     before: Vec<String>,
     after: Vec<String>,
+    warnings: Vec<String>,
+    /// Why the operation was not sent, when it was not.
+    not_sent: Option<String>,
+}
+
+/// The session's result: `out` (the operation's exchange, or the one before
+/// it when the operation was not sent) as an MCP record, with the session's
+/// notes around its own, redacted with every exchange's redactor.
+/// `expects_response`: the exchange's request is not a notification.
+fn finish(
+    mut out: ExecutionOutput,
+    notes: Notes,
+    run: &Run<'_>,
     session: Option<&str>,
     seen: &Seen,
     expects_response: bool,
 ) -> ExecutionOutput {
+    let mut redactor = run.redactor.clone();
     // No note quotes the session id; this is a backstop.
-    let redactor = Redactor::new(session.map(|s| vec![s.to_string()]).unwrap_or_default(), ctx.redaction_names.clone());
+    if let Some(s) = session {
+        redactor.add_secret(s);
+    }
     let r = &mut out.record;
     r.prepared.protocol = Protocol::Mcp;
-    let mut inferred: Vec<String> = before.iter().map(|n| redactor.text(n)).collect();
+    let mut inferred: Vec<String> = notes.before.iter().map(|n| redactor.inferred(n)).collect();
     inferred.append(&mut r.prepared.inferred);
-    inferred.extend(after.iter().map(|n| redactor.text(n)));
+    inferred.extend(notes.after.iter().map(|n| redactor.inferred(n)));
     r.prepared.inferred = inferred;
+    for w in &notes.warnings {
+        r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(w) });
+    }
     let answered = r.response.as_ref().is_some_and(|x| (200..300).contains(&x.status));
-    if expects_response && answered && seen.message.is_none() && r.outcome.application == ApplicationState::Success {
+    let mut changed = !notes.warnings.is_empty();
+    if let Some(why) = &notes.not_sent {
+        // The exchange shown is not the operation: its outcome is not the call's.
+        if r.outcome.application == ApplicationState::Success {
+            r.outcome.application = ApplicationState::NotEvaluated;
+        }
+        let message = format!("The MCP operation was not sent ({why}), so its outcome was not evaluated");
+        r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+        changed = true;
+    } else if expects_response && answered && seen.message.is_none() && r.outcome.application == ApplicationState::Success {
         // A 2xx without the JSON-RPC response says nothing about the call.
         r.outcome.application = ApplicationState::NotEvaluated;
         r.outcome.warnings.push(OutcomeWarning {
             code: WarningCode::PartialVisibility,
             message: "The response holds no JSON-RPC response to the MCP request, so the MCP outcome was not evaluated".into(),
         });
+        changed = true;
+    }
+    if changed {
         r.outcome.summary = record::summary_line(r.outcome.transport, r.outcome.application, &r.outcome.protocol_status, &r.findings);
     }
     out
@@ -430,10 +572,19 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
         return not_sent(ctx, started_at, &format!("{why}; nothing was sent"), field, FailureKind::BodySerialization);
     }
     let method = spec.operation.method().trim().to_string();
+    let total_ms = crate::settings::resolve(&ctx.settings_layers).timeouts.total_ms;
+    let mut run = Run {
+        engine,
+        cancel: &cancel,
+        deadline: total_ms.map(|ms| Instant::now() + Duration::from_millis(ms)),
+        total_ms,
+        redactor: Redactor::new(vec![], ctx.redaction_names.clone()),
+        timed_out: false,
+    };
     // The handshake and the close are not the execution the caller follows:
     // their progress events are not forwarded.
     let quiet = EventCtx { execution_id: events.execution_id, sink: None };
-    let mut before = Vec::new();
+    let mut notes = Notes::default();
     let mut session: Option<String> = None;
     let mut version = spec.protocol_version.trim().to_string();
     if spec.initialize {
@@ -444,29 +595,55 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
         let out = {
             let view = viewer(&seen, Some(INITIALIZE_ID));
             let view: BodyView<'_> = &view;
-            http_exec::execute_viewing(engine, &init, quiet.clone(), cancel.clone(), Some(view)).await
+            run.exchange(init, quiet.clone(), Some(view)).await
         };
         let seen = seen.into_inner();
-        match handshake(&seen, &out, spec) {
+        match handshake(&seen, &out, spec, &run.redactor) {
             Ok(s) => {
-                before.push(s.note);
+                notes.before.push(s.note);
                 session = s.id;
                 if let Some(v) = s.version {
                     version = v;
                 }
             }
-            Err(why) => {
-                before.push(why);
-                before.push(format!("the {method} request was not sent"));
-                return finish(ctx, out, before, vec![], None, &seen, true);
+            Err(refused) => {
+                notes.not_sent = Some(refused.why.clone());
+                notes.before.push(refused.why);
+                notes.before.push(format!("the {method} request was not sent"));
+                if run.timed_out {
+                    notes.before.push(run.deadline_note("initialize"));
+                }
+                // A session the server opened is ended even so.
+                if let Some(sid) = refused.issued.as_deref() {
+                    run.close(ctx, spec, sid, &version, &quiet, &mut notes.after).await;
+                }
+                return finish(out, notes, &run, refused.issued.as_deref(), &seen, true);
             }
         }
         let notify = exchange(ctx, "POST", Some(INITIALIZED.into()), session.as_deref(), Some(&version), Checks::None);
-        let out = http_exec::execute_viewing(engine, &notify, quiet.clone(), cancel.clone(), None).await;
-        before.push(exchange_note("notifications/initialized", &out));
-        if cancel.is_cancelled() {
-            before.push(format!("the {method} request was not sent: the execution was canceled"));
-            return finish(ctx, out, before, vec![], session.as_deref(), &Seen::default(), false);
+        let out = run.exchange(notify, quiet.clone(), None).await;
+        notes.before.push(exchange_note("notifications/initialized", &out));
+        let stop = if cancel.is_cancelled() {
+            Some("the execution was canceled".to_string())
+        } else if run.expired() {
+            Some(run.deadline_note("initialize and notifications/initialized"))
+        } else {
+            None
+        };
+        if let Some(why) = stop {
+            notes.before.push(format!("the {method} request was not sent: {why}"));
+            notes.not_sent = Some(why);
+            if let Some(sid) = session.as_deref() {
+                run.close(ctx, spec, sid, &version, &quiet, &mut notes.after).await;
+            }
+            return finish(out, notes, &run, session.as_deref(), &Seen::default(), false);
+        }
+        // A server that does not accept the notification may still answer
+        // the operation: it is sent, and the refusal is reported.
+        let answered = out.record.response.as_ref().map(|r| r.status);
+        if !answered.is_some_and(|s| (200..300).contains(&s)) {
+            let got = answered.map_or_else(|| "no response".to_string(), |s| format!("HTTP {s}"));
+            notes.warnings.push(format!("notifications/initialized was not accepted ({got}); the {method} request was still sent"));
         }
     }
     let id = (!spec.operation.is_notification()).then_some(OPERATION_ID);
@@ -475,23 +652,21 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     let out = {
         let view = viewer(&seen, id);
         let view: BodyView<'_> = &view;
-        http_exec::execute_viewing(engine, &op, events, cancel.clone(), Some(view)).await
+        run.exchange(op, events, Some(view)).await
     };
     let seen = seen.into_inner();
-    let mut after = Vec::new();
-    stream_notes(&seen, &method, &mut after);
-    if let Some(sid) = session.as_deref() {
-        if !spec.close_session {
-            after.push("MCP session left open (closing is off for this request)".into());
-        } else if cancel.is_cancelled() {
-            after.push("MCP session not closed: the execution was canceled".into());
-        } else {
-            let close = exchange(ctx, "DELETE", None, Some(sid), Some(&version), Checks::None);
-            let closed = http_exec::execute_viewing(engine, &close, quiet, cancel.clone(), None).await;
-            after.push(close_note(&closed));
-        }
+    stream_notes(&seen, &method, &mut notes.after);
+    if session.is_some() && out.record.response.as_ref().is_some_and(|r| r.status == 404) {
+        let why = "the server no longer knows the session (it expired or was ended); a new initialize opens another";
+        notes.after.push(format!("MCP {method}: HTTP 404 in the session: {why}"));
     }
-    finish(ctx, out, before, after, session.as_deref(), &seen, id.is_some())
+    if run.timed_out {
+        notes.after.push(run.deadline_note(&method));
+    }
+    if let Some(sid) = session.as_deref() {
+        run.close(ctx, spec, sid, &version, &quiet, &mut notes.after).await;
+    }
+    finish(out, notes, &run, session.as_deref(), &seen, id.is_some())
 }
 
 /// The operation's POST as a send would make it once the session is open:
@@ -585,6 +760,17 @@ mod tests {
         // An event the stream ends inside is not dispatched.
         let cut = "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
         assert_eq!(read_event_stream(cut.as_bytes(), Some(OPERATION_ID)).0, None);
+    }
+
+    #[test]
+    fn server_text_in_notes_is_redacted_before_it_is_cut() {
+        let secret = "tok-SENSITIVE-note-cut";
+        let r = Redactor::new(vec![secret.into()], vec![]);
+        let text = Value::String(format!("{}{secret}", "n".repeat(MAX_NOTE_TEXT - 3)));
+        let q = quoted(Some(&text), &r);
+        assert!(!q.contains("tok") && q.ends_with(anvil_domain::secret::REDACTED), "{q}");
+        assert_eq!(code_label(&serde_json::json!({"code": "-32001 injected"})), "(not an integer)");
+        assert_eq!(code_label(&serde_json::json!({"code": -32001})), "-32001");
     }
 
     #[test]

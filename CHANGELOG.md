@@ -15,8 +15,10 @@
   profiles, limits, deadlines, cancellation, redaction). The session id is a
   credential: it is sent as a sensitive header and redacted in records,
   previews, history and exports. The record's notes say how the session
-  went; a failed handshake is the result, with the operation not sent. See
-  docs/protocols.md §3.14.
+  went (server text in them redacted like the record); a failed handshake is
+  the result, with the operation not sent and a session it opened still
+  ended. One deadline, the request's total timeout, covers the whole
+  session. See docs/protocols.md §3.14.
 - Assertions `json_rpc_error {code}`, `json_rpc_result`, `mcp_is_error`,
   `tool_present` / `tool_absent` (in a `tools/list` result) and
   `tool_input_schema` (the listed schema, or its SHA-256 over sorted-key

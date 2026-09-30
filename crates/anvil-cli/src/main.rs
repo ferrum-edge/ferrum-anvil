@@ -889,6 +889,15 @@ async fn mcp_discover(app: &App, a: &McpDiscoverArgs) -> Result<i32> {
     for why in &d.skipped {
         println!("skipped: {why}");
     }
+    if d.skipped_total > d.skipped.len() {
+        println!("skipped: {} more tool(s)", d.skipped_total - d.skipped.len());
+    }
+    for n in &d.notes {
+        println!("note: {n}");
+    }
+    if d.notes_total > d.notes.len() {
+        println!("note: {} more", d.notes_total - d.notes.len());
+    }
     if d.more {
         println!("the server lists more tools than its first page; only the first page was read");
     }

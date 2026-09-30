@@ -355,8 +355,13 @@ export interface LoadRefusal {
 /** What MCP "discover tools" saved: one request per listed tool, beside the MCP request that listed them. */
 export interface McpDiscovered {
   created: RequestDefinition[];
-  /** Tools not saved, and why. */
+  /** Tools not saved, and why (the first few). */
   skipped: string[];
+  /** Every tool not saved. */
+  skipped_total: number;
+  /** What was changed from a listed schema (the first few). */
+  notes: string[];
+  notes_total: number;
   /** The server lists more tools than its first page; only that page was read. */
   more: boolean;
   /** The execution that listed the tools (in history). */

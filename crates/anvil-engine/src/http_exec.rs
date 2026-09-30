@@ -696,11 +696,13 @@ impl AttemptTarget {
 }
 
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
-    execute_viewing(engine, ctx, events, cancel, None).await
+    execute_viewing(engine, ctx, events, cancel, None, None).await
 }
 
 /// [`execute`], with the checks reading what `view` picks from the response
-/// instead of its body (see [`record::BodyView`]).
+/// instead of its body (see [`record::BodyView`]). `keep` receives the
+/// redactor the record was redacted with, once a request was prepared (an
+/// MCP session redacts its notes with its exchanges' redactors).
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub(crate) async fn execute_viewing(
     engine: &Engine,
@@ -708,6 +710,7 @@ pub(crate) async fn execute_viewing(
     events: EventCtx,
     cancel: CancellationToken,
     view: Option<record::BodyView<'_>>,
+    keep: Option<&parking_lot::Mutex<Option<Redactor>>>,
 ) -> crate::ExecutionOutput {
     let started_at = Utc::now();
     // Taken first, or when the context was built (`ExecutionContext::epoch`):
@@ -1199,6 +1202,9 @@ pub(crate) async fn execute_viewing(
     let used_secrets = resolver.used_secrets.lock().clone();
     for s in &used_secrets {
         redactor.add_secret(s);
+    }
+    if let Some(k) = keep {
+        *k.lock() = Some(redactor.clone());
     }
     // An automatic HTTP/3 → TCP fallback is reported, never hidden.
     let fallback_from = attempts.iter().find_map(|a| match &a.reason {

@@ -598,7 +598,11 @@ saves one request per listed tool in the same folder
   argument text is written as a JSON escape (`{\u007b`), so a listed text is
   sent as listed and never resolved as a variable reference.
 * At most 500 tools are saved, from the first page only; a `nextCursor` is
-  reported. Skipped tools are listed with the reason.
+  reported. Skipped tools are listed with the reason (the first 20; all are
+  counted).
+* A tool's arguments text is at most 64 KiB: when its schema's examples and
+  defaults make it larger, blank required values are used instead (or `{}`),
+  with a note.
 
 ## Known limitations
 

@@ -43,7 +43,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 ),
         );
     }
-    if let Some(e) = &ctx.body.jsonrpc_error {
+    // Its wording says the transport succeeded: a 4xx or 5xx carrying a
+    // JSON-RPC error is explained by the status findings (and the catalog).
+    if let Some(e) = ctx.body.jsonrpc_error.as_ref().filter(|_| (200..300).contains(&r.status)) {
         // The code alone does not say whose the fault is (invalid params are
         // the caller's, an internal error the server's).
         let (scope, owner) = (SourceScope::Unknown, Owner::Unknown);

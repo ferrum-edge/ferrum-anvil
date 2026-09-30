@@ -8,11 +8,13 @@
 //! `{{` in generated arguments is written as a JSON escape, so it reaches
 //! the tool as the text it listed and is never resolved. Bounded: at most
 //! [`MAX_DISCOVERED_TOOLS`] tools, arguments sampled to
-//! [`MAX_SAMPLE_DEPTH`] levels.
+//! [`MAX_SAMPLE_DEPTH`] levels and [`MAX_ARGUMENTS_BYTES`] of text, and at
+//! most [`MAX_REPORTED`] skipped tools and notes listed (all counted).
 
 use anvil_domain::assertions::{Assertion, AssertionKind};
 use anvil_domain::request::{McpOperation, Protocol, RequestSpec};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 /// Most tools one discovery saves.
 pub const MAX_DISCOVERED_TOOLS: usize = 500;
@@ -20,6 +22,12 @@ pub const MAX_DISCOVERED_TOOLS: usize = 500;
 pub const MAX_SAMPLE_DEPTH: usize = 8;
 /// Longest request name taken from a tool's title or name.
 const MAX_NAME_CHARS: usize = 120;
+/// Largest arguments text one tool request is given from its schema's
+/// examples and defaults; over it, blank required values are used instead.
+pub const MAX_ARGUMENTS_BYTES: usize = 64 * 1024;
+/// Most skipped tools, and most notes, a discovery lists (the rest are
+/// counted).
+pub const MAX_REPORTED: usize = 20;
 
 /// Where a tool request's arguments came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +39,10 @@ pub enum ArgumentSource {
     Sampled,
     /// No property has an example or a default: only blank required values.
     Blank,
+    /// The schema's examples and defaults made the arguments larger than
+    /// [`MAX_ARGUMENTS_BYTES`]: blank required values instead (or `{}` when
+    /// even those are larger).
+    Capped,
 }
 
 /// One tool's request.
@@ -48,8 +60,15 @@ pub struct DiscoveredTool {
 #[derive(Debug, Clone, Default)]
 pub struct McpDiscovery {
     pub tools: Vec<DiscoveredTool>,
-    /// Tools not saved, and why (no usable name, or over the bound).
+    /// Tools not saved, and why (no usable name, or over the bound): the
+    /// first [`MAX_REPORTED`].
     pub skipped: Vec<String>,
+    /// Every tool not saved.
+    pub skipped_total: usize,
+    /// What was changed from the listed schema (the first [`MAX_REPORTED`]).
+    pub notes: Vec<String>,
+    /// Every note.
+    pub notes_total: usize,
     /// The result has a `nextCursor`: the server lists more tools than this
     /// page holds.
     pub more: bool,
@@ -69,22 +88,33 @@ pub fn mcp_tool_requests(template: &RequestSpec, result: &Value) -> Result<McpDi
     let mut d = McpDiscovery { more: result.get("nextCursor").is_some_and(|c| !c.is_null()), ..Default::default() };
     for (i, t) in tools.iter().enumerate() {
         let Some(tool) = t.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) else {
-            d.skipped.push(format!("tool {i}: it has no name"));
+            d.skip(format!("tool {i}: it has no name"));
             continue;
         };
         if tool.contains("{{") || tool.contains("}}") || tool.chars().any(char::is_control) {
-            d.skipped.push(format!("tool {i}: its name holds '{{{{', '}}}}' or a control character, which Anvil would not send as listed"));
+            d.skip(format!("tool {i}: its name holds '{{{{', '}}}}' or a control character, which Anvil would not send as listed"));
             continue;
         }
         if d.tools.len() >= MAX_DISCOVERED_TOOLS {
-            d.skipped.push(format!("{}: more than {MAX_DISCOVERED_TOOLS} tools", display_name(tool)));
+            d.skip(format!("{}: more than {MAX_DISCOVERED_TOOLS} tools", display_name(tool)));
             continue;
         }
-        let schema = t.get("inputSchema").cloned().unwrap_or(Value::Null);
-        let (arguments, source) = sample_arguments(&schema);
+        let schema = t.get("inputSchema").unwrap_or(&Value::Null);
+        let (arguments, mut source) = sample_arguments(schema);
+        let mut text = arguments_text(&arguments);
+        if text.len() > MAX_ARGUMENTS_BYTES {
+            let mut explicit = false;
+            text = arguments_text(&sample_object(schema, 0, &mut explicit, false));
+            if text.len() > MAX_ARGUMENTS_BYTES {
+                text = "{}".into();
+            }
+            source = ArgumentSource::Capped;
+            let why = format!("the schema's examples and defaults are over {MAX_ARGUMENTS_BYTES} bytes; blank values instead");
+            d.note(format!("{}: {why}", display_name(tool)));
+        }
         let mut spec = template.clone();
         if let Some(m) = spec.mcp.as_mut() {
-            m.operation = McpOperation::ToolsCall { name: tool.to_string(), arguments: arguments_text(&arguments) };
+            m.operation = McpOperation::ToolsCall { name: tool.to_string(), arguments: text };
         }
         spec.assertions = vec![check(AssertionKind::JsonRpcResult), check(AssertionKind::McpIsError { is_error: false })];
         spec.extractions = vec![];
@@ -93,6 +123,22 @@ pub fn mcp_tool_requests(template: &RequestSpec, result: &Value) -> Result<McpDi
         d.tools.push(DiscoveredTool { tool: tool.to_string(), name: display_name(title), spec, arguments: source });
     }
     Ok(d)
+}
+
+impl McpDiscovery {
+    fn skip(&mut self, why: String) {
+        self.skipped_total += 1;
+        if self.skipped.len() < MAX_REPORTED {
+            self.skipped.push(why);
+        }
+    }
+
+    fn note(&mut self, what: String) {
+        self.notes_total += 1;
+        if self.notes.len() < MAX_REPORTED {
+            self.notes.push(what);
+        }
+    }
 }
 
 fn check(kind: AssertionKind) -> Assertion {
@@ -120,7 +166,7 @@ pub fn sample_arguments(schema: &Value) -> (Value, ArgumentSource) {
         return (ex.clone(), ArgumentSource::Example);
     }
     let mut explicit = false;
-    let v = sample_object(schema, 0, &mut explicit);
+    let v = sample_object(schema, 0, &mut explicit, true);
     (v, if explicit { ArgumentSource::Sampled } else { ArgumentSource::Blank })
 }
 
@@ -135,22 +181,23 @@ fn named_value(schema: &Value) -> Option<Value> {
         .or_else(|| first("enum"))
 }
 
-/// The object's properties that are required or name a value, in schema
-/// order. `explicit` is set when any value came from the schema.
-fn sample_object(schema: &Value, depth: usize, explicit: &mut bool) -> Value {
+/// The object's properties that are required or (with `named`) name a
+/// value, in schema order. `explicit` is set when any value came from the
+/// schema. Without `named`, only blank values of the required properties.
+fn sample_object(schema: &Value, depth: usize, explicit: &mut bool, named: bool) -> Value {
     let mut out = Map::new();
     let Some(props) = schema.get("properties").and_then(Value::as_object) else { return Value::Object(out) };
     if depth >= MAX_SAMPLE_DEPTH {
         return Value::Object(out);
     }
     let required = schema.get("required").and_then(Value::as_array);
-    let required: Vec<&str> = required.map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let required: HashSet<&str> = required.map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     for (name, prop) in props {
-        if let Some(v) = named_value(prop) {
+        if let Some(v) = named.then(|| named_value(prop)).flatten() {
             *explicit = true;
             out.insert(name.clone(), v);
-        } else if required.contains(&name.as_str()) {
-            out.insert(name.clone(), blank(prop, depth + 1, explicit));
+        } else if required.contains(name.as_str()) {
+            out.insert(name.clone(), blank(prop, depth + 1, explicit, named));
         }
     }
     Value::Object(out)
@@ -158,7 +205,7 @@ fn sample_object(schema: &Value, depth: usize, explicit: &mut bool) -> Value {
 
 /// A blank value of the schema's type (an object's required members filled
 /// in the same way).
-fn blank(schema: &Value, depth: usize, explicit: &mut bool) -> Value {
+fn blank(schema: &Value, depth: usize, explicit: &mut bool, named: bool) -> Value {
     let kind = match schema.get("type") {
         Some(Value::String(t)) => t.as_str(),
         // A union: its first type that is not null.
@@ -167,7 +214,7 @@ fn blank(schema: &Value, depth: usize, explicit: &mut bool) -> Value {
         _ => "",
     };
     match kind {
-        "object" => sample_object(schema, depth, explicit),
+        "object" => sample_object(schema, depth, explicit, named),
         "array" => Value::Array(vec![]),
         "string" => Value::String(String::new()),
         "integer" | "number" => Value::from(0),
@@ -236,6 +283,20 @@ mod tests {
         let McpOperation::ToolsCall { arguments: text, .. } = &d.tools[0].spec.mcp.as_ref().unwrap().operation else { panic!() };
         assert!(!text.contains("{{"), "{text}");
         assert_eq!(arguments(&d.tools[0]), json!({"text": "{{api_token}} and {{{x}}}"}), "the tool gets the text it listed");
+    }
+
+    #[test]
+    fn large_examples_and_many_skipped_tools_are_bounded() {
+        let huge = "x".repeat(MAX_ARGUMENTS_BYTES);
+        let mut tools = vec![json!({"name": "big", "inputSchema": {"type": "object", "required": ["q"], "properties": {
+            "q": {"type": "string", "default": huge}, "n": {"type": "integer", "default": 3}}}})];
+        tools.extend((0..MAX_REPORTED + 5).map(|_| json!({"inputSchema": {}})));
+        let d = mcp_tool_requests(&template(), &json!({ "tools": tools })).unwrap();
+        assert_eq!((d.skipped.len(), d.skipped_total), (MAX_REPORTED, MAX_REPORTED + 5));
+        assert_eq!(d.tools.len(), 1);
+        assert_eq!((arguments(&d.tools[0]), d.tools[0].arguments), (json!({"q": ""}), ArgumentSource::Capped));
+        assert_eq!((d.notes.len(), d.notes_total), (1, 1));
+        assert!(d.notes[0].starts_with("big: "), "{:?}", d.notes);
     }
 
     #[test]

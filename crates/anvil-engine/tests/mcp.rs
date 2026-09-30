@@ -8,13 +8,14 @@ use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction,
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::execution::FailureKind;
 use anvil_domain::outcome::{ApplicationState, AssertionState};
-use anvil_domain::request::{McpOperation, McpSpec, Protocol, RequestSpec};
+use anvil_domain::request::{KeyValue, McpOperation, McpSpec, Protocol, RequestSpec};
 use anvil_domain::secret::{REDACTED, SensitiveValue};
 use anvil_engine::mcp::{STREAMABLE_HTTP_ACCEPT, operation_response};
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::GroundTruth;
-use anvil_fixtures::mcp::{self, McpFixture, McpOptions};
+use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
+use anvil_fixtures::mcp::{self, Hostile, McpFixture, McpOptions};
 use anvil_transport::recorder::EventCtx;
 use tokio_util::sync::CancellationToken;
 
@@ -265,4 +266,116 @@ async fn an_mcp_request_without_its_settings_is_not_sent() {
     let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref()).map(|f| f.kind);
     assert_eq!(failure, Some(FailureKind::BodySerialization));
     assert!(f.state.calls().is_empty(), "nothing was sent");
+}
+
+// ---- a hostile server ------------------------------------------------------
+
+fn hostile(mode: Hostile) -> McpOptions {
+    McpOptions { hostile: mode, ..Default::default() }
+}
+
+/// Every header value the fixture received.
+fn received_values(f: &McpFixture) -> Vec<String> {
+    f.log
+        .entries()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            GroundTruth::RequestReceived { headers, .. } => Some(headers),
+            _ => None,
+        })
+        .flatten()
+        .map(|(_, v)| v)
+        .collect()
+}
+
+/// A session id holding a variable reference is never sent back: resolving it
+/// would send the variable's value (here a secret) to the server.
+#[tokio::test]
+async fn a_session_id_holding_a_variable_reference_is_never_sent_back() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::SessionId("{{api_token}}"))).await.unwrap();
+    let e = Engine::new();
+    let secret = "tok-SENSITIVE-mcp-variable";
+    let mut c = mcp_ctx(&f.url(), list());
+    let token = VarEntry { name: "api_token".into(), value: secret.into(), secret: true };
+    c.var_layers.push(VarLayer { label: "test".into(), vars: vec![token] });
+    let o = run(&e, &c).await;
+    assert!(notes(&o).contains("is not a session id Anvil sends back"), "{}", notes(&o));
+    assert!(notes(&o).contains("the tools/list request was not sent"), "{}", notes(&o));
+    assert_eq!(f.state.methods(), ["initialize"], "nothing else was sent");
+    assert!(!received_values(&f).iter().any(|v| v.contains(secret) || v.contains("{{")), "{:?}", received_values(&f));
+}
+
+/// A protocol version that is not a plain token is not used, and the session
+/// the server opened is ended all the same.
+#[tokio::test]
+async fn a_bad_protocol_version_ends_the_handshake_and_the_session_is_closed() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::ProtocolVersion("2025-11-25\r\nX-Injected: 1"))).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), list())).await;
+    let n = notes(&o);
+    assert!(n.contains("not a version token"), "{n}");
+    assert!(n.contains("MCP session closed: DELETE answered HTTP 200"), "{n}");
+    assert_eq!(f.state.methods(), ["initialize"]);
+    assert_eq!(f.state.closed.lock().len(), 1);
+    let sent_back = f.state.calls().iter().any(|c| c.protocol_version.as_deref().is_some_and(|v| v.contains("Injected")));
+    assert!(!sent_back, "the bad version was never sent");
+}
+
+/// A secret the server echoes in its initialize error is redacted in the
+/// session's notes (and so in history and exports, which keep the record).
+#[tokio::test]
+async fn a_secret_echoed_in_the_initialize_error_is_redacted_in_the_notes() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::InitializeErrorEchoing("x-api-key"))).await.unwrap();
+    let e = Engine::new();
+    let secret = "tok-SENSITIVE-echoed-key";
+    let mut c = mcp_ctx(&f.url(), list());
+    c.spec.headers.push(KeyValue { sensitive: true, ..KeyValue::new("X-Api-Key", secret) });
+    let o = run(&e, &c).await;
+    let n = notes(&o);
+    assert!(n.contains(&format!("rejected credential {REDACTED}")), "{n}");
+    assert!(!serde_json::to_string(&o.record).unwrap().contains(secret), "the secret is in the record");
+    assert!(n.contains("MCP session closed"), "the session initialize opened is ended: {n}");
+    assert_eq!(f.state.closed.lock().len(), 1);
+}
+
+/// One deadline covers the whole session: an operation answered with an
+/// event stream that never ends stops at the request's total timeout, and
+/// the close is skipped once the time is up.
+#[tokio::test]
+async fn an_endless_event_stream_is_bounded_by_the_session_deadline() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::EndlessStream)).await.unwrap();
+    let e = Engine::new();
+    let mut c = mcp_ctx(&f.url(), list());
+    let timeouts = TimeoutOverrides { total_ms: Some(Some(1500)), ..Default::default() };
+    c.settings_layers.push(("run".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+    let started = std::time::Instant::now();
+    let o = run(&e, &c).await;
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(6), "took {took:?}");
+    let n = notes(&o);
+    assert!(n.contains("MCP session deadline (1500 ms"), "{n}");
+    assert!(n.contains("MCP session not closed: the session deadline was reached"), "{n}");
+    assert_ne!(o.record.outcome.application, ApplicationState::Success, "{}", o.record.outcome.summary);
+    assert!(f.state.calls().iter().all(|c| c.http_method == "POST"), "no DELETE after the deadline");
+}
+
+/// A redirect of the operation to another origin does not carry the session
+/// id there (it is a credential).
+#[tokio::test]
+async fn a_cross_origin_redirect_drops_the_session_id() {
+    init();
+    let other = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let to: &'static str = Box::leak(other.url("/echo").into_boxed_str());
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::RedirectOperation(to))).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), list())).await;
+    let headers = other.log.last_request_headers().expect("the redirect was followed");
+    assert!(!headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id")), "{headers:?}");
+    assert!(headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-protocol-version")), "{headers:?}");
+    assert!(notes(&o).contains("credential headers withheld on the redirect"), "{}", notes(&o));
+    assert_eq!(f.state.closed.lock().len(), 1, "the session is still ended at its own origin");
 }

@@ -2,6 +2,7 @@
 //! separate outcome dimension from transport and application status.
 
 use crate::redact::Redactor;
+use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use anvil_domain::assertions::*;
 use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::{ResponseRecord, StreamTranscript};
@@ -295,29 +296,33 @@ fn jsonrpc_response(body: &[u8]) -> Result<serde_json::Value, String> {
 /// assertion's actual value.
 const MAX_ERROR_MESSAGE_CHARS: usize = 200;
 
-/// `error <code>: <message>` or `result`, as an assertion's actual value.
-fn jsonrpc_outcome(v: &serde_json::Value) -> String {
-    match v.get("error") {
-        Some(e) => {
-            let code = e.get("code").map(|c| c.to_string()).unwrap_or_else(|| "without a code".into());
-            let message: String = e.get("message").and_then(|m| m.as_str()).unwrap_or("").chars().take(MAX_ERROR_MESSAGE_CHARS).collect();
-            if message.is_empty() { format!("error {code}") } else { format!("error {code}: {message}") }
-        }
-        None => "result".into(),
+/// `error <code>: <message>` or `result`, as an assertion's actual value:
+/// the code as an integer (never the server's raw JSON), the message
+/// redacted before it is cut to [`MAX_ERROR_MESSAGE_CHARS`], so a secret it
+/// echoes across the cut is replaced whole.
+fn jsonrpc_outcome(v: &serde_json::Value, redactor: &Redactor) -> String {
+    let Some(e) = v.get("error") else { return "result".into() };
+    let code = e.get("code").and_then(|c| c.as_i64()).map_or_else(|| "without an integer code".to_string(), |c| c.to_string());
+    let message = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    if message.is_empty() {
+        return format!("error {code}");
     }
+    let window: String = message.chars().take(MAX_ERROR_MESSAGE_CHARS + REDACT_LOOKAHEAD_BYTES).collect();
+    let cut = window.char_indices().nth(MAX_ERROR_MESSAGE_CHARS).map_or(window.len(), |(i, _)| i);
+    format!("error {code}: {}", redact_then_cut(&|x: &str| redactor.text(x), &window, cut))
 }
 
 /// The `result` of a JSON-RPC response, or why it has none.
-fn jsonrpc_result(v: &serde_json::Value) -> Result<&serde_json::Value, String> {
+fn jsonrpc_result<'a>(v: &'a serde_json::Value, redactor: &Redactor) -> Result<&'a serde_json::Value, String> {
     match v.get("result") {
         Some(r) if v.get("error").is_none() => Ok(r),
-        _ => Err(format!("the response is a JSON-RPC {}, not a result", jsonrpc_outcome(v))),
+        _ => Err(format!("the response is a JSON-RPC {}, not a result", jsonrpc_outcome(v, redactor))),
     }
 }
 
 /// The tools of a `tools/list` result.
-fn listed_tools(v: &serde_json::Value) -> Result<&Vec<serde_json::Value>, String> {
-    let result = jsonrpc_result(v)?;
+fn listed_tools<'a>(v: &'a serde_json::Value, redactor: &Redactor) -> Result<&'a Vec<serde_json::Value>, String> {
+    let result = jsonrpc_result(v, redactor)?;
     result.get("tools").and_then(|t| t.as_array()).ok_or_else(|| "the result has no tools list (it is not a tools/list result)".into())
 }
 
@@ -366,12 +371,18 @@ fn canonical_json(v: &serde_json::Value, out: &mut String) {
 
 /// Whether the listed tool's `inputSchema` is `schema` (JSON, compared as
 /// values) and/or has the digest `sha256`; the actual value is the digest.
-fn tool_input_schema(body: &[u8], name: &str, schema: Option<&str>, sha256: Option<&str>) -> Result<(bool, Option<String>), String> {
+fn tool_input_schema(
+    body: &[u8],
+    name: &str,
+    schema: Option<&str>,
+    sha256: Option<&str>,
+    redactor: &Redactor,
+) -> Result<(bool, Option<String>), String> {
     if schema.is_none() && sha256.is_none() {
         return Err("give the expected inputSchema or its sha256".into());
     }
     let v = jsonrpc_response(body)?;
-    let tools = listed_tools(&v)?;
+    let tools = listed_tools(&v, redactor)?;
     let Some(tool) = listed_tool(tools, name) else { return Ok((false, Some("the tool is not listed".into()))) };
     let Some(actual) = tool.get("inputSchema") else { return Ok((false, Some("the tool has no inputSchema".into()))) };
     let digest = schema_sha256(actual);
@@ -464,27 +475,27 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                 AssertionKind::JsonRpcError { code } => {
                     let v = jsonrpc_response(o.body)?;
                     let actual = v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_i64());
-                    (actual == Some(*code), Some(redactor.text(&jsonrpc_outcome(&v))))
+                    (actual == Some(*code), Some(jsonrpc_outcome(&v, redactor)))
                 }
                 AssertionKind::JsonRpcResult => {
                     let v = jsonrpc_response(o.body)?;
-                    (v.get("result").is_some() && v.get("error").is_none(), Some(redactor.text(&jsonrpc_outcome(&v))))
+                    (v.get("result").is_some() && v.get("error").is_none(), Some(jsonrpc_outcome(&v, redactor)))
                 }
                 AssertionKind::McpIsError { is_error } => {
                     let v = jsonrpc_response(o.body)?;
-                    let flag = jsonrpc_result(&v)?.get("isError").and_then(|f| f.as_bool()).unwrap_or(false);
+                    let flag = jsonrpc_result(&v, redactor)?.get("isError").and_then(|f| f.as_bool()).unwrap_or(false);
                     (flag == *is_error, Some(format!("isError {flag}")))
                 }
                 AssertionKind::ToolPresent { name } | AssertionKind::ToolAbsent { name } => {
                     let v = jsonrpc_response(o.body)?;
-                    let tools = listed_tools(&v)?;
+                    let tools = listed_tools(&v, redactor)?;
                     let listed = listed_tool(tools, name).is_some();
                     let wanted = matches!(a.kind, AssertionKind::ToolPresent { .. });
                     let actual = format!("{} (of {} listed tools)", if listed { "listed" } else { "not listed" }, tools.len());
                     (listed == wanted, Some(actual))
                 }
                 AssertionKind::ToolInputSchema { name, schema, sha256 } => {
-                    tool_input_schema(o.body, name, schema.as_deref(), sha256.as_deref())?
+                    tool_input_schema(o.body, name, schema.as_deref(), sha256.as_deref(), redactor)?
                 }
             })
         })();
@@ -641,6 +652,21 @@ mod tests {
         assert!(neither.message.contains("give the expected inputSchema"), "{neither:?}");
         let not_a_list = check(AssertionKind::ToolPresent { name: "x".into() }, r#"{"jsonrpc":"2.0","id":2,"result":{}}"#);
         assert!(not_a_list.message.contains("not a tools/list result"), "{not_a_list:?}");
+    }
+
+    /// The message is redacted before it is cut: a secret that crosses the
+    /// cut leaves no prefix in the actual value.
+    #[test]
+    fn a_secret_crossing_the_message_cut_leaves_no_prefix() {
+        let secret = "tok-SENSITIVE-crossing-cut";
+        let message = format!("{}{secret}", "m".repeat(MAX_ERROR_MESSAGE_CHARS - 4));
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": 2, "error": {"code": 7.5, "message": message}}).to_string();
+        let a = Assertion { enabled: true, label: String::new(), kind: AssertionKind::JsonRpcError { code: 7 } };
+        let r = evaluate(&[a], &observed(&body), &Redactor::new(vec![secret.into()], vec![])).remove(0);
+        let actual = r.actual.unwrap_or_default();
+        assert!(!actual.contains(&secret[..4]) && actual.ends_with(anvil_domain::secret::REDACTED), "{actual}");
+        assert!(actual.starts_with("error without an integer code: "), "a non-integer code is not quoted: {actual}");
+        assert!(!r.passed);
     }
 
     #[test]

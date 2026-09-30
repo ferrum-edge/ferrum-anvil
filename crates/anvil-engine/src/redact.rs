@@ -166,6 +166,25 @@ impl Redactor {
         self.patterns = patterns;
     }
 
+    /// Take in another redactor's secret values and names (the exchanges of
+    /// an MCP session each have their own).
+    pub(crate) fn absorb(&mut self, other: &Redactor) {
+        let before = self.secrets.len();
+        for s in &other.secrets {
+            if !self.secrets.contains(s) {
+                self.secrets.push(s.clone());
+            }
+        }
+        if self.secrets.len() != before {
+            self.reindex();
+        }
+        for n in &other.extra_names {
+            if !self.extra_names.iter().any(|x| x.eq_ignore_ascii_case(n)) {
+                self.extra_names.push(n.clone());
+            }
+        }
+    }
+
     pub fn add_secret(&mut self, s: &str) {
         if s.len() >= MIN_SECRET_LEN && !self.secrets.iter().any(|x| x == s) {
             self.secrets.push(s.to_string());

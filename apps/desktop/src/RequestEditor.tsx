@@ -589,6 +589,32 @@ function linkedSchemaFiles(schema: GrpcSpec["schema"]): string[] {
 
 // -------------------------------------------------------------- protocols
 
+/** Skipped tools and notes a discovery result lists before "and N more". */
+const MAX_LISTED = 5;
+
+/** An integer field that accepts a leading "-" (and an empty value) while typing. */
+function SignedIntField(props: { label: string; value: number; onChange: (n: number) => void }) {
+  const [text, setText] = useState(String(props.value));
+  useEffect(() => {
+    if (text !== "" && text !== "-" && Number(text) !== props.value) setText(String(props.value));
+  }, [props.value, text]);
+  return (
+    <input
+      className="field mono num"
+      aria-label={props.label}
+      inputMode="numeric"
+      value={text}
+      onChange={(e) => {
+        const t = e.target.value.trim();
+        if (!/^-?\d*$/.test(t)) return;
+        setText(t);
+        const n = Number(t);
+        if (t !== "" && t !== "-" && Number.isSafeInteger(n)) props.onChange(n);
+      }}
+    />
+  );
+}
+
 const MCP_OPERATIONS: { id: McpOperation["kind"]; label: string }[] = [
   { id: "tools_list", label: "tools/list" },
   { id: "tools_call", label: "tools/call" },
@@ -629,23 +655,30 @@ function McpEditor(props: {
   const op = m.operation;
   const setM = (patch: Partial<McpSpec>) => set({ mcp: { ...m, ...patch } });
   const setOp = (operation: McpOperation) => setM({ operation });
-  const [discovering, setDiscovering] = useState(false);
+  // The execution id of a discovery in flight (to cancel it), else null.
+  const [discovering, setDiscovering] = useState<string | null>(null);
   const [discovered, setDiscovered] = useState<string | null>(null);
   const discover = async () => {
     if (!props.requestId) return;
-    setDiscovering(true);
+    const execId = uid();
+    setDiscovering(execId);
     setDiscovered(null);
     try {
-      const d = await api.mcpDiscoverTools({ workspace_id: props.workspaceId, request_id: props.requestId, environment_id: props.environmentId }, uid());
+      const d = await api.mcpDiscoverTools({ workspace_id: props.workspaceId, request_id: props.requestId, environment_id: props.environmentId }, execId);
       const parts = [`Saved ${d.created.length} tool request${d.created.length === 1 ? "" : "s"} beside this one.`];
-      if (d.skipped.length > 0) parts.push(`Skipped: ${d.skipped.join("; ")}.`);
+      const listed = (items: string[], total: number) => {
+        const shown = items.slice(0, MAX_LISTED).map((x) => (x.length > 200 ? `${x.slice(0, 200)}…` : x));
+        return total > shown.length ? `${shown.join("; ")}; and ${total - shown.length} more` : shown.join("; ");
+      };
+      if (d.skipped_total > 0) parts.push(`Skipped: ${listed(d.skipped, d.skipped_total)}.`);
+      if (d.notes_total > 0) parts.push(`Note: ${listed(d.notes, d.notes_total)}.`);
       if (d.more) parts.push("The server lists more tools than its first page; only that page was read.");
       setDiscovered(parts.join(" "));
       props.onTreeChanged?.();
     } catch (e) {
       setDiscovered(`Discovery failed: ${String(e)}`);
     } finally {
-      setDiscovering(false);
+      setDiscovering(null);
     }
   };
   return (
@@ -735,10 +768,17 @@ function McpEditor(props: {
         credential and shown redacted. Headers, auth and settings apply to every exchange of the session.
       </p>
       <div className="row">
-        <button type="button" className="btn" disabled={discovering || !props.requestId || props.dirty} onClick={() => void discover()}>
-          <Icon name="search" size={14} />
-          {discovering ? "Discovering…" : "Discover tools"}
-        </button>
+        {discovering ? (
+          <button type="button" className="btn" onClick={() => void api.cancel(discovering)}>
+            <Icon name="stop" size={13} />
+            Cancel discovery
+          </button>
+        ) : (
+          <button type="button" className="btn" disabled={!props.requestId || props.dirty} onClick={() => void discover()}>
+            <Icon name="search" size={14} />
+            Discover tools
+          </button>
+        )}
         <span className="hint">
           {props.dirty || !props.requestId
             ? "Save the request first: discovery lists the tools with the saved request."
@@ -1295,7 +1335,7 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
         </select>
       );
     case "json_rpc_error":
-      return <input className="field mono num" aria-label="JSON-RPC error code" value={a.code} onChange={(e) => onChange({ ...a, code: Number(e.target.value) || 0 })} />;
+      return <SignedIntField label="JSON-RPC error code" value={a.code} onChange={(code) => onChange({ ...a, code })} />;
     case "json_rpc_result":
       return null;
     case "mcp_is_error":

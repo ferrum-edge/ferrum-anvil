@@ -23,14 +23,20 @@
 //! hides or has not configured them). An unknown tool is JSON-RPC error
 //! -32602. Resources: `fixture://readme`; prompts: `greet` (`who`).
 //!
+//! [`McpOptions::hostile`] makes the server misbehave in one way (a session
+//! id or protocol version Anvil must not send back, an initialize error that
+//! echoes a request header, an operation answered with an endless event
+//! stream or a redirect), for the engine's safety tests.
+//!
 //! What each request asked for is kept in [`McpState`] as ground truth; it
 //! is never given to the diagnostic engine.
 
 use crate::log::{GroundTruth, GroundTruthLog};
 use bytes::Bytes;
-use http::{Method, Request, Response};
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Incoming;
+use http::{HeaderValue, Method, Request, Response};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, Limited, StreamBody};
+use hyper::body::{Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
@@ -40,6 +46,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -51,18 +58,40 @@ pub const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-2
 /// Largest request body read.
 const MAX_BODY: usize = 1024 * 1024;
 
+type FxBody = BoxBody<Bytes, Infallible>;
+
 #[derive(Debug, Clone, Copy)]
 pub struct McpOptions {
     /// Answer requests with an event stream instead of JSON.
     pub sse: bool,
     /// Let clients end their session with `DELETE`.
     pub allow_delete: bool,
+    pub hostile: Hostile,
 }
 
 impl Default for McpOptions {
     fn default() -> Self {
-        McpOptions { sse: false, allow_delete: true }
+        McpOptions { sse: false, allow_delete: true, hostile: Hostile::None }
     }
+}
+
+/// One way the server misbehaves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Hostile {
+    #[default]
+    None,
+    /// `initialize` issues this session id (and keeps no session).
+    SessionId(&'static str),
+    /// `initialize` answers with this protocol version.
+    ProtocolVersion(&'static str),
+    /// `initialize` opens a session but answers with a JSON-RPC error whose
+    /// message quotes the value of this request header.
+    InitializeErrorEchoing(&'static str),
+    /// Requests after the handshake are answered with an event stream that
+    /// never ends (a comment every 100 ms, for up to a minute).
+    EndlessStream,
+    /// Requests after the handshake are answered `307` to this URL.
+    RedirectOperation(&'static str),
 }
 
 /// One request the fixture received.
@@ -126,12 +155,37 @@ impl Drop for McpFixture {
     }
 }
 
-fn reply(status: u16, content_type: Option<&str>, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
+fn reply(status: u16, content_type: Option<&str>, body: impl Into<Bytes>) -> Response<FxBody> {
     let mut b = Response::builder().status(status);
     if let Some(ct) = content_type {
         b = b.header("content-type", ct);
     }
-    b.body(Full::new(body.into())).unwrap_or_else(|_| Response::new(Full::new(Bytes::new())))
+    b.body(Full::new(body.into()).boxed()).unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed()))
+}
+
+/// An event stream that starts with a log notification and then only sends
+/// comments, until the client goes away (or a minute passes).
+fn endless_stream() -> Response<FxBody> {
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(4);
+    tokio::spawn(async move {
+        use futures::SinkExt;
+        let first = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\n\n";
+        if tx.send(Ok(Frame::data(Bytes::from_static(first.as_bytes())))).await.is_err() {
+            return;
+        }
+        for _ in 0..600 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if tx.send(Ok(Frame::data(Bytes::from_static(b": still working\n\n")))).await.is_err() {
+                return;
+            }
+        }
+    });
+    let body = StreamBody::new(rx).boxed();
+    Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .body(body)
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed()))
 }
 
 fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
@@ -226,7 +280,7 @@ fn dispatch(method: &str, params: &Value, session: &str) -> Result<Value, (i64, 
 
 /// A JSON-RPC answer, as JSON or (with `sse`) as an event stream with a log
 /// notification before it.
-fn answer(opts: McpOptions, status: u16, message: &Value, session: Option<&str>) -> Response<Full<Bytes>> {
+fn answer(opts: McpOptions, status: u16, message: &Value, session: Option<&str>) -> Response<FxBody> {
     let mut resp = if opts.sse {
         let log = json!({"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info", "data": "fixture: working"}});
         let body = format!("event: message\ndata: {log}\n\nid: 1\nevent: message\ndata: {message}\n\n");
@@ -254,6 +308,8 @@ struct Asked<'a> {
     version: Option<&'a str>,
     accept: Option<&'a str>,
     content_type: Option<&'a str>,
+    /// The header [`Hostile::InitializeErrorEchoing`] quotes.
+    echo: Option<&'a str>,
 }
 
 async fn route(
@@ -262,7 +318,7 @@ async fn route(
     state: Arc<McpState>,
     opts: McpOptions,
     addr: SocketAddr,
-) -> Response<Full<Bytes>> {
+) -> Response<FxBody> {
     let http_method = req.method().clone();
     let path = req.uri().path().to_string();
     let headers: Vec<(String, String)> =
@@ -271,6 +327,10 @@ async fn route(
     let version = header(&req, "mcp-protocol-version");
     let accept = header(&req, "accept");
     let content_type = header(&req, "content-type");
+    let echo = match opts.hostile {
+        Hostile::InitializeErrorEchoing(name) => header(&req, name),
+        _ => None,
+    };
     let body = match Limited::new(req.into_body(), MAX_BODY).collect().await {
         Ok(b) => b.to_bytes(),
         Err(_) => return reply(413, Some("application/json"), r#"{"error":"fixture request body limit"}"#),
@@ -289,6 +349,7 @@ async fn route(
         version: version.as_deref(),
         accept: accept.as_deref(),
         content_type: content_type.as_deref(),
+        echo: echo.as_deref(),
     };
     let resp = handle(&state, opts, addr, &asked);
     let status = resp.status().as_u16();
@@ -305,11 +366,11 @@ fn accepts(accept: Option<&str>, media: &str) -> bool {
     listed.any(|m| m == media || m == "*/*" || m == wildcard)
 }
 
-fn json_error(status: u16, id: &Value, message: &str) -> Response<Full<Bytes>> {
+fn json_error(status: u16, id: &Value, message: &str) -> Response<FxBody> {
     reply(status, Some("application/json"), rpc_error(id, -32600, message).to_string())
 }
 
-fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -> Response<Full<Bytes>> {
+fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -> Response<FxBody> {
     if r.path != PATH {
         return reply(404, Some("text/plain"), "not the MCP endpoint");
     }
@@ -348,12 +409,24 @@ fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -
     if method == "initialize" {
         let Some(id) = id else { return json_error(400, &Value::Null, "initialize needs an id") };
         let requested = r.params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
-        let chosen = SUPPORTED_VERSIONS.iter().find(|v| **v == requested).copied().unwrap_or(SUPPORTED_VERSIONS[0]);
+        let supported = SUPPORTED_VERSIONS.iter().find(|v| **v == requested).copied().unwrap_or(SUPPORTED_VERSIONS[0]);
+        let chosen = match opts.hostile {
+            Hostile::ProtocolVersion(v) => v,
+            _ => supported,
+        };
         let n = state.issued.fetch_add(1, Ordering::Relaxed);
         let digest = Sha256::digest(format!("{addr}-{n}").as_bytes());
         let tail: String = digest.iter().take(12).map(|b| format!("{b:02x}")).collect();
         let sid = format!("mcp-fixture-{n}-{tail}");
+        if let Hostile::SessionId(bad) = opts.hostile {
+            let result = json!({"protocolVersion": chosen, "capabilities": {}, "serverInfo": {"name": "hostile", "version": "1"}});
+            return answer(opts, 200, &rpc_result(&id, result), Some(bad));
+        }
         state.sessions.lock().push(sid.clone());
+        if let Hostile::InitializeErrorEchoing(_) = opts.hostile {
+            let message = format!("rejected credential {}", r.echo.unwrap_or("(none)"));
+            return answer(opts, 200, &rpc_error(&id, -32600, &message), Some(&sid));
+        }
         let result = json!({
             "protocolVersion": chosen,
             "capabilities": {"tools": {"listChanged": false}, "resources": {}, "prompts": {}},
@@ -372,6 +445,17 @@ fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -
     if id.is_null() && message.get("id").is_none() {
         // A notification.
         return reply(202, None, "");
+    }
+    match opts.hostile {
+        Hostile::EndlessStream => return endless_stream(),
+        Hostile::RedirectOperation(to) => {
+            let mut resp = reply(307, None, "");
+            if let Ok(v) = HeaderValue::from_str(to) {
+                resp.headers_mut().insert("location", v);
+            }
+            return resp;
+        }
+        _ => {}
     }
     let answered = match dispatch(method, r.params, session) {
         Ok(result) => rpc_result(&id, result),

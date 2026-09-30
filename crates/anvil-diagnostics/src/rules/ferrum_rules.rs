@@ -492,7 +492,15 @@ fn jsonrpc_outcomes(ctx: &Ctx<'_>, cat: &FerrumCatalog, s: &JsonRpcSignal<'_>, c
     if candidates.is_empty() {
         return;
     }
-    let ids: Vec<String> = candidates.iter().map(|o| o.id.clone()).collect();
+    let mut ids: Vec<String> = candidates.iter().map(|o| o.id.clone()).collect();
+    // Outcomes the catalog says look the same are candidates too.
+    for o in candidates {
+        for s in &o.shared_signal_with {
+            if !ids.contains(s) {
+                ids.push(s.clone());
+            }
+        }
+    }
     let mut d = if m.exact.is_empty() {
         let (scope, owner) = (SourceScope::Unknown, Owner::Unknown);
         let d = Draft::new("ferrum.jsonrpc_code", "ferrum.catalog", Confidence::Unknown, scope, owner, Severity::Warning);
@@ -503,8 +511,10 @@ fn jsonrpc_outcomes(ctx: &Ctx<'_>, cat: &FerrumCatalog, s: &JsonRpcSignal<'_>, c
         d.var("count", ids.len().to_string()).var("common", candidates[0].minimum_truthful_diagnosis.clone())
     };
     d = evidence(d).ev(E::Configuration, "catalog.candidates", ids.join(", ")).var("release", release);
-    for o in candidates {
-        d.extra_alternatives.push(format!("{} ({})", o.minimum_truthful_diagnosis, o.id));
+    for id in &ids {
+        if let Some(o) = cat.outcome(id) {
+            d.extra_alternatives.push(format!("{} ({})", o.minimum_truthful_diagnosis, o.id));
+        }
     }
     out.push(d);
 }
@@ -734,6 +744,7 @@ mod tests {
         let f = diagnose_as(Protocol::Http, &r400, missing.as_bytes(), "ferrum-edge-0.9.8");
         let o = find(&f, "ferrum.outcome").expect("session outcome");
         assert_eq!(evidence(o, "catalog.outcome"), Some("plugin.mcp_gateway.session_or_version_rejected"));
+        assert!(find(&f, "app.jsonrpc_error").is_none(), "its wording says the transport succeeded; a 400 has the status findings");
     }
 
     /// The code alone is weak evidence: a server behind the gateway uses the

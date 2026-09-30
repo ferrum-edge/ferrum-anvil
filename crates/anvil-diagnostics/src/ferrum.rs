@@ -133,6 +133,9 @@ pub struct JsonRpcShape {
     pub gateway: Option<String>,
     /// Other codes the outcome's catalog notes list for the same condition.
     pub alternate_codes: Vec<i64>,
+    /// Other messages the outcome's catalog notes list with the same code
+    /// (matched as exactly as the body's own message).
+    pub alternate_messages: Vec<String>,
 }
 
 /// Further JSON-RPC error codes an outcome answers with, from its catalog
@@ -141,6 +144,11 @@ const JSONRPC_ALTERNATE_CODES: &[(&str, &[i64])] = &[
     ("plugin.mcp_gateway.unknown_item", &[-32008, -32007, -32002, -32601]),
     ("plugin.mcp_gateway.batch_rejections", &[-32009, -32010, -32011]),
 ];
+
+/// Further messages an outcome answers with under the same code, from its
+/// catalog notes ("Messages: ..."); its body shape shows one.
+const JSONRPC_ALTERNATE_MESSAGES: &[(&str, &[&str])] = &[("plugin.mcp_gateway.invalid_params", INVALID_PARAMS_MESSAGES)];
+const INVALID_PARAMS_MESSAGES: &[&str] = &["Invalid MCP tool call params", "Invalid MCP prompt params", "Invalid MCP resource params"];
 
 /// The JSON-RPC error of a catalog body shape such as
 /// `{"jsonrpc":"2.0","id":{id},"error":{"code":-32001,"message":"..."}}`.
@@ -155,11 +163,14 @@ fn parse_jsonrpc(id: &str, body_shape: &serde_json::Value) -> Option<JsonRpcShap
     let gateway = GATEWAY.get_or_init(|| Regex::new(r#""gateway":"([a-z0-9_]+)""#).expect("valid regex"));
     let c = error.captures(shape)?;
     let alternate_codes = JSONRPC_ALTERNATE_CODES.iter().find(|(o, _)| *o == id).map(|(_, c)| c.to_vec()).unwrap_or_default();
+    let alternates = JSONRPC_ALTERNATE_MESSAGES.iter().find(|(o, _)| *o == id);
+    let alternate_messages = alternates.map(|(_, m)| m.iter().map(|x| x.to_string()).collect()).unwrap_or_default();
     Some(JsonRpcShape {
         code: c[1].parse().ok()?,
         message: c[2].to_string(),
         gateway: gateway.captures(shape).map(|g| g[1].to_string()),
         alternate_codes,
+        alternate_messages,
     })
 }
 
@@ -447,7 +458,8 @@ impl FerrumCatalog {
                 continue;
             }
             let marker = j.gateway.as_deref().is_none_or(|g| s.gateway == Some(g));
-            if j.code == s.code && j.message == s.message && marker {
+            let message = j.message == s.message || j.alternate_messages.iter().any(|m| m == s.message);
+            if j.code == s.code && message && marker {
                 m.exact.push(o);
             } else if j.code == s.code || j.alternate_codes.contains(&s.code) {
                 m.code_only.push(o);
@@ -558,7 +570,7 @@ mod tests {
         let unknown = c.outcome("plugin.mcp_gateway.unknown_item").and_then(|o| o.jsonrpc.clone()).unwrap();
         assert!(unknown.alternate_codes.contains(&-32601), "{unknown:?}");
         assert!(c.outcome("plugin.mcp_gateway.session_not_found").is_some_and(|o| o.jsonrpc.is_none()), "an empty body");
-        for (id, _) in JSONRPC_ALTERNATE_CODES {
+        for id in JSONRPC_ALTERNATE_CODES.iter().map(|(id, _)| id).chain(JSONRPC_ALTERNATE_MESSAGES.iter().map(|(id, _)| id)) {
             for cat in catalogs() {
                 assert!(cat.outcome(id).is_some_and(|o| o.jsonrpc.is_some()), "{}: {id}", cat.compatibility_id);
             }
@@ -587,6 +599,10 @@ mod tests {
         assert_eq!(ids(&m.code_only), ["plugin.mcp_gateway.unknown_item"], "a code the outcome's notes list");
         let m = c.match_jsonrpc_error(&sig(200, -32602, "Invalid MCP tool arguments", None));
         assert_eq!(ids(&m.exact), ["plugin.mcp_gateway.invalid_params"]);
+        for audited in ["Invalid MCP tool call params", "Invalid MCP prompt params", "Invalid MCP resource params"] {
+            let m = c.match_jsonrpc_error(&sig(200, -32602, audited, None));
+            assert_eq!(ids(&m.exact), ["plugin.mcp_gateway.invalid_params"], "{audited}");
+        }
         assert!(c.match_jsonrpc_error(&sig(200, -31999, "other", None)).code_only.is_empty());
     }
 

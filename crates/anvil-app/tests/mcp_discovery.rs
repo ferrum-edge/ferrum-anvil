@@ -7,8 +7,9 @@ use anvil_app::App;
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_domain::outcome::AssertionState;
-use anvil_domain::request::{McpOperation, McpSpec, Protocol, RequestSpec};
-use anvil_fixtures::mcp::{self, McpOptions};
+use anvil_domain::request::{KeyValue, McpOperation, McpSpec, Protocol, RequestSpec};
+use anvil_fixtures::mcp::{self, Hostile, McpOptions};
+use anvil_portability::ExportMode;
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use tokio_util::sync::CancellationToken;
@@ -65,4 +66,36 @@ async fn discovered_tools_are_saved_beside_the_template_and_call_their_tool() {
     let plain = app.create_request(&ws, None, "plain", RequestSpec::http("GET", &f.url())).unwrap();
     let refused = app.mcp_discover_tools(&ws, &plain.meta.id, opts, CancellationToken::new()).await;
     assert!(refused.is_err(), "only an MCP request discovers tools");
+}
+
+/// A secret a server echoes in its initialize error is redacted in the
+/// session's notes as history keeps them and as an export carries them.
+#[tokio::test]
+async fn a_secret_the_server_echoes_is_redacted_in_history_and_exports() {
+    anvil_fixtures::init();
+    let echoing = McpOptions { hostile: Hostile::InitializeErrorEchoing("x-api-key"), ..Default::default() };
+    let f = mcp::serve("127.0.0.1:0", echoing).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Agents").unwrap().meta.id;
+    let secret = "tok-SENSITIVE-history-key";
+    let mut spec = mcp_request(&f.url());
+    spec.headers.push(KeyValue { sensitive: true, ..KeyValue::new("X-Api-Key", secret) });
+    let saved = app.create_request(&ws, None, "echoes", spec).unwrap();
+    let opts = SendOptions { record_history: true, ..Default::default() };
+    let out = app.send(Some(saved.meta.id), &ws, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
+    assert!(out.record.prepared.inferred.iter().any(|n| n.contains("rejected credential")), "{:?}", out.record.prepared.inferred);
+
+    let mut history = String::new();
+    for h in app.store.list_history(Some(&ws), None, 100).unwrap() {
+        let (rec, _) = app.store.get_history::<serde_json::Value>(&h.id).unwrap().unwrap();
+        history.push_str(&rec.to_string());
+    }
+    assert!(history.contains("rejected credential") && !history.contains(secret), "{history}");
+
+    let (zip, _) = app.export(Some(&ws), ExportMode::ShareSafely, None, true).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+    let mut records = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("history/records.jsonl").unwrap(), &mut records).unwrap();
+    assert!(records.contains("rejected credential") && !records.contains(secret), "{records}");
 }
