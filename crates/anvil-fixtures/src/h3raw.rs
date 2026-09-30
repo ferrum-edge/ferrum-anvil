@@ -10,14 +10,15 @@
 //! Its SETTINGS enable extended CONNECT (RFC 9220 §3), so a MASQUE client
 //! sends its request. It never parses a request and answers as soon as the
 //! stream opens: request `n` on a connection gets `answers[n]` (the last one
-//! once they run out). It records the
-//! `SETTINGS_MAX_FIELD_SECTION_SIZE` each client advertised and the code of
-//! every `STOP_SENDING` it received.
+//! once they run out). It records the `SETTINGS_MAX_FIELD_SECTION_SIZE` each
+//! client advertised, how many answers it wrote in full and the code of every
+//! `STOP_SENDING` it received.
 
 use crate::tlsserver::{TlsServerOptions, server_config};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// HTTP/3 frame types (RFC 9114 §7.2).
@@ -52,6 +53,7 @@ pub struct RawH3 {
     pub addr: SocketAddr,
     advertised: Arc<Mutex<Vec<u64>>>,
     stops: Arc<Mutex<Vec<u64>>>,
+    written: Arc<AtomicUsize>,
     endpoint: quinn::Endpoint,
 }
 
@@ -75,6 +77,19 @@ impl RawH3 {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// Wait up to `within` until the bytes of `n` answers were all written
+    /// (handed to QUIC, before the stream ends or is held open).
+    pub async fn wrote(&self, n: usize, within: Duration) -> bool {
+        let until = Instant::now() + within;
+        while self.written.load(Ordering::SeqCst) < n {
+            if Instant::now() >= until {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
     }
 
     /// Wait up to `within` for the first `STOP_SENDING` a client sent on a
@@ -108,11 +123,12 @@ pub async fn serve(mut tls: TlsServerOptions, answers: Vec<Answer>) -> anyhow::R
     let addr = endpoint.local_addr()?;
     let advertised = Arc::new(Mutex::new(Vec::new()));
     let stops = Arc::new(Mutex::new(Vec::new()));
+    let written = Arc::new(AtomicUsize::new(0));
     let answers = Arc::new(answers);
-    let (ep, adv, st) = (endpoint.clone(), advertised.clone(), stops.clone());
+    let (ep, adv, st, wr) = (endpoint.clone(), advertised.clone(), stops.clone(), written.clone());
     tokio::spawn(async move {
         while let Some(incoming) = ep.accept().await {
-            let (answers, adv, st) = (answers.clone(), adv.clone(), st.clone());
+            let (answers, adv, st, wr) = (answers.clone(), adv.clone(), st.clone(), wr.clone());
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
                 tokio::spawn(read_client_settings(conn.clone(), adv));
@@ -129,16 +145,22 @@ pub async fn serve(mut tls: TlsServerOptions, answers: Vec<Answer>) -> anyhow::R
                 while let Ok((send, recv)) = conn.accept_bi().await {
                     let Some(answer) = answers.get(n.min(answers.len().saturating_sub(1))).cloned() else { return };
                     n += 1;
-                    tokio::spawn(answer_stream(send, recv, answer, st.clone()));
+                    tokio::spawn(answer_stream(send, recv, answer, st.clone(), wr.clone()));
                 }
                 drop(control);
             });
         }
     });
-    Ok(RawH3 { addr, advertised, stops, endpoint })
+    Ok(RawH3 { addr, advertised, stops, written, endpoint })
 }
 
-async fn answer_stream(mut send: quinn::SendStream, mut recv: quinn::RecvStream, answer: Answer, stops: Arc<Mutex<Vec<u64>>>) {
+async fn answer_stream(
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    answer: Answer,
+    stops: Arc<Mutex<Vec<u64>>>,
+    written: Arc<AtomicUsize>,
+) {
     // The request is read and ignored (a CONNECT stream never ends).
     tokio::spawn(async move {
         let _ = recv.read_to_end(64 * 1024).await;
@@ -146,6 +168,7 @@ async fn answer_stream(mut send: quinn::SendStream, mut recv: quinn::RecvStream,
     if send.write_all(&answer.bytes).await.is_err() {
         return record_stop(&send, &stops).await;
     }
+    written.fetch_add(1, Ordering::SeqCst);
     match answer.end {
         End::Finish => {
             let _ = send.finish();

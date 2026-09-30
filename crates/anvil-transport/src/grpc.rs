@@ -931,10 +931,11 @@ fn start(
                 let (send_half, mut recv_half) = stream.split();
                 tokio::spawn(h3_uplink(send_half, body, ctl.clone()));
                 let resp = tokio::select! {
-                    r = recv_half.recv_response() => r.map_err(|e| TransportFailure::new(
+                    r = recv_half.recv_response() => r.map_err(|e| crate::h3::stream_failure(
+                        &e,
                         Phase::AwaitResponseHeaders,
                         FailureKind::ResetBeforeResponse,
-                        format!("the HTTP/3 stream ended before response headers: {e}"),
+                        "the HTTP/3 stream ended before response headers",
                     ))?,
                     _ = ctl.abort.cancelled() => {
                         recv_half.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
@@ -1013,13 +1014,8 @@ async fn h3_downlink(mut recv: H3Recv, tx: mpsc::Sender<Result<Frame<Bytes>, Tra
             }
             Down::Data(Ok(None)) => break,
             Down::Data(Err(e)) => {
-                let _ = tx
-                    .send(Err(TransportFailure::new(
-                        Phase::ResponseBody,
-                        FailureKind::BodyReset,
-                        format!("the HTTP/3 response stream ended abnormally: {e}"),
-                    )))
-                    .await;
+                let what = "the HTTP/3 response stream ended abnormally";
+                let _ = tx.send(Err(crate::h3::stream_failure(&e, Phase::ResponseBody, FailureKind::BodyReset, what))).await;
                 return;
             }
             Down::Abort => {
@@ -1028,19 +1024,23 @@ async fn h3_downlink(mut recv: H3Recv, tx: mpsc::Sender<Result<Frame<Bytes>, Tra
             }
         }
     }
-    match recv.recv_trailers().await {
+    // h3 returns the trailers only once the stream ends, so an abort stops
+    // this stream alone rather than waiting for the peer.
+    let trailers = tokio::select! {
+        t = recv.recv_trailers() => t,
+        _ = ctl.abort.cancelled() => {
+            recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+            return;
+        }
+    };
+    match trailers {
         Ok(Some(t)) => {
             let _ = tx.send(Ok(Frame::trailers(t))).await;
         }
         Ok(None) => {}
         Err(e) => {
-            let _ = tx
-                .send(Err(TransportFailure::new(
-                    Phase::ResponseBody,
-                    FailureKind::BodyReset,
-                    format!("the HTTP/3 response trailers could not be read: {e}"),
-                )))
-                .await;
+            let what = "the HTTP/3 response trailers could not be read";
+            let _ = tx.send(Err(crate::h3::stream_failure(&e, Phase::ResponseBody, FailureKind::BodyReset, what))).await;
         }
     }
 }

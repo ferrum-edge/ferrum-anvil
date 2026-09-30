@@ -563,11 +563,24 @@ pub(crate) struct H3ClientOptions {
     pub max_field_section_size: u64,
 }
 
+/// The smallest response field-section limit, as HTTP/1 floors its buffer.
+const MIN_FIELD_SECTION: u64 = 8192;
+/// The largest value a SETTINGS parameter can carry (a QUIC varint, RFC 9000 §16).
+const MAX_FIELD_SECTION: u64 = (1 << 62) - 1;
+
+/// The field-section limit HTTP/3 enforces and advertises for `limits`:
+/// `max_response_header_bytes`, at least 8 KiB and at most what a SETTINGS
+/// varint can carry. The raw value comes from settings layers and imports,
+/// so it may be 0 or `u64::MAX`.
+pub(crate) fn field_section_limit(limits: &Limits) -> u64 {
+    limits.max_response_header_bytes.clamp(MIN_FIELD_SECTION, MAX_FIELD_SECTION)
+}
+
 impl H3ClientOptions {
     /// No HTTP/3 datagrams; response headers and trailers bounded by
-    /// `limits.max_response_header_bytes`.
+    /// [`field_section_limit`].
     pub(crate) fn new(limits: &Limits) -> Self {
-        H3ClientOptions { h3_datagrams: false, max_field_section_size: limits.max_response_header_bytes }
+        H3ClientOptions { h3_datagrams: false, max_field_section_size: field_section_limit(limits) }
     }
 
     fn builder(self) -> h3::client::Builder {
@@ -908,7 +921,7 @@ async fn write_request(
 
 /// Response headers or trailers over the local `max_response_header_bytes`.
 fn headers_too_large(phase: Phase, what: &str, limits: &Limits) -> TransportFailure {
-    let max = limits.max_response_header_bytes;
+    let max = field_section_limit(limits);
     let message = format!("the HTTP/3 response {what} exceed the local max_response_header_bytes limit ({max} bytes)");
     TransportFailure::new(phase, FailureKind::ResponseHeadersTooLarge, message)
 }
@@ -1494,7 +1507,11 @@ impl H3Transport {
         let header_bytes = logical_header_bytes(plan, &uri);
         obs.bytes.request_headers_logical = header_bytes;
         let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-        let key = format!("{}|h3://{}:{}|{}", plan.isolation, plan.host.to_ascii_lowercase(), plan.port, prepared.fingerprint);
+        // The field-section limit is part of the key: a connection advertises
+        // (and enforces) the limit it was opened with, so a request with a
+        // smaller one never reuses a connection that accepts more.
+        let (host, fs) = (plan.host.to_ascii_lowercase(), field_section_limit(&plan.limits));
+        let key = format!("{}|h3://{host}:{}|{}|fs={fs}", plan.isolation, plan.port, prepared.fingerprint);
 
         // Those of the execution (else taken now, first): what this attempt
         // opens is pooled, and the tickets it receives are kept, only if
@@ -2063,6 +2080,16 @@ impl H3Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_field_section_limit_is_clamped_to_what_settings_can_carry() {
+        let limit = |max_response_header_bytes| field_section_limit(&Limits { max_response_header_bytes, ..Limits::default() });
+        assert_eq!(limit(0), 8192, "0 would refuse every response");
+        assert_eq!(limit(1), 8192);
+        assert_eq!(limit(256 * 1024), 256 * 1024);
+        assert_eq!(limit(u64::MAX), (1 << 62) - 1, "a larger SETTINGS value panics in h3's varint encoder");
+        assert!(quinn::VarInt::from_u64(limit(u64::MAX)).is_ok(), "it is a valid SETTINGS value");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn dropping_the_transport_ends_the_sweeper_at_once() {

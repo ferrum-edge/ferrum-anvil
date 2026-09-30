@@ -489,8 +489,8 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let h_idx = rec.start(Phase::AwaitResponseHeaders);
     let headers_deadline = deadline_from(plan.timeouts.response_headers_ms);
     let resp = tokio::select! {
-        r = stream.recv_response() => r.map_err(|e| TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
-            format!("the HTTP/3 stream ended before an answer to the extended CONNECT: {e}"))),
+        r = stream.recv_response() => r.map_err(|e| crate::h3::stream_failure(&e, Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
+            "the HTTP/3 stream ended before an answer to the extended CONNECT")),
         _ = sleep_until_opt(headers_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
             "no answer to the WebSocket extended CONNECT before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms)),
         _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
