@@ -427,7 +427,8 @@ mod tests {
         assert_eq!(call_tool(&json!({"name": "session"}), "sid-1").unwrap()["content"][0]["text"], "session sid-1");
         assert_eq!(call_tool(&json!({"name": "nope"}), "s").unwrap_err().0, -32602);
         assert_eq!(dispatch("nope/nope", &Value::Null, "s").unwrap_err().0, -32601);
-        let names: Vec<&str> = tools().as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+        let tools = tools();
+        let names: Vec<&str> = tools.as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, ["echo", "add", "fail", "session", "delete_all", "internal_audit", "new_tool"]);
     }
 
