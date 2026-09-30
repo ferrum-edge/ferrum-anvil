@@ -1,0 +1,315 @@
+{
+  "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-errors/v1.schema.json",
+  "vocabulary": "gateway-errors",
+  "version": 1,
+  "edge_release": "v0.9.8",
+  "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the eight coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
+  "provenance": [
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.8",
+      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "path": "src/retry.rs",
+      "symbols": [
+        "ErrorClass",
+        "ErrorClass::as_str",
+        "ErrorClass::ALL",
+        "OBS_* constants",
+        "HTTP_OBSERVABILITY_ERROR_CLASSES",
+        "HTTP_METRICS_GATEWAY_ERROR_CLASSES",
+        "HTTP_METRICS_ERROR_CLASS_BOUND",
+        "x_gateway_error_token_for_class",
+        "token_for_rejection_phase",
+        "request_reached_wire",
+        "error_class_log_kind"
+      ]
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.8",
+      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "path": "docs/error_classification.md",
+      "sections": [
+        "Canonical taxonomy (ErrorClass)",
+        "HTTP observability vocabulary (X-Gateway-Error)",
+        "Header tokens (X-Gateway-Error)",
+        "Granular class to header token"
+      ]
+    }
+  ],
+  "header": "X-Gateway-Error",
+  "surfaces": [
+    {
+      "surface": "X-Gateway-Error response header",
+      "values": "x_gateway_error_tokens",
+      "cardinality": 8
+    },
+    {
+      "surface": "access-log error_class",
+      "values": "error_classes",
+      "cardinality": 19,
+      "note": "Omitted when unset."
+    },
+    {
+      "surface": "ferrum_requests_total{error_class}",
+      "values": "error_classes plus the tokens whose metric_label_without_error_class is true",
+      "cardinality": 24,
+      "note": "Omitted on 2xx, 3xx and 4xx."
+    }
+  ],
+  "error_classes": [
+    {
+      "value": "connection_timeout",
+      "rust_variant": "ConnectionTimeout",
+      "request_reached_wire": false,
+      "log_kind": "connect_timeout",
+      "x_gateway_error": "connection_failure",
+      "meaning": "TCP connect did not complete before the configured timeout."
+    },
+    {
+      "value": "connection_refused",
+      "rust_variant": "ConnectionRefused",
+      "request_reached_wire": false,
+      "log_kind": "connect_failure",
+      "x_gateway_error": "connection_failure",
+      "meaning": "TCP connect refused (port not listening, firewall RST), including connect-phase RSTs. A TLS handshake failure after TCP connect is tls_error, not this class."
+    },
+    {
+      "value": "connection_reset",
+      "rust_variant": "ConnectionReset",
+      "request_reached_wire": true,
+      "log_kind": "connection_reset",
+      "x_gateway_error": "backend_error",
+      "meaning": "RST received after the connection was established and, for TLS, after the handshake completed. Also the verdict for an ambiguous post-connect failure with no independent setup-phase evidence (issue #4536)."
+    },
+    {
+      "value": "connection_closed",
+      "rust_variant": "ConnectionClosed",
+      "request_reached_wire": true,
+      "log_kind": "connection_closed",
+      "x_gateway_error": "backend_error",
+      "meaning": "Peer sent FIN before the response completed; broken pipe; aborted connection; post-connect UnexpectedEof or an incomplete (truncated) HTTP message."
+    },
+    {
+      "value": "dns_lookup_error",
+      "rust_variant": "DnsLookupError",
+      "request_reached_wire": false,
+      "log_kind": "dns_failure",
+      "x_gateway_error": "connection_failure",
+      "meaning": "The backend hostname could not be resolved."
+    },
+    {
+      "value": "tls_error",
+      "rust_variant": "TlsError",
+      "request_reached_wire": false,
+      "log_kind": "tls_error",
+      "x_gateway_error": "connection_failure",
+      "meaning": "TLS or DTLS handshake failed with a typed rustls error in the chain while the gateway independently knew it was still setting up. A missing close_notify is teardown, not this class."
+    },
+    {
+      "value": "read_write_timeout",
+      "rust_variant": "ReadWriteTimeout",
+      "request_reached_wire": true,
+      "log_kind": "read_timeout",
+      "x_gateway_error": "backend_timeout",
+      "meaning": "A backend read or write exceeded its per-direction timeout."
+    },
+    {
+      "value": "client_disconnect",
+      "rust_variant": "ClientDisconnect",
+      "request_reached_wire": true,
+      "log_kind": "client_disconnect",
+      "x_gateway_error": "backend_error",
+      "meaning": "The client gave up before the gateway could complete the response.",
+      "x_gateway_error_note": "Only when the public status is 5xx."
+    },
+    {
+      "value": "protocol_error",
+      "rust_variant": "ProtocolError",
+      "request_reached_wire": true,
+      "log_kind": "protocol_error",
+      "x_gateway_error": "backend_error",
+      "meaning": "HTTP/2 or HTTP/3 protocol error after a stream opened (stream reset, GOAWAY, RST_STREAM), or an RFC 6455 WebSocket protocol violation."
+    },
+    {
+      "value": "response_body_too_large",
+      "rust_variant": "ResponseBodyTooLarge",
+      "request_reached_wire": true,
+      "log_kind": "response_body_too_large",
+      "x_gateway_error": "backend_error",
+      "meaning": "The backend response exceeded the configured maximum size."
+    },
+    {
+      "value": "gateway_buffer_capacity",
+      "rust_variant": "GatewayBufferCapacity",
+      "request_reached_wire": true,
+      "log_kind": "gateway_buffer_capacity",
+      "x_gateway_error": "backend_error",
+      "meaning": "The process-wide retained-response budget (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES) could not admit this response. Gateway-local and transient; non-retryable and neutral to backend health; HTTP 503 or gRPC RESOURCE_EXHAUSTED."
+    },
+    {
+      "value": "request_body_too_large",
+      "rust_variant": "RequestBodyTooLarge",
+      "request_reached_wire": true,
+      "log_kind": "request_body_too_large",
+      "x_gateway_error": "backend_error",
+      "meaning": "The request body exceeded the configured maximum size."
+    },
+    {
+      "value": "connection_pool_error",
+      "rust_variant": "ConnectionPoolError",
+      "request_reached_wire": false,
+      "log_kind": "pool_error",
+      "x_gateway_error": "connection_failure",
+      "meaning": "Could not acquire or create an HTTP client from the pool, including a hyper is_canceled() request that was never dispatched (issues #3578, #4406)."
+    },
+    {
+      "value": "port_exhaustion",
+      "rust_variant": "PortExhaustion",
+      "request_reached_wire": false,
+      "log_kind": "port_exhaustion",
+      "x_gateway_error": "connection_failure",
+      "meaning": "EADDRNOTAVAIL: all ephemeral ports are in use."
+    },
+    {
+      "value": "graceful_remote_close",
+      "rust_variant": "GracefulRemoteClose",
+      "request_reached_wire": true,
+      "log_kind": "graceful_remote_close",
+      "x_gateway_error": "backend_error",
+      "meaning": "The peer closed the session cleanly: HTTP/3 H3_NO_ERROR or GOAWAY at the response read boundary, or a WebSocket Close frame."
+    },
+    {
+      "value": "dispatch_policy_rejected",
+      "rust_variant": "DispatchPolicyRejected",
+      "request_reached_wire": true,
+      "log_kind": "dispatch_policy_rejected",
+      "x_gateway_error": "backend_error",
+      "meaning": "Terminal gateway policy decision: pre-dial egress or SNI policy, opaque-TLS SNI admission refusal, admission overflow, final request-body hook rejection, or response-transformer output above the response ceiling. Non-retryable and neutral to backend health.",
+      "x_gateway_error_overrides": [
+        {
+          "token": "overload",
+          "when": "Response-transformer output above the effective response ceiling (HTTP 502)."
+        },
+        {
+          "token": "request_timeout",
+          "when": "Route-deadline 504 whose recorded phase is before_dispatch or retry_backoff: no backend held the request."
+        }
+      ]
+    },
+    {
+      "value": "backend_connection_limit",
+      "rust_variant": "BackendConnectionLimit",
+      "request_reached_wire": false,
+      "log_kind": "backend_connection_limit",
+      "x_gateway_error": "connection_failure",
+      "meaning": "The gateway refused to open a new backend connection because the destination is at its DestinationRule connectionPool.tcp.maxConnections ceiling. Pre-wire and neutral to backend health."
+    },
+    {
+      "value": "trust_withdrawn",
+      "rust_variant": "TrustWithdrawn",
+      "request_reached_wire": false,
+      "log_kind": "trust_withdrawn",
+      "x_gateway_error": "connection_failure",
+      "meaning": "An accepted gateway trust publication withdrew an authority, so a gateway-to-mesh TLS transport was refused (issue #3859). Pre-wire and neutral to backend health."
+    },
+    {
+      "value": "request_error",
+      "rust_variant": "RequestError",
+      "request_reached_wire": true,
+      "log_kind": "request_error",
+      "x_gateway_error": "backend_error",
+      "meaning": "Catch-all for unclassified gateway-side rejections and unknown failure modes."
+    }
+  ],
+  "x_gateway_error_tokens": [
+    {
+      "token": "connection_failure",
+      "http_statuses": [
+        "502"
+      ],
+      "metric_label_without_error_class": false,
+      "rejection_phases": [],
+      "meaning": "Pre-wire connect, DNS or TLS failure: the gateway could not set up a connection to the backend. Also the token for every ErrorClass whose request_reached_wire is false."
+    },
+    {
+      "token": "backend_timeout",
+      "http_statuses": [
+        "504"
+      ],
+      "metric_label_without_error_class": false,
+      "rejection_phases": [],
+      "meaning": "A backend held the request (it accepted the connection and was sent the request) but did not answer in time. Never used for a timeout no backend held."
+    },
+    {
+      "token": "backend_error",
+      "http_statuses": [
+        "5xx"
+      ],
+      "metric_label_without_error_class": true,
+      "rejection_phases": [],
+      "meaning": "The backend returned a 5xx, or a post-wire 5xx had no more specific token. Also the metric label for an unclassified backend 5xx. Never used for a response that did not reach a backend."
+    },
+    {
+      "token": "circuit_breaker_open",
+      "http_statuses": [
+        "503"
+      ],
+      "metric_label_without_error_class": true,
+      "rejection_phases": [
+        "circuit_breaker_open",
+        "circuit_breaker"
+      ],
+      "meaning": "The circuit breaker for the backend was open; the request never reached a backend."
+    },
+    {
+      "token": "overload",
+      "http_statuses": [
+        "503",
+        "502"
+      ],
+      "metric_label_without_error_class": true,
+      "rejection_phases": [
+        "overload"
+      ],
+      "meaning": "Gateway resource refusal: overload or drain reject_new_requests (503), or response-transformer output above the configured response ceiling (502)."
+    },
+    {
+      "token": "config_stale",
+      "http_statuses": [
+        "503"
+      ],
+      "metric_label_without_error_class": true,
+      "rejection_phases": [
+        "config_stale"
+      ],
+      "meaning": "Data-plane stale-config fence."
+    },
+    {
+      "token": "concurrency_limit",
+      "http_statuses": [
+        "503"
+      ],
+      "metric_label_without_error_class": true,
+      "rejection_phases": [
+        "adaptive_concurrency"
+      ],
+      "meaning": "adaptive_concurrency admission refused the request."
+    },
+    {
+      "token": "request_timeout",
+      "http_statuses": [
+        "504"
+      ],
+      "metric_label_without_error_class": false,
+      "rejection_phases": [],
+      "meaning": "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before any backend held the request: during the client upload, a gateway-local phase, admission, or retry backoff. New in v0.9.8 (#5762)."
+    }
+  ],
+  "main_branch_delta": {
+    "repo": "ferrum-edge/ferrum-edge",
+    "ref": "main",
+    "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
+    "summary": "No change to the 19 ErrorClass values, the eight X-Gateway-Error tokens, or the class-to-token mapping (src/retry.rs differs only in the visibility of a private helper). docs/error_classification.md adds gateway diagnostic references: X-Ferrum-Diagnostic-Ref joins the gateway-owned diagnostic response headers, and the lookup body is schemas/diagnostic-ref/v1 (issue #5767, not in any release yet)."
+  }
+}

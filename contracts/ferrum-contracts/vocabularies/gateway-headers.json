@@ -1,0 +1,741 @@
+{
+  "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-headers/v1.schema.json",
+  "vocabulary": "gateway-headers",
+  "version": 1,
+  "edge_release": "v0.9.8",
+  "description": "HTTP header names and prefixes that Ferrum Edge owns: gateway assertions to backends, gateway diagnostic response headers, internal markers, mesh control headers, and admin API headers. Names are case-insensitive; prefixes match any lowercase name that starts with them. Entries with availability \"unreleased\" are on Edge main only.",
+  "provenance": [
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.8",
+      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "path": "src/proxy/headers.rs"
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.8",
+      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "path": "docs/admin_api.md"
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.8",
+      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "path": "docs/error_classification.md"
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.8",
+      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "path": "docs/plugin_execution_order.md"
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "v0.9.8",
+      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "path": "openapi.yaml"
+    },
+    {
+      "repo": "ferrum-edge/ferrum-edge",
+      "ref": "main",
+      "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
+      "path": "src/proxy/headers.rs",
+      "note": "Entries with availability unreleased."
+    }
+  ],
+  "not_headers": {
+    "names": [
+      "x-ferrum-proxy",
+      "x-ferrum-upstream",
+      "x-ferrum-plugins",
+      "x-ferrum-consumers",
+      "x-ferrum-validate",
+      "x-ferrum-external-refs"
+    ],
+    "note": "OpenAPI document extension fields read by the API-spec import (docs/api_specs.md), not HTTP headers."
+  },
+  "headers": [
+    {
+      "name": "x-consumer-",
+      "match": "prefix",
+      "surface": "proxy",
+      "direction": "gateway_to_backend",
+      "role": "gateway_assertion",
+      "edge_behavior": "Gateway-owned consumer assertion namespace. Consumer plugins may add attributes beneath it, so backend boundaries reject the whole prefix, and it is forbidden in request and response trailers.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "is_consumer_assertion_header",
+            "is_forbidden_backend_request_trailer_name"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/plugins.md",
+          "sections": [
+            "grpc_web"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Consumer-Username",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "gateway_to_backend",
+      "role": "gateway_assertion",
+      "edge_behavior": "Set by the gateway only after a principal is resolved; never trusted from clients. Any client copy is removed before dispatch.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "strip_reserved_gateway_assertion_headers"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/plugin_execution_order.md",
+          "sections": [
+            "Finalized Request Egress",
+            "Backend Request Trailers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Consumer-Custom-Id",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "gateway_to_backend",
+      "role": "gateway_assertion",
+      "edge_behavior": "Set by the gateway only after a principal with a custom_id is resolved; never trusted from clients. Any client copy is removed before dispatch.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "strip_reserved_gateway_assertion_headers"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/plugin_execution_order.md",
+          "sections": [
+            "Finalized Request Egress",
+            "Backend Request Trailers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Geo-Country",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "gateway_to_backend",
+      "role": "gateway_assertion",
+      "edge_behavior": "Set by the gateway only after a successful GeoIP lookup. Any client copy is removed before dispatch.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "strip_reserved_gateway_assertion_headers"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/plugin_execution_order.md",
+          "sections": [
+            "Backend Request Trailers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "x-ferrum-",
+      "match": "prefix",
+      "surface": "all",
+      "direction": "any",
+      "role": "ferrum_owned",
+      "edge_behavior": "Ferrum-owned header namespace. Forbidden in request trailers sent to a backend and in gRPC end-of-stream trailers. Individual members below have narrower rules.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "is_forbidden_backend_request_trailer_name"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/plugin_execution_order.md",
+          "sections": [
+            "Backend Request Trailers"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/plugins.md",
+          "sections": [
+            "grpc_web"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "x-path-param-",
+      "match": "prefix",
+      "surface": "proxy",
+      "direction": "gateway_to_backend",
+      "role": "ferrum_owned",
+      "edge_behavior": "Ferrum-owned path-parameter namespace. Forbidden in request trailers sent to a backend.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "is_forbidden_backend_request_trailer_name"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/plugin_execution_order.md",
+          "sections": [
+            "Backend Request Trailers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Gateway-Error",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "gateway_to_client",
+      "role": "gateway_diagnostic",
+      "edge_behavior": "Gateway-owned diagnostic response header. Every dispatch path strips a backend copy, in headers or trailers, before the gateway writes its own value. Values are the closed vocabulary in vocabularies/gateway-errors.json. Not authenticated.",
+      "values": {
+        "vocabulary": "gateway-errors",
+        "field": "x_gateway_error_tokens"
+      },
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "X_GATEWAY_ERROR_HEADER",
+            "GATEWAY_OWNED_DIAGNOSTIC_RESPONSE_HEADERS"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/error_classification.md",
+          "sections": [
+            "HTTP observability vocabulary (X-Gateway-Error)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Gateway-Upstream-Status",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "gateway_to_client",
+      "role": "gateway_diagnostic",
+      "edge_behavior": "Gateway-owned diagnostic response header, present only when the load balancer routed through its all-unhealthy fallback. A backend copy is stripped. Not authenticated.",
+      "values": {
+        "enum": [
+          "degraded"
+        ]
+      },
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "X_GATEWAY_UPSTREAM_STATUS_HEADER",
+            "GATEWAY_OWNED_DIAGNOSTIC_RESPONSE_HEADERS"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/load_balancing.md",
+          "sections": [
+            "X-Gateway-Upstream-Status"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Original-Content-Encoding",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "internal",
+      "role": "internal_marker",
+      "edge_behavior": "Internal compression-plugin marker for the pre-compression encoding. Never forwarded to a backend.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "BACKEND_REQUEST_STRIP_HEADER_NAMES"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Grpc-Web-Trailer-Names",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "internal",
+      "role": "internal_marker",
+      "edge_behavior": "Internal grpc_web response-header bridge for trailer-name provenance. Consumed and removed before the client-visible response; a backend copy is stripped.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/plugins/grpc_web.rs",
+          "symbols": [
+            "HEADER_GRPC_WEB_TRAILER_NAMES",
+            "HEADER_GRPC_WEB_SHADOWED_TRAILERS",
+            "HEADER_GRPC_WEB_ACCEPT_REJECTED"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "is_backend_response_strip_header"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Grpc-Web-Shadowed-Trailers",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "internal",
+      "role": "internal_marker",
+      "edge_behavior": "Internal grpc_web response-header bridge for shadowed trailer values. Consumed and removed before the client-visible response; a backend copy is stripped.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/plugins/grpc_web.rs",
+          "symbols": [
+            "HEADER_GRPC_WEB_TRAILER_NAMES",
+            "HEADER_GRPC_WEB_SHADOWED_TRAILERS",
+            "HEADER_GRPC_WEB_ACCEPT_REJECTED"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "is_backend_response_strip_header"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Grpc-Web-Accept-Rejected",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "internal",
+      "role": "internal_marker",
+      "edge_behavior": "Internal grpc_web response-header bridge for the plugin's own Accept-negotiation 406. Consumed and removed before the client-visible response; a backend copy is stripped.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/plugins/grpc_web.rs",
+          "symbols": [
+            "HEADER_GRPC_WEB_TRAILER_NAMES",
+            "HEADER_GRPC_WEB_SHADOWED_TRAILERS",
+            "HEADER_GRPC_WEB_ACCEPT_REJECTED"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "is_backend_response_strip_header"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Mesh-Protocol",
+      "match": "exact",
+      "surface": "mesh",
+      "direction": "peer_to_peer",
+      "role": "mesh_control",
+      "edge_behavior": "Optional HBONE CONNECT marker between Ferrum mesh peers (value hbone, or a datagram-over-HBONE value).",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/modes/mesh/hbone.rs"
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/mesh.md",
+          "sections": [
+            "HBONE Protocol"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Mesh-Tunnel-Reuse",
+      "match": "exact",
+      "surface": "mesh",
+      "direction": "peer_to_peer",
+      "role": "mesh_control",
+      "edge_behavior": "Stamped by a destination on the HBONE CONNECT 200 only while the admission fence holds that tunnel.",
+      "values": {
+        "enum": [
+          "fenced"
+        ]
+      },
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/modes/mesh/hbone.rs",
+          "symbols": [
+            "TUNNEL_REUSE_HEADER"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/mesh.md",
+          "sections": [
+            "HBONE Inner Application Connection Reuse"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Namespace",
+      "match": "exact",
+      "surface": "admin",
+      "direction": "client_to_gateway",
+      "role": "admin_request",
+      "edge_behavior": "Selects the namespace of an admin API request; absent means the default namespace ferrum. A routing selector, not an authorization boundary.",
+      "values": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+        "max_length": 254,
+        "default": "ferrum"
+      },
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "openapi.yaml",
+          "symbols": [
+            "components.parameters.XFerrumNamespace"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/admin_api.md"
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Provisioned-By",
+      "match": "exact",
+      "surface": "admin",
+      "direction": "client_to_gateway",
+      "role": "admin_request",
+      "edge_behavior": "Optional provisioning-client identifier. Fills an absent labels.provisioned-by on created resources. Must occur once, be nonblank, contain no control characters, and be at most 512 bytes; the value is trimmed. Grants no authority.",
+      "values": {
+        "vocabulary": "provisioned-by",
+        "field": "values"
+      },
+      "availability": "v0.9.5",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/admin/provisioning.rs",
+          "symbols": [
+            "PROVISIONED_BY_HEADER",
+            "provisioner"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "openapi.yaml",
+          "symbols": [
+            "components.parameters.ProvisionedBy"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/admin_api.md",
+          "sections": [
+            "Resource labels and application attribution"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Config-Cursor",
+      "match": "exact",
+      "surface": "admin",
+      "direction": "gateway_to_client",
+      "role": "admin_response",
+      "edge_behavior": "Covering live-apply cursor of a database-mode config mutation, as {topology_epoch}:{sequence} (issue #4139).",
+      "values": {
+        "pattern": "^[0-9]+:[0-9]+$"
+      },
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "openapi.yaml",
+          "symbols": [
+            "components.headers.X-Ferrum-Config-Cursor"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/admin_api.md"
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Namespace-Unserved",
+      "match": "exact",
+      "surface": "admin",
+      "direction": "gateway_to_client",
+      "role": "admin_response",
+      "edge_behavior": "Present with value true when an accepted mutation targeted a namespace this process's data plane does not route (issue #5447).",
+      "values": {
+        "enum": [
+          "true"
+        ]
+      },
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "openapi.yaml",
+          "symbols": [
+            "components.headers.X-Ferrum-Namespace-Unserved"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/admin_api.md"
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Notification-Severity",
+      "match": "exact",
+      "surface": "notification",
+      "direction": "gateway_to_recipient",
+      "role": "notification",
+      "edge_behavior": "Header on email notifications sent by the gateway.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/notifications/channels/email.rs"
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/notifications.md",
+          "sections": [
+            "Email (SMTP)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Notification-Event-Action",
+      "match": "exact",
+      "surface": "notification",
+      "direction": "gateway_to_recipient",
+      "role": "notification",
+      "edge_behavior": "Header on email notifications sent by the gateway.",
+      "availability": "v0.9.8",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "src/notifications/channels/email.rs"
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "v0.9.8",
+          "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+          "path": "docs/notifications.md",
+          "sections": [
+            "Email (SMTP)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Diagnostic-Ref",
+      "match": "exact",
+      "surface": "proxy",
+      "direction": "gateway_to_client",
+      "role": "gateway_diagnostic",
+      "edge_behavior": "Opaque gateway-minted diagnostic reference (fd1_<32 hex> or fd2_<8 hex>_<32 hex>), off by default (FERRUM_DIAGNOSTIC_REFS). Gateway-owned whatever the setting: backend and hook copies are stripped. Resolves via GET /diagnostics/v1/refs/{ref}; body is schemas/diagnostic-ref/v1.",
+      "values": {
+        "pattern": "^(fd1_[0-9a-f]{32}|fd2_[0-9a-f]{8}_[0-9a-f]{32})$"
+      },
+      "availability": "unreleased",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "main",
+          "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
+          "path": "src/proxy/headers.rs",
+          "symbols": [
+            "X_FERRUM_DIAGNOSTIC_REF_HEADER",
+            "GATEWAY_OWNED_DIAGNOSTIC_RESPONSE_HEADERS"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "main",
+          "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
+          "path": "docs/error_classification.md",
+          "sections": [
+            "Gateway diagnostic references"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "X-Ferrum-Diagnostic-Owner-Replica",
+      "match": "exact",
+      "surface": "admin",
+      "direction": "gateway_to_client",
+      "role": "admin_response",
+      "edge_behavior": "On a diagnostic-reference lookup 404 from a replica that did not mint an fd2_ reference, names the owning replica id, only for a caller that passed the scope and namespace checks.",
+      "values": {
+        "pattern": "^[0-9a-f]{8}$"
+      },
+      "availability": "unreleased",
+      "sources": [
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "main",
+          "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
+          "path": "src/diagnostic_ref.rs",
+          "symbols": [
+            "DIAGNOSTIC_REF_OWNER_REPLICA_HEADER"
+          ]
+        },
+        {
+          "repo": "ferrum-edge/ferrum-edge",
+          "ref": "main",
+          "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
+          "path": "openapi.yaml"
+        }
+      ]
+    }
+  ],
+  "main_branch_delta": {
+    "repo": "ferrum-edge/ferrum-edge",
+    "ref": "main",
+    "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
+    "summary": "Main adds X-Ferrum-Diagnostic-Ref to GATEWAY_OWNED_DIAGNOSTIC_RESPONSE_HEADERS (now three entries) and the admin response header X-Ferrum-Diagnostic-Owner-Replica (issues #5767, #5846). Both are listed here with availability unreleased."
+  }
+}

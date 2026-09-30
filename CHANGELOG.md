@@ -4,6 +4,15 @@
 
 ### Added
 
+- Diagnostics: vendor Ferrum contracts at `contracts-edge-0.9.8` and check
+  their SHA-256 pins, gateway vocabulary, gateway diagnostic headers,
+  DiagnosticFinding schema, and shared fixtures in the offline CI suite. The
+  0.9.8 catalog already included `request_timeout`, but its test list omitted
+  the eighth token. The test now checks that token for 0.9.8 while retaining
+  the seven-token vocabulary for the older catalogs.
+  The 0.9.5 and 0.9.7 catalogs remain release-specific. See
+  [ferrum-contracts.md](docs/ferrum-contracts.md) for the pin and update steps.
+
 - Desktop: a linked local file that a saved request names (for example one
   imported from another machine) can be repointed to where the file is on
   this device. When the file is not chosen yet, or is missing or changed,

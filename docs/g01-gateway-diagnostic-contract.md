@@ -1,10 +1,10 @@
-# G01 — Proposed gateway diagnostic contract (v1)
+# G01 — Gateway diagnostic contract (v1)
 
 | | |
 |---|---|
-| **Status** | Proposal (new work in Ferrum Edge). No released gateway implements it, so Anvil keeps "authorized diagnostic detail" explicitly unavailable. |
+| **Status** | Implemented in Ferrum Edge (ferrum-edge#5767, #5845). The public contract is implemented on Edge `main`; the reference header remains unreleased in v0.9.8. |
 | **Owner** | Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer. |
-| **Tracking** | ferrum-edge/ferrum-edge#5767 (this proposal), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
+| **Tracking** | ferrum-edge/ferrum-edge#5767, ferrum-edge/ferrum-edge#5845 (implementation), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
 | **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8), their statuses and bodies stay unchanged. |
 
 ## Problem
@@ -136,8 +136,9 @@ Already modelled in Anvil:
   least-privilege diagnostic credential, never an admin token.
 - Evidence source `gateway_detail` exists for authenticated gateway detail.
 
-Planned once a gateway ships the contract (not implemented; no fetch exists
-today):
+The Edge implementation provides the reference header and authenticated
+diagnostic lookup. Anvil currently models the access configuration and
+evidence source, but does not fetch diagnostic details yet:
 
 - When a response carries a ref **and** the destination matches a gateway
   profile with detail access, the user can ask Anvil to fetch the detail.
@@ -155,13 +156,14 @@ today):
 
 ## Rollout
 
-1. Gateway PR: header plus ring plus endpoint behind the default-off flag,
-   the tests above, and a docs page.
-2. Publish `outcomes.json` for that release so client catalogs stay in sync.
-   Anvil CI fails on catalog drift.
-3. Anvil ships a compatibility profile for the release (for example
-   `ferrum-edge-0.9.8`) and enables the detail fetch only for gateways that
-   advertise `diagnostics/v1` via `GET /diagnostics/v1/capabilities`.
+1. Edge implements and tests the header plus authenticated lookup (complete
+   on Edge `main`; see the tracking issues above).
+2. Publish the matching Edge release and contract vocabulary so compatibility
+   catalogs stay in sync. Anvil CI fails on drift from its pinned contract.
+3. Anvil can add detail fetching when a released Edge version exposes the
+   capability; it should only fetch for destinations with configured,
+   authenticated detail access.
 
-Until then, Anvil's answers remain honest about uncertainty. Stating "likely,
-with these alternatives" is the correct result, not a gap to hide.
+Until Anvil implements diagnostic-detail fetching, its answers remain honest
+about uncertainty. Stating "likely, with these alternatives" is the correct
+result, not a gap to hide.

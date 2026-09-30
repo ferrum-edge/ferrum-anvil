@@ -18,6 +18,8 @@ url.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+jsonschema.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

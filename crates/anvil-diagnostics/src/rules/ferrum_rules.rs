@@ -52,7 +52,8 @@ fn token_scope(t: &str) -> SourceScope {
         // capacity or response-phase policy rejections (live: UP-015,
         // GW-020 content guard). The token alone does not identify the leg.
         "backend_error" => SourceScope::Unknown,
-        _ => SourceScope::GatewayAdmission,
+        "circuit_breaker_open" | "overload" | "config_stale" | "concurrency_limit" => SourceScope::GatewayAdmission,
+        _ => SourceScope::Unknown,
     }
 }
 
@@ -64,7 +65,10 @@ fn token_owner(t: &str) -> Owner {
         // A slow client upload is the caller's, gateway processing and the
         // route's budget the operator's; the token cannot tell them apart.
         "request_timeout" => Owner::Unknown,
-        _ => Owner::GatewayOperator,
+        "connection_failure" | "backend_timeout" | "circuit_breaker_open" | "overload" | "config_stale" | "concurrency_limit" => {
+            Owner::GatewayOperator
+        }
+        _ => Owner::Unknown,
     }
 }
 
@@ -504,11 +508,48 @@ fn catalog_title(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{token_owner, token_scope};
     use crate::facts::{DiagnosticInput, FerrumTrust};
-    use anvil_domain::diagnostics::{Confidence, DiagnosticFinding};
+    use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Owner, SourceScope};
     use anvil_domain::execution::{BodyCapture, BodyCompleteness, HeaderEntry, ResponseRecord};
     use anvil_domain::outcome::ProtocolStatus;
     use anvil_domain::request::Protocol;
+
+    #[test]
+    fn token_scope_and_owner_cover_the_pinned_vocabulary() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/ferrum-contracts/vocabularies/gateway-errors.json"
+        ))
+        .expect("pinned gateway error vocabulary");
+        let tokens = contract["x_gateway_error_tokens"].as_array().expect("token list");
+        let expected: std::collections::BTreeSet<&str> = [
+            "connection_failure",
+            "backend_timeout",
+            "backend_error",
+            "circuit_breaker_open",
+            "overload",
+            "config_stale",
+            "concurrency_limit",
+            "request_timeout",
+        ]
+        .into_iter()
+        .collect();
+        let actual: std::collections::BTreeSet<&str> = tokens.iter().map(|token| token["token"].as_str().unwrap()).collect();
+        assert_eq!(actual, expected, "update the explicit scope/owner mappings for any vocabulary change");
+        for token in actual {
+            let expected_scope = match token {
+                "connection_failure" | "backend_timeout" => SourceScope::GatewayToUpstream,
+                "backend_error" => SourceScope::Unknown,
+                _ => SourceScope::GatewayAdmission,
+            };
+            let expected_owner = match token {
+                "backend_error" | "request_timeout" => Owner::Unknown,
+                _ => Owner::GatewayOperator,
+            };
+            assert_eq!(token_scope(token), expected_scope, "token_scope({token})");
+            assert_eq!(token_owner(token), expected_owner, "token_owner({token})");
+        }
+    }
 
     fn response(status: u16, content_type: &str, headers: &[(&str, &str)]) -> ResponseRecord {
         ResponseRecord {
