@@ -12,9 +12,12 @@ website are manual owner steps, taken only after the
    `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json` — and
    commit.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
-   Or run the workflow manually with the tag as input. A manual run without a
-   tag is a **dry run**: everything is built and checked and the evidence is
-   uploaded to the run, but no release is created.
+   Or run the workflow manually **from the tag** (Run workflow → *Use workflow
+   from* → Tags → `anvil-v0.1.0`), optionally with the same tag as input;
+   preflight refuses an input that is not the tag the run started from, or a
+   tag that does not exist. A manual run from a branch without a tag input is
+   a **dry run**: everything is built and checked and the evidence is uploaded
+   to the run, but nothing is signed and no release is created.
 4. Review the draft (checklist below), then publish it by hand.
 
 ## What the workflow does
@@ -35,10 +38,16 @@ version fields must agree; `cargo deny check`; `node scripts/licenses.mjs --chec
 Each build job:
 
 1. `tauri build --ci --target <t> --no-bundle` — release profile, **default
-   features only**, with no signing credentials in its environment. The `e2e`
-   feature (embedded WebDriver + environment-driven unlock) is never passed.
-   Then `tauri bundle --ci --target <t> --bundles <b>`, the only step that
-   receives the Apple, Windows and updater signing credentials. With the
+   features only**, with no signing credentials in its environment and no
+   Windows certificate imported yet. The `e2e` feature (embedded WebDriver +
+   environment-driven unlock) is never passed. Then, for a tagged release, the
+   Windows certificate is imported and `tauri bundle --ci --target <t>
+   --bundles <b>` runs as the only step that receives the Apple, Windows and
+   updater signing credentials; the certificate is removed afterwards. This is
+   defense in depth, not isolation: both steps share the runner, and bundling
+   itself runs third-party tools (the AppImage bundler downloads unpinned
+   `linuxdeploy` tools while the key is present). Signing the updater artifacts
+   in a separate job with `tauri signer sign` would be stronger. With the
    owner's updater key a tagged release also writes signed updater artifacts
    (see [In-app updates](#in-app-updates)).
 2. `cargo build --release -p anvil-cli --target <t>`, packaged as
@@ -126,7 +135,9 @@ that could not be inspected (never reported as a pass).
 ## Signing and what "unsigned" means
 
 Code signing needs the owner's certificates, which are **not** in the
-repository. The workflow signs only when the corresponding secrets exist:
+repository. The workflow signs only a tagged release, and only when the
+corresponding secrets exist; a dry run is always unsigned. Store these secrets
+in the protected `release` environment (see [In-app updates](#in-app-updates)):
 
 | Platform | Secrets | Effect |
 | --- | --- | --- |
@@ -168,11 +179,13 @@ compiled in and the Upgrade button opens the GitHub release page instead.
 
 **Protecting the key.** The build job of a tagged release runs in the GitHub
 environment `release`; a dry run runs in none, and the workflow also withholds
-the key from any run without a tag. The owner must:
+the key (and the Apple and Windows credentials) from any run without a tag.
+The owner must:
 
 - create the `release` environment with required reviewers and a deployment
-  rule that allows only `anvil-v*` tags, and store the two secrets there
-  (not as repository secrets);
+  rule of **Ref type: Tag**, pattern `anvil-v*`, and store the two updater
+  secrets there, together with the Apple and Windows signing secrets (not as
+  repository secrets);
 - add a tag ruleset for `anvil-v*` that restricts who can create, update or
   delete those tags.
 
@@ -180,9 +193,11 @@ Only a tagged release with both the private key and `ANVIL_UPDATER_PUBKEY`
 passes `bundle.createUpdaterArtifacts: true` and `plugins.updater.pubkey` as an
 extra `--config` (to the build, which compiles the key into the app, and to
 the bundle step); one without the other logs a warning and builds exactly as
-without a key. The private key is in the environment of `tauri bundle` only,
-not of the compile step (build scripts, proc macros, `beforeBuildCommand`).
-`build-info.json` records the compiled-in public key. Tauri then signs
+without a key. As defense in depth, the private key is in the environment of
+`tauri bundle` only, not of the compile step (build scripts, proc macros,
+`beforeBuildCommand`); both share the runner, so this narrows exposure rather
+than isolating the key. The build job checks that the public key is in the
+built app binary and `build-info.json` records it (`updater.embedded`). Tauri then signs
 (minisign), recording the version in each signature's trusted comment:
 
 | Target | Updater file | `latest.json` keys |

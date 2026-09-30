@@ -122,6 +122,7 @@ export function builtPubkey(targets) {
     const u = t.info.updater;
     if (!u?.configured) continue;
     if (!u.pubkey) throw new Error(`${t.target}: built with the updater key but build-info.json records no public key`);
+    if (u.embedded !== true) throw new Error(`${t.target}: the updater public key was not found in the built app`);
     keys.add(String(u.pubkey).trim());
   }
   if (keys.size > 1) throw new Error("targets were built with different updater public keys");
@@ -171,9 +172,11 @@ function main() {
   }
   const platforms = {};
   let count = 0;
-  for (const { dir, target } of targets) {
+  for (const { dir, target, info } of targets) {
     for (const s of unpairedSignatures(dir)) errors.push(`${target}: ${s} has no matching artifact`);
-    for (const a of updaterArtifacts(dir, target)) {
+    const artifacts = updaterArtifacts(dir, target);
+    if (info.updater?.configured && artifacts.length === 0) errors.push(`${target}: built with the updater key but no signed updater artifact`);
+    for (const a of artifacts) {
       count++;
       if (!pubkey) continue;
       const signature = readFileSync(join(dir, a.sig), "utf8").trim();
@@ -191,6 +194,7 @@ function main() {
     }
   }
   if (count === 0 && errors.length === 0) {
+    // Nothing configured and nothing signed.
     console.log("no updater artifacts (owner updater key not configured); latest.json not written");
     return;
   }
