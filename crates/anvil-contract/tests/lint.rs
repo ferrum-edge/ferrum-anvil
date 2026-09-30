@@ -4,14 +4,17 @@ use anvil_contract::{LintOptions, LintReport, RuleSet, Severity, Spec, lint};
 use serde_json::json;
 use std::collections::BTreeSet;
 
-const ACME: &str = include_str!("../../../samples/api-standards/acme-api-standards.yaml");
+const ACME_RAW: &str = include_str!("../../../samples/api-standards/acme-api-standards.yaml");
 
+/// A fixture with `\n` line endings whatever the checkout's (Windows checks
+/// out CRLF): tests edit fixtures by string replacement. CRLF sources are
+/// covered by `crlf_sources_lint_like_lf`.
 fn fixture(name: &str) -> String {
-    std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap().replace("\r\n", "\n")
 }
 
 fn acme() -> RuleSet {
-    RuleSet::load(&[("acme-api-standards.yaml".into(), ACME.as_bytes().to_vec())]).unwrap()
+    RuleSet::load(&[("acme-api-standards.yaml".into(), ACME_RAW.replace("\r\n", "\n").into_bytes())]).unwrap()
 }
 
 fn run(text: &str, rules: &RuleSet) -> LintReport {
@@ -385,4 +388,28 @@ fn inherited_security_is_gathered_once() {
     assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
     assert_eq!(r.skipped_operations, 0);
     assert!(!r.findings.iter().any(|f| f.rule == "operation-security-defined"));
+}
+
+/// Specs and rulesets saved with CRLF line endings (Windows editors) lint
+/// exactly like LF ones: same findings, same lines and columns.
+#[test]
+fn crlf_sources_lint_like_lf() {
+    let acme_crlf = RuleSet::load(&[("acme.yaml".into(), ACME_RAW.replace("\r\n", "\n").replace('\n', "\r\n").into_bytes())]).unwrap();
+    for f in ["orders-2.0.json", "orders-3.0.yaml", "orders-3.1.yaml", "orders-3.2.yaml"] {
+        let lf = fixture(f);
+        let crlf = lf.replace('\n', "\r\n");
+        let a = run(&lf, &acme());
+        let b = run(&crlf, &acme_crlf);
+        let key = |r: &LintReport| {
+            r.findings.iter().map(|x| (x.rule.clone(), x.message.clone(), x.pointer.clone(), x.line, x.column)).collect::<Vec<_>>()
+        };
+        assert_eq!(key(&a), key(&b), "{f}");
+        assert!(!a.findings.is_empty());
+    }
+    // A block scalar, quoted keys and a flow mapping with CRLF.
+    let text = "openapi: 3.1.0\r\ninfo:\r\n  title: t\r\n  version: '1'\r\n  description: |\r\n    Multi\r\n    line\r\npaths:\r\n  '/a/{id}':\r\n    get: { responses: { '200': { description: ok } } }\r\n";
+    let r = run(text, &RuleSet::recommended());
+    let f = r.findings.iter().find(|f| f.rule == "path-params-declared").unwrap();
+    assert_eq!((f.line, f.column), (Some(10), Some(5)));
+    assert!(!r.findings.iter().any(|f| f.rule == "info-description"));
 }
