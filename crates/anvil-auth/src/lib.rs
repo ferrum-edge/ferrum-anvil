@@ -481,6 +481,10 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
                 if trimmed != assertion.as_str() {
                     out.secrets.push(trimmed.to_string());
                 }
+                let escaped = wsse::xml_escape(trimmed);
+                if escaped != trimmed {
+                    out.secrets.push(escaped);
+                }
             }
             out.body = Some(body);
         }
@@ -527,7 +531,13 @@ mod tests {
         let escaped = wsse::xml_escape(password);
         assert!(body.contains(assertion), "the assertion is not embedded as it is sent");
         assert!(body.contains(&escaped), "the password is not sent XML-escaped");
-        for (what, form) in [("trimmed assertion", assertion), ("escaped password", escaped.as_str()), ("password", password)] {
+        let escaped_assertion = wsse::xml_escape(assertion);
+        for (what, form) in [
+            ("trimmed assertion", assertion),
+            ("XML-escaped assertion", escaped_assertion.as_str()),
+            ("escaped password", escaped.as_str()),
+            ("password", password),
+        ] {
             assert!(applied.secrets.iter().any(|s| s == form), "the {what} is not registered for redaction");
         }
         // Every secret sent in the body is covered by one registered form.

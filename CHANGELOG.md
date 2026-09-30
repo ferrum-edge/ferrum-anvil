@@ -792,7 +792,11 @@
   value is scrubbed before it is split, so a secret that spans a `;`, `=`
   or space is replaced whole; a header value marked sensitive as a whole
   (scheme included) is now shown as `‹redacted›` without its scheme.
-  History recorded before this change is not rewritten.
+  Mixed and double percent-encoded secret echoes in `Set-Cookie` Path and
+  Domain attributes are redacted too. A `Set-Cookie` whose name contains a
+  secret used by that execution is not kept in the workspace cookie jar, so
+  it cannot appear in a later request's `Cookie` header or notes. History
+  recorded before this change is not rewritten.
   (GHSA-vvjj-4xxf-966f)
 - gRPC metadata marked sensitive is now redacted by name and by value, like
   a request header marked sensitive, in the effective-request preview, the

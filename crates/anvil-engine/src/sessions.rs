@@ -1828,13 +1828,6 @@ async fn run_prepared(
     workload: Option<WorkloadApiEvidence>,
 ) -> ExecutionOutput {
     let out = run_plan(&prep.plan, &events, &cancel, commands).await;
-    // The handshake responses' cookies, kept in the workspace jar unless the
-    // engine was locked or the workspace deleted since the execution started.
-    if let Some(c) = &prep.cookies {
-        for r in out.attempts.iter().filter_map(|a| a.response.as_ref()) {
-            c.jars.store(c.epoch, &c.isolation, &c.target, r);
-        }
-    }
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
     redactor.refresh_used_secrets(resolver);
@@ -1846,6 +1839,12 @@ async fn run_prepared(
             redactor.add_secret(s);
         }
     }
+    let skipped_secret_cookie_name = prep.cookies.as_ref().is_some_and(|c| {
+        out.attempts
+            .iter()
+            .filter_map(|a| a.response.as_ref())
+            .fold(false, |skipped, r| c.jars.store(c.epoch, &c.isolation, &c.target, r, &redactor) || skipped)
+    });
     // A call signed once server reflection resolved its schema, or the last
     // send of an event stream: the request as it was signed and sent.
     let (headers, body, auth_facts) = match prep.resigned.as_ref().and_then(|s| s.lock().take()) {
@@ -1874,6 +1873,9 @@ async fn run_prepared(
         }
     }
     let mut inferred = prep.inferred;
+    if skipped_secret_cookie_name && !inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE) {
+        inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
+    }
     inferred.extend(out.facts.notes.iter().cloned());
     if let Some(d) = &out.facts.grpc_status_details {
         inferred.push(format!("grpc-status-details-bin: {d}"));

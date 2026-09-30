@@ -294,7 +294,7 @@ fn authorization_endpoint_evidence_is_redacted_as_a_url() {
 /// of known secrets too, so the stored record (which a history export
 /// serializes as it is) does not hold it.
 #[tokio::test]
-async fn a_secret_echoed_into_a_set_cookie_name_is_redacted_in_the_record() {
+async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar() {
     anvil_transport::init();
     anvil_fixtures::init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
@@ -302,13 +302,31 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_redacted_in_the_record() {
     let mut c = ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/set-cookie?name={{reflected}}&value=ordinary")));
     let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true }];
     c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
-    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let engine = Engine::new();
+    let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
     let record = serde_json::to_string(&o.record).unwrap();
-    assert!(!record.contains(secret), "the stored record holds the echoed secret");
+    assert!(!record.contains(secret), "the first stored record holds the echoed secret");
+    assert!(o
+        .record
+        .prepared
+        .inferred
+        .iter()
+        .any(|n| n == "a response cookie was not stored because its name contains a request secret"));
     let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
     let r = o.record.response.as_ref().unwrap_or_else(|| panic!("no response: {failure:?}"));
     assert_eq!(r.status, 200);
     let set_cookie: Vec<&str> = r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("set-cookie")).map(|h| h.value.as_str()).collect();
     // The attributes without a secret in them are kept.
     assert_eq!(set_cookie, vec![format!("{REDACTED}={REDACTED}; Path=/; HttpOnly")]);
+
+    let second = engine
+        .execute(
+            &ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo"))),
+            EventCtx::none(),
+            CancellationToken::new(),
+        )
+        .await;
+    let second_record = serde_json::to_string(&second.record).unwrap();
+    assert!(!second_record.contains(secret), "the second record contains a cookie named with the first execution's secret");
+    assert!(second.record.prepared.inferred.iter().all(|note| !note.contains(secret)));
 }

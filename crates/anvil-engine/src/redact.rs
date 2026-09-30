@@ -282,7 +282,7 @@ impl Redactor {
             if lower == "set-cookie" {
                 return match value.split_once('=') {
                     Some((k, rest)) => {
-                        let attrs = rest.split_once(';').map(|(_, a)| format!(";{a}")).unwrap_or_default();
+                        let attrs = rest.split_once(';').map(|(_, a)| format!(";{}", self.set_cookie_attrs(a))).unwrap_or_default();
                         format!("{}={REDACTED}{attrs}", k.trim())
                     }
                     None => REDACTED.to_string(),
@@ -300,6 +300,21 @@ impl Redactor {
             return self.refresh(value);
         }
         self.text(value)
+    }
+
+    fn set_cookie_attrs(&self, attrs: &str) -> String {
+        attrs
+            .split(';')
+            .map(|attr| match attr.split_once('=') {
+                Some((name, value))
+                    if matches!(name.trim().to_ascii_lowercase().as_str(), "path" | "domain") && self.hides_secret(value.trim()) =>
+                {
+                    format!("{name}={REDACTED}")
+                }
+                _ => attr.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(";")
     }
 
     /// `Link` (RFC 8288): every `<URI-reference>` is redacted as a URL, and so
@@ -735,6 +750,16 @@ mod tests {
         assert_eq!(r.header("Set-Cookie", "sid=abc; Path=/app; HttpOnly"), format!("sid={REDACTED}; Path=/app; HttpOnly"));
         assert_eq!(r.header("Cookie", "a=1; b=2"), format!("a={REDACTED}; b={REDACTED}"));
         assert_eq!(r.header("Authorization", "Bearer abc.def"), format!("Bearer {REDACTED}"));
+
+        let r = Redactor::new(vec!["encoded-cookie-secret-7q2m".into()], vec![]);
+        assert_eq!(
+            r.header("Set-Cookie", "sid=x; Path=/mixed/encoded%2dcookie-secret-7q2m; HttpOnly"),
+            format!("sid={REDACTED}; Path={REDACTED}; HttpOnly")
+        );
+        assert_eq!(
+            r.header("Set-Cookie", "sid=x; Domain=encoded%252dcookie-secret-7q2m.example; Secure"),
+            format!("sid={REDACTED}; Domain={REDACTED}; Secure")
+        );
     }
 
     #[test]
