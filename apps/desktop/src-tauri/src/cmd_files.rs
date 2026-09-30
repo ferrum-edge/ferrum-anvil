@@ -227,6 +227,7 @@ fn title(purpose: FilePurpose) -> &'static str {
         FilePurpose::LoadReportExport => "Export the load report",
         FilePurpose::RunReportExport => "Export the run report",
         FilePurpose::LintReportExport => "Export the standards report",
+        FilePurpose::SpecRevisionExport => "Save the revised description",
         FilePurpose::JwtSvidFile => "Choose the JWT-SVID token file",
         FilePurpose::LinkedFile => "Choose the linked file on this device",
         FilePurpose::LinkedFileRelocate => "Choose the linked file's new location on this device",

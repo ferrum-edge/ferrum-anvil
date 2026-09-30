@@ -1,0 +1,571 @@
+//! Contract drift across dialects: observed traffic is routed and checked,
+//! grouped into findings with suggestions, and applying the suggestions
+//! resolves the drift they cover (the loop: observe, revise, check again).
+
+use anvil_contract::drift::{DriftKind, SuggestionKind};
+use anvil_contract::observe::{ObservedBody, ObservedResponse};
+use anvil_contract::{DriftOptions, DriftReport, Observation, Spec, analyze, revise};
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
+
+/// A fixture with `\n` line endings whatever the checkout's (Windows checks
+/// out CRLF): tests edit fixtures by string replacement.
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap().replace("\r\n", "\n")
+}
+
+struct Obs(Observation);
+
+impl Obs {
+    fn new(id: &str, method: &str, url: &str) -> Obs {
+        Obs(Observation {
+            id: id.into(),
+            at: None,
+            method: method.into(),
+            url: url.into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: anvil_contract::observe::query_names(url),
+            request_headers: vec!["x-tenant".into()],
+            response: None,
+            latency_ms: Some(20.0),
+        })
+    }
+    fn json(mut self, status: u16, body: Value) -> Obs {
+        let bytes = body.to_string().len() as u64;
+        self.0.response = Some(ObservedResponse {
+            status,
+            content_type: Some("application/json".into()),
+            headers: vec!["content-type".into(), "etag".into()],
+            bytes: Some(bytes),
+            body: ObservedBody::Json(body),
+        });
+        self
+    }
+    fn typed(mut self, status: u16, ct: &str, body: Value) -> Obs {
+        self = self.json(status, body);
+        self.0.response.as_mut().unwrap().content_type = Some(ct.into());
+        self
+    }
+    fn empty(mut self, status: u16) -> Obs {
+        self.0.response = Some(ObservedResponse { status, content_type: None, headers: vec![], bytes: Some(0), body: ObservedBody::Empty });
+        self
+    }
+    fn other(mut self, status: u16, ct: &str) -> Obs {
+        self.0.response = Some(ObservedResponse {
+            status,
+            content_type: Some(ct.into()),
+            headers: vec!["etag".into()],
+            bytes: Some(6),
+            body: ObservedBody::Other,
+        });
+        self
+    }
+    fn latency(mut self, ms: f64) -> Obs {
+        self.0.latency_ms = Some(ms);
+        self
+    }
+    fn size(mut self, n: u64) -> Obs {
+        self.0.response.as_mut().unwrap().bytes = Some(n);
+        self
+    }
+    fn no_headers(mut self) -> Obs {
+        self.0.request_headers.clear();
+        if let Some(r) = self.0.response.as_mut() {
+            r.headers.retain(|h| h != "etag");
+        }
+        self
+    }
+    fn body(mut self, ct: &str, n: u64) -> Obs {
+        self.0.request_content_type = Some(ct.into());
+        self.0.request_bytes = n;
+        self
+    }
+}
+
+const API: &str = "https://shop.example/api";
+
+fn traffic() -> Vec<Observation> {
+    vec![
+        Obs::new("1", "GET", &format!("{API}/orders?limit=5&cursor=abc"))
+            .json(200, json!([{"id": 1, "total": 10, "status": "open", "discount": 2.5}])),
+        Obs::new("2", "GET", &format!("{API}/orders/7"))
+            .json(200, json!({"id": 7, "total": 12.5, "status": "refunded", "note": null}))
+            .latency(250.0)
+            .size(3000),
+        Obs::new("3", "GET", &format!("{API}/orders/8"))
+            .typed(404, "application/problem+json", json!({"title": "no such order"}))
+            .no_headers(),
+        Obs::new("4", "GET", &format!("{API}/orders/9")).json(200, json!({"id": 9, "total": 3, "status": "open"})).no_headers(),
+        Obs::new("5", "POST", &format!("{API}/orders"))
+            .body("application/xml", 30)
+            .json(201, json!({"id": 10, "total": 1, "status": "open"})),
+        Obs::new("6", "GET", &format!("{API}/orders/10")).other(200, "text/html"),
+        Obs::new("7", "GET", &format!("{API}/customers/42")).json(200, json!({"name": "Ada", "since": "2026-09-30"})),
+        Obs::new("8", "PATCH", &format!("{API}/orders/3")).json(200, json!({"id": 3, "total": 1, "status": "paid"})),
+        Obs::new("9", "DELETE", &format!("{API}/orders/3")).empty(204),
+        Obs::new("10", "OPTIONS", &format!("{API}/orders")).empty(204),
+        Obs::new("11", "GET", "https://staging.shop.example/api/orders").json(200, json!([])),
+        Obs::new("12", "POST", &format!("{API}/orders")).body("application/json", 20).json(201, json!({"id": 11, "status": "open"})),
+        Obs::new("13", "GET", &format!("{API}/orders")),
+    ]
+    .into_iter()
+    .map(|o| o.0)
+    .collect()
+}
+
+fn kinds(r: &DriftReport) -> BTreeSet<DriftKind> {
+    r.findings.iter().map(|f| f.kind).collect()
+}
+
+fn find<'a>(r: &'a DriftReport, kind: DriftKind, needle: &str) -> &'a anvil_contract::DriftFinding {
+    r.findings
+        .iter()
+        .find(|f| f.kind == kind && f.message.contains(needle))
+        .unwrap_or_else(|| panic!("no {kind:?} with {needle:?} in {:#?}", r.findings))
+}
+
+#[test]
+fn traffic_is_checked_the_same_way_in_every_dialect() {
+    for f in ["shop-3.1.yaml", "shop-3.0.yaml", "shop-3.2.yaml", "shop-2.0.json"] {
+        let spec = Spec::parse(fixture(f).as_bytes()).unwrap();
+        let r = analyze(&spec, &traffic(), &DriftOptions::default());
+        let swagger = f.contains("2.0");
+        assert_eq!((r.observations, r.ignored, r.without_response), (13, 1, 1), "{f}");
+        assert_eq!(r.matched, 10, "{f}: {:#?}", r.findings);
+
+        find(&r, DriftKind::UndeclaredQueryParameter, "`cursor`");
+        find(&r, DriftKind::SlowerThanDeclared, "100 ms budget in 1 of");
+        find(&r, DriftKind::ResponseLargerThanDeclared, "2000-byte budget");
+        find(&r, DriftKind::MissingRequiredParameter, "header parameter `X-Tenant`");
+        find(&r, DriftKind::UndeclaredStatus, "GET /orders/{id} returned 404");
+        find(&r, DriftKind::UndeclaredRequestContentType, "application/xml");
+        find(&r, DriftKind::UndeclaredContentType, "was text/html");
+        find(&r, DriftKind::UndeclaredPath, "GET /customers/{customerId}");
+        find(&r, DriftKind::UndeclaredMethod, "PATCH is called on /orders/{id}");
+        find(&r, DriftKind::DeprecatedOperationCalled, "DELETE /orders/{id}");
+        find(&r, DriftKind::UndeclaredServer, "https://staging.shop.example");
+        let schema: Vec<&str> =
+            r.findings.iter().filter(|x| x.kind == DriftKind::ResponseSchemaMismatch).map(|x| x.message.as_str()).collect();
+        for needle in [
+            "`/total` is number, expected integer",
+            "`/status` is not one of the declared values",
+            "`/note` is null",
+            "missing required property `total`",
+        ] {
+            assert!(schema.iter().any(|m| m.contains(needle)), "{f}: {needle} not in {schema:#?}");
+        }
+        if !swagger {
+            find(&r, DriftKind::MissingResponseHeader, "`ETag`");
+        }
+        // No observed value leaks into a message, except the enum token in its suggestion.
+        let text = serde_json::to_string(&r.findings).unwrap();
+        for secret in ["no such order", "Ada", "abc"] {
+            assert!(!text.contains(secret), "{f}: {secret}");
+        }
+
+        // Suggestions: additions are recommended, relaxations are not.
+        let titles: Vec<(&str, SuggestionKind, bool)> = r.suggestions.iter().map(|s| (s.title.as_str(), s.kind, s.recommended)).collect();
+        for (needle, kind) in [
+            ("Document the 404 response of GET /orders/{id}", SuggestionKind::Addition),
+            ("Document property `discount` of Order", SuggestionKind::Addition),
+            ("Document query parameter `cursor`", SuggestionKind::Addition),
+            ("Document GET /customers/{customerId}", SuggestionKind::Addition),
+            ("Document PATCH /orders/{id}", SuggestionKind::Addition),
+            ("Document text/html for the 200 response", SuggestionKind::Addition),
+            ("Document the application/xml request body", SuggestionKind::Addition),
+            ("Allow null at Order.note", SuggestionKind::Relaxation),
+            ("Allow fractional numbers at Order.total", SuggestionKind::Relaxation),
+            ("Add `refunded` to the values of Order.status", SuggestionKind::Relaxation),
+            ("Make `total` optional in Order", SuggestionKind::Relaxation),
+            ("Raise the latency budget of GET /orders/{id} to 250 ms", SuggestionKind::Relaxation),
+        ] {
+            let s = titles
+                .iter()
+                .find(|(t, _, _)| t.contains(needle))
+                .unwrap_or_else(|| panic!("{f}: no suggestion {needle:?} in {titles:#?}"));
+            assert_eq!((s.1, s.2), (kind, kind == SuggestionKind::Addition), "{f}: {needle}");
+        }
+        // Findings point at their own suggestions only.
+        let null = r.suggestions.iter().find(|s| s.title.starts_with("Allow null")).unwrap();
+        let note = r.findings.iter().find(|x| x.kind == DriftKind::ResponseSchemaMismatch && x.message.contains("`/note`")).unwrap();
+        assert_eq!(note.suggestions, std::slice::from_ref(&null.id), "{f}");
+        let s404 = r.suggestions.iter().find(|s| s.title.starts_with("Document the 404")).unwrap();
+        assert!(find(&r, DriftKind::UndeclaredStatus, "404").suggestions.contains(&s404.id));
+        // The inferred 404 schema keeps the shape only.
+        assert!(s404.snippet.contains("title") && !s404.snippet.contains("no such order"), "{}", s404.snippet);
+        if swagger {
+            assert!(s404.ops.iter().any(|o| o.path.ends_with("/produces")), "{f}: 2.0 declares media types in produces");
+        } else {
+            assert!(s404.snippet.contains("application/problem+json"), "{}", s404.snippet);
+        }
+        // Coverage lists every operation, called or not.
+        let get = r.operations.iter().find(|o| o.operation == "GET /orders/{id}").unwrap();
+        assert_eq!(get.calls, 4);
+        assert_eq!(get.budget.max_latency_ms, Some(100.0));
+        assert_eq!(get.statuses.get("404"), Some(&1));
+        assert!(r.undeclared.iter().any(|u| u.method == "GET" && u.path == "/customers/{customerId}" && u.calls == 1));
+        // A fix is linked to the finding of its own category and place.
+        let optional = r.suggestions.iter().find(|s| s.title.starts_with("Make `total` optional")).unwrap();
+        assert_eq!(
+            find(&r, DriftKind::ResponseSchemaMismatch, "required property `total`").suggestions,
+            std::slice::from_ref(&optional.id),
+            "{f}"
+        );
+        let size = r.suggestions.iter().find(|s| s.title == "Raise the response size budget of GET /orders/{id} to 5000 bytes").unwrap();
+        assert!(!size.recommended);
+        assert_eq!(find(&r, DriftKind::ResponseLargerThanDeclared, "2000-byte").suggestions, std::slice::from_ref(&size.id));
+    }
+}
+
+#[test]
+fn applying_the_suggestions_resolves_the_drift_they_cover() {
+    for f in ["shop-3.1.yaml", "shop-3.0.yaml", "shop-3.2.yaml", "shop-2.0.json"] {
+        let spec = Spec::parse(fixture(f).as_bytes()).unwrap();
+        let r = analyze(&spec, &traffic(), &DriftOptions::default());
+        let all: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+        let rev = revise(&spec, &r, &all);
+        assert!(rev.skipped.is_empty(), "{f}: {:?}", rev.skipped);
+        // The revision parses in the original syntax, and so does its JSON Patch.
+        // A CRLF copy of the description revises to the same document.
+        let crlf = Spec::parse(fixture(f).replace('\n', "\r\n").as_bytes()).unwrap();
+        let crlf_report = analyze(&crlf, &traffic(), &DriftOptions::default());
+        let crlf_ids: Vec<String> = crlf_report.suggestions.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(revise(&crlf, &crlf_report, &crlf_ids).json_patch, rev.json_patch, "{f}");
+        // Suggestion ids name the change on this description: another source text, other ids.
+        assert!(crlf_ids.iter().all(|id| !all.contains(id)), "{f}");
+        let revised = Spec::parse(rev.text.as_bytes()).unwrap_or_else(|e| panic!("{f}: {e}\n{}", rev.text));
+        assert_eq!(revised.syntax, spec.syntax);
+        assert!(!rev.json_patch.is_empty());
+        // Every declared-contract gap is gone; what is left is the client's or
+        // the API's to fix, not the description's.
+        let again = analyze(&revised, &traffic(), &DriftOptions::default());
+        let mut left = kinds(&again);
+        for k in [DriftKind::MissingRequiredParameter, DriftKind::MissingResponseHeader, DriftKind::DeprecatedOperationCalled] {
+            left.remove(&k);
+        }
+        if f.contains("2.0") {
+            // Swagger 2.0 has one host: another server cannot be declared.
+            left.remove(&DriftKind::UndeclaredServer);
+        }
+        assert!(left.is_empty(), "{f}: still {left:?}\n{:#?}", again.findings);
+        // The lint of the revision still loads and runs.
+        let lint = anvil_contract::lint(&revised, &anvil_contract::RuleSet::recommended(), &Default::default());
+        assert!(lint.spec.operations >= 6, "{f}: {}", lint.spec.operations);
+    }
+}
+
+#[test]
+fn only_recommended_suggestions_leave_relaxations_open() {
+    let spec = Spec::parse(fixture("shop-3.1.yaml").as_bytes()).unwrap();
+    let r = analyze(&spec, &traffic(), &DriftOptions::default());
+    let recommended: Vec<String> = r.suggestions.iter().filter(|s| s.recommended).map(|s| s.id.clone()).collect();
+    let rev = revise(&spec, &r, &recommended);
+    let again = analyze(&Spec::parse(rev.text.as_bytes()).unwrap(), &traffic(), &DriftOptions::default());
+    let k = kinds(&again);
+    assert!(k.contains(&DriftKind::ResponseSchemaMismatch) && k.contains(&DriftKind::SlowerThanDeclared));
+    assert!(!k.contains(&DriftKind::UndeclaredStatus) && !k.contains(&DriftKind::UndeclaredPath));
+    // An unknown id is reported, not applied.
+    let rev = revise(&spec, &r, &["nope".to_string()]);
+    assert_eq!(rev.skipped, ["nope"]);
+    assert_eq!(rev.json_patch, Vec::<Value>::new());
+    // The digest names the revision: same choice, same digest.
+    let a = revise(&spec, &r, &recommended);
+    assert_eq!(a.digest, revise(&spec, &r, &recommended).digest);
+    assert_ne!(a.digest, revise(&spec, &r, &recommended[1..]).digest);
+    assert_ne!(a.digest, rev.digest);
+}
+
+fn titles_of(r: &DriftReport) -> Vec<String> {
+    r.suggestions.iter().map(|s| s.title.clone()).collect()
+}
+
+const STRICT: &str = r#"{"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "servers": [{"url": "https://api.example/v1"}],
+  "paths": {"/accounts/{id}": {"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+    "type": "object", "additionalProperties": false, "required": ["id"],
+    "properties": {"id": {"type": "string"}, "prefs": {"type": "object"},
+      "limits": {"type": "object", "additionalProperties": {"type": "object", "required": ["max"], "properties": {"max": {"type": "integer"}}}}}}}}}}}}}}"#;
+
+#[test]
+fn observed_values_never_reach_findings_suggestions_or_revisions() {
+    let spec = Spec::parse(STRICT.as_bytes()).unwrap();
+    // A token-shaped segment, assembled at run time so secret scanners do
+    // not flag the fixture.
+    let jwt = ["eyJhbGciOi", "JIUzI1NiJ9", ".", "eyJzdWIiOi", "JqYW5lIn0", ".", "c2lnbmF0dXJl"].concat();
+    let obs: Vec<Observation> = vec![
+        // Undeclared paths with a token, an email and a mixed-case id in them.
+        Obs::new("1", "GET", &format!("https://gw.example/Tenant-XY/v1/sessions/{jwt}?x9f3k2a8b1=1&page=2")).json(200, json!({})),
+        Obs::new("2", "GET", "https://api.example/v1/users/jane.doe@example.com/devices/AbCdEf").json(
+            200,
+            // A map keyed by emails, under an undeclared status.
+            json!({"jane.doe@example.com": {"seen": 3}, "john@example.com": {"seen": 1}}),
+        ),
+        // Undeclared keys that look like data, a map, a free-form object.
+        Obs::new("3", "GET", "https://api.example/v1/accounts/1").json(
+            200,
+            json!({"id": "1", "jane.doe@example.com": true, "token_9f8e7d6c": 1,
+                   "prefs": {"acct-771234": true}, "limits": {"u_998877": {"max": 1.5}, "x": {}}}),
+        ),
+        Obs::new("4", "PROPFIND", "https://api.example/v1/accounts/2").json(207, json!({"k@example.com": 1})),
+        Obs::new("5", "GET /x HTTP/1.1", "https://api.example/v1/accounts/3").empty(204),
+    ]
+    .into_iter()
+    .map(|o| o.0)
+    .collect();
+    for text in [STRICT.to_string(), STRICT.replace("3.1.0", "3.2.0")] {
+        let spec32 = Spec::parse(text.as_bytes()).unwrap();
+        let r = analyze(&spec32, &obs, &DriftOptions::default());
+        let all: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+        let rev = revise(&spec32, &r, &all);
+        let everything = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            serde_json::to_string(&r.findings).unwrap(),
+            serde_json::to_string(&r.suggestions).unwrap(),
+            serde_json::to_string(&r.undeclared).unwrap(),
+            serde_json::to_string(&r.notes).unwrap(),
+            rev.text
+        );
+        for secret in ["eyJ", "jane", "john", "example.com", "AbCdEf", "Tenant", "XY", "9f8e7d6c", "771234", "998877", "x9f3k2a8b1", "k@"] {
+            assert!(!everything.contains(secret), "{secret} leaked:\n{everything}");
+        }
+        // Map keys become `*`; the undeclared keys that are names are named.
+        find(&r, DriftKind::ResponseSchemaMismatch, "`/limits/*/max` is number");
+        find(&r, DriftKind::ResponseSchemaMismatch, "the body has undeclared properties");
+        assert!(r.undeclared.iter().any(|u| u.path == "/sessions/{sessionId}"), "{:#?}", r.undeclared);
+        let sessions = r.suggestions.iter().find(|s| s.title == "Document GET /sessions/{sessionId}").unwrap();
+        assert!(sessions.detail.contains("The prefix /{id}/v1 is not a declared server path"), "{}", sessions.detail);
+        assert!(titles_of(&r).contains(&"Declare the server https://gw.example".to_string()), "{:#?}", titles_of(&r));
+        assert!(titles_of(&r).contains(&"Make `max` optional in the 200 response of GET /accounts/{id}.limits.*".to_string()));
+        assert!(r.undeclared.iter().any(|u| u.path == "/users/{userId}/devices/{deviceId}"), "{:#?}", r.undeclared);
+        assert!(r.undeclared.iter().any(|u| u.method == "(invalid method)"), "{:#?}", r.undeclared);
+        let titles: Vec<&str> = r.suggestions.iter().map(|s| s.title.as_str()).collect();
+        assert!(!titles.iter().any(|t| t.contains("Document property")), "{titles:#?}");
+        assert!(titles.contains(&"Document GET /sessions/{sessionId}"), "{titles:#?}");
+        let propfind = titles.iter().any(|t| t.starts_with("Document PROPFIND"));
+        let is32 = text.contains("3.2.0");
+        assert_eq!(propfind, is32, "{titles:#?}");
+        if is32 {
+            let s = r.suggestions.iter().find(|s| s.title.starts_with("Document PROPFIND")).unwrap();
+            assert!(s.ops[0].path.ends_with("/additionalOperations/PROPFIND"), "{:?}", s.ops);
+        } else {
+            find(&r, DriftKind::UndeclaredMethod, "PROPFIND is called");
+        }
+        assert!(!titles.iter().any(|t| t.contains("(invalid method)")), "{titles:#?}");
+        // The inferred map is `additionalProperties`, not properties named by emails.
+        let users = r.suggestions.iter().find(|s| s.title.starts_with("Document GET /users")).unwrap();
+        assert!(users.snippet.contains("additionalProperties"), "{}", users.snippet);
+        let _ = &spec;
+    }
+}
+
+#[test]
+fn making_every_required_property_optional_drops_required() {
+    let text = r#"{"swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {"/a": {"get": {"produces": ["application/json"],
+      "responses": {"200": {"description": "ok", "schema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}, "e": {"type": "string", "enum": ["a"]}}}}}}}}}"#;
+    let spec = Spec::parse(text.as_bytes()).unwrap();
+    let obs = vec![Obs::new("1", "GET", "/a").json(200, json!({"e": null})).0];
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    let all: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+    let rev = revise(&spec, &r, &all);
+    let doc: Value = serde_json::from_str(&rev.text).unwrap();
+    let schema = &doc["paths"]["/a"]["get"]["responses"]["200"]["schema"];
+    assert!(schema.get("required").is_none(), "{schema}");
+    assert_eq!(schema["properties"]["e"], json!({"type": "string", "enum": ["a", null], "x-nullable": true}));
+    let again = analyze(&Spec::parse(rev.text.as_bytes()).unwrap(), &obs, &DriftOptions::default());
+    assert!(again.findings.is_empty(), "{:#?}", again.findings);
+}
+
+#[test]
+fn a_description_without_budgets_gets_a_budget_suggestion() {
+    let text = fixture("shop-3.1.yaml").replace("x-anvil-expectations:\n  max_latency_ms: 500\n", "");
+    let spec = Spec::parse(text.as_bytes()).unwrap();
+    let obs: Vec<Observation> = (0..20)
+        .map(|i| Obs::new(&i.to_string(), "GET", &format!("{API}/orders")).json(200, json!([])).latency(10.0 + i as f64).0)
+        .collect();
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    assert!(r.findings.is_empty(), "{:#?}", r.findings);
+    let s = r.suggestions.iter().find(|s| s.title.starts_with("Declare a")).unwrap();
+    assert_eq!(s.title, "Declare a 50 ms latency budget for GET /orders");
+    assert!(!s.recommended);
+    let list = r.operations.iter().find(|o| o.operation == "GET /orders").unwrap();
+    assert_eq!(list.latency_ms.unwrap().p95, 28.0);
+}
+
+#[test]
+fn har_captures_are_checked_too() {
+    let har = json!({"log": {"version": "1.2", "entries": [
+        {"startedDateTime": "2026-09-30T10:00:00Z", "time": 31,
+         "request": {"method": "GET", "url": "https://shop.example/api/orders/1", "headers": [{"name": "X-Tenant", "value": "t"}]},
+         "response": {"status": 200, "headers": [{"name": "ETag", "value": "x"}], "content": {"size": 40, "mimeType": "application/json", "text": "{\"id\":1,\"total\":2,\"status\":\"open\",\"extra\":true}"}}}
+    ]}});
+    let obs = anvil_contract::observe::from_har(har.to_string().as_bytes()).unwrap().observations;
+    let spec = Spec::parse(fixture("shop-3.1.yaml").as_bytes()).unwrap();
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    assert_eq!(r.matched, 1);
+    assert!(r.findings.is_empty(), "additional properties are allowed: {:#?}", r.findings);
+    assert!(r.suggestions.iter().any(|s| s.title == "Document property `extra` of Order"));
+    assert!(r.from.is_some());
+}
+
+#[test]
+fn many_operations_and_observations_stay_fast() {
+    let mut paths = serde_json::Map::new();
+    for i in 0..20_000 {
+        paths.insert(
+            format!("/r{i}/{{id}}"),
+            json!({"get": {"operationId": format!("g{i}"), "responses": {"200": {"description": "ok",
+            "content": {"application/json": {"schema": {"type": "object", "properties": {"a": {"type": "integer"}}}}}}}}}),
+        );
+    }
+    let doc =
+        json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "servers": [{"url": "https://x.example/v1"}], "paths": paths});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    let obs: Vec<Observation> = (0..1_000)
+        .map(|i| {
+            let items: Vec<Value> = (0..200).map(|k| json!({"a": k, "b": format!("x{k}")})).collect();
+            Obs::new(&i.to_string(), "GET", &format!("https://x.example/v1/r{}/{i}", i * 13 % 20_000))
+                .json(200, json!({"a": 1.5, "list": items}))
+                .0
+        })
+        .collect();
+    let start = std::time::Instant::now();
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
+    assert_eq!(r.matched, 1_000);
+    assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
+}
+
+#[test]
+fn a_suggestion_applies_whole_or_not_at_all() {
+    let spec = Spec::parse(fixture("shop-2.0.json").as_bytes()).unwrap();
+    let r = analyze(&spec, &traffic(), &DriftOptions::default());
+    let all: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+    // A suggestion whose last op fails leaves no trace, whichever position it has.
+    for victim in [0, r.suggestions.len() / 2, r.suggestions.len() - 1] {
+        let mut broken = r.clone();
+        broken.suggestions[victim].ops.push(anvil_contract::patch::PatchOp::remove("/no/such/member"));
+        let rev = revise(&spec, &broken, &all);
+        let without: Vec<String> = all.iter().filter(|id| **id != all[victim]).cloned().collect();
+        let expected = revise(&spec, &r, &without);
+        assert_eq!(rev.skipped, [all[victim].clone()]);
+        assert_eq!(rev.text, expected.text, "victim {victim}");
+        assert_eq!(rev.digest, expected.digest, "the digest is of the text");
+        assert_eq!(rev.applied, expected.applied);
+    }
+}
+
+#[test]
+fn hostile_traffic_is_capped() {
+    let spec = Spec::parse(fixture("shop-3.1.yaml").as_bytes()).unwrap();
+    let mut obs: Vec<Observation> = vec![];
+    // 200 distinct query names on a declared operation.
+    let q: Vec<String> = (0..200).map(|i| format!("p{i}")).collect();
+    obs.push(Obs::new("q", "GET", &format!("{API}/orders?{}", q.join("&"))).json(200, json!([])).0);
+    // 700 distinct undeclared endpoints and 80 undeclared servers.
+    for i in 0..700 {
+        let word: String = [i / 676, i / 26 % 26, i % 26].iter().map(|d| (b'a' + *d as u8) as char).collect();
+        obs.push(Obs::new(&format!("e{i}"), "GET", &format!("{API}/x{word}/y")).0);
+    }
+    for i in 0..80 {
+        obs.push(Obs::new(&format!("s{i}"), "GET", &format!("https://h{i}.other.example/api/orders")).0);
+    }
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    let queries = r.suggestions.iter().filter(|s| s.title.starts_with("Document query parameter")).count();
+    assert_eq!(queries, 50);
+    assert_eq!(r.undeclared.len(), 500);
+    assert_eq!(r.findings.iter().filter(|f| f.kind == DriftKind::UndeclaredServer).count(), 50);
+    for n in ["query parameters are reported per operation", "undeclared endpoints are reported", "undeclared servers are reported"] {
+        assert!(r.notes.iter().any(|x| x.contains(n)), "{n}: {:#?}", r.notes);
+    }
+}
+
+#[test]
+fn wide_recursive_schemas_are_walked_within_budget() {
+    // Every property of a 10,000-property schema is the schema again; each
+    // body has 10,000 keys two levels deep.
+    let props: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"$ref": "#/components/schemas/S"}))).collect();
+    let required: Vec<String> = (0..10_000).map(|i| format!("p{i}")).collect();
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {"/s": {"get": {"responses": {"200": {"description": "ok",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/S"}}}}}}}},
+        "components": {"schemas": {"S": {"type": "object", "properties": props, "required": required}}}});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    let inner: serde_json::Map<String, Value> = (0..100).map(|i| (format!("p{i}"), json!({}))).collect();
+    let body: serde_json::Map<String, Value> = (0..100).map(|i| (format!("p{i}"), Value::Object(inner.clone()))).collect();
+    let obs: Vec<Observation> = (0..20).map(|i| Obs::new(&i.to_string(), "GET", "/s").json(200, Value::Object(body.clone())).0).collect();
+    let start = std::time::Instant::now();
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
+    assert!(r.notes.iter().any(|n| n.contains("budget for walking bodies")), "{:#?}", r.notes);
+    assert!(r.notes.iter().any(|n| n.contains("only the first schema difference")), "{:#?}", r.notes);
+    assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
+}
+
+#[test]
+fn null_and_fraction_on_the_same_field_both_hold() {
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {"/n": {"get": {"responses": {"200": {"description": "ok",
+        "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "n": {"type": "integer"}, "k": {"const": "a"}, "e": {"type": "string", "enum": ["a"]},
+            "ke": {"enum": ["a", "b"], "const": "a"}}}}}}}}}}});
+    for version in ["3.1.0", "3.0.3"] {
+        let mut d = doc.clone();
+        d["openapi"] = json!(version);
+        if version == "3.0.3" {
+            d["paths"]["/n"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("k");
+        }
+        let spec = Spec::parse(d.to_string().as_bytes()).unwrap();
+        let obs: Vec<Observation> = [json!({"n": null, "k": null, "e": null, "ke": null}), json!({"n": 2.5, "e": "b", "ke": "a"})]
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| Obs::new(&i.to_string(), "GET", "/n").json(200, b).0)
+            .collect();
+        let r = analyze(&spec, &obs, &DriftOptions::default());
+        let ids: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+        // In report order and in reverse, every suggestion applies and all of them hold.
+        for order in [ids.clone(), ids.iter().rev().cloned().collect()] {
+            let mut reordered = r.clone();
+            reordered.suggestions.sort_by_key(|s| order.iter().position(|id| *id == s.id));
+            let rev = revise(&spec, &reordered, &ids);
+            assert!(rev.skipped.is_empty(), "{version}: {:?}", rev.skipped);
+            let again = analyze(&Spec::parse(rev.text.as_bytes()).unwrap(), &obs, &DriftOptions::default());
+            assert!(again.findings.is_empty(), "{version}: {:#?}\n{}", again.findings, rev.text);
+            if version == "3.1.0" {
+                // `enum` and `const` together: null joins what both allowed, not the wider enum.
+                let doc: Value = serde_json::from_str(&rev.text).unwrap();
+                let ke = &doc["paths"]["/n"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["ke"];
+                assert_eq!(ke, &json!({"enum": ["a", null]}), "{}", rev.text);
+            }
+        }
+    }
+}
+
+#[test]
+fn many_failing_suggestions_do_not_copy_the_document() {
+    // A large description and 2,000 suggestions that each fail on their
+    // last op: each is undone without copying the document.
+    let mut paths = serde_json::Map::new();
+    for i in 0..20_000 {
+        paths.insert(format!("/r{i}"), json!({"get": {"responses": {"200": {"description": "ok"}}}}));
+    }
+    let doc = json!({"swagger": "2.0", "info": {"title": "t", "version": "1"}, "produces": "application/json", "paths": paths});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    let obs: Vec<Observation> = (0..2_000).map(|i| Obs::new(&i.to_string(), "GET", &format!("/r{i}")).empty(404).0).collect();
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    assert_eq!(r.suggestions.len(), 2_000);
+    let ids: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+    let mut broken = r.clone();
+    for s in &mut broken.suggestions {
+        s.ops.push(anvil_contract::patch::PatchOp::remove("/no/such"));
+    }
+    let start = std::time::Instant::now();
+    let rev = revise(&spec, &broken, &ids);
+    assert!(start.elapsed() < std::time::Duration::from_secs(20), "{:?}", start.elapsed());
+    assert_eq!(rev.skipped.len(), 2_000);
+    assert!(rev.json_patch.is_empty());
+    // Unbroken, they all apply (a single `produces` value becomes a list).
+    let rev = revise(&spec, &r, &ids);
+    assert!(rev.skipped.is_empty(), "{:?}", rev.skipped);
+}

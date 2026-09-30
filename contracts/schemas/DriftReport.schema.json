@@ -1,0 +1,556 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DriftReport",
+  "type": "object",
+  "properties": {
+    "spec": {
+      "$ref": "#/$defs/SpecSummary"
+    },
+    "observations": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "matched": {
+      "description": "Routed to a declared operation.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "without_response": {
+      "description": "Exchanges that got no response (checked for routing only).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "ignored": {
+      "description": "CORS preflights (`OPTIONS` without a declared operation), not checked.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "from": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "to": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "findings": {
+      "description": "Most severe first, then most frequent.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DriftFinding"
+      }
+    },
+    "operations": {
+      "description": "Every declared operation, exercised or not.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OperationCoverage"
+      }
+    },
+    "undeclared": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UndeclaredEndpoint"
+      }
+    },
+    "suggestions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Suggestion"
+      }
+    },
+    "notes": {
+      "description": "Limits of the analysis (bodies not available, and why).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "spec",
+    "observations",
+    "matched",
+    "without_response",
+    "ignored",
+    "findings",
+    "operations",
+    "undeclared",
+    "suggestions",
+    "notes"
+  ],
+  "$defs": {
+    "SpecSummary": {
+      "description": "The linted document.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dialect": {
+          "$ref": "#/$defs/Dialect"
+        },
+        "declared_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "operations": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "dialect",
+        "sha256",
+        "size_bytes",
+        "operations"
+      ]
+    },
+    "Dialect": {
+      "description": "Exact dialect. Every OpenAPI minor version is its own dialect: 3.2 is\nnever treated as 3.1, and an unknown future version is refused rather\nthan guessed.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "swagger20",
+            "open_api30",
+            "open_api31",
+            "open_api32",
+            "wsdl11",
+            "postman_v20",
+            "postman_v21",
+            "postman_environment",
+            "postman_globals",
+            "insomnia_v4",
+            "insomnia_v5",
+            "curl",
+            "har",
+            "unknown"
+          ]
+        },
+        {
+          "description": "An `openapi`/`swagger` version this importer does not implement.",
+          "type": "string",
+          "const": "open_api_unsupported"
+        },
+        {
+          "description": "WSDL 2.0 (`http://www.w3.org/ns/wsdl`): recognized, not supported.",
+          "type": "string",
+          "const": "wsdl20"
+        },
+        {
+          "description": "Postman collection format v1: recognized, not supported.",
+          "type": "string",
+          "const": "postman_v1"
+        }
+      ]
+    },
+    "DriftFinding": {
+      "description": "One kind of difference, seen in one or more exchanges.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DriftKind"
+        },
+        "severity": {
+          "$ref": "#/$defs/LintSeverity"
+        },
+        "message": {
+          "type": "string"
+        },
+        "operation": {
+          "description": "`GET /pets/{id}`, when an operation (or observed endpoint) is concerned.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pointer": {
+          "description": "Where in the description, when it names an existing object.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "count": {
+          "description": "Exchanges that showed it.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "observations": {
+          "description": "Some of those exchanges' ids.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "suggestions": {
+          "description": "Suggestions that would resolve it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "severity",
+        "message",
+        "count",
+        "observations",
+        "suggestions"
+      ]
+    },
+    "DriftKind": {
+      "type": "string",
+      "enum": [
+        "undeclared_path",
+        "undeclared_method",
+        "undeclared_status",
+        "undeclared_content_type",
+        "response_schema_mismatch",
+        "undeclared_request_content_type",
+        "undeclared_query_parameter",
+        "missing_required_parameter",
+        "missing_response_header",
+        "slower_than_declared",
+        "response_larger_than_declared",
+        "request_larger_than_declared",
+        "undeclared_server",
+        "deprecated_operation_called"
+      ]
+    },
+    "LintSeverity": {
+      "description": "How serious a lint finding is (`off` in a ruleset turns a rule off).",
+      "type": "string",
+      "enum": [
+        "hint",
+        "info",
+        "warn",
+        "error"
+      ]
+    },
+    "OperationCoverage": {
+      "description": "How an operation was exercised.",
+      "type": "object",
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "calls": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "statuses": {
+          "description": "Observed status → count.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "declared_statuses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LatencyStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_response_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "findings": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "operation",
+        "method",
+        "path",
+        "pointer",
+        "calls",
+        "statuses",
+        "declared_statuses",
+        "budget",
+        "findings"
+      ]
+    },
+    "LatencyStats": {
+      "type": "object",
+      "properties": {
+        "p50": {
+          "type": "number",
+          "format": "double"
+        },
+        "p95": {
+          "type": "number",
+          "format": "double"
+        },
+        "max": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "p50",
+        "p95",
+        "max"
+      ]
+    },
+    "Budget": {
+      "description": "An operation's declared budget (`x-anvil-expectations`, the most\nspecific of operation, path item and document).",
+      "type": "object",
+      "properties": {
+        "max_latency_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_response_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_request_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "UndeclaredEndpoint": {
+      "description": "Calls to a path or method the description does not declare.",
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "description": "The observed paths generalized: every segment that is not a short\nlower-case word is a parameter (`/users/{userId}`). Observed paths\nthemselves are not kept.",
+          "type": "string"
+        },
+        "calls": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "statuses": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "method",
+        "path",
+        "calls",
+        "statuses"
+      ]
+    },
+    "Suggestion": {
+      "description": "A revision of the description.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Derived from the description, what the suggestion is about and its\noperations: the same for the same description and observations, and\ndifferent as soon as the change it makes is different.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SuggestionKind"
+        },
+        "recommended": {
+          "description": "Selected by default (additions are, relaxations are not).",
+          "type": "boolean"
+        },
+        "pointer": {
+          "description": "The main location it changes.",
+          "type": "string"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ops": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PatchOp"
+          }
+        },
+        "snippet": {
+          "description": "The change as a fragment of the description, in its syntax.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "detail",
+        "kind",
+        "recommended",
+        "pointer",
+        "ops",
+        "snippet"
+      ]
+    },
+    "SuggestionKind": {
+      "oneOf": [
+        {
+          "description": "Documents something the API does that the description leaves out.",
+          "type": "string",
+          "const": "addition"
+        },
+        {
+          "description": "Loosens the contract; the API may be what needs fixing.",
+          "type": "string",
+          "const": "relaxation"
+        }
+      ]
+    },
+    "PatchOp": {
+      "description": "One change at an RFC 6901 pointer.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "$ref": "#/$defs/PatchKind"
+        },
+        "path": {
+          "type": "string"
+        },
+        "value": true
+      },
+      "required": [
+        "op",
+        "path"
+      ]
+    },
+    "PatchKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "remove"
+          ]
+        },
+        {
+          "description": "Set the value (JSON `null` when absent), creating missing parents. On\nan existing object the new members are merged in and existing ones\nare kept.",
+          "type": "string",
+          "const": "add"
+        },
+        {
+          "description": "Set the value, creating missing parents.",
+          "type": "string",
+          "const": "replace"
+        },
+        {
+          "description": "Add the items of the value (a list) that the list at the path lacks;\nset the value when there is nothing there yet. A single value there\n(`type: integer`, `produces: x`) becomes a one-item list first.",
+          "type": "string",
+          "const": "union"
+        }
+      ]
+    }
+  }
+}

@@ -5,6 +5,7 @@
 pub mod backup;
 pub mod cleanup;
 pub mod device_identity;
+pub mod drift;
 pub mod exec;
 pub mod file_grants;
 pub mod identity;

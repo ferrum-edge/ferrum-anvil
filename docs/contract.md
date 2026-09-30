@@ -1,8 +1,15 @@
 # API contract (`anvil-contract`)
 
-`crates/anvil-contract` checks OpenAPI descriptions against a team's **API
-standards**: rules about what every description in the company must look
-like (naming, versioning, security, error formats, documentation). A
+`crates/anvil-contract` does two things with OpenAPI descriptions:
+
+- **API standards** (this page up to [Contract drift](#contract-drift)):
+  checks a description against the rules a team sets for all its APIs.
+- **[Contract drift](#contract-drift)**: compares what an API was seen doing
+  (sends in Anvil's history, or a HAR capture) with what its description
+  says, and suggests revisions to the description.
+
+**API standards** are rules about what every description in the company
+must look like (naming, versioning, security, error formats, documentation). A
 standard is a *ruleset* file, written once and shared, for example in the
 repository that holds the API descriptions. Anvil reports where a
 description breaks a rule, with the line to edit and how to fix it.
@@ -314,3 +321,214 @@ rulesets do not load (restored from a backup of another build, say), the
 view says why and they can still be disabled or removed. **Rules in effect** lists every rule with its severity,
 target and ruleset. The settings dialog never changes the standards: they
 change only through their own commands (`standards_*`).
+
+## Contract drift
+
+Live traffic shows where a description falls short of the API it
+describes. `anvil_contract::analyze` takes observed exchanges (method, URL,
+status, headers, content types, sizes, timing and, when available, the JSON
+response body) and the description, and reports each difference once, with
+how many exchanges showed it.
+
+```bash
+anvil spec-drift openapi.yaml --har traffic.har                         # a capture, no profile
+anvil spec-drift --import <import-id>                                   # an imported spec's history
+anvil spec-drift openapi.yaml --har traffic.har --revised openapi.revised.yaml --patch drift.json
+```
+
+`samples/contract/` has a description (`shop.yaml`) and a capture
+(`shop-traffic.har`) that shows most kinds of drift.
+
+### Routing
+
+Each exchange is matched to an operation: its path, after a server's base
+path (`servers[*].url` at every level, Swagger `basePath`; server variables
+match any segment), against the path templates. Among matching templates,
+the one with the most literal segments wins (`/pets/mine` over
+`/pets/{id}`, and `/files/{name}.json` over `/files/{name}`), then the
+longest base path, then the operation the request was imported from. When
+nothing matches, up to three leading segments are tried as an unknown prefix
+(an API mounted behind a gateway under `/api`), alone or in front of a
+declared base path. For a path nothing declares, a base path with server
+variables counts only when the variables have their `enum` or `default`
+values. `HEAD` falls back to `GET`. An `OPTIONS` request to a path or method
+the description lacks is a CORS preflight and is not checked. Base paths
+that differ only in variable names are one base path; 64 are kept at most.
+
+### What is checked
+
+| Kind | Severity | When |
+|---|---|---|
+| `undeclared_path` | warn | the path matches no template (reported generalized: `/users/123` → `/users/{userId}`; see below) |
+| `undeclared_method` | warn | the path is declared, the method is not |
+| `undeclared_status` | warn | the status has no response, `4XX`-style range or `default` |
+| `undeclared_content_type` | warn | the response's media type is not declared for its status (`type/*` and `*/*` count) |
+| `response_schema_mismatch` | error | a complete JSON body does not validate against its schema |
+| `undeclared_request_content_type` | warn | a request body's media type is not declared (or the operation declares no body) |
+| `undeclared_query_parameter` | info | a query parameter is not declared (unless the operation has a 3.2 `querystring` parameter) |
+| `missing_required_parameter` | info | a required query or header parameter was not sent |
+| `missing_response_header` | warn | a `required` response header was not returned |
+| `slower_than_declared` | error | the exchange took longer than the budget's `max_latency_ms` |
+| `response_larger_than_declared` | error | the body was larger than `max_response_bytes` |
+| `request_larger_than_declared` | warn | the request body was larger than `max_request_bytes` |
+| `undeclared_server` | info | the request went to an origin none of the absolute servers matches |
+| `deprecated_operation_called` | info | the operation is `deprecated` |
+
+Schema checks use the conversion described under [Schemas](#schemas) in the
+response direction (`writeOnly` properties are not required). Validation
+messages never quote the body: they name the place (`` `/items/*/id` ``), the
+declared constraint and the observed JSON type. In a place, only keys the
+schema names under `properties` are shown; array indexes and the keys of
+maps (`additionalProperties`, `patternProperties`) are `*`, and undeclared
+keys that look like data (see below) are not named. A body is checked only
+when it was captured completely, decoded, is JSON and at most 1 MiB, and
+while the analysis has parsed less than 32 MiB of bodies in all; otherwise a
+note says why (history set to keep no response bodies, say). Schema
+compiles share the linter's scanning budget and body walks for suggestions
+stop after 2,000,000 values, each with a note.
+
+**Keeping observed values out.** Findings, suggestions and the
+undeclared-endpoint list carry names, status codes, media types, sizes and
+times. Telling a name from a value is a heuristic, so these rules keep most
+data out but not all of it:
+
+- An undeclared path keeps only segments that are short lower-case words
+  (ASCII letters, digits, `-`, `_`, at most 32 characters and one digit:
+  `v1`, `orders`, `line-items`). Every other segment (an id, an email, a
+  token, a mixed-case or encoded value) becomes a parameter named after the
+  segment before it (`/users/{userId}`). Observed paths are not kept, and an
+  unknown prefix is shown generalized the same way. A value that is itself a
+  short lower-case word (a username, a slug, a tenant name: `/users/alice`)
+  stays literal.
+- A property or query parameter name is used only when it looks like a name
+  (letters, digits and `_ - . $ [ ]`, not starting with a digit, at most 64
+  characters and three digits, and not 16 or more characters mixing upper
+  case, lower case and digits); others are left out, with a note. A short
+  random token that happens to fit (few digits, one case) passes.
+- The origin (scheme, host and port) of a request to a server the
+  description does not declare is shown, in the finding and in the
+  suggestion to declare that server.
+- An object whose keys look like data, or that has more than 50 keys, is
+  inferred as a map (`additionalProperties` with the values' shape).
+- A method that is not an HTTP token of at most 20 characters is shown as
+  `(invalid method)`.
+
+**Budgets.** OpenAPI has no field for performance or size, so drift reads
+an extension on the operation, its path item or the document (the most
+specific wins, key by key):
+
+```yaml
+x-anvil-expectations:
+  max_latency_ms: 300          # per exchange, start to end of the response
+  max_response_bytes: 65536    # decoded body
+  max_request_bytes: 1048576
+```
+
+### Suggested revisions
+
+Each finding lists the suggestions that would resolve it. A suggestion is a
+set of patch operations on the description, written for its dialect
+(`produces`/`consumes` and `definitions` in Swagger 2.0, `content` and
+`nullable` in 3.0, type lists in 3.1 and 3.2), with a fragment of the
+change in the description's syntax.
+
+- **Additions** document what the API does. Most are recommended (selected
+  by default): a response for an undeclared status (with the schema inferred
+  from the observed bodies), a media type, a property the schema does not
+  declare, a query parameter, a request body media type, and a whole
+  operation for an undeclared path or method (path parameters typed
+  `integer` when every observed value was numeric). A method goes in its
+  Path Item field; in 3.2, `query` does too and any other method goes under
+  `additionalOperations`; a method the dialect cannot describe gets no
+  suggestion. Two additions are offered but not selected, because they
+  decide something rather than document it: a server for an undeclared
+  origin, and a latency budget from the observed p95 × 1.5 for an
+  operation without one.
+- **Relaxations** loosen the contract and are never selected by default,
+  because the API may be what needs fixing: allowing `null` (an `enum`
+  gets `null` among its values too, and a 3.1/3.2 `const` becomes an `enum`
+  of the constant and `null`), widening `integer` to `number` (3.1 and 3.2
+  add `number` to the type), adding
+  observed values to an `enum` (short tokens only, 20 per enum at most),
+  making a required property that was sometimes missing optional (an empty
+  `required` is removed), and raising a latency, response size or request
+  size budget to cover the largest observed value.
+
+A schema that names no properties (a free-form object or a map) or uses
+`patternProperties` gets no property suggestions. At most 50 properties are
+suggested per schema, 500 schema changes, 50 query parameters per operation
+and 2,000 suggestions in all; at most 500 undeclared endpoints, 50
+undeclared servers and 20,000 distinct differences are collected. Each cap
+adds a note when it is reached; past the 20,000th difference, the counts of
+the differences already collected keep growing, but nothing new about them
+(suggestions, body walks) is gathered, so the report is partial. A suggestion's id is derived from the
+description and the change it makes, so it changes whenever the change does. Each
+finding links to the suggestions that resolve it: a schema change is linked
+to the validation errors of its own kind (a type, an enum, an undeclared or
+a missing required property) at the same place in the body.
+
+Inferred schemas keep only the shape of what was seen (types, properties,
+which properties were always present, array items, and `date-time`, `date`,
+`uuid`, `email` and `uri` formats when every sample had them), never
+values: no examples, defaults or enums come from traffic. A value of more
+than one type becomes `oneOf` in 3.0, a type list in 3.1 and 3.2, and an
+unconstrained schema in Swagger 2.0, which has neither.
+
+`revise` applies chosen suggestions and returns the whole revised
+description in its original syntax, an RFC 6902 JSON Patch from the
+original to it, and a digest of the description and the applied
+suggestions. YAML is written anew, so comments and formatting of the
+original are not kept; the JSON Patch (or each suggestion's fragment) can be
+applied to the source by hand instead. Applying every suggestion and
+checking the same traffic again leaves only differences the description
+cannot fix (a missing required parameter or response header, a deprecated
+operation called), which `tests/drift.rs` checks in all four dialects. A
+suggestion applies whole or not at all: if one of its operations cannot
+apply, none of it is in the revision and it is listed as skipped. Changes
+to one schema compose: allowing null, widening a type and adding enum
+values extend the `type` and `enum` lists rather than replacing them, so
+they hold together in any order. The digest is of the description and the
+revised text.
+
+A HAR capture is read up to 64 MiB and 10,000 entries (a note says how many
+were left out). Parsed bodies are also capped at 1,000,000 JSON values per
+analysis, and when a large body could produce very many validation errors
+(many objects against a long `required` list) only its first difference is
+reported, with a note.
+
+### History, the desktop and the CLI
+
+For an imported spec, the exchanges are the newest sends (up to 500 in the
+desktop, `--limit` in the CLI, at most 1,000, found among the workspace's
+newest 20,000 history entries) of its collection: saved
+requests imported from it (under the current or an earlier import id),
+requests under its import root, or, when the import made its own workspace,
+every request of that workspace, so endpoints added by hand are checked
+against the same description. Unsaved drafts are not included. The
+description is the import's stored original (the version last applied).
+
+In the desktop, an imported spec in the **Contract** view has a **Live
+traffic** tab: the differences with their suggestions, the suggestions with
+checkboxes (additions preselected), the coverage of every declared
+operation (calls, statuses seen, p95, budget) and the endpoints called but
+not declared. **Save revised spec…** and **Save JSON Patch…** write the
+revision through the save dialog (file purpose `spec_revision_export`).
+**Update the import…** previews what reimporting the revision would do to
+the collection (new requests, updates, kept edits) and then reimports it as
+the import's new version, as `docs/import.md#reimport` describes (conflicts
+and removals are kept); the next check runs against the revision. The
+update runs the analysis again and applies only if the revision's digest is
+the one previewed: new traffic in between refuses it, and the preview must
+be opened again. **Save revised spec…** and **Save JSON Patch…** likewise
+refuse when a chosen suggestion is not in a fresh report any more (its id
+changed with its content), so the file is the revision that was shown. The
+response panel shows a **Contract** tab after a send of a request that
+belongs to an OpenAPI import, with the differences of that one send.
+
+`anvil spec-drift` prints the same report as text or JSON (`--format`),
+writes the revision (`--revised`) and the JSON Patch (`--patch`) with the
+recommended suggestions or all of them (`--apply all`), and exits with `2`
+when a finding reaches `--fail-on` (default `error`), `3` on a local error.
+With `--har` it needs no profile; with `--import` it opens the profile and
+reads its history. Text output escapes control characters from the spec
+and the traffic.
