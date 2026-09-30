@@ -633,6 +633,14 @@ fn repeated_doc(x: serde_json::Value) -> Vec<u8> {
     doc_with_schemas(schemas, "Root")
 }
 
+fn count_leaves(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Array(a) => a.iter().map(count_leaves).sum(),
+        serde_json::Value::Object(o) => o.values().map(count_leaves).sum(),
+        _ => 1,
+    }
+}
+
 fn count_nulls(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Null => 1,
@@ -681,8 +689,9 @@ fn nulls_for_undeclared_required_names_are_charged() {
 fn enum_and_const_scans_are_charged() {
     // Each visit of `X` scans 200k `enum` values for the first non-null one,
     // or compares `const` with 500k `enum` values; the body visits `X` about
-    // 20k times. The scans are charged, so a 4 MiB input limit (16 MiB for
-    // the import) stops them after a few visits.
+    // 20k times, which the payload's node budget allows. The scans are
+    // charged to the byte budget, so a 4 MiB input limit (16 MiB for the
+    // import) stops them after a few visits: far fewer values are generated.
     let mut values = vec![serde_json::Value::Null; 200_000];
     values.push(json!("a"));
     let o = ImportOptions { max_bytes: 4 * 1024 * 1024, ..opts() };
@@ -690,7 +699,21 @@ fn enum_and_const_scans_are_charged() {
         let r = import(&repeated_doc(x), &o).unwrap();
         assert!(has(&r, "sample_size_limit"));
         assert_eq!(r.requests.len(), 1);
+        let values = count_leaves(&json_body(&req(&r, "a").spec));
+        assert!(values < 1_000, "{values} values generated");
     }
+}
+
+#[test]
+fn const_with_an_empty_enum_is_not_walked() {
+    // `const` is a 400k-item array and `enum` is empty: each of about 20k
+    // visits used to walk all of `const` (uncharged, since the charge is its
+    // size times the enum's length) before copying the small example.
+    let x = json!({"example": 1, "const": vec![0; 400_000], "enum": []});
+    let r = import(&repeated_doc(x), &opts()).unwrap();
+    assert!(has(&r, "contradictory_schema"));
+    let values = count_leaves(&json_body(&req(&r, "a").spec));
+    assert!(values > 1_000, "{values} values generated");
 }
 
 #[test]
@@ -710,4 +733,101 @@ fn structural_lookups_borrow_what_they_do_not_merge() {
             other => panic!("expected an XML body, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn long_pointers_and_refs_are_charged_and_clipped() {
+    // A 100 KB member name nests arrays of 32: every value's pointer is at
+    // least that long, so ~20k values would copy about 2 GB of pointers.
+    let name = "n".repeat(100 * 1024);
+    let mut leaf = json!({"type": "string"});
+    for _ in 0..3 {
+        leaf = json!({"type": "array", "minItems": 32, "items": leaf});
+    }
+    let mut props = serde_json::Map::new();
+    props.insert(name.clone(), leaf);
+    let mut schemas = serde_json::Map::new();
+    schemas.insert("Root".into(), json!({"type": "object", "required": [name], "properties": props}));
+    let doc = doc_with_schemas(schemas, "Root");
+    let r = import(&doc, &ImportOptions { max_bytes: 1024 * 1024, ..opts() }).unwrap();
+    assert!(has(&r, "sample_size_limit"));
+    let values = count_leaves(&json_body(&req(&r, "a").spec));
+    assert!(values < 100, "{values} values generated");
+    // Stored pointers are clipped.
+    assert!(r.report.warnings.iter().all(|w| w.pointer.chars().count() <= 513), "a long pointer was stored");
+
+    // A `$ref` longer than the limit is not followed.
+    let mut schemas = serde_json::Map::new();
+    schemas.insert("Root".into(), json!({"$ref": format!("#/components/schemas/{}", "x".repeat(4_096))}));
+    let r = import(&doc_with_schemas(schemas, "Root"), &opts()).unwrap();
+    assert!(has(&r, "ref_too_long"));
+}
+
+#[test]
+fn findings_of_one_code_are_capped() {
+    // 3000 paths without a leading '/', each warned at its own pointer.
+    let mut paths = serde_json::Map::new();
+    for i in 0..3_000 {
+        paths.insert(format!("p{i}"), json!({}));
+    }
+    let doc = json!({"openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": paths});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let kept = r.report.warnings.iter().filter(|w| w.code == "path_not_absolute").count();
+    assert_eq!(kept, 1_000);
+    assert!(has(&r, "report_truncated"));
+}
+
+/// `paths` Path Items that all `$ref` `#/components/pathItems/Shared`.
+fn shared_path_item_doc(paths: usize, shared: serde_json::Value) -> Vec<u8> {
+    let mut map = serde_json::Map::new();
+    for i in 0..paths {
+        map.insert(format!("/p{i}"), json!({"$ref": "#/components/pathItems/Shared"}));
+    }
+    let doc = json!({
+        "openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": map,
+        "components": {"pathItems": {"Shared": shared}}
+    });
+    doc.to_string().into_bytes()
+}
+
+#[test]
+fn shared_path_items_are_borrowed_and_their_text_charged() {
+    // 20k paths share one Path Item with a 200 KB description and an
+    // operation with another: 4 GB of Path Item copies, then 200 KB more per
+    // imported operation. The item is read in place, and each operation's
+    // text is charged, so a 2 MiB input limit (8 MiB of text) stops the
+    // import after a few dozen operations.
+    let big = "d".repeat(200 * 1024);
+    let shared = json!({"description": big, "get": {"description": big, "responses": {}}});
+    let r = import(&shared_path_item_doc(20_000, shared), &ImportOptions { max_bytes: 2 * 1024 * 1024, ..opts() }).unwrap();
+    assert!(has(&r, "text_size_limit"));
+    assert!((1..100).contains(&r.requests.len()), "{} requests", r.requests.len());
+    assert_eq!(r.report.counts.operations_found, 20_000);
+}
+
+#[test]
+fn repeated_operation_keys_take_the_next_free_suffix() {
+    // 5000 operations share one 4 KB operationId: probing `#2`, `#3`, … for
+    // each one formatted and hashed about 50 GB of keys.
+    let id = "k".repeat(4 * 1024);
+    let r = import(&shared_path_item_doc(5_000, json!({"get": {"operationId": id, "responses": {}}})), &opts()).unwrap();
+    assert_eq!(r.requests.len(), 5_000);
+    assert!(req(&r, &format!("{id}#5000")).spec.source.is_some());
+    assert!(has(&r, "duplicate_operation_key"));
+}
+
+#[test]
+fn server_variables_are_rendered_once() {
+    // 50k uses of one variable whose enum has 50k values: the enum was
+    // scanned and joined, and a variable added, for every use.
+    let url = "https://example.com/{v}".repeat(50_000);
+    let values: Vec<String> = (0..50_000).map(|i| format!("v{i}")).collect();
+    let doc = json!({
+        "openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": {},
+        "servers": [{"url": url, "variables": {"v": {"default": "v49999", "enum": values}}}]
+    });
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let env = &r.environments[0];
+    assert_eq!(env.variables.iter().filter(|v| v.name == "v").count(), 1);
+    assert!(!has(&r, "contradictory_schema"));
 }

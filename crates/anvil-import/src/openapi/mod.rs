@@ -17,7 +17,7 @@ mod schema;
 mod security;
 
 use crate::builder::Builder;
-use crate::util::{fnv1a64, is_credential_name, ptr, sanitize_var, scalar_text, str_of};
+use crate::util::{clip, fnv1a64, is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, GroupBy, ImportError, SampleMode};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -29,6 +29,7 @@ use schema::SampleGen;
 use serde_json::{Map, Value, json};
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 pub(crate) struct Ctx<'a> {
     pub root: &'a Value,
@@ -36,6 +37,43 @@ pub(crate) struct Ctx<'a> {
     pub refs: Refs<'a>,
     /// Bytes sample generation may still copy from the document (whole import).
     pub sample_bytes: Cell<usize>,
+    /// Swagger 2.0 document-level `produces` and `consumes`, read once rather
+    /// than by every operation that inherits them.
+    pub swagger_defaults: SwaggerDefaults,
+}
+
+/// What an operation without its own `produces`/`consumes` inherits.
+#[derive(Default)]
+pub(crate) struct SwaggerDefaults {
+    /// The first `produces` type other than `*/*`.
+    accept: Option<String>,
+    /// The body media type chosen from `consumes`.
+    body_media: String,
+    /// `consumes` lists `multipart/form-data`.
+    multipart: bool,
+}
+
+impl SwaggerDefaults {
+    fn new(produces: Option<&Value>, consumes: Option<&Value>) -> Self {
+        let consumes: Vec<&str> =
+            consumes.and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        SwaggerDefaults {
+            accept: first_produced(produces),
+            body_media: body_media(&consumes),
+            multipart: consumes.iter().any(|c| c.starts_with("multipart/form-data")),
+        }
+    }
+}
+
+/// The first type of a `produces` list other than `*/*`.
+fn first_produced(produces: Option<&Value>) -> Option<String> {
+    produces?.as_array()?.iter().filter_map(Value::as_str).find(|m| *m != "*/*").map(str::to_string)
+}
+
+/// The Swagger 2.0 `in: body` media type chosen from a `consumes` list.
+fn body_media(consumes: &[&str]) -> String {
+    let keys: Vec<&str> = consumes.iter().copied().filter(|m| !m.contains("form")).collect();
+    body::choose_media(&keys).map(|i| keys[i].to_string()).unwrap_or_else(|| "application/json".into())
 }
 
 const METHODS: &[&str] = &["get", "put", "post", "delete", "options", "head", "patch", "trace"];
@@ -61,6 +99,11 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
         dialect,
         refs: Refs { root, max_depth: b.opts.max_ref_depth, max_expansions: b.opts.max_ref_expansions },
         sample_bytes: Cell::new(b.opts.max_bytes.saturating_mul(schema::SAMPLE_BYTES_PER_INPUT_BYTE)),
+        swagger_defaults: if dialect == Dialect::Swagger20 {
+            SwaggerDefaults::new(root.get("produces"), root.get("consumes"))
+        } else {
+            SwaggerDefaults::default()
+        },
     };
 
     // Info.
@@ -234,13 +277,18 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
 /// Convert an OpenAPI 3 server object into a base URL. With `inline`,
 /// server variables are replaced by their defaults (operation/path-level
 /// overrides); otherwise they become `{{variables}}` defined in the
-/// environment.
+/// environment. Each variable is rendered once however often the URL uses it
+/// (its default, the check against its `enum`, its description), and the
+/// text read and written is charged to the import's text budget: an
+/// operation-level server is converted for every operation that uses it.
 fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, Vec<Variable>) {
-    let raw = str_of(s, "url").unwrap_or("/").trim().to_string();
-    let decl = s.get("variables").and_then(Value::as_object).cloned().unwrap_or_default();
+    let raw = str_of(s, "url").unwrap_or("/").trim();
+    let empty = Map::new();
+    let decl = s.get("variables").and_then(Value::as_object).unwrap_or(&empty);
     let mut vars = vec![];
     let mut out = String::new();
-    let mut rest = raw.as_str();
+    let mut rendered: HashMap<&str, String> = HashMap::new();
+    let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -251,38 +299,15 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
         };
         let name = &after[..close];
         rest = &after[close + 1..];
-        let vptr = ptr(&ptr(sptr, "variables"), name);
-        let def = decl.get(name).and_then(|d| d.get("default")).map(scalar_text);
-        if decl.get(name).is_none() {
-            b.report.warn("undeclared_server_variable", sptr, format!("server URL uses '{{{name}}}' but does not declare it"));
+        let text = match rendered.entry(name) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(server_variable(b, decl, name, sptr, inline, &mut vars)),
+        };
+        if !b.charge_text(sptr, text.len()) {
+            rest = "";
+            break;
         }
-        if let Some(e) = decl.get(name).and_then(|d| d.get("enum")).and_then(Value::as_array)
-            && let Some(d) = &def
-            && !e.iter().any(|x| scalar_text(x) == *d)
-        {
-            b.report.warn("contradictory_schema", &vptr, format!("default '{d}' is not one of the server variable's enum values"));
-        }
-        match (inline, def) {
-            (true, Some(d)) => out.push_str(&d),
-            (_, d) => {
-                let v = sanitize_var(name);
-                out.push_str(&format!("{{{{{v}}}}}"));
-                match d {
-                    Some(d) => {
-                        let mut var = Variable::plain(&v, &d);
-                        if let Some(e) = decl.get(name).and_then(|x| x.get("enum")).and_then(Value::as_array) {
-                            var.description = format!("one of: {}", e.iter().map(scalar_text).collect::<Vec<_>>().join(", "));
-                        }
-                        if let Some(dsc) = decl.get(name).and_then(|x| str_of(x, "description")) {
-                            var.description =
-                                if var.description.is_empty() { dsc.to_string() } else { format!("{dsc} ({})", var.description) };
-                        }
-                        vars.push(var);
-                    }
-                    None => b.report.require_var(&v, false, "server variable without a default", &vptr),
-                }
-            }
-        }
+        out.push_str(text);
     }
     out.push_str(rest);
     let mut url = out.trim_end_matches('/').to_string();
@@ -297,11 +322,78 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
         b.report.warn(
             "relative_server_url",
             &ptr(sptr, "url"),
-            format!("server URL '{raw}' is relative; it is prefixed with {{{{origin}}}}"),
+            format!("server URL '{}' is relative; it is prefixed with {{{{origin}}}}", clip(raw, 256)),
         );
         url = origin.trim_end_matches('/').to_string();
     }
     (url, vars)
+}
+
+/// Render server variable `name` of `decl` once: the text the URL gets for
+/// it, with its `Variable` (or required variable) recorded. Every `enum`
+/// value read is charged.
+fn server_variable(
+    b: &mut Builder,
+    decl: &Map<String, Value>,
+    name: &str,
+    sptr: &str,
+    inline: bool,
+    vars: &mut Vec<Variable>,
+) -> String {
+    let vptr = ptr(&ptr(sptr, "variables"), name);
+    let d = decl.get(name);
+    if d.is_none() {
+        let msg = format!("server URL uses '{{{}}}' but does not declare it", clip(name, 256));
+        b.report.warn("undeclared_server_variable", sptr, msg);
+    }
+    let def = d.and_then(|d| d.get("default")).map(scalar_text);
+    let def = def.filter(|t| b.charge_text(&vptr, t.len()));
+    let values = d.and_then(|d| d.get("enum")).and_then(Value::as_array);
+    if let (Some(e), Some(dv)) = (values, &def) {
+        let mut found = Some(false);
+        for x in e {
+            let t = scalar_text(x);
+            if !b.charge_text(&vptr, t.len().saturating_add(1)) {
+                found = None;
+                break;
+            }
+            if t == *dv {
+                found = Some(true);
+                break;
+            }
+        }
+        if found == Some(false) {
+            let msg = format!("default '{}' is not one of the server variable's enum values", clip(dv, 256));
+            b.report.warn("contradictory_schema", &vptr, msg);
+        }
+    }
+    if inline && let Some(dv) = def {
+        return dv;
+    }
+    let v = sanitize_var(name);
+    match def {
+        Some(dv) => {
+            let mut var = Variable::plain(&v, &dv);
+            if let Some(e) = values {
+                let mut listed = vec![];
+                for x in e {
+                    let t = scalar_text(x);
+                    if !b.charge_text(&vptr, t.len().saturating_add(2)) {
+                        break;
+                    }
+                    listed.push(t);
+                }
+                var.description = format!("one of: {}", listed.join(", "));
+            }
+            if let Some(dsc) = d.and_then(|x| str_of(x, "description")) {
+                let dsc = b.text(&vptr, dsc);
+                var.description = if var.description.is_empty() { dsc } else { format!("{dsc} ({})", var.description) };
+            }
+            vars.push(var);
+        }
+        None => b.report.require_var(&v, false, "server variable without a default", &vptr),
+    }
+    format!("{{{{{v}}}}}")
 }
 
 struct TagIndex {
@@ -383,36 +475,28 @@ fn import_path_item(
     tags: &TagIndex,
     order: &mut Vec<(Id, usize)>,
 ) {
-    // Path Item `$ref` (local fields win over the referenced ones).
-    let mut merged: Map<String, Value> = match ctx.refs.resolve(item, pptr, &mut b.report) {
-        Some((t, _)) => t.as_object().cloned().unwrap_or_default(),
-        None => {
-            b.skipped();
-            return;
-        }
+    // Path Item `$ref` (local fields win over the referenced ones). The
+    // referenced item is read in place, never copied: many paths may share it.
+    let Some((target, _)) = ctx.refs.resolve(item, pptr, &mut b.report) else {
+        b.skipped();
+        return;
     };
-    if let Some(local) = item.as_object() {
-        for (k, v) in local {
-            if k != "$ref" {
-                merged.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    let item = Value::Object(merged);
+    let local = item.as_object();
+    let field = |k: &str| path_field(local, target, k);
     let mut ops: Vec<(String, &Value, String)> = vec![];
     for m in METHODS {
-        if let Some(op) = item.get(*m) {
+        if let Some(op) = field(*m) {
             ops.push((m.to_uppercase(), op, ptr(pptr, m)));
         }
     }
-    if let Some(op) = item.get("query") {
+    if let Some(op) = field("query") {
         if is_32(ctx.dialect) {
             ops.push(("QUERY".into(), op, ptr(pptr, "query")));
         } else {
             only_32(ctx, b, &ptr(pptr, "query"), "the `query` operation");
         }
     }
-    if let Some(Value::Object(extra)) = item.get("additionalOperations") {
+    if let Some(Value::Object(extra)) = field("additionalOperations") {
         if is_32(ctx.dialect) {
             for (m, op) in extra {
                 let upper = m.to_ascii_uppercase();
@@ -431,14 +515,26 @@ fn import_path_item(
             only_32(ctx, b, &ptr(pptr, "additionalOperations"), "`additionalOperations`");
         }
     }
-    let path_params = item.get("parameters").cloned().unwrap_or(Value::Array(vec![]));
-    let path_servers = item.get("servers").cloned();
+    let no_params = Value::Array(vec![]);
+    let path_params = field("parameters").unwrap_or(&no_params);
+    let path_servers = field("servers");
     for (method, op, optr) in ops {
         if !b.admit(&optr) {
             continue;
         }
-        import_operation(ctx, b, path, &method, op, &optr, &path_params, pptr, path_servers.as_ref(), global_sec, tags, order);
+        // An operation is walked, and parts of it copied, each time it is
+        // imported (a shared Path Item imports it once per path): charged.
+        if !b.charge_value(&optr, op) {
+            b.skipped();
+            continue;
+        }
+        import_operation(ctx, b, path, &method, op, &optr, path_params, pptr, path_servers, global_sec, tags, order);
     }
+}
+
+/// A Path Item field: the item's own (other than `$ref`), else the referenced item's.
+fn path_field<'v>(local: Option<&'v Map<String, Value>>, target: &'v Value, k: &str) -> Option<&'v Value> {
+    local.and_then(|l| l.get(k)).filter(|_| k != "$ref").or_else(|| target.get(k))
 }
 
 struct ParamOut {
@@ -455,25 +551,32 @@ struct ParamOut {
 /// same name + location). Returns (param, pointer) pairs.
 fn merged_params(ctx: &Ctx, b: &mut Builder, path_params: &Value, pptr: &str, op: &Value, optr: &str) -> Vec<(Value, String)> {
     let mut out: Vec<(Value, String)> = vec![];
+    // (location, name as compared) → position in `out`.
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
     let mut add = |b: &mut Builder, list: &Value, base: &str| {
         let Some(a) = list.as_array() else { return };
         for (i, p) in a.iter().enumerate() {
+            // Parameters are copied per operation, with their pointers; the
+            // copies share the import's sample byte budget.
+            if !schema::charge_len(&ctx.sample_bytes, base.len().saturating_add(24)) {
+                b.report.warn("sample_size_limit", base, "generated samples reached the import's byte budget; parameter skipped");
+                return;
+            }
             let at = format!("{base}/{i}");
             let Some((p, pp)) = ctx.refs.resolve(p, &at, &mut b.report) else { continue };
-            // Parameters are copied per operation; the copies share the import's sample byte budget.
-            if !schema::charge_copy(&ctx.sample_bytes, p) {
+            if !schema::charge_len(&ctx.sample_bytes, pp.len()) || !schema::charge_copy(&ctx.sample_bytes, p) {
                 b.report.warn("sample_size_limit", &pp, "generated samples reached the import's byte budget; parameter skipped");
                 continue;
             }
-            let name = str_of(p, "name").unwrap_or("").to_string();
-            let loc = str_of(p, "in").unwrap_or("").to_string();
-            let norm = |n: &str| if loc == "header" { n.to_ascii_lowercase() } else { n.to_string() };
-            if let Some(slot) =
-                out.iter_mut().find(|(q, _)| str_of(q, "in") == Some(loc.as_str()) && norm(str_of(q, "name").unwrap_or("")) == norm(&name))
-            {
-                *slot = (p.clone(), pp);
-            } else {
-                out.push((p.clone(), pp));
+            let name = str_of(p, "name").unwrap_or("");
+            let loc = str_of(p, "in").unwrap_or("");
+            let name = if loc == "header" { name.to_ascii_lowercase() } else { name.to_string() };
+            match index.entry((loc.to_string(), name)) {
+                Entry::Occupied(slot) => out[*slot.get()] = (p.clone(), pp),
+                Entry::Vacant(slot) => {
+                    slot.insert(out.len());
+                    out.push((p.clone(), pp));
+                }
             }
         }
     };
@@ -821,11 +924,13 @@ fn import_operation(
     }
 
     // ---- folder ----
-    let op_tags: Vec<String> = op
-        .get("tags")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-        .unwrap_or_default();
+    let tag_list = op.get("tags").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let tag_bytes = tag_list.iter().fold(0usize, |n, t| n.saturating_add(t.as_str().map_or(0, str::len)));
+    let op_tags: Vec<String> = if b.charge_text(optr, tag_bytes) {
+        tag_list.iter().filter_map(Value::as_str).map(str::to_string).collect()
+    } else {
+        vec![]
+    };
     let folder = match b.opts.group_by {
         GroupBy::Tags => op_tags.first().map(|t| tags.folder(b, t, order, 0)),
         GroupBy::Paths => {
@@ -856,10 +961,14 @@ fn import_operation(
         .or(op_id)
         .unwrap_or_else(|| format!("{method} {path}"));
     let deprecated = op.get("deprecated").and_then(Value::as_bool) == Some(true);
-    let mut description = str_of(op, "description").unwrap_or("").to_string();
-    if deprecated {
-        description = format!("[deprecated] {description}").trim().to_string();
-    }
+    let desc = str_of(op, "description").unwrap_or("");
+    let description = if !b.charge_text(optr, desc.len()) {
+        String::new()
+    } else if deprecated {
+        format!("[deprecated] {desc}").trim().to_string()
+    } else {
+        desc.to_string()
+    };
     let req = b.add_request(folder, &name, &key, spec, optr);
     req.description = description;
     req.tags = op_tags;
@@ -870,8 +979,10 @@ fn import_operation(
 
 fn accept_type(ctx: &Ctx, b: &mut Builder, op: &Value, optr: &str) -> Option<String> {
     if ctx.dialect == Dialect::Swagger20 {
-        let produces = op.get("produces").or_else(|| ctx.root.get("produces"))?;
-        return produces.as_array()?.iter().filter_map(Value::as_str).find(|m| *m != "*/*").map(str::to_string);
+        return match op.get("produces") {
+            Some(p) => first_produced(Some(p)),
+            None => ctx.swagger_defaults.accept.as_deref().map(|a| b.text(optr, a)).filter(|a| !a.is_empty()),
+        };
     }
     let responses = op.get("responses")?.as_object()?;
     for (code, resp) in responses {
@@ -916,15 +1027,15 @@ fn request_body(ctx: &Ctx, sg: &mut SampleGen, op: &Value, optr: &str, pout: &Pa
 }
 
 fn swagger2_body(ctx: &Ctx, sg: &mut SampleGen, op: &Value, optr: &str, pout: &ParamOut) -> body::GeneratedBody {
-    let consumes: Vec<String> = op
-        .get("consumes")
-        .or_else(|| ctx.root.get("consumes"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-        .unwrap_or_default();
+    // An operation's own `consumes` (charged with the operation), else the
+    // document's, read once.
+    let own = op.get("consumes").map(|c| SwaggerDefaults::new(None, Some(c)));
+    let consumes = own.as_ref().unwrap_or(&ctx.swagger_defaults);
     if let Some((p, pp)) = &pout.body_params {
-        let keys: Vec<&str> = consumes.iter().map(String::as_str).filter(|m| !m.contains("form")).collect();
-        let mt = body::choose_media(&keys).map(|i| keys[i].to_string()).unwrap_or_else(|| "application/json".into());
+        // Copied per operation: charged.
+        let Some(mt) = sg.copy_str(pp, &consumes.body_media) else {
+            return body::GeneratedBody { body: Body::None, content_type: None };
+        };
         let schema = match p.get("schema") {
             Some(s) => sg.copy(pp, s).unwrap_or(Value::Null),
             None => json!({}),
@@ -936,7 +1047,7 @@ fn swagger2_body(ctx: &Ctx, sg: &mut SampleGen, op: &Value, optr: &str, pout: &P
         return body::GeneratedBody { body: Body::None, content_type: None };
     }
     let has_file = pout.form_params.iter().any(|(p, _)| str_of(p, "type") == Some("file"));
-    let multipart = has_file || consumes.iter().any(|c| c.starts_with("multipart/form-data"));
+    let multipart = has_file || consumes.multipart;
     let mut props = Map::new();
     let mut required = vec![];
     let mut encoding = Map::new();
@@ -972,11 +1083,17 @@ fn swagger2_body(ctx: &Ctx, sg: &mut SampleGen, op: &Value, optr: &str, pout: &P
     // Findings refer to the synthesized schema: point them at the real
     // formData parameter instead.
     let prefix = format!("{synthetic}/schema/properties/");
+    let mut by_name: HashMap<&str, &String> = HashMap::new();
+    for (p, pp) in &pout.form_params {
+        if let Some(n) = str_of(p, "name") {
+            by_name.entry(n).or_insert(pp);
+        }
+    }
     let fix = |f: &mut crate::report::Finding| {
         if let Some(rest) = f.pointer.strip_prefix(&prefix) {
             let name = rest.split('/').next().unwrap_or("").replace("~1", "/").replace("~0", "~");
-            if let Some((_, pp)) = pout.form_params.iter().find(|(p, _)| str_of(p, "name") == Some(name.as_str())) {
-                f.pointer = pp.clone();
+            if let Some(pp) = by_name.get(name.as_str()) {
+                f.pointer = (*pp).clone();
             }
         }
     };

@@ -8,10 +8,17 @@
 //! * Plain-name fragments (`#foo`, JSON Schema `$anchor`) are reported as
 //!   unsupported.
 //! * Every resolution is charged against `max_ref_expansions` for the whole
-//!   import.
+//!   import. A `$ref` longer than [`MAX_REF_LEN`] bytes is not followed, so
+//!   one resolution step costs at most that much (decoding, lookup and the
+//!   cycle check).
 
 use crate::report::ImportReport;
+use crate::util::clip;
 use serde_json::Value;
+use std::collections::HashSet;
+
+/// Longest `$ref` followed, in bytes.
+pub(crate) const MAX_REF_LEN: usize = 2_048;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Refs<'a> {
@@ -55,11 +62,16 @@ impl<'a> Refs<'a> {
     {
         let mut cur: &'v Value = v;
         let mut cur_ptr = at.to_string();
-        let mut chain: Vec<String> = Vec::new();
+        let mut chain: HashSet<String> = HashSet::new();
         loop {
             let Some(r) = Self::ref_of(cur) else {
                 return Some((cur, cur_ptr));
             };
+            if r.len() > MAX_REF_LEN {
+                let msg = format!("$ref '{}' is longer than {MAX_REF_LEN} bytes and was not followed", clip(r, 64));
+                report.warn("ref_too_long", &cur_ptr, msg);
+                return None;
+            }
             if chain.len() >= self.max_depth {
                 report.warn("ref_depth_limit", at, format!("$ref chain longer than {} was not followed", self.max_depth));
                 return None;
@@ -86,7 +98,7 @@ impl<'a> Refs<'a> {
                         report.warn("dangling_ref", &cur_ptr, format!("$ref '{r}' does not point to anything in the document"));
                         return None;
                     };
-                    chain.push(p.clone());
+                    chain.insert(p.clone());
                     cur = target;
                     cur_ptr = p;
                 }
@@ -156,6 +168,17 @@ mod tests {
         assert!(refs.resolve(&root["ext"], "/ext", &mut rep).is_none());
         assert_eq!(rep.external_refs.len(), 1);
         assert_eq!(refs.resolve(&root["sp"], "/sp", &mut rep).unwrap().0["type"], "integer");
+    }
+
+    #[test]
+    fn long_refs_are_not_followed() {
+        let long = format!("#/{}", "x".repeat(MAX_REF_LEN));
+        let root = json!({"a": {"$ref": long}});
+        let refs = Refs { root: &root, max_depth: 8, max_expansions: 100 };
+        let mut rep = ImportReport::default();
+        assert!(refs.resolve(&root["a"], "/a", &mut rep).is_none());
+        assert!(rep.has_code("ref_too_long"));
+        assert_eq!(rep.counts.refs_resolved, 0);
     }
 
     #[test]

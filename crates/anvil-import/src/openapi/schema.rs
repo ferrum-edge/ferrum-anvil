@@ -117,7 +117,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     where
         'a: 'v,
     {
-        let (s, p) = self.refs.resolve_or_self(schema, at, self.report);
+        let (s, p) = match self.resolve(schema, at) {
+            Some(x) => x,
+            None => (schema, at.to_string()),
+        };
         let payload = (self.nodes, self.budget_warned);
         (self.nodes, self.budget_warned) = self.flat_budget;
         let merged = if s.get("allOf").is_some_and(Value::is_array) { self.merge_all_of(s, &p) } else { None };
@@ -177,6 +180,25 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         self.take_bytes(at, n)
     }
 
+    /// [`Refs::resolve`], with the pointer it copies and the `$ref` it
+    /// decodes charged first, and the target's pointer after.
+    fn resolve<'v>(&mut self, v: &'v Value, at: &str) -> Option<(&'v Value, String)>
+    where
+        'a: 'v,
+    {
+        let r = Refs::ref_of(v).map_or(0, str::len);
+        if !self.charge_scan(at, at.len().saturating_add(r)) {
+            return None;
+        }
+        let (t, tp) = self.refs.resolve(v, at, self.report)?;
+        self.charge_scan(at, tp.len()).then_some((t, tp))
+    }
+
+    /// Charge checking `p` against the `$ref`s being expanded (and keeping a copy).
+    fn charge_stack(&mut self, at: &str, p: &str) -> bool {
+        self.charge_scan(at, p.len().saturating_mul(self.stack.len() + 1))
+    }
+
     fn bytes_spent(&mut self, at: &str) {
         self.bytes.set(0);
         if !self.bytes_warned {
@@ -191,7 +213,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             return true;
         }
         if Refs::ref_of(schema).is_some()
-            && let Some((t, _)) = self.refs.resolve(schema, at, self.report)
+            && let Some((t, _)) = self.resolve(schema, at)
         {
             return t.get(key).and_then(Value::as_bool) == Some(true);
         }
@@ -220,7 +242,9 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     }
 
     fn gen_value(&mut self, schema: &Value, at: &str, depth: usize, name: Option<&str>) -> Option<Value> {
-        if !self.charge(at) {
+        // Every visit is charged a value and the length of its pointer, which
+        // the visit copies into child pointers and findings.
+        if !self.charge(at) || !self.charge_scan(at, at.len()) {
             return None;
         }
         if depth > MAX_NESTING {
@@ -283,6 +307,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             || obj.get("x-nullable").and_then(Value::as_bool) == Some(true);
         let non_null: Vec<&String> = types.iter().filter(|t| *t != "null").collect();
         if non_null.len() > 1 {
+            // The message lists every type, on every visit: charged.
+            if !self.charge_scan(at, non_null.iter().fold(0usize, |n, t| n.saturating_add(t.len() + 2))) {
+                return None;
+            }
             self.report.warn(
                 "multiple_types",
                 &ptr(at, "type"),
@@ -332,6 +360,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             "examples",
             "default",
         ];
+        // Every key may be looked at (all of them when they are annotations).
+        if !self.charge_scan(at, obj.len()) {
+            return None;
+        }
         let has_siblings = obj.keys().any(|k| !ANNOTATIONS.contains(&k.as_str()) && !k.starts_with("x-"));
         let modern = is_31_plus(self.dialect);
         if modern && self.mode == SampleMode::Sample {
@@ -343,7 +375,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 return self.copy(at, d);
             }
         }
-        let (target, tptr) = self.refs.resolve(schema, at, self.report)?;
+        let (target, tptr) = self.resolve(schema, at)?;
+        if !self.charge_stack(at, &tptr) {
+            return None;
+        }
         if self.stack.contains(&tptr) {
             self.report.warn(
                 "recursive_schema",
@@ -383,6 +418,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         match obj.get("type") {
             Some(Value::String(s)) => vec![s.clone()],
             Some(Value::Array(a)) => {
+                // Every entry is read (and copied) on every visit.
+                if !self.charge_scan(at, a.iter().fold(a.len(), |n, t| n.saturating_add(t.as_str().map_or(0, str::len)))) {
+                    return vec![];
+                }
                 if !is_31_plus(self.dialect) {
                     self.report.warn(
                         "type_array_in_legacy_dialect",
@@ -421,14 +460,20 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             );
         }
         if let (Some(c), Some(e)) = (obj.get("const"), obj.get("enum").and_then(Value::as_array)) {
-            // Each comparison may walk all of `const`: its size is charged
-            // once per `enum` value before any comparison is made.
-            let cost = size_within(c, self.bytes.get()).and_then(|n| n.checked_mul(e.len()));
-            if !cost.is_some_and(|n| self.charge_scan(at, n)) {
-                self.bytes_spent(at);
-                return None;
-            }
-            if !e.contains(c) {
+            // An empty `enum` contains nothing: `const` is not walked at all.
+            // Otherwise each comparison may walk all of `const`: its size is
+            // charged once per `enum` value before any comparison is made.
+            let contained = if e.is_empty() {
+                false
+            } else {
+                let cost = size_within(c, self.bytes.get()).and_then(|n| n.checked_mul(e.len()));
+                if !cost.is_some_and(|n| self.charge_scan(at, n)) {
+                    self.bytes_spent(at);
+                    return None;
+                }
+                e.contains(c)
+            };
+            if !contained {
                 self.report.warn("contradictory_schema", at, "`const` is not one of the `enum` values");
             }
         }
@@ -449,19 +494,25 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             self.report.warn("contradictory_schema", &kptr, format!("empty `{key}` accepts no value"));
             return None;
         }
-        let viable = |this: &mut Self, a: &Value| -> bool {
-            if a == &Value::Bool(false) {
-                return false;
+        // Every alternative looked at is charged, with the check of its
+        // `$ref` against the ones being expanded.
+        let viable = |this: &mut Self, a: &Value| -> Option<bool> {
+            let r = Refs::ref_of(a).and_then(|r| r.strip_prefix('#'));
+            if !this.charge_scan(at, r.map_or(0, str::len).saturating_mul(this.stack.len()).saturating_add(1)) {
+                return None;
             }
-            if let Some(r) = Refs::ref_of(a)
-                && let Some(frag) = r.strip_prefix('#')
-                && this.stack.iter().any(|s| s == frag)
-            {
-                return false;
+            if a == &Value::Bool(false) || r.is_some_and(|frag| this.stack.iter().any(|s| s == frag)) {
+                return Some(false);
             }
-            !(a.get("type").and_then(Value::as_str) == Some("null"))
+            Some(a.get("type").and_then(Value::as_str) != Some("null"))
         };
-        let idx = (0..alts.len()).find(|i| viable(self, &alts[*i])).unwrap_or(0);
+        let mut idx = 0;
+        for (i, a) in alts.iter().enumerate() {
+            if viable(self, a)? {
+                idx = i;
+                break;
+            }
+        }
         if alts.len() > 1 {
             let label = Refs::ref_of(&alts[idx]).and_then(ref_name).unwrap_or_else(|| format!("#{idx}"));
             self.report.warn(
@@ -488,6 +539,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             && let Some(prop) = d.get("propertyName").and_then(Value::as_str)
         {
             let r = Refs::ref_of(alt).map(str::to_string);
+            // Every mapping entry may be compared with the chosen `$ref`.
+            let entries = d.get("mapping").and_then(Value::as_object).map_or(0, Map::len);
+            if !self.charge_scan(at, entries.saturating_mul(r.as_ref().map_or(1, String::len))) {
+                return None;
+            }
             let mapped = d.get("mapping").and_then(Value::as_object).and_then(|mp| {
                 mp.iter().find(|(_, target)| r.as_deref().is_some_and(|r| target.as_str() == Some(r))).map(|(k, _)| k.clone())
             });
@@ -513,6 +569,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         let mut acc = self.copy_map_except(at, obj, "allOf")?;
         let branches = obj.get("allOf").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
         for (i, br) in branches.iter().enumerate() {
+            // A branch is charged a value, its pointer and its keys.
+            let keys = br.as_object().map_or(0, Map::len);
+            if !self.charge_scan(at, at.len().saturating_add(keys)) {
+                return None;
+            }
             let bptr = ptr_i(&ptr(at, "allOf"), i);
             if !self.charge(&bptr) {
                 return None;
@@ -520,7 +581,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             let mut pushed = false;
             let mut with_siblings = None;
             let target = if Refs::ref_of(br).is_some() {
-                let (t, tp) = self.refs.resolve(br, &bptr, self.report)?;
+                let (t, tp) = self.resolve(br, &bptr)?;
+                if !self.charge_stack(&bptr, &tp) {
+                    return None;
+                }
                 if self.stack.contains(&tp) {
                     self.report.warn("recursive_schema", &tp, "recursive allOf composition: expansion stops at the first repetition");
                     continue;
@@ -595,8 +659,14 @@ impl<'a, 'r> SampleGen<'a, 'r> {
 
     /// Merge `src` into `acc`. Only what is kept is copied, and each copy is
     /// charged first; `false` once the byte budget is spent. `allOf` members
-    /// were merged (or cut) by the caller.
+    /// were merged (or cut) by the caller. The lookups and comparisons a merge
+    /// makes are charged too: each key, each property name and the size of a
+    /// property compared with one already merged, the `required` names, and
+    /// the pairs of `type` and `enum` values compared.
     fn merge_into(&mut self, acc: &mut Map<String, Value>, src: &Map<String, Value>, at: &str) -> bool {
+        if !self.charge_scan(at, src.keys().fold(0usize, |n, k| n.saturating_add(k.len() + 1))) {
+            return false;
+        }
         for (k, v) in src {
             match k.as_str() {
                 "allOf" => {}
@@ -604,13 +674,25 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                     let dst = acc.entry("properties").or_insert_with(|| Value::Object(Map::new()));
                     if let (Value::Object(d), Value::Object(s)) = (dst, v) {
                         for (pk, pv) in s {
+                            if !self.charge_scan(at, pk.len().saturating_add(1)) {
+                                return false;
+                            }
                             match d.get_mut(pk) {
-                                Some(existing) if *existing != *pv => {
-                                    let Some(pv) = self.copy(at, pv) else { return false };
-                                    let prev = std::mem::take(existing);
-                                    *existing = json!({ "allOf": [prev, pv] });
+                                Some(existing) => {
+                                    // The comparison walks at most `pv`.
+                                    let Some(n) = size_within(pv, self.bytes.get()) else {
+                                        self.bytes_spent(at);
+                                        return false;
+                                    };
+                                    if !self.charge_scan(at, n) {
+                                        return false;
+                                    }
+                                    if *existing != *pv {
+                                        let Some(pv) = self.copy(at, pv) else { return false };
+                                        let prev = std::mem::take(existing);
+                                        *existing = json!({ "allOf": [prev, pv] });
+                                    }
                                 }
-                                Some(_) => {}
                                 None => {
                                     let Some(pv) = self.copy(at, pv) else { return false };
                                     d.insert(pk.clone(), pv);
@@ -622,16 +704,29 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 "required" => {
                     let dst = acc.entry("required").or_insert_with(|| Value::Array(vec![]));
                     if let (Value::Array(d), Value::Array(s)) = (dst, v) {
+                        // The names merged so far go into a set, and each new
+                        // one is looked up in it: all charged first.
+                        if !self.charge_scan(at, names_cost(d.iter().chain(s))) {
+                            return false;
+                        }
                         let mut names: HashSet<String> = d.iter().filter_map(Value::as_str).map(str::to_string).collect();
+                        let mut ignored = false;
                         for x in s {
-                            let known = match x.as_str() {
-                                Some(n) => !names.insert(n.to_string()),
-                                None => d.contains(x),
+                            let Some(n) = x.as_str() else {
+                                ignored = true;
+                                continue;
                             };
-                            if !known {
+                            if names.insert(n.to_string()) {
                                 let Some(x) = self.copy(at, x) else { return false };
                                 d.push(x);
                             }
+                        }
+                        if ignored {
+                            self.report.warn(
+                                "invalid_required",
+                                &ptr(at, "allOf"),
+                                "`required` lists values that are not names; they are ignored",
+                            );
                         }
                     }
                 }
@@ -641,6 +736,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                         acc.insert(k.clone(), v);
                     }
                     Some(existing) => {
+                        // Every pair of types may be compared.
+                        let ((na, la), (nb, lb)) = (type_size(existing), type_size(v));
+                        if !self.charge_scan(at, na.saturating_mul(nb).saturating_add(la).saturating_add(lb)) {
+                            return false;
+                        }
                         let a = type_set(existing);
                         let b = type_set(v);
                         let inter: Vec<String> = a
@@ -672,6 +772,15 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 "exclusiveMaximum" if v.is_number() => merge_num(acc, k, v, f64::min),
                 "enum" if acc.get("enum").is_some_and(Value::is_array) && v.is_array() => {
                     if let (Some(Value::Array(a)), Value::Array(b)) = (acc.get_mut("enum"), v) {
+                        // Each kept value is compared with every value of `b`
+                        // (twice: to test, then to keep): each comparison walks
+                        // at most the kept value, so its size is charged per
+                        // value of `b`.
+                        let cost = size_of_all(a, self.bytes.get()).and_then(|n| n.checked_mul(b.len())).and_then(|n| n.checked_mul(2));
+                        if !cost.is_some_and(|n| self.charge_scan(at, n)) {
+                            self.bytes_spent(at);
+                            return false;
+                        }
                         if a.iter().any(|x| b.contains(x)) {
                             a.retain(|x| b.contains(x));
                         } else {
@@ -696,8 +805,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         let listed = obj.get("required").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
         // Reading the `required` names (into a set, and later against the
         // members) is charged up front: a byte per name plus its length.
-        let cost = listed.iter().fold(0usize, |n, r| n.saturating_add(r.as_str().map_or(0, str::len)).saturating_add(1));
-        if !self.charge_scan(at, cost) {
+        if !self.charge_scan(at, names_cost(listed)) {
             return None;
         }
         let required: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
@@ -712,6 +820,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             let req = required_set.contains(k.as_str());
             if !req && !self.include_optional {
                 continue;
+            }
+            // Its pointer is built (and copied into findings) only now: charged.
+            if !self.charge_scan(at, pbase.len().saturating_add(k.len())) {
+                break;
             }
             let pp = ptr(&pbase, k);
             if self.flag(ps, &pp, "readOnly") {
@@ -1084,6 +1196,19 @@ pub(crate) fn charge_copy(bytes: &Cell<usize>, v: &Value) -> bool {
     }
 }
 
+/// Charge `n` bytes against an import's sample byte budget; `false` (and
+/// the budget is spent) when they do not fit.
+pub(crate) fn charge_len(bytes: &Cell<usize>, n: usize) -> bool {
+    let left = bytes.get();
+    if n < left {
+        bytes.set(left - n);
+        true
+    } else {
+        bytes.set(0);
+        false
+    }
+}
+
 /// Size estimate of a copy of `v` (its JSON text, roughly), or `None` when it
 /// exceeds `limit`. The walk stops as soon as the limit is passed, so it costs
 /// at most `limit`.
@@ -1127,6 +1252,30 @@ fn infer_type(obj: &Map<String, Value>) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Bytes charged for reading a `required` list: one per entry plus the
+/// length of each name.
+fn names_cost<'v>(vals: impl IntoIterator<Item = &'v Value>) -> usize {
+    vals.into_iter().fold(0usize, |n, x| n.saturating_add(x.as_str().map_or(0, str::len)).saturating_add(1))
+}
+
+/// (entries, bytes) of a `type` value, for charging a comparison of two.
+fn type_size(v: &Value) -> (usize, usize) {
+    match v {
+        Value::String(s) => (1, s.len()),
+        Value::Array(a) => (a.len(), a.iter().fold(0usize, |n, t| n.saturating_add(t.as_str().map_or(1, str::len)))),
+        _ => (0, 0),
+    }
+}
+
+/// The summed [`size_within`] of `vals`, or `None` past `limit`.
+fn size_of_all(vals: &[Value], limit: usize) -> Option<usize> {
+    let mut total = 0usize;
+    for v in vals {
+        total += size_within(v, limit.checked_sub(total)?)?;
+    }
+    Some(total)
 }
 
 fn type_set(v: &Value) -> Vec<String> {
@@ -1250,11 +1399,11 @@ mod tests {
         let schema = json!({"$ref": "#/components/schemas/A"});
         let (flat, at) = sg.flatten(&schema, "/s");
         // The resolved schema is borrowed: it is bigger than the whole budget,
-        // yet nothing is charged and it is not replaced by `null`.
+        // yet it is not replaced by `null`, and only the pointers are charged.
         assert!(matches!(flat, Cow::Borrowed(_)));
         assert_eq!(flat["type"], json!("string"));
         assert_eq!(at, "/components/schemas/A");
-        assert_eq!(bytes.get(), 1_000);
+        assert!(bytes.get() > 900, "{} bytes left", bytes.get());
     }
 
     #[test]
@@ -1352,6 +1501,18 @@ mod tests {
         ]});
         let (v, _) = gen_with(&root, &s, SampleMode::Sample, false);
         assert_eq!(v.unwrap(), json!({"a": "x", "b": 3}));
+    }
+
+    #[test]
+    fn all_of_required_ignores_values_that_are_not_names() {
+        let root = json!({});
+        let s = json!({"allOf": [
+            {"type": "object", "required": ["a"], "properties": {"a": {"type": "string", "enum": ["x"]}}},
+            {"required": [1, 2, "a", "b", {"c": 3}], "properties": {"b": {"type": "integer", "enum": [4]}}}
+        ]});
+        let (v, rep) = gen_with(&root, &s, SampleMode::Sample, false);
+        assert_eq!(v.unwrap(), json!({"a": "x", "b": 4}));
+        assert!(rep.has_code("invalid_required"));
     }
 
     #[test]

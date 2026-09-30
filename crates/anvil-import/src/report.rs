@@ -6,9 +6,34 @@
 //! `/definitions/binding[@name='QuoteSoap']/operation[@name='GetQuote']`;
 //! for cURL they point into the argument vector (`/args/3`).
 
+use crate::util::clip;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Findings of one code kept in a report; the rest are counted in a single
+/// `report_truncated` warning. Pointers and messages are clipped, so the
+/// report stays bounded however many locations an input repeats.
+const MAX_FINDINGS_PER_CODE: usize = 1_000;
+/// Locations kept per external reference or required variable.
+const MAX_POINTERS_PER_ENTRY: usize = 1_000;
+/// Inactive settings, redactions and retained scripts kept per report.
+const MAX_ENTRIES: usize = 10_000;
+/// Characters kept of a stored pointer.
+const MAX_POINTER_CHARS: usize = 512;
+/// Characters kept of a stored message or value.
+const MAX_TEXT_CHARS: usize = 2_048;
+
+/// `s` as stored in a report: whole when short, clipped otherwise (the
+/// clip looks at no more than `max` characters).
+fn bounded(s: &str, max: usize) -> String {
+    if s.len() <= max { s.to_string() } else { clip(s, max) }
+}
+
+/// [`bounded`] for text that is already owned.
+fn bounded_owned(s: String, max: usize) -> String {
+    if s.len() <= max { s } else { clip(&s, max) }
+}
 
 /// A located observation about the source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -135,10 +160,19 @@ pub struct ImportReport {
     seen: Seen,
 }
 
-/// De-duplication index for findings. Not part of the report's value:
+/// De-duplication and lookup indexes. Not part of the report's value:
 /// always compares equal and is never serialized.
 #[derive(Debug, Clone, Default)]
-struct Seen(HashSet<(String, String)>);
+struct Seen {
+    /// (code, clipped pointer) of every finding kept.
+    findings: HashSet<(String, String)>,
+    /// Findings kept per code (`u:` prefix for unsupported ones).
+    per_code: HashMap<String, usize>,
+    /// External reference → its index in `external_refs` and its pointers.
+    refs: HashMap<String, (usize, HashSet<String>)>,
+    /// Required variable name → its index in `required_variables` and its pointers.
+    vars: HashMap<String, (usize, HashSet<String>)>,
+}
 
 impl PartialEq for Seen {
     fn eq(&self, _: &Self) -> bool {
@@ -149,30 +183,75 @@ impl PartialEq for Seen {
 impl Eq for Seen {}
 
 impl Seen {
-    fn insert(&mut self, k: (String, String)) -> bool {
-        self.0.insert(k)
+    /// Whether a finding of `key` (its code) at `pointer` is new, and
+    /// whether its code still has room for it.
+    fn admit(&mut self, key: &str, pointer: &str) -> Admit {
+        if self.findings.contains(&(key.to_string(), pointer.to_string())) {
+            return Admit::Known;
+        }
+        let n = self.per_code.entry(key.to_string()).or_insert(0);
+        *n += 1;
+        if *n > MAX_FINDINGS_PER_CODE {
+            return if *n == MAX_FINDINGS_PER_CODE + 1 { Admit::Truncate } else { Admit::Dropped };
+        }
+        self.findings.insert((key.to_string(), pointer.to_string()));
+        Admit::Keep
     }
+}
+
+enum Admit {
+    Keep,
+    Known,
+    /// The first finding over the code's limit: note the truncation.
+    Truncate,
+    Dropped,
 }
 
 impl ImportReport {
     /// Record a warning once per (code, pointer).
     pub fn warn(&mut self, code: &str, pointer: &str, message: impl Into<String>) {
-        if self.seen.insert((code.to_string(), pointer.to_string())) {
-            self.warnings.push(Finding { code: code.into(), pointer: pointer.into(), message: message.into() });
+        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        match self.seen.admit(code, &pointer) {
+            Admit::Keep => {
+                let message = bounded_owned(message.into(), MAX_TEXT_CHARS);
+                self.warnings.push(Finding { code: code.into(), pointer, message });
+            }
+            Admit::Truncate => self.truncated(code),
+            Admit::Known | Admit::Dropped => {}
         }
     }
 
     /// Record an unsupported construct once per (code, pointer).
     pub fn unsupported(&mut self, code: &str, pointer: &str, message: impl Into<String>) {
-        if self.seen.insert((format!("u:{code}"), pointer.to_string())) {
-            self.unsupported.push(Finding { code: code.into(), pointer: pointer.into(), message: message.into() });
+        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        match self.seen.admit(&format!("u:{code}"), &pointer) {
+            Admit::Keep => {
+                let message = bounded_owned(message.into(), MAX_TEXT_CHARS);
+                self.unsupported.push(Finding { code: code.into(), pointer, message });
+            }
+            Admit::Truncate => self.truncated(code),
+            Admit::Known | Admit::Dropped => {}
         }
     }
 
+    /// Note, once per kind, that entries of that kind were left out.
+    fn truncated(&mut self, code: &str) {
+        if !self.seen.findings.insert(("report_truncated".into(), code.to_string())) {
+            return;
+        }
+        self.warnings.push(Finding {
+            code: "report_truncated".into(),
+            pointer: "/".into(),
+            message: format!("more than {MAX_FINDINGS_PER_CODE} '{}' findings; the rest are not listed", clip(code, 64)),
+        });
+    }
+
     pub fn external_ref(&mut self, reference: &str, pointer: &str) {
-        if let Some(e) = self.external_refs.iter_mut().find(|e| e.reference == reference) {
-            if !e.pointers.iter().any(|p| p == pointer) {
-                e.pointers.push(pointer.to_string());
+        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        if let Some((i, seen)) = self.seen.refs.get_mut(reference) {
+            let e = &mut self.external_refs[*i];
+            if e.pointers.len() < MAX_POINTERS_PER_ENTRY && seen.insert(pointer.clone()) {
+                e.pointers.push(pointer);
             }
             return;
         }
@@ -184,15 +263,14 @@ impl ImportReport {
         } else {
             ExternalRefKind::Other
         };
-        self.external_refs.push(ExternalRef {
-            reference: reference.to_string(),
-            kind,
-            pointers: vec![pointer.to_string()],
-            requires_approval: true,
-        });
+        self.seen.refs.insert(reference.to_string(), (self.external_refs.len(), HashSet::from([pointer.clone()])));
+        self.external_refs.push(ExternalRef { reference: reference.to_string(), kind, pointers: vec![pointer], requires_approval: true });
     }
 
     pub fn script(&mut self, pointer: &str, owner: &str, event: &str, language: &str, source: String) {
+        if self.scripts.len() >= MAX_ENTRIES {
+            return self.truncated("script");
+        }
         self.scripts.push(RetainedScript {
             pointer: pointer.into(),
             owner: owner.into(),
@@ -205,33 +283,41 @@ impl ImportReport {
     }
 
     pub fn inactive(&mut self, pointer: &str, setting: &str, value: &str, reason: impl Into<String>) {
+        if self.inactive_settings.len() >= MAX_ENTRIES {
+            return self.truncated("inactive_setting");
+        }
         self.inactive_settings.push(InactiveSetting {
-            pointer: pointer.into(),
-            setting: setting.into(),
-            value: value.into(),
-            reason: reason.into(),
+            pointer: bounded(pointer, MAX_POINTER_CHARS),
+            setting: bounded(setting, MAX_TEXT_CHARS),
+            value: bounded(value, MAX_TEXT_CHARS),
+            reason: bounded_owned(reason.into(), MAX_TEXT_CHARS),
         });
     }
 
     pub fn redacted(&mut self, pointer: &str, field: impl Into<String>, placeholder: &str) {
-        self.redactions.push(Redaction { pointer: pointer.into(), field: field.into(), placeholder: placeholder.into() });
+        if self.redactions.len() >= MAX_ENTRIES {
+            return self.truncated("redaction");
+        }
+        self.redactions.push(Redaction {
+            pointer: bounded(pointer, MAX_POINTER_CHARS),
+            field: field.into(),
+            placeholder: placeholder.into(),
+        });
     }
 
     /// Declare a variable that must be supplied by the user.
     pub fn require_var(&mut self, name: &str, secret: bool, reason: &str, pointer: &str) {
-        if let Some(v) = self.required_variables.iter_mut().find(|v| v.name == name) {
+        let pointer = bounded(pointer, MAX_POINTER_CHARS);
+        if let Some((i, seen)) = self.seen.vars.get_mut(name) {
+            let v = &mut self.required_variables[*i];
             v.secret |= secret;
-            if !v.pointers.iter().any(|p| p == pointer) {
-                v.pointers.push(pointer.to_string());
+            if v.pointers.len() < MAX_POINTERS_PER_ENTRY && seen.insert(pointer.clone()) {
+                v.pointers.push(pointer);
             }
             return;
         }
-        self.required_variables.push(RequiredVariable {
-            name: name.into(),
-            secret,
-            reason: reason.into(),
-            pointers: vec![pointer.to_string()],
-        });
+        self.seen.vars.insert(name.to_string(), (self.required_variables.len(), HashSet::from([pointer.clone()])));
+        self.required_variables.push(RequiredVariable { name: name.into(), secret, reason: reason.into(), pointers: vec![pointer] });
     }
 
     pub fn has_code(&self, code: &str) -> bool {

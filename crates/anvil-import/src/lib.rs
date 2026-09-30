@@ -42,6 +42,7 @@ mod report;
 mod structured;
 mod util;
 mod wsdl;
+mod xml_limits;
 
 pub use builder::ANVIL_IMPORT_NAMESPACE;
 pub use detect::{Detected, Dialect, SourceKind, Syntax, detect};
