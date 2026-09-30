@@ -45,8 +45,7 @@ type TcpBindFuture = Pin<Box<dyn Future<Output = io::Result<TcpListener>> + Send
 type UdpBindFuture<E> = Pin<Box<dyn Future<Output = anyhow::Result<(E, SocketAddr)>> + Send>>;
 
 fn retryable_bind_error(error: &io::Error) -> bool {
-    error.raw_os_error() == Some(WINDOWS_WSAEACCES)
-        || matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse)
+    error.raw_os_error() == Some(WINDOWS_WSAEACCES) || matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse)
 }
 
 async fn bind_udp_tcp_pair_with<E, U, T>(mut bind_udp: U, mut bind_tcp: T) -> anyhow::Result<(E, TcpListener)>

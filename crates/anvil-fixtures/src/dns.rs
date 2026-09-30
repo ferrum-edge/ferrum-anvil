@@ -75,9 +75,7 @@ where
     let error = last_error.unwrap_or_else(|| io::Error::other("the DNS fixture pair bind made no attempts"));
     Err(io::Error::new(
         error.kind(),
-        format!(
-            "could not bind a DNS UDP/TCP pair after {PORT_ZERO_BIND_ATTEMPTS} attempts; tried UDP ports {tried_ports:?}: {error}"
-        ),
+        format!("could not bind a DNS UDP/TCP pair after {PORT_ZERO_BIND_ATTEMPTS} attempts; tried UDP ports {tried_ports:?}: {error}"),
     ))
 }
 
@@ -131,12 +129,7 @@ fn answer(query: &[u8], mode: DnsMode) -> Option<Vec<u8>> {
 
 pub async fn serve(bind: &str, mode: DnsMode) -> anyhow::Result<DnsFixture> {
     let (udp, tcp) = if requests_ephemeral_port(bind) {
-        bind_ephemeral_pair_with(
-            bind,
-            bind_udp_future,
-            |addr| Box::pin(TcpListener::bind(addr)),
-        )
-        .await?
+        bind_ephemeral_pair_with(bind, bind_udp_future, |addr| Box::pin(TcpListener::bind(addr))).await?
     } else {
         let udp = UdpSocket::bind(bind).await?;
         let addr = udp.local_addr()?;
@@ -294,15 +287,11 @@ mod tests {
     async fn ephemeral_pair_final_error_lists_tried_ports() {
         let ports = Arc::new(Mutex::new(Vec::new()));
         let bind_ports = ports.clone();
-        let result = bind_ephemeral_pair_with(
-            "127.0.0.1:0",
-            bind_udp_future,
-            move |addr| {
-                bind_ports.lock().unwrap().push(addr.port());
-                let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
-                Box::pin(async move { denied }) as TcpBindFuture
-            },
-        )
+        let result = bind_ephemeral_pair_with("127.0.0.1:0", bind_udp_future, move |addr| {
+            bind_ports.lock().unwrap().push(addr.port());
+            let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+            Box::pin(async move { denied }) as TcpBindFuture
+        })
         .await;
 
         let tried = ports.lock().unwrap();
