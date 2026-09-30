@@ -13,7 +13,7 @@ use anvil_import::{
     Detected, ImportOptions, ImportReport, ImportResult, ImportedScope, ImportedSource, ReimportApproval, ReimportPlan, ScopeDiff,
     request_unit_hashes,
 };
-use anvil_storage::store::{StoreRead, StoreTx, kind};
+use anvil_storage::store::{StoreRead, kind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
