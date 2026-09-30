@@ -10,11 +10,19 @@
 //!
 //! Every scenario starts from an empty ticket cache (`clear_sensitive_state`,
 //! the vault-lock path), so the trusted and untrusted passes behave alike.
+//!
+//! EARLY-001 and EARLY-002 reach the gateway's HTTP/3 listener through a UDP
+//! relay (`fixtures_early.rs`) that holds the client's TLS Finished while its
+//! 0-RTT packets pass, so the gateway's handshake stays pending while it
+//! handles the 0-RTT request. The relay's hold is ground truth too: a backend
+//! request that arrived before the release was processed while the gateway's
+//! handshake was pending.
 
+use crate::fixtures_early::{HoldStats, Relay};
 use crate::gateway::{Gateway, Instance, Readiness};
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
 use crate::profiles::{BoxFut, Profile, RunArgs};
-use crate::scenario::{Check, CheckKind, Checks, ScenarioResult};
+use crate::scenario::{CheckKind, Checks, ScenarioResult};
 use anvil_domain::Id;
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::{AttemptReason, EarlyDataNotUsed, EarlyDataObservation, EarlyDataTransport, Phase};
@@ -27,6 +35,7 @@ use anvil_fixtures::http::{self, Fixture};
 use anvil_fixtures::{GroundTruth, LabPki};
 use anvil_transport::recorder::EventCtx;
 use std::future::Future;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
@@ -38,7 +47,10 @@ pub const HTTPS: &str = "127.0.0.1:17243";
 const HTTPS_OFF: &str = "127.0.0.1:17244";
 const ADMIN_PORT: u16 = 17290;
 const BACKEND: &str = "127.0.0.1:17301";
-const GATEWAY_PORTS: &[u16] = &[17280, 17243, 17281, 17244];
+/// The pending-window relay in front of [`HTTPS`]'s QUIC listener.
+const RELAY: &str = "127.0.0.1:17302";
+/// The gateway's listeners, and the relay that reaches one of them.
+const GATEWAY_PORTS: &[u16] = &[17280, 17243, 17281, 17244, 17302];
 const PATH: &str = "/early/echo";
 
 /// Every field is held so its server keeps running for the whole lab run.
@@ -48,6 +60,9 @@ pub struct EarlyFixtures {
     pub certs_dir: PathBuf,
     /// HTTP/1.1 echo backend: its request log is the `Early-Data` ground truth.
     pub backend: Fixture,
+    /// UDP relay to the gateway's QUIC listener that holds the client's
+    /// Finished while 0-RTT packets pass (EARLY-001, EARLY-002).
+    pub relay: Relay,
 }
 
 pub struct Env {
@@ -201,6 +216,13 @@ fn misclassifies_1rtt() -> bool {
     !crate::gateway::release_at_least("v0.9.8")
 }
 
+/// Before v0.9.8 the relay also waits this long after the first gateway
+/// datagram relayed to the Finished's client after the release before it
+/// lets the client's queued 1-RTT data (EARLY-002's retry) through, so the
+/// retry does not reach the gateway in the turn its handshake completes (see
+/// [`misclassifies_1rtt`]).
+const PRE_098_SETTLE: Duration = Duration::from_millis(20);
+
 fn misclassified_note() -> String {
     let release = crate::gateway::release_label();
     format!("{release} marked a 1-RTT stream as early data (fixed in v0.9.8, ferrum-edge#5775)")
@@ -256,12 +278,152 @@ async fn fetch_ticket(env: &Env, c: &mut Checks, https: &str, version: HttpVersi
 /// empty ticket cache, and every missed round must agree with the backend.
 const EARLY_ROUNDS: usize = 6;
 
+/// The longest the relay holds the client's Finished when the gateway does
+/// not act on the 0-RTT request (see [`send_held`]). A gateway slower than
+/// this is judged by what it does after the release.
+const HOLD_CAP: Duration = Duration::from_secs(2);
+
+/// How often the backend and gateway logs are read while the Finished is held.
+const HOLD_POLL: Duration = Duration::from_millis(2);
+
+/// How the relay's hold of the client's Finished ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Released {
+    /// The gateway acted on the 0-RTT request: the backend received a
+    /// request of the method, or the gateway logged its refusal of it.
+    Acted,
+    /// [`HOLD_CAP`] ran out without the gateway acting.
+    Cap,
+    /// The request finished while the Finished was still held.
+    Done,
+}
+
+/// What the relay's hold of the client's Finished showed for one round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hold {
+    released: Released,
+    /// Backend requests of the method since the round's request, counted
+    /// before the release: each reached the backend before the gateway could
+    /// have the client's Finished, so while its handshake was pending.
+    backend_before: usize,
+    /// The gateway's refusals of the method read from its log before the
+    /// release (not read once a backend request was counted).
+    refusals_before: usize,
+    /// How long the Finished was held.
+    held_for: Duration,
+    /// Datagrams queued at the release.
+    datagrams: usize,
+    /// What the relay did during the hold, read when the request finished.
+    relay: HoldStats,
+}
+
+/// A check detail for the relay's hold of a round's Finished.
+fn held(hold: Option<Hold>) -> String {
+    match hold {
+        None => "the relay held no Finished".into(),
+        Some(h) => format!(
+            "held {:?} with {} datagrams queued, released {:?}; before it: {} backend request(s), {} refusal line(s); \
+             {} Handshake datagram(s) also carried 1-RTT data, {} unreadable datagram(s) held",
+            h.held_for, h.datagrams, h.released, h.backend_before, h.refusals_before, h.relay.coalesced_1rtt, h.relay.unparsed
+        ),
+    }
+}
+
+/// The gateway's HTTP/3 0-RTT refusals of `method` logged since `from`.
+fn refusals(env: &Env, from: usize, method: &str) -> usize {
+    gw_lines(&env.gateway, from, H3_REFUSAL).iter().filter(|l| l.contains(method)).count()
+}
+
+/// Backend requests of `method` since request `from`.
+fn backend_of(env: &Env, from: usize, method: &str) -> usize {
+    env.fx.backend.log.requests().iter().skip(from).filter(|(m, _)| m == method).count()
+}
+
+/// Watches one round's backend and gateway logs while the relay holds the
+/// client's Finished, and releases it ([`Watch::poll`]).
+struct Watch<'a> {
+    env: &'a Env,
+    method: &'a str,
+    backend_from: usize,
+    /// Byte offset of the gateway log read so far: only appended lines are read.
+    log_offset: u64,
+    refusals: usize,
+}
+
+impl<'a> Watch<'a> {
+    fn new(env: &'a Env, method: &'a str, backend_from: usize) -> Self {
+        let log_offset = std::fs::metadata(&env.gateway.log_path).map(|m| m.len()).unwrap_or(0);
+        Watch { env, method, backend_from, log_offset, refusals: 0 }
+    }
+
+    /// Count the refusal lines the gateway appended since the last read, up
+    /// to its last complete line.
+    fn read_log(&mut self) {
+        let Ok(mut f) = std::fs::File::open(&self.env.gateway.log_path) else { return };
+        let mut buf = Vec::new();
+        if f.seek(SeekFrom::Start(self.log_offset)).is_err() || f.read_to_end(&mut buf).is_err() {
+            return;
+        }
+        let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return };
+        let text = String::from_utf8_lossy(&buf[..=end]);
+        self.refusals += text.lines().filter(|l| l.contains(H3_REFUSAL) && l.contains(self.method)).count();
+        self.log_offset += end as u64 + 1;
+    }
+
+    /// Release the held Finished once the gateway acted on the round's
+    /// request, once [`HOLD_CAP`] ran out, or (`done`) once the request
+    /// finished. `None` while no Finished is held, and while the hold goes on.
+    fn poll(&mut self, done: bool) -> Option<Hold> {
+        let since = self.env.fx.relay.holding_since()?;
+        let backend_before = backend_of(self.env, self.backend_from, self.method);
+        if backend_before == 0 {
+            self.read_log();
+        }
+        let held_for = since.elapsed();
+        let released = if backend_before > 0 || self.refusals > 0 {
+            Released::Acted
+        } else if held_for >= HOLD_CAP {
+            Released::Cap
+        } else if done {
+            Released::Done
+        } else {
+            return None;
+        };
+        // Counted above, before the release: the relay forwards the Finished
+        // only after this call, so a request counted here never came after it.
+        let datagrams = self.env.fx.relay.release();
+        Some(Hold { released, backend_before, refusals_before: self.refusals, held_for, datagrams, relay: HoldStats::default() })
+    }
+}
+
+/// Send `c` through the relay with its gate armed: the connection's 0-RTT
+/// packets pass while its Finished is held, until `watch` releases it. The
+/// release waits for an event (a backend request or the gateway's refusal
+/// log), not for a fixed time; only a gateway that does not act on the 0-RTT
+/// request within [`HOLD_CAP`] is released by time.
+async fn send_held(env: &Env, c: &ExecutionContext, mut watch: Watch<'_>) -> (ExecutionOutput, Option<Hold>) {
+    env.fx.relay.arm();
+    let request = send(env, c);
+    tokio::pin!(request);
+    let mut hold = None;
+    let out = loop {
+        tokio::select! {
+            o = &mut request => break o,
+            _ = tokio::time::sleep(HOLD_POLL), if hold.is_none() => hold = watch.poll(false),
+        }
+    };
+    let hold = hold.or_else(|| watch.poll(true));
+    env.fx.relay.disarm();
+    (out, hold.map(|h| Hold { relay: env.fx.relay.stats(), ..h }))
+}
+
 /// One round that did send the request as early data, with the backend and
-/// gateway-log positions from just before it.
+/// gateway-log positions from just before it and the relay's hold.
 struct EarlyRound {
     out: ExecutionOutput,
     backend_from: usize,
     log_from: usize,
+    hold: Option<Hold>,
 }
 
 /// A scenario's test of the gateway's side of a round that did send the
@@ -274,12 +436,9 @@ enum Rounds {
     /// A round sent the request as early data and the gateway's side did not
     /// rule it out: the scenario's checks judge it.
     Early(EarlyRound),
-    /// Rounds sent the request as early data, but the gateway handled it after
-    /// its handshake every time: a coverage limitation (the reason), never a
-    /// pass or a failure. Holds the last such round's output.
-    GatewayWindowMissed(ExecutionOutput, String),
-    /// No round sent the request as early data (a failed check was added).
-    NoEarlyData,
+    /// No round could be judged (a failed check was added). Holds the last
+    /// round the gateway handled after its handshake, if any.
+    Exhausted(Option<ExecutionOutput>),
 }
 
 /// What one round showed.
@@ -300,10 +459,8 @@ enum Step {
     Next,
     /// The last round is the one the scenario's checks judge.
     Early,
-    /// Out of rounds, the window under test not observed: skip with this reason.
-    Skip(String),
-    /// Out of rounds, nothing sent as early data: a failure.
-    NoEarlyData,
+    /// Out of rounds without one to judge: a failure, never a skip.
+    Exhausted,
 }
 
 fn rounds_of(outcomes: &[RoundOutcome], kind: RoundOutcome) -> Vec<usize> {
@@ -311,42 +468,31 @@ fn rounds_of(outcomes: &[RoundOutcome], kind: RoundOutcome) -> Vec<usize> {
 }
 
 /// The round loop's decision: judge the first round that sent the request as
-/// early data and was not ruled out by the gateway's side; once
-/// [`EARLY_ROUNDS`] rounds ran without one, skip when some round was sent as
-/// early data (the gateway handled it after its handshake) and fail when none
-/// was.
+/// early data and was not ruled out by the gateway's side; fail once
+/// [`EARLY_ROUNDS`] rounds ran without one.
 fn decide(outcomes: &[RoundOutcome]) -> Step {
     if outcomes.last() == Some(&RoundOutcome::Early) {
-        return Step::Early;
-    }
-    if outcomes.len() < EARLY_ROUNDS {
-        return Step::Next;
-    }
-    match window_unobserved(&rounds_of(outcomes, RoundOutcome::ClientMissed), &rounds_of(outcomes, RoundOutcome::GatewayMissed)) {
-        Some(reason) => Step::Skip(reason),
-        None => Step::NoEarlyData,
+        Step::Early
+    } else if outcomes.len() < EARLY_ROUNDS {
+        Step::Next
+    } else {
+        Step::Exhausted
     }
 }
 
-/// Starts every run-time skip reason of this profile, so triage can tell a
-/// window that was not observed from a scenario that cannot run at all.
-const WINDOW_NOT_OBSERVED: &str = "window not observed: ";
-
-/// Out of rounds: `Some(reason)` when some round did send the request as
-/// early data and the gateway handled it after its handshake every time (the
-/// window under test was not observed); `None` when no round sent it as early
-/// data at all, which stays a failure.
-fn window_unobserved(client_missed: &[usize], gateway_missed: &[usize]) -> Option<String> {
-    if gateway_missed.is_empty() {
-        return None;
+/// Out of rounds: what the rounds showed. With the relay holding the
+/// client's Finished, a gateway that handled the 0-RTT request only after its
+/// handshake did not act on it for [`HOLD_CAP`], so that is a failure too.
+fn exhausted(client_missed: &[usize], gateway_missed: &[usize]) -> String {
+    let mut parts = Vec::new();
+    if !client_missed.is_empty() {
+        parts.push(format!("the handshake finished before the request was written in round(s) {client_missed:?}"));
     }
-    let late = format!("the gateway handled the 0-RTT request after its handshake in round(s) {gateway_missed:?} (RFC 8470 section 6.4)");
-    let first = if client_missed.is_empty() {
-        String::new()
-    } else {
-        format!("; the handshake finished before the request was written in round(s) {client_missed:?}")
-    };
-    Some(format!("{WINDOW_NOT_OBSERVED}{late}{first}: its pre-handshake handling was not exercised within {EARLY_ROUNDS} rounds"))
+    if !gateway_missed.is_empty() {
+        let late = format!("the gateway handled the 0-RTT request after its handshake in round(s) {gateway_missed:?}");
+        parts.push(format!("{late}, not while the relay held the client's Finished (up to {} ms)", HOLD_CAP.as_millis()));
+    }
+    parts.join("; ")
 }
 
 fn missed_rounds_reported(c: &mut Checks, missed: &[usize]) {
@@ -359,25 +505,27 @@ fn missed_rounds_reported(c: &mut Checks, missed: &[usize]) {
 }
 
 /// Fetch a ticket (the gateway's tickets must allow early data), then send
-/// `method` under an early-data policy listing `extra`, until the request
-/// itself travelled as 0-RTT early data and `gateway_missed` does not say the
-/// gateway handled it after its handshake, or the rounds run out ([`decide`]).
+/// `method` under an early-data policy listing `extra`, both through the
+/// relay, until the request itself travelled as 0-RTT early data and
+/// `gateway_missed` does not say the gateway handled it after its handshake,
+/// or the rounds run out ([`decide`]).
 async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str], gateway_missed: GatewayMissed) -> Rounds {
     let mut outcomes = Vec::new();
     let mut last_late = None;
     for round in 0..EARLY_ROUNDS {
         fresh(env);
         if round == 0 {
-            fetch_ticket(env, c, HTTPS, HttpVersionPolicy::Http3Only, true).await;
+            fetch_ticket(env, c, RELAY, HttpVersionPolicy::Http3Only, true).await;
         } else {
-            send(env, &ctx(env, "GET", HTTPS, HttpVersionPolicy::Http3Only, Some(&[]))).await;
+            send(env, &ctx(env, "GET", RELAY, HttpVersionPolicy::Http3Only, Some(&[]))).await;
         }
         let backend_from = backend_count(env);
         let log_from = gw_from(&env.gateway);
-        let out = send(env, &ctx(env, method, HTTPS, HttpVersionPolicy::Http3Only, Some(extra))).await;
+        let request = ctx(env, method, RELAY, HttpVersionPolicy::Http3Only, Some(extra));
+        let (out, hold) = send_held(env, &request, Watch::new(env, method, backend_from)).await;
         let mut this_round = None;
         if early(&out, 0).is_some_and(|e| e.offered) {
-            let r = EarlyRound { out, backend_from, log_from };
+            let r = EarlyRound { out, backend_from, log_from, hold };
             if let Some(detail) = gateway_missed(env, &r) {
                 c.add(
                     CheckKind::Diagnosis,
@@ -413,22 +561,18 @@ async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str], g
                     return Rounds::Early(r);
                 }
             }
-            Step::Skip(reason) => {
-                if let Some(out) = last_late.take() {
-                    missed_rounds_reported(c, &rounds_of(&outcomes, RoundOutcome::ClientMissed));
-                    return Rounds::GatewayWindowMissed(out, reason);
-                }
-            }
-            Step::NoEarlyData => break,
+            Step::Exhausted => break,
         }
     }
     c.add(
         CheckKind::GroundTruth,
-        format!("the request went out as 0-RTT early data within {EARLY_ROUNDS} rounds"),
+        format!(
+            "the request went out as 0-RTT early data and the gateway saw it while its handshake was pending, within {EARLY_ROUNDS} rounds"
+        ),
         false,
-        format!("missed {:?}", rounds_of(&outcomes, RoundOutcome::ClientMissed)),
+        exhausted(&rounds_of(&outcomes, RoundOutcome::ClientMissed), &rounds_of(&outcomes, RoundOutcome::GatewayMissed)),
     );
-    Rounds::NoEarlyData
+    Rounds::Exhausted(last_late)
 }
 
 /// The gateway log warning for its HTTP/3 0-RTT method refusal.
@@ -439,24 +583,30 @@ const H3_REFUSAL: &str = "Rejected HTTP/3 0-RTT request";
 /// the gateway classifies each stream from its own handshake state when it
 /// accepts it, and handles a 0-RTT stream it accepts after its handshake
 /// completed as 1-RTT (RFC 8470 section 6.4; the v0.9.8 catalog's note on
-/// `gateway.admission.early_data_rejected`).
+/// `gateway.admission.early_data_rejected`). The relay holds the client's
+/// Finished, so the gateway's handshake stays pending while it acts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatewayWindow {
     /// The gateway saw the stream while its handshake was pending: it answered
-    /// the first attempt 425, logged its 0-RTT method refusal, or forwarded
-    /// the request with `Early-Data: 1`. The scenario's strict checks apply.
+    /// the first attempt 425, logged its 0-RTT method refusal, forwarded the
+    /// request with `Early-Data: 1`, or a backend request arrived before the
+    /// relay released the client's Finished. The scenario's strict checks
+    /// apply (a PUT at the backend by then fails them).
     Pending,
-    /// The gateway handled the stream after its handshake completed: one 200,
-    /// no retry, no `request.too_early`, exactly one backend request of the
-    /// method without `Early-Data`, no refusal logged. A missed window.
+    /// The relay held the Finished until [`HOLD_CAP`] ran out without the
+    /// gateway acting, and the gateway then handled the stream after its
+    /// handshake:
+    /// one 200, no retry, no `request.too_early`, exactly one backend request
+    /// of the method without `Early-Data`, no refusal logged. A missed round.
     Completed,
-    /// Neither shape: never a missed window; the strict checks judge (and
-    /// fail) it.
+    /// Neither shape, or a round whose Finished the relay did not hold: never
+    /// a missed round; the strict checks judge (and fail) it.
     Unexplained,
 }
 
 /// The facts that tell the gateway's windows apart: Anvil's attempts and
-/// finding, and independent ground truth (backend and gateway logs).
+/// finding, and independent ground truth (backend and gateway logs, and the
+/// relay's hold).
 struct RoundFacts<'a> {
     /// The method sent as early data.
     method: &'a str,
@@ -470,15 +620,19 @@ struct RoundFacts<'a> {
     backend: &'a [(String, Option<String>)],
     /// Gateway log lines refusing a 0-RTT request of the method since then.
     refusals: usize,
+    /// The relay's hold of the client's Finished; `None`: nothing was held.
+    hold: Option<Hold>,
 }
 
 fn gateway_window(f: &RoundFacts) -> GatewayWindow {
     let marked = f.backend.iter().any(|(_, e)| e.is_some());
-    if f.statuses.first() == Some(&Some(425)) || f.refusals > 0 || marked {
+    let before_release = f.hold.is_some_and(|h| h.backend_before > 0);
+    if f.statuses.first() == Some(&Some(425)) || f.refusals > 0 || marked || before_release {
         return GatewayWindow::Pending;
     }
     let one_rtt = matches!(f.backend, [(m, None)] if m == f.method);
-    if f.statuses == [Some(200)] && !f.retried && !f.too_early_finding && one_rtt {
+    let capped = f.hold.is_some_and(|h| h.released == Released::Cap);
+    if capped && f.statuses == [Some(200)] && !f.retried && !f.too_early_finding && one_rtt {
         GatewayWindow::Completed
     } else {
         GatewayWindow::Unexplained
@@ -487,7 +641,7 @@ fn gateway_window(f: &RoundFacts) -> GatewayWindow {
 
 fn round_window(env: &Env, r: &EarlyRound, method: &str) -> (GatewayWindow, String) {
     let seen = backend_requests(env, r.backend_from);
-    let refusals = gw_lines(&env.gateway, r.log_from, H3_REFUSAL).iter().filter(|l| l.contains(method)).count();
+    let refusals = refusals(env, r.log_from, method);
     let a = &r.out.record.attempts;
     let facts = RoundFacts {
         method,
@@ -496,8 +650,23 @@ fn round_window(env: &Env, r: &EarlyRound, method: &str) -> (GatewayWindow, Stri
         too_early_finding: codes(&r.out).iter().any(|x| x == "request.too_early"),
         backend: &seen,
         refusals,
+        hold: r.hold,
     };
-    (gateway_window(&facts), format!("{} backend={seen:?} refusals={refusals}", line(&r.out)))
+    (gateway_window(&facts), format!("{} backend={seen:?} refusals={refusals}; {}", line(&r.out), held(r.hold)))
+}
+
+/// EARLY-001: the admitted GET reached the backend before the relay released
+/// the Finished; or, for a gateway slower than [`HOLD_CAP`], the hold ran to
+/// its cap and the `Early-Data: 1` check decides.
+fn get_admitted_in_window(hold: Option<Hold>) -> bool {
+    hold.is_some_and(|h| (h.released == Released::Acted && h.backend_before == 1) || h.released == Released::Cap)
+}
+
+/// EARLY-002: the gateway refused the 0-RTT PUT while the relay held the
+/// Finished, or (a gateway slower than [`HOLD_CAP`]) answered its first
+/// attempt 425 and logged its refusal after the release.
+fn put_refused_in_window(hold: Option<Hold>, first_status: Option<u16>, refusals: usize) -> bool {
+    hold.is_some_and(|h| h.released == Released::Acted || (first_status == Some(425) && refusals > 0))
 }
 
 /// EARLY-001's gateway side: a 0-RTT GET the gateway handled after its
@@ -514,58 +683,9 @@ fn put_handled_after_handshake(env: &Env, r: &EarlyRound) -> Option<String> {
     (window == GatewayWindow::Completed).then_some(detail)
 }
 
-/// Scenarios whose run-time skip means the window was not observed.
-const WINDOW_SCENARIOS: &[&str] = &["EARLY-001", "EARLY-002"];
-
-fn window_skip(r: &ScenarioResult) -> bool {
-    r.status == "skipped" && r.skip_reason.as_deref().is_some_and(|s| s.starts_with(WINDOW_NOT_OBSERVED))
-}
-
-/// A window scenario skipped in both the trusted and the untrusted pass of
-/// one run fails both results: the passes race independently (lab run
-/// 36557709775's trusted pass reached the window its untrusted pass missed),
-/// so a double skip is a signal, for example a gateway that processes the
-/// request before its handshake yet forwards it unmarked and logs nothing,
-/// which one round cannot tell from the permitted shape. Returns the indices
-/// of the results it changed.
-fn fail_double_skips(results: &mut [ScenarioResult]) -> Vec<usize> {
-    let mut changed = Vec::new();
-    for id in WINDOW_SCENARIOS {
-        let untrusted = format!("{id}-untrusted");
-        let (Some(t), Some(u)) = (results.iter().position(|r| r.id == *id), results.iter().position(|r| r.id == untrusted)) else {
-            continue;
-        };
-        if !(window_skip(&results[t]) && window_skip(&results[u])) {
-            continue;
-        }
-        for i in [t, u] {
-            let r = &mut results[i];
-            let detail = r.skip_reason.take().unwrap_or_default();
-            r.checks.push(Check {
-                name: "the window under test was observed in the trusted or the untrusted pass".into(),
-                kind: CheckKind::GroundTruth,
-                passed: false,
-                detail,
-            });
-            r.status = "failed".into();
-            eprintln!("{:22} failed  skipped in both passes: the window was never observed", r.id);
-            changed.push(i);
-        }
-    }
-    changed
-}
-
 fn no_gateway_attribution(c: &mut Checks, o: &ExecutionOutput) {
     c.absent_prefix(o, "ferrum.token");
     c.absent_prefix(o, "ferrum.outcome");
-}
-
-/// A scenario whose window was not observed within its rounds: neither a pass
-/// nor a failure, and still no gateway attribution.
-fn window_missed(mut c: Checks, o: ExecutionOutput, reason: String) -> Outcome {
-    no_gateway_attribution(&mut c, &o);
-    c.skip(reason);
-    Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
 }
 
 // -------------------------------------------------------------- scenarios ---
@@ -592,11 +712,11 @@ fn ctrl(env: &Env) -> Fut<'_> {
 fn early001(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
-        let EarlyRound { out: o, backend_from: from, .. } = match send_in_0rtt(env, &mut c, "GET", &[], get_handled_after_handshake).await {
+        let r = match send_in_0rtt(env, &mut c, "GET", &[], get_handled_after_handshake).await {
             Rounds::Early(r) => r,
-            Rounds::GatewayWindowMissed(o, reason) => return window_missed(c, o, reason),
-            Rounds::NoEarlyData => return Outcome { main: None, recovery: None, checks: c, operator_log: vec![] },
+            Rounds::Exhausted(main) => return Outcome { main, recovery: None, checks: c, operator_log: vec![] },
         };
+        let EarlyRound { out: o, backend_from: from, hold, .. } = r;
         let ed = early(&o, 0);
         c.success(CheckKind::Diagnosis, &o);
         c.add(
@@ -640,6 +760,12 @@ fn early001(env: &Env) -> Fut<'_> {
             seen == vec![("GET".to_string(), Some("1".to_string()))] && ticket_ok,
             format!("{seen:?}; ticket GET {ticket}"),
         );
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend saw the 0-RTT GET before the relay released the client's Finished (unless the hold ran to its cap): admitted while the handshake was pending",
+            get_admitted_in_window(hold),
+            held(hold),
+        );
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
     })
 }
@@ -650,8 +776,7 @@ fn early002(env: &Env) -> Fut<'_> {
         // Anvil's policy allows PUT in early data; the gateway's allows GET only.
         let r = match send_in_0rtt(env, &mut c, "PUT", &["PUT"], put_handled_after_handshake).await {
             Rounds::Early(r) => r,
-            Rounds::GatewayWindowMissed(o, reason) => return window_missed(c, o, reason),
-            Rounds::NoEarlyData => return Outcome { main: None, recovery: None, checks: c, operator_log: vec![] },
+            Rounds::Exhausted(main) => return Outcome { main, recovery: None, checks: c, operator_log: vec![] },
         };
         let (window, detail) = round_window(env, &r, "PUT");
         c.add(
@@ -660,7 +785,22 @@ fn early002(env: &Env) -> Fut<'_> {
             window == GatewayWindow::Pending,
             detail,
         );
-        let EarlyRound { out: o, backend_from: from, log_from } = r;
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway refused the 0-RTT PUT while the relay held the client's Finished, or answered it 425 and logged its refusal after the cap",
+            put_refused_in_window(r.hold, r.out.record.attempts.first().and_then(|x| x.response_status), refusals(env, r.log_from, "PUT")),
+            held(r.hold),
+        );
+        // The hard failure: a PUT that reached the backend while the
+        // gateway's handshake was held pending was processed as early data
+        // (the count is of PUTs only).
+        c.add(
+            CheckKind::GroundTruth,
+            "no PUT reached the backend before the relay released the client's Finished",
+            r.hold.is_some_and(|h| h.backend_before == 0),
+            held(r.hold),
+        );
+        let EarlyRound { out: o, backend_from: from, log_from, .. } = r;
         c.success(CheckKind::Recovery, &o);
         let a = &o.record.attempts;
         c.add(
@@ -958,7 +1098,12 @@ async fn start() -> anyhow::Result<Env> {
     let certs = crate::gateway::repo_root().join("lab/.run/early/certs");
     let pki = LabPki::generate();
     pki.write_to(&certs)?;
-    let fx = EarlyFixtures { backend: http::serve(BACKEND, None).await?, certs_dir: certs.clone(), pki };
+    let fx = EarlyFixtures {
+        backend: http::serve(BACKEND, None).await?,
+        relay: Relay::start(RELAY, HTTPS, if misclassifies_1rtt() { PRE_098_SETTLE } else { Duration::ZERO }).await?,
+        certs_dir: certs.clone(),
+        pki,
+    };
     let vars = [("LAB_CERTS", certs.display().to_string())];
     let gateway = Gateway::start("early", "early.conf", "early.yaml", &vars, ADMIN_PORT, &[]).await?;
     let gw_off = Gateway::launch(Instance {
@@ -987,25 +1132,14 @@ async fn stop(env: Env) {
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let ctx = RunCtx::new("early")?;
     let mut env = start().await?;
-    let mut results = harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await;
-    let finished = match &mut results {
-        Ok(r) => {
-            let changed = fail_double_skips(r);
-            rewrite(&ctx, r, &changed).and_then(|_| harness::finish(&ctx, &env, r).map(|_| ()))
-        }
+    let results = harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await;
+    let finished = match &results {
+        Ok(r) => harness::finish(&ctx, &env, r).map(|_| ()),
         Err(_) => Ok(()),
     };
     stop(env).await;
     finished?;
     results
-}
-
-/// Write the result files of `changed` again (a double skip turned them into failures).
-fn rewrite(ctx: &RunCtx, results: &[ScenarioResult], changed: &[usize]) -> anyhow::Result<()> {
-    for r in changed.iter().map(|i| &results[*i]) {
-        std::fs::write(ctx.out_dir.join(format!("{}.json", r.id)), serde_json::to_vec_pretty(r)?)?;
-    }
-    Ok(())
 }
 
 async fn up() -> anyhow::Result<()> {
@@ -1016,6 +1150,7 @@ async fn up() -> anyhow::Result<()> {
         env.gateway.log_path.display()
     );
     println!("route: {PATH} -> HTTP/1.1 echo backend {BACKEND} (its request log shows Early-Data)");
+    println!("pending-window relay: UDP {RELAY} -> {HTTPS} (holds the client's Finished only while a lab scenario arms it)");
     harness::wait_for_shutdown().await?;
     stop(env).await;
     Ok(())
@@ -1049,18 +1184,89 @@ mod tests {
             too_early_finding: too_early,
             backend,
             refusals,
+            hold: Some(CAPPED),
         }
+    }
+
+    /// The relay held the Finished for the whole cap: the gateway did not act.
+    const CAPPED: Hold = Hold {
+        released: Released::Cap,
+        backend_before: 0,
+        refusals_before: 0,
+        held_for: HOLD_CAP,
+        datagrams: 4,
+        relay: HoldStats { coalesced_1rtt: 0, unparsed: 0 },
+    };
+
+    /// The gateway acted: `backend` backend requests and `refusals` refusal
+    /// lines before the release.
+    fn acted(backend: usize, refusals: usize) -> Option<Hold> {
+        Some(Hold {
+            released: Released::Acted,
+            backend_before: backend,
+            refusals_before: refusals,
+            held_for: Duration::from_millis(3),
+            ..CAPPED
+        })
     }
 
     /// Issue #221 (lab run 36557709775, EARLY-002-untrusted on v0.9.8): the
     /// client offered the PUT as 0-RTT and QUIC accepted it, but the gateway
     /// checked the stream after its handshake completed and handled it as
     /// 1-RTT: one 200, no retry, no `request.too_early`, one backend PUT
-    /// without `Early-Data`, no refusal logged. A missed window, not a failure.
+    /// without `Early-Data`, no refusal logged. With the relay this shape is a
+    /// missed round only when the relay held the Finished for the whole cap
+    /// without the gateway acting.
     #[test]
-    fn a_0rtt_put_handled_after_the_handshake_is_a_missed_window() {
+    fn a_0rtt_put_handled_after_the_held_finished_is_a_missed_round() {
         let backend = [put(None)];
         assert_eq!(gateway_window(&facts("PUT", &[200], false, false, &backend, 0)), GatewayWindow::Completed);
+        let mut f = facts("PUT", &[200], false, false, &backend, 0);
+        f.hold = None;
+        assert_eq!(gateway_window(&f), GatewayWindow::Unexplained, "a round the relay did not hold is judged strictly");
+        f.hold = Some(Hold { released: Released::Done, ..CAPPED });
+        assert_eq!(gateway_window(&f), GatewayWindow::Unexplained, "only a hold that ran to its cap is a missed round");
+    }
+
+    /// A correct gateway slower than the cap still passes EARLY-002's hold
+    /// check with its 425 and refusal log; EARLY-001 then leaves the verdict
+    /// to its `Early-Data: 1` check. Without a hold, or without the gateway's
+    /// action, neither passes.
+    #[test]
+    fn a_gateway_slower_than_the_cap_is_judged_by_what_it_did() {
+        assert!(put_refused_in_window(acted(0, 1), Some(425), 1));
+        assert!(put_refused_in_window(Some(CAPPED), Some(425), 1));
+        assert!(!put_refused_in_window(Some(CAPPED), Some(425), 0), "a 425 without the refusal log");
+        assert!(!put_refused_in_window(Some(CAPPED), Some(200), 1));
+        assert!(!put_refused_in_window(None, Some(425), 1));
+        assert!(get_admitted_in_window(acted(1, 0)));
+        assert!(get_admitted_in_window(Some(CAPPED)));
+        assert!(!get_admitted_in_window(acted(2, 0)));
+        assert!(!get_admitted_in_window(Some(Hold { released: Released::Done, ..CAPPED })));
+        assert!(!get_admitted_in_window(None));
+    }
+
+    /// Issue #223: a 200 whose backend receipt came before the relay released
+    /// the client's Finished was processed while the gateway's handshake was
+    /// pending. It is never a missed round: the strict checks judge it, and
+    /// EARLY-002 fails it (no 425, a PUT at the backend before the release).
+    #[test]
+    fn a_backend_receipt_before_the_release_is_the_pending_window() {
+        let backend = [put(None)];
+        let mut f = facts("PUT", &[200], false, false, &backend, 0);
+        f.hold = acted(1, 0);
+        assert_eq!(gateway_window(&f), GatewayWindow::Pending);
+        // EARLY-001's pass shape: the admitted GET reached the backend, marked,
+        // before the release.
+        let marked = [req("GET", Some("1"))];
+        let mut f = facts("GET", &[200], false, false, &marked, 0);
+        f.hold = acted(1, 0);
+        assert_eq!(gateway_window(&f), GatewayWindow::Pending);
+        // EARLY-002's pass shape: refused while held, the retry reached the
+        // backend after the release.
+        let mut f = facts("PUT", &[425, 200], true, true, &backend, 1);
+        f.hold = acted(0, 1);
+        assert_eq!(gateway_window(&f), GatewayWindow::Pending);
     }
 
     /// The negative path: the gateway saw the stream while its handshake was
@@ -1115,92 +1321,31 @@ mod tests {
     }
 
     /// The round loop: the first round not ruled out is judged, even after
-    /// missed windows; running out skips only when some round was sent as
-    /// early data, and never sending it as early data fails.
+    /// missed rounds; running out of rounds always fails, never skips.
     #[test]
     fn the_round_loop_decides_from_the_rounds_so_far() {
         assert_eq!(decide(&[ClientMissed]), Step::Next);
         assert_eq!(decide(&[GatewayMissed]), Step::Next);
-        // A missed window, then an unexplained shape: that round is judged
-        // strictly (and fails there), never skipped.
+        // A missed round, then an unexplained shape: that round is judged
+        // strictly (and fails there).
         assert_eq!(decide(&[GatewayMissed, Early]), Step::Early);
         assert_eq!(decide(&[ClientMissed, GatewayMissed, Early]), Step::Early);
-        let Step::Skip(reason) = decide(&[GatewayMissed, ClientMissed, GatewayMissed, GatewayMissed, ClientMissed, GatewayMissed]) else {
-            panic!("missed windows and client misses must skip");
-        };
-        assert!(reason.starts_with(WINDOW_NOT_OBSERVED), "{reason}");
-        assert!(reason.contains("round(s) [0, 2, 3, 5]") && reason.contains("round(s) [1, 4]"), "{reason}");
-        assert_eq!(decide(&[ClientMissed; EARLY_ROUNDS]), Step::NoEarlyData);
-        assert!(matches!(decide(&[GatewayMissed; EARLY_ROUNDS]), Step::Skip(_)));
+        assert_eq!(decide(&[GatewayMissed, ClientMissed, GatewayMissed, GatewayMissed, ClientMissed, GatewayMissed]), Step::Exhausted);
+        assert_eq!(decide(&[ClientMissed; EARLY_ROUNDS]), Step::Exhausted);
+        assert_eq!(decide(&[GatewayMissed; EARLY_ROUNDS]), Step::Exhausted);
+        assert_eq!(decide(&[GatewayMissed, ClientMissed, GatewayMissed, GatewayMissed, ClientMissed, Early]), Step::Early);
     }
 
     #[test]
-    fn the_skip_reason_is_marked_and_names_only_rounds_that_happened() {
-        assert_eq!(window_unobserved(&[0, 1, 2, 3, 4, 5], &[]), None);
-        let reason = window_unobserved(&[], &[0, 1, 2, 3, 4, 5]).expect("a coverage limitation");
-        assert!(reason.starts_with(WINDOW_NOT_OBSERVED), "{reason}");
-        assert!(!reason.contains("before the request was written"), "{reason}");
-        assert!(reason.contains("not exercised within 6 rounds"), "{reason}");
-        let reason = window_unobserved(&[1], &[0, 2, 3, 4, 5]).expect("a coverage limitation");
-        assert!(reason.contains("before the request was written in round(s) [1]"), "{reason}");
-    }
-
-    /// The skip reaches the scenario result with its reason.
-    #[test]
-    fn a_window_skip_reaches_the_result() {
-        let mut c = Checks::new();
-        c.add(CheckKind::Diagnosis, "round 0: the gateway handled the 0-RTT PUT after its handshake", true, "");
-        let Step::Skip(reason) = decide(&[GatewayMissed; EARLY_ROUNDS]) else { panic!("skip") };
-        c.skip(reason.clone());
-        assert_eq!(c.verdict(), ("skipped", Some(reason)));
-    }
-
-    fn result(id: &str, status: &str, reason: Option<&str>) -> ScenarioResult {
-        ScenarioResult {
-            id: id.into(),
-            title: String::new(),
-            profile: "early".into(),
-            evidence_mode: "public".into(),
-            trusted_destination: !id.ends_with("-untrusted"),
-            gateway_release: String::new(),
-            gateway_source_sha: String::new(),
-            gateway_binary_sha256: String::new(),
-            platform: String::new(),
-            observed: None,
-            recovery: None,
-            operator_log_evidence: vec![],
-            checks: vec![],
-            status: status.into(),
-            skip_reason: reason.map(str::to_string),
-            duration_ms: 0,
-        }
-    }
-
-    /// A window skipped in both passes of one run fails both results; one
-    /// skip, or a skip for another reason, stays a skip.
-    #[test]
-    fn a_double_window_skip_fails_the_run() {
-        let skip = format!("{WINDOW_NOT_OBSERVED}the gateway handled the 0-RTT request after its handshake");
-        let mut r = vec![
-            result("EARLY-001", "passed", None),
-            result("EARLY-002", "skipped", Some(skip.as_str())),
-            result("EARLY-001-untrusted", "skipped", Some(skip.as_str())),
-            result("EARLY-002-untrusted", "skipped", Some(skip.as_str())),
-        ];
-        assert_eq!(fail_double_skips(&mut r), vec![1, 3]);
-        for i in [1, 3] {
-            assert_eq!(r[i].status, "failed");
-            assert_eq!(r[i].skip_reason, None);
-            assert!(r[i].checks.iter().any(|c| !c.passed && c.detail == skip));
-        }
-        assert_eq!(r[2].status, "skipped", "one skipped pass stays a skip");
-
-        let mut r = vec![
-            result("EARLY-002", "skipped", Some("not supported here")),
-            result("EARLY-002-untrusted", "skipped", Some("not supported here")),
-        ];
-        assert!(fail_double_skips(&mut r).is_empty(), "a static skip is not a window skip");
-        let mut r = vec![result("EARLY-002", "skipped", Some(skip.as_str()))];
-        assert!(fail_double_skips(&mut r).is_empty(), "no untrusted pass ran");
+    fn the_exhausted_detail_names_only_rounds_that_happened() {
+        let detail = exhausted(&[0, 1, 2, 3, 4, 5], &[]);
+        assert!(detail.contains("before the request was written in round(s) [0, 1, 2, 3, 4, 5]"), "{detail}");
+        assert!(!detail.contains("relay"), "{detail}");
+        let detail = exhausted(&[], &[0, 1, 2, 3, 4, 5]);
+        assert!(!detail.contains("before the request was written"), "{detail}");
+        assert!(detail.contains("after its handshake in round(s) [0, 1, 2, 3, 4, 5]"), "{detail}");
+        assert!(detail.contains("(up to 2000 ms)"), "{detail}");
+        let detail = exhausted(&[1], &[0, 2, 3, 4, 5]);
+        assert!(detail.contains("round(s) [1]") && detail.contains("round(s) [0, 2, 3, 4, 5]"), "{detail}");
     }
 }
