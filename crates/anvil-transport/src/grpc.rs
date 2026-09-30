@@ -187,9 +187,9 @@ pub(crate) fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
         {
-            out.push(v);
+            out.push((hi << 4) | lo);
             i += 3;
             continue;
         }
@@ -197,6 +197,15 @@ pub(crate) fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -1061,6 +1070,68 @@ struct OneShot {
     sign_failed: bool,
 }
 
+fn append_reflection_data(
+    buf: &mut BytesMut,
+    data: &[u8],
+    wire_bytes: &mut usize,
+    decoded_bytes: &mut usize,
+    message_count: &mut usize,
+    max_message_bytes: usize,
+    max_response_bytes: usize,
+) -> Result<Vec<Bytes>, TransportFailure> {
+    *wire_bytes = wire_bytes
+        .checked_add(data.len())
+        .filter(|total| *total <= max_response_bytes)
+        .ok_or_else(|| {
+            TransportFailure::new(
+                Phase::ResponseBody,
+                FailureKind::ResponseTooLargeLocal,
+                "the reflection response exceeded the local max_response_bytes limit",
+            )
+        })?;
+    buf.extend_from_slice(data);
+    let mut messages = Vec::new();
+    loop {
+        match next_message(buf, max_message_bytes) {
+            Ok(Some((false, message))) => {
+                *message_count += 1;
+                if *message_count > 1 {
+                    return Err(TransportFailure::new(
+                        Phase::ResponseBody,
+                        FailureKind::HttpProtocolError,
+                        "the reflection response contained more than one message",
+                    ));
+                }
+                *decoded_bytes = decoded_bytes
+                    .checked_add(message.len())
+                    .filter(|total| *total <= max_response_bytes)
+                    .ok_or_else(|| {
+                        TransportFailure::new(
+                            Phase::ResponseBody,
+                            FailureKind::ResponseTooLargeLocal,
+                            "the decoded reflection response exceeded the local max_response_bytes limit",
+                        )
+                    })?;
+                messages.push(message);
+            }
+            Ok(Some((true, _))) => {
+                return Err(TransportFailure::new(
+                    Phase::ResponseBody,
+                    FailureKind::HttpProtocolError,
+                    "a compressed reflection response was not negotiated",
+                ));
+            }
+            Ok(None) => break,
+            Err(error) => {
+                let mut failure = frame_failure(error);
+                failure.phase = Phase::ResponseBody;
+                return Err(failure);
+            }
+        }
+    }
+    Ok(messages)
+}
+
 impl OneShot {
     fn empty(status: Option<u16>, grpc_status: Option<i32>) -> Self {
         OneShot {
@@ -1077,9 +1148,28 @@ impl OneShot {
     }
 }
 
-async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stats: &Arc<ConnStats>, cancel: &CancellationToken) -> OneShot {
+async fn one_shot(
+    conn: &mut Conn,
+    plan: &GrpcPlan,
+    path: &str,
+    msg: &[u8],
+    stats: &Arc<ConnStats>,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
+) -> OneShot {
     let body = frame(msg);
     let mut out = OneShot::empty(None, None);
+    if total_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        out.failure = Some(
+            TransportFailure::new(
+                Phase::AwaitResponseHeaders,
+                FailureKind::TotalTimeout,
+                "the total deadline elapsed during server reflection",
+            )
+            .with_deadline(plan.timeouts.total_ms),
+        );
+        return out;
+    }
     // Signed for the reflection request's own path and body, never sent
     // with the signature made for the call.
     let signed = match &plan.sign_reflection {
@@ -1109,6 +1199,11 @@ async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stat
     let head = tokio::select! {
         r = fut => r,
         _ = sleep_until_opt(deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout, "no answer to the reflection request").with_deadline(plan.timeouts.response_headers_ms)),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(
+            Phase::AwaitResponseHeaders,
+            FailureKind::TotalTimeout,
+            "the total deadline elapsed during server reflection",
+        ).with_deadline(plan.timeouts.total_ms)),
         _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during server reflection")),
     };
     let head = match head {
@@ -1128,38 +1223,40 @@ async fn one_shot(conn: &mut Conn, plan: &GrpcPlan, path: &str, msg: &[u8], stat
     }
     let mut body = head.body;
     let mut buf = BytesMut::new();
+    let mut wire_bytes = 0usize;
+    let mut decoded_bytes = 0usize;
+    let mut message_count = 0usize;
     loop {
         let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(30_000)));
         let item = tokio::select! {
             f = body.next() => f,
             _ = sleep_until_opt(idle) => Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the reflection response stalled"))),
+            _ = sleep_until_opt(total_deadline) => Some(Err(TransportFailure::new(
+                Phase::ResponseBody,
+                FailureKind::TotalTimeout,
+                "the total deadline elapsed during server reflection",
+            ).with_deadline(plan.timeouts.total_ms))),
             _ = cancel.cancelled() => Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled during server reflection"))),
         };
         match item {
             None => break,
             Some(Ok(fr)) => {
                 if fr.is_data() {
-                    buf.extend_from_slice(&fr.into_data().unwrap_or_default());
-                    loop {
-                        match next_message(&mut buf, plan.max_message_bytes) {
-                            Ok(Some((false, m))) => out.messages.push(m),
-                            Ok(Some((true, _))) => {
-                                out.failure = Some(TransportFailure::new(
-                                    Phase::ResponseBody,
-                                    FailureKind::HttpProtocolError,
-                                    "a compressed reflection response was not negotiated",
-                                ));
-                                ctl.abort.cancel();
-                                return out;
-                            }
-                            Ok(None) => break,
-                            Err(e) => {
-                                let mut f = frame_failure(e);
-                                f.phase = Phase::ResponseBody;
-                                out.failure = Some(f);
-                                ctl.abort.cancel();
-                                return out;
-                            }
+                    let data = fr.into_data().unwrap_or_default();
+                    match append_reflection_data(
+                        &mut buf,
+                        &data,
+                        &mut wire_bytes,
+                        &mut decoded_bytes,
+                        &mut message_count,
+                        plan.max_message_bytes,
+                        plan.limits.max_response_bytes,
+                    ) {
+                        Ok(messages) => out.messages.extend(messages),
+                        Err(failure) => {
+                            out.failure = Some(failure);
+                            ctl.abort.cancel();
+                            return out;
                         }
                     }
                 } else if let Ok(t) = fr.into_trailers() {
@@ -1191,6 +1288,7 @@ async fn reflect(
     plan: &GrpcPlan,
     stats: &Arc<ConnStats>,
     cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
 ) -> Result<(DescriptorPool, ReflectionOutcome), ReflectError> {
     let services = ["grpc.reflection.v1.ServerReflection", "grpc.reflection.v1alpha.ServerReflection"];
     let mut last: Option<(OneShot, ReflectionOutcome)> = None;
@@ -1209,7 +1307,8 @@ async fn reflect(
             if requests > 64 {
                 break;
             }
-            let r = one_shot(conn, plan, &path, &q.encode_to_vec(), stats, cancel).await;
+            let request = q.encode_to_vec();
+            let r = one_shot(conn, plan, &path, &request, stats, cancel, total_deadline).await;
             let outcome = |problem: String, r: &OneShot| ReflectionOutcome {
                 service: svc.trim_end_matches(".ServerReflection").to_string(),
                 http_status: r.status,
@@ -1659,7 +1758,7 @@ async fn exchange(
     // ---- server reflection (network schema) ----
     if matches!(plan.schema, Schema::Reflection) {
         let r_idx = rec.start(Phase::AwaitResponseHeaders);
-        match reflect(conn, plan, &stats, cancel).await {
+        match reflect(conn, plan, &stats, cancel, total_deadline).await {
             Ok((pool, outcome)) => {
                 rec.finish_with(r_idx, PhaseStatus::Completed, format!("server reflection via {}", outcome.service));
                 facts.notes.push(format!("schema loaded by server reflection ({})", outcome.service));
@@ -2255,6 +2354,80 @@ mod tests {
         assert_eq!(grpc_timeout(1500), "1500m");
         assert_eq!(grpc_timeout(200_000_000), "200000S");
         assert_eq!(percent_decode("a%20b%zz"), "a b%zz");
+    }
+
+    #[test]
+    fn reflection_response_is_bounded_and_single_message() {
+        let response = frame(b"response");
+        let mut buf = BytesMut::new();
+        let mut wire_bytes = 0;
+        let mut decoded_bytes = 0;
+        let mut message_count = 0;
+        let messages = append_reflection_data(
+            &mut buf,
+            &response,
+            &mut wire_bytes,
+            &mut decoded_bytes,
+            &mut message_count,
+            64,
+            response.len(),
+        )
+        .unwrap();
+        assert_eq!(messages, vec![Bytes::from_static(b"response")]);
+        assert_eq!(wire_bytes, response.len());
+        assert_eq!(decoded_bytes, 8);
+
+        let mut buf = BytesMut::new();
+        let mut wire_bytes = 0;
+        let mut decoded_bytes = 0;
+        let mut message_count = 0;
+        let partial = append_reflection_data(
+            &mut buf,
+            &response[..5],
+            &mut wire_bytes,
+            &mut decoded_bytes,
+            &mut message_count,
+            64,
+            8,
+        )
+        .unwrap();
+        assert!(partial.is_empty());
+        let too_large = append_reflection_data(
+            &mut buf,
+            &response[5..],
+            &mut wire_bytes,
+            &mut decoded_bytes,
+            &mut message_count,
+            64,
+            8,
+        )
+        .unwrap_err();
+        assert_eq!(too_large.kind, FailureKind::ResponseTooLargeLocal);
+
+        let mut buf = BytesMut::new();
+        let mut wire_bytes = 0;
+        let mut decoded_bytes = 0;
+        let mut message_count = 0;
+        let twice = [response.as_ref(), response.as_ref()].concat();
+        let extra = append_reflection_data(
+            &mut buf,
+            &twice,
+            &mut wire_bytes,
+            &mut decoded_bytes,
+            &mut message_count,
+            64,
+            twice.len(),
+        )
+        .unwrap_err();
+        assert_eq!(extra.kind, FailureKind::HttpProtocolError);
+    }
+
+    #[test]
+    fn percent_decode_handles_unicode_and_malformed_escapes() {
+        assert_eq!(percent_decode("%E2%82%AC"), "€");
+        assert_eq!(percent_decode("%€"), "%€");
+        assert_eq!(percent_decode("%2G"), "%2G");
+        assert_eq!(percent_decode("a%20b"), "a b");
     }
 
     #[test]
