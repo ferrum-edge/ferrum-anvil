@@ -118,6 +118,60 @@ pub struct Outcome {
     pub remediation: Vec<String>,
     pub owner: String,
     pub fixture_ids: Vec<String>,
+    /// The JSON-RPC error the outcome's body is, when it is one (MCP and A2A
+    /// gateway outcomes). Such a body carries the request's id, which no
+    /// fixed body pattern matches.
+    pub jsonrpc: Option<JsonRpcShape>,
+}
+
+/// A JSON-RPC error as an outcome's catalog body shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonRpcShape {
+    pub code: i64,
+    pub message: String,
+    /// `error.data.gateway`, when the body carries that marker.
+    pub gateway: Option<String>,
+    /// Other codes the outcome's catalog notes list for the same condition.
+    pub alternate_codes: Vec<i64>,
+    /// Other messages the outcome's catalog notes list with the same code
+    /// (matched as exactly as the body's own message).
+    pub alternate_messages: Vec<String>,
+}
+
+/// Further JSON-RPC error codes an outcome answers with, from its catalog
+/// notes ("Distinguishability: Codes: ..."); its body shape shows one.
+const JSONRPC_ALTERNATE_CODES: &[(&str, &[i64])] = &[
+    ("plugin.mcp_gateway.unknown_item", &[-32008, -32007, -32002, -32601]),
+    ("plugin.mcp_gateway.batch_rejections", &[-32009, -32010, -32011]),
+];
+
+/// Further messages an outcome answers with under the same code, from its
+/// catalog notes ("Messages: ..."); its body shape shows one.
+const JSONRPC_ALTERNATE_MESSAGES: &[(&str, &[&str])] = &[("plugin.mcp_gateway.invalid_params", INVALID_PARAMS_MESSAGES)];
+const INVALID_PARAMS_MESSAGES: &[&str] = &["Invalid MCP tool call params", "Invalid MCP prompt params", "Invalid MCP resource params"];
+
+/// The JSON-RPC error of a catalog body shape such as
+/// `{"jsonrpc":"2.0","id":{id},"error":{"code":-32001,"message":"..."}}`.
+fn parse_jsonrpc(id: &str, body_shape: &serde_json::Value) -> Option<JsonRpcShape> {
+    static ERROR: OnceLock<Regex> = OnceLock::new();
+    static GATEWAY: OnceLock<Regex> = OnceLock::new();
+    let shape = body_shape.as_str()?;
+    if !shape.contains(r#""jsonrpc":"2.0""#) {
+        return None;
+    }
+    let error = ERROR.get_or_init(|| Regex::new(r#""error":\{"code":(-?\d+),"message":"([^"\\]*)""#).expect("valid regex"));
+    let gateway = GATEWAY.get_or_init(|| Regex::new(r#""gateway":"([a-z0-9_]+)""#).expect("valid regex"));
+    let c = error.captures(shape)?;
+    let alternate_codes = JSONRPC_ALTERNATE_CODES.iter().find(|(o, _)| *o == id).map(|(_, c)| c.to_vec()).unwrap_or_default();
+    let alternates = JSONRPC_ALTERNATE_MESSAGES.iter().find(|(o, _)| *o == id);
+    let alternate_messages = alternates.map(|(_, m)| m.iter().map(|x| x.to_string()).collect()).unwrap_or_default();
+    Some(JsonRpcShape {
+        code: c[1].parse().ok()?,
+        message: c[2].to_string(),
+        gateway: gateway.captures(shape).map(|g| g[1].to_string()),
+        alternate_codes,
+        alternate_messages,
+    })
 }
 
 #[derive(Debug)]
@@ -279,6 +333,7 @@ pub fn load(raw: &str) -> Result<FerrumCatalog, serde_json::Error> {
                 remediation: strings(&o.remediation),
                 owner: o.owner.clone(),
                 fixture_ids: o.fixture_ids.clone(),
+                jsonrpc: parse_jsonrpc(&o.id, sig.get("body_shape").unwrap_or(&serde_json::Value::Null)),
             }
         })
         .collect();
@@ -305,6 +360,27 @@ pub struct Signal<'a> {
     pub body_text: &'a str,
     pub body: &'a BodyFacts,
     pub grpc_status: Option<i32>,
+}
+
+/// A JSON-RPC error response (MCP, A2A) as the client observed it.
+pub struct JsonRpcSignal<'a> {
+    pub status: u16,
+    pub token: Option<&'a str>,
+    pub code: i64,
+    pub message: &'a str,
+    /// `error.data.gateway`.
+    pub gateway: Option<&'a str>,
+}
+
+/// The JSON-RPC outcomes consistent with a [`JsonRpcSignal`].
+#[derive(Debug, Default)]
+pub struct JsonRpcMatch<'c> {
+    /// Status, code, message and gateway marker all matched.
+    pub exact: Vec<&'c Outcome>,
+    /// Status and code matched (the body shape's code or one its notes
+    /// list), not the message: a server behind the gateway can answer with
+    /// the same standard code.
+    pub code_only: Vec<&'c Outcome>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +437,35 @@ impl FerrumCatalog {
             }
         }
         out
+    }
+}
+
+impl FerrumCatalog {
+    /// The outcomes whose body is a JSON-RPC error consistent with `s`.
+    /// These bodies echo the request's id, so they are matched on status,
+    /// error code, message and the `data.gateway` marker instead of the body
+    /// text. A marker the catalog body shows must be present; one it does not
+    /// show is allowed (an outcome may add it).
+    pub fn match_jsonrpc_error(&self, s: &JsonRpcSignal<'_>) -> JsonRpcMatch<'_> {
+        let mut m = JsonRpcMatch::default();
+        for o in &self.outcomes {
+            let Some(j) = &o.jsonrpc else { continue };
+            if !o.statuses.contains(&s.status) {
+                continue;
+            }
+            // These outcomes carry no X-Gateway-Error token.
+            if s.token.is_some() && o.tokens.as_ref().is_some_and(|t| t.is_empty()) {
+                continue;
+            }
+            let marker = j.gateway.as_deref().is_none_or(|g| s.gateway == Some(g));
+            let message = j.message == s.message || j.alternate_messages.iter().any(|m| m == s.message);
+            if j.code == s.code && message && marker {
+                m.exact.push(o);
+            } else if j.code == s.code || j.alternate_codes.contains(&s.code) {
+                m.code_only.push(o);
+            }
+        }
+        m
     }
 }
 
@@ -450,6 +555,55 @@ mod tests {
                 m.iter().map(|x| &x.0.id).collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn mcp_gateway_json_rpc_errors_are_read_from_the_catalog_bodies() {
+        let c = default_catalog();
+        let tool_denied = c.outcome("plugin.mcp_gateway.tool_denied").and_then(|o| o.jsonrpc.clone()).expect("a JSON-RPC body");
+        assert_eq!((tool_denied.code, tool_denied.message.as_str()), (-32001, "MCP tool call denied by gateway policy"));
+        assert_eq!(tool_denied.gateway, None);
+        let upstream = c.outcome("plugin.mcp_gateway.upstream_session_unavailable").and_then(|o| o.jsonrpc.clone()).unwrap();
+        assert_eq!(upstream.gateway.as_deref(), Some("mcp_gateway"));
+        let a2a = c.outcome("plugin.a2a_gateway.jsonrpc_method_denied").and_then(|o| o.jsonrpc.clone()).unwrap();
+        assert_eq!((a2a.code, a2a.gateway.as_deref()), (-32001, Some("a2a_gateway")));
+        let unknown = c.outcome("plugin.mcp_gateway.unknown_item").and_then(|o| o.jsonrpc.clone()).unwrap();
+        assert!(unknown.alternate_codes.contains(&-32601), "{unknown:?}");
+        assert!(c.outcome("plugin.mcp_gateway.session_not_found").is_some_and(|o| o.jsonrpc.is_none()), "an empty body");
+        for id in JSONRPC_ALTERNATE_CODES.iter().map(|(id, _)| id).chain(JSONRPC_ALTERNATE_MESSAGES.iter().map(|(id, _)| id)) {
+            for cat in catalogs() {
+                assert!(cat.outcome(id).is_some_and(|o| o.jsonrpc.is_some()), "{}: {id}", cat.compatibility_id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_json_rpc_error_matches_by_code_message_and_marker() {
+        let c = default_catalog();
+        fn sig(status: u16, code: i64, message: &'static str, gateway: Option<&'static str>) -> JsonRpcSignal<'static> {
+            JsonRpcSignal { status, token: None, code, message, gateway }
+        }
+        let ids = |v: &[&Outcome]| v.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
+        let m = c.match_jsonrpc_error(&sig(200, -32001, "MCP tool call denied by gateway policy", None));
+        assert_eq!(ids(&m.exact), ["plugin.mcp_gateway.tool_denied"]);
+        assert_eq!(ids(&m.code_only), ["plugin.a2a_gateway.jsonrpc_method_denied"], "the same code with another message");
+        // A2A's body carries its marker: without it, only the code matches.
+        let m = c.match_jsonrpc_error(&sig(200, -32001, "A2A method denied by gateway policy", None));
+        assert!(m.exact.is_empty(), "{:?}", ids(&m.exact));
+        let m = c.match_jsonrpc_error(&sig(200, -32001, "A2A method denied by gateway policy", Some("a2a_gateway")));
+        assert_eq!(ids(&m.exact), ["plugin.a2a_gateway.jsonrpc_method_denied"]);
+        // Another status is another outcome.
+        assert!(c.match_jsonrpc_error(&sig(403, -32001, "MCP tool call denied by gateway policy", None)).exact.is_empty());
+        let m = c.match_jsonrpc_error(&sig(200, -32601, "MCP method not found", None));
+        assert!(m.exact.is_empty());
+        assert_eq!(ids(&m.code_only), ["plugin.mcp_gateway.unknown_item"], "a code the outcome's notes list");
+        let m = c.match_jsonrpc_error(&sig(200, -32602, "Invalid MCP tool arguments", None));
+        assert_eq!(ids(&m.exact), ["plugin.mcp_gateway.invalid_params"]);
+        for audited in ["Invalid MCP tool call params", "Invalid MCP prompt params", "Invalid MCP resource params"] {
+            let m = c.match_jsonrpc_error(&sig(200, -32602, audited, None));
+            assert_eq!(ids(&m.exact), ["plugin.mcp_gateway.invalid_params"], "{audited}");
+        }
+        assert!(c.match_jsonrpc_error(&sig(200, -31999, "other", None)).code_only.is_empty());
     }
 
     #[test]

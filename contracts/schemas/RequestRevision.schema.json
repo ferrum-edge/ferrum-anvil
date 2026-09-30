@@ -150,6 +150,16 @@
             }
           ]
         },
+        "mcp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "proxy_protocol": {
           "description": "PROXY protocol header for an HTTP-family request (HTTP/1.1, HTTP/2,\nWebSocket, gRPC, gRPC-Web, SSE): written once at the head of every new\nTCP connection to the request's own `host:port`, before any TLS. A\npooled connection keeps the header it was opened with. Raw TCP uses\n`tcp.proxy_protocol` and UDP `udp.proxy_protocol` instead.",
           "anyOf": [
@@ -186,7 +196,8 @@
         "grpc",
         "sse",
         "tcp",
-        "udp"
+        "udp",
+        "mcp"
       ]
     },
     "KeyValue": {
@@ -1932,6 +1943,117 @@
             "type",
             "state"
           ]
+        },
+        {
+          "description": "The response is a JSON-RPC error with this `code` (MCP, and any\nJSON-RPC API).",
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "type": {
+              "type": "string",
+              "const": "json_rpc_error"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ]
+        },
+        {
+          "description": "The response is a JSON-RPC result, not an error.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "json_rpc_result"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "MCP `tools/call`: the tool result's `isError` flag (absent = false).",
+          "type": "object",
+          "properties": {
+            "is_error": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "mcp_is_error"
+            }
+          },
+          "required": [
+            "type",
+            "is_error"
+          ]
+        },
+        {
+          "description": "MCP `tools/list`: a tool with this name is listed.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_present"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "MCP `tools/list`: no tool with this name is listed.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_absent"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "MCP `tools/list`: the listed tool's `inputSchema` equals `schema`\n(JSON, compared as values) and/or its SHA-256 is `sha256` (lowercase\nhex of the schema's JSON with object keys sorted and no whitespace).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sha256": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_input_schema"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
         }
       ]
     },
@@ -2861,6 +2983,213 @@
           "description": "Always DATAGRAM capsules on the CONNECT stream.",
           "type": "string",
           "const": "capsules"
+        }
+      ]
+    },
+    "McpSpec": {
+      "description": "MCP (Model Context Protocol) over Streamable HTTP: one operation, sent in\na session the engine opens with `initialize` (then\n`notifications/initialized`) and ends with `DELETE`. The request URL is the\nMCP endpoint; the request's query parameters, headers, auth and settings\napply to every POST and DELETE of the session (docs/protocols.md §3.14).",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "description": "The `protocolVersion` offered in `initialize`, and the\n`MCP-Protocol-Version` header when no session is opened.",
+          "type": "string",
+          "default": "2025-11-25"
+        },
+        "client_name": {
+          "description": "`clientInfo.name` sent in `initialize`.",
+          "type": "string",
+          "default": "anvil"
+        },
+        "client_version": {
+          "description": "`clientInfo.version`; empty = this Anvil build's version.",
+          "type": "string"
+        },
+        "capabilities": {
+          "description": "The `capabilities` object sent in `initialize`, as JSON (variables\nallowed).",
+          "type": "string",
+          "default": "{}"
+        },
+        "operation": {
+          "$ref": "#/$defs/McpOperation"
+        },
+        "initialize": {
+          "description": "Open a session first (`initialize`, then `notifications/initialized`).\nOff: the operation is sent on its own, with only the request's own\nheaders (to test how a server treats a request outside a session).",
+          "type": "boolean",
+          "default": true
+        },
+        "close_session": {
+          "description": "End the session with `DELETE` after the operation.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "operation"
+      ]
+    },
+    "McpOperation": {
+      "description": "The JSON-RPC request (or notification) an MCP request sends.",
+      "oneOf": [
+        {
+          "description": "`tools/list`.",
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "tools_list"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "`tools/call`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "arguments": {
+              "description": "The `arguments` object, as JSON (variables allowed).",
+              "type": "string",
+              "default": "{}"
+            },
+            "kind": {
+              "type": "string",
+              "const": "tools_call"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "`resources/list`.",
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "resources_list"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "`resources/templates/list`.",
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "resource_templates_list"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "`resources/read`.",
+          "type": "object",
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "resources_read"
+            }
+          },
+          "required": [
+            "kind",
+            "uri"
+          ]
+        },
+        {
+          "description": "`prompts/list`.",
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "prompts_list"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "`prompts/get`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "arguments": {
+              "description": "The `arguments` object, as JSON (variables allowed).",
+              "type": "string",
+              "default": "{}"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prompts_get"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "Any JSON-RPC method, with its `params` as JSON (empty = none). A\nnotification carries no `id` and gets no JSON-RPC response.",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string"
+            },
+            "params": {
+              "type": "string"
+            },
+            "notification": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "raw"
+            }
+          },
+          "required": [
+            "kind",
+            "method"
+          ]
         }
       ]
     },

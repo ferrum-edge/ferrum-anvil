@@ -805,11 +805,11 @@ async fn acquire_jwt_svid(
 // ----------------------------------------------------------- entry point ---
 
 /// Protocols whose auth headers are sent (and so need a JWT-SVID): HTTP,
-/// WebSocket, gRPC, SSE, and UDP through a MASQUE proxy (its CONNECT).
+/// WebSocket, gRPC, SSE, MCP, and UDP through a MASQUE proxy (its CONNECT).
 fn auth_is_sent(ctx: &ExecutionContext) -> bool {
     use anvil_domain::request::Protocol;
     match ctx.spec.protocol {
-        Protocol::Http | Protocol::WebSocket | Protocol::Grpc | Protocol::Sse => true,
+        Protocol::Http | Protocol::WebSocket | Protocol::Grpc | Protocol::Sse | Protocol::Mcp => true,
         Protocol::Udp => ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some()),
         Protocol::Tcp => false,
     }

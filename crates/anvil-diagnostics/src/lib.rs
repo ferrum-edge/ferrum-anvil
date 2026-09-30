@@ -189,7 +189,9 @@ pub fn assess_application(protocol: Protocol, status: &ProtocolStatus, body: &Bo
                 // A fault past a cut, or in an envelope too complex to
                 // inspect, would go unseen.
                 ApplicationState::NotEvaluated
-            } else if body.soap_fault.is_some() || body.graphql.is_some() {
+            } else if body.soap_fault.is_some() || body.graphql.is_some() || body.jsonrpc_error.is_some() || body.mcp_tool_error.is_some() {
+                // A SOAP fault, GraphQL errors, a JSON-RPC error or an MCP
+                // tool failure arrive in a 2xx body.
                 ApplicationState::Failure
             } else {
                 ApplicationState::Success

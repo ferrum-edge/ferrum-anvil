@@ -68,6 +68,7 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 | `proxyproto` | PROXY protocol v1/v2 and the datagram envelope | streams 18901–18923 | 19901–19930 | [proxyproto.md](proxyproto.md) |
 | `workload` | SPIFFE Workload API: X.509-SVID and JWT-SVID | mesh inbound 17406, HTTP 17480 | 17501–17503 | [workload.md](workload.md) |
 | `early` | TLS 1.3 / QUIC 0-RTT early data | HTTPS+QUIC 17243/17244 | 17300–17399 | [early.md](early.md) |
+| `mcp` | MCP over Streamable HTTP through `mcp_gateway` (aggregate router): allow, deny, hide, schema validation | HTTP 17180, admin 17190 | 17101–17102 | [mcp.md](mcp.md) |
 
 `cargo run -p anvil-lab -- list` prints the same list from the profile registry
 (`crates/anvil-lab/src/profiles.rs`). Gateway settings and routes are in `lab/gateway/<profile>*`;

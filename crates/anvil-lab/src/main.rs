@@ -31,6 +31,7 @@ mod fixtures_tls;
 mod gateway;
 mod h3x;
 mod harness;
+mod mcp;
 mod mesh;
 mod mesh_dtls;
 mod mesh_udp;

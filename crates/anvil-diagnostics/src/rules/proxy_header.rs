@@ -55,7 +55,7 @@ const REFUSAL_FINDINGS: &[&str] = &[
 ];
 
 fn http_family(p: Protocol) -> bool {
-    matches!(p, Protocol::Http | Protocol::WebSocket | Protocol::Grpc | Protocol::Sse)
+    matches!(p, Protocol::Http | Protocol::WebSocket | Protocol::Grpc | Protocol::Sse | Protocol::Mcp)
 }
 
 fn sent_header<'a>(ctx: &Ctx<'a>) -> Option<&'a ProxyHeaderObservation> {

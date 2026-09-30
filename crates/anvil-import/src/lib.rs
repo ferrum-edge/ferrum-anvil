@@ -35,6 +35,7 @@ mod curl;
 mod detect;
 mod har;
 mod insomnia;
+pub mod mcp;
 mod openapi;
 mod postman;
 mod reimport;

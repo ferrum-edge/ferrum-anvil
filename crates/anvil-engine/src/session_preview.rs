@@ -39,7 +39,7 @@ fn unsupported(msg: impl Into<String>, field: &str) -> TransportFailure {
 /// support them rather than show a request that is never sent.
 pub(crate) fn schemes(protocol: Protocol) -> Result<&'static [&'static str], TransportFailure> {
     match protocol {
-        Protocol::Http | Protocol::Sse => Ok(&["https", "http"]),
+        Protocol::Http | Protocol::Sse | Protocol::Mcp => Ok(&["https", "http"]),
         Protocol::WebSocket => Ok(&["wss", "ws"]),
         Protocol::Grpc => Ok(&["grpcs", "grpc", "https", "http"]),
         Protocol::Tcp => Err(unsupported(

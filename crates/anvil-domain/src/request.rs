@@ -17,6 +17,11 @@ pub enum Protocol {
     Sse,
     Tcp,
     Udp,
+    // MCP (Model Context Protocol) JSON-RPC over Streamable HTTP: HTTP POSTs
+    // in a session the engine opens and closes (see `McpSpec`). A plain
+    // comment, not a doc comment: a documented variant would turn the
+    // schema's string enum into a `oneOf`.
+    Mcp,
 }
 
 /// Enabled/disabled name-value entry. Repeated names are legal and preserved
@@ -455,6 +460,124 @@ fn default_udp_max() -> u32 {
     1_000
 }
 
+/// The MCP protocol version Anvil offers in `initialize` by default (the
+/// current revision of the specification).
+pub const MCP_DEFAULT_PROTOCOL_VERSION: &str = "2025-11-25";
+
+fn default_mcp_protocol_version() -> String {
+    MCP_DEFAULT_PROTOCOL_VERSION.to_string()
+}
+fn default_mcp_client_name() -> String {
+    "anvil".to_string()
+}
+fn default_mcp_json_object() -> String {
+    "{}".to_string()
+}
+
+/// MCP (Model Context Protocol) over Streamable HTTP: one operation, sent in
+/// a session the engine opens with `initialize` (then
+/// `notifications/initialized`) and ends with `DELETE`. The request URL is the
+/// MCP endpoint; the request's query parameters, headers, auth and settings
+/// apply to every POST and DELETE of the session (docs/protocols.md §3.14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpSpec {
+    /// The `protocolVersion` offered in `initialize`, and the
+    /// `MCP-Protocol-Version` header when no session is opened.
+    #[serde(default = "default_mcp_protocol_version")]
+    pub protocol_version: String,
+    /// `clientInfo.name` sent in `initialize`.
+    #[serde(default = "default_mcp_client_name")]
+    pub client_name: String,
+    /// `clientInfo.version`; empty = this Anvil build's version.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_version: String,
+    /// The `capabilities` object sent in `initialize`, as JSON (variables
+    /// allowed).
+    #[serde(default = "default_mcp_json_object")]
+    pub capabilities: String,
+    pub operation: McpOperation,
+    /// Open a session first (`initialize`, then `notifications/initialized`).
+    /// Off: the operation is sent on its own, with only the request's own
+    /// headers (to test how a server treats a request outside a session).
+    #[serde(default = "crate::request::default_true")]
+    pub initialize: bool,
+    /// End the session with `DELETE` after the operation.
+    #[serde(default = "crate::request::default_true")]
+    pub close_session: bool,
+}
+
+/// The JSON-RPC request (or notification) an MCP request sends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpOperation {
+    /// `tools/list`.
+    ToolsList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+    },
+    /// `tools/call`.
+    ToolsCall {
+        name: String,
+        /// The `arguments` object, as JSON (variables allowed).
+        #[serde(default = "default_mcp_json_object")]
+        arguments: String,
+    },
+    /// `resources/list`.
+    ResourcesList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+    },
+    /// `resources/templates/list`.
+    ResourceTemplatesList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+    },
+    /// `resources/read`.
+    ResourcesRead { uri: String },
+    /// `prompts/list`.
+    PromptsList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+    },
+    /// `prompts/get`.
+    PromptsGet {
+        name: String,
+        /// The `arguments` object, as JSON (variables allowed).
+        #[serde(default = "default_mcp_json_object")]
+        arguments: String,
+    },
+    /// Any JSON-RPC method, with its `params` as JSON (empty = none). A
+    /// notification carries no `id` and gets no JSON-RPC response.
+    Raw {
+        method: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        params: String,
+        #[serde(default)]
+        notification: bool,
+    },
+}
+
+impl McpOperation {
+    /// The JSON-RPC method name.
+    pub fn method(&self) -> &str {
+        match self {
+            McpOperation::ToolsList { .. } => "tools/list",
+            McpOperation::ToolsCall { .. } => "tools/call",
+            McpOperation::ResourcesList { .. } => "resources/list",
+            McpOperation::ResourceTemplatesList { .. } => "resources/templates/list",
+            McpOperation::ResourcesRead { .. } => "resources/read",
+            McpOperation::PromptsList { .. } => "prompts/list",
+            McpOperation::PromptsGet { .. } => "prompts/get",
+            McpOperation::Raw { method, .. } => method,
+        }
+    }
+
+    /// Whether it is a notification (no `id`, no JSON-RPC response).
+    pub fn is_notification(&self) -> bool {
+        matches!(self, McpOperation::Raw { notification: true, .. })
+    }
+}
+
 /// The editable, serializable definition of a request. Execution never
 /// mutates it; a run snapshots it as an immutable [`crate::workspace::RequestRevision`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -493,6 +616,8 @@ pub struct RequestSpec {
     pub tcp: Option<TcpSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp: Option<UdpSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpSpec>,
     /// PROXY protocol header for an HTTP-family request (HTTP/1.1, HTTP/2,
     /// WebSocket, gRPC, gRPC-Web, SSE): written once at the head of every new
     /// TCP connection to the request's own `host:port`, before any TLS. A
@@ -528,6 +653,7 @@ impl RequestSpec {
             sse: None,
             tcp: None,
             udp: None,
+            mcp: None,
             proxy_protocol: None,
             source: None,
         }
@@ -559,5 +685,21 @@ mod tests {
         assert_eq!(web.wire, GrpcWire::GrpcWebText);
         assert!(web.wire.is_web() && !GrpcWire::Grpc.is_web());
         assert!(serde_json::to_string(&web).unwrap().contains(r#""wire":"grpc_web_text""#));
+    }
+
+    #[test]
+    fn an_mcp_spec_needs_only_its_operation() {
+        let m: McpSpec = serde_json::from_str(r#"{"operation":{"kind":"tools_call","name":"fx.echo"}}"#).unwrap();
+        assert_eq!(m.protocol_version, MCP_DEFAULT_PROTOCOL_VERSION);
+        assert_eq!((m.client_name.as_str(), m.client_version.as_str(), m.capabilities.as_str()), ("anvil", "", "{}"));
+        assert!(m.initialize && m.close_session);
+        assert_eq!(m.operation, McpOperation::ToolsCall { name: "fx.echo".into(), arguments: "{}".into() });
+        assert_eq!(m.operation.method(), "tools/call");
+        let raw = McpOperation::Raw { method: "ping".into(), params: String::new(), notification: false };
+        assert_eq!(serde_json::to_value(&raw).unwrap(), serde_json::json!({"kind": "raw", "method": "ping", "notification": false}));
+        assert!(!raw.is_notification());
+        let old: RequestSpec = serde_json::from_str(r#"{"url":"https://x/"}"#).unwrap();
+        assert_eq!((old.protocol, old.mcp), (Protocol::Http, None), "requests saved before MCP load unchanged");
+        assert_eq!(serde_json::to_value(Protocol::Mcp).unwrap(), "mcp");
     }
 }

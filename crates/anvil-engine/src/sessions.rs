@@ -537,6 +537,7 @@ async fn prepare_session(
         Protocol::Tcp => prepare_tcp(engine, epoch, ctx, r),
         Protocol::Udp => prepare_udp(engine, epoch, ctx, r, cancel).await,
         Protocol::Http => Err(unsupported("HTTP is request/response; use execute() rather than a session", "protocol")),
+        Protocol::Mcp => Err(unsupported("MCP is request/response over HTTP POST; use execute() rather than a session", "protocol")),
     }
 }
 
@@ -1918,6 +1919,7 @@ async fn run_prepared(
         stream: out.transcript.map(|t| redact_transcript(t, &redactor)),
         protocol_status_override: Some(out.status),
         workload_api: workload,
+        body_view: None,
     };
     let mut output = record::assemble(assembly);
     output.session_facts = Some(out.facts);

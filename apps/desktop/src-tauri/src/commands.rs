@@ -609,6 +609,35 @@ pub fn cancel_execution(st: State<'_, DesktopState>, execution_id: String) -> R<
     Ok(crate::state::cancel_pending(&st.running, &id(&execution_id)?))
 }
 
+#[derive(Deserialize)]
+pub struct McpDiscoverInput {
+    pub workspace_id: String,
+    /// The saved MCP request whose endpoint lists the tools.
+    pub request_id: String,
+    pub environment_id: Option<String>,
+}
+
+/// MCP "discover tools": run tools/list with a saved MCP request and save a
+/// request per listed tool beside it. Canceled like a send (by
+/// `cancel_execution` with `execution_id`, or a lock); the list is recorded
+/// in history like a send.
+#[tauri::command]
+pub async fn mcp_discover_tools(
+    st: State<'_, DesktopState>,
+    input: McpDiscoverInput,
+    execution_id: String,
+) -> R<anvil_app::mcp::McpDiscovered> {
+    let pending = PendingEntry::register(&st.running, id(&execution_id)?)?;
+    let app = st.app()?;
+    let ws = id(&input.workspace_id)?;
+    let rid = id(&input.request_id)?;
+    let env = input.environment_id.as_deref().map(id).transpose()?;
+    let opts = SendOptions { environment: env, record_history: true, ..Default::default() };
+    let res = app.mcp_discover_tools(&ws, &rid, opts, pending.token().clone()).await;
+    drop(pending);
+    res.map_err(e)
+}
+
 #[derive(Serialize)]
 pub struct HistoryItem {
     pub id: String,

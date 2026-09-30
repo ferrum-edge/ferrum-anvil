@@ -412,7 +412,7 @@ export type FailureKind =
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "Protocol".
  */
-export type Protocol = "http" | "web_socket" | "grpc" | "sse" | "tcp" | "udp";
+export type Protocol = "http" | "web_socket" | "grpc" | "sse" | "tcp" | "udp" | "mcp";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "WorkloadRpc".
@@ -1064,6 +1064,31 @@ export type Assertion1 =
   | {
       state: string;
       type: "transport";
+    }
+  | {
+      code: number;
+      type: "json_rpc_error";
+    }
+  | {
+      type: "json_rpc_result";
+    }
+  | {
+      is_error: boolean;
+      type: "mcp_is_error";
+    }
+  | {
+      name: string;
+      type: "tool_present";
+    }
+  | {
+      name: string;
+      type: "tool_absent";
+    }
+  | {
+      name: string;
+      schema?: string | null;
+      sha256?: string | null;
+      type: "tool_input_schema";
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1161,6 +1186,55 @@ export type WsMessage =
  * via the `definition` "DatagramListenerProtocol".
  */
 export type DatagramListenerProtocol = "udp" | "dtls";
+/**
+ * The JSON-RPC request (or notification) an MCP request sends.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "McpOperation".
+ */
+export type McpOperation =
+  | {
+      cursor?: string | null;
+      kind: "tools_list";
+    }
+  | {
+      name: string;
+      /**
+       * The `arguments` object, as JSON (variables allowed).
+       */
+      arguments?: string;
+      kind: "tools_call";
+    }
+  | {
+      cursor?: string | null;
+      kind: "resources_list";
+    }
+  | {
+      cursor?: string | null;
+      kind: "resource_templates_list";
+    }
+  | {
+      uri: string;
+      kind: "resources_read";
+    }
+  | {
+      cursor?: string | null;
+      kind: "prompts_list";
+    }
+  | {
+      name: string;
+      /**
+       * The `arguments` object, as JSON (variables allowed).
+       */
+      arguments?: string;
+      kind: "prompts_get";
+    }
+  | {
+      method: string;
+      params?: string;
+      notification?: boolean;
+      kind: "raw";
+    };
 /**
  * Bounded, throttled live events of a collection run. The final
  * [`RunReport`] is authoritative; events may be coalesced under load
@@ -4521,7 +4595,7 @@ export interface RequestSpec {
    * Wire protocol family of a saved request. SOAP and GraphQL are HTTP body
    * kinds, not separate transports.
    */
-  protocol?: "http" | "web_socket" | "grpc" | "sse" | "tcp" | "udp";
+  protocol?: "http" | "web_socket" | "grpc" | "sse" | "tcp" | "udp" | "mcp";
   /**
    * HTTP method (ignored for non-HTTP protocols).
    */
@@ -4675,6 +4749,7 @@ export interface RequestSpec {
   sse?: SseSpec | null;
   tcp?: TcpSpec | null;
   udp?: UdpSpec | null;
+  mcp?: McpSpec | null;
   /**
    * PROXY protocol header for an HTTP-family request (HTTP/1.1, HTTP/2,
    * WebSocket, gRPC, gRPC-Web, SSE): written once at the head of every new
@@ -5050,6 +5125,47 @@ export interface MasqueSpec {
    * How HTTP Datagrams (RFC 9297) are carried through the tunnel.
    */
   datagrams?: "auto" | "quic_datagrams" | "capsules";
+}
+/**
+ * MCP (Model Context Protocol) over Streamable HTTP: one operation, sent in
+ * a session the engine opens with `initialize` (then
+ * `notifications/initialized`) and ends with `DELETE`. The request URL is the
+ * MCP endpoint; the request's query parameters, headers, auth and settings
+ * apply to every POST and DELETE of the session (docs/protocols.md §3.14).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "McpSpec".
+ */
+export interface McpSpec {
+  /**
+   * The `protocolVersion` offered in `initialize`, and the
+   * `MCP-Protocol-Version` header when no session is opened.
+   */
+  protocol_version?: string;
+  /**
+   * `clientInfo.name` sent in `initialize`.
+   */
+  client_name?: string;
+  /**
+   * `clientInfo.version`; empty = this Anvil build's version.
+   */
+  client_version?: string;
+  /**
+   * The `capabilities` object sent in `initialize`, as JSON (variables
+   * allowed).
+   */
+  capabilities?: string;
+  operation: McpOperation;
+  /**
+   * Open a session first (`initialize`, then `notifications/initialized`).
+   * Off: the operation is sent on its own, with only the request's own
+   * headers (to test how a server treats a request outside a session).
+   */
+  initialize?: boolean;
+  /**
+   * End the session with `DELETE` after the operation.
+   */
+  close_session?: boolean;
 }
 /**
  * Link from a request to the spec/collection it was imported from, used for

@@ -15,6 +15,8 @@ import type {
   KeyValue,
   MasqueDatagramMode,
   MasqueSpec,
+  McpOperation,
+  McpSpec,
   MultipartPart,
   ProxyProfile,
   RequestDefinition,
@@ -26,7 +28,7 @@ import { AuthEditor } from "./AuthEditor";
 import { DatagramEnvelopeEditor, ProxyHeaderEditor } from "./ProxyProtocolEditor";
 import { EarlyDataSettings } from "./EarlyData";
 import { LinkedFileBinding } from "./LinkedFile";
-import { KeyValueEditor, Tabs, fmtBytes, humanize, shortcut, useDebounced } from "./ui";
+import { KeyValueEditor, Tabs, fmtBytes, humanize, shortcut, uid, useDebounced } from "./ui";
 import { Icon } from "./icons";
 import { WsDeflateEditor } from "./WsDeflateEditor";
 
@@ -47,6 +49,7 @@ const PROTOCOLS: { id: NonNullable<RequestSpec["protocol"]>; label: string }[] =
   { id: "sse", label: "SSE" },
   { id: "tcp", label: "TCP" },
   { id: "udp", label: "UDP" },
+  { id: "mcp", label: "MCP" },
 ];
 
 export function RequestEditor(props: {
@@ -68,6 +71,8 @@ export function RequestEditor(props: {
   confirmReload?: () => Promise<boolean>;
   /** The saved request's URL: a relocated linked file is used for requests to its host. */
   savedUrl?: string;
+  /** Requests were added to the workspace (MCP "discover tools"). */
+  onTreeChanged?: () => void;
 }) {
   const { req } = props;
   const spec = req.spec;
@@ -75,6 +80,8 @@ export function RequestEditor(props: {
   const [sub, setSub] = useState<Sub>("params");
   const set = (patch: Partial<RequestSpec>) => props.onChange({ ...req, spec: { ...spec, ...patch } });
   const bodyKind = spec.body?.type ?? "none";
+  // HTTP and MCP send one request (an MCP session's exchanges); the other protocols run a scripted exchange.
+  const oneShot = protocol === "http" || protocol === "mcp";
   const tabs: { id: Sub; label: string; count?: number }[] = [
     { id: "params", label: "Params", count: spec.params?.filter((p) => p.enabled !== false && p.name).length },
     { id: "headers", label: "Headers", count: spec.headers?.filter((p) => p.enabled !== false && p.name).length },
@@ -140,10 +147,10 @@ export function RequestEditor(props: {
             type="submit"
             className="btn primary"
             disabled={props.connected}
-            title={protocol === "http" ? `Send (${shortcut("Enter")})` : `Run the scripted exchange and stop (${shortcut("Enter")})`}
+            title={oneShot ? `Send (${shortcut("Enter")})` : `Run the scripted exchange and stop (${shortcut("Enter")})`}
           >
-            <Icon name={protocol === "http" ? "send" : "play"} size={protocol === "http" ? 14 : 12} />
-            {protocol === "http" ? "Send" : "Run"}
+            <Icon name={oneShot ? "send" : "play"} size={oneShot ? 14 : 12} />
+            {oneShot ? "Send" : "Run"}
           </button>
         )}
         <button type="button" className="btn" onClick={props.onSave} disabled={!props.dirty} title={`Save (${shortcut("S")})`}>
@@ -173,6 +180,9 @@ export function RequestEditor(props: {
             savedUrl={props.savedUrl}
             onRelocated={props.onReload}
             confirmRelocate={props.confirmReload}
+            environmentId={props.environmentId}
+            dirty={props.dirty}
+            onTreeChanged={props.onTreeChanged}
           />
         )}
         {activeSub === "auth" && (
@@ -227,6 +237,8 @@ function placeholderFor(p: string): string {
       return "tcp://host:port or tls://host:port";
     case "udp":
       return "udp://host:port or dtls://host:port";
+    case "mcp":
+      return "https://host/mcp  (the MCP endpoint; the operation in the MCP tab)";
     default:
       return "https://api.example.com/v1/resource?q={{var}}";
   }
@@ -577,6 +589,211 @@ function linkedSchemaFiles(schema: GrpcSpec["schema"]): string[] {
 
 // -------------------------------------------------------------- protocols
 
+/** Skipped tools and notes a discovery result lists before "and N more". */
+const MAX_LISTED = 5;
+
+/** An integer field that accepts a leading "-" (and an empty value) while typing. */
+function SignedIntField(props: { label: string; value: number; onChange: (n: number) => void }) {
+  const [text, setText] = useState(String(props.value));
+  useEffect(() => {
+    if (text !== "" && text !== "-" && Number(text) !== props.value) setText(String(props.value));
+  }, [props.value, text]);
+  return (
+    <input
+      className="field mono num"
+      aria-label={props.label}
+      inputMode="numeric"
+      value={text}
+      onChange={(e) => {
+        const t = e.target.value.trim();
+        if (!/^-?\d*$/.test(t)) return;
+        setText(t);
+        const n = Number(t);
+        if (t !== "" && t !== "-" && Number.isSafeInteger(n)) props.onChange(n);
+      }}
+    />
+  );
+}
+
+const MCP_OPERATIONS: { id: McpOperation["kind"]; label: string }[] = [
+  { id: "tools_list", label: "tools/list" },
+  { id: "tools_call", label: "tools/call" },
+  { id: "resources_list", label: "resources/list" },
+  { id: "resource_templates_list", label: "resources/templates/list" },
+  { id: "resources_read", label: "resources/read" },
+  { id: "prompts_list", label: "prompts/list" },
+  { id: "prompts_get", label: "prompts/get" },
+  { id: "raw", label: "Raw JSON-RPC" },
+];
+
+function mcpOperationDefault(kind: McpOperation["kind"]): McpOperation {
+  switch (kind) {
+    case "tools_call":
+    case "prompts_get":
+      return { kind, name: "", arguments: "{}" };
+    case "resources_read":
+      return { kind, uri: "" };
+    case "raw":
+      return { kind, method: "", params: "" };
+    default:
+      return { kind };
+  }
+}
+
+/** MCP (Streamable HTTP): the operation, the session options, and "discover tools". */
+function McpEditor(props: {
+  spec: RequestSpec;
+  set: (p: Partial<RequestSpec>) => void;
+  workspaceId: string;
+  requestId: string | null;
+  environmentId: string | null;
+  dirty: boolean;
+  onTreeChanged?: () => void;
+}) {
+  const { spec, set } = props;
+  const m: McpSpec = spec.mcp ?? { operation: { kind: "tools_list" } };
+  const op = m.operation;
+  const setM = (patch: Partial<McpSpec>) => set({ mcp: { ...m, ...patch } });
+  const setOp = (operation: McpOperation) => setM({ operation });
+  // The execution id of a discovery in flight (to cancel it), else null.
+  const [discovering, setDiscovering] = useState<string | null>(null);
+  const [discovered, setDiscovered] = useState<string | null>(null);
+  const discover = async () => {
+    if (!props.requestId) return;
+    const execId = uid();
+    setDiscovering(execId);
+    setDiscovered(null);
+    try {
+      const d = await api.mcpDiscoverTools({ workspace_id: props.workspaceId, request_id: props.requestId, environment_id: props.environmentId }, execId);
+      const parts = [`Saved ${d.created.length} tool request${d.created.length === 1 ? "" : "s"} beside this one.`];
+      const listed = (items: string[], total: number) => {
+        const shown = items.slice(0, MAX_LISTED).map((x) => (x.length > 200 ? `${x.slice(0, 200)}…` : x));
+        return total > shown.length ? `${shown.join("; ")}; and ${total - shown.length} more` : shown.join("; ");
+      };
+      if (d.skipped_total > 0) parts.push(`Skipped: ${listed(d.skipped, d.skipped_total)}.`);
+      if (d.notes_total > 0) parts.push(`Note: ${listed(d.notes, d.notes_total)}.`);
+      if (d.more) parts.push("The server lists more tools than its first page; only that page was read.");
+      setDiscovered(parts.join(" "));
+      props.onTreeChanged?.();
+    } catch (e) {
+      setDiscovered(`Discovery failed: ${String(e)}`);
+    } finally {
+      setDiscovering(null);
+    }
+  };
+  return (
+    <div className="form">
+      <div className="fields">
+        <label className="lbl">
+          Operation
+          <select className="field" aria-label="MCP operation" value={op.kind} onChange={(e) => setOp(mcpOperationDefault(e.target.value as McpOperation["kind"]))}>
+            {MCP_OPERATIONS.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {(op.kind === "tools_call" || op.kind === "prompts_get") && (
+          <label className="lbl grow">
+            {op.kind === "tools_call" ? "Tool" : "Prompt"}
+            <input className="field mono" value={op.name} onChange={(e) => setOp({ ...op, name: e.target.value })} />
+          </label>
+        )}
+        {op.kind === "resources_read" && (
+          <label className="lbl grow">
+            Resource URI
+            <input className="field mono" value={op.uri} onChange={(e) => setOp({ ...op, uri: e.target.value })} />
+          </label>
+        )}
+        {op.kind === "raw" && (
+          <label className="lbl grow">
+            JSON-RPC method
+            <input className="field mono" value={op.method} onChange={(e) => setOp({ ...op, method: e.target.value })} />
+          </label>
+        )}
+        {(op.kind === "tools_list" || op.kind === "resources_list" || op.kind === "resource_templates_list" || op.kind === "prompts_list") && (
+          <label className="lbl grow">
+            Cursor (optional)
+            <input className="field mono" value={op.cursor ?? ""} onChange={(e) => setOp({ ...op, cursor: e.target.value || null })} />
+          </label>
+        )}
+      </div>
+      {(op.kind === "tools_call" || op.kind === "prompts_get") && (
+        <label className="lbl">
+          Arguments (JSON object; variables allowed)
+          <textarea className="field mono" rows={5} value={op.arguments ?? "{}"} onChange={(e) => setOp({ ...op, arguments: e.target.value })} />
+        </label>
+      )}
+      {op.kind === "raw" && (
+        <>
+          <label className="lbl">
+            Params (JSON; empty for none)
+            <textarea className="field mono" rows={5} value={op.params ?? ""} onChange={(e) => setOp({ ...op, params: e.target.value })} />
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={!!op.notification} onChange={(e) => setOp({ ...op, notification: e.target.checked })} />
+            Notification (no id, no JSON-RPC response)
+          </label>
+        </>
+      )}
+      <div className="fields">
+        <label className="lbl">
+          Protocol version
+          <input className="field mono" value={m.protocol_version ?? "2025-11-25"} onChange={(e) => setM({ protocol_version: e.target.value })} />
+        </label>
+        <label className="lbl">
+          Client name
+          <input className="field mono" value={m.client_name ?? "anvil"} onChange={(e) => setM({ client_name: e.target.value })} />
+        </label>
+        <label className="lbl">
+          Client version (empty = Anvil&apos;s)
+          <input className="field mono" value={m.client_version ?? ""} onChange={(e) => setM({ client_version: e.target.value })} />
+        </label>
+      </div>
+      <label className="lbl">
+        Client capabilities (JSON object)
+        <textarea className="field mono" rows={2} value={m.capabilities ?? "{}"} onChange={(e) => setM({ capabilities: e.target.value })} />
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={m.initialize !== false} onChange={(e) => setM({ initialize: e.target.checked })} />
+        Open a session first (initialize, then notifications/initialized)
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={m.close_session !== false} onChange={(e) => setM({ close_session: e.target.checked })} />
+        End the session afterwards (DELETE)
+      </label>
+      <p className="hint">
+        Every POST accepts JSON or an event stream; from a stream the tests read the JSON-RPC response to the request. The session id is sent as a
+        credential and shown redacted. Headers, auth and settings apply to every exchange of the session.
+      </p>
+      <div className="row">
+        {discovering ? (
+          <button type="button" className="btn" onClick={() => void api.cancel(discovering)}>
+            <Icon name="stop" size={13} />
+            Cancel discovery
+          </button>
+        ) : (
+          <button type="button" className="btn" disabled={!props.requestId || props.dirty} onClick={() => void discover()}>
+            <Icon name="search" size={14} />
+            Discover tools
+          </button>
+        )}
+        <span className="hint">
+          {props.dirty || !props.requestId
+            ? "Save the request first: discovery lists the tools with the saved request."
+            : "Runs tools/list and saves a request per tool here, with arguments from each tool's inputSchema."}
+        </span>
+      </div>
+      {discovered && (
+        <p className="hint" role="status">
+          {discovered}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ProtocolEditor({
   spec,
   set,
@@ -585,6 +802,9 @@ export function ProtocolEditor({
   savedUrl,
   onRelocated,
   confirmRelocate,
+  environmentId,
+  dirty,
+  onTreeChanged,
 }: {
   spec: RequestSpec;
   set: (p: Partial<RequestSpec>) => void;
@@ -596,8 +816,27 @@ export function ProtocolEditor({
   onRelocated?: () => Promise<void>;
   /** Asked before a linked schema file it names is relocated; false relocates nothing. */
   confirmRelocate?: () => Promise<boolean>;
+  /** The environment an MCP tool discovery lists the tools with. */
+  environmentId?: string | null;
+  /** The draft has unsaved changes (MCP tool discovery uses the saved request). */
+  dirty?: boolean;
+  /** Requests were added to the workspace (MCP "discover tools"). */
+  onTreeChanged?: () => void;
 }) {
   const p = spec.protocol ?? "http";
+  if (p === "mcp") {
+    return (
+      <McpEditor
+        spec={spec}
+        set={set}
+        workspaceId={workspaceId}
+        requestId={requestId ?? null}
+        environmentId={environmentId ?? null}
+        dirty={!!dirty}
+        onTreeChanged={onTreeChanged}
+      />
+    );
+  }
   if (p === "web_socket") {
     const ws = spec.websocket ?? {};
     return (
@@ -892,6 +1131,12 @@ const ASSERTION_TYPES: { id: Assertion["type"]; label: string }[] = [
   { id: "message_count", label: "Message count" },
   { id: "diagnostic", label: "Diagnostic finding" },
   { id: "transport", label: "Transport state" },
+  { id: "json_rpc_error", label: "JSON-RPC error code" },
+  { id: "json_rpc_result", label: "JSON-RPC result" },
+  { id: "mcp_is_error", label: "MCP tool isError" },
+  { id: "tool_present", label: "MCP tool listed" },
+  { id: "tool_absent", label: "MCP tool not listed" },
+  { id: "tool_input_schema", label: "MCP tool inputSchema" },
 ];
 
 /** Tooltip for XPath fields; the engine rejects anything outside this subset. */
@@ -925,6 +1170,17 @@ function assertionDefault(t: Assertion["type"]): Assertion {
       return { type: "diagnostic", code: "", present: false };
     case "transport":
       return { type: "transport", state: "completed" };
+    case "json_rpc_error":
+      return { type: "json_rpc_error", code: -32001 };
+    case "json_rpc_result":
+      return { type: "json_rpc_result" };
+    case "mcp_is_error":
+      return { type: "mcp_is_error", is_error: false };
+    case "tool_present":
+    case "tool_absent":
+      return { type: t, name: "" };
+    case "tool_input_schema":
+      return { type: "tool_input_schema", name: "", sha256: "" };
   }
 }
 
@@ -1078,6 +1334,28 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
           ))}
         </select>
       );
+    case "json_rpc_error":
+      return <SignedIntField label="JSON-RPC error code" value={a.code} onChange={(code) => onChange({ ...a, code })} />;
+    case "json_rpc_result":
+      return null;
+    case "mcp_is_error":
+      return (
+        <select className="field" aria-label="isError" value={a.is_error ? "true" : "false"} onChange={(e) => onChange({ ...a, is_error: e.target.value === "true" })}>
+          <option value="false">is false (the tool succeeded)</option>
+          <option value="true">is true (the tool reported an error)</option>
+        </select>
+      );
+    case "tool_present":
+    case "tool_absent":
+      return val(a.name, (name) => onChange({ ...a, name }), "tool name");
+    case "tool_input_schema":
+      return (
+        <>
+          {val(a.name, (name) => onChange({ ...a, name }), "tool name")}
+          {val(a.sha256 ?? "", (sha256) => onChange({ ...a, sha256: sha256 || null }), "sha256 of the inputSchema")}
+          <textarea className="field mono grow" rows={2} placeholder="or the expected inputSchema (JSON)" value={a.schema ?? ""} onChange={(e) => onChange({ ...a, schema: e.target.value || null })} />
+        </>
+      );
   }
 }
 
@@ -1095,7 +1373,7 @@ function fromTri(s: string): boolean | null {
 /** Request-level settings: the layered overrides, plus the PROXY header of
  * an HTTP-family request (raw TCP and UDP configure theirs in the protocol tab). */
 export function SettingsEditor({ spec, set, profiles }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; profiles: Profiles }) {
-  const httpFamily = ["http", "web_socket", "grpc", "sse"].includes(spec.protocol ?? "http");
+  const httpFamily = ["http", "web_socket", "grpc", "sse", "mcp"].includes(spec.protocol ?? "http");
   return (
     <div className="form wide">
       <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} protocol={spec.protocol} />

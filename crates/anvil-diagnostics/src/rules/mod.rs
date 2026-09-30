@@ -156,10 +156,10 @@ pub const RULES: &[RuleMeta] = &[
     RuleMeta {
         id: "ferrum.catalog",
         version: 1,
-        summary: "Signature matching against the source-audited Ferrum outcome inventory of the profile's own release; a release without a catalog is reported, never matched",
+        summary: "Signature matching against the source-audited Ferrum outcome inventory of the profile's own release (JSON-RPC errors by code, message and gateway marker); a release without a catalog is reported, never matched",
         fixtures: &[
             "UP-001", "UP-002", "UP-014", "UP-015", "GW-006", "GW-007", "GW-008", "GW-009", "GW-010", "GW-011", "GW-012", "GW-013",
-            "GW-014", "AUTH-001", "UP-017", "UP-018", "UP-019",
+            "GW-014", "AUTH-001", "UP-017", "UP-018", "UP-019", "MCP-003", "MCP-004", "MCP-005", "MCP-006", "MCP-007",
         ],
     },
     RuleMeta {
@@ -183,8 +183,8 @@ pub const RULES: &[RuleMeta] = &[
     RuleMeta {
         id: "app.body",
         version: 1,
-        summary: "Application failures inside transport-successful responses (SOAP, GraphQL)",
-        fixtures: &["PROTO-023", "PROTO-024"],
+        summary: "Application failures inside transport-successful responses (SOAP, GraphQL, JSON-RPC errors, MCP tool errors)",
+        fixtures: &["PROTO-023", "PROTO-024", "MCP-003", "MCP-008"],
     },
     RuleMeta {
         id: "protocol.grpc",

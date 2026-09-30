@@ -253,7 +253,8 @@
         "grpc",
         "sse",
         "tcp",
-        "udp"
+        "udp",
+        "mcp"
       ]
     },
     "HeaderEntry": {

@@ -695,8 +695,23 @@ impl AttemptTarget {
     }
 }
 
-#[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
+    execute_viewing(engine, ctx, events, cancel, None, None).await
+}
+
+/// [`execute`], with the checks reading what `view` picks from the response
+/// instead of its body (see [`record::BodyView`]). `keep` receives the
+/// redactor the record was redacted with, once a request was prepared (an
+/// MCP session redacts its notes with its exchanges' redactors).
+#[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
+pub(crate) async fn execute_viewing(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    events: EventCtx,
+    cancel: CancellationToken,
+    view: Option<record::BodyView<'_>>,
+    keep: Option<&parking_lot::Mutex<Option<Redactor>>>,
+) -> crate::ExecutionOutput {
     let started_at = Utc::now();
     // Taken first, or when the context was built (`ExecutionContext::epoch`):
     // what this execution prepares or receives after a lock (a new epoch) or
@@ -1188,6 +1203,9 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
     for s in &used_secrets {
         redactor.add_secret(s);
     }
+    if let Some(k) = keep {
+        *k.lock() = Some(redactor.clone());
+    }
     // An automatic HTTP/3 → TCP fallback is reported, never hidden.
     let fallback_from = attempts.iter().find_map(|a| match &a.reason {
         AttemptReason::ProtocolFallback { from } => Some(from.clone()),
@@ -1220,6 +1238,7 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         stream: None,
         protocol_status_override: None,
         workload_api: workload,
+        body_view: view,
     };
     let output = record::assemble(assembly);
     let _ = assertions::evaluate;

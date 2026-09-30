@@ -3,7 +3,8 @@
 //! per-send values (HMAC nonces, DPoP proofs, JWT iat/exp) are shown as they
 //! would be generated for one send and labelled as varying per send.
 //! WebSocket, SSE and gRPC requests show the handshake or call their session
-//! transport sends; raw TCP and UDP are not previewed.
+//! transport sends, an MCP request the POST of its operation; raw TCP and UDP
+//! are not previewed.
 
 use crate::Engine;
 use crate::context::ExecutionContext;
@@ -103,6 +104,10 @@ impl Engine {
     /// sends it (method, target, `Host` / `:authority`, headers, body and the
     /// signature over them); raw TCP and UDP have no request to preview.
     pub fn preview(&self, ctx: &ExecutionContext) -> Result<EffectiveRequest, TransportFailure> {
+        if ctx.spec.protocol == Protocol::Mcp {
+            // The operation's POST, as an HTTP request, with the session noted.
+            return crate::mcp::preview(self, ctx);
+        }
         let schemes = session_preview::schemes(ctx.spec.protocol)?;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
         let prep = http_exec::prepare_all(self, ctx, &resolver, schemes)?;

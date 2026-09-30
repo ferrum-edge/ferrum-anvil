@@ -67,6 +67,9 @@ pub enum RefusalCode {
     EarlyData,
     /// The request lacks what its protocol needs (e.g. a gRPC method).
     IncompleteRequest,
+    /// An MCP request: its load unit (one session's handshake and call) is
+    /// not defined yet.
+    McpUnsupported,
 }
 
 /// A typed refusal, raised before any traffic.
@@ -157,7 +160,7 @@ fn send_route(ctx: &ExecutionContext, protocol: Protocol) -> Option<(Target, Opt
 /// is used for a URL without one).
 pub fn send_schemes(protocol: Protocol) -> &'static [&'static str] {
     match protocol {
-        Protocol::Http | Protocol::Sse => &["https", "http"],
+        Protocol::Http | Protocol::Sse | Protocol::Mcp => &["https", "http"],
         Protocol::WebSocket => &["wss", "ws"],
         Protocol::Grpc => &["grpcs", "grpc", "https", "http"],
         Protocol::Tcp => &["tcp", "tls"],
@@ -247,6 +250,10 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             }
             Ok(StepUnit::of(LoadUnitKind::SseStream))
         }
+        Protocol::Mcp => refuse(
+            RefusalCode::McpUnsupported,
+            "MCP requests cannot be load tested yet: one execution is a session (initialize, the call, the close), and there is no MCP load unit to count it as. Load test the endpoint's HTTP requests instead".into(),
+        ),
         Protocol::WebSocket => Ok(StepUnit {
             ws_expect_messages: ctx.spec.websocket.as_ref().map(|w| w.expect_messages).unwrap_or(0),
             ..StepUnit::of(LoadUnitKind::WebsocketSession)
@@ -469,7 +476,8 @@ pub fn plan_semantics(kind: LoadUnitKind, mode: ConnectionMode, steps: &[StepUni
 /// a crash report whose worker never announced its run).
 pub fn unit_of_spec(spec: &anvil_domain::request::RequestSpec) -> LoadUnitKind {
     match spec.protocol {
-        Protocol::Http => LoadUnitKind::HttpRequest,
+        // An MCP request is refused for load; its exchanges are HTTP requests.
+        Protocol::Http | Protocol::Mcp => LoadUnitKind::HttpRequest,
         Protocol::Grpc => grpc_unit(spec.grpc.as_ref().map(|g| g.mode).unwrap_or_default()),
         Protocol::Sse => LoadUnitKind::SseStream,
         Protocol::WebSocket => LoadUnitKind::WebsocketSession,
@@ -491,4 +499,22 @@ pub fn connection_mode_applies(kind: LoadUnitKind) -> bool {
             | LoadUnitKind::GrpcClientStream
             | LoadUnitKind::GrpcBidiStream
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MCP load units are a follow-up: a plan with an MCP request is refused
+    /// before any traffic, with its own code.
+    #[test]
+    fn an_mcp_request_is_refused_for_load() {
+        let mut spec = anvil_domain::request::RequestSpec::http("POST", "http://127.0.0.1:9/mcp");
+        spec.protocol = Protocol::Mcp;
+        let ctx = ExecutionContext::standalone(spec);
+        let r = classify(None, &ctx, ConnectionMode::Persistent).unwrap_err();
+        assert_eq!(r.code, RefusalCode::McpUnsupported);
+        assert!(r.to_string().contains("(LOAD-013 mcp_unsupported)"), "{r}");
+        assert_eq!(send_schemes(Protocol::Mcp), ["https", "http"]);
+    }
 }

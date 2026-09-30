@@ -127,7 +127,11 @@ PLUGIN_KEYS = {
   'grpc_web' => %w[expose_headers],                                                     # grpc_web.rs:1218 parse_expose_headers (only key; v0.9.7, v0.9.8)
   'oidc_relying_party' => %w[providers session behavior],                               # oidc_relying_party.rs:89 (CONFIG_FIELDS)
   'soap_ws_security' => %w[reject_missing_security_header content_type timestamp username_token
-                           x509_signature saml nonce] + REDIS                         # soap_ws_security.rs:648-664 (ROOT_CONFIG_KEYS)
+                           x509_signature saml nonce] + REDIS,                        # soap_ws_security.rs:648-664 (ROOT_CONFIG_KEYS)
+  # Added for the mcp profile; the closed key sets (MCP_*_KEYS, reject_unknown_mcp_keys) are
+  # identical at v0.9.5, v0.9.7 and v0.9.8 (source-checked).
+  'mcp_gateway' => %w[capabilities discovery enabled endpoint mode observability policy servers
+                      sessions validation]                                            # mcp_gateway.rs:99-110 (MCP_CONFIG_KEYS)
 }.freeze
 NESTED = {
   %w[response_transformer rules] => %w[operation target key value new_key],           # response_transformer.rs:156
@@ -171,7 +175,23 @@ NESTED = {
                                  allowed_subject_confirmation_methods clock_skew_seconds], # soap_ws_security.rs:695
   %w[soap_ws_security nonce] => %w[replay_scope max_cache_size max_encoded_length max_total_cache_bytes], # soap_ws_security.rs:710
   %w[openapi_validator operations] => %w[method path_template path_regex operation_label request_required
-                                         request_body responses]                      # openapi_validator.rs:159-167
+                                         request_body responses],                     # openapi_validator.rs:159-167
+  # mcp_gateway.rs:111-170 (MCP_ENDPOINT_KEYS ... MCP_OBSERVABILITY_KEYS); `servers` is keyed by server id.
+  %w[mcp_gateway endpoint] => %w[path protocol_versions],
+  %w[mcp_gateway discovery] => %w[aggregate_prompts aggregate_resources aggregate_tools cache_ttl_seconds
+                                  hide_denied_items namespace_separator on_new_tool on_schema_change],
+  %w[mcp_gateway sessions] => %w[downstream_session_header initialize_upstreams max_sessions session_ttl_seconds
+                                 sse_keepalive_seconds sse_listener_max_lifetime_seconds sse_max_event_bytes
+                                 sse_max_last_event_id_bytes sse_max_replay_events sse_max_retained_bytes
+                                 sse_max_retained_events sse_max_stream_id_bytes sse_max_streams_per_session
+                                 sse_multiplexing upstream_session_header],
+  %w[mcp_gateway capabilities] => %w[advertise_completions advertise_logging advertise_prompts advertise_resources
+                                     advertise_tasks advertise_tools passthrough_unknown_methods],
+  %w[mcp_gateway policy] => %w[default_action hide_denied_tools tools],
+  %w[mcp_gateway validation] => %w[max_batch_bytes max_batch_item_bytes max_batch_items max_batch_response_bytes
+                                   max_catalog_bytes_per_list max_catalog_items_per_list max_upstream_response_bytes
+                                   validate_tool_arguments validate_tool_results],
+  %w[mcp_gateway observability] => %w[emit_metadata log_argument_hash log_raw_arguments]
 }.freeze
 
 $errors = []
