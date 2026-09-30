@@ -169,6 +169,7 @@ pub fn run() {
             commands::effective_request,
             commands::send_request,
             commands::cancel_execution,
+            commands::mcp_discover_tools,
             commands::history_list,
             commands::history_get,
             commands::history_clear,

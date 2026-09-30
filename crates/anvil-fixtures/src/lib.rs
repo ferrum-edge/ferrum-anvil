@@ -23,6 +23,7 @@ pub mod idp;
 pub mod lab_streams;
 pub mod ldap;
 pub mod log;
+pub mod mcp;
 pub mod mesh_pki;
 pub mod pki;
 pub mod policy;

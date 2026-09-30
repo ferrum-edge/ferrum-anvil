@@ -44,6 +44,7 @@ pub fn all() -> Vec<Profile> {
         crate::proxyproto::profile(),
         crate::workload::profile(),
         crate::early::profile(),
+        crate::mcp::profile(),
     ]
 }
 

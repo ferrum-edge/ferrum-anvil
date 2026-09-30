@@ -77,6 +77,29 @@ pub struct BodyFacts {
     /// (`SOAP_FAULT_XML_LIMITS`) or the node limit. A fault in it would go
     /// unseen, so the application outcome is not evaluated.
     pub xml_not_inspected: Option<String>,
+    /// The body is a JSON-RPC 2.0 error response (MCP, A2A, any JSON-RPC API).
+    pub jsonrpc_error: Option<JsonRpcError>,
+    /// The body is a JSON-RPC result of an MCP tool call that reports a
+    /// tool-level failure (`result.isError: true`).
+    pub mcp_tool_error: Option<McpToolError>,
+}
+
+/// A JSON-RPC 2.0 error, as the response carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonRpcError {
+    pub code: i64,
+    /// Redacted excerpt.
+    pub message: String,
+    /// `error.data.gateway` (Ferrum Edge marks the errors its MCP and A2A
+    /// gateways author with an internal detail this way).
+    pub gateway: Option<String>,
+}
+
+/// An MCP tool result with `isError: true`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolError {
+    /// Redacted excerpt of the first text content block, if any.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +206,8 @@ pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Reda
                 if let Some(e) = obj.get("error").and_then(|e| e.as_str()) {
                     f.json_error = Some(excerpt(redact, e, 300));
                 }
+                f.jsonrpc_error = jsonrpc_error(obj, redact);
+                f.mcp_tool_error = mcp_tool_error(obj, redact);
                 if let Some(errs) = obj.get("errors").and_then(|e| e.as_array())
                     && !errs.is_empty()
                     && errs.iter().all(|e| e.get("message").is_some())
@@ -203,6 +228,33 @@ pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Reda
         }
     }
     f
+}
+
+/// A JSON-RPC 2.0 error response: `"jsonrpc": "2.0"` and an `error` object
+/// with an integer `code` (no `result`).
+fn jsonrpc_error(obj: &serde_json::Map<String, serde_json::Value>, redact: Redact<'_>) -> Option<JsonRpcError> {
+    if obj.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") || obj.contains_key("result") {
+        return None;
+    }
+    let e = obj.get("error")?.as_object()?;
+    let code = e.get("code")?.as_i64()?;
+    let message = excerpt(redact, e.get("message").and_then(|m| m.as_str()).unwrap_or(""), 300);
+    let gateway = e.get("data").and_then(|d| d.get("gateway")).and_then(|g| g.as_str()).map(|g| excerpt(redact, g, 64));
+    Some(JsonRpcError { code, message, gateway })
+}
+
+/// An MCP `tools/call` result that reports a tool failure (`isError: true`).
+fn mcp_tool_error(obj: &serde_json::Map<String, serde_json::Value>, redact: Redact<'_>) -> Option<McpToolError> {
+    if obj.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") || obj.contains_key("error") {
+        return None;
+    }
+    let result = obj.get("result")?.as_object()?;
+    if result.get("isError").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let blocks = result.get("content").and_then(|c| c.as_array());
+    let text = blocks.and_then(|b| b.iter().find_map(|x| x.get("text").and_then(|t| t.as_str()))).unwrap_or("");
+    Some(McpToolError { text: excerpt(redact, text, 300) })
 }
 
 fn trim_ascii(b: &[u8]) -> &[u8] {

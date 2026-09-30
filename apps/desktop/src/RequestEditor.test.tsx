@@ -80,3 +80,24 @@ describe("request settings: PROXY protocol header for HTTP-family requests", () 
     expect(screen.queryByLabelText("PROXY protocol header", { selector: "select" })).toBeNull();
   });
 });
+
+describe("MCP protocol editor", () => {
+  const mcpSpec = (mcp?: RequestSpec["mcp"]): RequestSpec => ({ method: "POST", url: "https://gw.example/mcp", protocol: "mcp", mcp }) as RequestSpec;
+
+  it("starts a new MCP request with tools/list and edits a tool call", () => {
+    const set = vi.fn();
+    render(<ProtocolEditor spec={mcpSpec()} set={set} workspaceId="ws" requestId="r1" />);
+    const op = screen.getByLabelText("MCP operation") as HTMLSelectElement;
+    expect(op.value).toBe("tools_list");
+    expect(Array.from(op.options).map((o) => o.textContent)).toContain("tools/call");
+    fireEvent.change(op, { target: { value: "tools_call" } });
+    expect(set).toHaveBeenCalledWith({ mcp: expect.objectContaining({ operation: { kind: "tools_call", name: "", arguments: "{}" } }) });
+  });
+
+  it("asks for a saved request before discovering tools", () => {
+    render(<ProtocolEditor spec={mcpSpec({ operation: { kind: "tools_list" } })} set={() => {}} workspaceId="ws" requestId="r1" dirty />);
+    const discover = screen.getByRole("button", { name: /Discover tools/ }) as HTMLButtonElement;
+    expect(discover.disabled).toBe(true);
+    expect(screen.getByText(/Save the request first/)).toBeTruthy();
+  });
+});

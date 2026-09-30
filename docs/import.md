@@ -576,6 +576,30 @@ express (a vendor `+json` type, `text/xml`, parameters) is kept as an
 explicit `Content-Type` header unless one was recorded. Recorded responses,
 timings and pages are not imported.
 
+## MCP tool discovery
+
+"Discover tools" (`App::mcp_discover_tools`, `anvil mcp-discover <request>`,
+the desktop MCP tab) is not a file import: it sends `tools/list` with a saved
+MCP request (the one request it sends, recorded in history like any send) and
+saves one request per listed tool in the same folder
+(`anvil_import::mcp::mcp_tool_requests` builds them; nothing it saves is run).
+
+* Each request is a copy of the MCP request (URL, headers, auth, settings,
+  session options) whose operation calls the tool (`tools/call`), named after
+  the tool's `title`, else its name, with two checks: `json_rpc_result` and
+  `mcp_is_error` false.
+* Arguments come from the tool's `inputSchema`: its first `examples` entry
+  for the whole object; otherwise, per property, an `examples` entry,
+  `example`, `default`, `const` or the first `enum` value, and a blank value
+  of the property's type for a required property without one (objects filled
+  the same way, at most 8 levels deep).
+* The list comes from a server over the network and is untrusted: a tool
+  whose name holds `{{`, `}}` or a control character is skipped, and `{{` in
+  argument text is written as a JSON escape (`{\u007b`), so a listed text is
+  sent as listed and never resolved as a variable reference.
+* At most 500 tools are saved, from the first page only; a `nextCursor` is
+  reported. Skipped tools are listed with the reason.
+
 ## Known limitations
 
 * Sample payloads are produced by a constraint-aware generator, not

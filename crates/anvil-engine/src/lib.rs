@@ -14,6 +14,7 @@ pub mod h3_exec;
 pub mod http_exec;
 pub mod lint;
 mod local_checks;
+pub mod mcp;
 pub mod oauth_http;
 mod pkcs12;
 pub mod prepare;
@@ -365,6 +366,7 @@ impl Engine {
     pub async fn execute(&self, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
         match ctx.spec.protocol {
             Protocol::Http => self.boxed_http(ctx, events, cancel).await,
+            Protocol::Mcp => self.boxed_mcp(ctx, events, cancel).await,
             Protocol::WebSocket | Protocol::Grpc | Protocol::Sse | Protocol::Tcp | Protocol::Udp => {
                 self.boxed_session(ctx, events, cancel).await
             }
@@ -380,6 +382,17 @@ impl Engine {
         cancel: CancellationToken,
     ) -> Pin<Box<impl Future<Output = ExecutionOutput> + 'a>> {
         Box::pin(http_exec::execute(self, ctx, events, cancel))
+    }
+
+    /// An MCP execution (its session's HTTP exchanges run one after the
+    /// other), boxed as [`Engine::boxed_http`] is.
+    fn boxed_mcp<'a>(
+        &'a self,
+        ctx: &'a ExecutionContext,
+        events: EventCtx,
+        cancel: CancellationToken,
+    ) -> Pin<Box<impl Future<Output = ExecutionOutput> + 'a>> {
+        Box::pin(mcp::execute(self, ctx, events, cancel))
     }
 
     /// A session execution (WebSocket, gRPC, SSE, TCP, UDP), boxed as

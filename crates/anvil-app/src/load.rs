@@ -411,6 +411,7 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
         Protocol::Tcp => "TCP",
         Protocol::Udp => "UDP",
         Protocol::Http => "HTTP",
+        Protocol::Mcp => "MCP",
     };
     let mut d = format!("{label} {}", url_origin(&url));
     let mut local = url_is_loopback(&url);

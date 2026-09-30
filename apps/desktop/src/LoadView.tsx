@@ -53,7 +53,7 @@ const UNIT_WORDS: Record<LoadUnitKind, [string, string]> = {
   dtls_exchange: ["exchange", "exchanges"],
 };
 
-const PROTOCOL_LABEL: Record<Protocol, string> = { http: "HTTP", web_socket: "WebSocket", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP" };
+const PROTOCOL_LABEL: Record<Protocol, string> = { http: "HTTP", web_socket: "WebSocket", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP", mcp: "MCP" };
 
 const GRPC_CODES = [
   "OK",

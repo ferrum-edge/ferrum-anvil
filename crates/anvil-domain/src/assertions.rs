@@ -79,6 +79,35 @@ pub enum AssertionKind {
     Transport {
         state: String,
     },
+    /// The response is a JSON-RPC error with this `code` (MCP, and any
+    /// JSON-RPC API).
+    JsonRpcError {
+        code: i64,
+    },
+    /// The response is a JSON-RPC result, not an error.
+    JsonRpcResult,
+    /// MCP `tools/call`: the tool result's `isError` flag (absent = false).
+    McpIsError {
+        is_error: bool,
+    },
+    /// MCP `tools/list`: a tool with this name is listed.
+    ToolPresent {
+        name: String,
+    },
+    /// MCP `tools/list`: no tool with this name is listed.
+    ToolAbsent {
+        name: String,
+    },
+    /// MCP `tools/list`: the listed tool's `inputSchema` equals `schema`
+    /// (JSON, compared as values) and/or its SHA-256 is `sha256` (lowercase
+    /// hex of the schema's JSON with object keys sorted and no whitespace).
+    ToolInputSchema {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -45,7 +45,17 @@ pub struct Assembly<'a> {
     pub protocol_status_override: Option<ProtocolStatus>,
     /// SPIFFE Workload API calls and SVIDs used (public data only).
     pub workload_api: Option<WorkloadApiEvidence>,
+    /// What the checks read in place of the response body, if not the body
+    /// itself (see [`BodyView`]).
+    pub body_view: Option<BodyView<'a>>,
 }
+
+/// Picks what diagnosis, assertions and extractions read from a response:
+/// called once, with the response (before its headers are redacted) and the
+/// decoded body, before anything reads the body. `None`: the body itself.
+/// An MCP execution reads the JSON-RPC response out of a POST answered with
+/// an event stream this way, and the session id out of its headers.
+pub type BodyView<'a> = &'a (dyn Fn(Option<&ResponseRecord>, &[u8]) -> Option<Bytes> + Sync);
 
 /// A tunnel refusal body as the record keeps it: redacted, then cut to
 /// [`anvil_transport::hbone::MAX_REFUSAL_BODY`], and whether it was cut. The
@@ -180,6 +190,8 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         _ => BodyDecoding::default(),
     };
     let body_for_eval: &[u8] = decoded.as_deref().unwrap_or(&raw_body);
+    let viewed: Option<Bytes> = a.body_view.and_then(|view| view(response.as_ref(), body_for_eval));
+    let body_for_eval: &[u8] = viewed.as_deref().unwrap_or(body_for_eval);
     let decoding_gap: Option<String> = match decoding_status {
         Some(status) if !status.is_complete() => Some(decoding_detail.clone().unwrap_or_else(|| "decoding did not complete".into())),
         _ => None,
@@ -704,6 +716,7 @@ mod tests {
             stream: None,
             protocol_status_override: None,
             workload_api: None,
+            body_view: None,
         });
 
         let warning = output

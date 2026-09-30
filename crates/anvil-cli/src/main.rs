@@ -74,6 +74,9 @@ enum Cmd {
     Add(AddArgs),
     /// Send a saved request or an ad-hoc URL and print the diagnosis.
     Send(SendArgs),
+    /// Run tools/list with a saved MCP request and save one request per
+    /// listed tool beside it (arguments from each tool's inputSchema).
+    McpDiscover(McpDiscoverArgs),
     /// Run a scenario or every request of a folder (collection runner).
     Run(RunArgs),
     /// Import an API spec or collection (OpenAPI, WSDL, Postman, Insomnia, cURL, HAR).
@@ -227,6 +230,70 @@ struct AddArgs {
     headers: Vec<String>,
     #[arg(long)]
     json: Option<String>,
+    #[command(flatten)]
+    mcp: McpArgs,
+}
+
+/// Make the request an MCP (Streamable HTTP) request to the `--url`
+/// endpoint: a session is opened with initialize, the operation sent in it,
+/// and the session ended with DELETE.
+#[derive(clap::Args)]
+struct McpArgs {
+    /// MCP: list the endpoint's tools (tools/list).
+    #[arg(long, conflicts_with = "mcp_call")]
+    mcp_list_tools: bool,
+    /// MCP: call this tool (tools/call).
+    #[arg(long, value_name = "TOOL")]
+    mcp_call: Option<String>,
+    /// MCP: the tool call's arguments, a JSON object (variables allowed).
+    #[arg(long, value_name = "JSON", requires = "mcp_call")]
+    mcp_args: Option<String>,
+    /// MCP: the protocol version to offer in initialize.
+    #[arg(long, value_name = "VERSION")]
+    mcp_version: Option<String>,
+}
+
+impl McpArgs {
+    /// The MCP settings the flags ask for, if any.
+    fn spec(&self) -> Option<anvil_domain::request::McpSpec> {
+        use anvil_domain::request::McpOperation;
+        let operation = match (&self.mcp_call, self.mcp_list_tools) {
+            (Some(name), _) => {
+                McpOperation::ToolsCall { name: name.clone(), arguments: self.mcp_args.clone().unwrap_or_else(|| "{}".into()) }
+            }
+            (None, true) => McpOperation::ToolsList { cursor: None },
+            (None, false) => return None,
+        };
+        let mut v = serde_json::json!({ "operation": serde_json::to_value(operation).ok()? });
+        if let Some(version) = &self.mcp_version {
+            v["protocol_version"] = version.clone().into();
+        }
+        serde_json::from_value(v).ok()
+    }
+
+    fn apply(&self, spec: &mut RequestSpec) {
+        if let Some(m) = self.spec() {
+            spec.protocol = anvil_domain::request::Protocol::Mcp;
+            spec.method = "POST".into();
+            spec.mcp = Some(m);
+        }
+    }
+}
+
+#[derive(clap::Args)]
+struct McpDiscoverArgs {
+    /// The saved MCP request (id, name or Folder/Path/Name).
+    request: String,
+    #[arg(long)]
+    workspace: Option<String>,
+    #[arg(long)]
+    env: Option<String>,
+    /// Print what was saved as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Do not record the tools/list exchange in history.
+    #[arg(long)]
+    no_history: bool,
 }
 
 #[derive(clap::Args)]
@@ -272,6 +339,8 @@ struct SendArgs {
     /// also be sent as early data. Repeatable. Other methods are refused.
     #[arg(long = "early-data-method", requires = "early_data")]
     early_data_methods: Vec<String>,
+    #[command(flatten)]
+    mcp: McpArgs,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -574,6 +643,12 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
             .collect();
         println!("  phases: {}", phases.join(" · "));
     }
+    if r.prepared.protocol == anvil_domain::request::Protocol::Mcp {
+        // How the MCP session went (the session id is never in them).
+        for n in r.prepared.inferred.iter().filter(|n| n.starts_with("MCP") || n.starts_with("the ")) {
+            println!("  {n}");
+        }
+    }
     if let ProtocolStatus::WebSocket { extensions: Some(e), .. } = &r.outcome.protocol_status {
         for line in ws_extension_lines(e) {
             println!("  {line}");
@@ -789,6 +864,37 @@ fn print_probe(p: &anvil_engine::workload::WorkloadProbe) {
     }
 }
 
+async fn mcp_discover(app: &App, a: &McpDiscoverArgs) -> Result<i32> {
+    let ws = match &a.workspace {
+        Some(w) => app.find_workspace(w)?,
+        None => app.workspaces()?.into_iter().next().ok_or_else(|| anyhow!("no workspace"))?,
+    };
+    let env = match &a.env {
+        Some(e) => {
+            let found = app.environments(&ws.meta.id)?.into_iter().find(|x| x.name.eq_ignore_ascii_case(e));
+            Some(found.ok_or_else(|| anyhow!("environment '{e}' not found"))?.meta.id)
+        }
+        None => None,
+    };
+    let request = app.find_request(&ws.meta.id, &a.request)?;
+    let opts = SendOptions { environment: env, record_history: !a.no_history, ..Default::default() };
+    let d = app.mcp_discover_tools(&ws.meta.id, &request.meta.id, opts, CancellationToken::new()).await.context("discover tools")?;
+    if a.json {
+        println!("{}", serde_json::to_string_pretty(&d)?);
+        return Ok(0);
+    }
+    for r in &d.created {
+        println!("{}  {}", r.meta.id, r.name);
+    }
+    for why in &d.skipped {
+        println!("skipped: {why}");
+    }
+    if d.more {
+        println!("the server lists more tools than its first page; only the first page was read");
+    }
+    Ok(0)
+}
+
 fn anvil_diagnostics_version() -> String {
     anvil_diagnostics::catalog_version()
 }
@@ -857,6 +963,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             if let Some(j) = &a.json {
                 spec.body = Body::Json { text: j.clone() };
             }
+            a.mcp.apply(&mut spec);
             let r = app.create_request(&w.meta.id, parent, &a.name, spec)?;
             println!("{}", r.meta.id);
             Ok(0)
@@ -903,6 +1010,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 })?;
             }
             let (rid, draft) = match (&s.request, &s.url) {
+                (Some(_), _) if s.mcp.spec().is_some() => bail!("the --mcp-* options make an ad-hoc --url request an MCP request"),
                 (Some(r), _) => (Some(app.find_request(&ws.meta.id, r)?.meta.id), None),
                 (None, Some(u)) => {
                     let mut spec = RequestSpec::http(&s.method, u);
@@ -912,6 +1020,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     if let Some(d) = &s.data {
                         spec.body = Body::Raw { text: d.clone(), content_type: None };
                     }
+                    s.mcp.apply(&mut spec);
                     (None, Some(spec))
                 }
                 (None, None) => bail!("give a saved request or --url"),
@@ -950,6 +1059,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 0
             })
         }
+        Cmd::McpDiscover(a) => mcp_discover(&app, a).await,
         Cmd::Run(a) => collection::run_collection(&app, a).await,
         Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),
         Cmd::SpecDrift(a) => drift::spec_drift_import(&app, a),

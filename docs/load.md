@@ -98,6 +98,7 @@ with a `RefusalCode`; the editor shows it and cannot start the run):
 | `hbone_persistent` | HTTP or gRPC through a mesh HBONE proxy in persistent mode: tunnels carry one execution's identity and are never pooled, so persistent mode could not be honoured. Fresh mode is allowed (it is what would happen). A target the profile's `NO_PROXY` list bypasses is sent directly and is not refused. |
 | `early_data` | The request enables 0-RTT early data: handshakes that share session tickets are serialized (their evidence is per connection) and the report has no early-data denominators. |
 | `incomplete_request` | A gRPC request without a service, method or schema. |
+| `mcp_unsupported` | An MCP request: one execution is a whole session (initialize, notifications/initialized, the operation, DELETE), and there is no MCP load unit to count it as yet. |
 
 Interactive sessions (`Engine::open_session`) are never used by a load run:
 each unit runs the automation path, so the request's script, stop conditions,

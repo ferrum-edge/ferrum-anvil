@@ -248,6 +248,31 @@ catalog whose id equals the profile's `compatibility_id`:
   unknown), does no outcome matching, and reads a token only with the coarse
   meaning every audited release shares.
 
+### JSON-RPC outcomes (MCP and A2A gateways)
+
+The `mcp_gateway` and `a2a_gateway` outcomes answer with a JSON-RPC error
+whose body echoes the request's id (`{"jsonrpc":"2.0","id":{id},"error":…}`),
+so no fixed body pattern matches them. For a JSON-RPC error response (MCP
+POSTs, and any JSON-RPC API; an MCP execution reads it out of an event-stream
+answer), when no body pattern matched, Anvil compares the status, the error
+`code`, the `message` and the `data.gateway` marker with each such outcome's
+catalog body:
+
+- **All match** (a marker the catalog body shows must be present; one it does
+  not show is allowed): `ferrum.outcome` with the outcome's text, capped at
+  `likely` (a server behind the gateway could send the same bytes). Several
+  outcomes: `ferrum.outcome_ambiguous`.
+- **Only the code** (the body's code, or one the outcome's catalog notes list
+  for the same condition, e.g. `-32601` for `plugin.mcp_gateway.unknown_item`):
+  `ferrum.jsonrpc_code` (warning, confidence `unknown`), listing the outcomes
+  that use the code and saying the gateway may not have produced it: upstream
+  MCP servers use the same standard codes.
+
+Independently of any gateway, a JSON-RPC error in a 2xx body is an
+application failure (`app.jsonrpc_error`, with the code's JSON-RPC 2.0
+meaning), and an MCP tool result with `isError: true` is the tool's own
+failure (`app.mcp_tool_error`, scope upstream application).
+
 ### Confidence ceilings (why most gateway findings say "likely")
 
 - On v0.9.5 and v0.9.7 a backend can inject `X-Gateway-Error` and

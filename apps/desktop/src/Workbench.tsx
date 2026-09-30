@@ -850,6 +850,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     onReload={() => reloadSaved(tab.req.id)}
                     confirmReload={() => confirmReload(tab.req.id)}
                     savedUrl={savedUrl(tab)}
+                    onTreeChanged={() => void loadTree()}
                   />
                 </div>
                 <div
@@ -1084,7 +1085,7 @@ function requestIds(nodes: TreeNode[]): string[] {
   return nodes.flatMap((n) => (n.kind === "request" ? [n.id] : requestIds(n.children)));
 }
 
-const PROTOCOL_TAGS: Partial<Record<Protocol, string>> = { web_socket: "WS", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP" };
+const PROTOCOL_TAGS: Partial<Record<Protocol, string>> = { web_socket: "WS", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP", mcp: "MCP" };
 
 function protoShort(p: string) {
   return PROTOCOL_TAGS[p as Protocol] ?? p.toUpperCase();

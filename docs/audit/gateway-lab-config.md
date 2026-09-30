@@ -282,6 +282,7 @@ Rule: **profile N uses gateway ports 18N00–18N99 and fixture ports 19N00–19N
 | 6 | drain (`drain.*`) | HTTP 18680; admin 18690 | 19600 control; 19601 echo; 19602 6 s staller |
 | 7 | cpdp (`cpdp-*.conf`, `cpdp-seed-proxy.json`) | CP: admin 18790, gRPC 18795. DP: HTTP 18780, admin 18791. Orphan DP: HTTP 18770, admin 18771 (its CP URL 18799 is unbound) | 19700 control; 19701 echo |
 | 9 | proxyproto (`proxyproto{,-auth,-v6}.*`, see `docs/lab/proxyproto.md`) | Main: HTTP 18980, HTTPS 18981, admin 18990, streams 18901–18904. Auth: HTTP 18982, HTTPS 18983, admin 18991, streams 18911–18912. Untrusted-peer: HTTP 18984, admin 18992, streams `[::1]`:18921, 18923 | 19901–19904, 19913–19914, 19921/19923 (must stay silent) |
+| — | mcp (`mcp.conf`, `mcp.yaml`, see `docs/lab/mcp.md`); outside the 18N/19N rule: gateway 171xx, fixtures 171xx | HTTP 17180, admin 17190 | 17101 MCP server behind `mcp_gateway` (JSON answers); 17102 the same server answering with event streams (addressed directly) |
 | — | early (`early{,-off}.conf`, `early.yaml`, see `docs/lab/early.md`); outside the 18N/19N rule: gateway 172xx, fixtures 173xx | Early data for GET: HTTP 17280, HTTPS + HTTP/3 17243, admin 17290. Early data off: HTTP 17281, HTTPS + HTTP/3 17244, admin 17291 | 17301 HTTP/1.1 echo (records `Early-Data`); 17302 UDP pending-window relay to 17243 |
 
 All profiles can run at the same time. Profiles 5 and 6 each change process-wide behavior, so they are separate instances. Profile 6 is destroyed by its own test.

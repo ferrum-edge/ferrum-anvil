@@ -4,6 +4,54 @@
 
 ### Added
 
+- MCP (Model Context Protocol, JSON-RPC over Streamable HTTP) as a request
+  kind (`protocol: mcp`, `RequestSpec.mcp`). One request is one operation
+  (`tools/list`, `tools/call`, `resources/*`, `prompts/*` or any raw
+  JSON-RPC request or notification) in a session of its own: the engine
+  sends `initialize` and `notifications/initialized`, carries the
+  `Mcp-Session-Id` and the negotiated `MCP-Protocol-Version`, reads JSON or
+  event-stream answers to each POST, and ends the session with `DELETE`.
+  Every exchange is an ordinary HTTP execution (auth per send, TLS and proxy
+  profiles, limits, deadlines, cancellation, redaction). The session id is a
+  credential: it is sent as a sensitive header and redacted in records,
+  previews, history and exports. The record's notes say how the session
+  went; a failed handshake is the result, with the operation not sent. See
+  docs/protocols.md §3.14.
+- Assertions `json_rpc_error {code}`, `json_rpc_result`, `mcp_is_error`,
+  `tool_present` / `tool_absent` (in a `tools/list` result) and
+  `tool_input_schema` (the listed schema, or its SHA-256 over sorted-key
+  JSON). `json_path` reads the JSON-RPC response of an event-stream answer,
+  so `$.result.structuredContent…` works for both kinds of answer.
+- Diagnostics: a JSON-RPC error in a 2xx body is an application failure
+  (`app.jsonrpc_error`, with the code's JSON-RPC 2.0 meaning), and so is an
+  MCP tool result with `isError: true` (`app.mcp_tool_error`). With a trusted
+  Ferrum profile, JSON-RPC errors are matched against the release catalog's
+  `mcp_gateway` and `a2a_gateway` outcomes by status, code, message and the
+  `data.gateway` marker (their bodies echo the request id, which no fixed
+  pattern matched), so a `-32001` gets the `plugin.mcp_gateway.tool_denied`
+  explanation; a matching code with another message is reported only as
+  consistent with those outcomes (`ferrum.jsonrpc_code`).
+- MCP "discover tools": `App::mcp_discover_tools`, `anvil mcp-discover
+  <request>` and the desktop MCP tab's **Discover tools** run `tools/list`
+  with a saved MCP request and save one request per tool beside it, with
+  arguments from each tool's `inputSchema` (examples, defaults, constants,
+  then blank required values) and checks that the call is a result the tool
+  did not mark as an error. A tool name or argument text holding `{{` is
+  never read as a variable reference. See docs/import.md.
+- CLI: `anvil send --url … --mcp-list-tools | --mcp-call TOOL [--mcp-args
+  JSON]` (and the same on `anvil add`) make an ad-hoc MCP request.
+- Desktop: MCP in the protocol list, an MCP tab (operation, arguments,
+  protocol version, client info and capabilities, session options) and the
+  new assertions in the Tests tab.
+- Lab: an `mcp` profile runs the pinned Ferrum Edge with `mcp_gateway` in
+  aggregate-router mode in front of a fixture MCP server
+  (`anvil_fixtures::mcp`): allowed, denied, hidden and unconfigured tools,
+  schema validation of arguments, unknown tools, a request without a session
+  and a tool's own error, each cross-checked with the catalog outcome and the
+  calls that reached the server (docs/lab/mcp.md).
+- Load: a plan with an MCP request is refused before traffic
+  (`mcp_unsupported`); an MCP load unit is a follow-up.
+
 - Contract drift: compare observed traffic with an OpenAPI description
   (`anvil_contract::analyze`). Exchanges are routed to operations through
   the declared server base paths and checked for undeclared paths, methods,

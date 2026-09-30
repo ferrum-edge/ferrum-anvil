@@ -12,6 +12,7 @@ pub mod identity;
 pub mod linked_files;
 pub mod load;
 pub mod logging;
+pub mod mcp;
 pub mod port;
 pub mod profiles;
 pub mod runner;

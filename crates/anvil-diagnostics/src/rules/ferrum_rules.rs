@@ -13,7 +13,7 @@
 
 use super::Ctx;
 use crate::facts::FerrumTrust;
-use crate::ferrum::{self, FerrumCatalog, MatchStrength, Signal};
+use crate::ferrum::{self, FerrumCatalog, JsonRpcSignal, MatchStrength, Signal};
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Remediation, Severity, SourceScope};
 use anvil_domain::outcome::{OutcomeWarning, WarningCode};
@@ -375,6 +375,22 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         }
         None => exact,
     };
+    // A JSON-RPC error (MCP, A2A): the gateway's bodies echo the request's
+    // id, which no fixed body pattern matches; its code and message do.
+    if exact.is_empty()
+        && passthrough.is_empty()
+        && let Some(e) = &ctx.body.jsonrpc_error
+    {
+        let signal = JsonRpcSignal {
+            status: r.status,
+            token: token.as_deref(),
+            code: e.code,
+            message: &e.message,
+            gateway: e.gateway.as_deref(),
+        };
+        jsonrpc_outcomes(ctx, cat, &signal, body_ceiling, out);
+        return;
+    }
     if exact.len() == 1 && exact[0].shared_signal_with.is_empty() {
         let o = exact[0];
         let mut d = Draft::new(
@@ -450,6 +466,52 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         }
         out.push(d);
     }
+}
+
+/// Findings for a JSON-RPC error matched against the catalog's JSON-RPC
+/// outcomes: one outcome (status, code, message and marker all match), several,
+/// or only the code (weak: a server behind the gateway can use the same code).
+fn jsonrpc_outcomes(ctx: &Ctx<'_>, cat: &FerrumCatalog, s: &JsonRpcSignal<'_>, ceiling: Confidence, out: &mut Vec<Draft>) {
+    let idx = ctx.attempt_index();
+    let release = cat.release_label();
+    let body_text = String::from_utf8_lossy(ctx.input.body);
+    let m = cat.match_jsonrpc_error(s);
+    let evidence = |d: Draft| {
+        d.ev_at(E::HttpStatus, "status", s.status.to_string(), idx)
+            .ev_at(E::BodyContent, "jsonrpc.error.code", s.code.to_string(), idx)
+            .ev_at(E::BodyContent, "body.signature", ctx.excerpt(&body_text, 160), idx)
+            .ev(E::Configuration, "catalog.compatibility_id", cat.compatibility_id.clone())
+    };
+    if m.exact.len() == 1 && m.exact[0].shared_signal_with.is_empty() {
+        let o = m.exact[0];
+        let d = Draft::new("ferrum.outcome", "ferrum.catalog", ceiling, scope_for_family(&o.family), owner_from(&o.owner), Severity::Error);
+        let mut d = evidence(d).ev(E::Configuration, "catalog.outcome", o.id.clone()).var("outcome", o.id.clone()).var("release", release);
+        d.catalog_text = Some((catalog_title(&o.id), o.minimum_truthful_diagnosis.clone()));
+        d.extra_does_not_prove.extend(o.must_not_claim.iter().cloned());
+        d.extra_does_not_prove.push("That the gateway, not a server behind it answering alike, authored this response.".into());
+        d.extra_remediation.extend(o.remediation.iter().map(|t| Remediation { text: t.clone(), owner: owner_from(&o.owner) }));
+        out.push(d);
+        return;
+    }
+    let candidates = if m.exact.is_empty() { &m.code_only } else { &m.exact };
+    if candidates.is_empty() {
+        return;
+    }
+    let ids: Vec<String> = candidates.iter().map(|o| o.id.clone()).collect();
+    let mut d = if m.exact.is_empty() {
+        let (scope, owner) = (SourceScope::Unknown, Owner::Unknown);
+        let d = Draft::new("ferrum.jsonrpc_code", "ferrum.catalog", Confidence::Unknown, scope, owner, Severity::Warning);
+        d.var("code", s.code.to_string()).var("outcomes", ids.join(", "))
+    } else {
+        let (scope, owner) = (SourceScope::Unknown, Owner::GatewayOperator);
+        let d = Draft::new("ferrum.outcome_ambiguous", "ferrum.catalog", Confidence::Unknown, scope, owner, Severity::Error);
+        d.var("count", ids.len().to_string()).var("common", candidates[0].minimum_truthful_diagnosis.clone())
+    };
+    d = evidence(d).ev(E::Configuration, "catalog.candidates", ids.join(", ")).var("release", release);
+    for o in candidates {
+        d.extra_alternatives.push(format!("{} ({})", o.minimum_truthful_diagnosis, o.id));
+    }
+    out.push(d);
 }
 
 /// Append a catalog's release-specific sentences to a marker finding. The
@@ -640,6 +702,67 @@ mod tests {
 
     fn find<'a>(f: &'a [DiagnosticFinding], code: &str) -> Option<&'a DiagnosticFinding> {
         f.iter().find(|x| x.code == code)
+    }
+
+    fn evidence<'a>(f: &'a DiagnosticFinding, key: &str) -> Option<&'a str> {
+        f.evidence.iter().find(|e| e.key == key).map(|e| e.value.as_str())
+    }
+
+    /// An `mcp_gateway` JSON-RPC error echoes the request's id, so no fixed
+    /// body pattern matches it: its code, message and marker map it to the
+    /// catalog outcome, on every audited release, capped at likely over
+    /// plain HTTP.
+    #[test]
+    fn a_gateway_json_rpc_error_maps_to_its_catalog_outcome() {
+        const DENIED: &str = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"MCP tool call denied by gateway policy"}}"#;
+        const INVALID: &str = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"Invalid MCP tool arguments"}}"#;
+        const UNKNOWN: &str = r#"{"jsonrpc":"2.0","id":"a-7","error":{"code":-32003,"message":"Unknown MCP tool"}}"#;
+        let r = response(200, "application/json", &[]);
+        let cases = [
+            (DENIED, "plugin.mcp_gateway.tool_denied"),
+            (INVALID, "plugin.mcp_gateway.invalid_params"),
+            (UNKNOWN, "plugin.mcp_gateway.unknown_item"),
+        ];
+        for compat in ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", "ferrum-edge-0.9.8"] {
+            for (body, outcome) in cases {
+                let f = diagnose_as(Protocol::Http, &r, body.as_bytes(), compat);
+                let codes: Vec<&String> = f.iter().map(|x| &x.code).collect();
+                let o = find(&f, "ferrum.outcome").unwrap_or_else(|| panic!("{compat} {outcome}: {codes:?}"));
+                assert_eq!(evidence(o, "catalog.outcome"), Some(outcome), "{compat}");
+                assert_eq!(o.confidence, Confidence::Likely, "plain-HTTP trust and a body a server could also send");
+                assert!(find(&f, "app.jsonrpc_error").is_some(), "the application failure is reported too");
+            }
+        }
+        let r400 = response(400, "application/json", &[]);
+        const MISSING: &str = "Missing Mcp-Session-Id header; call initialize to obtain a session";
+        let missing = format!(r#"{{"jsonrpc":"2.0","id":2,"error":{{"code":-32600,"message":"{MISSING}"}}}}"#);
+        let f = diagnose_as(Protocol::Http, &r400, missing.as_bytes(), "ferrum-edge-0.9.8");
+        let o = find(&f, "ferrum.outcome").expect("session outcome");
+        assert_eq!(evidence(o, "catalog.outcome"), Some("plugin.mcp_gateway.session_or_version_rejected"));
+    }
+
+    /// The code alone is weak evidence: a server behind the gateway uses the
+    /// same codes. Without the audited message it is reported as consistent
+    /// with the outcomes that use the code, never as their match.
+    #[test]
+    fn a_json_rpc_code_without_the_audited_message_is_only_consistent() {
+        let r = response(200, "application/json", &[]);
+        let own = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"Invalid params: echo needs a text argument"}}"#;
+        let f = diagnose_as(Protocol::Http, &r, own.as_bytes(), "ferrum-edge-0.9.8");
+        assert!(find(&f, "ferrum.outcome").is_none(), "{:?}", f.iter().map(|x| &x.code).collect::<Vec<_>>());
+        let c = find(&f, "ferrum.jsonrpc_code").expect("code-only finding");
+        assert_eq!(c.confidence, Confidence::Unknown);
+        assert_eq!(evidence(c, "catalog.candidates"), Some("plugin.mcp_gateway.invalid_params"));
+        assert!(c.explanation.contains("-32602") && c.explanation.contains("may not have produced it"), "{}", c.explanation);
+        // -32001 with A2A's message but without its marker: consistent with both denials.
+        let a2a = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"A2A method denied by gateway policy"}}"#;
+        let f = diagnose_as(Protocol::Http, &r, a2a.as_bytes(), "ferrum-edge-0.9.8");
+        let ids = find(&f, "ferrum.jsonrpc_code").and_then(|c| evidence(c, "catalog.candidates")).unwrap_or_default().to_string();
+        assert!(ids.contains("plugin.mcp_gateway.tool_denied") && ids.contains("plugin.a2a_gateway.jsonrpc_method_denied"), "{ids}");
+        // A result is no error at all.
+        let ok = br#"{"jsonrpc":"2.0","id":2,"result":{"content":[]}}"#;
+        let codes: Vec<String> = diagnose_as(Protocol::Http, &r, ok, "ferrum-edge-0.9.8").into_iter().map(|x| x.code).collect();
+        assert!(!codes.iter().any(|c| c.starts_with("ferrum.") || c.starts_with("app.")), "{codes:?}");
     }
 
     /// Live GW-019 (policy lab): a response_transformer on an ip_restriction

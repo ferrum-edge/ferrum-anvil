@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.27-1",
+  "version": "2026.09.30-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1821,6 +1821,26 @@
       ],
       "confirm_with": []
     },
+    "ferrum.jsonrpc_code": {
+      "title": "JSON-RPC error code used by a known gateway outcome",
+      "explanation": "The response is JSON-RPC error {code}. On {release} this code is used by {outcomes}, but the message or gateway marker differs from the audited body, so the gateway may not have produced it.",
+      "alternatives": [
+        "A server behind the gateway answered with the same standard or application error code."
+      ],
+      "does_not_prove": [
+        "That the gateway produced this error.",
+        "Which of the listed outcomes applied, if any."
+      ],
+      "remediation": [
+        {
+          "text": "Compare the error message with the MCP server's own errors, or ask the gateway operator for the correlated log entry.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "Gateway logs or authorized diagnostic detail for this request."
+      ]
+    },
     "ferrum.backend_passthrough": {
       "title": "The backend's own response passed through the gateway",
       "explanation": "The body is not a gateway-generated error body. On {release}, a backend's own {status} passes through with the gateway marker {token}. This is consistent with the application producing the status.",
@@ -1884,6 +1904,38 @@
       "remediation": [
         {
           "text": "Inspect each error's path; partial data may still be usable.",
+          "owner": "api_owner"
+        }
+      ],
+      "confirm_with": []
+    },
+    "app.jsonrpc_error": {
+      "title": "The JSON-RPC response is an error",
+      "explanation": "The transport succeeded (status {status}), but the response is JSON-RPC error {code}: {message}. By the JSON-RPC 2.0 code ranges, {meaning}.",
+      "alternatives": [],
+      "does_not_prove": [
+        "That HTTP 200 means the call succeeded.",
+        "Which component (a gateway or the server) produced the error; a trusted Ferrum profile's catalog may tell."
+      ],
+      "remediation": [
+        {
+          "text": "Read the error code and message; fix the request's parameters or ask the server's owner.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "app.mcp_tool_error": {
+      "title": "The MCP tool reported an error",
+      "explanation": "The tool call reached the tool (status {status}, a JSON-RPC result), but the tool marked its result as an error (isError: true): {text}",
+      "alternatives": [],
+      "does_not_prove": [
+        "That the MCP protocol exchange failed: the error is the tool's own result.",
+        "That a gateway refused the call."
+      ],
+      "remediation": [
+        {
+          "text": "Read the tool's error text and fix the arguments, or ask the tool's owner.",
           "owner": "api_owner"
         }
       ],

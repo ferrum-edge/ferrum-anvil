@@ -347,9 +347,20 @@ export interface LoadRefusal {
     | "sse_reconnect"
     | "hbone_persistent"
     | "early_data"
-    | "incomplete_request";
+    | "incomplete_request"
+    | "mcp_unsupported";
   request_id?: string | null;
   message: string;
+}
+/** What MCP "discover tools" saved: one request per listed tool, beside the MCP request that listed them. */
+export interface McpDiscovered {
+  created: RequestDefinition[];
+  /** Tools not saved, and why. */
+  skipped: string[];
+  /** The server lists more tools than its first page; only that page was read. */
+  more: boolean;
+  /** The execution that listed the tools (in history). */
+  execution_id: string;
 }
 /** What an edited plan would measure, or its typed refusal. Nothing is sent. */
 export interface LoadPlanCheck {
@@ -632,6 +643,9 @@ export const api = {
   effective: (input: SendInput) => call<EffectiveRequest>("effective_request", { input }),
   send: (input: SendInput, executionId: string) => call<ExecutionView>("send_request", { input, executionId }),
   cancel: (executionId: string) => call<boolean>("cancel_execution", { executionId }),
+  /** MCP: list the tools of a saved MCP request's endpoint and save a request per tool beside it (cancel with `cancel(executionId)`). */
+  mcpDiscoverTools: (input: { workspace_id: string; request_id: string; environment_id: string | null }, executionId: string) =>
+    call<McpDiscovered>("mcp_discover_tools", { input, executionId }),
   history: (workspaceId: string, requestId: string | null, limit = 100) => call<HistoryItem[]>("history_list", { workspaceId, requestId, limit }),
   historyGet: (historyId: string) => call<ExecutionView>("history_get", { historyId }),
   historyClear: (workspaceId: string | null) => call<void>("history_clear", { workspaceId }),
