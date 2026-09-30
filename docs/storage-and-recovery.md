@@ -587,7 +587,8 @@ different owner; Merge keeps those.
 - Legacy migration can leave a profile over the ruleset count or combined-size
   limit when it adds rulesets to existing records. Such a profile remains
   usable for disabling and removing rulesets, but it must be trimmed below
-  the limits before its full backup can be restored elsewhere.
+  the limits before a full backup of it can be made (and therefore restored
+  elsewhere).
 
 ## History retention
 

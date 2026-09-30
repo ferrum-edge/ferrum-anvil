@@ -950,7 +950,9 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     for ruleset in &mut d.graph.rulesets {
         crate::standards::normalize_imported_ruleset(ruleset).map_err(|e| invalid(e.to_string()))?;
     }
-    anvil_portability::validate::validate_ruleset_limits(&d.graph, "backup").map_err(|e| invalid(e.to_string()))?;
+    anvil_portability::validate::validate_ruleset_limits(&d.graph, "backup").map_err(|e| {
+        invalid(format!("{e}; a profile over the ruleset limits must have rulesets removed before a full backup of it can be made or restored"))
+    })?;
     d.warnings = anvil_portability::validate::validate_and_normalize(&mut d.graph).map_err(|e| invalid(e.to_string()))?;
     if outside_history > 0 {
         d.warnings.push(format!("{outside_history} history record(s) of workspaces that are not in the backup were left out."));
@@ -1079,7 +1081,7 @@ fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<V
         &local.rulesets,
     ) {
         notes.push(format!(
-            "Restored API standards exceed profile limits: {e}; trim the profile below the ruleset limits before its full backup can be restored elsewhere; the restore will be refused"
+            "Restored API standards exceed profile limits: {e}; remove rulesets from this profile or from the backup; the restore will be refused"
         ));
     }
     if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(d, local, policy)) {
