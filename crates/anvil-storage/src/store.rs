@@ -106,6 +106,8 @@ pub mod kind {
     pub const SPEC_SOURCE: &str = "spec_source";
     /// Saved collection-run reports (`anvil_domain::runner::RunReport`).
     pub const RUN_REPORT: &str = "run_report";
+    /// User-provided API standards rulesets, ordered by `sort_key`.
+    pub const API_RULESET: &str = "api_ruleset";
     /// Token files the user bound in the desktop's native open dialog
     /// (`anvil_app::token_files`). Device-specific: not in [`ALL`], never
     /// exported or imported.
@@ -136,6 +138,7 @@ pub mod kind {
         IMPORT_SOURCE,
         SPEC_SOURCE,
         RUN_REPORT,
+        API_RULESET,
     ];
 }
 

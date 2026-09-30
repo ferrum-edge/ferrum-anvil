@@ -25,6 +25,7 @@ use anvil_portability::plan::{ConflictPolicy, ExistingWorkspace};
 use anvil_storage::{KdfParams, kind};
 use anvil_transport::recorder::EventCtx;
 use serde_json::json;
+use sha2::Digest;
 use std::collections::BTreeSet;
 use tokio_util::sync::CancellationToken;
 
@@ -57,6 +58,27 @@ fn new_app(root: &std::path::Path, name: &str) -> App {
     let (s, dek, _recovery) = pm.create_passphrase(name, "correct horse battery", KdfParams::testing()).unwrap();
     let h = anvil_storage::vault::read_header(&s.dir).unwrap();
     App::open(s.dir, h, dek).unwrap()
+}
+
+#[test]
+fn restores_rulesets_from_legacy_app_settings_in_an_old_backup() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path(), "legacy-source");
+    let ruleset = source.add_api_ruleset("legacy.yaml", b"anvil_ruleset: 1\nname: Legacy\nrules:\n  info-contact: error\n").unwrap();
+    source.store.delete(kind::API_RULESET, &ruleset.id).unwrap();
+    let mut settings = source.settings().unwrap();
+    settings.api_standards.legacy_rulesets.push(ruleset.clone());
+    source.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();
+    let bytes = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let target = new_app(root.path(), "legacy-target");
+    let restored = target.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(restored.api_standards_count, 1);
+    let imported = target.api_standards().unwrap().rulesets;
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].id, ruleset.id);
+    assert_eq!(imported[0].sha256, ruleset.sha256);
+    assert!(target.settings().unwrap().api_standards.legacy_rulesets.is_empty());
 }
 
 fn export(app: &App) -> Vec<u8> {
@@ -214,7 +236,21 @@ async fn full_backup_restores_every_entity_into_a_clean_profile() {
     std::fs::write(&token, "token-file-content").unwrap();
     let a_root = tempfile::tempdir().unwrap();
     let a = populated(a_root.path(), &fx.url(""), &token).await;
+    let ruleset = a
+        .add_api_ruleset(
+            "team.yaml",
+            br#"anvil_ruleset: 1
+name: Team
+rules:
+  team-summary:
+    severity: error
+    given: operation
+    then: { field: summary, function: truthy }
+"#,
+        )
+        .unwrap();
     let before = a.backup_contents().unwrap();
+    assert!(before.objects.iter().any(|o| o.kind == kind::API_RULESET && o.id == ruleset.id.to_string()));
 
     // Inventory of the source: every carried kind, both kinds of secret,
     // attachments, all history (no 1,000 cap), bodies and load reports.
@@ -256,6 +292,7 @@ async fn full_backup_restores_every_entity_into_a_clean_profile() {
 
     // The restored profile holds exactly what the source held.
     let after = b.backup_contents().unwrap();
+    assert_eq!(b.api_standards().unwrap().rulesets, [ruleset]);
     let inventory = |c: &BackupContents| -> BTreeSet<(String, String)> {
         let mut v: BTreeSet<_> = c.objects.iter().map(|o| (o.kind.clone(), o.id.clone())).collect();
         v.extend(c.secrets.iter().map(|s| ("secret".to_string(), s.id.clone())));
@@ -825,6 +862,64 @@ fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_doe
     let restored = c.settings().unwrap();
     assert_eq!(restored.theme, Theme::Light);
     assert_eq!(restored.defaults.dns_overrides, settings.defaults.dns_overrides);
+}
+
+#[test]
+fn restore_preserves_a_backup_with_recommended_rules_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path(), "source");
+    source.set_api_standards_recommended(false).unwrap();
+    let backup = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let target = new_app(root.path(), "target");
+    target.restore(&backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(!target.api_standards().unwrap().include_recommended);
+}
+
+#[test]
+fn replace_restore_checks_matching_rulesets_at_their_stored_position() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path(), "source");
+    source.create_workspace("Backup standards").unwrap();
+    let team_text = r#"anvil_ruleset: 1
+name: Team
+version: '3'
+rules:
+  info-contact: error
+  team-summary:
+    severity: error
+    given: operation
+    then: { field: summary, function: truthy }
+"#;
+    let team = source.add_api_ruleset("team.yaml", team_text.as_bytes()).unwrap();
+    let unchanged_backup = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let mut changed = team.clone();
+    changed.text = "anvil_ruleset: 1\nname: Team\nversion: '4'\nrules:\n  info-contact: error\n".into();
+    changed.sha256 = hex::encode(sha2::Sha256::digest(changed.text.as_bytes()));
+    source.store.put(kind::API_RULESET, &changed.id, None, None, 0.0, &changed).unwrap();
+    let changed_backup = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let target = new_app(root.path(), "target");
+    target.create_workspace("Local workspace").unwrap();
+    target.store.put(kind::API_RULESET, &team.id, None, None, 7.0, &team).unwrap();
+    let overlay_text = "anvil_ruleset: 1\nname: Overlay\nrules:\n  team-summary: off\n";
+    let overlay = target.add_api_ruleset("overlay.yaml", overlay_text.as_bytes()).unwrap();
+    target.store.put(kind::API_RULESET, &overlay.id, None, None, 9.0, &overlay).unwrap();
+    let preview = target.restore_preview(&changed_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
+    let report = target.restore(&changed_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
+
+    let unchanged_target = new_app(root.path(), "unchanged");
+    unchanged_target.create_workspace("Local workspace").unwrap();
+    unchanged_target.store.put(kind::API_RULESET, &team.id, None, None, 7.0, &team).unwrap();
+    let unchanged_overlay = unchanged_target.add_api_ruleset("overlay.yaml", overlay_text.as_bytes()).unwrap();
+    unchanged_target.store.put(kind::API_RULESET, &unchanged_overlay.id, None, None, 9.0, &unchanged_overlay).unwrap();
+    let preview = unchanged_target.restore_preview(&unchanged_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(!preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
+    let report = unchanged_target.restore(&unchanged_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(!report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
 }
 
 #[test]

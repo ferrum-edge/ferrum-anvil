@@ -204,6 +204,16 @@ profiles, spec-import records or load reports, and its bundle kind is
 
 ### What a bundle carries
 
+- Profile-wide API standards rulesets are excluded by default. In the desktop,
+  select **Include API standards** to carry them; the CLI accepts
+  `--include-standards` for the same opt-in. The manifest and both export and
+  import previews show the number carried. Imported bundle rulesets start
+  disabled, so they cannot change linting until enabled in API standards.
+  Replace keeps a matching local ruleset's enabled flag and position; only
+  new bundle rulesets arrive disabled. Full backups always carry rulesets.
+  When Replace restores the backup's app settings, it restores ruleset order
+  and enabled state too; when local settings are kept, matching rulesets keep
+  their local positions and new rulesets follow them.
 - Each workspace's load plans, except one that names a request, dataset or
   environment deleted since (an import would refuse it; the export lists it
   among its excluded items).
@@ -228,6 +238,10 @@ profiles, spec-import records or load reports, and its bundle kind is
   the request or dataset that names it (`linked_files` in the preview, as
   `request 'Upload': /path/to/file`); the manifest does not repeat them.
   Attach a copy instead to keep a local path out of a bundle.
+
+For example, `anvil export --workspace Team --mode share --include-standards
+--out team.anvil` includes profile standards in a share-safe bundle. Omit
+`--include-standards` to leave them out (the default in both export modes).
 
 In either bundle mode **only the vault is encrypted**. The objects (names,
 URLs, header and body text), attachments and history are ordinary zip
@@ -563,6 +577,18 @@ different owner; Merge keeps those.
   schema are never silently dropped.
 - Contracts (`contracts/schemas`) are generated from the Rust types. Additive
   fields use serde defaults so older records keep loading.
+- On profile open, the app-level settings migration moves legacy API
+  standards rulesets into `api_ruleset` object records in one transaction.
+  Each legacy id is written only when no ruleset record with that id already
+  exists. All rulesets that fit the per-record limit are moved, even when
+  this takes the profile over the count or combined-size limits. A legacy
+  ruleset above the per-record limit is dropped with a warning. The legacy
+  field is then cleared and the migration is not retried.
+- Legacy migration can leave a profile over the ruleset count or combined-size
+  limit when it adds rulesets to existing records. Such a profile remains
+  usable for disabling and removing rulesets, but it must be trimmed below
+  the limits before a full backup of it can be made (and therefore restored
+  elsewhere).
 
 ## History retention
 

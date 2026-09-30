@@ -141,14 +141,48 @@ impl App {
     }
 
     pub fn save_settings(&self, s: &anvil_domain::settings::AppSettings) -> Result<()> {
-        self.store.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, s)?;
+        let mut next = s.clone();
+        next.api_standards.legacy_rulesets.clear();
+        self.store.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &next)?;
         Ok(())
     }
 
     fn ensure_settings(&self) -> Result<()> {
-        if self.store.get::<anvil_domain::settings::AppSettings>(anvil_storage::kind::APP_SETTINGS, &settings_id())?.is_none() {
-            self.save_settings(&Default::default())?;
-        }
+        self.store.atomically(|tx| {
+            let stored_settings: Option<anvil_domain::settings::AppSettings> = tx.get(anvil_storage::kind::APP_SETTINGS, &settings_id())?;
+            let needs_settings = stored_settings.is_none();
+            let mut settings = stored_settings.unwrap_or_default();
+            let legacy = std::mem::take(&mut settings.api_standards.legacy_rulesets);
+            if needs_settings || !legacy.is_empty() {
+                let existing = tx.object_meta(anvil_storage::kind::API_RULESET)?;
+                let mut order = existing.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
+                let mut ids: std::collections::HashSet<String> = existing.into_iter().map(|row| row.id).collect();
+                for ruleset in legacy {
+                    let id = ruleset.id.to_string();
+                    if ids.contains(&id) {
+                        // A stored row has an `updated_at`; the legacy copy
+                        // has only `added_at`, so those timestamps cannot be
+                        // compared. Keep the existing row as authoritative.
+                        tracing::warn!(id = %id, kept = "stored record", "legacy API ruleset id collides with an existing record");
+                        continue;
+                    }
+                    if ruleset.text.len() > anvil_domain::settings::MAX_STORED_RULESET_BYTES {
+                        tracing::warn!(
+                            id = %id,
+                            bytes = ruleset.text.len(),
+                            limit = anvil_domain::settings::MAX_STORED_RULESET_BYTES,
+                            "dropping oversized legacy API ruleset during migration"
+                        );
+                        continue;
+                    }
+                    tx.put(anvil_storage::kind::API_RULESET, &ruleset.id, None, None, order, &ruleset)?;
+                    ids.insert(id);
+                    order += 1.0;
+                }
+                tx.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &settings)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 }

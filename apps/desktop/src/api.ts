@@ -214,6 +214,7 @@ export interface ImportReport {
   workspace_ids: string[];
   /** A full backup (restored) rather than a bundle. */
   full_backup: boolean;
+  api_standards_count: number;
   /** SHA-256 of the file as read; applying passes it back so the approval holds only for the previewed file. */
   bundle_sha256: string;
 }
@@ -682,7 +683,8 @@ export const api = {
   jwtInspect: (token: string) => call<JwtInspection>("jwt_inspect", { token }),
   workloadProbe: (endpoint: string, audience: string | null) => call<WorkloadProbe>("workload_probe", { endpoint, audience }),
 
-  exportPreview: (workspaceId: string | null, exportMode: string) => call<ExportPreview>("export_preview", { workspaceId, exportMode }),
+  exportPreview: (workspaceId: string | null, exportMode: string, includeStandards = false) =>
+    call<ExportPreview>("export_preview", { workspaceId, exportMode, includeStandards }),
   /** Native open/save dialog for `purpose`; empty when the user cancels. */
   chooseFiles: (purpose: FilePurpose, options: FileDialogOptions = {}) => call<FileGrant[]>("file_choose", { purpose, options }),
   /** One file from the native open/save dialog for `purpose`; null when the user cancels. */
@@ -705,8 +707,20 @@ export const api = {
   tokenFiles: () => call<TokenFileBinding[]>("token_files_list"),
   /** Stop reading a bound token file until it is chosen again. */
   removeTokenFile: (bindingId: string) => call<void>("token_file_remove", { bindingId }),
-  exportToPath: (workspaceId: string | null, exportMode: string, passphrase: string | null, grant: string) =>
-    call<number>("export_to_path", { workspaceId, exportMode, passphrase, grant }),
+  exportToPath: (
+    workspaceId: string | null,
+    exportMode: string,
+    passphrase: string | null,
+    grant: string,
+    includeStandards = false,
+  ) =>
+    call<number>("export_to_path", {
+      workspaceId,
+      exportMode,
+      passphrase,
+      grant,
+      includeStandards,
+    }),
   /** `attempt`: a fresh id that `importCancel` ends the preview with (it then fails with `CANCELED`). */
   importPreview: (grant: string, passphrase: string | null, conflictPolicy: string, attempt: string | null = null) =>
     call<ImportReport>("import_preview", { grant, passphrase, conflictPolicy, attempt }),

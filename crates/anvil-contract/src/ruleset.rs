@@ -31,8 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-/// Largest ruleset file accepted.
-pub const MAX_RULESET_BYTES: usize = 1024 * 1024;
+use anvil_domain::settings::MAX_STORED_RULESET_BYTES;
 /// Most rules in one merged rule set.
 pub const MAX_RULES: usize = 2_000;
 
@@ -363,8 +362,8 @@ pub fn describe(source: &str, bytes: &[u8]) -> Result<RulesetSummary, RulesetErr
 
 fn header(source: &str, bytes: &[u8], builtin: bool) -> Result<(Map<String, Value>, RulesetSummary), RulesetError> {
     let err = |m: String| RulesetError::new(source, None, m);
-    if bytes.len() > MAX_RULESET_BYTES {
-        return Err(err(format!("the ruleset is {} bytes; the limit is {MAX_RULESET_BYTES}", bytes.len())));
+    if bytes.len() > MAX_STORED_RULESET_BYTES {
+        return Err(err(format!("the ruleset is {} bytes; the limit is {MAX_STORED_RULESET_BYTES}", bytes.len())));
     }
     let opts = ImportOptions { max_nodes: 200_000, ..ImportOptions::default() };
     let (doc, _syntax): (Value, Syntax) = anvil_import::parse_document(bytes, &opts).map_err(|e| err(e.to_string()))?;

@@ -749,6 +749,7 @@ export function displayLinkedFile(entry: string): string {
 export function ExportDialog(props: { workspace: Workspace | null; onClose: () => void; notify: (m: string) => void }) {
   const [mode, setMode] = useState("share_safely");
   const [scope, setScope] = useState<"workspace" | "all">(props.workspace ? "workspace" : "all");
+  const [includeStandards, setIncludeStandards] = useState(false);
   const [preview, setPreview] = useState<ExportPreview | null>(null);
   const [pass, setPass] = useState("");
   const [pass2, setPass2] = useState("");
@@ -759,10 +760,10 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
   useEffect(() => {
     setPreview(null);
     api
-      .exportPreview(wsId, effMode)
+      .exportPreview(wsId, effMode, includeStandards)
       .then(setPreview)
       .catch((e) => setErr(String((e as Error).message)));
-  }, [effMode, wsId]);
+  }, [effMode, includeStandards, wsId]);
   const encrypted = effMode !== "share_safely";
   const go = async () => {
     setErr(null);
@@ -775,7 +776,13 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
         filters: [{ name: "Anvil bundle", extensions: ["anvil"] }],
       });
       if (!file) return;
-      const n = await api.exportToPath(wsId, effMode, encrypted ? pass : null, file.token);
+      const n = await api.exportToPath(
+        wsId,
+        effMode,
+        encrypted ? pass : null,
+        file.token,
+        includeStandards,
+      );
       props.notify(`Exported ${(n / 1024).toFixed(1)} KB to ${file.file_name}`);
       props.onClose();
     } catch (e) {
@@ -824,6 +831,16 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
         </fieldset>
       )}
       {scope === "all" && <div className="info-box">{MODES[2].desc}</div>}
+      {scope === "workspace" && (
+        <label className="tree-row check">
+          <input
+            type="checkbox"
+            checked={includeStandards}
+            onChange={(e) => setIncludeStandards(e.target.checked)}
+          />
+          <span>Include API standards</span>
+        </label>
+      )}
       {preview && (
         <div className="col">
           <h4 className="section-title">What goes into the bundle</h4>
@@ -1091,6 +1108,10 @@ export function ImportDialog(props: {
               <tr><td className="k">To create</td><td className="v">{preview.plan.to_create}</td></tr>
               <tr><td className="k">To replace</td><td className="v">{preview.plan.to_replace}</td></tr>
               <tr><td className="k">Skipped (already present)</td><td className="v">{preview.plan.skipped_existing}</td></tr>
+              <tr>
+                <td className="k">API standards</td>
+                <td className="v">{preview.api_standards_count}</td>
+              </tr>
               <tr><td className="k">Secrets</td><td className="v">{preview.secrets_restored ? `restored from the encrypted ${noun}` : "not included"}</td></tr>
             </tbody>
           </table>

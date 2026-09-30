@@ -1,7 +1,7 @@
 // Export dialog: the preview lists each linked local file path the bundle
 // carries, with the request or dataset that names it, and shows a Windows
 // verbatim path without its `\\?\` prefix. A full-backup preview has no list.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
 const invoke = vi.fn();
@@ -44,6 +44,19 @@ function backend(p: ExportPreview) {
 }
 
 describe("export linked files", () => {
+  it("leaves API standards out by default and previews the explicit opt-in", async () => {
+    backend(preview());
+    render(<ExportDialog workspace={WORKSPACE} onClose={vi.fn()} notify={vi.fn()} />);
+    const option = await screen.findByRole("checkbox", { name: "Include API standards" });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("export_preview", expect.objectContaining({ includeStandards: false })),
+    );
+    fireEvent.click(option);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("export_preview", expect.objectContaining({ includeStandards: true })),
+    );
+  });
+
   it("lists each linked file path under the rebinding warning", async () => {
     backend(preview(["request 'Upload': /home/me/upload.bin", "dataset 'Users': \\\\?\\C:\\Users\\me\\users.csv"]));
     render(<ExportDialog workspace={WORKSPACE} onClose={vi.fn()} notify={vi.fn()} />);

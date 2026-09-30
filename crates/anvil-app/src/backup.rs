@@ -105,6 +105,7 @@ pub const OBJECT_KINDS: &[&str] = &[
     kind::USER_PROFILE,
     kind::SPEC_SOURCE,
     kind::RUN_REPORT,
+    kind::API_RULESET,
 ];
 
 /// Object kinds a full backup does not carry as rows, and why.
@@ -448,6 +449,10 @@ struct Local {
     existing: Existing,
     /// Spec import namespaces already assigned in this profile.
     spec_sources: Vec<SpecSourceRecord>,
+    /// Profile-wide API standards rulesets.
+    rulesets: Vec<anvil_domain::settings::StoredRuleset>,
+    /// Whether the local profile layers Anvil's recommended standards.
+    include_recommended: bool,
     /// The content hashes among the backup's uncarried attachments whose
     /// content is stored here.
     stored: HashSet<String>,
@@ -507,10 +512,11 @@ impl App {
     /// Restore a full backup. Nothing is written unless the whole file
     /// authenticates under `passphrase` and every item in it is valid. Then a
     /// checkpoint is taken and every item is written in one transaction:
-    /// `Replace` overwrites items with the same id, `Merge` keeps them
-    /// (including this profile's settings). Nothing else is deleted. App
-    /// settings apply to every workspace's requests, so `Replace` keeps this
-    /// profile's too while it holds a workspace the backup does not claim.
+    /// `Replace` overwrites items with matching ids. `Merge` keeps existing
+    /// items, including app settings. Replace without kept settings also
+    /// replaces local rulesets. App settings apply to every workspace's
+    /// requests, so Replace keeps this profile's settings while it holds a
+    /// workspace the backup does not claim.
     ///
     /// The whole restore is refused, before anything is written, when:
     /// - `approval` was given for another file (its `bundle_sha256`), or
@@ -567,11 +573,51 @@ impl App {
             // Read inside the transaction, so every check sees exactly what
             // the writes below land on.
             let local = local(&s.as_read(), &d)?;
-            let (plan, notes) = match checked_plan(&d, &local, policy, approval) {
+            let (plan, mut notes) = match checked_plan(&d, &local, policy, approval) {
                 Ok(checked) => checked,
                 Err(e) => return Ok(Err(e)),
             };
             let keep_settings = keeps_local_settings(&d, &local, policy);
+            let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
+            let replacing: HashSet<Id> = if policy == ConflictPolicy::Replace && keep_settings {
+                d.graph.rulesets.iter().map(|r| r.id).collect()
+            } else {
+                HashSet::new()
+            };
+            let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
+                d.graph
+                    .rulesets
+                    .iter()
+                    .filter(|r| local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
+                    .map(|r| r.id)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let combined = crate::standards::combine_rulesets_in_stored_order(
+                &local_rulesets,
+                &d.graph.rulesets,
+                &replacing,
+                policy != ConflictPolicy::Replace || keep_settings,
+                &skipped,
+            );
+            if let Err(e) = crate::standards::validate_standards(
+                &anvil_domain::settings::ApiStandards {
+                    include_recommended: include_recommended(&d, &local, policy),
+                    rulesets: combined.clone(),
+                },
+                &local_rulesets,
+            ) {
+                return Ok(Err(e));
+            }
+            if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(&d, &local, policy)) {
+                notes.push(format!("Restored API standards would not load: {e}"));
+            }
+            if policy == ConflictPolicy::Replace && !keep_settings {
+                for ruleset in &local_rulesets {
+                    s.delete(kind::API_RULESET, &ruleset.id)?;
+                }
+            }
             write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
             // This device's workload identity stays out of every workspace
             // written here until the user allows it on this device.
@@ -736,6 +782,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     let mut d = Decoded::default();
     let mut seen = HashSet::new();
     let mut revision_rows: HashMap<Id, &ObjectRow> = HashMap::new();
+    let mut ruleset_order: HashMap<Id, f64> = HashMap::new();
     let g = &mut d.graph;
     for o in &c.objects {
         if !seen.insert((o.kind.as_str(), o.id.as_str())) {
@@ -758,14 +805,30 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
             kind::DATASET => g.datasets.push(typed(o, |x: &Dataset| x.meta.id)?),
             kind::SCENARIO => g.scenarios.push(typed(o, |x: &Scenario| x.meta.id)?),
             kind::LOAD_PLAN => g.load_plans.push(typed(o, |x: &LoadPlan| x.id)?),
-            kind::APP_SETTINGS => g.app_settings = Some(typed(o, |_: &AppSettings| settings_id())?),
+            kind::APP_SETTINGS => {
+                let mut settings = typed(o, |_: &AppSettings| settings_id())?;
+                for (index, ruleset) in settings.api_standards.legacy_rulesets.iter().enumerate() {
+                    ruleset_order.insert(ruleset.id, index as f64);
+                }
+                d.items.extend(settings.api_standards.legacy_rulesets.iter().map(|r| (kind::API_RULESET.to_string(), r.id.to_string())));
+                g.rulesets.append(&mut settings.api_standards.legacy_rulesets);
+                settings.api_standards.legacy_rulesets.clear();
+                g.app_settings = Some(settings);
+            }
             kind::USER_PROFILE => d.user_profiles.push(typed(o, |x: &UserProfile| x.meta.id)?),
             kind::SPEC_SOURCE => d.spec_sources.push(typed(o, |x: &SpecSourceRecord| x.source.import_id)?),
             kind::RUN_REPORT => d.run_reports.push(typed(o, |x: &RunReport| x.run_id)?),
+            kind::API_RULESET => {
+                let ruleset = typed(o, |x: &anvil_domain::settings::StoredRuleset| x.id)?;
+                ruleset_order.insert(ruleset.id, o.sort_key);
+                g.rulesets.push(ruleset);
+            }
             other => return Err(invalid(format!("the backup holds '{other}' objects, which a full backup never carries"))),
         }
         d.items.push((o.kind.clone(), o.id.clone()));
     }
+    let order = |ruleset: &anvil_domain::settings::StoredRuleset| ruleset_order.get(&ruleset.id).copied().unwrap_or_default();
+    g.rulesets.sort_by(|a, b| order(a).total_cmp(&order(b)).then_with(|| a.id.cmp(&b.id)));
     // Workspace-scoped items must belong to a workspace in the backup, so a
     // restore never attaches anything to an unrelated local workspace.
     // Folders, requests and environments are checked by the normalisation.
@@ -884,6 +947,14 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     // integrity, TLS bypasses, marker trust, credential forwarding, early
     // data, legacy HMAC and scenario/plan trust. Revisions of requests that
     // are not in the backup (their request was deleted) are left out.
+    for ruleset in &mut d.graph.rulesets {
+        crate::standards::normalize_imported_ruleset(ruleset).map_err(|e| invalid(e.to_string()))?;
+    }
+    anvil_portability::validate::validate_ruleset_limits(&d.graph, "backup").map_err(|e| {
+        invalid(format!(
+            "{e}; a profile over the ruleset limits must have rulesets removed before a full backup of it can be made or restored"
+        ))
+    })?;
     d.warnings = anvil_portability::validate::validate_and_normalize(&mut d.graph).map_err(|e| invalid(e.to_string()))?;
     if outside_history > 0 {
         d.warnings.push(format!("{outside_history} history record(s) of workspaces that are not in the backup were left out."));
@@ -957,6 +1028,12 @@ fn local(r: &StoreRead<'_>, d: &Decoded) -> anvil_storage::store::Result<Local> 
         existing: port::existing(r)?,
         spec_sources: r.list(kind::SPEC_SOURCE, None)?,
         stored: port::stored_among(r, &d.uncarried)?,
+        rulesets: r.list(kind::API_RULESET, None)?,
+        include_recommended: r
+            .get::<AppSettings>(kind::APP_SETTINGS, &settings_id())?
+            .unwrap_or_default()
+            .api_standards
+            .include_recommended,
     })
 }
 
@@ -971,11 +1048,47 @@ fn keeps_local_settings(d: &Decoded, local: &Local, policy: ConflictPolicy) -> b
     d.graph.app_settings.is_some() && (policy == ConflictPolicy::Merge || local.existing.workspaces.keys().any(|w| !ws.contains(w)))
 }
 
+fn include_recommended(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bool {
+    if keeps_local_settings(d, local, policy) {
+        local.include_recommended
+    } else {
+        d.graph.app_settings.as_ref().map_or(local.include_recommended, |settings| settings.api_standards.include_recommended)
+    }
+}
+
 /// Warnings a restore reports before writing: each item that names a stored
 /// file the backup does not include, and whether Replace keeps or replaces
 /// this profile's app settings.
 fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<Vec<String>> {
     let mut notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
+    let replacements: HashSet<Id> = if policy == ConflictPolicy::Replace && keeps_local_settings(d, local, policy) {
+        d.graph.rulesets.iter().map(|r| r.id).collect()
+    } else {
+        HashSet::new()
+    };
+    let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
+        d.graph.rulesets.iter().filter(|r| local.items.contains(&(kind::API_RULESET.into(), r.id.to_string()))).map(|r| r.id).collect()
+    } else {
+        HashSet::new()
+    };
+    let combined = crate::standards::combine_rulesets_in_stored_order(
+        &local.rulesets,
+        &d.graph.rulesets,
+        &replacements,
+        policy != ConflictPolicy::Replace || keeps_local_settings(d, local, policy),
+        &skipped,
+    );
+    if let Err(e) = crate::standards::validate_standards(
+        &anvil_domain::settings::ApiStandards { include_recommended: include_recommended(d, local, policy), rulesets: combined.clone() },
+        &local.rulesets,
+    ) {
+        notes.push(format!(
+            "Restored API standards exceed profile limits: {e}; remove rulesets from this profile or from the backup; the restore will be refused"
+        ));
+    }
+    if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(d, local, policy)) {
+        notes.push(format!("Restored API standards would not load: {e}"));
+    }
     if policy == ConflictPolicy::Replace && d.graph.app_settings.is_some() {
         let kept = keeps_local_settings(d, local, policy);
         notes.push(if kept { KEPT_SETTINGS_NOTE } else { REPLACED_SETTINGS_NOTE }.into());
@@ -1131,6 +1244,7 @@ fn report(
         workspaces: d.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
         workspace_ids: d.graph.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
         full_backup: true,
+        api_standards_count: d.graph.rulesets.len(),
         bundle_sha256,
     }
 }
@@ -1207,6 +1321,14 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
         && !w.keep_settings
     {
         w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, x)?;
+    }
+    let ruleset_sort_keys: HashMap<String, f64> =
+        w.tx.object_meta(kind::API_RULESET)?.into_iter().map(|row| (row.id, row.sort_key)).collect();
+    let mut next_ruleset_sort = ruleset_sort_keys.values().copied().fold(-1.0_f64, f64::max) + 1.0;
+    for x in &g.rulesets {
+        let sort_key = ruleset_sort_keys.get(&x.id.to_string()).copied().unwrap_or(next_ruleset_sort);
+        w.put(kind::API_RULESET, &x.id, None, None, sort_key, x)?;
+        next_ruleset_sort = next_ruleset_sort.max(sort_key + 1.0);
     }
     // Nothing reads user profiles yet (no request uses one), so they are
     // restored as carried, without a gate.

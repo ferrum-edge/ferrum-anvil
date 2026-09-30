@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Workspace bundles now omit profile-wide API standards unless explicitly
+  included (`--include-standards` in the CLI or **Include API standards** in
+  the desktop). Bundle imports keep those rulesets disabled, recompute their
+  hashes, and enforce profile-wide limits together with local records.
+- Bundle imports append new API standards records after existing ones. Replace
+  keeps a matching local ruleset's enabled flag and position; only new
+  rulesets arrive disabled. Full backups continue to restore their order and
+  enabled flags.
+
 ### Added
 
 - MCP (Model Context Protocol, JSON-RPC over Streamable HTTP) as a request
@@ -121,9 +132,11 @@
 - Desktop: a **Contract** view checks the workspace's imported OpenAPI
   descriptions, or a chosen file, against the profile's API standards,
   filters findings by severity and exports JSON or SARIF. Rulesets are kept
-  in the app settings (new `api_standards`), added from a file (file purpose
-  `ruleset`), replaced, enabled and removed there; a change that would not
-  load with the others is refused. The settings dialog never changes them.
+  as separate encrypted records, added from a file (file purpose `ruleset`),
+  replaced, enabled and removed there; each can be up to 1 MiB, with bounded
+  count and aggregate size. Existing settings rulesets migrate on profile open.
+  A change that would not load with the others is refused. The settings dialog
+  never changes them. Rulesets travel in bundles and full backups.
 
 - Desktop: a linked local file that a saved request names (for example one
   imported from another machine) can be repointed to where the file is on

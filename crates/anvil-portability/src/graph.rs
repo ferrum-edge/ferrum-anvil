@@ -3,7 +3,7 @@
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::load::LoadPlan;
 use anvil_domain::request::AttachmentRef;
-use anvil_domain::settings::AppSettings;
+use anvil_domain::settings::{AppSettings, StoredRuleset};
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, Workspace};
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,9 @@ pub struct PortableGraph {
     pub scenarios: Vec<Scenario>,
     #[serde(default)]
     pub load_plans: Vec<LoadPlan>,
+    /// Profile-level API standards rulesets, carried with workspace bundles.
+    #[serde(default)]
+    pub rulesets: Vec<StoredRuleset>,
     /// App settings, carried only by full backups (ANVILBAK files). Never
     /// written to or read from a bundle.
     #[serde(skip)]
@@ -73,6 +76,7 @@ impl PortableGraph {
             + self.datasets.len()
             + self.scenarios.len()
             + self.load_plans.len()
+            + self.rulesets.len()
     }
 
     /// Every linked local file the graph's requests and datasets name, as
