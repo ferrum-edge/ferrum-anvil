@@ -784,10 +784,13 @@
 ### Security
 
 - Full backup restores now reject spec provenance whose root is missing,
-  belongs to another workspace, or is not a top-level import root. Reimport
-  also validates that relationship before reading or updating scope, including
-  again in its write transaction. This prevents restored provenance from
-  changing an unrelated folder. Fixes GHSA-2c97-mfx4-3g7r.
+  belongs to another workspace, or is not an import root. Import roots may be
+  nested in their workspace and remain valid for restore and reimport; a
+  deleted root retains the guidance to import the source again. Restore rejects
+  an imported spec namespace already used in another workspace, and reimport
+  refuses generated IDs owned by another workspace before writing. This keeps
+  restored provenance from changing unrelated objects. Fixes
+  GHSA-2c97-mfx4-3g7r.
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted
