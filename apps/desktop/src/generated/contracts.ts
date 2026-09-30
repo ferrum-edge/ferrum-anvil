@@ -1,6 +1,13 @@
 /* Generated from contracts/schemas by scripts/gen-contracts.mjs — do not edit. */
 
 /**
+ * Stable object identifier. UUIDv7 so ids sort roughly by creation time.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "Id".
+ */
+export type Id = string;
+/**
  * Protocol negotiation policy for HTTP-family requests.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -38,13 +45,6 @@ export type ProxySelection =
       id: Id;
       kind: "profile";
     };
-/**
- * Stable object identifier. UUIDv7 so ids sort roughly by creation time.
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "Id".
- */
-export type Id = string;
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "Theme".
@@ -1583,6 +1583,54 @@ export interface AnvilContracts {
   Workspace?: Workspace;
 }
 /**
+ * Rulesets that describe what a team's OpenAPI descriptions must look like
+ * (`anvil_contract::ruleset`). They are layered in order: Anvil's
+ * recommended rules (when included), then each enabled ruleset.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ApiStandards".
+ */
+export interface ApiStandards {
+  include_recommended?: boolean;
+  rulesets?: StoredRuleset[];
+}
+/**
+ * A ruleset file the user added, kept verbatim.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "StoredRuleset".
+ */
+export interface StoredRuleset {
+  id: Id;
+  /**
+   * The ruleset's `name`, else the file name.
+   */
+  name: string;
+  file_name: string;
+  version?: string | null;
+  /**
+   * The ruleset text (YAML or JSON) as added.
+   */
+  text: string;
+  /**
+   * SHA-256 (hex) of `text`.
+   */
+  sha256: string;
+  added_at: string;
+  enabled?: boolean;
+}
+/**
+ * API standards settings stored in `AppSettings`. User rulesets are separate
+ * objects; `legacy_rulesets` only reads the pre-separate-records field so the
+ * app can migrate it when opening a profile.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ApiStandardsSettings".
+ */
+export interface ApiStandardsSettings {
+  include_recommended?: boolean;
+}
+/**
  * Portable application settings (included in whole-app backups).
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1601,7 +1649,7 @@ export interface AppSettings {
    */
   redaction_names: string[];
   check_for_updates: boolean;
-  api_standards?: ApiStandardsSettings;
+  api_standards?: ApiStandardsSettings1;
 }
 /**
  * Non-secret request settings resolved deterministically:
@@ -1768,33 +1816,8 @@ export interface LockPolicy {
  * objects; `legacy_rulesets` only reads the pre-separate-records field so the
  * app can migrate it when opening a profile.
  */
-export interface ApiStandardsSettings {
+export interface ApiStandardsSettings1 {
   include_recommended?: boolean;
-}
-/**
- * A ruleset file the user added, kept verbatim.
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "StoredRuleset".
- */
-export interface StoredRuleset {
-  id: Id;
-  /**
-   * The ruleset's `name`, else the file name.
-   */
-  name: string;
-  file_name: string;
-  version?: string | null;
-  /**
-   * The ruleset text (YAML or JSON) as added.
-   */
-  text: string;
-  /**
-   * SHA-256 (hex) of `text`.
-   */
-  sha256: string;
-  added_at: string;
-  enabled?: boolean;
 }
 /**
  * Iteration data (CSV rows / JSON array of objects).
@@ -5694,18 +5717,6 @@ export interface SettingsOverrides3 {
    * TLS 1.3 / QUIC 0-RTT early data (off unless a layer enables it).
    */
   early_data?: EarlyDataPolicy | null;
-}
-/**
- * Rulesets that describe what a team's OpenAPI descriptions must look like
- * (`anvil_contract::ruleset`). They are layered in order: Anvil's
- * recommended rules (when included), then each enabled ruleset.
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "ApiStandards".
- */
-export interface ApiStandards {
-  include_recommended?: boolean;
-  rulesets?: StoredRuleset[];
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
