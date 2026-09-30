@@ -1175,12 +1175,8 @@ where
             break;
         }
         if let Some(e) = pending_error.take() {
-            let st = ErrorState {
-                close: &mut close,
-                failure: &mut failure,
-                violation: &mut violation,
-                write_interrupted: &write_interrupted,
-            };
+            let st =
+                ErrorState { close: &mut close, failure: &mut failure, violation: &mut violation, write_interrupted: &write_interrupted };
             classify_ws_error(e, st, &mut ws, &mut tr, peer_close_seen, &stats).await;
             break;
         }
