@@ -240,8 +240,7 @@ impl App {
         }
         let uncarried = validate::uncarried_attachments(&graph)?;
         let (existing, stored, local_rulesets, include_recommended) = self.store.read_consistently(|r| {
-            let settings: anvil_domain::settings::AppSettings =
-                r.get(kind::APP_SETTINGS, &crate::settings_id())?.unwrap_or_default();
+            let settings: anvil_domain::settings::AppSettings = r.get(kind::APP_SETTINGS, &crate::settings_id())?.unwrap_or_default();
             Ok((
                 existing(r)?,
                 stored_among(r, &uncarried)?,
@@ -268,11 +267,8 @@ impl App {
             }
         }
         let replacing: HashSet<Id> = graph.rulesets.iter().map(|r| r.id).collect();
-        let mut combined: Vec<_> = local_rulesets
-            .iter()
-            .filter(|r| !(policy == ConflictPolicy::Replace && replacing.contains(&r.id)))
-            .cloned()
-            .collect();
+        let mut combined: Vec<_> =
+            local_rulesets.iter().filter(|r| !(policy == ConflictPolicy::Replace && replacing.contains(&r.id))).cloned().collect();
         combined.extend(graph.rulesets.iter().filter(|r| !(policy == ConflictPolicy::Merge && existing.objects.contains(&r.id))).cloned());
         if let Err(e) = crate::standards::validate_standards(
             &anvil_domain::settings::ApiStandards { include_recommended, rulesets: combined.clone() },

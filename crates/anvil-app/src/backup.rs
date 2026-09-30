@@ -1042,10 +1042,7 @@ fn include_recommended(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bo
     if keeps_local_settings(d, local, policy) {
         local.include_recommended
     } else {
-        d.graph
-            .app_settings
-            .as_ref()
-            .map_or(local.include_recommended, |settings| settings.api_standards.include_recommended)
+        d.graph.app_settings.as_ref().map_or(local.include_recommended, |settings| settings.api_standards.include_recommended)
     }
 }
 

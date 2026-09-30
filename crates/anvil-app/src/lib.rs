@@ -155,8 +155,7 @@ impl App {
             if needs_settings || !legacy.is_empty() {
                 let existing = tx.object_meta(anvil_storage::kind::API_RULESET)?;
                 let mut order = existing.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
-                let existing_rulesets: Vec<anvil_domain::settings::StoredRuleset> =
-                    tx.list(anvil_storage::kind::API_RULESET, None)?;
+                let existing_rulesets: Vec<anvil_domain::settings::StoredRuleset> = tx.list(anvil_storage::kind::API_RULESET, None)?;
                 let mut ids: std::collections::HashSet<String> = existing.into_iter().map(|row| row.id).collect();
                 let mut count = ids.len();
                 let mut total_bytes: usize = existing_rulesets.iter().map(|ruleset| ruleset.text.len()).sum();
