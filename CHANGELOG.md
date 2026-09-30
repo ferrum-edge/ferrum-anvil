@@ -4,6 +4,30 @@
 
 ### Added
 
+- API standards: check OpenAPI descriptions against a team's own rules.
+  A ruleset (YAML or JSON, `anvil_ruleset: 1`) targets version-neutral
+  objects (operations, parameters, responses, media types, schemas,
+  properties, servers, tags, security schemes, or any node by JSONPath) with
+  checks such as `pattern`, `casing`, `enumeration`, `includes`, `length`
+  and `schema`, so one standard applies to Swagger 2.0 and OpenAPI 3.0, 3.1
+  and 3.2 alike. Rulesets layer in order, may extend the built-in
+  `anvil:recommended` rules and change or turn off inherited ones, and are
+  checked when loaded. Each finding names the rule, the JSON Pointer and the
+  line and column to edit, and how to fix it; body examples are validated
+  against their schemas. New crate `anvil-contract`; see
+  `docs/contract.md` and `samples/api-standards/`.
+- CLI: `anvil lint-spec <spec> [--ruleset FILE]...` prints text, JSON or
+  SARIF 2.1.0 (for code scanning) and exits with 2 when a finding reaches
+  `--fail-on` (default `error`), and with 3 on a local error, including a
+  description too large to lint completely unless `--allow-incomplete` is
+  passed. It needs no profile.
+- Desktop: a **Contract** view checks the workspace's imported OpenAPI
+  descriptions, or a chosen file, against the profile's API standards,
+  filters findings by severity and exports JSON or SARIF. Rulesets are kept
+  in the app settings (new `api_standards`), added from a file (file purpose
+  `ruleset`), replaced, enabled and removed there; a change that would not
+  load with the others is refused. The settings dialog never changes them.
+
 - Desktop: a linked local file that a saved request names (for example one
   imported from another machine) can be repointed to where the file is on
   this device. When the file is not chosen yet, or is missing or changed,

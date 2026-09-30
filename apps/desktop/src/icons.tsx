@@ -136,6 +136,12 @@ const PATHS = {
     </>
   ),
   activity: <path d="M3 12h4l2.5-7 5 14 2.5-7h4" />,
+  fileCheck: (
+    <>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5M9 14.5l2 2 4-4.5" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof PATHS;

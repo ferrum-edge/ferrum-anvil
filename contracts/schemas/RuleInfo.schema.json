@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RuleInfo",
+  "description": "A rule as listed to users.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "severity": {
+      "$ref": "#/$defs/LintSeverity"
+    },
+    "given": {
+      "type": "string"
+    },
+    "formats": {
+      "description": "Dialect labels the rule is limited to; empty = every dialect.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ruleset": {
+      "type": "string"
+    },
+    "how_to_fix": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "docs_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "severity",
+    "given",
+    "formats",
+    "ruleset"
+  ],
+  "$defs": {
+    "LintSeverity": {
+      "description": "How serious a lint finding is (`off` in a ruleset turns a rule off).",
+      "type": "string",
+      "enum": [
+        "hint",
+        "info",
+        "warn",
+        "error"
+      ]
+    }
+  }
+}
