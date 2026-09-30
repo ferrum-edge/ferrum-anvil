@@ -1,5 +1,6 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_drift;
 mod cmd_files;
 mod cmd_identity;
 mod cmd_load;
@@ -231,6 +232,12 @@ pub fn run() {
             cmd_standards::standards_set_recommended,
             cmd_standards::standards_lint,
             cmd_standards::standards_report_export,
+            cmd_drift::drift_report,
+            cmd_drift::drift_check_execution,
+            cmd_drift::drift_revise,
+            cmd_drift::drift_reimport_plan,
+            cmd_drift::drift_reimport_apply,
+            cmd_drift::drift_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ferrum Anvil");

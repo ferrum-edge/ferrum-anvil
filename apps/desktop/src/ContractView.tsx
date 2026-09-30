@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type LintReport, type LintTarget, type SpecSourceRecord, type StandardsView, type StoredRuleset } from "./api";
 import type { LintFinding, LintSeverity } from "./generated/contracts";
-import { SidebarResizer, fmtAgo, humanize } from "./ui";
+import { SidebarResizer, Tabs, fmtAgo, humanize } from "./ui";
+import { DriftPage } from "./DriftView";
 import { Icon, type IconName } from "./icons";
 
 type Sel = { kind: "import"; id: string } | { kind: "file"; grant: string; name: string } | { kind: "rules" } | { kind: "ruleset"; id: string } | null;
@@ -24,6 +25,9 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
   const [sources, setSources] = useState<SpecSourceRecord[]>([]);
   const [standards, setStandards] = useState<StandardsView | null>(null);
   const [sel, setSel] = useState<Sel>(null);
+  const [specTab, setSpecTab] = useState<"standards" | "traffic">("standards");
+  // Bumped when a reimport changes the stored original: checks run again.
+  const [revision, setRevision] = useState(0);
   const [shownWs, setShownWs] = useState(props.workspaceId);
   if (shownWs !== props.workspaceId) {
     setShownWs(props.workspaceId);
@@ -185,7 +189,32 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
       <SidebarResizer />
       <section className="work single">
         <div className="pane">
-          {target && <LintPage key={`${JSON.stringify(target)}|${rulesKey}`} target={target} fileName={targetName} notify={props.notify} />}
+          {target && sel?.kind === "import" && (
+            <Tabs
+              className="spec-tabs"
+              tabs={[
+                { id: "standards", label: "Standards" },
+                { id: "traffic", label: "Live traffic" },
+              ]}
+              value={specTab}
+              onChange={setSpecTab}
+            />
+          )}
+          {target && (sel?.kind !== "import" || specTab === "standards") && (
+            <LintPage key={`${JSON.stringify(target)}|${rulesKey}|${revision}`} target={target} fileName={targetName} notify={props.notify} />
+          )}
+          {sel?.kind === "import" && selImport && specTab === "traffic" && (
+            <DriftPage
+              key={`${sel.id}|${revision}`}
+              importId={sel.id}
+              fileName={selImport.file_name}
+              notify={props.notify}
+              onReimported={() => {
+                void loadSources();
+                setRevision((n) => n + 1);
+              }}
+            />
+          )}
           {sel?.kind === "rules" && standards && <RulesPage view={standards} />}
           {selRuleset && (
             <RulesetPage

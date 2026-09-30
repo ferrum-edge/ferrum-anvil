@@ -1,7 +1,8 @@
 // Response and diagnosis view. Remote content is rendered as inert text only
 // (no HTML rendering, no links, no scripts).
 import { useEffect, useMemo, useState } from "react";
-import type { ExecutionView } from "./api";
+import { api, type ExecutionDrift, type ExecutionView } from "./api";
+import { ContractTab } from "./DriftView";
 import type { AttemptObservation, DiagnosticFinding, PhaseTiming, ProtocolStatus, SourceScope, StreamTranscript, TlsObservation, TunnelObservation } from "./generated/contracts";
 import { Keys, Tabs, fmtBytes, fmtUs, humanize } from "./ui";
 import { Icon, type IconName } from "./icons";
@@ -10,7 +11,7 @@ import { WsExtensionsEvidence } from "./WsDeflateEditor";
 import { WorkloadEvidenceView } from "./WorkloadApi";
 import { EarlyDataEvidence, earlyDataSummary } from "./EarlyData";
 
-type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests";
+type Tab = "diagnosis" | "body" | "messages" | "headers" | "timing" | "connection" | "attempts" | "tests" | "contract";
 
 const SCOPE_LABEL: Record<SourceScope, string> = {
   local_client: "This app (nothing sent)",
@@ -40,6 +41,22 @@ export function ResponsePanel(props: {
   // never on a tab left over from a previous request.
   const recordId = view?.record.id;
   useEffect(() => setTab("diagnosis"), [recordId]);
+  // A send of a saved request imported from (or kept with) an OpenAPI
+  // description is checked against it; the tab shows only then.
+  const [drift, setDrift] = useState<ExecutionDrift | null>(null);
+  const checkable = !!view?.record.request_id && !!view.record.response && !view.record.stream;
+  useEffect(() => {
+    setDrift(null);
+    if (!checkable || !recordId) return;
+    let live = true;
+    api
+      .driftCheckExecution(recordId)
+      .then((d) => live && setDrift(d))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [recordId, checkable]);
   const isStream = !!view?.record.stream;
   const quiet = !hasProblems && findings.length === 0 && !!view;
   const effectiveTab: Tab = tab === "diagnosis" && quiet ? (isStream ? "messages" : "body") : tab === "body" && isStream && !view?.record.response ? "messages" : tab;
@@ -99,6 +116,7 @@ export function ResponsePanel(props: {
     { id: "connection", label: "Connection" },
     { id: "attempts", label: "Attempts", count: r.attempts.length > 1 ? r.attempts.length : undefined },
     { id: "tests", label: "Tests", count: r.assertion_results.length || undefined },
+    ...(drift ? [{ id: "contract" as Tab, label: "Contract", count: drift.report.findings.length || undefined }] : []),
   ];
   return (
     <div className="resp">
@@ -151,6 +169,7 @@ export function ResponsePanel(props: {
         )}
         {effectiveTab === "attempts" && <Attempts attempts={r.attempts} />}
         {effectiveTab === "tests" && <TestsView view={view} />}
+        {effectiveTab === "contract" && drift && <ContractTab drift={drift} />}
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 [package]
 name = "anvil-contract"
-description = "OpenAPI contract tooling: an API-standards rules engine (linting) for OpenAPI 3.0/3.1/3.2 and Swagger 2.0 descriptions"
+description = "OpenAPI contract tooling for OpenAPI 3.0/3.1/3.2 and Swagger 2.0: an API-standards rules engine (linting) and contract drift between observed traffic and the description, with suggested revisions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,6 +18,9 @@ thiserror.workspace = true
 regex.workspace = true
 jsonschema.workspace = true
 serde_json_path.workspace = true
+serde_norway.workspace = true
+chrono.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

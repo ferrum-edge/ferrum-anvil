@@ -1,0 +1,70 @@
+openapi: 3.2.0
+info:
+  title: Shop
+  version: '1'
+servers:
+  - url: https://shop.example/api
+x-anvil-expectations:
+  max_latency_ms: 500
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Order' }
+    post:
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Order' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      x-anvil-expectations:
+        max_latency_ms: 100
+        max_response_bytes: 2000
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: X-Tenant, in: header, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The order
+          headers:
+            ETag:
+              required: true
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+    delete:
+      operationId: deleteOrder
+      deprecated: true
+      responses:
+        '204':
+          description: Deleted
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id, total, status]
+      properties:
+        id: { type: integer }
+        total: { type: integer }
+        status: { type: string, enum: [open, paid] }
+        note: { type: string }

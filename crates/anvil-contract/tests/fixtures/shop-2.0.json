@@ -1,0 +1,50 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Shop", "version": "1" },
+  "host": "shop.example",
+  "basePath": "/api",
+  "schemes": ["https"],
+  "produces": ["application/json"],
+  "consumes": ["application/json"],
+  "x-anvil-expectations": { "max_latency_ms": 500 },
+  "paths": {
+    "/orders": {
+      "get": {
+        "operationId": "listOrders",
+        "parameters": [{ "name": "limit", "in": "query", "type": "integer" }],
+        "responses": { "200": { "description": "Orders", "schema": { "type": "array", "items": { "$ref": "#/definitions/Order" } } } }
+      },
+      "post": {
+        "operationId": "createOrder",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "$ref": "#/definitions/Order" } }],
+        "responses": { "201": { "description": "Created", "schema": { "$ref": "#/definitions/Order" } } }
+      }
+    },
+    "/orders/{id}": {
+      "get": {
+        "operationId": "getOrder",
+        "x-anvil-expectations": { "max_latency_ms": 100, "max_response_bytes": 2000 },
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "type": "integer" },
+          { "name": "X-Tenant", "in": "header", "required": true, "type": "string" }
+        ],
+        "responses": {
+          "200": { "description": "The order", "headers": { "ETag": { "type": "string" } }, "schema": { "$ref": "#/definitions/Order" } }
+        }
+      },
+      "delete": { "operationId": "deleteOrder", "deprecated": true, "responses": { "204": { "description": "Deleted" } } }
+    }
+  },
+  "definitions": {
+    "Order": {
+      "type": "object",
+      "required": ["id", "total", "status"],
+      "properties": {
+        "id": { "type": "integer" },
+        "total": { "type": "integer" },
+        "status": { "type": "string", "enum": ["open", "paid"] },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

@@ -29,7 +29,7 @@ pub enum FailOn {
 }
 
 impl FailOn {
-    fn threshold(self) -> Option<Severity> {
+    pub fn threshold(self) -> Option<Severity> {
         match self {
             FailOn::Error => Some(Severity::Error),
             FailOn::Warn => Some(Severity::Warn),

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Revision",
+  "description": "A description revised with chosen suggestions.",
+  "type": "object",
+  "properties": {
+    "text": {
+      "description": "The whole revised description, in the original syntax. YAML is\nwritten anew: comments and formatting of the original are not kept.",
+      "type": "string"
+    },
+    "json_patch": {
+      "description": "RFC 6902 operations from the original to the revision.",
+      "type": "array",
+      "items": true
+    },
+    "applied": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "skipped": {
+      "description": "Suggestion ids that were not found, and ops that could not apply.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "digest": {
+      "description": "SHA-256 (hex) of the description and the revised text: the same\ndigest means the same revision, so a preview can be applied exactly\nas shown.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "text",
+    "json_patch",
+    "applied",
+    "skipped",
+    "digest"
+  ]
+}

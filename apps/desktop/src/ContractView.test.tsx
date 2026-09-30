@@ -183,3 +183,33 @@ test("switching workspaces drops the previous workspace's selected import", asyn
   await waitFor(() => expect(screen.queryByText(/uses path parameter/)).toBeNull());
   expect(screen.getByText(/Import an OpenAPI or Swagger description/)).toBeTruthy();
 });
+
+test("an imported spec has a Live traffic tab that compares its sends", async () => {
+  backend({
+    drift_report: () => ({
+      spec: { dialect: "open_api31", sha256: "ab", size_bytes: 1, operations: 0 },
+      observations: 0,
+      matched: 0,
+      without_response: 0,
+      ignored: 0,
+      findings: [],
+      operations: [],
+      undeclared: [],
+      suggestions: [],
+      notes: ["No sends of this collection are in history yet: send its requests (or run them) and check again."],
+    }),
+  });
+  render(<ContractView workspaceId="A" notify={notify} />);
+  fireEvent.click(await screen.findByText("Orders"));
+  await screen.findByText(/uses path parameter/);
+  fireEvent.click(screen.getByRole("tab", { name: "Live traffic" }));
+  expect(await screen.findByText(/No sends of this collection are in history yet/)).toBeTruthy();
+  expect(calls("drift_report")).toEqual([{ importId: "i1" }]);
+  // A spec file has no history, so no such tab.
+  cleanup();
+  backend({ file_choose: () => [{ token: "g", file_name: "x.yaml" }] });
+  render(<ContractView workspaceId="B" notify={notify} />);
+  fireEvent.click((await screen.findAllByRole("button", { name: /Check a spec file/ }))[0]);
+  await screen.findByText(/uses path parameter/);
+  expect(screen.queryByRole("tab", { name: "Live traffic" })).toBeNull();
+});

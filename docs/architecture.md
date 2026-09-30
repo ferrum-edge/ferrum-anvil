@@ -89,7 +89,8 @@ transaction to end.
   native open or save dialog itself (`file_choose`), keeps the chosen path and
   returns an opaque grant bound to one purpose: bundle import or export,
   attachment, PEM or PKCS#12 file, spec source, API-standards ruleset,
-  dataset, or load, run or standards report export (`anvil_app::file_grants`).
+  dataset, or load, run or standards report or revised spec export
+  (`anvil_app::file_grants`).
 - A read grant is refused if the file, or a folder on its path, was replaced
   after the choice. A write goes to a new temporary file that is renamed over
   the chosen name, and spends the grant. A bundle or backup is created
@@ -206,7 +207,7 @@ secrets its requests reference. See [load.md](load.md#worker-process-and-ipc).
 | `anvil-portability` | Workspace bundles: share-safely (placeholders) and encrypted transfer. Bundles that describe a full backup are refused (full backups are ANVILBAK files, see `anvil-app`). Import is hardened (limits, traversal, symlinks, bombs, checksums), normalises trust, applies conflict policies, and writes objects and secrets in one transaction that a failure rolls back (see [storage-and-recovery.md](storage-and-recovery.md)). |
 | `anvil-import` | OpenAPI 2.0/3.0/3.1/3.2, WSDL 1.1, Postman, Insomnia, cURL and HAR importers with reports and reimport diffs. |
 | `anvil-xml-limits` | The pre-parse XML scan every XML parse runs first (WSDL import, body lint, XPath, SOAP fault detection, WS-Security): it bounds `xmlns` declarations, attributes and attribute pairs, and name, prefix and URI lengths, in one allocation-free pass. |
-| `anvil-contract` | OpenAPI contract tooling: API-standards rulesets and the linter (a version-neutral model of Swagger 2.0 and OpenAPI 3.x, source positions, OpenAPI schemas as JSON Schema 2020-12, SARIF output). |
+| `anvil-contract` | OpenAPI contract tooling: API-standards rulesets and the linter (a version-neutral model of Swagger 2.0 and OpenAPI 3.x, source positions, OpenAPI schemas as JSON Schema 2020-12, SARIF output), and contract drift between observed traffic and a description, with suggested revisions (routing, schema inference, patches). |
 | `anvil-identity` | Interactive identity flows: the OAuth authorization-code + PKCE sign-in to a target API (loopback redirect) and optional provider accounts linked to a profile (see [identity.md](identity.md)). |
 | `anvil-load` | Open, closed and iteration workloads over the same engine; mergeable HDR histograms; balanced ledgers; generator health; the worker protocol; JSON, CSV and HTML reports; run comparison. |
 | `anvil-runner` | Collection runner: scenarios and folders, datasets, chained extraction, stop-on-failure, JUnit/HTML/JSON reports. |

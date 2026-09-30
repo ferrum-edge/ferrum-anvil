@@ -15,6 +15,7 @@
 //! same user; use only in isolated CI). Keychain profiles unlock automatically.
 
 mod collection;
+mod drift;
 mod lint;
 mod specs_load;
 
@@ -80,6 +81,10 @@ enum Cmd {
     /// Check an OpenAPI/Swagger description against API standards (rulesets).
     /// Needs no profile. Exit 2 when a finding reaches `--fail-on`.
     LintSpec(lint::LintSpecArgs),
+    /// Compare observed traffic (a HAR file, or an imported spec's history)
+    /// with an OpenAPI description and suggest revisions. Exit 2 when a
+    /// finding reaches `--fail-on`.
+    SpecDrift(drift::SpecDriftArgs),
     /// Load plans, runs (in a worker process) and reports.
     Load {
         #[command(subcommand)]
@@ -715,6 +720,7 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(if ok { 0 } else { 2 })
         }
         Cmd::LintSpec(a) => lint::lint_spec(a),
+        Cmd::SpecDrift(a) if !a.needs_profile() => drift::spec_drift_files(a),
         Cmd::Jwt { token } => {
             let i = anvil_auth::jwt::inspect(token, chrono::Utc::now(), 0).map_err(|e| anyhow!(e.to_string()))?;
             println!("{}", serde_json::to_string_pretty(&i)?);
@@ -946,6 +952,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
         }
         Cmd::Run(a) => collection::run_collection(&app, a).await,
         Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),
+        Cmd::SpecDrift(a) => drift::spec_drift_import(&app, a),
         Cmd::Load { cmd } => specs_load::load_cmd(&app, cmd).await,
         Cmd::Scenario { cmd } => collection::scenario_cmd(&app, cmd),
         Cmd::StorageCleanup { now, json } => {
