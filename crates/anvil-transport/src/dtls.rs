@@ -46,7 +46,7 @@ use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
 use anvil_domain::settings::Timeouts;
 use bytes::Bytes;
-use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion};
+use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion, SecurityError};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -291,9 +291,8 @@ fn alert_name(code: u8) -> String {
     .to_string()
 }
 
-/// Typed classification of a dimpl error. dimpl reports received alerts only
-/// inside its own formatted error (`description=N`); the numeric alert code
-/// is extracted from that fixed format — no cause is inferred from wording.
+/// Typed classification of a dimpl error. Received fatal alerts carry their
+/// numeric description directly; no cause is inferred from error wording.
 fn classify_dimpl(e: &dimpl::Error, deadline_ms: u64) -> TransportFailure {
     match e {
         dimpl::Error::Timeout(what) => TransportFailure::new(
@@ -302,27 +301,26 @@ fn classify_dimpl(e: &dimpl::Error, deadline_ms: u64) -> TransportFailure {
             format!("the DTLS handshake did not complete ({what}); retransmissions were exhausted"),
         )
         .with_deadline(Some(deadline_ms)),
-        dimpl::Error::SecurityError(msg) => {
-            let code =
-                msg.split("description=").nth(1).and_then(|s| s.trim().split(|c: char| !c.is_ascii_digit()).next()?.parse::<u8>().ok());
+        dimpl::Error::SecurityError(SecurityError::FatalAlert { description }) => {
+            let code = *description;
             let mut f = TransportFailure::new(Phase::DtlsHandshake, FailureKind::DtlsHandshakeFailed, "");
-            match code {
-                Some(c) => {
-                    let name = alert_name(c);
-                    f.message = format!(
-                        "the DTLS peer sent a fatal alert ({name}) during the handshake{}",
-                        if matches!(c, 42 | 43 | 44 | 45 | 46 | 48 | 49 | 116) {
-                            " — this alert concerns certificates; the peer may have rejected the client identity or the negotiated parameters"
-                        } else {
-                            ""
-                        }
-                    );
-                    f.tls_alert = Some(name);
+            let name = alert_name(code);
+            f.message = format!(
+                "the DTLS peer sent a fatal alert ({name}) during the handshake{}",
+                if matches!(code, 42 | 43 | 44 | 45 | 46 | 48 | 49 | 116) {
+                    " — this alert concerns certificates; the peer may have rejected the client identity or the negotiated parameters"
+                } else {
+                    ""
                 }
-                None => f.message = format!("the DTLS handshake failed a security check: {msg}"),
-            }
+            );
+            f.tls_alert = Some(name);
             f
         }
+        dimpl::Error::SecurityError(reason) => TransportFailure::new(
+            Phase::DtlsHandshake,
+            FailureKind::DtlsHandshakeFailed,
+            format!("the DTLS handshake failed a security check: {reason}"),
+        ),
         dimpl::Error::CertificateError(msg) => TransportFailure::new(
             Phase::DtlsHandshake,
             FailureKind::DtlsHandshakeFailed,
@@ -339,7 +337,7 @@ fn version_label(v: Option<ProtocolVersion>) -> Option<String> {
         ProtocolVersion::DTLS1_0 => Some("DTLSv1_0".into()),
         ProtocolVersion::DTLS1_2 => Some("DTLSv1_2".into()),
         ProtocolVersion::DTLS1_3 => Some("DTLSv1_3".into()),
-        ProtocolVersion::Unknown(n) => Some(format!("DTLS(0x{n:04x})")),
+        version => Some(format!("DTLS(0x{:04x})", version.as_u16())),
     }
 }
 
@@ -1038,10 +1036,20 @@ mod tests {
 
     #[test]
     fn alert_codes_are_extracted() {
-        let f = classify_dimpl(&dimpl::Error::SecurityError("Received fatal alert: level=2, description=48".into()), 1000);
+        let f = classify_dimpl(&dimpl::Error::SecurityError(SecurityError::FatalAlert { description: 48 }), 1000);
         assert_eq!(f.kind, FailureKind::DtlsHandshakeFailed);
         assert_eq!(f.tls_alert.as_deref(), Some("unknown_ca"));
-        let t = classify_dimpl(&dimpl::Error::Timeout("handshake"), 1000);
+        assert_eq!(
+            f.message,
+            "the DTLS peer sent a fatal alert (unknown_ca) during the handshake — this alert concerns certificates; the peer may have rejected the client identity or the negotiated parameters"
+        );
+        let t = classify_dimpl(&dimpl::Error::Timeout(dimpl::TimeoutError::Handshake), 1000);
         assert_eq!(t.kind, FailureKind::DtlsHandshakeTimeout);
+    }
+
+    #[test]
+    fn unknown_protocol_versions_keep_the_wire_value() {
+        assert_eq!(version_label(Some(ProtocolVersion::DTLS1_2)).as_deref(), Some("DTLSv1_2"));
+        assert_eq!(version_label(Some(ProtocolVersion::from_u16(0xFEFE))).as_deref(), Some("DTLS(0xfefe)"));
     }
 }
