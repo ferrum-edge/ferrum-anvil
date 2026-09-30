@@ -855,6 +855,14 @@
   one response message per request. gRPC-Web percent decoding reads escape
   digits as bytes, preserving malformed escapes without panicking on
   multibyte UTF-8.
+- Full backup restores now reject spec provenance whose root is missing,
+  belongs to another workspace, or is not an import root. Import roots may be
+  nested in their workspace and remain valid for restore and reimport; a
+  deleted root retains the guidance to import the source again. Restore rejects
+  an imported spec namespace already used in another workspace, and reimport
+  refuses generated IDs owned by another workspace before writing. This keeps
+  restored provenance from changing unrelated objects. Fixes
+  GHSA-2c97-mfx4-3g7r.
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a
