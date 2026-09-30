@@ -25,6 +25,8 @@ const LATEST_RELEASE_API: &str = "https://api.github.com/repos/ferrum-edge/ferru
 const RELEASES_PAGE: &str = "https://github.com/ferrum-edge/ferrum-anvil/releases";
 const TAG_PREFIX: &str = "anvil-v";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+/// The whole download of an update, body included.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// A release description larger than this is not read.
 const MAX_RESPONSE: usize = 1 << 20;
 /// Release notes are cut to this many characters.
@@ -137,12 +139,15 @@ pub async fn update_install(handle: AppHandle, version: String) -> R<()> {
         }
     }
     let _done = Done;
-    let updater = handle.updater().map_err(|x| format!("The updater is not available: {x}"))?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|x| format!("Could not read the update manifest: {x}"))?
-        .ok_or_else(|| "The release has no signed update for this platform. Download it from the release page.".to_string())?;
+    // `_done` clears INSTALLING on every return below, errors and timeouts included.
+    let updater = handle.updater_builder().timeout(CHECK_TIMEOUT).build().map_err(|x| format!("The updater is not available: {x}"))?;
+    let mut update = updater.check().await.map_err(|x| format!("Could not read the update manifest: {x}"))?.ok_or_else(|| {
+        format!(
+            "The update manifest does not offer a version newer than {} yet (it may not be published). Try again later or download the release from its page.",
+            handle.package_info().version
+        )
+    })?;
+    update.timeout = Some(DOWNLOAD_TIMEOUT);
     if Version::parse(&update.version).ok() != Some(wanted) {
         return Err(format!("The release offered changed to {} since the check. Check again.", update.version));
     }
@@ -302,6 +307,19 @@ mod tests {
         let mut r = release("anvil-v9.0.0");
         r.body = Some("ü".repeat(MAX_NOTES + 10));
         assert_eq!(evaluate(&v("0.1.0"), Some(r)).unwrap().notes.chars().count(), MAX_NOTES + 1);
+    }
+
+    /// The shipped updater config loads as the plugin reads it at startup, requires a signed
+    /// version and carries no key (a release build gets the owner's key from the workflow).
+    #[test]
+    fn the_shipped_updater_config_requires_a_signed_version_and_has_no_key() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let updater: tauri_plugin_updater::Config = serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(updater.require_signed_version);
+        assert!(!updater.allow_downgrades);
+        assert_eq!(updater.pubkey, "");
+        let endpoints: Vec<String> = updater.endpoints.iter().map(|u| u.to_string()).collect();
+        assert_eq!(endpoints, ["https://github.com/ferrum-edge/ferrum-anvil/releases/latest/download/latest.json"]);
     }
 
     #[test]

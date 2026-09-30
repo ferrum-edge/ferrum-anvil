@@ -96,6 +96,10 @@ jobs:
   build:
     name: Build · ${{ matrix.target }}
     needs: preflight
+    # A tagged release runs in the protected `release` environment (required
+    # reviewers, anvil-v* deployment rule; the updater key lives there). A dry
+    # run uses no environment and never sees the updater key.
+    environment: ${{ needs.preflight.outputs.tag != '' && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -162,8 +166,48 @@ jobs:
           $cfg = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Compress -Depth 5
           "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
-      - name: Build desktop bundles (release profile, default features — no e2e)
-        id: tauri
+      - name: Updater config (tagged release with the owner's updater key only)
+        id: updater
+        shell: bash
+        env:
+          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
+          # Whether the key exists, never the key itself.
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          # Signed updater artifacts need both halves of the owner's updater key
+          # and a real tag: dry runs never sign updates. The public key is
+          # compiled into the app, so build and bundle both get this config.
+          if [ -n "$TAG" ] && [ "$HAS_KEY" = "true" ] && [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
+            cfg="$RUNNER_TEMP/anvil-updater.conf.json"
+            node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey: process.env.ANVIL_UPDATER_PUBKEY.trim() } } }))' "$cfg"
+            pubkey="$(tr -d '[:space:]' <<<"$ANVIL_UPDATER_PUBKEY")"
+            { echo "updater=true"; echo "config=$cfg"; echo "pubkey=$pubkey"; } >> "$GITHUB_OUTPUT"
+            echo "Updater key configured; creating signed updater artifacts."
+          else
+            if [ -z "$TAG" ]; then
+              echo "Dry run: no updater artifacts."
+            elif [ "$HAS_KEY" = "true" ] || [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
+              echo "::warning::only one of TAURI_SIGNING_PRIVATE_KEY / ANVIL_UPDATER_PUBKEY is set; building without updater artifacts"
+            fi
+            { echo "updater=false"; echo "config="; echo "pubkey="; } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build desktop app (release profile, default features — no e2e; no signing credentials)
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config }}
+          UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
+        run: |
+          # Compiling (build scripts, proc macros, beforeBuildCommand) runs
+          # without any signing key; only `tauri bundle` below gets them.
+          args=(build --ci --target "$TARGET" --no-bundle)
+          if [ -n "${WIN_SIGN_CONFIG:-}" ]; then args+=(--config "$WIN_SIGN_CONFIG"); fi
+          if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
+          npx tauri "${args[@]}"
+
+      - name: Bundle and sign
         shell: bash
         working-directory: apps/desktop
         env:
@@ -174,34 +218,21 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
+          UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
+          # Only a tagged release (in the `release` environment) receives the updater key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           BUNDLES: ${{ matrix.bundles }}
         run: |
           # Unset empty credentials so Tauri never attempts a half-configured signing.
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD ANVIL_UPDATER_PUBKEY; do
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             [ -n "${!v:-}" ] || unset "$v"
           done
-          args=(build --ci --target "$TARGET" --bundles "$BUNDLES")
+          if [ -z "${UPDATER_CONFIG:-}" ]; then unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; fi
+          # The same --config values as the build (Tauri merges them in order).
+          args=(bundle --ci --target "$TARGET" --bundles "$BUNDLES")
           if [ -n "${WIN_SIGN_CONFIG:-}" ]; then args+=(--config "$WIN_SIGN_CONFIG"); fi
-          # Signed updater artifacts only with both halves of the owner's updater
-          # key; the public key is compiled into the app. Tauri merges repeated
-          # --config values in order.
-          updater=false
-          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
-            cfg="$RUNNER_TEMP/anvil-updater.conf.json"
-            node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey: process.env.ANVIL_UPDATER_PUBKEY.trim() } } }))' "$cfg"
-            args+=(--config "$cfg")
-            updater=true
-            echo "Updater key configured; creating signed updater artifacts."
-          else
-            if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
-              echo "::warning::only one of TAURI_SIGNING_PRIVATE_KEY / ANVIL_UPDATER_PUBKEY is set; building without updater artifacts"
-            fi
-            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD ANVIL_UPDATER_PUBKEY
-          fi
-          echo "updater=$updater" >> "$GITHUB_OUTPUT"
+          if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
           npx tauri "${args[@]}"
 
       - name: Build CLI
@@ -267,7 +298,8 @@ jobs:
         shell: bash
         env:
           RUNNER_LABEL: ${{ matrix.os }}
-          UPDATER: ${{ steps.tauri.outputs.updater }}
+          UPDATER: ${{ steps.updater.outputs.updater }}
+          UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
         run: |
           out="dist/$TARGET"
           signed=false; method="none"; detail="unsigned — owner credentials not configured"
@@ -296,18 +328,19 @@ jobs:
           echo "signed=$signed method=$method detail=$detail"
           # shellcheck disable=SC2016 # JavaScript source, not shell
           node -e '
-            const [target, os, arch, runner, signed, method, detail, updater] = process.argv.slice(1);
+            const [target, os, arch, runner, signed, method, detail, updater, pubkey] = process.argv.slice(1);
             const { execSync } = require("node:child_process");
             const v = (c) => { try { return execSync(c, { encoding: "utf8" }).trim(); } catch { return null; } };
             const info = {
               target, os, arch, runner,
               toolchain: { rustc: v("rustc -V"), cargo: v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
               signing: { signed: signed === "true", method, detail },
-              // Built with the owner updater key; signatures are verified in the publish job.
-              updater: { configured: updater === "true" },
+              // Built with the owner updater key: the public key compiled into the
+              // app, which the publish job verifies every signature against.
+              updater: updater === "true" ? { configured: true, pubkey } : { configured: false },
             };
             require("node:fs").writeFileSync(`dist/${target}/build-info.json`, JSON.stringify(info, null, 2) + "\n");
-          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail" "$UPDATER"
+          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail" "$UPDATER" "$UPDATER_PUBKEY"
 
       - name: CycloneDX SBOMs (Rust, per target)
         shell: bash
@@ -367,12 +400,8 @@ jobs:
             --jq '[.workflow_runs[] | {workflow: .name, run_id: .id, event: .event, status: .status, conclusion: .conclusion, url: .html_url}]' > "$RUNNER_TEMP/runs.json"
           cat "$RUNNER_TEMP/runs.json"
       - name: Updater manifest (only with signed updater artifacts)
-        env:
-          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
         run: node scripts/updater-manifest.mjs --dist dist --repo "$GITHUB_REPOSITORY" --tag "${TAG:-anvil-v$VERSION}" --version "$VERSION"
       - name: Checksums and release evidence
-        env:
-          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
         run: |
           args=(--dist dist --test-runs "$RUNNER_TEMP/runs.json")
           [ -n "$TAG" ] && args+=(--tag "$TAG")

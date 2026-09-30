@@ -34,10 +34,13 @@ version fields must agree; `cargo deny check`; `node scripts/licenses.mjs --chec
 
 Each build job:
 
-1. `tauri build --ci --target <t> --bundles <b>` — release profile, **default
-   features only**. The `e2e` feature (embedded WebDriver + environment-driven
-   unlock) is never passed. With the owner's updater key it also writes signed
-   updater artifacts (see [In-app updates](#in-app-updates)).
+1. `tauri build --ci --target <t> --no-bundle` — release profile, **default
+   features only**, with no signing credentials in its environment. The `e2e`
+   feature (embedded WebDriver + environment-driven unlock) is never passed.
+   Then `tauri bundle --ci --target <t> --bundles <b>`, the only step that
+   receives the Apple, Windows and updater signing credentials. With the
+   owner's updater key a tagged release also writes signed updater artifacts
+   (see [In-app updates](#in-app-updates)).
 2. `cargo build --release -p anvil-cli --target <t>`, packaged as
    `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
@@ -85,7 +88,8 @@ bundle. For a tag only, it then runs
 The script lists every problem in `problems` and exits non-zero if a target
 has no passing release check, no installer, no CLI archive or no SBOM, if two
 artifacts share a name, or if updater signatures, artifacts and `latest.json`
-do not match or do not verify against `ANVIL_UPDATER_PUBKEY`.
+do not match, do not verify against the public key the builds compiled into
+the app, or do not record the release version.
 
 ## Release artifact safety check
 
@@ -158,14 +162,28 @@ compiled in and the Upgrade button opens the GitHub release page instead.
 
 | Setting | Kind | Value |
 | --- | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | secret | private key file contents from `npx tauri signer generate -w <file>` |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret | its password (optional; set one) |
+| `TAURI_SIGNING_PRIVATE_KEY` | secret of the `release` environment | private key file contents from `npx tauri signer generate -w <file>` (generate it offline) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret of the `release` environment | its password (optional; set one) |
 | `ANVIL_UPDATER_PUBKEY` | repository variable | the `.pub` file contents (base64) |
 
-Only when both the private key and `ANVIL_UPDATER_PUBKEY` are set does the
-build pass `bundle.createUpdaterArtifacts: true` and
-`plugins.updater.pubkey` as an extra `--config`; one without the other logs a
-warning and builds exactly as without a key. Tauri then signs (minisign):
+**Protecting the key.** The build job of a tagged release runs in the GitHub
+environment `release`; a dry run runs in none, and the workflow also withholds
+the key from any run without a tag. The owner must:
+
+- create the `release` environment with required reviewers and a deployment
+  rule that allows only `anvil-v*` tags, and store the two secrets there
+  (not as repository secrets);
+- add a tag ruleset for `anvil-v*` that restricts who can create, update or
+  delete those tags.
+
+Only a tagged release with both the private key and `ANVIL_UPDATER_PUBKEY`
+passes `bundle.createUpdaterArtifacts: true` and `plugins.updater.pubkey` as an
+extra `--config` (to the build, which compiles the key into the app, and to
+the bundle step); one without the other logs a warning and builds exactly as
+without a key. The private key is in the environment of `tauri bundle` only,
+not of the compile step (build scripts, proc macros, `beforeBuildCommand`).
+`build-info.json` records the compiled-in public key. Tauri then signs
+(minisign), recording the version in each signature's trusted comment:
 
 | Target | Updater file | `latest.json` keys |
 | --- | --- | --- |
@@ -174,8 +192,13 @@ warning and builds exactly as without a key. Tauri then signs (minisign):
 | Windows | NSIS `-setup.exe`, `.msi` (+ `.sig` each) | `windows-x86_64-nsis`, `windows-x86_64-msi` |
 
 The publish job (`scripts/updater-manifest.mjs`) verifies every signature
-against `ANVIL_UPDATER_PUBKEY` and the signed version, then writes
-`latest.json` (Tauri static format). Any mismatch fails the run. The plugin
+against the public key recorded in `build-info.json` (the same on every
+target) and requires its signed version to equal the release version, then
+writes `latest.json` (Tauri static format). Any mismatch, or a signature
+without a version, fails the run. `latest.json` itself is not signed: the app
+sets `requireSignedVersion`, so it rejects an update whose signature records
+no version or a version other than the one the manifest announces, and a
+crafted manifest cannot pass an older signed build off as newer. The plugin
 looks up `{os}-{arch}-{installer}` before `{os}-{arch}`; the bare key is
 written only for macOS, so an MSI install never receives the NSIS installer.
 `.deb`/`.rpm` installs are not updated in-app: the bundler signs no `.deb` or
@@ -287,8 +310,9 @@ E2E build and requires it to fail.
       release is explicitly labelled unsigned/preview and not offered as a
       production download.
 - [ ] In-app updates: with the updater key configured (secrets
-      `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`,
-      variable `ANVIL_UPDATER_PUBKEY`), `updater.signed` is `true` and
+      `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the
+      protected `release` environment, variable `ANVIL_UPDATER_PUBKEY`, and
+      the `anvil-v*` tag ruleset), `updater.signed` is `true` and
       `updater.platforms` covers every target; otherwise `updater.manifest` is
       `null` and users update from the release page. Publishing makes
       `latest.json` live for every installed app with the key.
@@ -303,7 +327,9 @@ E2E build and requires it to fail.
 - **Signing credentials** (owner): Apple Developer ID + notarization and a
   Windows code-signing certificate. Until then every build is unsigned. Steps,
   secret names and the recommended workflow changes: ferrum-edge/ferrum-anvil#2.
-- **Updater key** (owner): `npx tauri signer generate`, stored as described in
+- **Updater key** (owner): `npx tauri signer generate` offline, the secrets in
+  the protected `release` environment (required reviewers, `anvil-v*`
+  deployment rule) plus an `anvil-v*` tag ruleset, as described in
   [In-app updates](#in-app-updates). Until then the app links to the release
   page.
 - **Sign-in providers** (owner): Google/GitHub/Facebook registrations and an

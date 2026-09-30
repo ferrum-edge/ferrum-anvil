@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Build the Tauri updater manifest (latest.json) for a release.
 //
-//   ANVIL_UPDATER_PUBKEY=<base64 public key> \
 //   node scripts/updater-manifest.mjs --dist <dir> --repo <owner/name> --tag <tag> --version <x.y.z>
 //
 // <dir> is laid out as for release-evidence.mjs: one sub-directory per build
@@ -13,9 +12,11 @@
 //   Linux    *.AppImage(.sig)
 //   Windows  *-setup.exe(.sig) (NSIS), *.msi(.sig)
 //
-// Every signature is verified against ANVIL_UPDATER_PUBKEY (minisign, as the
-// updater plugin does at install time) and its signed version must match
-// --version; any failure exits 1 and no manifest is written. With no updater
+// Every signature is verified against the public key the builds compiled into
+// the app (build-info.json `updater.pubkey`, which must be the same for every
+// target), as the updater plugin does at install time, and must record a
+// signed version equal to --version (the app sets requireSignedVersion); any
+// failure exits 1 and no manifest is written. With no updater
 // artifacts the script writes nothing and exits 0.
 //
 // Platform keys follow tauri-plugin-updater 2.12, which looks up
@@ -65,7 +66,7 @@ export function verifyUpdaterSignature(data, sigFileText, pubkey) {
   if (raw.length !== 74) throw new Error("malformed minisign signature");
   const alg = raw.subarray(0, 2).toString("latin1");
   if (alg !== "Ed" && alg !== "ED") throw new Error(`unsupported minisign algorithm ${alg}`);
-  if (raw.subarray(2, 10).toString("hex") !== pk.keyId) throw new Error("signed with a different key than ANVIL_UPDATER_PUBKEY");
+  if (raw.subarray(2, 10).toString("hex") !== pk.keyId) throw new Error("signed with a different key than the one compiled into the app");
   const signature = raw.subarray(10);
   const message = alg === "ED" ? createHash("blake2b512").update(data).digest() : data;
   if (!verify(null, message, pk.key, signature)) throw new Error("signature does not verify");
@@ -110,12 +111,39 @@ export function unpairedSignatures(dir) {
   return [...names].filter((n) => n.endsWith(".sig") && !names.has(n.slice(0, -4))).sort();
 }
 
+/**
+ * The updater public key the builds compiled into the app: the same
+ * build-info.json `updater.pubkey` on every target built with the key. Null
+ * when no target was. Throws when targets disagree or one lacks the key.
+ */
+export function builtPubkey(targets) {
+  const keys = new Set();
+  for (const t of targets) {
+    const u = t.info.updater;
+    if (!u?.configured) continue;
+    if (!u.pubkey) throw new Error(`${t.target}: built with the updater key but build-info.json records no public key`);
+    keys.add(String(u.pubkey).trim());
+  }
+  if (keys.size > 1) throw new Error("targets were built with different updater public keys");
+  return keys.size ? [...keys][0] : null;
+}
+
+/** Check a verified signature's trusted comment against the release version. */
+export function checkSignedVersion(trusted, version) {
+  const sv = signedVersion(trusted);
+  if (sv === null) throw new Error("the signature records no version (the app requires a signed version)");
+  if (sv.replace(/^v/, "") !== version) throw new Error(`signed for version ${sv}, not ${version}`);
+}
+
 export function targetDirs(dist) {
   return readdirSync(dist)
     .sort()
     .map((d) => join(dist, d))
     .filter((d) => statSync(d).isDirectory() && existsSync(join(d, "build-info.json")))
-    .map((dir) => ({ dir, target: JSON.parse(readFileSync(join(dir, "build-info.json"), "utf8")).target }));
+    .map((dir) => {
+      const info = JSON.parse(readFileSync(join(dir, "build-info.json"), "utf8"));
+      return { dir, target: info.target, info };
+    });
 }
 
 // ------------------------------------------------------------ main
@@ -129,25 +157,28 @@ function main() {
   const tag = arg("--tag");
   const version = arg("--version");
   if (!dist || !existsSync(dist) || !repo || !tag || !version) {
-    console.error("usage: ANVIL_UPDATER_PUBKEY=<key> updater-manifest.mjs --dist <dir> --repo <owner/name> --tag <tag> --version <x.y.z> [--out <file>]");
+    console.error("usage: updater-manifest.mjs --dist <dir> --repo <owner/name> --tag <tag> --version <x.y.z> [--out <file>]");
     process.exit(2);
   }
   const out = arg("--out") ?? join(dist, "latest.json");
-  const pubkey = process.env.ANVIL_UPDATER_PUBKEY?.trim();
-
   const errors = [];
+  const targets = targetDirs(dist);
+  let pubkey = null;
+  try {
+    pubkey = builtPubkey(targets);
+  } catch (e) {
+    errors.push(e.message);
+  }
   const platforms = {};
   let count = 0;
-  for (const { dir, target } of targetDirs(dist)) {
+  for (const { dir, target } of targets) {
     for (const s of unpairedSignatures(dir)) errors.push(`${target}: ${s} has no matching artifact`);
     for (const a of updaterArtifacts(dir, target)) {
       count++;
       if (!pubkey) continue;
       const signature = readFileSync(join(dir, a.sig), "utf8").trim();
       try {
-        const trusted = verifyUpdaterSignature(readFileSync(join(dir, a.name)), signature, pubkey);
-        const sv = signedVersion(trusted);
-        if (sv !== null && sv.replace(/^v/, "") !== version) throw new Error(`signed for version ${sv}, not ${version}`);
+        checkSignedVersion(verifyUpdaterSignature(readFileSync(join(dir, a.name)), signature, pubkey), version);
       } catch (e) {
         errors.push(`${target}: ${a.name}: ${e.message}`);
         continue;
@@ -163,7 +194,7 @@ function main() {
     console.log("no updater artifacts (owner updater key not configured); latest.json not written");
     return;
   }
-  if (count > 0 && !pubkey) errors.push("updater signatures present but ANVIL_UPDATER_PUBKEY is not set; cannot verify them");
+  if (count > 0 && !pubkey) errors.push("updater signatures present but no build recorded the updater public key; cannot verify them");
   if (errors.length) {
     console.error("updater manifest not written:\n  " + errors.join("\n  "));
     process.exit(1);

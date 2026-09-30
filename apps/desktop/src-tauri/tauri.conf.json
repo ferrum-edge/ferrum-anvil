@@ -53,6 +53,7 @@
   "plugins": {
     "updater": {
       "pubkey": "",
+      "requireSignedVersion": true,
       "endpoints": ["https://github.com/ferrum-edge/ferrum-anvil/releases/latest/download/latest.json"]
     }
   }

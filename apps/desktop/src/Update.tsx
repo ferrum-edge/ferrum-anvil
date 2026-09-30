@@ -174,7 +174,7 @@ export function UpdatePanel(props: { check: UpdateCheck }) {
           )}
           {phase.step === "failed" && (
             <div className="bad-box" role="alert">
-              {phase.error} Nothing was changed.
+              {phase.error} Anvil keeps running version {check.current}.
               <div className="row">
                 <button className="btn small" onClick={() => void install()}>
                   Try again

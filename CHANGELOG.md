@@ -14,8 +14,11 @@
   verifies its minisign signature (`tauri-plugin-updater`), installs it and
   offers **Restart now**. A build without the key (every build until the owner
   configures it), and `.deb`/`.rpm` installs, open the release page instead.
-  The release workflow creates signed updater artifacts and `latest.json` only
-  with that key (docs/release.md, In-app updates). The launch check fails
+  The app requires the signed version (`requireSignedVersion`), so an unsigned
+  `latest.json` cannot pass an older signed build off as newer. The release
+  workflow creates signed updater artifacts and `latest.json` only for a tagged
+  release with that key, which lives in the protected `release` environment
+  and reaches only the `tauri bundle` step (docs/release.md, In-app updates). The launch check fails
   silently; the request carries only Anvil's version.
 - Contract drift: compare observed traffic with an OpenAPI description
   (`anvil_contract::analyze`). Exchanges are routed to operations through

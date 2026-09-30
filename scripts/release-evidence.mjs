@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Assemble release evidence for a set of built artifacts.
 //
-//   [ANVIL_UPDATER_PUBKEY=<key>] node scripts/release-evidence.mjs --dist <dir> [--test-runs <runs.json>] [--tag <tag>]
+//   node scripts/release-evidence.mjs --dist <dir> [--test-runs <runs.json>] [--tag <tag>]
 //
 // <dir> contains one sub-directory per build target (as downloaded from the
 // release workflow's build jobs), each holding that target's shipped files and
@@ -21,12 +21,14 @@
 // Updater artifacts (`*.sig` beside an .app.tar.gz, AppImage or Windows
 // installer) and the shared latest.json exist only when the build ran with the
 // owner's updater key. `updater.signed` is true only when latest.json exists
-// and every signature in it verifies here against ANVIL_UPDATER_PUBKEY.
+// and every signature in it verifies here against the public key the builds
+// compiled into the app (build-info.json `updater.pubkey`) and records the
+// release version.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decodePublicKey, signedVersion, unpairedSignatures, updaterArtifacts, verifyUpdaterSignature } from "./updater-manifest.mjs";
+import { builtPubkey, checkSignedVersion, decodePublicKey, unpairedSignatures, updaterArtifacts, verifyUpdaterSignature } from "./updater-manifest.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (name) => {
@@ -127,6 +129,7 @@ for (const d of readdirSync(dist).sort()) {
     updater: { configured: info.updater?.configured === true, artifacts: updater.map((u) => ({ name: u.name, signature: u.sig, platforms: u.keys })) },
     artifacts,
     _dir: dir,
+    _info: info,
     _unpaired: unpairedSignatures(dir),
   });
 }
@@ -147,17 +150,22 @@ if (dupes.length) problems.push(`duplicate artifact names: ${[...new Set(dupes)]
 
 // Updater: every signature pairs with an artifact, every signed artifact is in
 // latest.json with the same signature and URL, and each verifies against the
-// configured public key.
-const pubkey = process.env.ANVIL_UPDATER_PUBKEY?.trim() || null;
+// public key the builds compiled into the app.
 const manifestPath = join(dist, "latest.json");
 const manifest = existsSync(manifestPath) ? readJson(manifestPath) : null;
 const updaterProblems = [];
+let pubkey = null;
+try {
+  pubkey = builtPubkey(targets.map((t) => ({ target: t.target, info: t._info })));
+} catch (e) {
+  updaterProblems.push(e.message);
+}
 let keyId = null;
 if (pubkey) {
   try {
     keyId = decodePublicKey(pubkey).displayId;
   } catch (e) {
-    updaterProblems.push(`ANVIL_UPDATER_PUBKEY: ${e.message}`);
+    updaterProblems.push(`compiled-in updater public key: ${e.message}`);
   }
 }
 const signedFiles = new Map();
@@ -171,7 +179,7 @@ if (signedFiles.size > 0 && !manifest) updaterProblems.push("updater artifacts p
 if (manifest) {
   if (signedFiles.size === 0) updaterProblems.push("latest.json present but no signed updater artifacts");
   if (manifest.version !== workspaceVersion) updaterProblems.push(`latest.json version ${manifest.version} is not ${workspaceVersion}`);
-  if (!pubkey) updaterProblems.push("latest.json present but ANVIL_UPDATER_PUBKEY is not set; signatures not verified");
+  if (!pubkey) updaterProblems.push("latest.json present but no build recorded the updater public key; signatures not verified");
   const listed = new Set();
   for (const [key, p] of Object.entries(manifest.platforms ?? {})) {
     const file = decodeURIComponent(String(p.url).split("/").pop());
@@ -187,8 +195,7 @@ if (manifest) {
     if (p.signature !== sigText) updaterProblems.push(`latest.json ${key}: signature differs from ${a.signature}`);
     if (pubkey && keyId) {
       try {
-        const sv = signedVersion(verifyUpdaterSignature(readFileSync(join(a.target._dir, file)), p.signature, pubkey));
-        if (sv !== null && sv.replace(/^v/, "") !== workspaceVersion) updaterProblems.push(`${file}: signed for version ${sv}`);
+        checkSignedVersion(verifyUpdaterSignature(readFileSync(join(a.target._dir, file)), p.signature, pubkey), workspaceVersion);
       } catch (e) {
         updaterProblems.push(`${file}: ${e.message}`);
       }
@@ -204,13 +211,14 @@ const updaterEvidence = {
   key_id: updaterSigned ? keyId : null,
   platforms: manifest ? Object.keys(manifest.platforms ?? {}).sort() : [],
   detail: updaterSigned
-    ? `minisign signatures verified against ANVIL_UPDATER_PUBKEY (key ${keyId}); in-app updates resolve releases/latest/download/latest.json only after this draft is published`
+    ? `minisign signatures and signed versions verified against the public key compiled into the app (key ${keyId}); in-app updates resolve releases/latest/download/latest.json only after this draft is published`
     : manifest || signedFiles.size > 0
       ? "unverified — see problems"
       : "not configured — owner updater key (TAURI_SIGNING_PRIVATE_KEY, ANVIL_UPDATER_PUBKEY) not set; no updater artifacts, the app links to the release page",
 };
 for (const t of targets) {
   delete t._dir;
+  delete t._info;
   delete t._unpaired;
 }
 
