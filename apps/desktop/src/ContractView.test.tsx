@@ -102,7 +102,8 @@ test("only OpenAPI imports are offered, and picking one lists its findings with 
   expect(await screen.findByText(/uses path parameter\(s\) orderId/)).toBeTruthy();
   expect(calls("standards_lint")[0]).toEqual({ target: { kind: "import", import_id: "i1" } });
   expect(screen.getByText("Line 42:5")).toBeTruthy();
-  expect(screen.getByText(/Add each one to `parameters`/)).toBeTruthy();
+  // The fix renders `backticked` names as code.
+  expect(screen.getByText("parameters", { selector: "code" }).parentElement?.textContent).toBe("Add each one to parameters with in: path and required: true.");
   expect(screen.getByText("does not meet the standards")).toBeTruthy();
   // The severity cards filter the list.
   fireEvent.click(screen.getByRole("button", { name: /Warnings/ }));
