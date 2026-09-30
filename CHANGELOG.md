@@ -886,6 +886,45 @@
   from a file or a full backup could otherwise place markup and inline
   styles in the exported page (the page's CSP already blocked scripts).
 
+- Imports: parsing a JSON or YAML document now also bounds the string bytes
+  it keeps (string values and map keys, every YAML alias expansion
+  included) at twice `max_bytes`, charged before each string is copied. A
+  long scalar that many aliases repeat was charged one node per copy, so a
+  small file could make the preview allocate far more than its size; it is
+  now refused with `LimitExceeded` ("document string bytes").
+- WSDL imports: envelope generation is bounded by the envelope's
+  `max_sample_nodes` budget and by the bytes it may generate (8 MiB per
+  envelope, four times `max_bytes` per import, both charged before the text
+  is built). Every schema node looked at counts: group and attributeGroup
+  references, extension bases, particles, attributes, message parts and the
+  children of each construct. `group` and `attributeGroup` references back to
+  a group being expanded stop at the first repetition (`recursive_schema`).
+  An attribute is written once per element. Once the import's envelope budget
+  is spent, the remaining envelopes are left empty (`sample_size_limit`).
+  A document in which an element has more than 256 namespaces in scope is
+  refused (`LimitExceeded`), and once `max_operations` is reached the
+  remaining operations are counted without being walked again for each
+  port. Branching or self-referencing groups and types could make generation
+  grow exponentially, and many message parts could exceed the envelope limit.
+- OpenAPI imports: `allOf` merging charges each branch against the payload's
+  `max_sample_nodes` budget, and a `$ref` it follows counts toward
+  `max_ref_depth` like a direct `$ref` (`ref_depth_limit`). Generated
+  values (including `minLength` padding), examples, defaults, merged schemas
+  and per-operation parameter copies now share a byte budget for the whole
+  import (four times `max_bytes`), charged before each value is made. When
+  it is spent, the remaining samples are left out (`sample_size_limit`).
+  The structural lookups made while writing one payload (XML names,
+  multipart parts) share a node budget of their own and no longer use up the
+  payload's. Long or branching composition chains, large examples reused
+  many times and long generated strings in many operations could previously
+  do unbounded work.
+- Insomnia v4 imports: an export in which a workspace, request group or
+  environment shares its `_id` with another resource is refused (`Invalid`,
+  naming both). A repeated id of any other resource skips the later copy
+  (`duplicate_resource_id`). A resource without an `_id` is never treated as
+  a parent, the walk lists each parent's children once, and each request or
+  group is imported at most once. Repeated, empty or self-referencing ids
+  could make the import repeat subtrees exponentially.
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a

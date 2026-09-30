@@ -106,6 +106,17 @@ fn yaml_alias_bombs_are_bounded() {
 }
 
 #[test]
+fn yaml_flat_aliases_to_a_long_scalar_are_bounded() {
+    // Shallow and few nodes, but every alias repeats a 64 KiB scalar.
+    let head = format!("openapi: 3.0.0\ninfo: {{title: t, version: '1'}}\npaths: {{}}\na: &a {}\nb:\n", "x".repeat(64 * 1024));
+    let o = ImportOptions { max_bytes: 256 * 1024, ..opts() };
+    let many = format!("{head}{}", "  - *a\n".repeat(1_000));
+    assert!(matches!(import(many.as_bytes(), &o), Err(anvil_import::ImportError::LimitExceeded { .. })));
+    let one = format!("{head}  - *a\n");
+    assert!(import(one.as_bytes(), &o).is_ok());
+}
+
+#[test]
 fn self_referencing_schemas_terminate() {
     let doc = serde_json::json!({
         "openapi": "3.1.0", "info": {"title": "t", "version": "1"},

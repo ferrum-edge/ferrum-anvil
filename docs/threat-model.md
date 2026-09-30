@@ -21,7 +21,7 @@ against it).
 | Boundary | Untrusted side | Controls |
 |---|---|---|
 | Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; gRPC reflection enforces cumulative wire-plus-decoded byte and per-request message limits under its own absolute deadline; no response can call IPC or change settings |
-| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size/node/ref limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
+| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size, node, string-byte, reference and sample-generation limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
 | Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no open or save dialog, no filesystem plugin. |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
@@ -223,6 +223,18 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
     its path and the request or dataset that names it, as the receiving
     device's import preview does. Attach a copy instead to keep a local
     path out of a bundle.
+- **Small spec or collection that expands during preview:** the expansions
+  known to multiply work after parsing are charged before they run, against
+  the import limits in [import.md](import.md#trust-and-safety-policy).
+  JSON/YAML parsing charges nodes and the string bytes it keeps (YAML aliases
+  included). OpenAPI `allOf` merging charges the payload budget and the
+  `$ref` depth, and copied examples, defaults and merged schemas share a byte
+  budget for the whole import. WSDL envelopes charge the schema nodes they
+  look at and the bytes they generate (per envelope and per import) and cut
+  recursive groups. An Insomnia v4 export with a repeated workspace, group or
+  environment id is refused, and each resource is walked once. These are
+  budgets, not a proof that every code path is linear: a preview can still
+  take time and memory proportional to those limits.
 - **Altering an encrypted bundle:** the vault is sealed with associated data
   covering the format version and the SHA-256 of every other entry
   (manifest, `workspace/objects.json`, each attachment, the history). Any
