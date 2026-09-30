@@ -193,10 +193,10 @@ impl Redactor {
         out
     }
 
-    /// True when a URL component, once percent-decoded (and with `+` read as
-    /// a space), contains a secret value. Raw occurrences are scrubbed by
+    /// True when a component, once percent-decoded (and with `+` read as a
+    /// space), contains a secret value. Raw occurrences are scrubbed by
     /// [`Redactor::text`] before components are examined.
-    fn hides_secret(&self, component: &str) -> bool {
+    pub(crate) fn hides_secret(&self, component: &str) -> bool {
         if self.secrets.is_empty() || !component.contains(['%', '+']) {
             return false;
         }
@@ -273,7 +273,14 @@ impl Redactor {
                 return value
                     .split(';')
                     .map(|c| match c.split_once('=') {
-                        Some((k, _)) => format!("{}={REDACTED}", k.trim()),
+                        Some((k, _)) => {
+                            let name = k.trim();
+                            if self.hides_secret(name) {
+                                format!("{REDACTED}={REDACTED}")
+                            } else {
+                                format!("{name}={REDACTED}")
+                            }
+                        }
                         None => REDACTED.to_string(),
                     })
                     .collect::<Vec<_>>()
@@ -282,8 +289,10 @@ impl Redactor {
             if lower == "set-cookie" {
                 return match value.split_once('=') {
                     Some((k, rest)) => {
+                        let name = k.trim();
+                        let name = if self.hides_secret(name) { REDACTED } else { name };
                         let attrs = rest.split_once(';').map(|(_, a)| format!(";{}", self.set_cookie_attrs(a))).unwrap_or_default();
-                        format!("{}={REDACTED}{attrs}", k.trim())
+                        format!("{name}={REDACTED}{attrs}")
                     }
                     None => REDACTED.to_string(),
                 };
@@ -759,6 +768,14 @@ mod tests {
         assert_eq!(
             r.header("Set-Cookie", "sid=x; Domain=encoded%252dcookie-secret-7q2m.example; Secure"),
             format!("sid={REDACTED}; Domain={REDACTED}; Secure")
+        );
+        assert_eq!(
+            r.header("Set-Cookie", "encoded%2dcookie-secret-7q2m=x; Path=/"),
+            format!("{REDACTED}={REDACTED}; Path=/")
+        );
+        assert_eq!(
+            r.header("Cookie", "ordinary=x; encoded%2dcookie-secret-7q2m=y"),
+            format!("ordinary={REDACTED}; {REDACTED}={REDACTED}")
         );
     }
 

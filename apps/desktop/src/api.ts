@@ -3,7 +3,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ApiStandards,
   AppSettings,
+  LintReport,
+  RuleInfo,
+  RulesetSummary,
+  StoredRuleset,
   AttachmentRef,
   Dataset,
   LoadCounts,
@@ -244,9 +249,11 @@ export type FilePurpose =
   | "pkcs12_file"
   | "spec_source"
   | "dataset"
+  | "ruleset"
   | "bundle_export"
   | "load_report_export"
   | "run_report_export"
+  | "lint_report_export"
   | "jwt_svid_file"
   | "linked_file"
   | "linked_file_relocate";
@@ -463,6 +470,39 @@ export interface SpecImported {
   report: SpecImportReport;
 }
 export type SpecTarget = { kind: "new_workspace" } | { kind: "workspace"; workspace_id: string };
+/** Provenance of a spec import (`anvil_app::specs::SpecSourceRecord`). */
+export interface SpecSourceRecord {
+  source: {
+    import_id: string;
+    kind: string;
+    dialect: string;
+    declared_version?: string | null;
+    title?: string | null;
+    sha256: string;
+    size_bytes: number;
+    imported_at: string;
+  };
+  workspace_id: string;
+  root_folder_id?: string | null;
+  original_sha256: string;
+  file_name: string;
+  previous_import_ids?: string[];
+}
+
+// ----------------------------------------------------------- API standards
+export type { ApiStandards, LintReport, RuleInfo, RulesetSummary, StoredRuleset };
+/** The layered rules in effect (`anvil_app::standards::StandardsView`). */
+export interface StandardsView {
+  standards: ApiStandards;
+  sources: RulesetSummary[];
+  rules: RuleInfo[];
+  /** Rules a later ruleset turned off. */
+  disabled: string[];
+  /** Why the stored rulesets do not load; they can still be disabled or removed. */
+  error?: string | null;
+}
+/** What to lint: an import's stored original, or a spec file chosen in the native dialog. */
+export type LintTarget = { kind: "import"; import_id: string } | { kind: "spec"; input: SpecInput };
 
 // ------------------------------------------------------------- runner/oauth
 export type RunTarget = { kind: "scenario"; scenario_id: string } | { kind: "folder"; workspace_id: string; folder_id: string | null };
@@ -666,6 +706,19 @@ export const api = {
 
   specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
   specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
+  specSources: (workspaceId: string) => call<SpecSourceRecord[]>("spec_sources", { workspaceId }),
+
+  standards: () => call<StandardsView>("standards_view"),
+  /** Keep the ruleset file chosen in the native dialog (purpose `ruleset`); refused when it does not load with the others. */
+  standardsAdd: (grant: string) => call<StoredRuleset>("standards_add", { grant }),
+  standardsReplace: (rulesetId: string, grant: string) => call<StoredRuleset>("standards_replace", { rulesetId, grant }),
+  standardsRemove: (rulesetId: string) => call<ApiStandards>("standards_remove", { rulesetId }),
+  standardsSetEnabled: (rulesetId: string, enabled: boolean) => call<ApiStandards>("standards_set_enabled", { rulesetId, enabled }),
+  standardsSetRecommended: (include: boolean) => call<ApiStandards>("standards_set_recommended", { include }),
+  lintSpec: (target: LintTarget) => call<LintReport>("standards_lint", { target }),
+  /** Lint again and write JSON or SARIF to a save-dialog grant (purpose `lint_report_export`). */
+  exportLintReport: (target: LintTarget, format: "json" | "sarif", artifact: string, grant: string) =>
+    call<number>("standards_report_export", { target, format, artifact, grant }),
   readTextFile: (grant: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
     call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { grant, workspaceId, storeAsSecret, base64 }),
 };

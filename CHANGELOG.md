@@ -4,6 +4,30 @@
 
 ### Added
 
+- API standards: check OpenAPI descriptions against a team's own rules.
+  A ruleset (YAML or JSON, `anvil_ruleset: 1`) targets version-neutral
+  objects (operations, parameters, responses, media types, schemas,
+  properties, servers, tags, security schemes, or any node by JSONPath) with
+  checks such as `pattern`, `casing`, `enumeration`, `includes`, `length`
+  and `schema`, so one standard applies to Swagger 2.0 and OpenAPI 3.0, 3.1
+  and 3.2 alike. Rulesets layer in order, may extend the built-in
+  `anvil:recommended` rules and change or turn off inherited ones, and are
+  checked when loaded. Each finding names the rule, the JSON Pointer and the
+  line and column to edit, and how to fix it; body examples are validated
+  against their schemas. New crate `anvil-contract`; see
+  `docs/contract.md` and `samples/api-standards/`.
+- CLI: `anvil lint-spec <spec> [--ruleset FILE]...` prints text, JSON or
+  SARIF 2.1.0 (for code scanning) and exits with 2 when a finding reaches
+  `--fail-on` (default `error`), and with 3 on a local error, including a
+  description too large to lint completely unless `--allow-incomplete` is
+  passed. It needs no profile.
+- Desktop: a **Contract** view checks the workspace's imported OpenAPI
+  descriptions, or a chosen file, against the profile's API standards,
+  filters findings by severity and exports JSON or SARIF. Rulesets are kept
+  in the app settings (new `api_standards`), added from a file (file purpose
+  `ruleset`), replaced, enabled and removed there; a change that would not
+  load with the others is refused. The settings dialog never changes them.
+
 - Desktop: a linked local file that a saved request names (for example one
   imported from another machine) can be repointed to where the file is on
   this device. When the file is not chosen yet, or is missing or changed,
@@ -244,6 +268,11 @@
 
 ### Fixed
 
+- UDP load-scenario silence coverage keeps its non-responding target socket
+  bound for the whole sub-case, then checks ICMP-unreachable counts on a
+  released port with up to five fresh-port retries for parallel UDP replies.
+  PROTO-020 uses the same bounded retry for its ICMP-unreachable assertion;
+  both tests fail clearly if every attempt receives foreign traffic.
 - The effective-request preview reports a multi-auth as varying per send
   when any of its profiles is HMAC, DPoP, JWT, WS-Security or JWT-SVID
   (nested sets included), and an SSE preview with such a multi-auth says
@@ -792,10 +821,10 @@
   value is scrubbed before it is split, so a secret that spans a `;`, `=`
   or space is replaced whole; a header value marked sensitive as a whole
   (scheme included) is now shown as `‹redacted›` without its scheme.
-  Mixed and double percent-encoded secret echoes in `Set-Cookie` Path and
-  Domain attributes are redacted too. A `Set-Cookie` whose name contains a
-  secret used by that execution is not kept in the workspace cookie jar, so
-  it cannot appear in a later request's `Cookie` header or notes. History
+  Mixed and double percent-encoded secret echoes in `Set-Cookie` names,
+  Path and Domain attributes are redacted too. A `Set-Cookie` whose name
+  contains a secret used by that execution is not kept in the workspace cookie
+  jar, so it cannot appear in a later request's `Cookie` header or notes. History
   recorded before this change is not rewritten.
   (GHSA-vvjj-4xxf-966f)
 - gRPC metadata marked sensitive is now redacted by name and by value, like
@@ -808,6 +837,21 @@
   the request, so the effective-request preview of a WS-Security body and
   the execution record redact them. Before, an assertion taken directly
   from the vault was shown in the preview. (GHSA-6j83-rrqr-953h)
+- A redirect that would resend a request body to another origin is no
+  longer followed when the body has a form field marked sensitive, even
+  when its value is a literal rather than a secret variable. Before, only
+  secret variables marked the body structurally, and a literal whose form
+  encoding changed its bytes (such as one holding `@` or a space) was
+  resent by a 307 or 308 redirect. Allowing credentials to be forwarded
+  cross-origin in the redirect policy still lifts the refusal.
+  (GHSA-c8jq-hq57-v523)
+- The workspace cookie jar no longer stores a cookie whose `Domain` is a
+  public suffix, such as `com`, `co.uk` or a private-section suffix like
+  `github.io`, so one site can no longer set a cookie that Anvil then sends
+  to unrelated sites under that suffix. When the suffix is the responding
+  host itself, the cookie is kept for that host only. Cookies scoped to a
+  registrable parent domain and host-only cookies are unchanged. The Public
+  Suffix List is compiled in (the `psl` crate). (GHSA-vv3h-gm7f-3hm7)
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a

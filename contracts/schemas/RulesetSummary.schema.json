@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RulesetSummary",
+  "description": "A ruleset that took part in a [`RuleSet`].",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "source": {
+      "description": "File name, or the built-in name.",
+      "type": "string"
+    },
+    "version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "builtin": {
+      "type": "boolean"
+    },
+    "sha256": {
+      "description": "SHA-256 (hex) of the ruleset text.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "source",
+    "builtin",
+    "sha256"
+  ]
+}

@@ -12,6 +12,7 @@ import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
 import { ResponsePanel } from "./ResponsePanel";
 import { LoadView } from "./LoadView";
 import { RunnerView } from "./RunnerView";
+import { ContractView } from "./ContractView";
 import { Icon } from "./icons";
 import { Keys, Modal, SidebarContext, SidebarResizer, Toast, drag, fmtAgo, shortcut, uid } from "./ui";
 
@@ -54,7 +55,7 @@ const savedUrl = (t: OpenTab): string | undefined => {
 /** What is still running for a tab in the backend, if anything. */
 const liveWork = (t: OpenTab): "session" | "request" | null => (t.session ? "session" : t.running ? "request" : null);
 
-type View = "requests" | "runner" | "load";
+type View = "requests" | "runner" | "load" | "contract";
 type Layout = "stack" | "side";
 
 const clamp = (lo: number, hi: number, v: number) => Math.min(hi, Math.max(lo, v));
@@ -627,6 +628,10 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
               <span className="vs-label">Load tests</span>
               {liveRuns.load && <span className="live-dot" data-testid="load-live" />}
             </button>
+            <button aria-pressed={view === "contract"} aria-label="API contract" title="Check OpenAPI descriptions against your API standards" onClick={() => show("contract")}>
+              <Icon name="fileCheck" size={14} />
+              <span className="vs-label">Contract</span>
+            </button>
           </div>
           <span className="spacer" />
           <div className="topbar-group">
@@ -663,6 +668,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             onLiveChange={(load) => setLiveRuns((l) => ({ ...l, load }))}
           />
         )}
+        {mounted.has("contract") && viewWs && <ContractView workspaceId={viewWs.id} notify={notify} hidden={view !== "contract"} />}
         {mounted.has("runner") && viewWs && (
           <RunnerView
             workspaceId={viewWs.id}

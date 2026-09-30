@@ -56,12 +56,16 @@ pub enum FilePurpose {
     SpecSource,
     /// Read a CSV/JSON load-test dataset.
     Dataset,
+    /// Read an API-standards ruleset (YAML or JSON) to keep in the profile.
+    Ruleset,
     /// Write an Anvil bundle or backup.
     BundleExport,
     /// Write a load-test report.
     LoadReportExport,
     /// Write a collection-run report.
     RunReportExport,
+    /// Write an API-standards lint report (JSON or SARIF).
+    LintReportExport,
     /// Bind a JWT-SVID token file that the backend reads at send time.
     JwtSvidFile,
     /// Bind a linked local file that a saved request or dataset names, so
@@ -87,13 +91,16 @@ pub enum Access {
 impl FilePurpose {
     pub fn access(self) -> Access {
         match self {
-            FilePurpose::BundleExport | FilePurpose::LoadReportExport | FilePurpose::RunReportExport => Access::Write,
+            FilePurpose::BundleExport | FilePurpose::LoadReportExport | FilePurpose::RunReportExport | FilePurpose::LintReportExport => {
+                Access::Write
+            }
             FilePurpose::BundleImport
             | FilePurpose::Attachment
             | FilePurpose::PemFile
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
-            | FilePurpose::Dataset => Access::Read,
+            | FilePurpose::Dataset
+            | FilePurpose::Ruleset => Access::Read,
             FilePurpose::JwtSvidFile | FilePurpose::LinkedFile | FilePurpose::LinkedFileRelocate => Access::Bind,
         }
     }
@@ -113,9 +120,11 @@ impl FilePurpose {
             FilePurpose::PemFile | FilePurpose::Pkcs12File => MIB,
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
+            FilePurpose::Ruleset => MIB,
             FilePurpose::BundleExport
             | FilePurpose::LoadReportExport
             | FilePurpose::RunReportExport
+            | FilePurpose::LintReportExport
             | FilePurpose::JwtSvidFile
             | FilePurpose::LinkedFile
             | FilePurpose::LinkedFileRelocate => 0,

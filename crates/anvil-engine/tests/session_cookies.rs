@@ -13,10 +13,11 @@ use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::events::ExecutionEvent;
 use anvil_domain::execution::Direction;
 use anvil_domain::request::*;
-use anvil_domain::secret::SensitiveValue;
+use anvil_domain::secret::{REDACTED, SensitiveValue};
 use anvil_domain::settings::{DnsOverride, SettingsOverrides};
 use anvil_domain::tls::{TlsMinVersion, TlsProfile};
 use anvil_engine::context::MemoryAttachments;
+use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::grpc::ECHO_PROTO;
 use anvil_fixtures::http as fx;
@@ -230,6 +231,38 @@ async fn set_cookie_on_a_session_handshake_is_kept_in_the_jar() {
     ok(&e, &ws(&format!("ws://{}/ws?close_after=1&set_cookie=ws_sid%3Dfrom-ws", f.addr))).await;
     ok(&e, &get(&f.url("/echo"))).await;
     assert_eq!(cookie_on(&f, "/echo").as_deref(), Some("ws_sid=from-ws"));
+}
+
+#[tokio::test]
+async fn session_cookie_names_with_secrets_are_refused_and_ordinary_cookies_are_kept() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+
+    let secret = "reflected-cookie-secret-4k7w";
+    let mut c = sse(&f.url(
+        "/sse?count=1&interval=1&set_cookie=reflected%252dcookie-secret-4k7w%3Dordinary&secret={{reflected}}",
+    ));
+    c.var_layers = vec![VarLayer {
+        label: "environment:test".into(),
+        vars: vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true }],
+    }];
+    let o = ok(&e, &c).await;
+    assert!(o
+        .record
+        .prepared
+        .inferred
+        .iter()
+        .any(|n| n == "a response cookie was not stored because its name contains a request secret"));
+    let set_cookie = o.record.response.as_ref().unwrap().header_values("set-cookie");
+    assert_eq!(set_cookie[0], format!("{REDACTED}={REDACTED}; Path=/; HttpOnly"));
+    ok(&e, &get(&f.url("/echo"))).await;
+    assert_eq!(cookie_on(&f, "/echo"), None, "the session stored a cookie whose name hides a request secret");
+
+    let e = Engine::new();
+    ok(&e, &get(&f.url("/set-cookie?name=ordinary&value=kept"))).await;
+    ok(&e, &get(&f.url("/echo"))).await;
+    assert_eq!(cookie_on(&f, "/echo").as_deref(), Some("ordinary=kept"));
 }
 
 #[tokio::test]
