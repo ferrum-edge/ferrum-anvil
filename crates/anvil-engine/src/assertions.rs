@@ -2,11 +2,11 @@
 //! separate outcome dimension from transport and application status.
 
 use crate::redact::Redactor;
-use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use anvil_domain::assertions::*;
 use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::{ResponseRecord, StreamTranscript};
 use anvil_domain::outcome::{ProtocolStatus, TransportState};
+use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use anvil_xml_limits::{XmlLimits, check_xml_limits};
 
 /// XML nodes an XPath assertion or extraction parses. A response body can be

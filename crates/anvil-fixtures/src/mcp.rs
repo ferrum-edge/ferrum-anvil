@@ -312,13 +312,7 @@ struct Asked<'a> {
     echo: Option<&'a str>,
 }
 
-async fn route(
-    req: Request<Incoming>,
-    log: GroundTruthLog,
-    state: Arc<McpState>,
-    opts: McpOptions,
-    addr: SocketAddr,
-) -> Response<FxBody> {
+async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<McpState>, opts: McpOptions, addr: SocketAddr) -> Response<FxBody> {
     let http_method = req.method().clone();
     let path = req.uri().path().to_string();
     let headers: Vec<(String, String)> =
