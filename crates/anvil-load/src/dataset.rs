@@ -310,7 +310,7 @@ impl<'de> serde::de::Visitor<'de> for JsonRowVisitor {
         A: serde::de::MapAccess<'de>,
     {
         use serde::de::Error;
-        let mut values = Vec::new();
+        let mut values: Vec<(String, String)> = Vec::new();
         let mut value_indexes: HashMap<String, usize> = HashMap::new();
         while let Some(key) = map.next_key::<String>()? {
             let raw = map.next_value::<&serde_json::value::RawValue>()?;
