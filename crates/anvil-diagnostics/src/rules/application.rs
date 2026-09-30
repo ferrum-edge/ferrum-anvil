@@ -17,6 +17,13 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 .var("fault_reason", f.reason.clone()),
         );
     }
+    if let Some(why) = &ctx.body.xml_not_inspected {
+        warn(
+            warnings,
+            WarningCode::PartialVisibility,
+            format!("The response XML is too complex to inspect safely ({why}); it was not checked for a SOAP fault."),
+        );
+    }
     if let Some(g) = &ctx.body.graphql {
         out.push(
             Draft::new("app.graphql_errors", "app.body", Confidence::Confirmed, SourceScope::Unknown, Owner::ApiOwner, Severity::Error)

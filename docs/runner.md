@@ -175,6 +175,18 @@ between path parts (`/a / b`, `b [1]`; spaces inside a position, `[ 1 ]`,
 are allowed). The path is checked before the body is parsed. A failed
 extraction names its variable (`extraction for 'id': …`).
 
+The body is also checked before it is parsed, because the XML parser's work
+on namespaces and attributes can grow with the square of the body's size. A
+body with more than 8192 `xmlns` declarations, an element with more than 256
+attributes, more than 2^22 attribute pairs over the whole document
+(n·(n−1)/2 for an element with n attributes), an attribute name over 256
+bytes, a namespace prefix over 128 bytes, a namespace URI over 512 bytes, or
+more than 4,000,000 nodes is not evaluated: the assertion fails with "could
+not evaluate: XML too complex to evaluate safely (…)", naming the limit, and
+an extraction from it fails the same way. Every declaration counts, so a
+service that declares the same prefix again on each of more than 8192
+elements reaches the cap.
+
 ## Cancellation, lock and abort
 
 The run's `CancellationToken` is passed to every engine execution and to the

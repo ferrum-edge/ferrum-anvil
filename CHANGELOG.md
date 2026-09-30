@@ -846,6 +846,18 @@
 
 ### Security
 
+- XML parsing (GHSA-mvjp-hhjj-mh63): the pre-parse scan WSDL imports use
+  now runs before every XML parse, from the new internal crate
+  `anvil-xml-limits`, with limits chosen per site. It bounds `xmlns`
+  declarations, attributes per element, attribute pairs over the document
+  and the length of attribute names, namespace prefixes and namespace URIs,
+  and every site parses with DTDs refused and a node limit. Request body
+  lint reports a finding ("XML too complex to lint safely"). XPath
+  assertions and extractions fail with "XML too complex to evaluate safely"
+  (a response body is now also limited to 4,000,000 XML nodes; see
+  [runner.md](docs/runner.md#xpath-subset)). SOAP fault detection in
+  diagnostics is skipped with a `partial_visibility` warning. WS-Security
+  refuses the envelope (now also limited to 1,000,000 XML nodes).
 - Imports (GHSA-c9jq-p5rq-wj3h): more of the work a small spec can repeat
   during preview is now charged or done once. OpenAPI samples charge the
   schema lists they read on every visit to the import's byte budget: each

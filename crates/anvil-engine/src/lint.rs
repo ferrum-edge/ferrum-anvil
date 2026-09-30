@@ -1,9 +1,28 @@
 //! Bounded JSON/XML syntax lint with line/column messages. XML linting never
 //! processes DTDs, external entities or remote schemas.
 
+use anvil_xml_limits::{XmlLimits, check_xml_limits};
 use serde::Serialize;
 
 pub const MAX_LINT_BYTES: usize = 4 * 1024 * 1024;
+/// XML nodes one lint parses.
+const MAX_LINT_XML_NODES: u32 = 1_000_000;
+/// What an XML body may contain before it is parsed (the body can come from
+/// an imported collection). The parser copies the namespaces in scope for
+/// every element that declares one and compares each attribute with every
+/// earlier one on its element, names and full namespace URIs, so both are
+/// bounded before it runs. Names, prefixes and URIs are allowed as long as a
+/// WSDL import allows them, so an imported envelope lints; the bounds keep a
+/// body to about 2^20 comparisons of at most 3 KiB and (4096/2)^2 = 2^22
+/// copied namespace references (8 MiB).
+const LINT_XML_LIMITS: XmlLimits = XmlLimits {
+    attributes_per_element: 256,
+    attribute_pairs: 1 << 20,
+    attribute_name_bytes: 1_024,
+    xmlns_declarations: 4_096,
+    xmlns_prefix_bytes: 256,
+    xmlns_uri_bytes: 2_048,
+};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LintIssue {
@@ -42,10 +61,17 @@ pub fn xml(text: &str) -> LintResult {
     if text.len() > MAX_LINT_BYTES {
         return LintResult::Skipped { reason: format!("body larger than {MAX_LINT_BYTES} bytes") };
     }
+    // Counted in one pass before the parser does work that grows with the
+    // square of the namespace declarations or of an element's attributes.
+    if let Err(e) = check_xml_limits(text, &LINT_XML_LIMITS) {
+        let message = format!("XML too complex to lint safely ({e}); the body was not parsed");
+        return LintResult::Invalid { issues: vec![LintIssue { line: 1, column: 1, message }] };
+    }
     // `allow_dtd: false` makes the parser reject real DTDs with `DtdDetected`
     // while accepting declaration-like text inside comments and CDATA, where
-    // `<!DOCTYPE`/`<!ENTITY` are literal characters rather than markup.
-    let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: 1_000_000, ..Default::default() };
+    // `<!DOCTYPE`/`<!ENTITY` are literal characters rather than markup. The
+    // pre-parse scan above relies on it: it stops at a DOCTYPE.
+    let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_LINT_XML_NODES, ..Default::default() };
     match roxmltree::Document::parse_with_options(text, opts) {
         Ok(_) => LintResult::Valid,
         // A real DTD is refused without entity expansion or external fetches.
@@ -106,5 +132,62 @@ mod tests {
         );
         // A bare entity declaration in element content is not markup either.
         assert!(matches!(xml(r#"<r><!ENTITY x "y"></r>"#), LintResult::Invalid { .. }));
+    }
+
+    /// `depth` nested elements that each declare a namespace.
+    fn nested_namespaces(depth: usize) -> String {
+        let mut s = String::new();
+        for i in 0..depth {
+            s.push_str(&format!("<e xmlns:p{i}=\"urn:n{i}\">"));
+        }
+        s.push_str(&"</e>".repeat(depth));
+        s
+    }
+
+    /// `elements` children of one root, each with `attributes` attributes in
+    /// one namespace whose URI is `uri_bytes` long.
+    fn wide_elements(elements: usize, attributes: usize, uri_bytes: usize) -> String {
+        let mut s = format!("<r xmlns:p=\"{}\">", "u".repeat(uri_bytes));
+        for _ in 0..elements {
+            s.push_str("<c");
+            for i in 0..attributes {
+                s.push_str(&format!(" p:a{i}=\"\""));
+            }
+            s.push_str("/>");
+        }
+        s.push_str("</r>");
+        s
+    }
+
+    fn too_complex(r: &LintResult) -> bool {
+        matches!(r, LintResult::Invalid { issues } if issues[0].message.starts_with("XML too complex to lint safely"))
+    }
+
+    /// GHSA-mvjp-hhjj-mh63: documents whose namespace or attribute work grows
+    /// with the square of their size are a lint finding, found before parsing.
+    #[test]
+    fn xml_too_complex_to_parse_is_a_lint_finding() {
+        let started = std::time::Instant::now();
+        let r = xml(&nested_namespaces(5_000));
+        assert!(too_complex(&r), "{r:?}");
+        assert!(format!("{r:?}").contains("more than 4096 namespace declarations"), "{r:?}");
+        let r = xml(&wide_elements(1, 300, 16));
+        assert!(too_complex(&r) && format!("{r:?}").contains("more than 256 attributes on one element"), "{r:?}");
+        // Each element is within the per-element bound; together they are not.
+        let r = xml(&wide_elements(60, 200, 2_000));
+        assert!(too_complex(&r) && format!("{r:?}").contains("attribute pairs"), "{r:?}");
+        let r = xml(&wide_elements(1, 2, 3_000));
+        assert!(too_complex(&r) && format!("{r:?}").contains("namespace URI longer than 2048 bytes"), "{r:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn xml_within_the_limits_still_lints() {
+        let envelope = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:m="urn:x"><soap:Body><m:Ping a="1" b="2">1</m:Ping></soap:Body></soap:Envelope>"#;
+        assert_eq!(xml(envelope), LintResult::Valid);
+        assert_eq!(xml(&nested_namespaces(1_000)), LintResult::Valid);
+        assert_eq!(xml(&wide_elements(20, 200, 2_000)), LintResult::Valid);
+        // The scan passes malformed text on to the parser, which reports it.
+        assert!(matches!(xml("<r a=\"1\"><c></r>"), LintResult::Invalid { issues } if !issues[0].message.contains("too complex")));
     }
 }

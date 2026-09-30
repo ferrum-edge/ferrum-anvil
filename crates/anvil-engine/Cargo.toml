@@ -12,6 +12,7 @@ anvil-domain.workspace = true
 anvil-transport.workspace = true
 anvil-diagnostics.workspace = true
 anvil-auth.workspace = true
+anvil-xml-limits.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true

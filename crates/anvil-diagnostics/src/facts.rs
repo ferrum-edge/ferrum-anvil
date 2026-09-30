@@ -11,6 +11,7 @@
 use anvil_domain::execution::*;
 use anvil_domain::outcome::ProtocolStatus;
 use anvil_domain::request::Protocol;
+use anvil_xml_limits::{XmlLimits, check_xml_limits};
 
 /// Whether the destination is an explicitly trusted Ferrum gateway.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -71,6 +72,10 @@ pub struct BodyFacts {
     pub soap_fault: Option<SoapFault>,
     pub graphql: Option<GraphQlResult>,
     pub is_html: bool,
+    /// Why an XML body was not parsed for a SOAP fault: the pre-parse scan
+    /// found it over the limits (`SOAP_FAULT_XML_LIMITS`), so no fault can be
+    /// reported from it.
+    pub xml_not_inspected: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +92,22 @@ pub struct GraphQlResult {
 }
 
 const MAX_PARSE: usize = 256 * 1024;
+/// XML nodes parsed to find a SOAP fault.
+const SOAP_FAULT_MAX_NODES: u32 = 50_000;
+/// What an XML response body may contain before it is parsed for a SOAP
+/// fault (every XML response up to [`MAX_PARSE`] bytes is). The parser copies
+/// the namespaces in scope for every element that declares one and compares
+/// each attribute with every earlier one on its element, names and full
+/// namespace URIs; with these bounds that stays under 2^18 comparisons of at
+/// most 768 bytes and (1024/2)^2 = 2^18 copied namespace references (512 KiB).
+const SOAP_FAULT_XML_LIMITS: XmlLimits = XmlLimits {
+    attributes_per_element: 256,
+    attribute_pairs: 1 << 18,
+    attribute_name_bytes: 256,
+    xmlns_declarations: 1_024,
+    xmlns_prefix_bytes: 128,
+    xmlns_uri_bytes: 512,
+};
 
 fn floor_char_boundary(s: &str, i: usize) -> usize {
     let mut end = i.min(s.len());
@@ -168,7 +189,10 @@ pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Reda
             f.json_canonical = Some(v);
         }
     } else if (trimmed.first() == Some(&b'<')) && (ct.contains("xml") || ct.is_empty() || ct.contains("soap")) {
-        f.soap_fault = soap_fault(trimmed, redact);
+        match soap_fault(trimmed, redact) {
+            Ok(fault) => f.soap_fault = fault,
+            Err(why) => f.xml_not_inspected = Some(why),
+        }
     }
     f
 }
@@ -179,12 +203,21 @@ fn trim_ascii(b: &[u8]) -> &[u8] {
     &b[start..end.max(start)]
 }
 
-/// SOAP 1.1/1.2 fault detection. roxmltree rejects DTDs by default, so no
-/// entity expansion or external resolution can occur.
-fn soap_fault(xml: &[u8], redact: Redact<'_>) -> Option<SoapFault> {
-    let text = std::str::from_utf8(xml).ok()?;
-    let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: 50_000, ..Default::default() };
-    let doc = roxmltree::Document::parse_with_options(text, opts).ok()?;
+/// SOAP 1.1/1.2 fault detection. DTDs are refused, so no entity expansion
+/// or external resolution can occur. `Err` says why the body was not parsed
+/// (it is over the pre-parse limits). A body that is not XML, or has more
+/// than `SOAP_FAULT_MAX_NODES` nodes, has no fault.
+fn soap_fault(xml: &[u8], redact: Redact<'_>) -> Result<Option<SoapFault>, String> {
+    let Ok(text) = std::str::from_utf8(xml) else { return Ok(None) };
+    // Counted in one pass before the parser does work that grows with the
+    // square of the namespace declarations or of an element's attributes.
+    // The scan stops at a DOCTYPE, which the parser then refuses.
+    check_xml_limits(text, &SOAP_FAULT_XML_LIMITS).map_err(|e| e.to_string())?;
+    let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: SOAP_FAULT_MAX_NODES, ..Default::default() };
+    Ok(roxmltree::Document::parse_with_options(text, opts).ok().and_then(|doc| fault_in(&doc, redact)))
+}
+
+fn fault_in(doc: &roxmltree::Document<'_>, redact: Redact<'_>) -> Option<SoapFault> {
     let root = doc.root_element();
     if root.tag_name().name() != "Envelope" {
         return None;

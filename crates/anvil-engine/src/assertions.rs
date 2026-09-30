@@ -6,6 +6,29 @@ use anvil_domain::assertions::*;
 use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::{ResponseRecord, StreamTranscript};
 use anvil_domain::outcome::{ProtocolStatus, TransportState};
+use anvil_xml_limits::{XmlLimits, check_xml_limits};
+
+/// XML nodes an XPath assertion or extraction parses. A response body can be
+/// up to 256 MiB, and the parsed tree costs more than the text.
+const XPATH_MAX_NODES: u32 = 4_000_000;
+/// What a response body may contain before it is parsed for XPath. The
+/// parser copies the namespaces in scope for every element that declares one
+/// and compares each attribute with every earlier one on its element, names
+/// and full namespace URIs; with these bounds a body of any size stays under
+/// about 2^22 comparisons of at most 768 bytes and (8192/2)^2 = 2^24 copied
+/// namespace references (32 MiB). The declarations are counted, not the
+/// namespaces in scope, so the cap leaves room for services that declare the
+/// same prefix again on many elements.
+const XPATH_XML_LIMITS: XmlLimits = XmlLimits {
+    attributes_per_element: 256,
+    attribute_pairs: 1 << 22,
+    attribute_name_bytes: 256,
+    xmlns_declarations: 8_192,
+    xmlns_prefix_bytes: 128,
+    xmlns_uri_bytes: 512,
+};
+/// How a body over those bounds is reported.
+const TOO_COMPLEX: &str = "XML too complex to evaluate safely";
 
 pub struct Observed<'a> {
     pub response: Option<&'a ResponseRecord>,
@@ -189,12 +212,20 @@ fn xpath_elements<'a, 'i>(
 /// `/a/b`, `//b`, `/a/b[2]`, `/a/*`, `/a/@attr`, `//@attr`, `/a/text()`.
 /// Names match local names (namespace prefixes ignored). The result is the
 /// first selected node in document order: an element's full text, an
-/// attribute value or a text node. Any other syntax is an error.
+/// attribute value or a text node. Any other syntax is an error, and so is a
+/// body over `XPATH_XML_LIMITS` or `XPATH_MAX_NODES` ("XML too complex to
+/// evaluate safely"), which is not parsed.
 pub fn xpath(body: &[u8], path: &str) -> Result<Option<String>, String> {
     let steps = parse_xpath(path)?;
     let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8".to_string())?;
-    let doc = roxmltree::Document::parse_with_options(text, roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() })
-        .map_err(|e| format!("body is not XML: {e}"))?;
+    // A malicious server controls the body: bound the parser's work before it
+    // runs. The scan relies on DTDs being refused (it stops at a DOCTYPE).
+    check_xml_limits(text, &XPATH_XML_LIMITS).map_err(|e| format!("{TOO_COMPLEX} ({e})"))?;
+    let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: XPATH_MAX_NODES, ..Default::default() };
+    let doc = roxmltree::Document::parse_with_options(text, opts).map_err(|e| match e {
+        roxmltree::Error::NodesLimitReached => format!("{TOO_COMPLEX} (more than {XPATH_MAX_NODES} nodes)"),
+        e => format!("body is not XML: {e}"),
+    })?;
     let mut nodes: Vec<roxmltree::Node> = vec![doc.root()];
     for step in steps {
         match step {

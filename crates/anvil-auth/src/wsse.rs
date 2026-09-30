@@ -9,6 +9,7 @@
 
 use crate::AuthError;
 use anvil_domain::auth::WssePasswordType;
+use anvil_xml_limits::{XmlLimits, check_xml_limits};
 use base64::Engine;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sha1::{Digest, Sha1};
@@ -18,6 +19,23 @@ const WSU_NS: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-ws
 const PW_TEXT: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText";
 const PW_DIGEST: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest";
 const B64_ENC: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary";
+/// XML nodes one envelope may have, as a request body lint allows.
+const MAX_ENVELOPE_NODES: u32 = 1_000_000;
+/// What an envelope may contain before it is parsed (it can come from an
+/// imported collection). The parser copies the namespaces in scope for every
+/// element that declares one and compares each attribute with every earlier
+/// one on its element, names and full namespace URIs, so both are bounded
+/// before it runs, as for a request body lint: names, prefixes and URIs as
+/// long as a WSDL import allows, at most 2^20 attribute pairs and
+/// (4096/2)^2 = 2^22 copied namespace references (8 MiB).
+const ENVELOPE_XML_LIMITS: XmlLimits = XmlLimits {
+    attributes_per_element: 256,
+    attribute_pairs: 1 << 20,
+    attribute_name_bytes: 1_024,
+    xmlns_declarations: 4_096,
+    xmlns_prefix_bytes: 256,
+    xmlns_uri_bytes: 2_048,
+};
 
 /// PasswordDigest = Base64(SHA-1(nonce_bytes || created || password)).
 pub fn password_digest(nonce: &[u8], created: &str, password: &str) -> String {
@@ -112,9 +130,18 @@ pub fn insert_security_token(
         }
     };
     let text = std::str::from_utf8(body).map_err(|_| AuthError::Invalid("SOAP envelope is not UTF-8".into()))?;
-    let opts = roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() };
-    let doc = roxmltree::Document::parse_with_options(text, opts)
-        .map_err(|e| AuthError::Invalid(format!("SOAP envelope is not well-formed XML: {e}")))?;
+    // Counted in one pass before the parser does work that grows with the
+    // square of the namespace declarations or of an element's attributes.
+    // The scan stops at a DOCTYPE, which the parser then refuses.
+    check_xml_limits(text, &ENVELOPE_XML_LIMITS)
+        .map_err(|e| AuthError::Invalid(format!("SOAP envelope is too complex to parse safely: {e}")))?;
+    let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_ENVELOPE_NODES, ..Default::default() };
+    let doc = roxmltree::Document::parse_with_options(text, opts).map_err(|e| match e {
+        roxmltree::Error::NodesLimitReached => {
+            AuthError::Invalid(format!("SOAP envelope is too complex to parse safely: more than {MAX_ENVELOPE_NODES} nodes"))
+        }
+        e => AuthError::Invalid(format!("SOAP envelope is not well-formed XML: {e}")),
+    })?;
     let env = doc.root_element();
     if env.tag_name().name() != "Envelope" {
         return Err(AuthError::Invalid("WS-Security requires a SOAP Envelope body".into()));
@@ -198,5 +225,74 @@ mod tests {
     fn rejects_dtd_bearing_envelopes() {
         let env = br#"<!DOCTYPE x [<!ENTITY a "b">]><Envelope><Body/></Envelope>"#;
         assert!(insert_security(env, "a", "b", WssePasswordType::PasswordText, None, None, Utc::now()).is_err());
+    }
+
+    const SOAP_NS: &str = "http://schemas.xmlsoap.org/soap/envelope/";
+
+    /// An envelope binding `m` to a URI of `uri_bytes`, with `body` in its Body.
+    fn envelope(uri_bytes: usize, body: &str) -> String {
+        let uri = "u".repeat(uri_bytes);
+        format!(r#"<soap:Envelope xmlns:soap="{SOAP_NS}" xmlns:m="{uri}"><soap:Body>{body}</soap:Body></soap:Envelope>"#)
+    }
+
+    /// `depth` nested elements that each declare a namespace.
+    fn nested_namespaces(depth: usize) -> String {
+        let mut s = String::new();
+        for i in 0..depth {
+            s.push_str(&format!("<e xmlns:p{i}=\"urn:n{i}\">"));
+        }
+        s.push_str(&"</e>".repeat(depth));
+        s
+    }
+
+    /// `elements` elements with `attributes` attributes each in the `m` namespace.
+    fn wide_elements(elements: usize, attributes: usize) -> String {
+        let mut s = String::new();
+        for _ in 0..elements {
+            s.push_str("<m:c");
+            for i in 0..attributes {
+                s.push_str(&format!(" m:a{i}=\"\""));
+            }
+            s.push_str("/>");
+        }
+        s
+    }
+
+    fn insert(env: &str) -> Result<Vec<u8>, AuthError> {
+        insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordText, Some(300), None, Utc::now())
+    }
+
+    /// GHSA-mvjp-hhjj-mh63: an envelope whose namespace or attribute work
+    /// grows with the square of its size is refused before it is parsed.
+    #[test]
+    fn refuses_envelopes_too_complex_to_parse() {
+        let started = std::time::Instant::now();
+        let envelopes = [
+            (envelope(16, &nested_namespaces(5_000)), "more than 4096 namespace declarations"),
+            (envelope(2_000, &wide_elements(1, 300)), "more than 256 attributes on one element"),
+            // Each element is within the per-element bound; together they are not.
+            (envelope(2_000, &wide_elements(60, 200)), "attribute pairs"),
+            (envelope(3_000, ""), "a namespace URI longer than 2048 bytes"),
+        ];
+        for (env, why) in &envelopes {
+            let e = insert(env).expect_err(why).to_string();
+            assert!(e.starts_with("SOAP envelope is too complex to parse safely: "), "{e}");
+            assert!(e.contains(why), "{e}");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn inserts_into_envelopes_within_the_limits() {
+        let envelopes = [
+            envelope(16, "<m:Ping>1</m:Ping>"),
+            envelope(2_000, &wide_elements(20, 200)),
+            envelope(16, &nested_namespaces(1_000)),
+        ];
+        for env in &envelopes {
+            let out = String::from_utf8(insert(env).unwrap()).unwrap();
+            assert!(out.contains("<soap:Header><wsse:Security"), "{}", &out[..200]);
+            assert!(out.ends_with("</soap:Body></soap:Envelope>"));
+        }
     }
 }

@@ -7,6 +7,7 @@ use anvil_domain::assertions::{Assertion, AssertionKind, AssertionResult, Compar
 use anvil_domain::outcome::{ProtocolStatus, TransportState};
 use anvil_engine::assertions::{Observed, evaluate, extract, xpath};
 use anvil_engine::redact::Redactor;
+use std::time::{Duration, Instant};
 
 const ONE_ITEM: &[u8] = br#"<root><item id="present">first</item></root>"#;
 
@@ -187,4 +188,71 @@ fn extraction_errors_name_the_variable() {
     let out = extract(&[xpath_extraction("/root/item")], None, b"not xml", None);
     let e = out[0].as_ref().unwrap_err();
     assert!(e.starts_with("extraction for 'id': body is not XML"), "{e}");
+}
+
+/// `depth` nested elements that each declare a namespace.
+fn nested_namespaces(depth: usize) -> Vec<u8> {
+    let mut s = String::new();
+    for i in 0..depth {
+        s.push_str(&format!("<e xmlns:p{i}=\"urn:n{i}\">"));
+    }
+    s.push_str(&"</e>".repeat(depth));
+    s.into_bytes()
+}
+
+/// `elements` children of one root, each with `attributes` attributes in one
+/// namespace whose URI is `uri_bytes` long.
+fn wide_elements(elements: usize, attributes: usize, uri_bytes: usize) -> Vec<u8> {
+    let mut s = format!("<r xmlns:p=\"{}\">", "u".repeat(uri_bytes));
+    for _ in 0..elements {
+        s.push_str("<c");
+        for i in 0..attributes {
+            s.push_str(&format!(" p:a{i}=\"\""));
+        }
+        s.push_str("/>");
+    }
+    s.push_str("</r>");
+    s.into_bytes()
+}
+
+/// GHSA-mvjp-hhjj-mh63: a response body whose namespace or attribute work
+/// grows with the square of its size is not parsed; assertions on it fail
+/// and extractions from it fail, promptly.
+#[test]
+fn xml_too_complex_to_evaluate_fails_assertions_and_extractions() {
+    let started = Instant::now();
+    let bodies = [
+        (nested_namespaces(20_000), "more than 8192 namespace declarations"),
+        (wide_elements(1, 300, 16), "more than 256 attributes on one element"),
+        // Each element is within the per-element bound; together they are not.
+        (wide_elements(200, 250, 500), "attribute pairs"),
+        (wide_elements(1, 2, 600), "a namespace URI longer than 512 bytes"),
+    ];
+    for (body, why) in &bodies {
+        for comparison in [Comparison::Exists, Comparison::NotExists] {
+            let r = &observe(body, &[xpath_assertion("//c/@a0", comparison)])[0];
+            assert!(!r.passed, "{why}: {}", r.message);
+            assert!(r.message.starts_with("could not evaluate: XML too complex to evaluate safely ("), "{}", r.message);
+            assert!(r.message.contains(why), "{}", r.message);
+            assert_eq!(r.actual, None);
+        }
+        let out = extract(&[xpath_extraction("//c/@a0")], None, body, None);
+        let e = out[0].as_ref().unwrap_err();
+        assert!(e.starts_with("extraction for 'id': XML too complex to evaluate safely"), "{e}");
+    }
+    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+}
+
+#[test]
+fn xml_within_the_limits_is_evaluated() {
+    let wide = wide_elements(20, 250, 500);
+    let r = &observe(&wide, &[xpath_assertion("//c/@a249", Comparison::Exists)])[0];
+    assert!(r.passed, "{}", r.message);
+    assert_eq!(xpath(&nested_namespaces(1_000), "//e/@missing").unwrap(), None);
+    // A service may declare the same prefix again on every element.
+    let redeclared = format!("<r>{}</r>", r#"<m:i xmlns:m="urn:m">v</m:i>"#.repeat(5_000));
+    assert_eq!(xpath(redeclared.as_bytes(), "/r/i[5000]").unwrap().as_deref(), Some("v"));
+    let envelope = br#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><m:R xmlns:m="urn:m" m:id="7">ok</m:R></soap:Body></soap:Envelope>"#;
+    assert_eq!(xpath(envelope, "/Envelope/Body/R").unwrap().as_deref(), Some("ok"));
+    assert_eq!(xpath(envelope, "//R/@id").unwrap().as_deref(), Some("7"));
 }

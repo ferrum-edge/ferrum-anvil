@@ -240,6 +240,7 @@ name = "anvil-auth"
 version = "0.1.0"
 dependencies = [
  "anvil-domain",
+ "anvil-xml-limits",
  "base64 0.23.1",
  "chrono",
  "hex",
@@ -345,6 +346,7 @@ name = "anvil-diagnostics"
 version = "0.1.0"
 dependencies = [
  "anvil-domain",
+ "anvil-xml-limits",
  "chrono",
  "jsonschema",
  "regex",
@@ -377,6 +379,7 @@ dependencies = [
  "anvil-domain",
  "anvil-fixtures",
  "anvil-transport",
+ "anvil-xml-limits",
  "base64 0.23.1",
  "bytes",
  "chrono",
@@ -477,6 +480,7 @@ name = "anvil-import"
 version = "0.1.0"
 dependencies = [
  "anvil-domain",
+ "anvil-xml-limits",
  "base64 0.23.1",
  "chrono",
  "hex",
@@ -666,6 +670,10 @@ dependencies = [
  "zeroize",
  "zstd",
 ]
+
+[[package]]
+name = "anvil-xml-limits"
+version = "0.1.0"
 
 [[package]]
 name = "anyhow"
