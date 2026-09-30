@@ -217,7 +217,7 @@ pub fn parse_document(bytes: &[u8], opts: &ImportOptions) -> Result<(serde_json:
         return Err(ImportError::TooLarge { size: bytes.len(), max: opts.max_bytes });
     }
     let text = detect::decode_text(bytes).map_err(|message| ImportError::Unrecognized { message })?;
-    structured::parse(text, opts.max_nodes)
+    structured::parse(text, structured::Limits::for_input(opts.max_nodes, opts.max_bytes))
 }
 
 /// Parse an OpenAPI 3.0/3.1/3.2 or Swagger 2.0 document without importing
