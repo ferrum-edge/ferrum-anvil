@@ -79,8 +79,8 @@ Exact commands are in `docs/release.md` → "Local verification record".
 | `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo test --workspace --exclude anvil-desktop` | 93 test binaries, 716 passed, 0 failed, 2 ignored (the real OS keychain round trip, run by CI on each OS; the Python `websockets` interop check) |
 | Renderer (`tsc`, `vitest`) | clean; 78 passed |
-| Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway on the pinned Ferrum Edge v0.9.8) | 9 spec files, 18 tests passed (earlier also on the release-profile e2e build) |
-| `anvil-lab [--release <release>] run <profile> --untrusted-pass` (13 profiles) | v0.9.8 (the default pin), v0.9.7 and v0.9.5 each: 530 passed, 0 failed, 19 skipped with stated reasons |
+| Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway on Ferrum Edge 0.9.7) | 9 spec files, 18 tests passed (earlier also on the release-profile e2e build) |
+| `anvil-lab [--release v0.9.5] run <profile> --untrusted-pass` (13 profiles) | v0.9.7 and v0.9.5 each: 530 passed, 0 failed, 19 skipped with stated reasons. This local record predates the v0.9.8 default pin; v0.9.8 is exercised by the nightly lab in CI, which runs all three releases. |
 | Release check on the production `.app`, `.dmg`, raw binary and CLI, with runtime probe | pass. The e2e build fails as required. |
 | Plaintext-at-rest audit (profile files, WAL/SHM side files, temp files) | no leak |
 | `cargo deny`, license inventory, `gitleaks` over the branch | clean |
