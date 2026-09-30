@@ -518,12 +518,14 @@ impl<'a> ModelBuilder<'a> {
         let mut used_tags: HashSet<&str> = HashSet::new();
         let mut used_schemes: HashSet<String> = HashSet::new();
         let mut methods_by_path: HashMap<&str, Vec<&str>> = HashMap::new();
+        // The document's requirements once; each operation adds only its own.
+        used_schemes.extend(requirement_names(root.get("security").and_then(Value::as_array)));
         for op in &ops {
             if let Some(id) = op.operation_id() {
                 *id_counts.entry(id).or_default() += 1;
             }
             used_tags.extend(op.op.get("tags").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str));
-            used_schemes.extend(requirement_names(effective_security(spec, op)));
+            used_schemes.extend(requirement_names(op.op.get("security").and_then(Value::as_array)));
             methods_by_path.entry(op.path.as_str()).or_default().push(op.method.as_str());
         }
         let declared_tag_set: HashSet<String> = declared_tags.iter().cloned().collect();
@@ -757,17 +759,23 @@ impl<'a> ModelBuilder<'a> {
         let params = parameters(spec, op);
         let body = request_body(spec, op);
         let resps = responses(spec, op);
+        let security_reqs = effective_security(spec, op);
+        let security_names = requirement_names(security_reqs);
+        // Everything below is proportional to these (inherited parameters and
+        // the document's security count for every operation).
         self.work += 1
             + params.len()
-            + resps.iter().map(|r| 1 + r.media.len()).sum::<usize>()
+            + security_names.len()
+            + resps
+                .iter()
+                .map(|r| 1 + r.media.len() + r.value.get("headers").and_then(Value::as_object).map_or(0, |h| h.len()))
+                .sum::<usize>()
             + body.as_ref().map_or(0, |b| b.media.len())
             + op.item.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
             + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len);
         let tags = list_of_strings(op.op.get("tags")).unwrap_or_default();
         let template = template_params(&op.path);
         let path_params: Vec<&str> = params.iter().filter(|p| p.location == "path").map(|p| p.name.as_str()).collect();
-        let security_reqs = effective_security(spec, op);
-        let security_names = requirement_names(security_reqs);
         let codes: Vec<&str> = resps.iter().map(|r| r.code.as_str()).collect();
         let class = |c: &str, first: char| c.starts_with(first);
         // The same name and location twice in one parameter list.
@@ -822,7 +830,7 @@ impl<'a> ModelBuilder<'a> {
                 "undeclared_path_params": template.iter().filter(|t| !path_params.contains(&t.as_str())).collect::<Vec<_>>(),
                 "unused_path_params": path_params.iter().filter(|p| !template.iter().any(|t| t == *p)).collect::<Vec<_>>(),
                 "undeclared_tags": list_of_strings(op.op.get("tags")).unwrap_or_default().into_iter().filter(|t| !declared_tags.contains(t)).collect::<Vec<_>>(),
-                "undefined_security_schemes": requirement_names(security_reqs).into_iter().filter(|n| !scheme_names.contains(n)).collect::<Vec<_>>(),
+                "undefined_security_schemes": security_names.iter().filter(|n| !scheme_names.contains(*n)).collect::<Vec<_>>(),
                 "duplicate_parameters": dup_params,
                 "extensions": extensions(op.op),
             }),
@@ -863,7 +871,8 @@ impl<'a> ModelBuilder<'a> {
             }
         }
 
-        if let Some(body) = &body {
+        // A shared (`$ref`'d) body or response is one target: built once.
+        if let Some(body) = body.as_ref().filter(|b| !self.seen.contains(&(TargetKind::RequestBody, b.pointer.clone()))) {
             let mut view = json!({
                 "required": body.required,
                 "description": opt_str(body.value, "description"),
@@ -878,6 +887,9 @@ impl<'a> ModelBuilder<'a> {
         }
 
         for r in &resps {
+            if self.seen.contains(&(TargetKind::Response, r.pointer.clone())) {
+                continue;
+            }
             let headers: Vec<String> =
                 r.value.get("headers").and_then(Value::as_object).map(|h| h.keys().cloned().collect()).unwrap_or_default();
             let mut view = json!({
@@ -927,6 +939,12 @@ impl<'a> ModelBuilder<'a> {
         label: &str,
         examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>,
     ) {
+        // A Swagger 2.0 media type shares its pointer with its response; key
+        // the target by media type too.
+        let pointer = if self.spec.is_swagger2() { format!("{}#{}", m.pointer, m.media_type) } else { m.pointer.clone() };
+        if self.seen.contains(&(TargetKind::MediaType, pointer.clone())) {
+            return;
+        }
         let obj = m.object.unwrap_or(&Value::Null);
         let has_example = if self.spec.is_swagger2() {
             obj.pointer(&format!("/examples/{}", m.media_type.replace('~', "~0").replace('/', "~1"))).is_some()
@@ -940,9 +958,6 @@ impl<'a> ModelBuilder<'a> {
             Some(c) => format!("{c} response of {label}"),
             None => format!("request body of {label}"),
         };
-        // A Swagger 2.0 media type shares its pointer with its response; key
-        // the target by media type too.
-        let pointer = if self.spec.is_swagger2() { format!("{}#{}", m.pointer, m.media_type) } else { m.pointer.clone() };
         let (ty, _, _) = m.schema.map(|s| schema_types(self.spec.deref(s, &m.schema_pointer).0)).unwrap_or((Value::Null, vec![], false));
         let mut view = json!({
             "media_type": m.media_type,

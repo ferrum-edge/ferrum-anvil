@@ -80,3 +80,20 @@ fn text_output_escapes_control_characters_from_the_spec() {
     assert!(!text.contains('\u{1b}'), "{text}");
     assert!(text.contains("\\n::stop-commands::x"), "{text}");
 }
+
+#[test]
+fn an_incomplete_lint_is_a_local_error_unless_accepted() {
+    let data = tempfile::tempdir().unwrap();
+    let params: Vec<serde_json::Value> = (0..3_000).map(|i| serde_json::json!({"name": format!("p{i}"), "in": "query"})).collect();
+    let ops: serde_json::Map<String, serde_json::Value> =
+        (0..3_000).map(|i| (format!("X{i}"), serde_json::json!({"responses": {"200": {"description": "ok"}}}))).collect();
+    let doc = serde_json::json!({"openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {"/w": {"parameters": params, "additionalOperations": ops}}});
+    let spec = data.path().join("wide.json");
+    std::fs::write(&spec, doc.to_string()).unwrap();
+    let out = anvil(data.path(), &["lint-spec", spec.to_str().unwrap(), "--fail-on", "never"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--allow-incomplete"));
+    let out = anvil(data.path(), &["lint-spec", spec.to_str().unwrap(), "--fail-on", "never", "--allow-incomplete"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("too large to lint completely"));
+}

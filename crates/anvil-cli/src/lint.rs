@@ -64,6 +64,10 @@ pub struct LintSpecArgs {
     /// Print the rules in effect and exit.
     #[arg(long)]
     list_rules: bool,
+    /// Accept a description too large to lint completely (some operations
+    /// left out, see `skipped_operations`) instead of exiting with 3.
+    #[arg(long)]
+    allow_incomplete: bool,
 }
 
 fn read_limited(path: &Path, what: &str) -> Result<Vec<u8>> {
@@ -115,6 +119,13 @@ pub fn lint_spec(a: &LintSpecArgs) -> Result<i32> {
             eprintln!("{}", summary(&report, a.fail_on));
         }
         None => std::io::stdout().write_all(out.as_bytes())?,
+    }
+    if report.skipped_operations > 0 && !a.allow_incomplete {
+        eprintln!(
+            "error: the description is too large to lint completely ({} operation(s) not checked); pass --allow-incomplete to accept that",
+            report.skipped_operations
+        );
+        return Ok(3);
     }
     Ok(if report.passes(a.fail_on.threshold()) { 0 } else { 2 })
 }

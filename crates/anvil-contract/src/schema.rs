@@ -21,11 +21,13 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 64;
+/// References followed inside one another, and nesting summed along such a
+/// chain: the validator compiles and checks schemas recursively.
+const MAX_REF_CHAIN: usize = 32;
+const MAX_CHAIN_DEPTH: usize = 512;
 /// Schema nodes a check may visit for one value with every `$ref` expanded
 /// (repeated references count each time): beyond this a schema is not used.
 pub const MAX_EXPANDED_NODES: usize = 100_000;
-/// `$ref`s followed inside one another while measuring.
-const MAX_REF_NESTING: usize = 256;
 /// Distinct `$ref` targets copied into one validator.
 const MAX_REF_TARGETS: usize = 4_096;
 
@@ -35,7 +37,7 @@ pub fn compile(spec: &Spec, schema: &Value, direction: Direction) -> Result<json
     // Validation walks the schema with references expanded: a schema that
     // fans out through repeated `$ref`s (each level twice, forty levels
     // deep) compiles cheaply and then validates for ever.
-    measure(spec, schema, &mut HashMap::new(), &mut vec![], 0)?;
+    measure(spec, schema)?;
     let wrapper = bundle(spec, schema, direction)?;
     jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
@@ -89,7 +91,8 @@ pub fn bundle(spec: &Spec, schema: &Value, direction: Direction) -> Result<Value
 }
 
 /// Keywords whose subschemas apply to a part of the value (a property, an
-/// item): a reference cycle through one of them ends with the value.
+/// item, a property name): a reference cycle through one of them ends with
+/// the value. (`dependentSchemas` applies to the same value, so it does not.)
 fn descends(keyword: &str) -> bool {
     matches!(
         keyword,
@@ -103,64 +106,132 @@ fn descends(keyword: &str) -> bool {
             | "propertyNames"
             | "unevaluatedProperties"
             | "unevaluatedItems"
-            | "dependentSchemas"
     )
 }
 
-/// Schema nodes a check may visit, with `$ref`s expanded (memoized per
-/// target), refusing more than [`MAX_EXPANDED_NODES`] and a reference
-/// cycle that does not descend into the value (it would never end).
-fn measure(
-    spec: &Spec,
-    v: &Value,
-    memo: &mut HashMap<String, usize>,
-    stack: &mut Vec<(String, usize)>,
-    descended: usize,
-) -> Result<usize, String> {
-    let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
-    let mut n = 1usize;
-    match v {
-        Value::Object(o) => {
-            if let Some(t) = o.get("$ref").and_then(Value::as_str).and_then(internal_pointer) {
-                if let Some((_, at)) = stack.iter().find(|(s, _)| *s == t) {
-                    if *at == descended {
-                        return Err("the schema refers to itself without descending into the value".into());
+/// One schema (the root, or a `$ref` target): how many objects and lists
+/// it has, and its internal references, each with whether it sits under a
+/// keyword that descends into the value.
+struct Part {
+    nodes: usize,
+    /// Deepest nesting of objects and lists.
+    depth: usize,
+    refs: Vec<(String, bool)>,
+}
+
+fn scan(v: &Value) -> Part {
+    let mut part = Part { nodes: 0, depth: 0, refs: vec![] };
+    let mut stack: Vec<(&Value, bool, usize)> = vec![(v, false, 1)];
+    while let Some((v, down, d)) = stack.pop() {
+        part.depth = part.depth.max(d);
+        match v {
+            Value::Object(o) => {
+                part.nodes += 1;
+                if let Some(t) = o.get("$ref").and_then(Value::as_str).and_then(internal_pointer) {
+                    part.refs.push((t, down));
+                }
+                for (k, child) in o {
+                    if k != "$ref" && (child.is_object() || child.is_array()) {
+                        stack.push((child, down || descends(k), d + 1));
                     }
-                } else if let Some(m) = memo.get(&t) {
-                    n = n.saturating_add(*m);
-                } else if let Some(target) = spec.root.pointer(&t) {
-                    if stack.len() >= MAX_REF_NESTING {
-                        return Err("the schema nests references too deeply".into());
-                    }
-                    stack.push((t.clone(), descended));
-                    let m = measure(spec, target, memo, stack, descended);
-                    stack.pop();
-                    let m = m?;
-                    memo.insert(t, m);
-                    n = n.saturating_add(m);
                 }
             }
-            for (k, child) in o {
-                if k == "$ref" || !(child.is_object() || child.is_array()) {
-                    continue;
-                }
-                n = n.saturating_add(measure(spec, child, memo, stack, if descends(k) { descended + 1 } else { descended })?);
-                if n > MAX_EXPANDED_NODES {
-                    return Err(too_big());
-                }
+            Value::Array(a) => {
+                part.nodes += 1;
+                stack.extend(a.iter().filter(|c| c.is_object() || c.is_array()).map(|c| (c, down, d + 1)));
             }
+            _ => {}
         }
-        Value::Array(a) => {
-            for child in a.iter().filter(|c| c.is_object() || c.is_array()) {
-                n = n.saturating_add(measure(spec, child, memo, stack, descended)?);
-                if n > MAX_EXPANDED_NODES {
-                    return Err(too_big());
-                }
-            }
-        }
-        _ => {}
     }
-    if n > MAX_EXPANDED_NODES { Err(too_big()) } else { Ok(n) }
+    part
+}
+
+const ROOT: &str = "#root";
+
+/// Check a schema before it is compiled: refuse a reference cycle that
+/// does not descend into the value (validation would never end), and a
+/// schema that expands to more than [`MAX_EXPANDED_NODES`] nodes with every
+/// `$ref` expanded (repeated references count each time). Both passes are
+/// iterative, so neither nesting nor reference chains use the call stack.
+fn measure(spec: &Spec, schema: &Value) -> Result<usize, String> {
+    let mut parts: HashMap<String, Part> = HashMap::from([(ROOT.to_string(), scan(schema))]);
+    let part_of = |parts: &mut HashMap<String, Part>, key: &str| -> Result<bool, String> {
+        if parts.contains_key(key) {
+            return Ok(true);
+        }
+        if parts.len() >= MAX_REF_TARGETS {
+            return Err(format!("the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
+        }
+        match spec.root.pointer(key) {
+            Some(v) => {
+                parts.insert(key.to_string(), scan(v));
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    };
+
+    // 1. Cycles along references that do not descend (three colours; no
+    //    shortcuts, so a cycle is found whatever path reaches it first).
+    let mut colour: HashMap<String, u8> = HashMap::from([(ROOT.to_string(), 1)]);
+    let mut stack: Vec<(String, usize)> = vec![(ROOT.to_string(), 0)];
+    while let Some((key, i)) = stack.last_mut() {
+        let next = parts[key.as_str()].refs.iter().enumerate().skip(*i).find(|(_, (_, down))| !down).map(|(j, (t, _))| (j, t.clone()));
+        let Some((j, target)) = next else {
+            colour.insert(key.clone(), 2);
+            stack.pop();
+            continue;
+        };
+        *i = j + 1;
+        match colour.get(&target).copied() {
+            Some(1) => return Err("the schema refers to itself without descending into the value".into()),
+            Some(_) => {}
+            None => {
+                if part_of(&mut parts, &target)? {
+                    colour.insert(target.clone(), 1);
+                    stack.push((target, 0));
+                }
+            }
+        }
+    }
+
+    // 2. Sizes, memoized per target; a reference back to a schema being
+    //    measured (a cycle through the value) adds nothing more.
+    let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
+    let mut size: HashMap<String, usize> = HashMap::new();
+    let mut open: HashSet<String> = HashSet::from([ROOT.to_string()]);
+    let mut stack: Vec<(String, usize, usize)> = vec![(ROOT.to_string(), 0, 0)];
+    let mut chain_depth = parts[ROOT].depth;
+    loop {
+        let Some((key, i, acc)) = stack.last_mut() else { unreachable!("the root is popped last") };
+        if let Some((target, _)) = parts[key.as_str()].refs.get(*i).cloned() {
+            *i += 1;
+            if let Some(n) = size.get(&target) {
+                *acc = acc.saturating_add(*n);
+            } else if !open.contains(&target) && part_of(&mut parts, &target)? {
+                if stack.len() >= MAX_REF_CHAIN || chain_depth + parts[target.as_str()].depth > MAX_CHAIN_DEPTH {
+                    return Err("the schema nests references too deeply".into());
+                }
+                chain_depth += parts[target.as_str()].depth;
+                open.insert(target.clone());
+                stack.push((target, 0, 0));
+            }
+            continue;
+        }
+        let total = parts[key.as_str()].nodes.saturating_add(*acc);
+        if total > MAX_EXPANDED_NODES {
+            return Err(too_big());
+        }
+        let done = key.clone();
+        stack.pop();
+        chain_depth -= parts[done.as_str()].depth;
+        open.remove(&done);
+        size.insert(done, total);
+        match stack.last_mut() {
+            Some((_, _, parent)) => *parent = parent.saturating_add(total),
+            None => return Ok(total),
+        }
+    }
 }
 
 fn collect_refs(v: &Value, out: &mut Vec<String>) -> Result<(), String> {
@@ -387,11 +458,11 @@ mod tests {
     #[test]
     fn fan_out_through_repeated_references_is_refused() {
         let mut schemas = serde_json::Map::new();
-        for i in 0..40 {
+        for i in 0..25 {
             let next = format!("#/components/schemas/S{}", i + 1);
             schemas.insert(format!("S{i}"), json!({"allOf": [{"$ref": next}, {"$ref": next}]}));
         }
-        schemas.insert("S40".into(), json!({"type": "object"}));
+        schemas.insert("S25".into(), json!({"type": "object"}));
         let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "components": {"schemas": schemas}});
         let s = spec(&doc.to_string());
         let start = std::time::Instant::now();
@@ -399,7 +470,50 @@ mod tests {
         assert!(e.contains("expands to more than"), "{e}");
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
         // A shallow chain is fine.
-        assert!(compile(&s, &json!({"$ref": "#/components/schemas/S35"}), Direction::Response).is_ok());
+        assert!(compile(&s, &json!({"$ref": "#/components/schemas/S20"}), Direction::Response).is_ok());
+    }
+
+    #[test]
+    fn a_cycle_is_found_whatever_path_reaches_it_first() {
+        // U is first reached through `additionalProperties` (descending), but
+        // V → X → U → V does not descend.
+        let s = spec(
+            r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},"components":{"schemas":{
+              "V":{"additionalProperties":{"$ref":"#/components/schemas/U"},"allOf":[{"$ref":"#/components/schemas/X"}]},
+              "X":{"allOf":[{"$ref":"#/components/schemas/U"}]},
+              "U":{"allOf":[{"$ref":"#/components/schemas/V"}]},
+              "D":{"dependentSchemas":{"x":{"$ref":"#/components/schemas/D"}}},
+              "Tree":{"type":"object","properties":{"children":{"type":"array","items":{"$ref":"#/components/schemas/Tree"}}}}}}}"##,
+        );
+        for name in ["V", "D"] {
+            let e = compile(&s, &json!({"$ref": format!("#/components/schemas/{name}")}), Direction::Response).unwrap_err();
+            assert!(e.contains("refers to itself"), "{name}: {e}");
+        }
+        // Recursion through the value is fine.
+        let tree = compile(&s, &json!({"$ref": "#/components/schemas/Tree"}), Direction::Response).unwrap();
+        assert!(tree.is_valid(&json!({"children": [{"children": []}]})));
+    }
+
+    #[test]
+    fn long_reference_chains_use_no_call_stack() {
+        let mut schemas = serde_json::Map::new();
+        for i in 0..3_000 {
+            schemas.insert(format!("C{i}"), json!({"properties": {"n": {"$ref": format!("#/components/schemas/C{}", i + 1)}}}));
+        }
+        schemas.insert("C3000".into(), json!({"type": "string"}));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "components": {"schemas": schemas}});
+        let s = spec(&doc.to_string());
+        // Measured without recursion, and refused: the validator would recurse
+        // as deep as the chain.
+        let e = compile(&s, &json!({"$ref": "#/components/schemas/C0"}), Direction::Response).unwrap_err();
+        assert!(e.contains("too deeply"), "{e}");
+        // Up to the limit it compiles and validates, even on a small stack.
+        let ok = compile(&s, &json!({"$ref": "#/components/schemas/C2970"}), Direction::Response).unwrap();
+        let mut v = json!("x");
+        for _ in 0..30 {
+            v = json!({ "n": v });
+        }
+        assert!(ok.is_valid(&v));
     }
 
     #[test]

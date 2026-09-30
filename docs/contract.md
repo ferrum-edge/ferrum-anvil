@@ -37,13 +37,15 @@ company ruleset.
   in the `pattern`/`patternProperties` of schemas, use the linear-time
   `regex` crate with a size limit; a schema whose pattern needs look-around
   or a back-reference is not used to check examples. Before a schema is
-  used, its size with every `$ref` expanded is measured (repeated
-  references count each time): one over 100,000 nodes, or one that refers
-  to itself without descending into the value (`A: allOf [B]`, `B: allOf
-  [A]`), is not used either, and the report counts the examples not checked
+  used, its references are checked without recursion: a cycle of
+  references that does not descend into the value (`A: allOf [B]`, `B:
+  allOf [A]`, or `dependentSchemas` back to itself), a chain of more than 32
+  references or 512 levels of nesting along one, or a size over 100,000
+  nodes with every `$ref` expanded (repeated references count each time),
+  and the schema is not used either, and the report counts the examples not checked
   (`examples_not_checked`). Operations look at 2 million parameters,
-  responses and media types at most in all (inherited path-level parameters
-  count for each operation); past that the remaining operations are counted
+  responses and media types at most in all (inherited path-level parameters, the document's security requirements
+  and a shared response's headers count for each operation); past that the remaining operations are counted
   in `skipped_operations` and not checked.
 - **Unresolvable references are reported, not checked.** An external,
   missing, cyclic or too deep `$ref` is skipped: the parameter, response,
@@ -250,7 +252,8 @@ without `host` has no `server` target.
 [--list-rules]` needs no profile, so it runs in CI. `-` reads the spec from
 stdin. Without `--ruleset`, the recommended rules apply. Exit codes: `0` no
 finding at or above `--fail-on` (default `error`), `2` otherwise, `3` a
-local error (unreadable file, invalid spec or ruleset). With `--output`, the
+local error (unreadable file, invalid spec or ruleset, or a description too
+large to lint completely, unless `--allow-incomplete`). With `--output`, the
 report goes to the file and a summary line to stderr. Text output escapes
 control characters and bidirectional overrides in everything that comes
 from the spec or a ruleset (errors included), so a message cannot inject a

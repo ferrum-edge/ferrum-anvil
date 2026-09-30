@@ -10,7 +10,7 @@ use anvil_import::Dialect;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Examples validated per lint (each compiles a validator).
 pub const MAX_EXAMPLE_CHECKS: usize = 1_000;
@@ -133,6 +133,8 @@ pub struct LintReport {
 
 impl LintReport {
     /// Whether no finding reaches `threshold` (`None`: always passes).
+    /// Operations left out (`skipped_operations`) are not considered: the
+    /// CLI refuses such a report unless told to accept it.
     pub fn passes(&self, threshold: Option<Severity>) -> bool {
         threshold.is_none_or(|t| self.counts.at_least(t) == 0)
     }
@@ -140,9 +142,9 @@ impl LintReport {
 
 /// Lint `spec` with `rules`.
 pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
-    let mut example_budget = if opts.validate_examples { MAX_EXAMPLE_CHECKS } else { 0 };
-    let mut examples_not_checked = 0usize;
-    let mut examples = |m: &Media<'_>, dir: Direction| example_errors(spec, m, dir, &mut example_budget, &mut examples_not_checked);
+    let mut checker =
+        ExampleChecker { budget: if opts.validate_examples { MAX_EXAMPLE_CHECKS } else { 0 }, not_checked: 0, compiled: HashMap::new() };
+    let mut examples = |m: &Media<'_>, dir: Direction| checker.check(spec, m, dir);
     let model = Model::build(spec, &mut examples);
     let mut out = Collector { spec, findings: vec![], counts: SeverityCounts::default(), seen: HashSet::new(), dropped: 0 };
     let (mut run, mut skipped) = (0, 0);
@@ -187,6 +189,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
             .then(a.message.cmp(&b.message))
     });
     let skipped_operations = model.skipped_operations;
+    let examples_not_checked = checker.not_checked;
     let (unresolved_refs, unresolved_ref_count) = spec.unresolved();
     let mut dropped = out.dropped;
     if findings.len() > opts.max_findings {
@@ -381,50 +384,71 @@ fn show_plain(v: &Value) -> String {
     }
 }
 
-/// Validate a media type's examples against its schema.
-fn example_errors(spec: &Spec, m: &Media<'_>, dir: Direction, budget: &mut usize, not_checked: &mut usize) -> Vec<String> {
-    let (Some(schema), Some(obj)) = (m.schema, m.object) else { return vec![] };
-    let json_media = {
-        let e = m.media_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-        e == "application/json" || e.ends_with("+json") || e == "*/*"
-    };
-    let mut examples: Vec<(String, &Value)> = vec![];
-    if spec.is_swagger2() {
-        if let Some(v) = obj.get("examples").and_then(|e| e.get(&m.media_type)) {
-            examples.push((format!("examples/{}", m.media_type), v));
-        }
-    } else {
-        if let Some(v) = obj.get("example") {
-            examples.push(("example".into(), v));
-        }
-        if let Some(map) = obj.get("examples").and_then(Value::as_object) {
-            for (name, ex) in map {
-                let (ex, _) = spec.deref(ex, "");
-                if let Some(v) = ex.get("value").or_else(|| ex.get("dataValue")) {
-                    examples.push((format!("examples/{name}"), v));
+/// Validates body examples against their schemas. Each validation and each
+/// compile attempt spends one unit of [`MAX_EXAMPLE_CHECKS`]; a schema is
+/// compiled once per direction however many media types share it.
+struct ExampleChecker {
+    budget: usize,
+    not_checked: usize,
+    compiled: HashMap<(String, bool), Option<jsonschema::Validator>>,
+}
+
+impl ExampleChecker {
+    fn check(&mut self, spec: &Spec, m: &Media<'_>, dir: Direction) -> Vec<String> {
+        let (Some(schema), Some(obj)) = (m.schema, m.object) else { return vec![] };
+        let json_media = {
+            let e = m.media_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            e == "application/json" || e.ends_with("+json") || e == "*/*"
+        };
+        let mut examples: Vec<(String, &Value)> = vec![];
+        if spec.is_swagger2() {
+            if let Some(v) = obj.get("examples").and_then(|e| e.get(&m.media_type)) {
+                examples.push((format!("examples/{}", m.media_type), v));
+            }
+        } else {
+            if let Some(v) = obj.get("example") {
+                examples.push(("example".into(), v));
+            }
+            if let Some(map) = obj.get("examples").and_then(Value::as_object) {
+                for (name, ex) in map {
+                    let at = crate::locate::ptr(&crate::locate::ptr(&m.pointer, "examples"), name);
+                    let Some((ex, _)) = spec.usable(ex, &at) else { continue };
+                    if let Some(v) = ex.get("value").or_else(|| ex.get("dataValue")) {
+                        examples.push((format!("examples/{name}"), v));
+                    }
                 }
             }
         }
-    }
-    // A string example of a non-JSON media type is the serialized body.
-    examples.retain(|(_, v)| json_media || !v.is_string());
-    if examples.is_empty() || *budget == 0 {
-        return vec![];
-    }
-    let Ok(validator) = schema::compile(spec, schema, dir) else {
-        *not_checked += examples.len();
-        return vec![];
-    };
-    let mut out = vec![];
-    for (name, v) in examples {
-        if *budget == 0 {
-            break;
+        // A string example of a non-JSON media type is the serialized body.
+        examples.retain(|(_, v)| json_media || !v.is_string());
+        if examples.is_empty() {
+            return vec![];
         }
-        *budget -= 1;
-        for e in validator.iter_errors(v).take(3) {
-            let at = e.instance_path().to_string();
-            out.push(if at.is_empty() { format!("{name}: {e}") } else { format!("{name}: {e} at {at}") });
+        if self.budget == 0 {
+            self.not_checked += examples.len();
+            return vec![];
         }
+        let key = (m.schema_pointer.clone(), dir == Direction::Request);
+        if !self.compiled.contains_key(&key) {
+            self.budget -= 1;
+            self.compiled.insert(key.clone(), schema::compile(spec, schema, dir).ok());
+        }
+        let Some(validator) = self.compiled.get(&key).and_then(Option::as_ref) else {
+            self.not_checked += examples.len();
+            return vec![];
+        };
+        let mut out = vec![];
+        for (name, v) in examples {
+            if self.budget == 0 {
+                self.not_checked += 1;
+                continue;
+            }
+            self.budget -= 1;
+            for e in validator.iter_errors(v).take(3) {
+                let at = e.instance_path().to_string();
+                out.push(if at.is_empty() { format!("{name}: {e}") } else { format!("{name}: {e} at {at}") });
+            }
+        }
+        out
     }
-    out
 }

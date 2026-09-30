@@ -326,11 +326,11 @@ components:
 #[test]
 fn examples_behind_an_exploding_schema_are_counted_not_checked() {
     let mut schemas = serde_json::Map::new();
-    for i in 0..40 {
+    for i in 0..25 {
         let next = format!("#/components/schemas/S{}", i + 1);
         schemas.insert(format!("S{i}"), json!({"allOf": [{"$ref": next}, {"$ref": next}]}));
     }
-    schemas.insert("S40".into(), json!({"type": "object"}));
+    schemas.insert("S25".into(), json!({"type": "object"}));
     let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "components": {"schemas": schemas},
         "paths": {"/a": {"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {
             "schema": {"$ref": "#/components/schemas/S0"}, "examples": {"a": {"value": {}}, "b": {"value": {}}}}}}}}}}});
@@ -338,4 +338,36 @@ fn examples_behind_an_exploding_schema_are_counted_not_checked() {
     let r = run(&doc.to_string(), &RuleSet::recommended());
     assert!(start.elapsed() < std::time::Duration::from_secs(10));
     assert_eq!(r.examples_not_checked, 2);
+}
+
+#[test]
+fn security_headers_and_shared_examples_count_against_the_budgets() {
+    // 20k global security schemes inherited by 3k operations sharing one
+    // response with 20k headers and an example behind a refused schema.
+    let schemes: serde_json::Map<String, serde_json::Value> =
+        (0..20_000).map(|i| (format!("k{i}"), json!({"type": "apiKey", "in": "header", "name": "X"}))).collect();
+    let requirement: serde_json::Map<String, serde_json::Value> = (0..20_000).map(|i| (format!("k{i}"), json!([]))).collect();
+    let headers: serde_json::Map<String, serde_json::Value> =
+        (0..20_000).map(|i| (format!("H{i}"), json!({"schema": {"type": "string"}}))).collect();
+    let mut schemas = serde_json::Map::new();
+    for i in 0..25 {
+        let next = format!("#/components/schemas/S{}", i + 1);
+        schemas.insert(format!("S{i}"), json!({"allOf": [{"$ref": next}, {"$ref": next}]}));
+    }
+    schemas.insert("S25".into(), json!({"type": "object"}));
+    let mut paths = serde_json::Map::new();
+    for i in 0..3_000 {
+        paths.insert(format!("/p{i}"), json!({"get": {"operationId": format!("o{i}"), "responses": {
+            "200": {"$ref": "#/components/responses/Shared"},
+            "201": {"description": "own", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/S0"}, "example": {}}}}}}}));
+    }
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "security": [requirement], "paths": paths,
+        "components": {"securitySchemes": schemes, "schemas": schemas,
+            "responses": {"Shared": {"description": "ok", "headers": headers, "content": {"application/json": {"schema": {"type": "object"}, "example": {}}}}}}});
+    let start = std::time::Instant::now();
+    let r = run(&doc.to_string(), &RuleSet::recommended());
+    assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
+    assert!(r.skipped_operations > 0, "security names and headers are charged");
+    // Every example behind the refused schema is counted, with one compile.
+    assert!(r.examples_not_checked > 0);
 }
