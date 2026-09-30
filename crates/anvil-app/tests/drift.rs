@@ -83,6 +83,10 @@ async fn history_drift_is_found_and_a_reimport_of_the_revision_resolves_it() {
     let (rev, plan) = app.drift_reimport_plan(&done.import_id, &ids, 100).unwrap();
     assert_eq!(rev.applied.len(), ids.len());
     assert_eq!(plan.added.len(), 1, "GET /echo becomes a request");
+    // Saving refuses a suggestion that is not in the fresh report.
+    let err = app.drift_revise_exact(&done.import_id, &["000000000000".to_string()], 100).unwrap_err();
+    assert!(err.to_string().contains("changed since this report"), "{err}");
+    assert_eq!(app.drift_revise_exact(&done.import_id, &ids, 100).unwrap().digest, rev.digest);
     // Only the previewed revision applies.
     let err = app.drift_reimport_apply(&done.import_id, &ids[1..], 100, &rev.digest).unwrap_err();
     assert!(err.to_string().contains("changed since the preview"), "{err}");

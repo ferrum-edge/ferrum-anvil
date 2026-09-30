@@ -141,8 +141,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   carry data too: an undeclared path keeps only short lower-case words
   (ids, emails and tokens become parameters), observed paths are not kept,
   keys of map-like objects are `*`, and property or query names that look
-  like values are left out. Parsed bodies are capped at 32 MiB per
-  analysis. A revision is written only to a file the user picks in the save
+  like values are left out. These are heuristics: a value that looks like a
+  word (a lower-case username or tenant slug in a path, a short token with
+  few digits as a key) can still appear, and the origin of a request to an
+  undeclared server is shown. Parsed bodies are capped at 32 MiB and
+  1,000,000 JSON values per analysis. A revision is written only to a file the user picks in the save
   dialog, or reimported after a preview whose digest must still match.
 - **Malicious bundle trying to enable insecure settings:** import
   normalisation (TLS bypass, plain-HTTP marker trust, credential forwarding,

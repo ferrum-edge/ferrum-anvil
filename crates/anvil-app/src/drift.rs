@@ -138,6 +138,21 @@ impl App {
         Ok(anvil_contract::revise(&spec, &report, ids))
     }
 
+    /// [`App::drift_revise`] for saving a revision the user chose from a
+    /// report they are looking at: a suggestion id names the change on this
+    /// description, so an id the fresh report lacks means that change is
+    /// different now (new traffic, a new version) and nothing is written.
+    pub fn drift_revise_exact(&self, import_id: &Id, ids: &[String], limit: usize) -> Result<Revision> {
+        let spec = self.drift_spec(import_id)?;
+        let c = self.drift_observations(import_id, limit)?;
+        let report = anvil_contract::analyze(&spec, &c.observations, &DriftOptions::default());
+        let changed = ids.iter().filter(|id| !report.suggestions.iter().any(|s| &s.id == *id)).count();
+        if changed > 0 {
+            return Err(AppError::Invalid(format!("{changed} of the chosen revisions changed since this report; check again")));
+        }
+        Ok(anvil_contract::revise(&spec, &report, ids))
+    }
+
     /// What reimporting the revised description would change.
     pub fn drift_reimport_plan(&self, import_id: &Id, ids: &[String], limit: usize) -> Result<(Revision, ReimportPlan)> {
         let rev = self.drift_revise(import_id, ids, limit)?;

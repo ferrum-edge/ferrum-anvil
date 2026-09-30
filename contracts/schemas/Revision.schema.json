@@ -27,7 +27,7 @@
       }
     },
     "digest": {
-      "description": "SHA-256 (hex) of the description and the applied suggestions with\ntheir operations: the same digest means the same revision, so a\npreview can be applied exactly as shown.",
+      "description": "SHA-256 (hex) of the description and the revised text: the same\ndigest means the same revision, so a preview can be applied exactly\nas shown.",
       "type": "string"
     }
   },

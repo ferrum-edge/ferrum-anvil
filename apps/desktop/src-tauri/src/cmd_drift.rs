@@ -90,7 +90,7 @@ pub async fn drift_reimport_apply(handle: AppHandle, import_id: String, suggesti
 #[tauri::command]
 pub async fn drift_export(handle: AppHandle, import_id: String, suggestion_ids: Vec<String>, format: String, grant: String) -> R<usize> {
     blocking(&handle, move |st| {
-        let rev = st.app()?.drift_revise(&id(&import_id)?, &suggestion_ids, LIMIT).map_err(e)?;
+        let rev = st.app()?.drift_revise_exact(&id(&import_id)?, &suggestion_ids, LIMIT).map_err(e)?;
         let text = match format.as_str() {
             "spec" => rev.text,
             "patch" => serde_json::to_string_pretty(&rev.json_patch).map_err(|x| x.to_string())? + "\n",

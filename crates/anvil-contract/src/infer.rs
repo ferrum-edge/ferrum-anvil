@@ -23,15 +23,20 @@ const MAX_NAMED_PROPERTIES: usize = 50;
 
 /// A member or parameter name from traffic that may appear in a message or a
 /// suggested description: ASCII letters, digits and `_ - . $ [ ]`, not
-/// starting with a digit, at most 64 characters and fewer than four digits.
-/// Anything else (an email, a token, an id) is data, not a name.
+/// starting with a digit, at most 64 characters, fewer than four digits,
+/// and not 16 or more characters mixing upper case, lower case and digits
+/// (a random token). Anything else (an email, a token, an id) is taken for
+/// data. A heuristic: a word-like value (`alice`) passes.
 pub fn safe_name(n: &str) -> bool {
     let b = n.as_bytes();
+    let has = |f: fn(&u8) -> bool| b.iter().any(f);
+    let token_like = b.len() >= 16 && has(u8::is_ascii_uppercase) && has(u8::is_ascii_lowercase) && has(u8::is_ascii_digit);
     !b.is_empty()
         && b.len() <= 64
         && !b[0].is_ascii_digit()
         && b.iter().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'$' | b'[' | b']'))
         && b.iter().filter(|c| c.is_ascii_digit()).count() < 4
+        && !token_like
 }
 
 /// An accumulating shape: merge samples in, then render for a dialect.
@@ -425,6 +430,12 @@ mod tests {
             json!({"type": "object", "additionalProperties": {"type": "boolean"}})
         );
         assert!(safe_name("createdAt") && safe_name("items[]") && !safe_name("user_12345") && !safe_name("a@b") && !safe_name("9lives"));
+        assert!(
+            safe_name("createdAtTimestamp")
+                && safe_name("oauth2ClientId")
+                && !safe_name("aZ3kQpLmWxYvBnRt")
+                && !safe_name("Xk9fPqLmZtRvWbNc")
+        );
     }
 
     #[test]

@@ -4,3 +4,9 @@
 # allowlisted tok-SENSITIVE- canary prefix. CI scans full history, so the original
 # commit stays visible without a history rewrite, hence this single fingerprint.
 fa40c8bc7e0dd5f62b2f36ead7f7c67b5c7a80a8:crates/anvil-engine/tests/redirect_policy.rs:generic-api-key:76
+
+# Fake JWT-shaped path segment in crates/anvil-contract/tests/drift.rs (a test that
+# observed values never reach drift reports), first pushed in commit a7b38263 on
+# branch claude/openapi-contract-drift. It encodes no real credential; later commits
+# build it at run time. CI scans full history, hence this single fingerprint.
+a7b38263c579e088c5fe03efd2f18aba50453414:crates/anvil-contract/tests/drift.rs:jwt:289

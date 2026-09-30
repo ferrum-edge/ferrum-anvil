@@ -21,6 +21,8 @@ use std::collections::{HashMap, HashSet};
 /// Distinct server base paths kept (after the ones differing only in
 /// variable names are merged).
 const MAX_BASES: usize = 64;
+/// Declared values kept per server variable segment of a base path.
+const MAX_CHOICES: usize = 64;
 
 #[derive(Debug, Clone)]
 enum Seg {
@@ -64,7 +66,8 @@ impl Seg {
 
 /// A server base path: segments that match any variable value (to route),
 /// and segments that match only a variable's `enum` or `default` (to name
-/// the base of a path nothing declares).
+/// the base of a path nothing declares). Servers whose base paths differ
+/// only in variables share one `Base`; their declared values are merged.
 struct Base {
     loose: Vec<Seg>,
     strict: Vec<Seg>,
@@ -140,6 +143,8 @@ pub struct Router<'a> {
     by_len: HashMap<usize, Vec<usize>>,
     bases: Vec<Base>,
     pub servers: Vec<Server>,
+    /// Server URLs whose base path was not kept ([`MAX_BASES`]).
+    pub dropped_servers: usize,
 }
 
 /// Where an observed request lands.
@@ -183,6 +188,9 @@ impl<'a> Router<'a> {
         // Server URLs with their variables.
         let mut urls: Vec<(String, Option<&Value>)> = vec![];
         let mut seen_urls: HashSet<String> = HashSet::new();
+        // Every server object's URL and variables, for the base paths (the
+        // same URL may declare other variable values elsewhere).
+        let mut variants: Vec<(&str, Option<&Value>)> = vec![];
         if spec.is_swagger2() {
             let base = spec.root.get("basePath").and_then(Value::as_str).unwrap_or("");
             if let Some(host) = spec.root.get("host").and_then(Value::as_str) {
@@ -206,26 +214,43 @@ impl<'a> Router<'a> {
             }
             for list in lists.into_iter().flatten().filter_map(Value::as_array) {
                 for s in list {
-                    if let Some(u) = s.get("url").and_then(Value::as_str)
-                        && seen_urls.insert(u.to_string())
-                    {
+                    let Some(u) = s.get("url").and_then(Value::as_str) else { continue };
+                    if seen_urls.insert(u.to_string()) {
                         urls.push((u.to_string(), s.get("variables")));
+                    }
+                    if s.get("variables").is_some() {
+                        variants.push((u, s.get("variables")));
                     }
                 }
             }
         }
         let mut bases: Vec<Base> = vec![Base { loose: vec![], strict: vec![] }];
-        let mut seen_bases: HashSet<String> = HashSet::from([String::new()]);
-        for (u, vars) in &urls {
-            if bases.len() >= MAX_BASES {
-                break;
-            }
+        // Routing form (`/{v}` and `/{w}` route alike) → index in `bases`.
+        let mut seen_bases: HashMap<String, usize> = HashMap::from([(String::new(), 0)]);
+        let mut dropped_servers = 0;
+        let all = urls.iter().map(|(u, v)| (u.as_str(), *v)).chain(variants);
+        for (u, vars) in all {
             let b = server_base(u);
-            let strict = strict_segments(&b, *vars);
-            // `/{v}` and `/{w}` route alike: keep one of them.
-            let key: Vec<String> = parse_segments(&b).iter().chain(&strict).map(Seg::canonical).collect();
-            if seen_bases.insert(key.join("/")) {
-                bases.push(Base { loose: parse_segments(&b), strict });
+            let loose = parse_segments(&b);
+            let strict = strict_segments(&b, vars);
+            let key = loose.iter().map(Seg::canonical).collect::<Vec<_>>().join("/");
+            match seen_bases.get(&key) {
+                Some(&i) => {
+                    for (have, add) in bases[i].strict.iter_mut().zip(strict) {
+                        if let (Seg::Choice(values), Seg::Choice(more)) = (have, add) {
+                            for v in more {
+                                if values.len() < MAX_CHOICES && !values.contains(&v) {
+                                    values.push(v);
+                                }
+                            }
+                        }
+                    }
+                }
+                None if bases.len() < MAX_BASES => {
+                    seen_bases.insert(key, bases.len());
+                    bases.push(Base { loose, strict });
+                }
+                None => dropped_servers += 1,
             }
         }
         // Longest base first.
@@ -251,7 +276,7 @@ impl<'a> Router<'a> {
                 Server { url: u.clone(), origin: origin.flatten() }
             })
             .collect();
-        Router { ops, templates, by_len, bases, servers }
+        Router { ops, templates, by_len, bases, servers, dropped_servers }
     }
 
     /// Whether `base` (observed segments) is a declared server base path.
@@ -446,6 +471,28 @@ mod tests {
         assert_eq!(op_of(&r, r.route("GET", "/r/1.json/2", None)), "mixed @");
         assert_eq!(op_of(&r, r.route("GET", "/r/x.json/2", None)), "literal @");
         assert_eq!(op_of(&r, r.route("GET", "/r/1/2", None)), "params @");
+    }
+
+    #[test]
+    fn variable_bases_with_different_defaults_are_one_base() {
+        let servers: Vec<serde_json::Value> = (0..100)
+            .map(|i| serde_json::json!({"url": "https://h.example/{v}", "variables": {"v": {"default": format!("t{i}")}}}))
+            .collect();
+        let doc = serde_json::json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "servers": servers,
+            "paths": {"/a": {"get": {}}}});
+        let s = spec(&doc.to_string());
+        let r = Router::new(&s);
+        assert_eq!(r.bases.len(), 2, "the empty base and /{{v}}");
+        assert_eq!(r.dropped_servers, 0);
+        assert_eq!(op_of(&r, r.route("GET", "https://h.example/t7/a", None)), "GET /a @/t7");
+        // Declared values name an undeclared path's base; the first 64 are kept.
+        assert_eq!(op_of(&r, r.route("GET", "https://h.example/t42/zzz", None)), "path @/t42");
+        assert_eq!(op_of(&r, r.route("GET", "https://h.example/t99/zzz", None)), "path @");
+        let many: Vec<serde_json::Value> = (0..100).map(|i| serde_json::json!({"url": format!("https://h.example/b{i}")})).collect();
+        let doc = serde_json::json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "servers": many, "paths": {}});
+        let s = spec(&doc.to_string());
+        let r = Router::new(&s);
+        assert_eq!((r.bases.len(), r.dropped_servers), (MAX_BASES, 100 - (MAX_BASES - 1)));
     }
 
     #[test]

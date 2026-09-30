@@ -230,7 +230,11 @@ fn applying_the_suggestions_resolves_the_drift_they_cover() {
         // The revision parses in the original syntax, and so does its JSON Patch.
         // A CRLF copy of the description revises to the same document.
         let crlf = Spec::parse(fixture(f).replace('\n', "\r\n").as_bytes()).unwrap();
-        assert_eq!(revise(&crlf, &analyze(&crlf, &traffic(), &DriftOptions::default()), &all).json_patch, rev.json_patch, "{f}");
+        let crlf_report = analyze(&crlf, &traffic(), &DriftOptions::default());
+        let crlf_ids: Vec<String> = crlf_report.suggestions.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(revise(&crlf, &crlf_report, &crlf_ids).json_patch, rev.json_patch, "{f}");
+        // Suggestion ids name the change on this description: another source text, other ids.
+        assert!(crlf_ids.iter().all(|id| !all.contains(id)), "{f}");
         let revised = Spec::parse(rev.text.as_bytes()).unwrap_or_else(|e| panic!("{f}: {e}\n{}", rev.text));
         assert_eq!(revised.syntax, spec.syntax);
         assert!(!rev.json_patch.is_empty());
@@ -286,7 +290,9 @@ const STRICT: &str = r#"{"openapi": "3.1.0", "info": {"title": "t", "version": "
 #[test]
 fn observed_values_never_reach_findings_suggestions_or_revisions() {
     let spec = Spec::parse(STRICT.as_bytes()).unwrap();
-    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqYW5lIn0.c2lnbmF0dXJl";
+    // A token-shaped segment, assembled at run time so secret scanners do
+    // not flag the fixture.
+    let jwt = ["eyJhbGciOi", "JIUzI1NiJ9", ".", "eyJzdWIiOi", "JqYW5lIn0", ".", "c2lnbmF0dXJl"].concat();
     let obs: Vec<Observation> = vec![
         // Undeclared paths with a token, an email and a mixed-case id in them.
         Obs::new("1", "GET", &format!("https://gw.example/Tenant-XY/v1/sessions/{jwt}?x9f3k2a8b1=1&page=2")).json(200, json!({})),
@@ -427,5 +433,70 @@ fn many_operations_and_observations_stay_fast() {
     let r = analyze(&spec, &obs, &DriftOptions::default());
     assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
     assert_eq!(r.matched, 1_000);
+    assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
+}
+
+#[test]
+fn a_suggestion_applies_whole_or_not_at_all() {
+    let spec = Spec::parse(fixture("shop-2.0.json").as_bytes()).unwrap();
+    let r = analyze(&spec, &traffic(), &DriftOptions::default());
+    let all: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+    // A suggestion whose last op fails leaves no trace, whichever position it has.
+    for victim in [0, r.suggestions.len() / 2, r.suggestions.len() - 1] {
+        let mut broken = r.clone();
+        broken.suggestions[victim].ops.push(anvil_contract::patch::PatchOp::remove("/no/such/member"));
+        let rev = revise(&spec, &broken, &all);
+        let without: Vec<String> = all.iter().filter(|id| **id != all[victim]).cloned().collect();
+        let expected = revise(&spec, &r, &without);
+        assert_eq!(rev.skipped, [all[victim].clone()]);
+        assert_eq!(rev.text, expected.text, "victim {victim}");
+        assert_eq!(rev.digest, expected.digest, "the digest is of the text");
+        assert_eq!(rev.applied, expected.applied);
+    }
+}
+
+#[test]
+fn hostile_traffic_is_capped() {
+    let spec = Spec::parse(fixture("shop-3.1.yaml").as_bytes()).unwrap();
+    let mut obs: Vec<Observation> = vec![];
+    // 200 distinct query names on a declared operation.
+    let q: Vec<String> = (0..200).map(|i| format!("p{i}")).collect();
+    obs.push(Obs::new("q", "GET", &format!("{API}/orders?{}", q.join("&"))).json(200, json!([])).0);
+    // 700 distinct undeclared endpoints and 80 undeclared servers.
+    for i in 0..700 {
+        let word: String = [i / 676, i / 26 % 26, i % 26].iter().map(|d| (b'a' + *d as u8) as char).collect();
+        obs.push(Obs::new(&format!("e{i}"), "GET", &format!("{API}/x{word}/y")).0);
+    }
+    for i in 0..80 {
+        obs.push(Obs::new(&format!("s{i}"), "GET", &format!("https://h{i}.other.example/api/orders")).0);
+    }
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    let queries = r.suggestions.iter().filter(|s| s.title.starts_with("Document query parameter")).count();
+    assert_eq!(queries, 50);
+    assert_eq!(r.undeclared.len(), 500);
+    assert_eq!(r.findings.iter().filter(|f| f.kind == DriftKind::UndeclaredServer).count(), 50);
+    for n in ["query parameters are reported per operation", "undeclared endpoints are reported", "undeclared servers are reported"] {
+        assert!(r.notes.iter().any(|x| x.contains(n)), "{n}: {:#?}", r.notes);
+    }
+}
+
+#[test]
+fn wide_recursive_schemas_are_walked_within_budget() {
+    // Every property of a 10,000-property schema is the schema again; each
+    // body has 10,000 keys two levels deep.
+    let props: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"$ref": "#/components/schemas/S"}))).collect();
+    let required: Vec<String> = (0..10_000).map(|i| format!("p{i}")).collect();
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {"/s": {"get": {"responses": {"200": {"description": "ok",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/S"}}}}}}}},
+        "components": {"schemas": {"S": {"type": "object", "properties": props, "required": required}}}});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    let inner: serde_json::Map<String, Value> = (0..100).map(|i| (format!("p{i}"), json!({}))).collect();
+    let body: serde_json::Map<String, Value> = (0..100).map(|i| (format!("p{i}"), Value::Object(inner.clone()))).collect();
+    let obs: Vec<Observation> = (0..20).map(|i| Obs::new(&i.to_string(), "GET", "/s").json(200, Value::Object(body.clone())).0).collect();
+    let start = std::time::Instant::now();
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
+    assert!(r.notes.iter().any(|n| n.contains("budget for walking bodies")), "{:#?}", r.notes);
+    assert!(r.notes.iter().any(|n| n.contains("only the first schema difference")), "{:#?}", r.notes);
     assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
 }

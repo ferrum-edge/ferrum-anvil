@@ -387,18 +387,27 @@ note says why (history set to keep no response bodies, say). Schema
 compiles share the linter's scanning budget and body walks for suggestions
 stop after 2,000,000 values, each with a note.
 
-**No observed values.** Findings, suggestions and the undeclared-endpoint
-list carry names, status codes, media types, sizes and times, never data:
+**Keeping observed values out.** Findings, suggestions and the
+undeclared-endpoint list carry names, status codes, media types, sizes and
+times. Telling a name from a value is a heuristic, so these rules keep most
+data out but not all of it:
 
 - An undeclared path keeps only segments that are short lower-case words
   (ASCII letters, digits, `-`, `_`, at most 32 characters and one digit:
   `v1`, `orders`, `line-items`). Every other segment (an id, an email, a
   token, a mixed-case or encoded value) becomes a parameter named after the
   segment before it (`/users/{userId}`). Observed paths are not kept, and an
-  unknown prefix is shown generalized the same way.
+  unknown prefix is shown generalized the same way. A value that is itself a
+  short lower-case word (a username, a slug, a tenant name: `/users/alice`)
+  stays literal.
 - A property or query parameter name is used only when it looks like a name
   (letters, digits and `_ - . $ [ ]`, not starting with a digit, at most 64
-  characters and three digits); others are left out, with a note.
+  characters and three digits, and not 16 or more characters mixing upper
+  case, lower case and digits); others are left out, with a note. A short
+  random token that happens to fit (few digits, one case) passes.
+- The origin (scheme, host and port) of a request to a server the
+  description does not declare is shown, in the finding and in the
+  suggestion to declare that server.
 - An object whose keys look like data, or that has more than 50 keys, is
   inferred as a map (`additionalProperties` with the values' shape).
 - A method that is not an HTTP token of at most 20 characters is shown as
@@ -445,7 +454,11 @@ change in the description's syntax.
 
 A schema that names no properties (a free-form object or a map) or uses
 `patternProperties` gets no property suggestions. At most 50 properties are
-suggested per schema and 500 schema changes in all, with a note. Each
+suggested per schema, 500 schema changes, 50 query parameters per operation
+and 2,000 suggestions in all; at most 500 undeclared endpoints, 50
+undeclared servers and 20,000 distinct differences are collected. Each cap
+adds a note when it is reached. A suggestion's id is derived from the
+description and the change it makes, so it changes whenever the change does. Each
 finding links to the suggestions that resolve it: a schema change is linked
 to the validation errors of its own kind (a type, an enum, an undeclared or
 a missing required property) at the same place in the body.
@@ -464,12 +477,17 @@ suggestions. YAML is written anew, so comments and formatting of the
 original are not kept; the JSON Patch (or each suggestion's fragment) can be
 applied to the source by hand instead. Applying every suggestion and
 checking the same traffic again leaves only differences the description
-cannot fix (a missing required parameter, a response over its size budget,
-a deprecated operation called), which `tests/drift.rs` checks in all four
-dialects.
+cannot fix (a missing required parameter or response header, a deprecated
+operation called), which `tests/drift.rs` checks in all four dialects. A
+suggestion applies whole or not at all: if one of its operations cannot
+apply, none of it is in the revision and it is listed as skipped. The
+digest is of the description and the revised text.
 
 A HAR capture is read up to 64 MiB and 10,000 entries (a note says how many
-were left out).
+were left out). Parsed bodies are also capped at 1,000,000 JSON values per
+analysis, and when a large body could produce very many validation errors
+(many objects against a long `required` list) only its first difference is
+reported, with a note.
 
 ### History, the desktop and the CLI
 
@@ -494,7 +512,9 @@ the import's new version, as `docs/import.md#reimport` describes (conflicts
 and removals are kept); the next check runs against the revision. The
 update runs the analysis again and applies only if the revision's digest is
 the one previewed: new traffic in between refuses it, and the preview must
-be opened again. The
+be opened again. **Save revised spec…** and **Save JSON Patch…** likewise
+refuse when a chosen suggestion is not in a fresh report any more (its id
+changed with its content), so the file is the revision that was shown. The
 response panel shows a **Contract** tab after a send of a request that
 belongs to an OpenAPI import, with the differences of that one send.
 

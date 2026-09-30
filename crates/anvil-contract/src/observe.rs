@@ -9,6 +9,10 @@ use serde_json::Value;
 pub const MAX_BODY_CHECKED: usize = 1024 * 1024;
 /// Body bytes parsed for one analysis, across all exchanges.
 pub const MAX_BODIES_PARSED: usize = 32 * 1024 * 1024;
+/// JSON values (every scalar, array and object) kept from parsed bodies for
+/// one analysis: a body of `[0,0,…]` is two bytes per value, and a value
+/// takes far more memory than that.
+pub const MAX_BODY_VALUES: usize = 1_000_000;
 /// HAR entries read at most.
 pub const MAX_HAR_ENTRIES: usize = 10_000;
 /// Largest HAR file read.
@@ -18,12 +22,31 @@ pub const MAX_HAR_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct BodyBudget {
     left: usize,
+    values_left: usize,
 }
 
 impl Default for BodyBudget {
     fn default() -> Self {
-        BodyBudget { left: MAX_BODIES_PARSED }
+        BodyBudget { left: MAX_BODIES_PARSED, values_left: MAX_BODY_VALUES }
     }
+}
+
+/// Values in `v`, counting up to `max + 1`.
+pub fn count_values(v: &Value, max: usize) -> usize {
+    let mut n = 0;
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        n += 1;
+        if n > max {
+            break;
+        }
+        match v {
+            Value::Array(a) => stack.extend(a),
+            Value::Object(o) => stack.extend(o.values()),
+            _ => {}
+        }
+    }
+    n
 }
 
 /// One exchange.
@@ -102,9 +125,18 @@ pub fn body_of(content_type: Option<&str>, bytes: &[u8], complete: bool, budget:
         return ObservedBody::Unavailable(format!("the analysis parses at most {} MiB of bodies", MAX_BODIES_PARSED >> 20));
     }
     budget.left -= bytes.len();
-    // Bounded by the size check and serde_json's nesting limit.
+    // Bounded by the size check and serde_json's nesting limit; the parsed
+    // body is kept only while the analysis' value budget lasts.
     match serde_json::from_slice(bytes) {
-        Ok(v) => ObservedBody::Json(v),
+        Ok(v) => {
+            let n = count_values(&v, budget.values_left);
+            if n > budget.values_left {
+                budget.values_left = 0;
+                return ObservedBody::Unavailable(format!("the analysis keeps at most {MAX_BODY_VALUES} parsed JSON values"));
+            }
+            budget.values_left -= n;
+            ObservedBody::Json(v)
+        }
         Err(_) => ObservedBody::Unavailable("the body is not valid JSON".into()),
     }
 }
@@ -330,8 +362,20 @@ mod tests {
     }
 
     #[test]
+    fn parsed_values_share_one_budget() {
+        // 250k values in 500 KB: the value budget runs out before the byte budget.
+        let body = format!("[{}]", vec!["0"; 249_999].join(","));
+        let mut b = BodyBudget::default();
+        let parsed =
+            (0..10).filter(|_| matches!(body_of(Some("application/json"), body.as_bytes(), true, &mut b), ObservedBody::Json(_))).count();
+        assert_eq!(parsed, MAX_BODY_VALUES / 250_000);
+        assert!(matches!(body_of(Some("application/json"), b"{}", true, &mut b), ObservedBody::Unavailable(w) if w.contains("values")));
+    }
+
+    #[test]
     fn parsed_bodies_share_one_budget() {
-        let body = format!("[{}]", vec!["1"; 400_000].join(","));
+        // Few values, many bytes.
+        let body = format!("[\"{}\"]", "x".repeat(800_000));
         let mut b = BodyBudget::default();
         let parsed =
             (0..60).filter(|_| matches!(body_of(Some("application/json"), body.as_bytes(), true, &mut b), ObservedBody::Json(_))).count();

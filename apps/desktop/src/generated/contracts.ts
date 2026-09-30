@@ -2028,7 +2028,9 @@ export interface UndeclaredEndpoint {
  */
 export interface Suggestion {
   /**
-   * Stable for the same description and observations.
+   * Derived from the description, what the suggestion is about and its
+   * operations: the same for the same description and observations, and
+   * different as soon as the change it makes is different.
    */
   id: string;
   title: string;
@@ -5106,9 +5108,9 @@ export interface Revision {
    */
   skipped: string[];
   /**
-   * SHA-256 (hex) of the description and the applied suggestions with
-   * their operations: the same digest means the same revision, so a
-   * preview can be applied exactly as shown.
+   * SHA-256 (hex) of the description and the revised text: the same
+   * digest means the same revision, so a preview can be applied exactly
+   * as shown.
    */
   digest: string;
 }

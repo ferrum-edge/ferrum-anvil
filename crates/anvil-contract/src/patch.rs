@@ -82,13 +82,17 @@ pub fn apply(doc: &mut Value, ops: &[PatchOp]) -> usize {
             }
             continue;
         };
-        let Some(cur) = walk_to(doc, parents, &toks) else {
+        // Removing creates nothing: the target must exist.
+        let cur = if op.op == PatchKind::Remove { walk_existing(doc, parents) } else { walk_to(doc, parents, &toks) };
+        let Some(cur) = cur else {
             failed += 1;
             continue;
         };
         match (op.op, cur) {
             (PatchKind::Remove, Value::Object(o)) => {
-                o.shift_remove(last);
+                if o.shift_remove(last).is_none() {
+                    failed += 1;
+                }
             }
             (PatchKind::Remove, Value::Array(a)) => match last.parse::<usize>() {
                 Ok(i) if i < a.len() => {
@@ -154,6 +158,17 @@ fn walk_to<'v>(mut cur: &'v mut Value, parents: &[String], toks: &[String]) -> O
             Value::Object(o) => {
                 o.entry(t.clone()).or_insert_with(|| if child_is_list { Value::Array(vec![]) } else { Value::Object(Map::new()) })
             }
+            Value::Array(a) => a.get_mut(t.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
+fn walk_existing<'v>(mut cur: &'v mut Value, parents: &[String]) -> Option<&'v mut Value> {
+    for t in parents {
+        cur = match cur {
+            Value::Object(o) => o.get_mut(t)?,
             Value::Array(a) => a.get_mut(t.parse::<usize>().ok()?)?,
             _ => return None,
         };

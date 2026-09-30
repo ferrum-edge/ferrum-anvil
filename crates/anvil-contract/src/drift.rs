@@ -27,7 +27,7 @@ use crate::lint::MAX_EXAMPLE_SCAN_STEPS;
 use crate::lint::SpecSummary;
 use crate::locate::ptr;
 use crate::model::{Direction, METHODS, Media, OperationRef, parameters, request_body, responses, schema_types, swagger_media};
-use crate::observe::{Observation, ObservedBody, essence, is_json, split_url};
+use crate::observe::{Observation, ObservedBody, count_values, essence, is_json, split_url};
 use crate::patch::{self, PatchOp};
 use crate::route::{Route, Router};
 use crate::ruleset::Severity;
@@ -52,8 +52,19 @@ const MAX_SCHEMA_FIXES: usize = 500;
 const MAX_ENUM_TOKENS: usize = 20;
 /// Body values walked for schema suggestions, across the analysis.
 const MAX_WALK_STEPS: usize = 2_000_000;
-/// Query parameter names kept per undeclared endpoint.
+/// Query parameter names kept per undeclared endpoint or per operation.
 const MAX_QUERY_NAMES: usize = 50;
+/// Undeclared endpoints and undeclared servers reported.
+const MAX_ENDPOINTS: usize = 500;
+const MAX_SERVERS: usize = 50;
+/// Distinct findings collected before the most severe are kept.
+const MAX_FINDING_KEYS: usize = 20_000;
+/// Suggestions in a report.
+const MAX_SUGGESTIONS: usize = 2_000;
+/// Validation errors a body may produce before only its first is asked for:
+/// the validator collects every error before any is read, and a body can
+/// miss each name of a long `required` list in each of its objects.
+const MAX_ERROR_WORK: usize = 1_000_000;
 /// How an observed method that is not an HTTP token is shown.
 const INVALID_METHOD: &str = "(invalid method)";
 
@@ -139,7 +150,9 @@ pub enum SuggestionKind {
 /// A revision of the description.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Suggestion {
-    /// Stable for the same description and observations.
+    /// Derived from the description, what the suggestion is about and its
+    /// operations: the same for the same description and observations, and
+    /// different as soon as the change it makes is different.
     pub id: String,
     pub title: String,
     pub detail: String,
@@ -244,9 +257,9 @@ pub struct Revision {
     pub applied: Vec<String>,
     /// Suggestion ids that were not found, and ops that could not apply.
     pub skipped: Vec<String>,
-    /// SHA-256 (hex) of the description and the applied suggestions with
-    /// their operations: the same digest means the same revision, so a
-    /// preview can be applied exactly as shown.
+    /// SHA-256 (hex) of the description and the revised text: the same
+    /// digest means the same revision, so a preview can be applied exactly
+    /// as shown.
     pub digest: String,
 }
 
@@ -255,24 +268,33 @@ pub fn revise(spec: &Spec, report: &DriftReport, ids: &[String]) -> Revision {
     let chosen: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let known: HashSet<&str> = report.suggestions.iter().map(|s| s.id.as_str()).collect();
     let mut doc = spec.root.clone();
-    let mut applied = vec![];
+    let mut applied: Vec<&Suggestion> = vec![];
     let mut skipped: Vec<String> = ids.iter().filter(|id| !known.contains(id.as_str())).cloned().collect();
-    let mut digest = Sha256::new();
-    digest.update(spec.sha256.as_bytes());
     for s in report.suggestions.iter().filter(|s| chosen.contains(s.id.as_str())) {
+        // All of a suggestion or none of it: after a failed op the
+        // document is rebuilt from the suggestions applied so far (rare,
+        // so the common case never copies the document).
         if patch::apply(&mut doc, &s.ops) > 0 {
             skipped.push(s.id.clone());
+            doc = spec.root.clone();
+            for a in &applied {
+                patch::apply(&mut doc, &a.ops);
+            }
         } else {
-            digest.update(b"\0");
-            digest.update(s.id.as_bytes());
-            digest.update(serde_json::to_vec(&s.ops).unwrap_or_default());
-            applied.push(s.id.clone());
+            applied.push(s);
         }
     }
+    let text = patch::render(&doc, spec.syntax);
+    // The digest is of what the revision is: the description it starts
+    // from and the text it produces.
+    let mut digest = Sha256::new();
+    digest.update(spec.sha256.as_bytes());
+    digest.update(format!("\0{:?}\0", spec.syntax).as_bytes());
+    digest.update(text.as_bytes());
     Revision {
-        text: patch::render(&doc, spec.syntax),
+        text,
         json_patch: patch::diff(&spec.root, &doc),
-        applied,
+        applied: applied.iter().map(|s| s.id.clone()).collect(),
         skipped,
         digest: hex::encode(digest.finalize()),
     }
@@ -347,6 +369,8 @@ struct State<'a> {
     validators: HashMap<(String, bool), Option<jsonschema::Validator>>,
     /// Members and items scanned by schema compiles.
     scan_steps: usize,
+    /// The longest `required` list of the description.
+    max_required: usize,
     /// Body values walked.
     walk_steps: usize,
     /// Undeclared properties suggested per object schema.
@@ -382,6 +406,7 @@ pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -
         servers: BTreeMap::new(),
         validators: HashMap::new(),
         scan_steps: 0,
+        max_required: longest_required(&spec.root),
         walk_steps: 0,
         per_schema: HashMap::new(),
         notes: BTreeMap::new(),
@@ -630,6 +655,10 @@ impl<'a> State<'a> {
         operation: Option<String>,
         pointer: Option<String>,
     ) -> String {
+        if !self.findings.contains_key(&key) && self.findings.len() >= MAX_FINDING_KEYS {
+            self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
+            return key;
+        }
         let f = self.findings.entry(key.clone()).or_default();
         if f.kind.is_none() {
             *f = FindingAcc { kind: Some(kind), message, operation, pointer, ..FindingAcc::default() };
@@ -660,6 +689,10 @@ impl<'a> State<'a> {
         let (origin, path) = split_url(&o.url);
         if let Some(origin) = &origin
             && self.router.origin_declared(origin) == Some(false)
+            && (self.servers.contains_key(origin) || self.servers.len() < MAX_SERVERS || {
+                self.note(format!("only the first {MAX_SERVERS} undeclared servers are reported"));
+                false
+            })
         {
             let base = match &route {
                 Route::Operation { base, .. } | Route::Method { base, .. } | Route::Path { base } => base.clone(),
@@ -701,6 +734,10 @@ impl<'a> State<'a> {
         let rest = path.strip_prefix(&base).unwrap_or(path);
         let pattern = template.clone().unwrap_or_else(|| generalize(rest));
         let method = method_token(&o.method);
+        if self.endpoints.len() >= MAX_ENDPOINTS && !self.endpoints.contains_key(&(method.clone(), pattern.clone())) {
+            self.note(format!("only the first {MAX_ENDPOINTS} undeclared endpoints are reported"));
+            return;
+        }
         let label = format!("{method} {pattern}");
         let (kind, message, pointer) = match &template {
             Some(t) => {
@@ -786,6 +823,10 @@ impl<'a> State<'a> {
                 if !params.iter().any(|p| p.location == "query" && &p.name == q) {
                     if !safe_name(q) {
                         self.note("undeclared query parameters whose names look like values were not reported");
+                        continue;
+                    }
+                    if self.ops[i].new_query.len() >= MAX_QUERY_NAMES && !self.ops[i].new_query.contains(q) {
+                        self.note(format!("at most {MAX_QUERY_NAMES} undeclared query parameters are reported per operation"));
                         continue;
                     }
                     let key = format!("query|{op_ptr}|{q}");
@@ -972,7 +1013,18 @@ impl<'a> State<'a> {
             self.validators.insert(vkey.clone(), v);
         }
         let Some(validator) = self.validators.get(&vkey).and_then(Option::as_ref) else { return };
-        let messages: Vec<(String, String, String)> = validator.iter_errors(body).take(10).map(|e| describe(&e)).collect();
+        let mut first_only = false;
+        let messages: Vec<(String, String, String)> = if validator.is_valid(body) {
+            vec![]
+        } else if count_values(body, MAX_ERROR_WORK).saturating_mul(1 + self.max_required) <= MAX_ERROR_WORK {
+            validator.iter_errors(body).take(10).map(|e| describe(&e)).collect()
+        } else {
+            first_only = true;
+            validator.validate(body).err().map(|e| describe(&e)).into_iter().collect()
+        };
+        if first_only {
+            self.note("for large bodies against long `required` lists only the first schema difference is reported");
+        }
         if messages.is_empty() {
             // Still record required-property presence for relaxations.
             self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, false);
@@ -992,6 +1044,20 @@ impl<'a> State<'a> {
             self.schema_places.entry((label.clone(), code.clone(), place.clone(), category.clone())).or_default().insert(key);
         }
         self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, true);
+    }
+
+    /// Count `n` steps of walking bodies and their schemas; false once the
+    /// analysis' budget is spent.
+    fn spend(&mut self, n: usize) -> bool {
+        if self.walk_steps > MAX_WALK_STEPS {
+            return false;
+        }
+        self.walk_steps += n;
+        if self.walk_steps > MAX_WALK_STEPS {
+            self.note("the analysis' budget for walking bodies is spent; later bodies got no schema suggestions");
+            return false;
+        }
+        true
     }
 
     /// The fix at `key`, created with `owner` unless a cap is reached.
@@ -1031,14 +1097,7 @@ impl<'a> State<'a> {
         o: &Observation,
         failed: bool,
     ) {
-        if depth > 32 {
-            return;
-        }
-        self.walk_steps += 1;
-        if self.walk_steps > MAX_WALK_STEPS {
-            if self.walk_steps == MAX_WALK_STEPS + 1 {
-                self.note("the analysis' budget for walking bodies is spent; later bodies got no schema suggestions");
-            }
+        if depth > 32 || !self.spend(1) {
             return;
         }
         let spec: &'a Spec = self.spec;
@@ -1067,31 +1126,44 @@ impl<'a> State<'a> {
             Value::Object(obj) => {
                 // Declared properties, across `allOf` branches (the first
                 // declaration of a name wins).
-                let mut declared: HashMap<&'a str, (&'a Value, String)> = HashMap::new();
-                let mut required: Vec<(&'a str, String)> = vec![];
+                // Values: (schema, index of the part declaring it).
+                let mut declared: HashMap<&'a str, (&'a Value, usize)> = HashMap::new();
+                let mut required: Vec<(&'a str, usize)> = vec![];
                 let mut holder = at.clone();
                 let mut additional: Option<(&'a Value, String)> = None;
                 let mut patterned = false;
+                let all = s.get("allOf").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+                if !self.spend(1 + all.len()) {
+                    return;
+                }
                 let mut parts: Vec<(&'a Value, String)> = vec![(s, at.clone())];
-                if let Some(all) = s.get("allOf").and_then(Value::as_array) {
-                    for (k, b) in all.iter().enumerate() {
-                        parts.push(spec.deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string())));
-                    }
+                for (k, b) in all.iter().enumerate() {
+                    parts.push(spec.deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string())));
+                }
+                // Reading the schema costs as much as its members.
+                let members: usize = parts
+                    .iter()
+                    .map(|(p, _)| {
+                        p.get("properties").and_then(Value::as_object).map_or(0, |o| o.len())
+                            + p.get("required").and_then(Value::as_array).map_or(0, Vec::len)
+                    })
+                    .sum();
+                if !self.spend(members) {
+                    return;
                 }
                 let mut found_holder = false;
-                for (part, pp) in &parts {
+                for (pi, (part, pp)) in parts.iter().enumerate() {
                     if let Some(props) = part.get("properties").and_then(Value::as_object) {
                         if !found_holder {
                             holder = pp.clone();
                             found_holder = true;
                         }
-                        let base = ptr(pp, "properties");
                         for (n, ps) in props {
-                            declared.entry(n.as_str()).or_insert_with(|| (ps, ptr(&base, n)));
+                            declared.entry(n.as_str()).or_insert((ps, pi));
                         }
                     }
                     for r in part.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-                        required.push((r, pp.clone()));
+                        required.push((r, pi));
                     }
                     if let Some(ap) = part.get("additionalProperties").filter(|a| a.is_object()) {
                         additional = Some((ap, ptr(pp, "additionalProperties")));
@@ -1106,10 +1178,12 @@ impl<'a> State<'a> {
                 // a map) or matches names by pattern gets no property
                 // suggestions: its keys are likely data.
                 let names_properties = !declared.is_empty() && !patterned;
+                if !self.spend(obj.len()) {
+                    return;
+                }
                 for (k, x) in obj {
-                    self.walk_steps += 1;
-                    if let Some((ps, pp)) = declared.get(k.as_str()) {
-                        let (ps, pp) = (*ps, pp.clone());
+                    if let Some(&(ps, pi)) = declared.get(k.as_str()) {
+                        let pp = ptr(&ptr(&parts[pi].1, "properties"), k);
                         self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, o, failed);
                     } else if let Some((ap, app)) = &additional {
                         let (ap, app) = (*ap, app.clone());
@@ -1123,7 +1197,8 @@ impl<'a> State<'a> {
                         }
                     }
                 }
-                for (name, rp) in required {
+                for (name, pi) in required {
+                    let rp = parts[pi].1.clone();
                     let write_only = declared
                         .get(name)
                         .is_some_and(|(ps, _)| spec.deref(ps, "").0.get("writeOnly").and_then(Value::as_bool) == Some(true));
@@ -1199,10 +1274,8 @@ impl<'a> State<'a> {
             |key: &str, title: String, detail: String, kind: SuggestionKind, recommended: bool, pointer: String, ops: Vec<PatchOp>| {
                 let snippet = patch::fragment(&ops, syntax);
                 let line = spec.position(&pointer).filter(|_| spec.root.pointer(&pointer).is_some()).map(|p| p.line);
-                suggestions.insert(
-                    key.to_string(),
-                    Suggestion { id: short_id(key), title, detail, kind, recommended, pointer, line, ops, snippet },
-                );
+                let id = short_id(&format!("{}\0{key}\0{}", spec.sha256, serde_json::to_string(&ops).unwrap_or_default()));
+                suggestions.insert(key.to_string(), Suggestion { id, title, detail, kind, recommended, pointer, line, ops, snippet });
             };
 
         // Undeclared responses, media types, query parameters, request types.
@@ -1671,6 +1744,23 @@ impl<'a> State<'a> {
         findings.truncate(self.opts.max_findings);
         let mut suggestions: Vec<Suggestion> = suggestions.into_values().collect();
         suggestions.sort_by(|a, b| b.recommended.cmp(&a.recommended).then(a.pointer.cmp(&b.pointer)).then(a.title.cmp(&b.title)));
+        if suggestions.len() > MAX_SUGGESTIONS {
+            self.notes.insert(
+                format!("only {MAX_SUGGESTIONS} suggestions are listed; check again after applying them"),
+                suggestions.len() - MAX_SUGGESTIONS,
+            );
+            suggestions.truncate(MAX_SUGGESTIONS);
+            let kept: HashSet<String> = suggestions.iter().map(|s| s.id.clone()).collect();
+            for f in &mut findings {
+                f.suggestions.retain(|id| kept.contains(id));
+            }
+        }
+        if self.router.dropped_servers > 0 {
+            self.notes.insert(
+                "the description declares more server base paths than are matched; some were not used".into(),
+                self.router.dropped_servers,
+            );
+        }
         let undeclared = self
             .endpoints
             .into_iter()
@@ -1708,6 +1798,25 @@ fn fix_suggestion_key(k: &FixKey) -> String {
         FixKey::Widen { at } => format!("widen|{at}"),
         FixKey::Enum { at } => format!("enum|{at}"),
     }
+}
+
+/// The length of the longest `required` list anywhere in `root`.
+fn longest_required(root: &Value) -> usize {
+    let mut max = 0;
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Object(o) => {
+                if let Some(Value::Array(r)) = o.get("required") {
+                    max = max.max(r.len());
+                }
+                stack.extend(o.values());
+            }
+            Value::Array(a) => stack.extend(a),
+            _ => {}
+        }
+    }
+    max
 }
 
 /// The component a schema location is in, else the response.

@@ -446,7 +446,7 @@
       "type": "object",
       "properties": {
         "id": {
-          "description": "Stable for the same description and observations.",
+          "description": "Derived from the description, what the suggestion is about and its\noperations: the same for the same description and observations, and\ndifferent as soon as the change it makes is different.",
           "type": "string"
         },
         "title": {
