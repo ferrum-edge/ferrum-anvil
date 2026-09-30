@@ -138,6 +138,21 @@ impl<'o> Builder<'o> {
         true
     }
 
+    /// Whether `max_operations` requests exist already.
+    pub fn operations_full(&self) -> bool {
+        self.requests.len() >= self.opts.max_operations
+    }
+
+    /// Count `n` more operations once the limit is reached, as `admit` would
+    /// one by one (the first of them is at `pointer`).
+    pub fn skip_operations(&mut self, pointer: &str, n: usize) {
+        if n > 0 {
+            self.report.counts.operations_found += n - 1;
+            self.report.counts.skipped_operations += n - 1;
+            self.admit(pointer);
+        }
+    }
+
     /// Mark an operation as found but not importable (already reported).
     pub fn skipped(&mut self) {
         self.report.counts.skipped_operations += 1;

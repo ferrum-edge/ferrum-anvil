@@ -309,14 +309,16 @@ pub fn is_xml_media(ct: &str) -> bool {
     e == "application/xml" || e == "text/xml" || e.ends_with("+xml")
 }
 
-/// Truncate a string for inclusion in a report message.
+/// Truncate a string for inclusion in a report message. Looks at no more
+/// than `max` characters of `s`, however long it is.
 pub fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
+    match s.char_indices().nth(max) {
+        None => s.to_string(),
+        Some((end, _)) => {
+            let mut out = s[..end].to_string();
+            out.push('…');
+            out
+        }
     }
 }
 

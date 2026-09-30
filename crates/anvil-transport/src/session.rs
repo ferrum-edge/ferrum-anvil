@@ -5,6 +5,14 @@
 //!   of the bound plus the most recent half; everything in between is counted
 //!   as dropped) and emits every entry live as [`ExecutionEvent::Message`].
 //!   Counters always cover the whole session, not just retained entries.
+//!   Every entry is bounded: its preview holds at most `preview_bytes` of the
+//!   payload and an SSE event id or type at most [`METADATA_PREVIEW_BYTES`],
+//!   so the retained history is bounded however large the messages are.
+//!   Previews are redacted before they are cut ([`redact_then_cut`]): a
+//!   secret that crosses the cut is replaced whole, never left as a prefix.
+//! * [`guarded`] races a write or flush against cancellation and the
+//!   applicable deadline, so a peer that stops reading (or withholds
+//!   flow-control credit) cannot hold a session past either.
 //! * [`SessionOutput`] is what every session adapter returns: the attempt(s)
 //!   with native evidence, the transcript and a typed [`ProtocolStatus`].
 //! * Interactive sessions receive [`SessionCommand`]s over a bounded channel
@@ -52,6 +60,86 @@ impl Default for TranscriptLimits {
     }
 }
 
+/// Bytes of an SSE event id or event type a transcript entry keeps (after
+/// redaction). A longer value is cut and ends with `…`.
+pub const METADATA_PREVIEW_BYTES: usize = 256;
+
+/// How far past a preview cut the redactor looks: a secret (in any form the
+/// redactor knows) that starts before the cut and is at most this long is
+/// recognized whole before the preview is cut. Only this much of a payload
+/// is redacted per entry, whatever its size.
+pub const REDACT_LOOKAHEAD_BYTES: usize = 64 * 1024;
+
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut end = i.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// `window` redacted, then cut at `cut` bytes (a char boundary of `window`).
+///
+/// Redaction runs before the cut, so a secret that crosses the cut is
+/// replaced whole instead of leaving its prefix in the preview. `window`
+/// must hold the text past the cut that the redactor needs to see (up to
+/// [`REDACT_LOOKAHEAD_BYTES`]). The result shows nothing from past the cut:
+/// when a secret crosses it, the preview ends with the redaction marker
+/// where that secret starts.
+pub fn redact_then_cut<F: Fn(&str) -> String + ?Sized>(redact: &F, window: &str, cut: usize) -> String {
+    if cut >= window.len() {
+        return redact(window);
+    }
+    let whole = redact(window);
+    if whole == window {
+        // Nothing in the window is secret, so nothing before the cut is.
+        return window[..cut].to_string();
+    }
+    let head = redact(&window[..cut]);
+    let tail = redact(&window[cut..]);
+    if whole.len() == head.len() + tail.len() && whole.starts_with(&head) && whole.ends_with(&tail) {
+        // Redacting either side alone finds the same secrets: none crosses the cut.
+        return head;
+    }
+    // A secret crosses the cut. What precedes it is the same in both forms;
+    // from where they differ on, the head holds that secret's prefix.
+    let same = whole.bytes().zip(head.bytes()).take_while(|(a, b)| a == b).count();
+    let mut out = head[..floor_char_boundary(&head, same)].to_string();
+    out.push_str(anvil_domain::secret::REDACTED);
+    out
+}
+
+/// Why a [`guarded`] operation did not complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interrupted {
+    Canceled,
+    Deadline,
+}
+
+/// Run `fut` (a write, flush or close) until it completes, the session is
+/// canceled or `deadline` passes, whichever comes first. A peer that stops
+/// reading, or withholds HTTP/2 or QUIC flow-control credit, can keep a
+/// write pending forever; the session's cancellation and deadlines must
+/// still end it. Cancellation is checked first: nothing is written once the
+/// session is canceled. The caller then drops or resets the transport, as
+/// the interrupted write may have been partly sent.
+pub async fn guarded<F: Future>(fut: F, cancel: &CancellationToken, deadline: Option<Instant>) -> Result<F::Output, Interrupted> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(Interrupted::Canceled),
+        _ = sleep_until_opt(deadline) => Err(Interrupted::Deadline),
+        r = fut => Ok(r),
+    }
+}
+
+/// The earlier of two optional deadlines.
+pub fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Bounded, redacted session transcript with live event emission.
 pub struct Transcript {
     t0: Instant,
@@ -65,6 +153,10 @@ pub struct Transcript {
     received_bytes: u64,
     events: EventCtx,
     redact: Option<RedactFn>,
+    /// The last shared SSE event id and how entries show it: every event of
+    /// a stream shares the parser's id buffer, so it is redacted once, not
+    /// once per event.
+    shared_id: Option<(Arc<str>, String)>,
 }
 
 fn printable(s: &str) -> bool {
@@ -85,29 +177,63 @@ impl Transcript {
             received_bytes: 0,
             events,
             redact,
+            shared_id: None,
+        }
+    }
+
+    /// `s` redacted, then cut to `limit` bytes. Only `limit` plus
+    /// [`REDACT_LOOKAHEAD_BYTES`] of it is redacted.
+    fn redacted_prefix(&self, s: &str, limit: usize) -> String {
+        let cut = floor_char_boundary(s, limit);
+        match &self.redact {
+            Some(r) => redact_then_cut(&**r, &s[..floor_char_boundary(s, limit.saturating_add(REDACT_LOOKAHEAD_BYTES))], cut),
+            None => s[..cut].to_string(),
         }
     }
 
     /// The payload's redacted preview: printable text, or else hex (which
-    /// the redactor sees too: it knows secrets' hex forms).
+    /// the redactor sees too: it knows secrets' hex forms). Redacted before
+    /// it is cut.
     fn preview(&self, payload: &[u8], force_hex: bool) -> (String, bool, bool) {
         let limit = self.limits.preview_bytes;
-        let redact = |s: &str| match &self.redact {
-            Some(r) => r(s),
-            None => s.to_string(),
-        };
         if !force_hex
             && let Ok(s) = std::str::from_utf8(payload)
             && printable(s)
         {
-            let mut end = s.len().min(limit);
-            while !s.is_char_boundary(end) {
-                end -= 1;
-            }
-            return (redact(&s[..end]), false, end < s.len());
+            return (self.redacted_prefix(s, limit), false, s.len() > floor_char_boundary(s, limit));
         }
         let n = payload.len().min(limit / 2);
-        (redact(&hex::encode(&payload[..n])), true, n < payload.len())
+        let preview = match &self.redact {
+            Some(_) => {
+                let window = hex::encode(&payload[..payload.len().min(n.saturating_add(REDACT_LOOKAHEAD_BYTES / 2))]);
+                self.redacted_prefix(&window, 2 * n)
+            }
+            None => hex::encode(&payload[..n]),
+        };
+        (preview, true, n < payload.len())
+    }
+
+    /// An SSE event id or type as a transcript entry keeps it: redacted, then
+    /// cut to [`METADATA_PREVIEW_BYTES`] (ending with `…` when cut).
+    fn metadata(&self, value: &str) -> String {
+        let mut shown = self.redacted_prefix(value, METADATA_PREVIEW_BYTES);
+        if value.len() > floor_char_boundary(value, METADATA_PREVIEW_BYTES) {
+            shown.push('…');
+        }
+        shown
+    }
+
+    /// [`Transcript::metadata`] for an id shared across events, reusing the
+    /// last result while the id is the same buffer ([`Arc::ptr_eq`]).
+    fn shared_metadata(&mut self, id: &Arc<str>) -> String {
+        if let Some((cached, shown)) = &self.shared_id
+            && Arc::ptr_eq(cached, id)
+        {
+            return shown.clone();
+        }
+        let shown = self.metadata(id);
+        self.shared_id = Some((id.clone(), shown.clone()));
+        shown
     }
 
     fn push(&mut self, m: StreamMessage) {
@@ -131,14 +257,10 @@ impl Transcript {
         kind: &str,
         payload: &[u8],
         force_hex: bool,
-        event_id: Option<String>,
-        event_type: Option<String>,
+        event_id: Option<&str>,
+        event_type: Option<&str>,
     ) -> StreamMessage {
         let (preview, preview_is_hex, preview_truncated) = self.preview(payload, force_hex);
-        let redact = |s: String| match &self.redact {
-            Some(r) => r(&s),
-            None => s,
-        };
         StreamMessage {
             direction,
             offset_us: self.t0.elapsed().as_micros() as u64,
@@ -147,8 +269,8 @@ impl Transcript {
             preview,
             preview_is_hex,
             preview_truncated,
-            event_id: event_id.map(redact),
-            event_type: event_type.map(redact),
+            event_id: event_id.map(|v| self.metadata(v)),
+            event_type: event_type.map(|v| self.metadata(v)),
         }
     }
 
@@ -181,10 +303,22 @@ impl Transcript {
         self.push(m);
     }
 
-    /// Record an application event with SSE-style metadata (counted).
-    pub fn event(&mut self, direction: Direction, kind: &str, payload: &[u8], event_id: Option<String>, event_type: Option<String>) {
+    /// Record an application event with SSE-style metadata (counted). The
+    /// entry keeps a bounded, redacted copy of the id and type.
+    pub fn event(&mut self, direction: Direction, kind: &str, payload: &[u8], event_id: Option<&str>, event_type: Option<&str>) {
         self.count(direction, payload.len());
         let m = self.entry(direction, kind, payload, false, event_id, event_type);
+        self.push(m);
+    }
+
+    /// [`Transcript::event`] for an event id the stream's events share (the
+    /// SSE last event id): it is redacted and cut once while it stays the
+    /// same buffer, however many events carry it.
+    pub fn event_shared_id(&mut self, direction: Direction, kind: &str, payload: &[u8], event_id: Option<&Arc<str>>, event_type: &str) {
+        self.count(direction, payload.len());
+        let shown = event_id.map(|id| self.shared_metadata(id));
+        let mut m = self.entry(direction, kind, payload, false, None, Some(event_type));
+        m.event_id = shown;
         self.push(m);
     }
 
@@ -612,6 +746,7 @@ pub fn body_capture(completeness: BodyCompleteness, wire: u64, captured: &[u8], 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anvil_domain::secret::REDACTED;
 
     #[test]
     fn transcript_keeps_head_and_tail_and_counts_everything() {
@@ -645,11 +780,160 @@ mod tests {
         let mut t = Transcript::new(Instant::now(), TranscriptLimits::default(), EventCtx::none(), Some(redact));
         t.data(Direction::Sent, "binary", &[0x01, 0xc0, 0xff, 0xee, 0x00]);
         t.control(Direction::Sent, "ping", &[0xc0, 0xff, 0xee, 0x00]);
-        t.event(Direction::Received, "event", b"data", Some("id-1".into()), Some("sekret-type".into()));
+        t.event(Direction::Received, "event", b"data", Some("id-1"), Some("sekret-type"));
         let s = t.finish();
         assert!(s.messages[0].preview_is_hex && s.messages[0].preview == "01‹redacted›", "{:?}", s.messages[0]);
         assert!(s.messages[1].preview_is_hex && s.messages[1].preview == "‹redacted›", "{:?}", s.messages[1]);
         assert_eq!(s.messages[2].event_type.as_deref(), Some("‹redacted›"));
+    }
+
+    /// A test secret and a redactor that knows it raw and as lowercase hex.
+    const SECRET: &str = "Zq7-cut-boundary-secret-value-91";
+
+    fn secret_redactor() -> RedactFn {
+        Arc::new(|s: &str| s.replace(SECRET, REDACTED).replace(&hex::encode(SECRET), REDACTED))
+    }
+
+    /// Whether `shown` holds any prefix of the secret of at least 4 bytes.
+    fn shows_secret_prefix(shown: &str) -> bool {
+        (4..=SECRET.len()).any(|n| shown.contains(&SECRET[..n]))
+    }
+
+    #[test]
+    fn a_secret_crossing_the_text_preview_cut_leaves_no_prefix() {
+        let limit = 64;
+        let limits = TranscriptLimits { max_messages: 16, preview_bytes: limit };
+        let mut t = Transcript::new(Instant::now(), limits, EventCtx::none(), Some(secret_redactor()));
+        // The cut falls after every character of the secret but its last, then after its first four.
+        for keep in [SECRET.len() - 1, 4] {
+            let pad = "p".repeat(limit - keep);
+            t.data(Direction::Received, "text", format!("{pad}{SECRET} and more").as_bytes());
+        }
+        let s = t.finish();
+        for m in &s.messages {
+            assert!(!shows_secret_prefix(&m.preview), "a secret prefix survived the preview cut");
+            assert!(m.preview.ends_with(REDACTED) && m.preview_truncated && !m.preview_is_hex);
+        }
+        assert_eq!(s.messages[0].preview, format!("{}{REDACTED}", "p".repeat(limit - (SECRET.len() - 1))));
+    }
+
+    #[test]
+    fn a_secret_crossing_the_hex_preview_cut_leaves_no_prefix() {
+        let limit = 64;
+        let limits = TranscriptLimits { max_messages: 4, preview_bytes: limit };
+        let mut t = Transcript::new(Instant::now(), limits, EventCtx::none(), Some(secret_redactor()));
+        // Binary: the preview shows the first limit / 2 bytes as hex.
+        let mut payload = vec![0u8; limit / 2 - 5];
+        payload.extend_from_slice(SECRET.as_bytes());
+        payload.extend_from_slice(&[0xff; 8]);
+        t.data(Direction::Received, "binary", &payload);
+        let s = t.finish();
+        let m = &s.messages[0];
+        assert!(m.preview_is_hex && m.preview_truncated);
+        let hex_secret = hex::encode(SECRET);
+        assert!(!(8..=hex_secret.len()).any(|n| m.preview.contains(&hex_secret[..n])), "a hex secret prefix survived the cut");
+        assert_eq!(m.preview, format!("{}{REDACTED}", "00".repeat(limit / 2 - 5)));
+    }
+
+    #[test]
+    fn previews_cut_after_redaction_keep_everything_else() {
+        let limits = TranscriptLimits { max_messages: 8, preview_bytes: 64 };
+        let mut t = Transcript::new(Instant::now(), limits, EventCtx::none(), Some(secret_redactor()));
+        // A secret wholly before the cut: redacted, and the text after it is still shown up to the cut.
+        let text = format!("token={SECRET}; {}", "a".repeat(200));
+        t.data(Direction::Sent, "text", text.as_bytes());
+        // No secret at all, or one wholly past the cut: the preview is the plain prefix.
+        let plain = "b".repeat(200);
+        t.data(Direction::Sent, "text", plain.as_bytes());
+        let late = format!("{}{SECRET}", "c".repeat(100));
+        t.data(Direction::Sent, "text", late.as_bytes());
+        // Short payloads are redacted whole, as before.
+        t.data(Direction::Sent, "text", format!("k={SECRET}").as_bytes());
+        let s = t.finish();
+        let shown: Vec<&str> = s.messages.iter().map(|m| m.preview.as_str()).collect();
+        // The first 64 bytes of the payload, redacted: 6 + 32 + 2 bytes before the 24 `a`s.
+        assert_eq!(shown[0], format!("token={REDACTED}; {}", "a".repeat(24)));
+        assert_eq!(shown[1], &plain[..64]);
+        assert_eq!(shown[2], &late[..64]);
+        assert_eq!(shown[3], format!("k={REDACTED}"));
+        assert!(!s.messages[3].preview_truncated && s.messages[0].preview_truncated);
+        // Without a redactor, previews are plain prefixes.
+        let mut t = Transcript::new(Instant::now(), limits, EventCtx::none(), None);
+        t.data(Direction::Sent, "text", plain.as_bytes());
+        assert_eq!(t.finish().messages[0].preview, &plain[..64]);
+    }
+
+    #[test]
+    fn redact_then_cut_never_shows_what_is_past_the_cut() {
+        let r = |s: &str| s.replace("abcdef", "#");
+        // The secret crosses the cut: the preview stops where it starts.
+        assert_eq!(redact_then_cut(&r, "xxabcdefyy", 4), format!("xx{REDACTED}"));
+        // Wholly before the cut; wholly after it; none.
+        assert_eq!(redact_then_cut(&r, "abcdefxxyy", 8), "#xx");
+        assert_eq!(redact_then_cut(&r, "xxyyabcdef", 4), "xxyy");
+        assert_eq!(redact_then_cut(&r, "xxyyzz", 3), "xxy");
+        // A cut at or past the end redacts the whole text.
+        assert_eq!(redact_then_cut(&r, "xxabcdef", 8), "xx#");
+    }
+
+    #[test]
+    fn event_ids_and_types_are_bounded_and_redacted_live_and_in_the_record() {
+        let live: Arc<parking_lot::Mutex<Vec<StreamMessage>>> = Arc::default();
+        let sink = live.clone();
+        let events = EventCtx {
+            execution_id: anvil_domain::Id::nil(),
+            sink: Some(Arc::new(move |ev: ExecutionEvent| {
+                if let ExecutionEvent::Message { message, .. } = ev {
+                    sink.lock().push(message);
+                }
+            })),
+        };
+        let mut t = Transcript::new(Instant::now(), TranscriptLimits::default(), events, Some(secret_redactor()));
+        let huge = "i".repeat(1 << 20);
+        for _ in 0..3 {
+            t.event(Direction::Received, "event", b"x", Some(huge.as_str()), Some("message"));
+        }
+        // A secret crossing the metadata cut.
+        let crossing = format!("{}{SECRET}", "e".repeat(METADATA_PREVIEW_BYTES - 5));
+        t.event(Direction::Received, "event", b"x", Some(crossing.as_str()), Some(crossing.as_str()));
+        let s = t.finish();
+        let bound = METADATA_PREVIEW_BYTES + REDACTED.len() + '…'.len_utf8();
+        for m in s.messages.iter().chain(live.lock().iter()) {
+            for v in [&m.event_id, &m.event_type] {
+                let v = v.as_deref().unwrap();
+                assert!(v.len() <= bound, "{} bytes of metadata kept", v.len());
+                assert!(!shows_secret_prefix(v), "a secret prefix survived the metadata cut");
+            }
+        }
+        assert_eq!(s.messages[0].event_id.as_deref(), Some(format!("{}…", &huge[..METADATA_PREVIEW_BYTES]).as_str()));
+        assert_eq!(s.messages[0].event_type.as_deref(), Some("message"), "short values are kept whole");
+        assert_eq!(live.lock().len(), 4);
+    }
+
+    #[test]
+    fn a_shared_event_id_is_redacted_once_for_every_event_carrying_it() {
+        let long_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = long_calls.clone();
+        let redact: RedactFn = Arc::new(move |s: &str| {
+            if s.len() >= 4096 {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            s.replace(SECRET, REDACTED)
+        });
+        let mut t = Transcript::new(Instant::now(), TranscriptLimits::default(), EventCtx::none(), Some(redact));
+        let id: Arc<str> = Arc::from("k".repeat(4096));
+        for _ in 0..1_000 {
+            t.event_shared_id(Direction::Received, "event", b"x", Some(&id), "message");
+        }
+        assert_eq!(long_calls.load(std::sync::atomic::Ordering::Relaxed), 1, "the shared id is redacted once");
+        // A new id buffer (even with the same text) is redacted again; a secret in it is still caught.
+        let with_secret: Arc<str> = Arc::from(format!("{SECRET}{}", "k".repeat(4096)));
+        t.event_shared_id(Direction::Received, "event", b"x", Some(&with_secret), "message");
+        let s = t.finish();
+        assert_eq!(s.messages.len(), 1_001.min(TranscriptLimits::default().max_messages));
+        let last = s.messages.last().unwrap();
+        assert!(last.event_id.as_deref().is_some_and(|v| v.starts_with(REDACTED) && !shows_secret_prefix(v)), "{:?}", last.event_id);
+        assert_eq!(s.messages[0].event_id.as_deref(), Some(format!("{}…", "k".repeat(METADATA_PREVIEW_BYTES)).as_str()));
     }
 
     #[test]

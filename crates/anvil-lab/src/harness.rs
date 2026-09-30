@@ -106,11 +106,14 @@ pub async fn run_defs<E: LabEnv>(
                 checks.absent_prefix(m, "ferrum.token");
                 checks.absent_prefix(m, "ferrum.outcome");
             }
-            let status = if checks.all_passed() { "passed" } else { "failed" };
+            let (status, skip_reason) = checks.verdict();
             let id = if trusted { def.id.to_string() } else { format!("{}-untrusted", def.id) };
             eprintln!("{:22} {:7} {}", id, status, def.title);
             for c in checks.items.iter().filter(|c| !c.passed) {
                 eprintln!("    ✗ [{:?}] {} — {}", c.kind, c.name, c.detail);
+            }
+            if let Some(reason) = &skip_reason {
+                eprintln!("    — {reason}");
             }
             let r = ScenarioResult {
                 id: id.clone(),
@@ -127,7 +130,7 @@ pub async fn run_defs<E: LabEnv>(
                 operator_log_evidence: o.operator_log,
                 checks: checks.items,
                 status: status.into(),
-                skip_reason: None,
+                skip_reason,
                 duration_ms: started.elapsed().as_millis(),
             };
             std::fs::write(ctx.out_dir.join(format!("{id}.json")), serde_json::to_vec_pretty(&r)?)?;

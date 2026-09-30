@@ -64,16 +64,16 @@ pub(crate) enum Explicit {
 
 pub(crate) fn explicit_example(sg: &mut SampleGen, holder: &Value, at: &str) -> Option<Explicit> {
     if let Some(v) = holder.get("example") {
-        return Some(Explicit::Value(v.clone()));
+        return sg.copy(&ptr(at, "example"), v).map(Explicit::Value);
     }
     let (name, ex) = holder.get("examples").and_then(Value::as_object).and_then(|m| m.iter().next())?;
     let eptr = ptr(&ptr(at, "examples"), name);
     let (ex, eptr) = sg.refs.resolve(ex, &eptr, sg.report)?;
     if let Some(v) = ex.get("value").or_else(|| ex.get("dataValue")) {
-        return Some(Explicit::Value(v.clone()));
+        return sg.copy(&eptr, v).map(Explicit::Value);
     }
     if let Some(s) = ex.get("serializedValue").and_then(Value::as_str) {
-        return Some(Explicit::Serialized(s.to_string()));
+        return sg.copy_str(&eptr, s).map(Explicit::Serialized);
     }
     if let Some(u) = ex.get("externalValue").and_then(Value::as_str) {
         sg.report.external_ref(u, &ptr(&eptr, "externalValue"));
@@ -86,13 +86,12 @@ pub(crate) fn explicit_example(sg: &mut SampleGen, holder: &Value, at: &str) -> 
 pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str) -> GeneratedBody {
     sg.reset_budget();
     let (media, mptr) = sg.refs.resolve_or_self(media, mptr, sg.report);
-    let media = media.clone();
     for k in ["prefixEncoding", "itemEncoding"] {
         if media.get(k).is_some() {
             sg.report.unsupported("sequential_encoding", &ptr(&mptr, k), format!("OpenAPI 3.2 `{k}` is not supported; parts use defaults"));
         }
     }
-    let schema = media.get("schema").cloned();
+    let schema = media.get("schema");
     let sptr = ptr(&mptr, "schema");
     if schema.is_none()
         && let Some(item) = media.get("itemSchema")
@@ -105,7 +104,7 @@ pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str
         let v = sg.generate(item, &ptr(&mptr, "itemSchema"), None).unwrap_or(Value::Null);
         return GeneratedBody { body: Body::Raw { text: format!("{v}\n"), content_type: Some(mt.to_string()) }, content_type: None };
     }
-    let explicit = if sg.mode == SampleMode::Sample { explicit_example(sg, &media, &mptr) } else { None };
+    let explicit = if sg.mode == SampleMode::Sample { explicit_example(sg, media, &mptr) } else { None };
     if let Some(Explicit::Serialized(text)) = &explicit {
         return GeneratedBody { body: Body::Raw { text: text.clone(), content_type: Some(mt.to_string()) }, content_type: None };
     }
@@ -286,19 +285,20 @@ fn xml_element(
         _ => String::new(),
     };
     let pad = "  ".repeat(indent);
+    let no_schema = Value::Object(Map::new());
     match value {
         Value::Object(m) => {
-            let props = flat.get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
+            let props = flat.get("properties").and_then(Value::as_object);
             let mut attrs = String::new();
             let mut text: Option<String> = None;
             let mut children = String::new();
             let unwrap = h.node_type.as_deref() == Some("none");
             let child_indent = if unwrap { indent } else { indent + 1 };
             for (k, v) in m {
-                let ps = props.get(k).cloned().unwrap_or(Value::Object(Map::new()));
+                let ps = props.and_then(|p| p.get(k)).unwrap_or(&no_schema);
                 let pptr = ptr(&ptr(&fp, "properties"), k);
-                let (pflat, _) = sg.flatten(&ps, &pptr);
-                let ph = hints(&ps);
+                let (pflat, _) = sg.flatten(ps, &pptr);
+                let ph = hints(ps);
                 let ph2 = hints(&pflat);
                 let nt = ph.node_type.clone().or(ph2.node_type.clone());
                 let pname = xml_name(ph.name.as_deref().or(ph2.name.as_deref()).unwrap_or(k));
@@ -312,7 +312,7 @@ fn xml_element(
                     }
                     Some("text") => text = Some(xml_escape(&scalar_text(v), false)),
                     Some("cdata") => text = Some(format!("<![CDATA[{}]]>", scalar_text(v).replace("]]>", "]]]]><![CDATA[>"))),
-                    _ => xml_element(sg, &ps, &pptr, v, k, &mut children, child_indent, depth + 1),
+                    _ => xml_element(sg, ps, &pptr, v, k, &mut children, child_indent, depth + 1),
                 }
             }
             if unwrap {
@@ -327,19 +327,19 @@ fn xml_element(
             }
         }
         Value::Array(items) => {
-            let item_schema = flat.get("items").cloned().unwrap_or(Value::Object(Map::new()));
+            let item_schema = flat.get("items").unwrap_or(&no_schema);
             let iptr = ptr(&fp, "items");
-            let (iflat, _) = sg.flatten(&item_schema, &iptr);
-            let item_name = hints(&item_schema).name.or(hints(&iflat).name).unwrap_or_else(|| name.clone());
+            let (iflat, _) = sg.flatten(item_schema, &iptr);
+            let item_name = hints(item_schema).name.or(hints(&iflat).name).unwrap_or_else(|| name.clone());
             if h.wrapped {
                 out.push_str(&format!("{pad}<{qname}{ns_attr}>\n"));
                 for it in items {
-                    xml_element(sg, &item_schema, &iptr, it, &item_name, out, indent + 1, depth + 1);
+                    xml_element(sg, item_schema, &iptr, it, &item_name, out, indent + 1, depth + 1);
                 }
                 out.push_str(&format!("{pad}</{qname}>\n"));
             } else {
                 for it in items {
-                    xml_element(sg, &item_schema, &iptr, it, &item_name, out, indent, depth + 1);
+                    xml_element(sg, item_schema, &iptr, it, &item_name, out, indent, depth + 1);
                 }
             }
         }

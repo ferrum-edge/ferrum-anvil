@@ -27,12 +27,15 @@ use params::Location;
 use refs::Refs;
 use schema::SampleGen;
 use serde_json::{Map, Value, json};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 pub(crate) struct Ctx<'a> {
     pub root: &'a Value,
     pub dialect: Dialect,
     pub refs: Refs<'a>,
+    /// Bytes sample generation may still copy from the document (whole import).
+    pub sample_bytes: Cell<usize>,
 }
 
 const METHODS: &[&str] = &["get", "put", "post", "delete", "options", "head", "patch", "trace"];
@@ -53,7 +56,12 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
     if !root.is_object() {
         return Err(ImportError::Invalid { dialect, pointer: String::new(), message: "the document is not an object".into() });
     }
-    let ctx = Ctx { root, dialect, refs: Refs { root, max_depth: b.opts.max_ref_depth, max_expansions: b.opts.max_ref_expansions } };
+    let ctx = Ctx {
+        root,
+        dialect,
+        refs: Refs { root, max_depth: b.opts.max_ref_depth, max_expansions: b.opts.max_ref_expansions },
+        sample_bytes: Cell::new(b.opts.max_bytes.saturating_mul(schema::SAMPLE_BYTES_PER_INPUT_BYTE)),
+    };
 
     // Info.
     let info = root.get("info").cloned().unwrap_or(Value::Null);
@@ -452,6 +460,11 @@ fn merged_params(ctx: &Ctx, b: &mut Builder, path_params: &Value, pptr: &str, op
         for (i, p) in a.iter().enumerate() {
             let at = format!("{base}/{i}");
             let Some((p, pp)) = ctx.refs.resolve(p, &at, &mut b.report) else { continue };
+            // Parameters are copied per operation; the copies share the import's sample byte budget.
+            if !schema::charge_copy(&ctx.sample_bytes, p) {
+                b.report.warn("sample_size_limit", &pp, "generated samples reached the import's byte budget; parameter skipped");
+                continue;
+            }
             let name = str_of(p, "name").unwrap_or("").to_string();
             let loc = str_of(p, "in").unwrap_or("").to_string();
             let norm = |n: &str| if loc == "header" { n.to_ascii_lowercase() } else { n.to_string() };
@@ -479,7 +492,7 @@ fn param_value(sg: &mut SampleGen, p: &Value, pp: &str) -> Option<Value> {
             None => {}
         }
         if let Some(v) = p.get("x-example") {
-            return Some(v.clone());
+            return sg.copy(&ptr(pp, "x-example"), v);
         }
     }
     if let Some(s) = p.get("schema") {
@@ -496,7 +509,7 @@ fn param_value(sg: &mut SampleGen, p: &Value, pp: &str) -> Option<Value> {
     }
     // Swagger 2.0 non-body parameters are schema-like themselves.
     if p.get("type").is_some() {
-        let mut s = p.clone();
+        let mut s = sg.copy(pp, p)?;
         if let Some(o) = s.as_object_mut() {
             for k in ["name", "in", "required", "description", "collectionFormat", "allowEmptyValue"] {
                 o.remove(k);
@@ -524,11 +537,13 @@ fn process_params(ctx: &Ctx, sg: &mut SampleGen, params: &[(Value, String)], bla
         if ctx.dialect == Dialect::Swagger20 {
             match raw_loc {
                 "body" => {
-                    out.body_params = Some((p.clone(), pp.clone()));
+                    out.body_params = sg.copy(pp, p).map(|c| (c, pp.clone()));
                     continue;
                 }
                 "formData" => {
-                    out.form_params.push((p.clone(), pp.clone()));
+                    if let Some(c) = sg.copy(pp, p) {
+                        out.form_params.push((c, pp.clone()));
+                    }
                     continue;
                 }
                 _ => {}
@@ -732,7 +747,7 @@ fn import_operation(
     // ---- generation (borrows the report) ----
     let mut blank_vars: Vec<(String, String)> = vec![];
     let (pout, body) = {
-        let mut sg = SampleGen::new(ctx.refs, &mut b.report, ctx.dialect, b.opts, seed);
+        let mut sg = SampleGen::new(ctx.refs, &mut b.report, ctx.dialect, b.opts, seed, &ctx.sample_bytes);
         let pout = process_params(ctx, &mut sg, &params, &mut blank_vars);
         let body = request_body(ctx, &mut sg, op, optr, &pout);
         (pout, body)
@@ -910,7 +925,11 @@ fn swagger2_body(ctx: &Ctx, sg: &mut SampleGen, op: &Value, optr: &str, pout: &P
     if let Some((p, pp)) = &pout.body_params {
         let keys: Vec<&str> = consumes.iter().map(String::as_str).filter(|m| !m.contains("form")).collect();
         let mt = body::choose_media(&keys).map(|i| keys[i].to_string()).unwrap_or_else(|| "application/json".into());
-        let media = json!({ "schema": p.get("schema").cloned().unwrap_or(json!({})) });
+        let schema = match p.get("schema") {
+            Some(s) => sg.copy(pp, s).unwrap_or(Value::Null),
+            None => json!({}),
+        };
+        let media = json!({ "schema": schema });
         return body::from_media(sg, &mt, &media, pp);
     }
     if pout.form_params.is_empty() {
@@ -921,9 +940,9 @@ fn swagger2_body(ctx: &Ctx, sg: &mut SampleGen, op: &Value, optr: &str, pout: &P
     let mut props = Map::new();
     let mut required = vec![];
     let mut encoding = Map::new();
-    for (p, _) in &pout.form_params {
+    for (p, pp) in &pout.form_params {
         let name = str_of(p, "name").unwrap_or("").to_string();
-        let mut s = p.clone();
+        let Some(mut s) = sg.copy(pp, p) else { continue };
         if let Some(o) = s.as_object_mut() {
             for k in ["name", "in", "required", "description", "collectionFormat", "allowEmptyValue"] {
                 o.remove(k);
