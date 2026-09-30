@@ -1063,12 +1063,7 @@ fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<V
         HashSet::new()
     };
     let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
-        d.graph
-            .rulesets
-            .iter()
-            .filter(|r| local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
-            .map(|r| r.id)
-            .collect()
+        d.graph.rulesets.iter().filter(|r| local.items.contains(&(kind::API_RULESET.into(), r.id.to_string()))).map(|r| r.id).collect()
     } else {
         HashSet::new()
     };

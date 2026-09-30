@@ -266,11 +266,8 @@ impl App {
                 warnings.push(format!("{} duplicate API ruleset(s) with matching SHA-256 will be skipped.", before - graph.rulesets.len()));
             }
         }
-        let replacing: HashSet<Id> = if policy == ConflictPolicy::Replace {
-            graph.rulesets.iter().map(|r| r.id).collect()
-        } else {
-            HashSet::new()
-        };
+        let replacing: HashSet<Id> =
+            if policy == ConflictPolicy::Replace { graph.rulesets.iter().map(|r| r.id).collect() } else { HashSet::new() };
         let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
             graph.rulesets.iter().filter(|r| existing.objects.contains(&r.id)).map(|r| r.id).collect()
         } else {

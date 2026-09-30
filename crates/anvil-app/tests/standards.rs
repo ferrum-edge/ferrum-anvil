@@ -7,8 +7,8 @@ use anvil_app::specs::SpecTarget;
 use anvil_contract::Severity;
 use anvil_import::ImportOptions;
 use anvil_storage::{KdfParams, kind};
-use std::path::Path;
 use sha2::Digest;
+use std::path::Path;
 
 fn new_app(root: &Path) -> App {
     let pm = ProfileManager::new(root);
@@ -279,13 +279,7 @@ fn replace_import_checks_changed_rulesets_at_their_stored_position() {
     let ws = source.create_workspace("Replace ordering source").unwrap();
     let team = source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
     let unchanged_bundle = source
-        .export_with_standards(
-            Some(&ws.meta.id),
-            anvil_portability::ExportMode::EncryptedTransfer,
-            Some("bundle passphrase"),
-            false,
-            true,
-        )
+        .export_with_standards(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false, true)
         .unwrap()
         .0;
 
@@ -294,13 +288,7 @@ fn replace_import_checks_changed_rulesets_at_their_stored_position() {
     changed.sha256 = hex::encode(sha2::Sha256::digest(changed.text.as_bytes()));
     source.store.put(kind::API_RULESET, &changed.id, None, None, 0.0, &changed).unwrap();
     let changed_bundle = source
-        .export_with_standards(
-            Some(&ws.meta.id),
-            anvil_portability::ExportMode::EncryptedTransfer,
-            Some("bundle passphrase"),
-            false,
-            true,
-        )
+        .export_with_standards(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false, true)
         .unwrap()
         .0;
 
@@ -309,9 +297,8 @@ fn replace_import_checks_changed_rulesets_at_their_stored_position() {
     let overlay = target.add_api_ruleset("overlay.yaml", OVERLAY.as_bytes()).unwrap();
     target.store.put(kind::API_RULESET, &overlay.id, None, None, 9.0, &overlay).unwrap();
 
-    let preview = target
-        .import_preview(&changed_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace)
-        .unwrap();
+    let preview =
+        target.import_preview(&changed_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
     assert!(preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
     let report = target.import(&changed_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
     assert!(report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
@@ -320,13 +307,10 @@ fn replace_import_checks_changed_rulesets_at_their_stored_position() {
     unchanged.store.put(kind::API_RULESET, &team.id, None, None, 7.0, &team).unwrap();
     let unchanged_overlay = unchanged.add_api_ruleset("overlay.yaml", OVERLAY.as_bytes()).unwrap();
     unchanged.store.put(kind::API_RULESET, &unchanged_overlay.id, None, None, 9.0, &unchanged_overlay).unwrap();
-    let preview = unchanged
-        .import_preview(&unchanged_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace)
-        .unwrap();
+    let preview =
+        unchanged.import_preview(&unchanged_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
     assert!(!preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
-    let report = unchanged
-        .import(&unchanged_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace)
-        .unwrap();
+    let report = unchanged.import(&unchanged_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
     assert!(!report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
 }
 
@@ -444,9 +428,7 @@ fn duplicate_import_skips_matching_ruleset_hashes_and_combined_limits_refuse_exc
     let err = full_target.import(&bundle, None, anvil_portability::plan::ConflictPolicy::Merge).unwrap_err();
     assert!(err.to_string().contains("32 rulesets"));
     let backup = source.export_backup_with("backup passphrase", anvil_storage::KdfParams::testing()).unwrap().0;
-    let preview = full_target
-        .restore_preview(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge)
-        .unwrap();
+    let preview = full_target.restore_preview(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
     assert!(preview.warnings.iter().any(|warning| warning.contains("the restore will be refused")), "{:?}", preview.warnings);
     let err = full_target.restore(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap_err();
     assert!(err.to_string().contains("32 rulesets"));
