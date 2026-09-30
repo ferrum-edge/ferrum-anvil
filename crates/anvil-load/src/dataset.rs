@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn large_object_array_stops_at_the_row_limit() {
-        let bytes = format!("[{{}}{}]", ",{{}}".repeat(MAX_ROWS)).into_bytes();
+        let bytes = format!("[{{}}{}]", ",{}".repeat(MAX_ROWS)).into_bytes();
         let e = Dataset::parse(DatasetFormat::Json, bytes).unwrap_err().to_string();
         assert!(e.contains("more than 1000000 rows"), "{e}");
     }
