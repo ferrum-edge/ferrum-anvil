@@ -786,6 +786,9 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
                 break;
             }
         };
+        // Every attempt redacts the shared last event id afresh: the redactor
+        // has taken in this attempt's credentials by now.
+        tr.reset_shared_metadata();
         let last_id = parser.last_event_id.clone();
         let opened_attempt = if use_h3 {
             open_h3(plan, fields, &mut rec, &mut obs, last_id.as_deref(), cancel, total_deadline).await

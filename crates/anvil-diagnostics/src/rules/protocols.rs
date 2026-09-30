@@ -383,6 +383,7 @@ mod tests {
             credentials_stripped_on_redirect: false,
             protocol_fallback_from: None,
             workload: None,
+            redact: None,
         };
         crate::diagnose(&input).findings
     }

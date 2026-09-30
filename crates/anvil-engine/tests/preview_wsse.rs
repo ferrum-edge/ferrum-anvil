@@ -1,7 +1,8 @@
 //! The effective-request preview shows the body the send path sends when an
 //! auth profile rewrites it: a WS-Security UsernameToken request previews its
-//! `wsse:Security` header block, with the password and any SAML assertion
-//! redacted, and the size the fixture received.
+//! `wsse:Security` header block, with the password (or a PasswordDigest and
+//! its nonce) and any SAML assertion redacted, and the size the fixture
+//! received.
 
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
@@ -119,4 +120,52 @@ async fn preview_redacts_a_vault_backed_saml_assertion_and_keeps_the_soap_data()
     assert_eq!(received.len() as u64, p.body_bytes, "the preview's body size differs from the one sent");
     let record = serde_json::to_string(&o.record).unwrap();
     assert!(!record.contains(ASSERTION_MARKER), "the stored record holds the SAML assertion");
+}
+
+/// The text of `s` between `start` and the next `end`.
+fn between<'a>(s: &'a str, start: &str, end: &str) -> &'a str {
+    let from = s.find(start).unwrap_or_else(|| panic!("no {start} in {s}")) + start.len();
+    let to = s[from..].find(end).unwrap_or_else(|| panic!("no {end} in {s}")) + from;
+    &s[from..to]
+}
+
+/// A PasswordDigest UsernameToken authenticates on its own: it can be
+/// replayed against a service that keeps no nonce cache or Timestamp limit.
+/// Its digest and nonce are secrets of the request, redacted in the preview
+/// and in the stored record; the creation time is not.
+#[tokio::test]
+async fn a_password_digest_and_its_nonce_are_redacted_in_the_preview_and_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut s = RequestSpec::http("POST", &f.url("/echo"));
+    s.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+    s.auth = AuthConfig::Wsse {
+        config: WsseConfig {
+            username: USERNAME.into(),
+            password: SensitiveValue::template(PASSWORD),
+            password_type: WssePasswordType::PasswordDigest,
+            timestamp_ttl_secs: Some(300),
+            saml_assertion: None,
+        },
+    };
+    let c = ExecutionContext::standalone(s);
+
+    let p = e.preview(&c).unwrap();
+    assert!(p.body_preview.contains(&format!("#PasswordDigest\">{REDACTED}</wsse:Password>")), "{}", p.body_preview);
+    assert!(p.body_preview.contains(&format!("#Base64Binary\">{REDACTED}</wsse:Nonce>")), "{}", p.body_preview);
+    assert!(p.body_preview.contains(&format!("<wsse:Username>{USERNAME}</wsse:Username>")), "{}", p.body_preview);
+    assert!(!between(&p.body_preview, "<wsu:Created>", "</wsu:Created>").contains(REDACTED), "{}", p.body_preview);
+
+    let o = e.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    assert_eq!(o.record.response.as_ref().map(|r| r.status), Some(200), "{:?}", o.record.attempts.last().and_then(|a| a.failure.as_ref()));
+    let echo: serde_json::Value = serde_json::from_slice(&o.body).expect("the echo body is JSON");
+    let received = echo["body"].as_str().expect("the fixture received a text body");
+    // Ground truth: the token the fixture received.
+    let digest = between(received, "#PasswordDigest\">", "</wsse:Password>");
+    let nonce = between(received, "#Base64Binary\">", "</wsse:Nonce>");
+    assert!(digest.len() == 28 && nonce.len() == 24, "a SHA-1 digest and a 16-byte nonce, in Base64");
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains(digest), "the stored record holds the PasswordDigest");
+    assert!(!record.contains(nonce), "the stored record holds the nonce");
 }

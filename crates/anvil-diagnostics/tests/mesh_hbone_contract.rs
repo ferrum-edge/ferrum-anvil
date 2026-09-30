@@ -9,6 +9,7 @@ use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::*;
 use anvil_domain::outcome::ProtocolStatus;
 use anvil_domain::request::Protocol;
+use anvil_domain::secret::REDACTED;
 
 const ENDPOINT: &str = "mesh hbone (127.0.0.1:17618)";
 const AUTHORITY: &str = "127.0.0.1:17801";
@@ -112,6 +113,10 @@ fn attempt(s: &Shape) -> AttemptObservation {
 }
 
 fn run(s: &Shape) -> Diagnosis {
+    run_redacted(s, None)
+}
+
+fn run_redacted(s: &Shape, redact: Option<&dyn Fn(&str) -> String>) -> Diagnosis {
     let attempts = vec![attempt(s)];
     let trust = FerrumTrust::NotConfigured;
     diagnose(&DiagnosticInput {
@@ -128,6 +133,7 @@ fn run(s: &Shape) -> Diagnosis {
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact,
     })
 }
 
@@ -181,6 +187,43 @@ fn a_404_relay_synthesis_refusal_quotes_the_body_and_claims_no_policy() {
     assert!(f.does_not_prove.iter().any(|x| x.contains("Which mesh policy")));
     assert!(f.evidence.iter().any(|e| e.key == "tunnel.connect_headers" && e.value.contains("x-ferrum-mesh-protocol")));
     no_destination_blame(&d);
+}
+
+/// A refusal body that echoes a secret across the cut of a quote keeps no
+/// prefix of it: the quotes are redacted before they are cut, as the record's
+/// redaction of the finding afterwards could no longer match a cut secret.
+#[test]
+fn a_refusal_body_echoing_a_secret_across_the_cut_keeps_no_prefix_of_it() {
+    const SECRET: &str = "zq7-echoed-secret-5r7t";
+    let scrub = |s: &str| s.replace(SECRET, REDACTED);
+    // The JSON error is quoted up to 200 characters and the raw body up to
+    // 300: both cuts fall 4 characters into an echo of the secret.
+    let error = format!("{}{SECRET}", "e".repeat(196));
+    let body = format!(r#"{{"error":"{error}","detail":"{}{SECRET}"}}"#, "d".repeat(56));
+    let shape = Shape {
+        kind: FailureKind::HboneConnectRefused,
+        inner: inner(Phase::ProxyTunnel, FailureKind::HboneConnectRefused, None),
+        tls: Some(outer_tls(TlsVerification::Verified, true)),
+        status: Some(404),
+        body: Some(Box::leak(body.into_boxed_str())),
+    };
+    let quoted = |d: &Diagnosis| {
+        let f = find(d, "hbone.tunnel_refused").clone();
+        let body = f.evidence.iter().find(|e| e.key == "tunnel.refusal_body").map(|e| e.value.clone()).expect("the body is quoted");
+        (f.explanation, body)
+    };
+    // Ground truth: cut first, both quotes end with the secret's first 4 characters.
+    let (explanation, body) = quoted(&run(&shape));
+    assert!(explanation.contains(&format!("{}{}", "e".repeat(196), &SECRET[..4])), "{explanation}");
+    assert!(body.ends_with(&SECRET[..4]), "{body}");
+
+    let (explanation, body) = quoted(&run_redacted(&shape, Some(&scrub)));
+    for text in [&explanation, &body] {
+        assert!(!(4..=SECRET.len()).any(|n| text.contains(&SECRET[..n])), "a prefix of the secret is quoted: {text}");
+    }
+    assert!(explanation.contains(&format!("{}{REDACTED}", "e".repeat(196))), "{explanation}");
+    assert!(body.ends_with(&format!("{}{REDACTED}", "d".repeat(56))), "the secret is replaced where it starts: {body}");
+    assert!(body.contains(&format!(r#"{{"error":"{}{REDACTED}","detail""#, "e".repeat(196))), "{body}");
 }
 
 #[test]
@@ -341,6 +384,7 @@ fn a_direct_tls13_handshake_failure_after_finished_with_a_presented_certificate_
             credentials_stripped_on_redirect: false,
             protocol_fallback_from: None,
             workload: None,
+            redact: None,
         })
     };
     let d = direct(FailureKind::TlsAlertAfterHandshake, true);
@@ -403,6 +447,7 @@ fn udp(
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact: None,
     })
 }
 

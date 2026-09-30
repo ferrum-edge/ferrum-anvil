@@ -41,6 +41,11 @@ use tokio_util::sync::CancellationToken;
 
 /// Bound of the interactive command queue (the UI never blocks a session).
 const COMMAND_QUEUE: usize = 256;
+/// How long a canceled session has to end on its own before its owner
+/// aborts the task. The WebSocket, raw TCP, DTLS, HBONE and MASQUE adapters
+/// race their writes against cancellation; a gRPC stream's writes are not
+/// raced, so for a stalled gRPC send (or a defect) this grace is the bound.
+const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Reconnections allowed for an SSE stream with `reconnect` enabled.
 const SSE_MAX_RECONNECTS: u32 = 5;
 /// Per-message receive ceiling for gRPC (local policy; lowered by limits).
@@ -1964,6 +1969,13 @@ pub enum SessionError {
 /// Handle to a live interactive session. Live messages arrive through the
 /// [`EventCtx`] given to [`Engine::open_session`]; the authoritative record
 /// is returned by [`SessionHandle::finish`].
+///
+/// The handle owns the session: dropping it cancels the session and aborts
+/// its task. The task is dropped at its next await point, and with it the
+/// connection (code that blocks without awaiting cannot be stopped this way).
+/// After [`cancel`](Self::cancel) the task has [`CANCEL_GRACE`] to end on its
+/// own before it is aborted, so [`finish`](Self::finish) and
+/// [`is_finished`](Self::is_finished) are bounded once a session is canceled.
 pub struct SessionHandle {
     pub execution_id: Id,
     pub protocol: Protocol,
@@ -1971,6 +1983,19 @@ pub struct SessionHandle {
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<ExecutionOutput>,
     fallback: Box<ExecutionContext>,
+    /// How long a canceled task may take to end before it is aborted.
+    grace: std::time::Duration,
+    /// The abort after [`cancel`](Self::cancel) is armed (once).
+    abort_armed: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for SessionHandle {
+    fn drop(&mut self) {
+        // Owner-side abort: a session nobody can finish or cancel any more
+        // must not keep running (or keep its connection open).
+        self.cancel.cancel();
+        self.task.abort();
+    }
 }
 
 fn command_unsupported(protocol: Protocol, cmd: &SessionCommand) -> Option<String> {
@@ -1987,6 +2012,18 @@ fn command_unsupported(protocol: Protocol, cmd: &SessionCommand) -> Option<Strin
 }
 
 impl SessionHandle {
+    fn new(
+        execution_id: Id,
+        protocol: Protocol,
+        commands: Option<mpsc::Sender<SessionCommand>>,
+        cancel: CancellationToken,
+        task: tokio::task::JoinHandle<ExecutionOutput>,
+        fallback: Box<ExecutionContext>,
+    ) -> Self {
+        let abort_armed = std::sync::atomic::AtomicBool::new(false);
+        SessionHandle { execution_id, protocol, commands, cancel, task, fallback, grace: CANCEL_GRACE, abort_armed }
+    }
+
     /// Queue a command. Commands a protocol cannot express are rejected here
     /// rather than silently ignored.
     pub async fn send(&self, cmd: SessionCommand) -> Result<(), SessionError> {
@@ -2004,9 +2041,22 @@ impl SessionHandle {
         self.send(SessionCommand::Close { code: 1000, reason: String::new() }).await
     }
 
-    /// Abort the session now (no graceful close handshake is awaited).
+    /// Abort the session now (no graceful close handshake is awaited). The
+    /// session ends on its own at once; a task that has not ended
+    /// [`CANCEL_GRACE`] later is aborted.
     pub fn cancel(&self) {
         self.cancel.cancel();
+        // Outside a runtime nothing can be armed (a later cancel inside one
+        // still can); `finish` bounds its own wait either way.
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        if self.abort_armed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let (abort, grace) = (self.task.abort_handle(), self.grace);
+        rt.spawn(async move {
+            tokio::time::sleep(grace).await;
+            abort.abort();
+        });
     }
 
     pub fn is_finished(&self) -> bool {
@@ -2015,18 +2065,35 @@ impl SessionHandle {
 
     /// Wait for the session to end (peer close, [`close`](Self::close),
     /// [`cancel`](Self::cancel) or a stop condition) and return its record.
-    pub async fn finish(self) -> ExecutionOutput {
-        let SessionHandle { commands, task, fallback, .. } = self;
-        let out = task.await;
-        drop(commands);
-        match out {
-            Ok(o) => o,
-            Err(e) => {
-                let r = Resolver::new(vec![], None);
-                let f = TransportFailure::new(Phase::Session, FailureKind::Internal, format!("the session task ended unexpectedly: {e}"));
-                record::local_failure(&fallback, &r, Utc::now(), f)
+    /// Once the session is canceled the wait is bounded: a task that has not
+    /// ended [`CANCEL_GRACE`] after the cancel is aborted, and the record
+    /// says so (its transcript is lost with it).
+    pub async fn finish(mut self) -> ExecutionOutput {
+        // The command sender stays open until the task ends: a closed queue
+        // is read as a Close command.
+        let (cancel, grace) = (self.cancel.clone(), self.grace);
+        let out = tokio::select! {
+            out = &mut self.task => out,
+            _ = async {
+                cancel.cancelled().await;
+                tokio::time::sleep(grace).await;
+            } => {
+                self.task.abort();
+                (&mut self.task).await
             }
-        }
+        };
+        let f = match out {
+            Ok(o) => return o,
+            Err(e) if e.is_cancelled() => {
+                let message = format!(
+                    "the session did not end within {} ms of being canceled and was aborted; its transcript is not available",
+                    grace.as_millis()
+                );
+                TransportFailure::new(Phase::Session, FailureKind::Canceled, message)
+            }
+            Err(e) => TransportFailure::new(Phase::Session, FailureKind::Internal, format!("the session task ended unexpectedly: {e}")),
+        };
+        record::local_failure(&self.fallback, &Resolver::new(vec![], None), Utc::now(), f)
     }
 }
 
@@ -2065,12 +2132,12 @@ impl Engine {
                 let c2 = cancel.clone();
                 let task =
                     tokio::spawn(async move { run_prepared(prep, &ctx, &resolver, started_at, events, c2, Some(rx), workload).await });
-                SessionHandle { execution_id, protocol, commands: Some(tx), cancel, task, fallback }
+                SessionHandle::new(execution_id, protocol, Some(tx), cancel, task, fallback)
             }
             Err(f) => {
                 let out = record::local_failure_with(&ctx, &resolver, started_at, f, workload);
                 let task = tokio::spawn(async move { out });
-                SessionHandle { execution_id, protocol, commands: None, cancel, task, fallback }
+                SessionHandle::new(execution_id, protocol, None, cancel, task, fallback)
             }
         }
     }
@@ -2137,5 +2204,77 @@ mod tests {
         let sign = sign_in_transport(auth, &request, &[], &prepared, &[], Some(slot.clone()), Default::default(), signed);
         assert!(sign("/events", &Bytes::new()).is_ok());
         assert!(slot.lock().is_some());
+    }
+
+    fn context() -> ExecutionContext {
+        ExecutionContext::standalone(RequestSpec::http("GET", "ws://127.0.0.1:9/"))
+    }
+
+    fn handle(task: tokio::task::JoinHandle<ExecutionOutput>, cancel: CancellationToken, grace: std::time::Duration) -> SessionHandle {
+        let mut h = SessionHandle::new(Id::new(), Protocol::WebSocket, None, cancel, task, Box::new(context()));
+        h.grace = grace;
+        h
+    }
+
+    fn failure(o: &ExecutionOutput) -> &TransportFailure {
+        o.record.attempts.last().and_then(|a| a.failure.as_ref()).expect("a failure")
+    }
+
+    const SHORT: std::time::Duration = std::time::Duration::from_millis(100);
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// A session task that ignores its cancellation (a defect, but one that
+    /// must not hang its owner) is aborted once the grace has passed.
+    #[tokio::test]
+    async fn finish_is_bounded_once_the_session_is_canceled() {
+        let h = handle(tokio::spawn(std::future::pending::<ExecutionOutput>()), CancellationToken::new(), SHORT);
+        h.cancel();
+        let o = tokio::time::timeout(BOUND, h.finish()).await.expect("finish must not wait on a task that ignores the cancel");
+        assert_eq!(failure(&o).kind, FailureKind::Canceled);
+        assert!(failure(&o).message.contains("was aborted"), "{}", failure(&o).message);
+    }
+
+    /// The desktop waits for `is_finished` before it calls `finish`: a
+    /// cancel alone ends the task within the grace.
+    #[tokio::test]
+    async fn a_cancel_alone_ends_a_task_that_ignores_it() {
+        let h = handle(tokio::spawn(std::future::pending::<ExecutionOutput>()), CancellationToken::new(), SHORT);
+        h.cancel();
+        h.cancel();
+        let started = std::time::Instant::now();
+        while !h.is_finished() {
+            assert!(started.elapsed() < BOUND, "the task was not aborted after the grace");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_handle_cancels_the_session_and_aborts_its_task() {
+        let (held, dropped) = tokio::sync::oneshot::channel::<()>();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(async move {
+            let _held = held;
+            std::future::pending::<ExecutionOutput>().await
+        });
+        drop(handle(task, cancel.clone(), CANCEL_GRACE));
+        assert!(cancel.is_cancelled(), "the session is told to stop");
+        let r = tokio::time::timeout(BOUND, dropped).await.expect("the task must be aborted, not left running");
+        assert!(r.is_err(), "the task ended without completing");
+    }
+
+    /// Positive control: a session that honours the cancel returns its own record.
+    #[tokio::test]
+    async fn a_session_that_ends_on_cancel_keeps_its_own_record() {
+        let cancel = CancellationToken::new();
+        let c2 = cancel.clone();
+        let task = tokio::spawn(async move {
+            c2.cancelled().await;
+            let f = TransportFailure::new(Phase::Session, FailureKind::Canceled, "ended by the session itself");
+            record::local_failure(&context(), &Resolver::new(vec![], None), Utc::now(), f)
+        });
+        let h = handle(task, cancel, CANCEL_GRACE);
+        h.cancel();
+        let o = tokio::time::timeout(BOUND, h.finish()).await.expect("the session ends at once");
+        assert_eq!(failure(&o).message, "ended by the session itself");
     }
 }

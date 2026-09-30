@@ -65,6 +65,18 @@ pub fn security_header(
     s
 }
 
+/// A Security header inserted for one send.
+pub struct Inserted {
+    /// The envelope with the header.
+    pub body: Vec<u8>,
+    /// The per-send parts of the UsernameToken that authenticate on their
+    /// own: a PasswordDigest (with its Nonce) can be replayed against a
+    /// service that keeps no nonce cache or Timestamp limit, so both are
+    /// secrets of the request. Empty for PasswordText, whose password is the
+    /// secret. The `Created` time is not secret.
+    pub token_secrets: Vec<String>,
+}
+
 /// Insert a fresh Security header into the SOAP envelope.
 pub fn insert_security(
     body: &[u8],
@@ -75,9 +87,30 @@ pub fn insert_security(
     saml: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<Vec<u8>, AuthError> {
+    insert_security_token(body, username, password, ptype, ttl, saml, now).map(|i| i.body)
+}
+
+/// [`insert_security`], with the parts of the UsernameToken that must be
+/// redacted wherever the request is recorded.
+pub fn insert_security_token(
+    body: &[u8],
+    username: &str,
+    password: &str,
+    ptype: WssePasswordType,
+    ttl: Option<u32>,
+    saml: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Inserted, AuthError> {
     let mut nonce = [0u8; 16];
     rand::fill(&mut nonce);
     let header_xml = security_header(username, password, ptype, ttl, saml, now, &nonce);
+    let token_secrets = match ptype {
+        WssePasswordType::PasswordText => vec![],
+        WssePasswordType::PasswordDigest => {
+            let created = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+            vec![password_digest(&nonce, &created, password), base64::engine::general_purpose::STANDARD.encode(nonce)]
+        }
+    };
     let text = std::str::from_utf8(body).map_err(|_| AuthError::Invalid("SOAP envelope is not UTF-8".into()))?;
     let opts = roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() };
     let doc = roxmltree::Document::parse_with_options(text, opts)
@@ -121,7 +154,7 @@ pub fn insert_security(
         out.push_str(&format!("<{}>{header_xml}</{}>", qual("Header"), qual("Header")));
         out.push_str(&text[at..]);
     }
-    Ok(out.into_bytes())
+    Ok(Inserted { body: out.into_bytes(), token_secrets })
 }
 
 #[cfg(test)]
@@ -144,6 +177,21 @@ mod tests {
         assert!(s.contains(r#"<soap:Body><m:Ping xmlns:m="urn:x">1</m:Ping></soap:Body>"#));
         assert!(!s.contains("secret123"), "digest mode never sends the password");
         roxmltree::Document::parse(&s).unwrap();
+    }
+
+    /// The digest and nonce registered for redaction are the ones the header carries.
+    #[test]
+    fn a_password_digest_token_reports_its_digest_and_nonce_as_secrets() {
+        let env = br#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+        let i = insert_security_token(env, "alice", "secret123", WssePasswordType::PasswordDigest, Some(300), None, Utc::now()).unwrap();
+        let s = String::from_utf8(i.body).unwrap();
+        let [digest, nonce] = i.token_secrets.as_slice() else {
+            panic!("{} token secrets, not the digest and the nonce", i.token_secrets.len())
+        };
+        assert!(s.contains(&format!("#PasswordDigest\">{digest}</wsse:Password>")), "the digest is not the one sent");
+        assert!(s.contains(&format!("#Base64Binary\">{nonce}</wsse:Nonce>")), "the nonce is not the one sent");
+        let text = insert_security_token(env, "alice", "secret123", WssePasswordType::PasswordText, None, None, Utc::now()).unwrap();
+        assert!(text.token_secrets.is_empty(), "a PasswordText token has no secret but its password");
     }
 
     #[test]

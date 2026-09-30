@@ -11,8 +11,9 @@
 //! sends its request. It never parses a request and answers as soon as the
 //! stream opens: request `n` on a connection gets `answers[n]` (the last one
 //! once they run out). It records the `SETTINGS_MAX_FIELD_SECTION_SIZE` each
-//! client advertised, how many answers it wrote in full and the code of every
-//! `STOP_SENDING` it received.
+//! client advertised, how many answers it wrote in full, the code of every
+//! `STOP_SENDING` it received and, on a stream it does not read
+//! ([`End::HoldUnread`]), the code of the client's `RESET_STREAM`.
 
 use crate::tlsserver::{TlsServerOptions, server_config};
 use parking_lot::Mutex;
@@ -40,6 +41,11 @@ pub enum End {
     /// One more DATA frame of one byte every interval, until the client
     /// stops the stream.
     Drip(Duration),
+    /// As [`End::Hold`], and the request stream is never read: once QUIC
+    /// flow control is spent the client's writes stall, as with a peer that
+    /// stopped reading. A reset of the request stream is recorded
+    /// ([`RawH3::first_reset`]).
+    HoldUnread,
 }
 
 /// What a request stream gets.
@@ -53,6 +59,7 @@ pub struct RawH3 {
     pub addr: SocketAddr,
     advertised: Arc<Mutex<Vec<u64>>>,
     stops: Arc<Mutex<Vec<u64>>>,
+    resets: Arc<Mutex<Vec<u64>>>,
     written: Arc<AtomicUsize>,
     endpoint: quinn::Endpoint,
 }
@@ -98,6 +105,21 @@ impl RawH3 {
         self.nth_stop(0, within).await
     }
 
+    /// Wait up to `within` for the first `RESET_STREAM` a client sent on a
+    /// request stream answered with [`End::HoldUnread`], and return its code.
+    pub async fn first_reset(&self, within: Duration) -> Option<u64> {
+        let until = Instant::now() + within;
+        loop {
+            if let Some(v) = self.resets.lock().first() {
+                return Some(*v);
+            }
+            if Instant::now() >= until {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Wait up to `within` for the `n`th (from 0) `STOP_SENDING` a client
     /// sent on a request stream, and return its code.
     pub async fn nth_stop(&self, n: usize, within: Duration) -> Option<u64> {
@@ -129,12 +151,13 @@ pub async fn serve(mut tls: TlsServerOptions, answers: Vec<Answer>) -> anyhow::R
     let addr = endpoint.local_addr()?;
     let advertised = Arc::new(Mutex::new(Vec::new()));
     let stops = Arc::new(Mutex::new(Vec::new()));
+    let resets = Arc::new(Mutex::new(Vec::new()));
     let written = Arc::new(AtomicUsize::new(0));
     let answers = Arc::new(answers);
-    let (ep, adv, st, wr) = (endpoint.clone(), advertised.clone(), stops.clone(), written.clone());
+    let (ep, adv, st, rs, wr) = (endpoint.clone(), advertised.clone(), stops.clone(), resets.clone(), written.clone());
     tokio::spawn(async move {
         while let Some(incoming) = ep.accept().await {
-            let (answers, adv, st, wr) = (answers.clone(), adv.clone(), st.clone(), wr.clone());
+            let (answers, adv, st, rs, wr) = (answers.clone(), adv.clone(), st.clone(), rs.clone(), wr.clone());
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
                 tokio::spawn(read_client_settings(conn.clone(), adv));
@@ -151,13 +174,13 @@ pub async fn serve(mut tls: TlsServerOptions, answers: Vec<Answer>) -> anyhow::R
                 while let Ok((send, recv)) = conn.accept_bi().await {
                     let Some(answer) = answers.get(n.min(answers.len().saturating_sub(1))).cloned() else { return };
                     n += 1;
-                    tokio::spawn(answer_stream(send, recv, answer, st.clone(), wr.clone()));
+                    tokio::spawn(answer_stream(send, recv, answer, st.clone(), rs.clone(), wr.clone()));
                 }
                 drop(control);
             });
         }
     });
-    Ok(RawH3 { addr, advertised, stops, written, endpoint })
+    Ok(RawH3 { addr, advertised, stops, resets, written, endpoint })
 }
 
 async fn answer_stream(
@@ -165,12 +188,23 @@ async fn answer_stream(
     mut recv: quinn::RecvStream,
     answer: Answer,
     stops: Arc<Mutex<Vec<u64>>>,
+    resets: Arc<Mutex<Vec<u64>>>,
     written: Arc<AtomicUsize>,
 ) {
-    // The request is read and ignored (a CONNECT stream never ends).
-    tokio::spawn(async move {
-        let _ = recv.read_to_end(64 * 1024).await;
-    });
+    if matches!(answer.end, End::HoldUnread) {
+        // Nothing is read, so no flow-control credit is returned; only a
+        // reset is waited for.
+        tokio::spawn(async move {
+            if let Ok(Some(code)) = recv.received_reset().await {
+                resets.lock().push(code.into_inner());
+            }
+        });
+    } else {
+        // The request is read and ignored (a CONNECT stream never ends).
+        tokio::spawn(async move {
+            let _ = recv.read_to_end(64 * 1024).await;
+        });
+    }
     if send.write_all(&answer.bytes).await.is_err() {
         return record_stop(&send, &stops).await;
     }
@@ -180,7 +214,7 @@ async fn answer_stream(
             let _ = send.finish();
             let _ = send.stopped().await;
         }
-        End::Hold => record_stop(&send, &stops).await,
+        End::Hold | End::HoldUnread => record_stop(&send, &stops).await,
         End::Drip(every) => loop {
             tokio::time::sleep(every).await;
             if send.write_all(&frame(DATA, b"x")).await.is_err() {
