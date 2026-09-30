@@ -53,11 +53,12 @@ fn rulesets_layer_in_order_and_lint_imported_specs() {
     app.set_api_ruleset_enabled(&overlay.id, false).unwrap();
     assert!(app.lint_spec(SPEC.as_bytes()).unwrap().findings.iter().any(|f| f.rule == "team-summary"));
 
-    // Without the recommended rules only the team's own apply.
+    // Without the recommended rules only the team's own apply. Team's
+    // info-contact override remains valid once its recommended base is gone.
     app.remove_api_ruleset(&overlay.id).unwrap();
-    let err = app.set_api_standards_recommended(false).unwrap_err();
-    assert!(err.to_string().contains("info-contact"), "Team overrides a recommended rule: {err}");
+    app.set_api_standards_recommended(false).unwrap();
     let view = app.standards_view().unwrap();
+    assert!(!view.standards.include_recommended);
     assert!(view.rules.iter().any(|r| r.id == "team-summary" && r.ruleset == "Team"));
     assert_eq!(view.standards.rulesets.len(), 1);
 
@@ -105,7 +106,7 @@ fn a_settings_save_from_elsewhere_keeps_the_standards() {
     let dir = tempfile::tempdir().unwrap();
     let app = new_app(dir.path());
     let stale = app.settings().unwrap();
-    let ruleset = app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
     let mut edited = stale.clone();
     edited.autosave = true;
     app.save_settings_keeping_standards(&edited).unwrap();
@@ -135,15 +136,13 @@ fn stored_standards_that_do_not_load_can_still_be_seen_and_removed() {
 }
 
 #[test]
-fn old_settings_rulesets_migrate_once_and_keep_newer_id_collision() {
+fn old_settings_rulesets_migrate_once_on_profile_open() {
     let dir = tempfile::tempdir().unwrap();
     let app = new_app(dir.path());
     let ruleset = app.add_api_ruleset("legacy.yaml", TEAM.as_bytes()).unwrap();
-    let mut newer = ruleset.clone();
-    newer.name = "Newer legacy copy".into();
-    newer.added_at += chrono::Duration::seconds(60);
+    app.store.delete(kind::API_RULESET, &ruleset.id).unwrap();
     let mut settings = app.settings().unwrap();
-    settings.api_standards.legacy_rulesets.push(newer.clone());
+    settings.api_standards.legacy_rulesets.push(ruleset.clone());
     app.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();
     let path = app.dir.clone();
     drop(app);
@@ -151,14 +150,36 @@ fn old_settings_rulesets_migrate_once_and_keep_newer_id_collision() {
     let manager = ProfileManager::new(dir.path());
     let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
     let migrated = App::open(path.clone(), header, key).unwrap();
-    assert_eq!(migrated.api_standards().unwrap().rulesets, [newer.clone()]);
+    assert_eq!(migrated.api_standards().unwrap().rulesets, [ruleset.clone()]);
     assert!(migrated.settings().unwrap().api_standards.legacy_rulesets.is_empty());
     drop(migrated);
 
     let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
     let reopened = App::open(path, header, key).unwrap();
-    assert_eq!(reopened.api_standards().unwrap().rulesets, [newer]);
+    assert_eq!(reopened.api_standards().unwrap().rulesets, [ruleset]);
     assert_eq!(manager.list().len(), 1);
+}
+
+#[test]
+fn existing_ruleset_wins_legacy_id_collision_regardless_of_legacy_timestamp() {
+    for offset in [-60, 60] {
+        let dir = tempfile::tempdir().unwrap();
+        let app = new_app(dir.path());
+        let existing = app.add_api_ruleset("stored.yaml", TEAM.as_bytes()).unwrap();
+        let mut legacy = existing.clone();
+        legacy.name = "Legacy copy".into();
+        legacy.added_at += chrono::Duration::seconds(offset);
+        let mut settings = app.settings().unwrap();
+        settings.api_standards.legacy_rulesets.push(legacy);
+        app.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();
+        let path = app.dir.clone();
+        drop(app);
+
+        let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
+        let migrated = App::open(path, header, key).unwrap();
+        assert_eq!(migrated.api_standards().unwrap().rulesets, [existing]);
+        assert!(migrated.settings().unwrap().api_standards.legacy_rulesets.is_empty());
+    }
 }
 
 #[test]
@@ -187,6 +208,26 @@ fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
     let mut imported = ruleset;
     imported.enabled = false;
     assert_eq!(round_trip.api_standards().unwrap().rulesets, [imported]);
+}
+
+#[test]
+fn replace_import_keeps_enabled_state_and_sort_order_for_matching_ruleset_id() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path());
+    let ws = source.create_workspace("Replace standards workspace").unwrap();
+    let ruleset = source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    let (bundle, _) = source
+        .export_with_standards(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false, true)
+        .unwrap();
+
+    let target = new_app(root.path());
+    target.store.put(kind::API_RULESET, &ruleset.id, None, None, 7.0, &ruleset).unwrap();
+    target.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
+
+    let imported = target.api_standards().unwrap().rulesets;
+    assert_eq!(imported, [ruleset.clone()]);
+    let meta = target.store.object_meta(kind::API_RULESET).unwrap();
+    assert_eq!(meta.iter().find(|row| row.id == ruleset.id.to_string()).unwrap().sort_key, 7.0);
 }
 
 #[test]

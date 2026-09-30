@@ -155,33 +155,47 @@ impl App {
             if needs_settings || !legacy.is_empty() {
                 let existing = tx.object_meta(anvil_storage::kind::API_RULESET)?;
                 let mut order = existing.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
-                let mut rows: std::collections::HashMap<String, anvil_storage::store::RowMeta> =
-                    existing.into_iter().map(|row| (row.id.clone(), row)).collect();
+                let existing_rulesets: Vec<anvil_domain::settings::StoredRuleset> =
+                    tx.list(anvil_storage::kind::API_RULESET, None)?;
+                let mut ids: std::collections::HashSet<String> = existing.into_iter().map(|row| row.id).collect();
+                let mut count = ids.len();
+                let mut total_bytes: usize = existing_rulesets.iter().map(|ruleset| ruleset.text.len()).sum();
                 for ruleset in legacy {
                     let id = ruleset.id.to_string();
-                    if let Some(row) = rows.get(&id) {
-                        let incoming_updated_at = ruleset.added_at.timestamp_millis();
-                        tracing::warn!(id = %id, "legacy API ruleset id collides with an existing record; keeping the newer copy");
-                        if incoming_updated_at > row.updated_at {
-                            tx.put(anvil_storage::kind::API_RULESET, &ruleset.id, None, None, row.sort_key, &ruleset)?;
-                            let updated = anvil_storage::store::RowMeta { updated_at: incoming_updated_at, ..row.clone() };
-                            rows.insert(id, updated);
-                        }
-                    } else {
-                        tx.put(anvil_storage::kind::API_RULESET, &ruleset.id, None, None, order, &ruleset)?;
-                        rows.insert(
-                            id,
-                            anvil_storage::store::RowMeta {
-                                kind: anvil_storage::kind::API_RULESET.into(),
-                                id: ruleset.id.to_string(),
-                                workspace_id: None,
-                                parent_id: None,
-                                sort_key: order,
-                                updated_at: ruleset.added_at.timestamp_millis(),
-                            },
-                        );
-                        order += 1.0;
+                    if ids.contains(&id) {
+                        // A stored row has an `updated_at`; the legacy copy
+                        // has only `added_at`, so those timestamps cannot be
+                        // compared. Keep the existing row as authoritative.
+                        tracing::warn!(id = %id, kept = "stored record", "legacy API ruleset id collides with an existing record");
+                        continue;
                     }
+                    if ruleset.text.len() > anvil_domain::settings::MAX_STORED_RULESET_BYTES {
+                        tracing::warn!(id = %id, bytes = ruleset.text.len(), "skipping oversized legacy API ruleset during migration");
+                        continue;
+                    }
+                    if count >= anvil_domain::settings::MAX_STORED_RULESETS {
+                        tracing::warn!(
+                            id = %id,
+                            limit = anvil_domain::settings::MAX_STORED_RULESETS,
+                            "skipping excess legacy API ruleset during migration"
+                        );
+                        continue;
+                    }
+                    let next_total = total_bytes.saturating_add(ruleset.text.len());
+                    if next_total > anvil_domain::settings::MAX_STORED_RULESETS_BYTES {
+                        tracing::warn!(
+                            id = %id,
+                            bytes = next_total,
+                            limit = anvil_domain::settings::MAX_STORED_RULESETS_BYTES,
+                            "skipping legacy API ruleset that exceeds the profile size limit"
+                        );
+                        continue;
+                    }
+                    tx.put(anvil_storage::kind::API_RULESET, &ruleset.id, None, None, order, &ruleset)?;
+                    ids.insert(id);
+                    order += 1.0;
+                    count += 1;
+                    total_bytes = next_total;
                 }
                 tx.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &settings)?;
             }

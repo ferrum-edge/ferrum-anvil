@@ -451,6 +451,8 @@ struct Local {
     spec_sources: Vec<SpecSourceRecord>,
     /// Profile-wide API standards rulesets.
     rulesets: Vec<anvil_domain::settings::StoredRuleset>,
+    /// Whether the local profile layers Anvil's recommended standards.
+    include_recommended: bool,
     /// The content hashes among the backup's uncarried attachments whose
     /// content is stored here.
     stored: HashSet<String>,
@@ -494,9 +496,6 @@ impl App {
     /// changing anything.
     pub fn restore_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let (manifest, mut d) = open_for_restore(bytes, passphrase, policy)?;
-        for ruleset in &mut d.graph.rulesets {
-            crate::standards::normalize_imported_ruleset(ruleset)?;
-        }
         let local = self.store.read_consistently(|r| local(r, &d))?;
         check_id_namespaces(&d, &local, policy)?;
         let notes = restore_notes(&d, &local, policy)?;
@@ -514,7 +513,8 @@ impl App {
     /// authenticates under `passphrase` and every item in it is valid. Then a
     /// checkpoint is taken and every item is written in one transaction:
     /// `Replace` overwrites items with the same id, `Merge` keeps them
-    /// (including this profile's settings). Nothing else is deleted. App
+    /// (including this profile's settings). Replace without kept settings
+    /// also replaces local rulesets. App
     /// settings apply to every workspace's requests, so `Replace` keeps this
     /// profile's too while it holds a workspace the backup does not claim.
     ///
@@ -563,9 +563,6 @@ impl App {
     ) -> Result<ImportReport> {
         approval.check_file(bytes, "restored")?;
         let (manifest, mut d) = open_for_restore(bytes, passphrase, policy)?;
-        for ruleset in &mut d.graph.rulesets {
-            crate::standards::normalize_imported_ruleset(ruleset)?;
-        }
         if !proceed() {
             return Err(AppError::Canceled);
         }
@@ -599,12 +596,15 @@ impl App {
                     .cloned(),
             );
             if let Err(e) = crate::standards::validate_standards(
-                &anvil_domain::settings::ApiStandards { include_recommended: true, rulesets: combined.clone() },
+                &anvil_domain::settings::ApiStandards {
+                    include_recommended: include_recommended(&d, &local, policy),
+                    rulesets: combined.clone(),
+                },
                 &local_rulesets,
             ) {
                 return Ok(Err(e));
             }
-            if let Err(e) = crate::standards::layered_for_port(&combined) {
+            if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(&d, &local, policy)) {
                 notes.push(format!("Restored API standards would not load: {e}"));
             }
             if policy == ConflictPolicy::Replace && !keep_settings {
@@ -1019,6 +1019,11 @@ fn local(r: &StoreRead<'_>, d: &Decoded) -> anvil_storage::store::Result<Local> 
         spec_sources: r.list(kind::SPEC_SOURCE, None)?,
         stored: port::stored_among(r, &d.uncarried)?,
         rulesets: r.list(kind::API_RULESET, None)?,
+        include_recommended: r
+            .get::<AppSettings>(kind::APP_SETTINGS, &settings_id())?
+            .unwrap_or_default()
+            .api_standards
+            .include_recommended,
     })
 }
 
@@ -1031,6 +1036,17 @@ fn local(r: &StoreRead<'_>, d: &Decoded) -> anvil_storage::store::Result<Local> 
 fn keeps_local_settings(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bool {
     let ws = d.workspace_ids();
     d.graph.app_settings.is_some() && (policy == ConflictPolicy::Merge || local.existing.workspaces.keys().any(|w| !ws.contains(w)))
+}
+
+fn include_recommended(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bool {
+    if keeps_local_settings(d, local, policy) {
+        local.include_recommended
+    } else {
+        d.graph
+            .app_settings
+            .as_ref()
+            .map_or(local.include_recommended, |settings| settings.api_standards.include_recommended)
+    }
 }
 
 /// Warnings a restore reports before writing: each item that names a stored
@@ -1055,7 +1071,13 @@ fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<V
             .filter(|r| !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string()))))
             .cloned(),
     );
-    if let Err(e) = crate::standards::layered_for_port(&combined) {
+    if let Err(e) = crate::standards::validate_standards(
+        &anvil_domain::settings::ApiStandards { include_recommended: include_recommended(d, local, policy), rulesets: combined.clone() },
+        &local.rulesets,
+    ) {
+        notes.push(format!("Restored API standards exceed profile limits: {e}"));
+    }
+    if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(d, local, policy)) {
         notes.push(format!("Restored API standards would not load: {e}"));
     }
     if policy == ConflictPolicy::Replace && d.graph.app_settings.is_some() {
@@ -1291,13 +1313,11 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     {
         w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, x)?;
     }
-    let mut next_ruleset_sort = w.tx.object_meta(kind::API_RULESET)?.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
+    let ruleset_sort_keys: HashMap<String, f64> =
+        w.tx.object_meta(kind::API_RULESET)?.into_iter().map(|row| (row.id, row.sort_key)).collect();
+    let mut next_ruleset_sort = ruleset_sort_keys.values().copied().fold(-1.0_f64, f64::max) + 1.0;
     for x in &g.rulesets {
-        let sort_key =
-            w.tx.object_meta(kind::API_RULESET)?
-                .iter()
-                .find(|row| row.id == x.id.to_string())
-                .map_or(next_ruleset_sort, |row| row.sort_key);
+        let sort_key = ruleset_sort_keys.get(&x.id.to_string()).copied().unwrap_or(next_ruleset_sort);
         w.put(kind::API_RULESET, &x.id, None, None, sort_key, x)?;
         next_ruleset_sort = next_ruleset_sort.max(sort_key + 1.0);
     }

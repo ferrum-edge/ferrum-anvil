@@ -749,7 +749,7 @@ pub async fn export_preview(
     handle: AppHandle,
     workspace_id: Option<String>,
     export_mode: String,
-    include_standards: bool,
+    include_standards: Option<bool>,
 ) -> R<ExportPreview> {
     let ws = workspace_id.map(|w| id(&w)).transpose()?;
     let m = mode(&export_mode)?;
@@ -758,7 +758,7 @@ pub async fn export_preview(
         if full_backup(ws.as_ref(), m)? {
             return app.backup_preview().map(ExportPreview::Backup).map_err(e);
         }
-        app.export_preview_with_standards(ws.as_ref(), m, false, include_standards).map(ExportPreview::Bundle).map_err(e)
+        app.export_preview_with_standards(ws.as_ref(), m, false, include_standards.unwrap_or(false)).map(ExportPreview::Bundle).map_err(e)
     })
     .await
 }
@@ -777,7 +777,7 @@ pub async fn export_to_path(
     st: State<'_, DesktopState>,
     workspace_id: Option<String>,
     export_mode: String,
-    include_standards: bool,
+    include_standards: Option<bool>,
     passphrase: Option<String>,
     grant: String,
 ) -> R<usize> {
@@ -788,7 +788,11 @@ pub async fn export_to_path(
         let pass = passphrase.ok_or("a full backup needs a passphrase")?;
         off_ui_thread(move || app.export_backup(&pass)).await?.0
     } else {
-        off_ui_thread(move || app.export_with_standards(ws.as_ref(), m, passphrase.as_deref(), false, include_standards)).await?.0
+        off_ui_thread(move || {
+            app.export_with_standards(ws.as_ref(), m, passphrase.as_deref(), false, include_standards.unwrap_or(false))
+        })
+        .await?
+        .0
     };
     st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
 }

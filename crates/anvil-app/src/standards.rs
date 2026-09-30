@@ -32,17 +32,16 @@ pub struct StandardsView {
     pub error: Option<String>,
 }
 
-pub(crate) fn layered_for_port(rulesets: &[StoredRuleset]) -> std::result::Result<RuleSet, AppError> {
-    let std = ApiStandards { include_recommended: true, rulesets: rulesets.to_vec() };
-    let mut set = if std.include_recommended { RuleSet::recommended() } else { RuleSet::default() };
-    for r in std.rulesets.iter().filter(|r| r.enabled) {
+pub(crate) fn layered_for_port(rulesets: &[StoredRuleset], include_recommended: bool) -> std::result::Result<RuleSet, AppError> {
+    let mut set = if include_recommended { RuleSet::recommended() } else { RuleSet::default() };
+    for r in rulesets.iter().filter(|r| r.enabled) {
         set.add(&r.file_name, r.text.as_bytes(), false).map_err(|e| AppError::Invalid(e.to_string()))?;
     }
     Ok(set)
 }
 
 fn layered(std: &ApiStandards) -> std::result::Result<RuleSet, AppError> {
-    layered_for_port(&std.rulesets)
+    layered_for_port(&std.rulesets, std.include_recommended)
 }
 
 impl App {
@@ -77,7 +76,9 @@ impl App {
             // The result must load, as it will be used.
             let change = f(&mut next).and_then(|()| {
                 validate_standards(&next, &current)?;
-                if !only_disables_or_removals(&current, &next.rulesets) {
+                if !(only_disables_or_removals(&current, &next.rulesets)
+                    || (next.include_recommended == settings.api_standards.include_recommended && next.rulesets == current))
+                {
                     layered(&next)?;
                 }
                 Ok(())
@@ -93,15 +94,13 @@ impl App {
                     tx.delete(kind::API_RULESET, &old.id)?;
                 }
             }
-            let mut next_sort_key = tx.object_meta(kind::API_RULESET)?.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
+            let sort_keys: std::collections::HashMap<String, f64> =
+                tx.object_meta(kind::API_RULESET)?.into_iter().map(|row| (row.id, row.sort_key)).collect();
+            let mut next_sort_key = sort_keys.values().copied().fold(-1.0_f64, f64::max) + 1.0;
             for ruleset in &next.rulesets {
                 if let Some(old) = current.iter().find(|old| old.id == ruleset.id) {
                     if old != ruleset {
-                        let sort_key = tx
-                            .object_meta(kind::API_RULESET)?
-                            .iter()
-                            .find(|row| row.id == ruleset.id.to_string())
-                            .map_or(next_sort_key, |row| row.sort_key);
+                        let sort_key = sort_keys.get(&ruleset.id.to_string()).copied().unwrap_or(next_sort_key);
                         tx.put(kind::API_RULESET, &ruleset.id, None, None, sort_key, ruleset)?;
                     }
                 } else {

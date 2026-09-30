@@ -176,8 +176,7 @@ impl App {
         include_standards: bool,
     ) -> Result<ExportPreview> {
         refuse_full_backup(mode)?;
-        let g = self.graph(ws, !matches!(mode, ExportMode::ShareSafely), include_history)?;
-        let mut g = g;
+        let mut g = self.graph(ws, !matches!(mode, ExportMode::ShareSafely), include_history)?;
         if !include_standards {
             g.rulesets.clear();
         }
@@ -240,9 +239,23 @@ impl App {
             ruleset.enabled = false;
         }
         let uncarried = validate::uncarried_attachments(&graph)?;
-        let (existing, stored, local_rulesets) = self.store.read_consistently(|r| {
-            Ok((existing(r)?, stored_among(r, &uncarried)?, r.list::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, None)?))
+        let (existing, stored, local_rulesets, include_recommended) = self.store.read_consistently(|r| {
+            let settings: anvil_domain::settings::AppSettings =
+                r.get(kind::APP_SETTINGS, &crate::settings_id())?.unwrap_or_default();
+            Ok((
+                existing(r)?,
+                stored_among(r, &uncarried)?,
+                r.list::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, None)?,
+                settings.api_standards.include_recommended,
+            ))
         })?;
+        if policy == ConflictPolicy::Replace {
+            for incoming in &mut graph.rulesets {
+                if let Some(local) = local_rulesets.iter().find(|local| local.id == incoming.id) {
+                    incoming.enabled = local.enabled;
+                }
+            }
+        }
         let mut warnings = opened.warnings;
         warnings.extend(uncarried_warnings(&uncarried, &stored, "bundle", "imported")?);
         warnings.extend(crate::device_identity::sealed_note(&graph.workspaces));
@@ -255,10 +268,19 @@ impl App {
             }
         }
         let replacing: HashSet<Id> = graph.rulesets.iter().map(|r| r.id).collect();
-        let mut combined: Vec<_> =
-            local_rulesets.iter().filter(|r| !(policy != ConflictPolicy::Merge && replacing.contains(&r.id))).cloned().collect();
+        let mut combined: Vec<_> = local_rulesets
+            .iter()
+            .filter(|r| !(policy == ConflictPolicy::Replace && replacing.contains(&r.id)))
+            .cloned()
+            .collect();
         combined.extend(graph.rulesets.iter().filter(|r| !(policy == ConflictPolicy::Merge && existing.objects.contains(&r.id))).cloned());
-        if let Err(e) = crate::standards::layered_for_port(&combined) {
+        if let Err(e) = crate::standards::validate_standards(
+            &anvil_domain::settings::ApiStandards { include_recommended, rulesets: combined.clone() },
+            &local_rulesets,
+        ) {
+            warnings.push(format!("Imported API standards exceed profile limits: {e}"));
+        }
+        if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended) {
             warnings.push(format!("Imported API standards would not load: {e}"));
         }
         let plan = plan::plan(&graph, &existing, policy);
@@ -381,13 +403,12 @@ impl App {
             let mut notes = notes;
             if policy == ConflictPolicy::Duplicate {
                 let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
-                let hashes: HashSet<String> = local_rulesets
+                let mut hashes: HashSet<String> = local_rulesets
                     .iter()
                     .map(|r| hex::encode(Sha256::digest(r.text.as_bytes())))
                     .collect();
                 let before = g.rulesets.len();
-                let mut seen_hashes = hashes;
-                g.rulesets.retain(|r| seen_hashes.insert(r.sha256.clone()));
+                g.rulesets.retain(|r| hashes.insert(r.sha256.clone()));
                 if g.rulesets.len() < before {
                     notes.push(format!("{} duplicate API ruleset(s) with matching SHA-256 were skipped.", before - g.rulesets.len()));
                 }
@@ -397,6 +418,15 @@ impl App {
             }
             let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.objects.contains(id);
             let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
+            if policy == ConflictPolicy::Replace {
+                for incoming in &mut g.rulesets {
+                    if let Some(local) = local_rulesets.iter().find(|local| local.id == incoming.id) {
+                        incoming.enabled = local.enabled;
+                    }
+                }
+            }
+            let settings: anvil_domain::settings::AppSettings = s.get(kind::APP_SETTINGS, &crate::settings_id())?.unwrap_or_default();
+            let include_recommended = settings.api_standards.include_recommended;
             let replacing: HashSet<Id> = g.rulesets.iter().map(|r| r.id).collect();
             let retained: Vec<_> = local_rulesets
                 .iter()
@@ -406,12 +436,12 @@ impl App {
             let mut combined = retained;
             combined.extend(g.rulesets.iter().filter(|r| !skip(&r.id)).cloned());
             if let Err(e) = crate::standards::validate_standards(
-                &anvil_domain::settings::ApiStandards { include_recommended: true, rulesets: combined.clone() },
+                &anvil_domain::settings::ApiStandards { include_recommended, rulesets: combined.clone() },
                 &local_rulesets,
             ) {
                 return Ok(Err(e));
             }
-            if let Err(e) = crate::standards::layered_for_port(&combined) {
+            if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended) {
                 notes.push(format!("Imported API standards would not load: {e}"));
             }
             // A different workspace with the same name would be
@@ -478,14 +508,12 @@ impl App {
                     s.put(kind::LOAD_PLAN, &p.id, Some(&p.workspace_id), None, 0.0, p)?;
                 }
             }
-            let mut next_ruleset_sort = s.object_meta(kind::API_RULESET)?.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
+            let ruleset_sort_keys: HashMap<String, f64> =
+                s.object_meta(kind::API_RULESET)?.into_iter().map(|row| (row.id, row.sort_key)).collect();
+            let mut next_ruleset_sort = ruleset_sort_keys.values().copied().fold(-1.0_f64, f64::max) + 1.0;
             for ruleset in &g.rulesets {
                 if !skip(&ruleset.id) {
-                    let sort_key = s
-                        .object_meta(kind::API_RULESET)?
-                        .iter()
-                        .find(|row| row.id == ruleset.id.to_string())
-                        .map_or(next_ruleset_sort, |row| row.sort_key);
+                    let sort_key = ruleset_sort_keys.get(&ruleset.id.to_string()).copied().unwrap_or(next_ruleset_sort);
                     s.put(kind::API_RULESET, &ruleset.id, None, None, sort_key, ruleset)?;
                     next_ruleset_sort = next_ruleset_sort.max(sort_key + 1.0);
                 }
