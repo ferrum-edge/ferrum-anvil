@@ -116,7 +116,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tempfile = "3.27.0"
 proptest = "1.11.0"
 httpdate = "1.0.3"
-dimpl = { version = "0.6", default-features = false, features = ["rust-crypto"] }
+dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
 parking_lot = "0.12.5"
 libc = "0.2.189"
 # Safe GetFileInformationByHandle (volume serial + file index) for file grants on Windows.
