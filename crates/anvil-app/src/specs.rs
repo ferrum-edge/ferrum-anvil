@@ -380,16 +380,13 @@ impl App {
             let revisions: Vec<RequestRevision> = next
                 .iter()
                 .filter_map(|q| {
-                    previous
-                        .iter()
-                        .find(|p| p.meta.id == q.meta.id && spec_hash(&p.spec) != spec_hash(&q.spec))
-                        .map(|_| RequestRevision {
-                            id: Id::new(),
-                            request_id: q.meta.id,
-                            created_at: now,
-                            spec_sha256: spec_hash(&q.spec),
-                            spec: q.spec.clone(),
-                        })
+                    previous.iter().find(|p| p.meta.id == q.meta.id && spec_hash(&p.spec) != spec_hash(&q.spec)).map(|_| RequestRevision {
+                        id: Id::new(),
+                        request_id: q.meta.id,
+                        created_at: now,
+                        spec_sha256: spec_hash(&q.spec),
+                        spec: q.spec.clone(),
+                    })
                 })
                 .collect();
             for rev in &revisions {
@@ -543,9 +540,9 @@ fn valid_root(s: &StoreRead<'_>, rec: &SpecSourceRecord) -> anvil_storage::store
 
 fn foreign_workspace_owns(s: &StoreTx<'_>, object_kind: &str, id: &Id, workspace_id: &Id) -> anvil_storage::store::Result<bool> {
     let expected = workspace_id.to_string();
-    Ok(s.object_meta(object_kind)?.into_iter().any(|row| {
-        row.id == id.to_string() && row.workspace_id.as_deref() != Some(expected.as_str())
-    }))
+    Ok(s.object_meta(object_kind)?
+        .into_iter()
+        .any(|row| row.id == id.to_string() && row.workspace_id.as_deref() != Some(expected.as_str())))
 }
 
 fn foreign_reimport_collision() -> AppError {
@@ -718,12 +715,7 @@ mod tests {
         let ws = app.create_workspace("Workspace").unwrap();
         let parent = app.create_folder(&ws.meta.id, None, "Parent").unwrap();
         let imported = app
-            .spec_import(
-                ADMIN.as_bytes(),
-                "admin.json",
-                &ImportOptions::default(),
-                SpecTarget::Workspace { workspace_id: ws.meta.id },
-            )
+            .spec_import(ADMIN.as_bytes(), "admin.json", &ImportOptions::default(), SpecTarget::Workspace { workspace_id: ws.meta.id })
             .unwrap();
         let root_id = imported.root_folder_id.unwrap();
         app.move_folder(&root_id, Some(parent.meta.id), 1.0).unwrap();
@@ -746,12 +738,7 @@ mod tests {
         let app = App::open(s.dir, h, dek).unwrap();
         let ws = app.create_workspace("Workspace").unwrap();
         let imported = app
-            .spec_import(
-                ADMIN.as_bytes(),
-                "admin.json",
-                &ImportOptions::default(),
-                SpecTarget::Workspace { workspace_id: ws.meta.id },
-            )
+            .spec_import(ADMIN.as_bytes(), "admin.json", &ImportOptions::default(), SpecTarget::Workspace { workspace_id: ws.meta.id })
             .unwrap();
         app.delete_folder(&imported.root_folder_id.unwrap()).unwrap();
 
@@ -771,9 +758,7 @@ mod tests {
         let b_namespace = app.spec_source(&b.import_id).unwrap().source.id_namespace;
         let mut source_a = app.spec_source(&a.import_id).unwrap();
         source_a.source.id_namespace = b_namespace;
-        app.store
-            .put(kind::SPEC_SOURCE, &source_a.source.import_id, Some(&source_a.workspace_id), None, 0.0, &source_a)
-            .unwrap();
+        app.store.put(kind::SPEC_SOURCE, &source_a.source.import_id, Some(&source_a.workspace_id), None, 0.0, &source_a).unwrap();
         let before_folders = app.folders(&b.workspace_id).unwrap();
         let before_requests = app.requests(&b.workspace_id).unwrap();
         let changed = ADMIN.replace(r#""value": "read""#, r#""value": "write""#);

@@ -1050,9 +1050,11 @@ fn foreign_secrets(d: &Decoded, existing: &Existing) -> Vec<String> {
 /// each item that names a stored file the backup does not include.
 fn checked_plan(d: &Decoded, local: &Local, policy: ConflictPolicy, approval: &ImportApproval) -> Result<(ImportPlan, Vec<String>)> {
     for incoming in &d.spec_sources {
-        if local.spec_sources.iter().any(|stored| {
-            stored.source.id_namespace == incoming.source.id_namespace && stored.workspace_id != incoming.workspace_id
-        }) {
+        if local
+            .spec_sources
+            .iter()
+            .any(|stored| stored.source.id_namespace == incoming.source.id_namespace && stored.workspace_id != incoming.workspace_id)
+        {
             return Err(AppError::Invalid(format!(
                 "spec import '{}' reuses an id namespace already used in another workspace; nothing was restored",
                 incoming.file_name
