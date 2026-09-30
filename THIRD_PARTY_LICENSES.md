@@ -385,9 +385,9 @@ the modified file under MPL-2.0.
 | js-sys | 0.3.106 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
 | json-patch | 3.0.1 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
 | jsonptr | 0.6.3 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
-| jsonschema | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-regex | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-value | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-regex | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-value | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.7.0 | MIT OR Apache-2.0 | https://github.com/pyfisch/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
@@ -556,7 +556,7 @@ the modified file under MPL-2.0.
 | redox_users | 0.5.3 | MIT | https://gitlab.redox-os.org/redox-os/users |
 | ref-cast | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
 | ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
-| referencing | 0.57.0 | MIT | https://github.com/Stranger6667/jsonschema |
+| referencing | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
