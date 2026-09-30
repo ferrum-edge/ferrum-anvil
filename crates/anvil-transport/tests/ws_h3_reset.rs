@@ -91,14 +91,20 @@ async fn an_interrupted_write_resets_the_http3_stream_instead_of_finishing_it() 
     // Far more than QUIC flow control lets through to a peer that does not read.
     let plan = plan(origin.addr, vec![WsMessage::Text { text: "x".repeat(16 << 20) }]);
     let cancel = CancellationToken::new();
-    let c = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(2_000)).await;
-        c.cancel();
-    });
     let events = EventCtx::none();
     let run = ws::run(&plan, &events, &cancel, None);
-    let out = tokio::time::timeout(GIVE_UP, run).await.expect("the session must end although the peer never reads");
+    // Cancel once the origin has answered the extended CONNECT (the stream is
+    // open) and the message has had time to fill the flow-control window.
+    let trigger = async {
+        let opened = origin.wrote(1, GIVE_UP).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        cancel.cancel();
+        opened
+    };
+    let (out, opened) = tokio::time::timeout(GIVE_UP, async { tokio::join!(run, trigger) })
+        .await
+        .expect("the session must end although the peer never reads");
+    assert!(opened, "the origin never answered the extended CONNECT");
     let f = out.attempts[0].observation.failure.as_ref().expect("the session was canceled");
     assert_eq!(f.kind, FailureKind::Canceled);
     assert!(f.message.contains("while a write was pending"), "the cancel must interrupt the stalled write: {}", f.message);

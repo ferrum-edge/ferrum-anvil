@@ -109,6 +109,18 @@ pub fn redact_then_cut<F: Fn(&str) -> String + ?Sized>(redact: &F, window: &str,
     out
 }
 
+/// At most `max_chars` characters of `s`, redacted before the cut when a
+/// redactor is given ([`redact_then_cut`], over up to
+/// [`REDACT_LOOKAHEAD_BYTES`] past the cut): a secret that crosses the cut
+/// is replaced whole instead of leaving its prefix.
+pub fn redacted_excerpt(redact: Option<&(dyn Fn(&str) -> String + Send + Sync)>, s: &str, max_chars: usize) -> String {
+    let cut = s.char_indices().nth(max_chars).map_or(s.len(), |(i, _)| i);
+    match redact {
+        Some(r) => redact_then_cut(r, &s[..floor_char_boundary(s, cut.saturating_add(REDACT_LOOKAHEAD_BYTES))], cut),
+        None => s[..cut].to_string(),
+    }
+}
+
 /// Why a [`guarded`] operation did not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interrupted {

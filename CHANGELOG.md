@@ -1006,15 +1006,18 @@
   (DTLS ones included) are reset. A raw TCP payload that was partly written
   is reported as possibly dispatched. Graceful Close frames and
   `close_notify` have their own short bound.
-- Follow-ups to the two entries above (GHSA-jjvp-frqf-xw3p,
-  GHSA-24m4-27gj-gvmx):
+- Follow-ups to the three entries above (GHSA-jjvp-frqf-xw3p,
+  GHSA-gwfc-m32p-636g, GHSA-24m4-27gj-gvmx):
   - The excerpts a diagnostic finding quotes from a response (a JSON
     `error`, a GraphQL or SOAP fault message, an HBONE tunnel refusal body,
     a Ferrum Edge body signature) are now redacted with the record's
     redactor before they are cut to 160–300 characters. Before, a secret
     the response echoed across the cut kept its prefix in the finding,
     because the record's redaction could no longer match it.
-    `DiagnosticInput` has a new `redact` field for this.
+    `DiagnosticInput` has a new `redact` field for this. An HBONE refusal
+    body is now captured up to 64 KiB past its 8 KiB bound and redacted
+    before the record cuts it to the bound, and a malformed gRPC-Web trailer
+    line quoted in a failure is redacted before it is cut to 64 characters.
   - An OAuth issuer's `error_description` also has the percent-encoded and
     form-encoded forms of the token request's credentials replaced before
     it is cut.
@@ -1023,9 +1026,10 @@
     ignores its cancel is aborted 5 s after `cancel()`, so `finish()` and
     `is_finished()` are bounded once a session is canceled (the record then
     says the session was aborted).
-  - A raw TCP session whose write was interrupted now resets its connection
-    (`SO_LINGER` 0: RST instead of FIN), so the peer cannot read a partly
-    written payload as a complete one. A WebSocket Close frame sent after a
+  - A raw TCP session, or a WebSocket session over HTTP/1.1 or HTTP/2, whose
+    write was interrupted now resets its connection (`SO_LINGER` 0: RST
+    instead of FIN), so the peer cannot read a partly written payload as a
+    complete one. A WebSocket Close frame sent after a
     peer's protocol violation that is not written within 500 ms now counts
     as an interrupted write (over HTTP/3 the stream is reset, not finished).
   - DTLS inside an HBONE or MASQUE tunnel resets the tunnel only when a

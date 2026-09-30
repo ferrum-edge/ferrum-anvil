@@ -696,6 +696,9 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         // ending it: a partial frame must not be followed by a clean FIN.
         let _ = tokio::time::timeout(Duration::from_millis(100), &mut uplink).await;
         uplink.abort();
+        // Give the QUIC connection a moment to send the RESET_STREAM before
+        // it is closed: frames still queued at the close are discarded.
+        tokio::time::sleep(Duration::from_millis(50)).await;
     } else {
         // Let the last frames (normally our Close) leave before the connection closes.
         let _ = tokio::time::timeout(Duration::from_millis(500), &mut uplink).await;
@@ -1368,6 +1371,12 @@ where
             }
         }
     }
+    // An interrupted write may have left a partial frame: the dedicated TCP
+    // connection of an HTTP/1.1 or HTTP/2 bootstrap is reset (RST, not FIN)
+    // when it is dropped; over HTTP/3 the bootstrap resets the stream.
+    if write_interrupted.is_cancelled() {
+        stats.request_abortive_close();
+    }
     let close = close.unwrap_or(match &client_close_sent {
         Some((c, r)) => Close { code: Some(*c), reason: r.clone(), closed_by: ClosedBy::Client },
         None => Close { code: None, reason: String::new(), closed_by: ClosedBy::NotClosed },
@@ -1652,16 +1661,18 @@ mod tests {
 
     /// The session phase over an in-memory pipe (the handshake is not part of it).
     async fn session(io: DuplexStream, plan: &WsPlan, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
-        session_with(io, plan, cancel, commands, CancellationToken::new()).await
+        session_with(io, plan, cancel, commands, CancellationToken::new(), crate::stats::ConnStats::new()).await
     }
 
-    /// [`session`] with the token an interrupted write cancels.
+    /// [`session`] with the token an interrupted write cancels and the
+    /// connection's stats (which carry the request for an abortive close).
     async fn session_with(
         io: DuplexStream,
         plan: &WsPlan,
         cancel: &CancellationToken,
         commands: Option<CommandRx>,
         write_interrupted: CancellationToken,
+        stats: Arc<crate::stats::ConnStats>,
     ) -> SessionOutput {
         let events = EventCtx::none();
         let interactive = commands.is_some();
@@ -1671,7 +1682,7 @@ mod tests {
             cancel,
             interactive,
             total_deadline: if interactive { None } else { deadline_from(plan.timeouts.total_ms) },
-            stats: crate::stats::ConnStats::new(),
+            stats,
             written_before: 0,
             read_before: 0,
             status: 101,
@@ -1720,6 +1731,19 @@ mod tests {
         assert_eq!(failure(&out), Some(FailureKind::Canceled));
         assert_eq!(closed(&out), (None, ClosedBy::Client), "no Close frame follows a partly written message");
         assert_eq!(out.transcript.unwrap().sent_count, 0, "the stalled message is not recorded as sent");
+    }
+
+    /// Over a TCP connection (HTTP/1.1 or HTTP/2 bootstrap) an interrupted
+    /// write resets the connection instead of ending it with a FIN.
+    #[tokio::test]
+    async fn an_interrupted_write_asks_for_the_connection_to_be_reset() {
+        let (io, _peer) = tokio::io::duplex(1024);
+        let plan = plan(vec![big_text()], None);
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &cancel_after(100), None, interrupted.clone(), stats.clone()).await;
+        assert_eq!(failure(&out), Some(FailureKind::Canceled));
+        assert!(interrupted.is_cancelled());
+        assert!(stats.abortive_close_requested(), "the connection is reset (SO_LINGER 0) when it is dropped");
     }
 
     #[tokio::test]
@@ -1808,10 +1832,11 @@ mod tests {
         // The filler leaves 6 bytes of the pipe: the 1007 Close frame (21 bytes masked) does not fit.
         let plan = plan(vec![filler()], None);
         peer.write_all(&INVALID_UTF8_TEXT).await.unwrap();
-        let interrupted = CancellationToken::new();
-        let out = session_with(io, &plan, &CancellationToken::new(), None, interrupted.clone()).await;
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &CancellationToken::new(), None, interrupted.clone(), stats.clone()).await;
         assert_eq!(failure(&out), Some(FailureKind::WsProtocolError));
         assert!(interrupted.is_cancelled(), "the stalled Close frame counts as an interrupted write");
+        assert!(stats.abortive_close_requested(), "a TCP connection is reset, not ended with a FIN");
         let t = out.transcript.unwrap();
         assert!(t.messages.iter().any(|m| m.kind == "close_incomplete"), "{:?}", t.messages);
         assert!(!t.messages.iter().any(|m| m.kind == "close" && m.direction == Direction::Sent), "the Close frame was not written");
@@ -1825,10 +1850,11 @@ mod tests {
         let (io, mut peer) = tokio::io::duplex(1024);
         let plan = plan(vec![], None);
         peer.write_all(&INVALID_UTF8_TEXT).await.unwrap();
-        let interrupted = CancellationToken::new();
-        let out = session_with(io, &plan, &CancellationToken::new(), None, interrupted.clone()).await;
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &CancellationToken::new(), None, interrupted.clone(), stats.clone()).await;
         assert_eq!(failure(&out), Some(FailureKind::WsProtocolError));
         assert!(!interrupted.is_cancelled());
+        assert!(!stats.abortive_close_requested(), "the connection ends normally");
         assert_eq!(closed(&out), (Some(1007), ClosedBy::Client));
         let t = out.transcript.unwrap();
         assert!(t.messages.iter().any(|m| m.kind == "close" && m.direction == Direction::Sent), "{:?}", t.messages);

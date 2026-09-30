@@ -42,8 +42,9 @@ use tokio_util::sync::CancellationToken;
 /// Bound of the interactive command queue (the UI never blocks a session).
 const COMMAND_QUEUE: usize = 256;
 /// How long a canceled session has to end on its own before its owner
-/// aborts the task. Every write, flush and close of a session is raced
-/// against cancellation, so only a task that ignores it (a defect) needs it.
+/// aborts the task. The WebSocket, raw TCP, DTLS, HBONE and MASQUE adapters
+/// race their writes against cancellation; a gRPC stream's writes are not
+/// raced, so for a stalled gRPC send (or a defect) this grace is the bound.
 const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Reconnections allowed for an SSE stream with `reconnect` enabled.
 const SSE_MAX_RECONNECTS: u32 = 5;
@@ -1970,7 +1971,8 @@ pub enum SessionError {
 /// is returned by [`SessionHandle::finish`].
 ///
 /// The handle owns the session: dropping it cancels the session and aborts
-/// its task, so a session (and its connection) never outlives its owner.
+/// its task. The task is dropped at its next await point, and with it the
+/// connection (code that blocks without awaiting cannot be stopped this way).
 /// After [`cancel`](Self::cancel) the task has [`CANCEL_GRACE`] to end on its
 /// own before it is aborted, so [`finish`](Self::finish) and
 /// [`is_finished`](Self::is_finished) are bounded once a session is canceled.
@@ -2044,17 +2046,17 @@ impl SessionHandle {
     /// [`CANCEL_GRACE`] later is aborted.
     pub fn cancel(&self) {
         self.cancel.cancel();
+        // Outside a runtime nothing can be armed (a later cancel inside one
+        // still can); `finish` bounds its own wait either way.
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         if self.abort_armed.swap(true, std::sync::atomic::Ordering::Relaxed) {
             return;
         }
-        // Outside a runtime there is nothing to arm; `finish` still bounds the wait.
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let (abort, grace) = (self.task.abort_handle(), self.grace);
-            rt.spawn(async move {
-                tokio::time::sleep(grace).await;
-                abort.abort();
-            });
-        }
+        let (abort, grace) = (self.task.abort_handle(), self.grace);
+        rt.spawn(async move {
+            tokio::time::sleep(grace).await;
+            abort.abort();
+        });
     }
 
     pub fn is_finished(&self) -> bool {

@@ -103,7 +103,10 @@ against it).
     a response (a JSON `error`, a GraphQL or SOAP fault message, a tunnel
     refusal body, a Ferrum Edge body signature) are redacted with the
     record's redactor before they are cut to 160–300 characters, the same
-    way.
+    way. An HBONE refusal body is captured up to 64 KiB past its 8 KiB
+    bound, and the record redacts it before cutting it to the bound. A
+    malformed gRPC-Web trailer line quoted in a failure is redacted with the
+    live redactor before it is cut to 64 characters.
 - **Redirect hops:** every hop is evaluated for its own target. Unless
   `redirects.forward_credentials_cross_origin` is on, once a redirect leaves
   the request's origin (scheme, host or port):
@@ -207,18 +210,23 @@ against it).
     connection (`SO_LINGER` 0: the OS sends RST, not FIN, so the peer cannot
     read a cut payload as complete), WebSocket over HTTP/3 resets its stream
     (`H3_REQUEST_CANCELLED`), including when the Close frame after a peer's
-    protocol violation is not written in time, and DTLS inside an HBONE or
-    MASQUE tunnel resets the tunnel. A DTLS tunnel is reset only when a
-    record was being sent at that moment; a session canceled or timed out
-    while waiting for the peer finishes it cleanly. A raw TCP payload that
-    was partly written is reported as possibly dispatched. Through a
-    forward proxy the raw TCP reset reaches the proxy, not the destination;
-    WebSocket over HTTP/1.1 or HTTP/2 drops its connection without a reset.
+    protocol violation is not written in time, WebSocket over HTTP/1.1 or
+    HTTP/2 resets its dedicated TCP connection the same way as raw TCP, and
+    DTLS inside an HBONE or MASQUE tunnel resets the tunnel. A DTLS tunnel is
+    reset only when a record was being sent at that moment; a session
+    canceled or timed out while waiting for the peer finishes it cleanly.
+    Plain UDP over MASQUE still resets its tunnel on every cancel (and on
+    an interrupted capsule send), and plain UDP over HBONE on every cancel
+    and total timeout, whether or not a send was pending. A raw TCP payload
+    that was partly written is reported as possibly dispatched. Through a
+    forward proxy a TCP reset reaches the proxy, not the destination.
   - Interactive sessions have no total deadline: cancel (or a profile lock)
     is what ends them. The session handle bounds that too: a session task
-    still running 5 s after its cancel is aborted, and dropping the handle
-    cancels the session and aborts its task at once, so no session or
-    connection outlives its owner.
+    still running 5 s after its cancel is aborted (this is what ends a gRPC
+    stream whose send stalled, as gRPC writes are not raced against the
+    cancel), and dropping the handle cancels the session and aborts its
+    task. An aborted task is dropped at its next await point, together with
+    its connection.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -498,5 +506,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - Keychain-protected profiles are as strong as the OS session.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
+- Some text from a peer is still cut before the record's redaction sees
+  it: a SPIFFE Workload API `grpc-message` is cut to 300 characters where
+  it is received, with no redactor available there, and every
+  redact-before-cut bound looks only 64 KiB past the cut, so a longer
+  secret form that crosses a cut keeps its prefix.
 - Unsigned development builds cannot prove provenance; release signing is
   blocked on owner credentials (see [release.md](release.md)).

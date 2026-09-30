@@ -288,7 +288,7 @@ pub async fn open(
             match tokio::time::timeout(idle, rx.data()).await {
                 Ok(Some(Ok(d))) => {
                     let _ = rx.flow_control().release_capacity(d.len());
-                    let room = hbone::MAX_REFUSAL_BODY.saturating_sub(captured.len());
+                    let room = hbone::REFUSAL_CAPTURE.saturating_sub(captured.len());
                     if d.len() > room {
                         truncated = true;
                     }
