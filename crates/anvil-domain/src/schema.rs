@@ -21,6 +21,8 @@ pub fn all() -> Vec<(&'static str, serde_json::Value)> {
         ("ProxyProfile", s::<crate::tls::ProxyProfile>()),
         ("IntegrationProfile", s::<crate::integration::IntegrationProfile>()),
         ("AppSettings", s::<crate::settings::AppSettings>()),
+        ("ApiStandards", s::<crate::settings::ApiStandards>()),
+        ("ApiStandardsSettings", s::<crate::settings::ApiStandardsSettings>()),
         ("EffectiveSettings", s::<crate::settings::EffectiveSettings>()),
         ("ExecutionRecord", s::<crate::execution::ExecutionRecord>()),
         ("ExecutionEvent", s::<crate::events::ExecutionEvent>()),

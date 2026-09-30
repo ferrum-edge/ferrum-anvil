@@ -140,14 +140,32 @@ impl App {
     }
 
     pub fn save_settings(&self, s: &anvil_domain::settings::AppSettings) -> Result<()> {
-        self.store.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, s)?;
+        let mut next = s.clone();
+        next.api_standards.legacy_rulesets.clear();
+        self.store.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &next)?;
         Ok(())
     }
 
     fn ensure_settings(&self) -> Result<()> {
-        if self.store.get::<anvil_domain::settings::AppSettings>(anvil_storage::kind::APP_SETTINGS, &settings_id())?.is_none() {
-            self.save_settings(&Default::default())?;
-        }
+        self.store.atomically(|tx| {
+            let stored_settings: Option<anvil_domain::settings::AppSettings> = tx.get(anvil_storage::kind::APP_SETTINGS, &settings_id())?;
+            let needs_settings = stored_settings.is_none();
+            let mut settings = stored_settings.unwrap_or_default();
+            let legacy = std::mem::take(&mut settings.api_standards.legacy_rulesets);
+            if needs_settings || !legacy.is_empty() {
+                let existing = tx.object_meta(anvil_storage::kind::API_RULESET)?;
+                let mut ids: std::collections::HashSet<String> = existing.iter().map(|row| row.id.clone()).collect();
+                let mut order = existing.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
+                for ruleset in legacy {
+                    if ids.insert(ruleset.id.to_string()) {
+                        tx.put(anvil_storage::kind::API_RULESET, &ruleset.id, None, None, order, &ruleset)?;
+                        order += 1.0;
+                    }
+                }
+                tx.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &settings)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 }

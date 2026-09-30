@@ -1552,6 +1552,8 @@ export type MasqueDatagramMode = "auto" | "quic_datagrams" | "capsules";
 export type TlsMinVersion = "tls12" | "tls13";
 
 export interface AnvilContracts {
+  ApiStandards?: ApiStandards;
+  ApiStandardsSettings?: ApiStandardsSettings;
   AppSettings?: AppSettings;
   Dataset?: Dataset;
   DiagnosticFinding?: DiagnosticFinding;
@@ -1599,7 +1601,7 @@ export interface AppSettings {
    */
   redaction_names: string[];
   check_for_updates: boolean;
-  api_standards?: ApiStandards;
+  api_standards?: ApiStandardsSettings;
 }
 /**
  * Non-secret request settings resolved deterministically:
@@ -1762,11 +1764,12 @@ export interface LockPolicy {
   clear_clipboard_on_lock: boolean;
 }
 /**
- * The API standards OpenAPI descriptions are linted against.
+ * API standards settings stored in `AppSettings`. User rulesets are separate
+ * objects; `legacy_rulesets` only reads the pre-separate-records field so the
+ * app can migrate it when opening a profile.
  */
-export interface ApiStandards {
+export interface ApiStandardsSettings {
   include_recommended?: boolean;
-  rulesets?: StoredRuleset[];
 }
 /**
  * A ruleset file the user added, kept verbatim.
@@ -5700,7 +5703,7 @@ export interface SettingsOverrides3 {
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ApiStandards".
  */
-export interface ApiStandards1 {
+export interface ApiStandards {
   include_recommended?: boolean;
   rulesets?: StoredRuleset[];
 }

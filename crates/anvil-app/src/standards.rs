@@ -1,5 +1,5 @@
 //! API standards: the rulesets a profile lints OpenAPI descriptions with
-//! (`anvil_contract`), kept in the app settings, and linting of imported
+//! (`anvil_contract`), kept as separate profile records, and linting of imported
 //! or chosen descriptions.
 //!
 //! Rulesets are layered in order: Anvil's recommended rules when included,
@@ -9,16 +9,16 @@
 use crate::{App, AppError, Result, settings_id};
 use anvil_contract::{LintOptions, LintReport, RuleInfo, RuleSet, RulesetSummary, Spec};
 use anvil_domain::Id;
-use anvil_domain::settings::{ApiStandards, AppSettings, StoredRuleset};
+use anvil_domain::settings::{ApiStandards, ApiStandardsSettings, AppSettings, StoredRuleset};
 use anvil_storage::kind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Largest ruleset kept. The settings are read on every send, so the
-/// rulesets together stay under 1 MiB.
-pub const MAX_STORED_RULESET_BYTES: usize = 128 * 1024;
-/// Most rulesets kept.
-pub const MAX_STORED_RULESETS: usize = 8;
+/// Per-ruleset limit shared with the CLI parser.
+pub const MAX_STORED_RULESET_BYTES: usize = anvil_contract::ruleset::MAX_RULESET_BYTES;
+/// Bound the number and aggregate size of profile ruleset records.
+pub const MAX_STORED_RULESETS: usize = anvil_portability::validate::MAX_RULESET_RECORDS;
+pub const MAX_STORED_RULESETS_BYTES: usize = anvil_portability::validate::MAX_TOTAL_RULESET_BYTES;
 
 /// The rules in effect, for listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,7 +45,13 @@ fn layered(std: &ApiStandards) -> std::result::Result<RuleSet, AppError> {
 
 impl App {
     pub fn api_standards(&self) -> Result<ApiStandards> {
-        Ok(self.settings()?.api_standards)
+        let (settings, rulesets) = self.store.read_consistently(|r| {
+            Ok((
+                r.get::<AppSettings>(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default(),
+                r.list::<StoredRuleset>(kind::API_RULESET, None)?,
+            ))
+        })?;
+        Ok(ApiStandards { include_recommended: settings.api_standards.include_recommended, rulesets })
     }
 
     /// The layered rules, with where each came from.
@@ -64,13 +70,23 @@ impl App {
     fn update_standards(&self, f: impl FnOnce(&mut ApiStandards) -> Result<()>) -> Result<ApiStandards> {
         self.store.atomically(|tx| {
             let mut settings: AppSettings = tx.get(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default();
-            let mut next = settings.api_standards.clone();
+            let current = tx.list::<StoredRuleset>(kind::API_RULESET, None)?;
+            let mut next = ApiStandards { include_recommended: settings.api_standards.include_recommended, rulesets: current.clone() };
             // The result must load, as it will be used.
-            if let Err(e) = f(&mut next).and_then(|()| layered(&next).map(|_| ())) {
+            if let Err(e) = f(&mut next).and_then(|()| validate_standards(&next).and_then(|()| layered(&next).map(|_| ()))) {
                 return Ok(Err(e));
             }
-            settings.api_standards = next.clone();
+            settings.api_standards = ApiStandardsSettings { include_recommended: next.include_recommended, legacy_rulesets: vec![] };
             tx.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &settings)?;
+            let ids: std::collections::HashSet<Id> = next.rulesets.iter().map(|r| r.id).collect();
+            for old in &current {
+                if !ids.contains(&old.id) {
+                    tx.delete(kind::API_RULESET, &old.id)?;
+                }
+            }
+            for (index, ruleset) in next.rulesets.iter().enumerate() {
+                tx.put(kind::API_RULESET, &ruleset.id, None, None, index as f64, ruleset)?;
+            }
             Ok(Ok(next))
         })?
     }
@@ -136,7 +152,10 @@ impl App {
         self.store.atomically(|tx| {
             let stored: AppSettings = tx.get(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default();
             let mut next = settings.clone();
-            next.api_standards = stored.api_standards;
+            next.api_standards = ApiStandardsSettings {
+                include_recommended: stored.api_standards.include_recommended,
+                legacy_rulesets: vec![],
+            };
             tx.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &next)
         })?;
         Ok(())
@@ -181,4 +200,15 @@ fn stored_ruleset(file_name: &str, bytes: &[u8]) -> Result<StoredRuleset> {
         added_at: chrono::Utc::now(),
         enabled: true,
     })
+}
+
+fn validate_standards(standards: &ApiStandards) -> Result<()> {
+    if standards.rulesets.len() > MAX_STORED_RULESETS {
+        return Err(AppError::Invalid(format!("at most {MAX_STORED_RULESETS} rulesets can be kept")));
+    }
+    let total: usize = standards.rulesets.iter().map(|r| r.text.len()).sum();
+    if total > MAX_STORED_RULESETS_BYTES {
+        return Err(AppError::Invalid(format!("rulesets together are {total} bytes; at most {MAX_STORED_RULESETS_BYTES} are kept")));
+    }
+    Ok(())
 }

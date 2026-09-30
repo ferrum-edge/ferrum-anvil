@@ -279,8 +279,8 @@ control characters and bidirectional overrides in everything that comes
 from the spec or a ruleset (errors included), so a message cannot inject a
 CI workflow command or a terminal escape sequence; JSON and SARIF output
 escape C1 controls, line separators and bidirectional overrides as
-`\uXXXX`. The CLI reads ruleset files up to 1 MiB; the desktop keeps
-rulesets up to 128 KiB.
+`\uXXXX`. The CLI and desktop accept rulesets up to 1 MiB each; the desktop
+also bounds the count and aggregate size of stored rulesets.
 
 SARIF 2.1.0 output names each rule (with its fix as help text and its
 `http(s)` documentation link) and each finding's file, line and column
@@ -308,15 +308,17 @@ rule; the severity cards filter them. **SARIF** and **JSON** check again and
 write the report to a file chosen in the save dialog
 (`lint_report_export`).
 
-**API standards** are kept in the profile's app settings (encrypted, and in
-full backups): Anvil's recommended rules, which can be left out, then each
-ruleset added with **Add** (a file chosen with purpose `ruleset`), in order.
+**API standards** are kept as separate encrypted profile records (included in
+workspace bundles and full backups): Anvil's recommended rules, which can be
+left out, then each ruleset added with **Add** (a file chosen with purpose
+`ruleset`), in order.
 A ruleset is checked together with the others when it is added, replaced,
 enabled or disabled, or when the recommended rules are left out; a change
 that would not load (an overlay changing a rule no remaining ruleset
 defines, say) is refused and nothing is kept; each change is one write
-transaction, so it never undoes a concurrent one. Up to 8 rulesets of 128
-KiB each are kept (the settings are read on every send). When the stored
+transaction, so it never undoes a concurrent one. Each ruleset can be up to
+1 MiB, with at most 32 records and 8 MiB total. Existing rulesets in older
+profiles migrate from app settings the first time the profile opens. When the stored
 rulesets do not load (restored from a backup of another build, say), the
 view says why and they can still be disabled or removed. **Rules in effect** lists every rule with its severity,
 target and ruleset. The settings dialog never changes the standards: they

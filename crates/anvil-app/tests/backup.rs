@@ -214,7 +214,21 @@ async fn full_backup_restores_every_entity_into_a_clean_profile() {
     std::fs::write(&token, "token-file-content").unwrap();
     let a_root = tempfile::tempdir().unwrap();
     let a = populated(a_root.path(), &fx.url(""), &token).await;
+    let ruleset = a
+        .add_api_ruleset(
+            "team.yaml",
+            br#"anvil_ruleset: 1
+name: Team
+rules:
+  team-summary:
+    severity: error
+    given: operation
+    then: { field: summary, function: truthy }
+"#,
+        )
+        .unwrap();
     let before = a.backup_contents().unwrap();
+    assert!(before.objects.iter().any(|o| o.kind == kind::API_RULESET && o.id == ruleset.id.to_string()));
 
     // Inventory of the source: every carried kind, both kinds of secret,
     // attachments, all history (no 1,000 cap), bodies and load reports.
@@ -256,6 +270,7 @@ async fn full_backup_restores_every_entity_into_a_clean_profile() {
 
     // The restored profile holds exactly what the source held.
     let after = b.backup_contents().unwrap();
+    assert_eq!(b.api_standards().unwrap().rulesets, [ruleset]);
     let inventory = |c: &BackupContents| -> BTreeSet<(String, String)> {
         let mut v: BTreeSet<_> = c.objects.iter().map(|o| (o.kind.clone(), o.id.clone())).collect();
         v.extend(c.secrets.iter().map(|s| ("secret".to_string(), s.id.clone())));

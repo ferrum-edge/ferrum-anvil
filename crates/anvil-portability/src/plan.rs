@@ -83,6 +83,7 @@ pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
     v.extend(g.datasets.iter().map(|x| ("dataset".to_string(), x.meta.id, x.name.clone())));
     v.extend(g.scenarios.iter().map(|x| ("scenario".to_string(), x.meta.id, x.name.clone())));
     v.extend(g.load_plans.iter().map(|x| ("load_plan".to_string(), x.id, x.name.clone())));
+    v.extend(g.rulesets.iter().map(|x| ("api_ruleset".to_string(), x.id, x.name.clone())));
     v
 }
 
@@ -143,6 +144,7 @@ fn owned_ids(g: &PortableGraph) -> Vec<(&'static str, Id, String, Option<Id>)> {
     v.extend(g.datasets.iter().map(|x| ("dataset", x.meta.id, x.name.clone(), Some(x.workspace_id))));
     v.extend(g.scenarios.iter().map(|x| ("scenario", x.meta.id, x.name.clone(), Some(x.workspace_id))));
     v.extend(g.load_plans.iter().map(|x| ("load_plan", x.id, x.name.clone(), Some(x.workspace_id))));
+    v.extend(g.rulesets.iter().map(|x| ("api_ruleset", x.id, x.name.clone(), None)));
     v
 }
 

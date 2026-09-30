@@ -6,7 +6,7 @@ use anvil_app::profiles::ProfileManager;
 use anvil_app::specs::SpecTarget;
 use anvil_contract::Severity;
 use anvil_import::ImportOptions;
-use anvil_storage::KdfParams;
+use anvil_storage::{KdfParams, kind};
 use std::path::Path;
 
 fn new_app(root: &Path) -> App {
@@ -111,7 +111,7 @@ fn a_settings_save_from_elsewhere_keeps_the_standards() {
     app.save_settings_keeping_standards(&edited).unwrap();
     let now = app.settings().unwrap();
     assert!(now.autosave);
-    assert_eq!(now.api_standards.rulesets.len(), 1, "the dialog's stale copy did not drop the ruleset");
+    assert_eq!(app.api_standards().unwrap().rulesets.len(), 1, "the dialog's stale copy did not drop the ruleset");
 }
 
 #[test]
@@ -120,12 +120,10 @@ fn stored_standards_that_do_not_load_can_still_be_seen_and_removed() {
     let app = new_app(dir.path());
     let good = app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
     // A restore from another build can store a ruleset this build refuses.
-    let mut settings = app.settings().unwrap();
-    let mut bad = settings.api_standards.rulesets[0].clone();
+    let mut bad = good.clone();
     bad.id = anvil_domain::Id::new();
     bad.text = "anvil_ruleset: 2\n".into();
-    settings.api_standards.rulesets.push(bad.clone());
-    app.save_settings(&settings).unwrap();
+    app.store.put(anvil_storage::kind::API_RULESET, &bad.id, None, None, 1.0, &bad).unwrap();
     let view = app.standards_view().unwrap();
     assert!(view.error.as_deref().unwrap().contains("version 2"), "{:?}", view.error);
     assert!(view.rules.is_empty() && view.standards.rulesets.len() == 2);
@@ -134,4 +132,79 @@ fn stored_standards_that_do_not_load_can_still_be_seen_and_removed() {
     let view = app.standards_view().unwrap();
     assert!(view.error.is_none());
     assert_eq!(view.standards.rulesets[0].id, good.id);
+}
+
+#[test]
+fn old_settings_rulesets_migrate_once_on_profile_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let ruleset = app.add_api_ruleset("legacy.yaml", TEAM.as_bytes()).unwrap();
+    app.store.delete(kind::API_RULESET, &ruleset.id).unwrap();
+    let mut settings = app.settings().unwrap();
+    settings.api_standards.legacy_rulesets.push(ruleset.clone());
+    app.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();
+    let path = app.dir.clone();
+    drop(app);
+
+    let manager = ProfileManager::new(dir.path());
+    let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
+    let migrated = App::open(path.clone(), header, key).unwrap();
+    assert_eq!(migrated.api_standards().unwrap().rulesets, [ruleset.clone()]);
+    assert!(migrated.settings().unwrap().api_standards.legacy_rulesets.is_empty());
+    drop(migrated);
+
+    let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
+    let reopened = App::open(path, header, key).unwrap();
+    assert_eq!(reopened.api_standards().unwrap().rulesets, [ruleset]);
+    assert_eq!(manager.list().len(), 1);
+}
+
+#[test]
+fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path());
+    let ws = source.create_workspace("Standards workspace").unwrap();
+    let ruleset = source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    let (bundle, _) = source
+        .export(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false)
+        .unwrap();
+
+    let target = new_app(root.path());
+    let preview = target.import_preview(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    assert_eq!(preview.plan.to_create, 2, "workspace and ruleset are separate importable objects");
+    let mut changed = ruleset.clone();
+    changed.name = "Local version".into();
+    target.store.put(kind::API_RULESET, &changed.id, None, None, 0.0, &changed).unwrap();
+    let conflict = target.import_preview(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    assert!(conflict.plan.conflicts.iter().any(|c| c.contains("api_ruleset 'Team'")), "{:?}", conflict.plan.conflicts);
+    target.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    assert_eq!(target.api_standards().unwrap().rulesets[0].name, "Local version");
+
+    let round_trip = new_app(root.path());
+    round_trip.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    assert_eq!(round_trip.api_standards().unwrap().rulesets, [ruleset]);
+}
+
+#[test]
+fn one_mebibyte_rulesets_are_stored_as_individual_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let body = format!("{TEAM}#{}\n", "x".repeat(anvil_app::standards::MAX_STORED_RULESET_BYTES - TEAM.len() - 2));
+    assert_eq!(body.len(), anvil_app::standards::MAX_STORED_RULESET_BYTES);
+    let stored = app.add_api_ruleset("large.yaml", body.as_bytes()).unwrap();
+    assert_eq!(
+        app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(),
+        Some(stored.clone())
+    );
+
+    let too_large = format!("{body} ");
+    assert!(app.add_api_ruleset("too-large.yaml", too_large.as_bytes()).is_err());
+    let updated = app.replace_api_ruleset(&stored.id, "large-v2.yaml", TEAM.as_bytes()).unwrap();
+    assert_eq!(updated.id, stored.id);
+    assert_eq!(
+        app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(),
+        Some(updated)
+    );
+    app.remove_api_ruleset(&stored.id).unwrap();
+    assert!(app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap().is_none());
 }

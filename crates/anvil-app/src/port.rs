@@ -88,6 +88,7 @@ impl App {
             None => self.workspaces()?,
         };
         let mut g = PortableGraph::default();
+        g.rulesets = self.store.list(kind::API_RULESET, None)?;
         for w in &wss {
             let id = w.meta.id;
             g.folders.extend(self.folders(&id)?);
@@ -389,6 +390,11 @@ impl App {
             for p in &g.load_plans {
                 if !skip(&p.id) {
                     s.put(kind::LOAD_PLAN, &p.id, Some(&p.workspace_id), None, 0.0, p)?;
+                }
+            }
+            for (index, ruleset) in g.rulesets.iter().enumerate() {
+                if !skip(&ruleset.id) {
+                    s.put(kind::API_RULESET, &ruleset.id, None, None, index as f64, ruleset)?;
                 }
             }
             // Validation keeps only records of a workspace in the bundle, as

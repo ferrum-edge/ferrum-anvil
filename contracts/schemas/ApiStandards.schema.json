@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ApiStandards",
+  "description": "Rulesets that describe what a team's OpenAPI descriptions must look like\n(`anvil_contract::ruleset`). They are layered in order: Anvil's\nrecommended rules (when included), then each enabled ruleset.",
+  "type": "object",
+  "properties": {
+    "include_recommended": {
+      "type": "boolean",
+      "default": true
+    },
+    "rulesets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StoredRuleset"
+      }
+    }
+  },
+  "$defs": {
+    "StoredRuleset": {
+      "description": "A ruleset file the user added, kept verbatim.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "name": {
+          "description": "The ruleset's `name`, else the file name.",
+          "type": "string"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "The ruleset text (YAML or JSON) as added.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 (hex) of `text`.",
+          "type": "string"
+        },
+        "added_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "file_name",
+        "text",
+        "sha256",
+        "added_at"
+      ]
+    },
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

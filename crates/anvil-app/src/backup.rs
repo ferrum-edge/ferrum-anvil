@@ -105,6 +105,7 @@ pub const OBJECT_KINDS: &[&str] = &[
     kind::USER_PROFILE,
     kind::SPEC_SOURCE,
     kind::RUN_REPORT,
+    kind::API_RULESET,
 ];
 
 /// Object kinds a full backup does not carry as rows, and why.
@@ -736,6 +737,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     let mut d = Decoded::default();
     let mut seen = HashSet::new();
     let mut revision_rows: HashMap<Id, &ObjectRow> = HashMap::new();
+    let mut ruleset_order: HashMap<Id, f64> = HashMap::new();
     let g = &mut d.graph;
     for o in &c.objects {
         if !seen.insert((o.kind.as_str(), o.id.as_str())) {
@@ -758,14 +760,29 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
             kind::DATASET => g.datasets.push(typed(o, |x: &Dataset| x.meta.id)?),
             kind::SCENARIO => g.scenarios.push(typed(o, |x: &Scenario| x.meta.id)?),
             kind::LOAD_PLAN => g.load_plans.push(typed(o, |x: &LoadPlan| x.id)?),
-            kind::APP_SETTINGS => g.app_settings = Some(typed(o, |_: &AppSettings| settings_id())?),
+            kind::APP_SETTINGS => {
+                let mut settings = typed(o, |_: &AppSettings| settings_id())?;
+                for (index, ruleset) in settings.api_standards.legacy_rulesets.iter().enumerate() {
+                    ruleset_order.insert(ruleset.id, index as f64);
+                }
+                d.items.extend(settings.api_standards.legacy_rulesets.iter().map(|r| (kind::API_RULESET.to_string(), r.id.to_string())));
+                g.rulesets.append(&mut settings.api_standards.legacy_rulesets);
+                g.app_settings = Some(settings);
+            }
             kind::USER_PROFILE => d.user_profiles.push(typed(o, |x: &UserProfile| x.meta.id)?),
             kind::SPEC_SOURCE => d.spec_sources.push(typed(o, |x: &SpecSourceRecord| x.source.import_id)?),
             kind::RUN_REPORT => d.run_reports.push(typed(o, |x: &RunReport| x.run_id)?),
+            kind::API_RULESET => {
+                let ruleset = typed(o, |x: &anvil_domain::settings::StoredRuleset| x.id)?;
+                ruleset_order.insert(ruleset.id, o.sort_key);
+                g.rulesets.push(ruleset);
+            }
             other => return Err(invalid(format!("the backup holds '{other}' objects, which a full backup never carries"))),
         }
         d.items.push((o.kind.clone(), o.id.clone()));
     }
+    let order = |ruleset: &anvil_domain::settings::StoredRuleset| ruleset_order.get(&ruleset.id).copied().unwrap_or_default();
+    g.rulesets.sort_by(|a, b| order(a).total_cmp(&order(b)).then_with(|| a.id.cmp(&b.id)));
     // Workspace-scoped items must belong to a workspace in the backup, so a
     // restore never attaches anything to an unrelated local workspace.
     // Folders, requests and environments are checked by the normalisation.
@@ -1207,6 +1224,9 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
         && !w.keep_settings
     {
         w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, x)?;
+    }
+    for (index, x) in g.rulesets.iter().enumerate() {
+        w.put(kind::API_RULESET, &x.id, None, None, index as f64, x)?;
     }
     // Nothing reads user profiles yet (no request uses one), so they are
     // restored as carried, without a gate.

@@ -368,7 +368,25 @@ pub struct AppSettings {
     pub check_for_updates: bool,
     /// The API standards OpenAPI descriptions are linted against.
     #[serde(default)]
-    pub api_standards: ApiStandards,
+    pub api_standards: ApiStandardsSettings,
+}
+
+/// API standards settings stored in `AppSettings`. User rulesets are separate
+/// objects; `legacy_rulesets` only reads the pre-separate-records field so the
+/// app can migrate it when opening a profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApiStandardsSettings {
+    #[serde(default = "crate::request::default_true")]
+    pub include_recommended: bool,
+    #[serde(default, rename = "rulesets", skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    pub legacy_rulesets: Vec<StoredRuleset>,
+}
+
+impl Default for ApiStandardsSettings {
+    fn default() -> Self {
+        ApiStandardsSettings { include_recommended: true, legacy_rulesets: vec![] }
+    }
 }
 
 /// Rulesets that describe what a team's OpenAPI descriptions must look like
@@ -417,7 +435,7 @@ impl Default for AppSettings {
             autosave: false,
             redaction_names: vec![],
             check_for_updates: false,
-            api_standards: ApiStandards::default(),
+            api_standards: ApiStandardsSettings::default(),
         }
     }
 }

@@ -563,6 +563,10 @@ different owner; Merge keeps those.
   schema are never silently dropped.
 - Contracts (`contracts/schemas`) are generated from the Rust types. Additive
   fields use serde defaults so older records keep loading.
+- On profile open, the app-level settings migration moves legacy API
+  standards rulesets into `api_ruleset` object records in one transaction,
+  then clears the old field. It is idempotent: each legacy id is written only
+  when no ruleset record with that id already exists.
 
 ## History retention
 
