@@ -149,7 +149,7 @@ fn old_settings_rulesets_migrate_once_on_profile_open() {
     let manager = ProfileManager::new(dir.path());
     let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
     let migrated = App::open(path.clone(), header, key).unwrap();
-    assert_eq!(migrated.api_standards().unwrap().rulesets, [ruleset.clone()]);
+    assert_eq!(migrated.api_standards().unwrap().rulesets, std::slice::from_ref(&ruleset));
     assert!(migrated.settings().unwrap().api_standards.legacy_rulesets.is_empty());
     drop(migrated);
 
